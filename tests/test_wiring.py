@@ -3486,3 +3486,202 @@ class TestGraftRouterWirePhase1:
         )
         assert router is not None
         assert router.primary_model == "test-model"
+
+
+# ---------------------------------------------------------------------------
+# GRAFT-ROUTER-WIRE Phase 1.5 — TaskClassifier integrated into route() tree
+# ---------------------------------------------------------------------------
+
+
+class TestGraftRouterWirePhase1Point5:
+    """Phase 1.5 wires TaskClassifier into ModelRouter.route().
+
+    route() priority order after Phase 1.5:
+      1. User override
+      2. Retry escalation
+      3. Smart routing (cost)
+      4. Task-type rules (capability)  ← NEW
+      5. Primary
+
+    No production call site consumes this yet — daemon still uses adapter/router.py.
+    """
+
+    @staticmethod
+    def _build_router_with_rules(
+        rules: list[tuple[str, str, str]],
+        min_confidences: dict[int, float] | None = None,
+    ):
+        """Helper: build a ModelRouter with task_type rules.
+
+        Args:
+            rules: list of (task_type_str, provider_name, model_name) tuples
+            min_confidences: optional dict mapping rule index → min_confidence
+        """
+        from prometheus.router import ModelRouter, RouterConfig, RoutingRule, TaskType
+
+        routing_rules = [
+            RoutingRule(
+                task_type=TaskType(tt),
+                provider=provider,
+                model=model,
+                min_confidence=(min_confidences or {}).get(i, 0.0),
+            )
+            for i, (tt, provider, model) in enumerate(rules)
+        ]
+        config = RouterConfig(task_rules=routing_rules)
+        return ModelRouter(
+            config=config,
+            primary_provider=MagicMock(),
+            primary_adapter=MagicMock(),
+            primary_model="primary-test-model",
+        )
+
+    @pytest.mark.integration
+    def test_dormant_router_classifies_message(self):
+        """CODE_GENERATION message matches a code task rule and routes to its provider."""
+        from prometheus.router import RouteReason
+
+        router = self._build_router_with_rules(
+            [("code_generation", "anthropic", "claude-sonnet-4-6")]
+        )
+        with patch(
+            "prometheus.providers.registry.ProviderRegistry.create",
+            return_value=MagicMock(),
+        ):
+            decision = router.route("write a python function to parse json")
+
+        assert decision.provider_name == "anthropic"
+        assert decision.model_name == "claude-sonnet-4-6"
+        assert decision.reason == RouteReason.TASK_RULE
+
+    @pytest.mark.integration
+    def test_task_rule_yields_correct_route_reason(self):
+        """TASK_RULE reason is distinct from PRIMARY so /route and logs can tell them apart."""
+        from prometheus.router import RouteReason
+
+        router = self._build_router_with_rules(
+            [("reasoning", "anthropic", "claude-opus-4-7")]
+        )
+        with patch(
+            "prometheus.providers.registry.ProviderRegistry.create",
+            return_value=MagicMock(),
+        ):
+            decision = router.route(
+                "explain the tradeoffs of immutable data structures in depth"
+            )
+
+        assert decision.reason == RouteReason.TASK_RULE
+        assert decision.reason != RouteReason.PRIMARY
+
+    @pytest.mark.integration
+    def test_dormant_router_falls_through_to_primary_on_no_rule_match(self):
+        """Empty rules list → falls through all the way to primary."""
+        from prometheus.router import RouteReason
+
+        router = self._build_router_with_rules([])
+        decision = router.route("hi")
+
+        assert decision.reason == RouteReason.PRIMARY
+        assert decision.model_name == "primary-test-model"
+
+    @pytest.mark.integration
+    def test_dormant_router_respects_min_confidence(self):
+        """Rule with high min_confidence doesn't match a weakly-classified message."""
+        from prometheus.router import RouteReason
+
+        router = self._build_router_with_rules(
+            [("code_generation", "anthropic", "claude-sonnet-4-6")],
+            min_confidences={0: 0.9},
+        )
+        # Multi-category message: tokens span CODE_GEN and REASONING, so
+        # best-score confidence is well under 0.9 — rule is skipped.
+        decision = router.route("review and implement this refactor")
+
+        assert decision.reason == RouteReason.PRIMARY
+
+    @pytest.mark.integration
+    def test_task_rule_provider_is_cached_across_calls(self):
+        """ProviderRegistry.create is invoked once per unique provider:model pair."""
+        router = self._build_router_with_rules(
+            [("code_generation", "anthropic", "claude-sonnet-4-6")]
+        )
+        with patch(
+            "prometheus.providers.registry.ProviderRegistry.create",
+            return_value=MagicMock(),
+        ) as mock_create:
+            router.route("write a python function")
+            router.route("implement a class for event handling")
+
+        assert mock_create.call_count == 1
+
+    @pytest.mark.integration
+    def test_first_matching_rule_wins(self):
+        """When two rules match the same task_type, the earlier one is picked."""
+        from prometheus.router import RouteReason
+
+        router = self._build_router_with_rules([
+            ("code_generation", "anthropic", "claude-sonnet-4-6"),
+            ("code_generation", "openai", "gpt-4o"),
+        ])
+        with patch(
+            "prometheus.providers.registry.ProviderRegistry.create",
+            return_value=MagicMock(),
+        ):
+            decision = router.route("write a python function to parse json")
+
+        assert decision.provider_name == "anthropic"
+        assert decision.reason == RouteReason.TASK_RULE
+
+    @pytest.mark.integration
+    def test_load_router_config_parses_rules(self):
+        """router.rules YAML block is parsed into RouterConfig.task_rules."""
+        from prometheus.router import load_router_config, TaskType
+
+        yaml_like = {
+            "router": {
+                "rules": [
+                    {
+                        "task_type": "code_generation",
+                        "provider": "anthropic",
+                        "model": "claude-sonnet-4-6",
+                        "min_confidence": 0.4,
+                    },
+                    {
+                        "task_type": "tool_heavy",
+                        "provider": "llama_cpp",
+                        "model": "",
+                        "base_url": "http://localhost:8080",
+                    },
+                ]
+            }
+        }
+        config = load_router_config(yaml_like)
+        assert len(config.task_rules) == 2
+        assert config.task_rules[0].task_type == TaskType.CODE_GENERATION
+        assert config.task_rules[0].provider == "anthropic"
+        assert config.task_rules[0].min_confidence == 0.4
+        assert config.task_rules[1].task_type == TaskType.TOOL_HEAVY
+        assert config.task_rules[1].base_url == "http://localhost:8080"
+
+    @pytest.mark.integration
+    def test_load_router_config_skips_invalid_rules(self):
+        """Invalid rule entries (bad task_type, missing keys) are logged and skipped."""
+        from prometheus.router import load_router_config
+
+        yaml_like = {
+            "router": {
+                "rules": [
+                    {"task_type": "not_a_real_type", "provider": "x", "model": "y"},
+                    {"provider": "anthropic", "model": "claude-sonnet-4-6"},  # missing task_type
+                    {
+                        "task_type": "code_generation",
+                        "provider": "anthropic",
+                        "model": "claude-sonnet-4-6",
+                    },  # valid
+                ]
+            }
+        }
+        config = load_router_config(yaml_like)
+        # Only the one valid rule survives
+        assert len(config.task_rules) == 1
+        assert config.task_rules[0].provider == "anthropic"

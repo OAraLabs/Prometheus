@@ -175,6 +175,7 @@ class RouteReason(str, Enum):
     USER_OVERRIDE = "user_override"
     SMART_SIMPLE = "smart_simple"
     SMART_COMPLEX = "smart_complex"
+    TASK_RULE = "task_rule"        # Phase 1.5: TaskClassifier matched a config rule
     ESCALATION = "escalation"
     FALLBACK = "fallback"
     QUEUE = "queue"
@@ -195,10 +196,27 @@ class RouteDecision:
 
 
 @dataclass
+class RoutingRule:
+    """A rule mapping a classified task type to a provider+model.
+
+    Phase 1.5: consumed by ModelRouter._route_by_task_type(). Configured under
+    `router.rules` in prometheus.yaml.
+    """
+    task_type: TaskType
+    provider: str
+    model: str
+    base_url: Optional[str] = None
+    min_confidence: float = 0.0
+
+
+@dataclass
 class RouterConfig:
     """Loaded from prometheus.yaml router: section."""
 
     fallback_chain: list[dict] = field(default_factory=list)
+
+    # Task-type rules (Phase 1.5)
+    task_rules: list[RoutingRule] = field(default_factory=list)
 
     # Smart routing
     smart_routing_enabled: bool = False
@@ -274,6 +292,12 @@ class ModelRouter:
         self._simple_provider: Any | None = None
         self._auxiliary_cache: dict[str, Any] = {}
 
+        # Task-type rule provider cache (Phase 1.5); keyed by "provider:model"
+        self._task_rule_providers: dict[str, Any] = {}
+
+        # Task classifier (Phase 1.5); used by _route_by_task_type
+        self.classifier = TaskClassifier()
+
         # User override (set by /claude, /gpt; cleared by /local)
         self._override_config: dict | None = None
         self._override_provider: Any | None = None
@@ -304,7 +328,15 @@ class ModelRouter:
             if self._classify_complexity(message) == "simple":
                 return self._route_simple()
 
-        # 4. Primary (with fallback if needed)
+        # 4. Task-type rules (Phase 1.5)
+        # Cost-first ordering intentional: smart routing at #3 catches short/simple
+        # messages before capability matching runs. See GRAFT-ROUTER-WIRE v3 Phase 1.5
+        # design note for rationale.
+        task_rule_decision = self._route_by_task_type(message)
+        if task_rule_decision is not None:
+            return task_rule_decision
+
+        # 5. Primary (with fallback if needed)
         return self._route_primary()
 
     def route_auxiliary(self, task: str) -> RouteDecision:
@@ -425,6 +457,55 @@ class ModelRouter:
             cost_warning=f"Escalating to {model} (local retries exhausted)",
         )
 
+    # ── Task-type rules (Phase 1.5: Hermes-style rule-based routing) ──
+
+    def _route_by_task_type(self, message: str) -> RouteDecision | None:
+        """Classify the message and search config.task_rules for a match.
+
+        Returns a RouteDecision with reason=TASK_RULE if a rule matches (and
+        classification.confidence >= rule.min_confidence); otherwise returns
+        None so the caller falls through to the next routing branch.
+        """
+        if not self.config.task_rules:
+            return None
+
+        classification = self.classifier.classify(message)
+        for rule in self.config.task_rules:
+            if rule.task_type != classification.task_type:
+                continue
+            if classification.confidence < rule.min_confidence:
+                continue
+
+            cache_key = f"{rule.provider}:{rule.model}"
+            if cache_key not in self._task_rule_providers:
+                from prometheus.providers.registry import ProviderRegistry
+                provider_cfg: dict[str, Any] = {
+                    "provider": rule.provider,
+                    "model": rule.model,
+                }
+                if rule.base_url:
+                    provider_cfg["base_url"] = rule.base_url
+                try:
+                    self._task_rule_providers[cache_key] = ProviderRegistry.create(
+                        provider_cfg
+                    )
+                except Exception:
+                    log.debug(
+                        "Failed to create task-rule provider %s",
+                        provider_cfg,
+                        exc_info=True,
+                    )
+                    return None
+
+            return RouteDecision(
+                provider=self._task_rule_providers[cache_key],
+                adapter=_build_adapter_for(rule.provider),
+                reason=RouteReason.TASK_RULE,
+                model_name=rule.model,
+                provider_name=rule.provider,
+            )
+        return None
+
     # ── Primary + fallback (OpenClaw pattern) ─────────────────────
 
     def _route_primary(self) -> RouteDecision:
@@ -508,6 +589,29 @@ def _build_adapter_for(provider_name: str) -> Any:
     return ModelAdapter(formatter=QwenFormatter(), strictness="MEDIUM")
 
 
+def _parse_task_rules(rules_config: list) -> list[RoutingRule]:
+    """Parse task-type routing rules from config (Phase 1.5).
+
+    Invalid rule entries are logged and skipped rather than raising, so a
+    typo in one rule doesn't break the whole daemon.
+    """
+    rules: list[RoutingRule] = []
+    for r in rules_config:
+        try:
+            rules.append(
+                RoutingRule(
+                    task_type=TaskType(r["task_type"]),
+                    provider=r["provider"],
+                    model=r["model"],
+                    base_url=r.get("base_url"),
+                    min_confidence=r.get("min_confidence", 0.0),
+                )
+            )
+        except (KeyError, ValueError) as e:
+            log.warning("Invalid routing rule %r: %s", r, e)
+    return rules
+
+
 def load_router_config(config: dict) -> RouterConfig:
     """Parse the router: section from prometheus.yaml."""
     rc = config.get("router", {})
@@ -517,6 +621,7 @@ def load_router_config(config: dict) -> RouterConfig:
 
     return RouterConfig(
         fallback_chain=rc.get("fallback", []),
+        task_rules=_parse_task_rules(rc.get("rules", [])),
         smart_routing_enabled=smart.get("enabled", False),
         max_simple_chars=smart.get("max_simple_chars", 160),
         max_simple_words=smart.get("max_simple_words", 28),
