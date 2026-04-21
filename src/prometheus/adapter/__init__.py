@@ -24,15 +24,13 @@ from prometheus.adapter.formatter import (
     QwenFormatter,
 )
 from prometheus.adapter.retry import RetryAction, RetryEngine
-from prometheus.adapter.router import ModelRouter, TaskClassifier, TaskType, ProviderConfig
+# Phase 2: ModelRouter, TaskClassifier, TaskType, ProviderConfig moved to
+# prometheus.router. ProviderConfig is replaced by RouteDecision (richer return
+# type — carries pre-instantiated provider + adapter). Import from prometheus.router.
 from prometheus.adapter.validator import RepairResult, Strictness, ToolCallValidator, ValidationResult
 
 __all__ = [
     "ModelAdapter",
-    "ModelRouter",
-    "TaskClassifier",
-    "TaskType",
-    "ProviderConfig",
     "AnthropicFormatter",
     "GemmaFormatter",
     "ModelPromptFormatter",

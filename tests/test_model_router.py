@@ -18,6 +18,8 @@ from prometheus.router.model_router import (
     RouteReason,
     RouterConfig,
     OVERRIDE_PRESETS,
+    TaskClassifier,
+    TaskType,
     _build_adapter_for,
     load_router_config,
 )
@@ -356,3 +358,72 @@ class TestOverridePresets:
 
     def test_xai_preset(self):
         assert OVERRIDE_PRESETS["xai"]["provider"] == "xai"
+
+
+# -- TaskClassifier (absorbed from tests/test_router.py in Phase 2) ----------
+#
+# These verify TaskClassifier in isolation now that it lives in
+# prometheus.router.model_router. Phase 1.5's tests in test_wiring.py cover
+# the classifier's INTEGRATION into route(); these cover its classification
+# behavior per-category.
+
+
+class TestTaskClassifier:
+    """Test token-based task classification (relocated from adapter/router.py)."""
+
+    def test_code_generation(self):
+        c = TaskClassifier()
+        result = c.classify("Write a Python function to parse JSON")
+        assert result.task_type == TaskType.CODE_GENERATION
+        assert result.confidence > 0.3
+        assert "python" in result.matched_tokens or "write" in result.matched_tokens
+
+    def test_quick_answer(self):
+        c = TaskClassifier()
+        result = c.classify("What is the capital of France?")
+        assert result.task_type == TaskType.QUICK_ANSWER
+
+    def test_reasoning(self):
+        c = TaskClassifier()
+        result = c.classify(
+            "Explain the trade-offs between microservices and monoliths"
+        )
+        assert result.task_type == TaskType.REASONING
+        assert "tradeoffs" in result.matched_tokens or "explain" in result.matched_tokens
+
+    def test_tool_heavy(self):
+        c = TaskClassifier()
+        result = c.classify(
+            "Search for recent news about AI", tool_mentions=["web_search"]
+        )
+        assert result.task_type == TaskType.TOOL_HEAVY
+
+    def test_creative(self):
+        c = TaskClassifier()
+        result = c.classify("Write a short story about a robot learning to love")
+        # "write" overlaps CODE_GENERATION and "story" overlaps CREATIVE
+        assert result.task_type in (TaskType.CREATIVE, TaskType.CODE_GENERATION)
+
+    def test_short_message_boosts_quick(self):
+        c = TaskClassifier()
+        result = c.classify("hi")
+        # Short messages should boost QUICK_ANSWER
+        assert result.task_type == TaskType.QUICK_ANSWER or result.confidence < 0.5
+
+    def test_code_block_boosts_code(self):
+        c = TaskClassifier()
+        result = c.classify("Fix this: ```python\nprint('hello')\n```")
+        assert result.task_type == TaskType.CODE_GENERATION
+
+    def test_empty_message(self):
+        c = TaskClassifier()
+        result = c.classify("")
+        # Empty message triggers short-message boost → QUICK_ANSWER
+        assert result.task_type == TaskType.QUICK_ANSWER
+
+    def test_classification_returns_reason(self):
+        c = TaskClassifier()
+        result = c.classify("Explain why Python is popular")
+        assert "tokens=" in result.reason
+        assert "len=" in result.reason
+        assert "conf=" in result.reason

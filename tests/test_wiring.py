@@ -551,27 +551,36 @@ class TestSprint10Wiring:
     """Verify ModelRouter and DivergenceDetector are invoked."""
 
     def test_model_router_classifies_and_routes(self):
-        """ModelRouter.route() returns a ProviderConfig for user messages."""
-        from prometheus.adapter.router import ModelRouter
+        """ModelRouter.route() returns a RouteDecision for user messages (Phase 2)."""
+        from prometheus.router import ModelRouter, RouterConfig, RouteReason
 
-        config = {
-            "model": {"provider": "llama_cpp", "model": "test-model", "base_url": "http://localhost:8080"},
-            "model_router": {"enabled": True, "rules": [], "fallback_chain": []},
-        }
-        router = ModelRouter(config)
-        result = router.route("write a python function to sort a list")
-        assert result.provider == "llama_cpp"
-        assert result.model == "test-model"
+        primary = MagicMock()
+        adapter = MagicMock()
+        router = ModelRouter(
+            config=RouterConfig(),
+            primary_provider=primary,
+            primary_adapter=adapter,
+            primary_model="test-model",
+        )
+        decision = router.route("write a python function to sort a list")
+        assert decision.reason == RouteReason.PRIMARY
+        assert decision.model_name == "test-model"
+        assert decision.provider is primary
+        assert decision.adapter is adapter
 
     def test_model_router_invoked_in_run_loop(self, tmp_path):
-        """ModelRouter.route() is called at the start of run_loop."""
-        from prometheus.adapter.router import ModelRouter
+        """ModelRouter.route() is called at the start of run_loop (Phase 2)."""
+        from prometheus.router import ModelRouter, RouterConfig
 
-        config = {
-            "model": {"provider": "llama_cpp", "model": "test", "base_url": "http://localhost:8080"},
-            "model_router": {"enabled": True, "rules": [], "fallback_chain": []},
-        }
-        router = ModelRouter(config)
+        provider = ScriptedProvider([_text_response("done")])
+        adapter = MagicMock()
+        adapter.format_request.return_value = ("test", [])
+        router = ModelRouter(
+            config=RouterConfig(),
+            primary_provider=provider,
+            primary_adapter=adapter,
+            primary_model="test",
+        )
         original_route = router.route
         call_log = []
 
@@ -579,15 +588,15 @@ class TestSprint10Wiring:
             call_log.append(args)
             return original_route(*args, **kwargs)
 
-        router.route = tracking_route
+        router.route = tracking_route  # type: ignore[assignment]
 
-        provider = ScriptedProvider([_text_response("done")])
         ctx = LoopContext(
             provider=provider,
             model="test",
             system_prompt="test",
             max_tokens=1024,
             model_router=router,
+            adapter=adapter,
         )
         messages = [ConversationMessage.from_user_text("write python code")]
 
@@ -3685,3 +3694,165 @@ class TestGraftRouterWirePhase1Point5:
         # Only the one valid rule survives
         assert len(config.task_rules) == 1
         assert config.task_rules[0].provider == "anthropic"
+
+
+# ---------------------------------------------------------------------------
+# GRAFT-ROUTER-WIRE Phase 2 — flip to canonical router, delete adapter/router
+# ---------------------------------------------------------------------------
+
+
+class TestGraftRouterWirePhase2:
+    """Phase 2 flips the live router: daemon + agent_loop now consume
+    prometheus.router.ModelRouter and its RouteDecision return type.
+
+    The old prometheus.adapter.router module is deleted. These tests guard
+    the contract changes so a future refactor doesn't silently regress them.
+    """
+
+    @pytest.mark.integration
+    def test_adapter_router_module_is_deleted(self):
+        """The old adapter.router module must not import successfully after Phase 2."""
+        with pytest.raises(ImportError):
+            import prometheus.adapter.router  # noqa: F401
+
+    @pytest.mark.integration
+    def test_canonical_router_exports_are_importable(self):
+        """All symbols that moved must be reachable from prometheus.router."""
+        from prometheus.router import (
+            ModelRouter,
+            RouteDecision,
+            RouteReason,
+            RouterConfig,
+            RoutingRule,
+            TaskClassification,
+            TaskClassifier,
+            TaskType,
+            load_router_config,
+        )
+        # Sanity-instantiate each type that has a no-arg constructor
+        assert TaskClassifier() is not None
+        assert RouterConfig() is not None
+
+    @pytest.mark.integration
+    def test_adapter_package_no_longer_re_exports_router_types(self):
+        """adapter/__init__.py must not leak router types via old import paths."""
+        import prometheus.adapter as adapter_pkg
+
+        assert not hasattr(adapter_pkg, "ModelRouter")
+        assert not hasattr(adapter_pkg, "TaskClassifier")
+        assert not hasattr(adapter_pkg, "TaskType")
+        assert not hasattr(adapter_pkg, "ProviderConfig")
+        for symbol in ("ModelRouter", "TaskClassifier", "TaskType", "ProviderConfig"):
+            assert symbol not in getattr(adapter_pkg, "__all__", ())
+
+    @pytest.mark.integration
+    def test_create_model_router_factory_signature_takes_primary(self):
+        """Phase 2 B1/daemon reorder: factory now requires primary provider + adapter + model."""
+        import inspect
+        from prometheus.__main__ import create_model_router
+
+        sig = inspect.signature(create_model_router)
+        params = list(sig.parameters.keys())
+        assert params[0] == "config"
+        assert "primary_provider" in params
+        assert "primary_adapter" in params
+        assert "primary_model" in params
+
+    @pytest.mark.integration
+    def test_create_model_router_emits_migration_warning_for_legacy_key(self, caplog):
+        """I3: if config contains deprecated `model_router:` key, log WARNING."""
+        from prometheus.__main__ import create_model_router
+
+        legacy_config = {
+            "model_router": {"enabled": True, "rules": []},
+        }
+        with caplog.at_level("WARNING"):
+            router = create_model_router(
+                legacy_config,
+                primary_provider=MagicMock(),
+                primary_adapter=MagicMock(),
+                primary_model="test-model",
+            )
+
+        assert router is not None
+        assert any(
+            "model_router: config key is deprecated" in rec.getMessage()
+            for rec in caplog.records
+        ), "Expected deprecation warning for legacy model_router: key was not emitted"
+
+    @pytest.mark.integration
+    def test_agent_loop_consumes_route_decision_not_provider_config(self):
+        """Phase 2 contract: run_loop reads decision.provider/adapter/model_name
+        and swaps them onto the context (no ProviderRegistry.create needed)."""
+        from prometheus.router import ModelRouter, RouterConfig
+
+        primary_provider = ScriptedProvider([_text_response("done")])
+        # Adapter whose format_request returns a proper 2-tuple (as real adapters do)
+        primary_adapter = MagicMock()
+        primary_adapter.format_request.return_value = ("test", [])
+
+        router = ModelRouter(
+            config=RouterConfig(),
+            primary_provider=primary_provider,
+            primary_adapter=primary_adapter,
+            primary_model="primary-model",
+        )
+
+        ctx = LoopContext(
+            provider=primary_provider,
+            model="primary-model",
+            system_prompt="test",
+            max_tokens=256,
+            model_router=router,
+            adapter=primary_adapter,
+        )
+        messages = [ConversationMessage.from_user_text("write python code")]
+
+        async def _run():
+            async for _ in run_loop(ctx, messages):
+                pass
+
+        asyncio.run(_run())
+        # For default RouterConfig (no rules/smart/override/escalation), the
+        # swap is a no-op — context.provider stays as the primary instance.
+        assert ctx.provider is primary_provider
+        assert ctx.adapter is primary_adapter
+        assert ctx.model == "primary-model"
+
+    @pytest.mark.integration
+    def test_fallback_returns_route_decision_not_tuple(self):
+        """Phase 2 contract: _try_model_fallback returns a RouteDecision | None,
+        not a (provider, model) tuple."""
+        from prometheus.engine.agent_loop import _try_model_fallback
+        from prometheus.router import ModelRouter, RouteDecision, RouterConfig
+
+        primary = MagicMock()
+        primary.provider_name = "llama_cpp"
+        adapter = MagicMock()
+
+        fallback_provider = MagicMock()
+        fake_decision = RouteDecision(
+            provider=fallback_provider,
+            adapter=adapter,
+            reason="fallback",
+            model_name="fallback-model",
+            provider_name="ollama",
+        )
+
+        router = MagicMock()
+        router.get_fallback.return_value = fake_decision
+
+        ctx = LoopContext(
+            provider=primary,
+            model="primary-model",
+            system_prompt="test",
+            max_tokens=256,
+            model_router=router,
+            adapter=adapter,
+        )
+        result = _try_model_fallback(ctx)
+        assert isinstance(result, RouteDecision)
+        assert result.model_name == "fallback-model"
+        assert result.provider is fallback_provider
+        # Critical Phase 2 regression guard: must NOT be a tuple anymore
+        assert not isinstance(result, tuple)

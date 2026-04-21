@@ -211,9 +211,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     # Sprint 15 wiring fix: daemon was missing adapter, security_gate,
     # model_router, and divergence_detector — all were built but not connected.
+    # Phase 2: router now requires primary provider + adapter + model built first.
     adapter = create_adapter(model_config, config.get("adapter"))
     security_gate = create_security_gate(security_config)
-    model_router = create_model_router(config)
+    model_router = create_model_router(config, provider, adapter, model_name)
     divergence_detector = create_divergence_detector(config)
 
     # Telemetry — shared instance for AgentLoop and SENTINEL digest

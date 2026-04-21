@@ -38,10 +38,10 @@ from prometheus.providers.base import (
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    # Sprint 10: Model Router + Divergence Detector
+    # Sprint 10 / Phase 2: Model Router + Divergence Detector
     # Lazy-imported at runtime to avoid circular import
     # (coordinator.__init__ → subagent → engine.agent_loop)
-    from prometheus.adapter.router import ModelRouter, ProviderConfig
+    from prometheus.router import ModelRouter, RouteDecision
     from prometheus.coordinator.divergence import DivergenceDetector, CheckpointStore
 
 log = logging.getLogger(__name__)
@@ -169,18 +169,36 @@ async def run_loop(
     elif context.tool_registry is not None and hasattr(context.tool_registry, "to_api_schema"):
         tool_schema = context.tool_registry.to_api_schema()
 
-    # Sprint 10/15: route the first user message through ModelRouter
+    # Sprint 10 / Phase 2: route the first user message through ModelRouter.
+    # The canonical router returns a RouteDecision with pre-instantiated
+    # provider + adapter. For the default/primary path the decision's provider
+    # is the same instance already on the context (no-op swap). When a rule,
+    # smart-routing, override, or escalation branch fires, the swap activates.
     if context.model_router is not None and messages:
         first_user = next(
             (m.text for m in messages if m.role == "user" and m.text), None
         )
         if first_user:
             try:
-                route = context.model_router.route(first_user)
+                decision = context.model_router.route(first_user)
+                reason_repr = (
+                    decision.reason.value
+                    if hasattr(decision.reason, "value")
+                    else decision.reason
+                )
                 log.debug(
                     "ModelRouter: %s → %s/%s (%s)",
-                    first_user[:60], route.provider, route.model, route.reason,
+                    first_user[:60],
+                    decision.provider_name,
+                    decision.model_name,
+                    reason_repr,
                 )
+                if decision.provider is not None:
+                    context.provider = decision.provider
+                if decision.adapter is not None:
+                    context.adapter = decision.adapter
+                if decision.model_name:
+                    context.model = decision.model_name
             except Exception:
                 log.debug("ModelRouter: classification failed", exc_info=True)
 
@@ -275,15 +293,23 @@ async def run_loop(
                 trip_msg = trip_reasons[0]
                 _log_iteration(context, _IterationReason.CIRCUIT_BREAKER_TRIP, turn, tool_iteration, trip_msg)
 
-                # Try model fallback for formatting errors before giving up
+                # Try model fallback for formatting errors before giving up.
+                # Phase 2: _try_model_fallback now returns a RouteDecision (or None)
+                # whose .provider and .adapter are pre-instantiated.
                 if circuit_breaker.is_formatting_error and context.model_router is not None:
                     fallback = _try_model_fallback(context)
                     if fallback is not None:
-                        fallback_provider, fallback_model = fallback
-                        _log_iteration(context, _IterationReason.MODEL_FALLBACK, turn, tool_iteration,
-                                       f"{context.model} → {fallback_model}")
-                        context.provider = fallback_provider
-                        context.model = fallback_model
+                        _log_iteration(
+                            context,
+                            _IterationReason.MODEL_FALLBACK,
+                            turn,
+                            tool_iteration,
+                            f"{context.model} → {fallback.model_name}",
+                        )
+                        context.provider = fallback.provider
+                        context.model = fallback.model_name
+                        if fallback.adapter is not None:
+                            context.adapter = fallback.adapter
                         circuit_breaker.record_success()
                         # Re-format for the new model's adapter if needed
                         if context.adapter is not None and hasattr(context.adapter, "format_request"):
@@ -380,35 +406,34 @@ def _log_iteration(
         )
 
 
-def _try_model_fallback(context: LoopContext) -> tuple | None:
+def _try_model_fallback(context: LoopContext):
     """Attempt to switch to a fallback provider for tool-call formatting errors.
 
-    Returns (new_provider, new_model) or None if no fallback is available.
+    Phase 2: the canonical ModelRouter.get_fallback() returns a RouteDecision
+    with pre-instantiated provider + adapter (no ProviderRegistry.create call
+    needed here). Returns the RouteDecision or None if no fallback is available.
     """
     if context.model_router is None or not hasattr(context.model_router, "get_fallback"):
         return None
 
     # Determine current provider name from config or model_router defaults
     current_provider = getattr(context.provider, "provider_name", None) or "llama_cpp"
-    fallback_cfg = context.model_router.get_fallback(current_provider)
-    if fallback_cfg is None:
+    try:
+        decision = context.model_router.get_fallback(current_provider)
+    except Exception:
+        log.warning("Failed to get fallback from router", exc_info=True)
         return None
 
-    try:
-        from prometheus.providers.registry import ProviderRegistry
-        new_provider = ProviderRegistry.create({
-            "provider": fallback_cfg.provider,
-            "base_url": fallback_cfg.base_url,
-            "model": fallback_cfg.model,
-        })
-        log.warning(
-            "Model fallback: %s → %s/%s (tool formatting errors)",
-            current_provider, fallback_cfg.provider, fallback_cfg.model,
-        )
-        return new_provider, fallback_cfg.model
-    except Exception:
-        log.warning("Failed to create fallback provider %s", fallback_cfg.provider, exc_info=True)
+    if decision is None:
         return None
+
+    log.warning(
+        "Model fallback: %s → %s/%s (tool formatting errors)",
+        current_provider,
+        decision.provider_name,
+        decision.model_name,
+    )
+    return decision
 
 
 def _apply_cross_result_budget(

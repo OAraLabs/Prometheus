@@ -374,10 +374,37 @@ async def create_mcp_runtime(config: dict[str, Any], registry: Any) -> Any:
         return None
 
 
-def create_model_router(config: dict[str, Any]):
-    """Create the model router (Sprint 10)."""
-    from prometheus.adapter.router import ModelRouter
-    return ModelRouter(config)
+def create_model_router(
+    config: dict[str, Any],
+    primary_provider: Any,
+    primary_adapter: Any,
+    primary_model: str,
+):
+    """Create the model router (Sprint 10 / GRAFT-ROUTER-WIRE Phase 2).
+
+    Reads the `router:` section from prometheus.yaml. If the deprecated
+    `model_router:` key is present, logs a migration warning and runs with
+    primary-only routing until the user renames the block.
+    """
+    from prometheus.router import ModelRouter, load_router_config
+
+    # Phase 2 migration (I3): warn if the deprecated model_router: key is present
+    if "model_router" in config:
+        log.warning(
+            "model_router: config key is deprecated (renamed to router: in "
+            "GRAFT-ROUTER-WIRE v3). Your existing rules are not being applied. "
+            "Migrate the block manually: rename 'model_router:' to 'router:' "
+            "and update the 'rules:' schema if it differs. Running with "
+            "primary-only routing until migrated."
+        )
+
+    router_config = load_router_config(config)
+    return ModelRouter(
+        config=router_config,
+        primary_provider=primary_provider,
+        primary_adapter=primary_adapter,
+        primary_model=primary_model,
+    )
 
 
 def create_divergence_detector(config: dict[str, Any]):
@@ -844,8 +871,9 @@ def main() -> None:
     from prometheus.context.dynamic_tools import DynamicToolLoader
     tool_loader = DynamicToolLoader(registry, config.get("tools", {}).get("deferred_loading"))
 
-    # Sprint 10: Model Router + Divergence Detector
-    model_router = create_model_router(config)
+    # Sprint 10 / Phase 2: Model Router + Divergence Detector
+    # Router now requires primary provider + adapter + model built beforehand.
+    model_router = create_model_router(config, provider, adapter, model_name)
     divergence_detector = create_divergence_detector(config)
 
     # Sprint 15 wiring fix: HookExecutor was built (Sprint 2) but never created
