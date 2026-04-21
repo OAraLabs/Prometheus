@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+#
+# Pre-commit hook: blocks commits containing secrets, private IPs,
+# or infrastructure-specific data that shouldn't go public.
+#
+# Install: git config core.hooksPath .githooks
+
+set -euo pipefail
+
+BLOCKED=0
+
+# Get staged files, skip markdown, docs/reference, and the hook itself
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | \
+    grep -v '\.md$' | \
+    grep -v '^docs/' | \
+    grep -v '^reference/' | \
+    grep -v '^\.githooks/' || true)
+
+if [ -z "$STAGED_FILES" ]; then
+    exit 0
+fi
+
+check_pattern() {
+    local label="$1"
+    local pattern="$2"
+
+    while IFS= read -r file; do
+        [ -f "$file" ] || continue
+        # Use git show to read the staged version, not the working copy
+        matches=$(git show ":$file" 2>/dev/null | grep -nP "$pattern" || true)
+        if [ -n "$matches" ]; then
+            while IFS= read -r match; do
+                echo "  BLOCKED  $file:$match"
+                echo "           reason: $label"
+                echo ""
+            done <<< "$matches"
+            BLOCKED=1
+        fi
+    done <<< "$STAGED_FILES"
+}
+
+echo ""
+echo "=== Prometheus pre-commit: scanning staged files ==="
+echo ""
+
+# 1. Tailscale private IPs (100.x.x.x)
+check_pattern "Tailscale private IP (100.x.x.x)" \
+    '100\.[0-9]+\.[0-9]+\.[0-9]+'
+
+# 2. SSH private key material
+check_pattern "SSH private key material" \
+    'BEGIN (RSA|EC|DSA|OPENSSH) PRIVATE KEY|PRIVATE KEY-----'
+
+# 3. Telegram bot tokens (digits:alphanumeric)
+check_pattern "Telegram bot token pattern" \
+    '[0-9]{8,}:[A-Za-z0-9_-]{30,}'
+
+# 4. Live/test API keys (sk-live, sk-test, sk_live, sk_test)
+check_pattern "API key (sk-live/sk-test/sk_live/sk_test)" \
+    'sk[-_](live|test)[_A-Za-z0-9]+'
+
+# 5. Hardcoded SSH key paths to user-specific keys
+check_pattern "Hardcoded user SSH key path" \
+    '/home/[^/]+/\.ssh/id_'
+
+# 6. OAra machine hostnames (Brain-Node, GPU-Node, etc. — not "OAra AI Lab" attribution)
+check_pattern "Infrastructure hostname (OAra-*)" \
+    'OAra-|oara-'
+
+if [ "$BLOCKED" -eq 1 ]; then
+    echo "=== COMMIT BLOCKED ==="
+    echo ""
+    echo "Staged files contain sensitive data that must not be committed."
+    echo "Fix the flagged lines above, then re-stage and commit."
+    echo ""
+    echo "If this is a false positive, you can bypass with:"
+    echo "  git commit --no-verify"
+    echo ""
+    exit 1
+fi
+
+echo "All clean. No sensitive data found in staged files."
+echo ""
+exit 0

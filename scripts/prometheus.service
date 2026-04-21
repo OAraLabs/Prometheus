@@ -1,0 +1,21 @@
+[Unit]
+Description=Prometheus AI Agent Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=%h/prometheus-build/Prometheus
+ExecStart=/usr/bin/env python3 scripts/daemon.py --config config/prometheus.yaml
+ExecStop=/bin/kill -SIGTERM $MAINPID
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+Environment=PROMETHEUS_CONFIG_DIR=%h/.prometheus
+Environment=PROMETHEUS_DATA_DIR=%h/.prometheus/data
+Environment=PROMETHEUS_LOGS_DIR=%h/.prometheus/logs
+
+[Install]
+WantedBy=default.target

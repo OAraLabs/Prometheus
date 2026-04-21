@@ -1,0 +1,130 @@
+# Prometheus configuration — reference defaults
+# Copy to config/prometheus.yaml and customize.
+# config/prometheus.yaml is gitignored — your secrets stay local.
+
+system:
+  name: "Prometheus"
+  version: "0.1.0"
+
+# Layer 1 Bootstrap — identity files loaded into every system prompt
+bootstrap:
+  load_soul: true       # ~/.prometheus/SOUL.md
+  load_agents: true     # ~/.prometheus/AGENTS.md
+
+model:
+  provider: "llama_cpp"             # llama_cpp, ollama, openai, anthropic, gemini, xai
+  base_url: "http://localhost:8080" # Inference server URL
+  model: ""                         # Auto-detected from server if blank
+  grammar_enforcement: true             # GBNF constrained decoding for llama.cpp tool calls
+  max_tool_iterations: 25               # Max tool calls per user message before hard stop
+  fallback_provider: "ollama"
+  fallback_url: "http://localhost:11434"
+
+context:
+  effective_limit: 24000
+  compression_trigger: 0.75
+  tool_result_max: 4000
+  tool_results_turn_budget: 8000            # max tokens across all results per turn
+  reserved_output: 2000
+  fresh_tail_count: 32
+  microcompact_after_turns: 3               # compact tool results older than N turns
+  microcompact_keep_chars: 200
+  microcompact_keep_chars_no_lcm: 500
+
+tools:
+  deferred_loading:
+    enabled: false                          # all tool schemas in prompt by default
+    always_loaded: [bash, read_file, write_file, edit_file, grep, glob, tool_search]
+    mcp_always_deferred: true
+    search_mcp: true
+
+adapter:
+  adaptive_strictness: false                # auto-tune per-tool strictness from telemetry
+  strictness_window: 100
+  strictness_threshold: 0.8
+
+security:
+  permission_mode: "default"
+  workspace_root: "~"
+  denied_commands:
+    - "rm -rf /"
+    - "rm -rf ~"
+    - "DROP TABLE"
+    - "mkfs"
+  denied_paths:
+    - "/etc"
+    - "/sys"
+    - "/boot"
+    - "~/.ssh"
+  audit:
+    enabled: true
+    retention_days: 30
+  exfiltration:
+    enabled: true
+  approval_queue:
+    enabled: false
+    timeout_seconds: 300
+
+infrastructure:
+  archive_enabled: true
+  telemetry_enabled: true
+
+gateway:
+  telegram_enabled: false
+  telegram_token: ""                # Set via PROMETHEUS_TELEGRAM_TOKEN env var
+  allowed_chat_ids: []
+  proxy_url: null
+  heartbeat_interval: 30
+  cron_enabled: true
+  media:
+    max_file_size_mb: 20
+    cache_dir: "~/.prometheus/cache/media"
+  rate_limits:
+    messages_per_minute: 30
+    media_downloads_per_minute: 10
+
+whisper:
+  enabled: false
+  model: "base"
+  device: "auto"
+  language: "en"
+
+model_router:
+  enabled: false
+
+divergence:
+  enabled: false
+
+learning:
+  periodic_nudge_interval: 15
+  auto_skill_creation: true
+
+sentinel:
+  enabled: false
+  idle_threshold_minutes: 15
+  dream_interval_minutes: 30
+
+web:
+  enabled: false
+  api_port: 8005
+  ws_port: 8010
+
+lsp:
+  enabled: false
+
+profiles:
+  default: "full"
+  custom_dir: "~/.prometheus/profiles"
+
+anatomy:
+  enabled: true
+  scan_on_startup: true
+
+mcp_servers: {}
+
+evals:
+  results_dir: "~/.prometheus/eval_results"
+  skip_network_tasks: true
+
+tracing:
+  enabled: false

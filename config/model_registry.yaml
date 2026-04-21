@@ -1,0 +1,203 @@
+# Model Capability Registry
+# Maps model families to their supported capabilities and required dependencies.
+# Used by /doctor to identify missing dependencies and misconfigurations.
+#
+# Matching: the scanner extracts a model identifier from the loaded GGUF filename
+# or ollama model name. The registry matches on partial/fuzzy name (e.g. "gemma-4"
+# matches "google_gemma-4-26B-A4B-it-Q4_K_M.gguf"). Case-insensitive.
+#
+# Users can add their own models at the bottom of this file.
+
+models:
+
+  gemma-4:
+    display_name: "Google Gemma 4"
+    match_patterns:
+      - "gemma-4"
+      - "gemma_4"
+      - "gemma4"
+    capabilities:
+      vision:
+        supported: true
+        requires: "mmproj"
+        description: "Multimodal vision — image understanding"
+        setup_hint: |
+          Download the mmproj file for your model size:
+            huggingface.co/google/gemma-4-*-GGUF (look for mmproj-*.gguf)
+          Add to your llama.cpp launch command:
+            --mmproj /path/to/mmproj-BF16.gguf
+      function_calling:
+        supported: true
+        requires: null
+        description: "Native tool/function calling"
+        setup_hint: "Enabled by default when using Prometheus tool system."
+      streaming:
+        supported: true
+        requires: null
+    context_sizes:
+      - 8192
+      - 32768
+      - 131072
+    notes: "26B-A4B is a mixture-of-experts variant. Q4_K_M is a good balance."
+
+  gemma-3:
+    display_name: "Google Gemma 3"
+    match_patterns:
+      - "gemma-3"
+      - "gemma_3"
+      - "gemma3"
+    capabilities:
+      vision:
+        supported: true
+        requires: "mmproj"
+        description: "Multimodal vision — image understanding"
+        setup_hint: |
+          Download the mmproj GGUF from HuggingFace.
+          Add --mmproj to your llama.cpp launch command.
+      function_calling:
+        supported: true
+        requires: null
+      streaming:
+        supported: true
+        requires: null
+
+  qwen-3:
+    display_name: "Qwen 3"
+    match_patterns:
+      - "qwen-3"
+      - "qwen_3"
+      - "qwen3"
+      - "Qwen3"
+      - "qwen3.5"
+    capabilities:
+      vision:
+        supported: false
+        description: "Text-only model"
+      function_calling:
+        supported: true
+        requires: null
+      streaming:
+        supported: true
+        requires: null
+      thinking:
+        supported: true
+        requires: null
+        description: "Extended thinking / chain-of-thought mode"
+        setup_hint: "Use /think or enable_thinking in config."
+    notes: "Strong at code and reasoning. No vision — use Gemma 4 for multimodal."
+
+  qwen-2.5:
+    display_name: "Qwen 2.5"
+    match_patterns:
+      - "qwen-2.5"
+      - "qwen_2.5"
+      - "qwen2.5"
+      - "Qwen2.5"
+    capabilities:
+      vision:
+        supported: false
+      function_calling:
+        supported: true
+        requires: null
+      streaming:
+        supported: true
+        requires: null
+
+  llama-3:
+    display_name: "Meta Llama 3"
+    match_patterns:
+      - "llama-3"
+      - "llama_3"
+      - "llama3"
+      - "Llama-3"
+      - "Meta-Llama-3"
+    capabilities:
+      vision:
+        supported: false
+        description: "Text-only (Llama 3.2 Vision is a separate model family)"
+      function_calling:
+        supported: true
+        requires: null
+      streaming:
+        supported: true
+        requires: null
+
+  mistral:
+    display_name: "Mistral"
+    match_patterns:
+      - "mistral"
+      - "Mistral"
+      - "mixtral"
+      - "Mixtral"
+    capabilities:
+      vision:
+        supported: false
+      function_calling:
+        supported: true
+        requires: null
+      streaming:
+        supported: true
+        requires: null
+
+  deepseek:
+    display_name: "DeepSeek"
+    match_patterns:
+      - "deepseek"
+      - "DeepSeek"
+    capabilities:
+      vision:
+        supported: false
+      function_calling:
+        supported: true
+        requires: null
+      streaming:
+        supported: true
+        requires: null
+
+  phi:
+    display_name: "Microsoft Phi"
+    match_patterns:
+      - "phi-3"
+      - "phi-4"
+      - "phi3"
+      - "phi4"
+      - "Phi-3"
+      - "Phi-4"
+    capabilities:
+      vision:
+        supported: false
+      function_calling:
+        supported: true
+        requires: null
+      streaming:
+        supported: true
+        requires: null
+
+  command-r:
+    display_name: "Cohere Command R"
+    match_patterns:
+      - "command-r"
+      - "command_r"
+      - "c4ai-command"
+    capabilities:
+      vision:
+        supported: false
+      function_calling:
+        supported: true
+        requires: null
+      streaming:
+        supported: true
+        requires: null
+
+  # Users add their own models here. Match patterns are case-insensitive substrings.
+  # Example:
+  #
+  # my-custom-model:
+  #   display_name: "My Fine-tune"
+  #   match_patterns:
+  #     - "my-custom"
+  #   capabilities:
+  #     vision:
+  #       supported: false
+  #     function_calling:
+  #       supported: true

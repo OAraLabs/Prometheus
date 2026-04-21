@@ -1,0 +1,46 @@
+# Agent Registry
+
+Prometheus can spawn isolated subagents for parallel or specialized work.
+Each subagent gets its own context window, tool subset, and turn budget.
+
+## When to Spawn vs Handle Directly
+
+**Spawn** when: task is independent and parallelizable, requires deep focused work
+(50+ lines of code), or needs a different tool subset than the main conversation.
+
+**Handle directly** when: task is quick (<5 tool calls), requires conversation
+context the subagent wouldn't have, or is a follow-up to ongoing work.
+
+## Available Specializations
+
+### general-purpose
+Full-capability agent for multi-step tasks. Gets all tools.
+Use for: ambiguous tasks, tasks needing both read and write, anything that doesn't
+fit a specialization.
+
+### explorer
+Read-only agent for fast codebase navigation. Gets: FileRead, Glob, Grep.
+Max 25 turns. Use for: "find all uses of X", "how does Y work?", "what files
+touch Z?". Cannot modify anything.
+
+### planner
+Architect agent for implementation design. Gets: FileRead, Glob, Grep.
+Read-only, max 30 turns. Use for: task breakdown, dependency analysis,
+identifying which files need changes before starting work.
+
+### worker
+Implementation agent for writing code. Gets all file + shell tools.
+Max 100 turns. Use for: focused coding tasks with clear specs, refactoring,
+test writing. Give it a precise brief — it won't have conversation context.
+
+### verification
+Test and validation agent. Gets: Bash, FileRead, Glob, Grep.
+Read-only, max 25 turns. Use for: running test suites, checking build output,
+validating that changes work. Spawn after worker completes.
+
+## Spawn Patterns
+
+- **Parallel research**: spawn 2-3 explorers for independent questions
+- **Plan then execute**: spawn planner, review plan, then spawn worker
+- **Implement and verify**: spawn worker, then spawn verification
+- **Never**: recursive spawning (subagent spawning subagent)
