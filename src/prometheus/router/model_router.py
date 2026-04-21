@@ -12,11 +12,160 @@ The router SELECTS. It does not EXECUTE. The agent loop still runs.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 log = logging.getLogger(__name__)
+
+
+# ── Task classification (relocated from adapter/router.py in Phase 1) ─────────
+#
+# Phase 1 of GRAFT-ROUTER-WIRE: TaskType, TaskClassification, and TaskClassifier
+# live here now in addition to the adapter/router.py copy. This duplication is
+# intentional for the zero-behavior-change guarantee — adapter/router.py is
+# still the live path until Phase 2 flips the switch. Phase 1.5 will integrate
+# TaskClassifier into ModelRouter.route() via a new _route_by_task_type branch.
+
+
+class TaskType(Enum):
+    """Task classification types for routing decisions."""
+    CODE_GENERATION = "code_generation"
+    REASONING = "reasoning"
+    QUICK_ANSWER = "quick_answer"
+    CREATIVE = "creative"
+    TOOL_HEAVY = "tool_heavy"
+
+
+@dataclass
+class TaskClassification:
+    """Result of classifying a user message."""
+    task_type: TaskType
+    confidence: float  # 0.0 - 1.0
+    matched_tokens: list[str]
+    reason: str
+
+
+class TaskClassifier:
+    """
+    Classify incoming tasks for routing decisions.
+
+    Uses token-based scoring similar to leaky's PortRuntime.route_prompt().
+    No LLM calls — pure heuristics for speed.
+    """
+
+    # Token sets for each task type (like leaky's module name matching)
+    TASK_TOKENS: dict[TaskType, set[str]] = {
+        TaskType.CODE_GENERATION: {
+            "write", "create", "implement", "code", "function", "class",
+            "script", "program", "fix", "debug", "refactor", "optimize",
+            "python", "javascript", "typescript", "rust", "go", "java",
+            "api", "endpoint", "database", "query", "sql", "schema",
+            "test", "unittest", "pytest", "module", "package", "library",
+        },
+        TaskType.REASONING: {
+            "explain", "why", "how", "analyze", "compare", "evaluate",
+            "assess", "think", "reason", "consider", "implications",
+            "consequences", "pros", "cons", "tradeoffs", "advantages",
+            "disadvantages", "strategy", "approach", "plan", "design",
+            "architect", "review", "critique", "weigh",
+        },
+        TaskType.QUICK_ANSWER: {
+            "what", "who", "when", "where", "which", "define",
+            "definition", "meaning", "list", "name", "give",
+            "is", "are", "does", "can", "will", "would",
+        },
+        TaskType.CREATIVE: {
+            "story", "poem", "song", "essay", "article", "creative",
+            "imaginative", "fictional", "narrative", "roleplay",
+            "pretend", "imagine", "scenario", "character", "dialogue",
+            "compose", "draft", "author",
+        },
+        TaskType.TOOL_HEAVY: {
+            "search", "find", "look", "fetch", "download", "browse",
+            "file", "directory", "folder", "read", "edit",
+            "delete", "run", "execute", "bash", "shell", "command",
+            "terminal", "dashboard", "serve", "http", "server",
+            "git", "commit", "push", "pull", "deploy",
+        },
+    }
+
+    # Message length thresholds
+    SHORT_MSG_CHARS = 50
+    LONG_MSG_CHARS = 500
+
+    def classify(
+        self,
+        message: str,
+        tool_mentions: Optional[list[str]] = None,
+    ) -> TaskClassification:
+        """
+        Classify a message using token-based scoring.
+
+        Algorithm (adapted from leaky runtime.py):
+        1. Tokenize message (split on whitespace and punctuation)
+        2. Score each task type by token overlap
+        3. Apply length-based adjustments
+        4. Apply tool-mention boosts
+        5. Return highest-scoring type with confidence
+        """
+        # Tokenize (leaky pattern: split on / - and whitespace)
+        tokens = set(
+            token.lower()
+            for token in re.split(r'[\s/\-_.,;:!?\'"()\[\]{}]+', message)
+            if token and len(token) > 1
+        )
+
+        # Score each task type
+        scores: dict[TaskType, float] = {}
+        matched: dict[TaskType, list[str]] = {}
+
+        for task_type, task_tokens in self.TASK_TOKENS.items():
+            overlap = tokens & task_tokens
+            scores[task_type] = len(overlap)
+            matched[task_type] = list(overlap)
+
+        # Apply adjustments
+        msg_len = len(message)
+
+        # Short messages favor quick answers
+        if msg_len < self.SHORT_MSG_CHARS:
+            scores[TaskType.QUICK_ANSWER] += 1.0
+
+        # Long messages favor reasoning/code
+        if msg_len > self.LONG_MSG_CHARS:
+            scores[TaskType.REASONING] += 0.5
+            scores[TaskType.CODE_GENERATION] += 0.5
+
+        # Code blocks strongly indicate code generation
+        if "```" in message or "`" in message:
+            scores[TaskType.CODE_GENERATION] += 2.0
+
+        # Tool mentions boost TOOL_HEAVY
+        if tool_mentions:
+            scores[TaskType.TOOL_HEAVY] += len(tool_mentions) * 0.5
+
+        # Find best match
+        best_type = max(scores, key=lambda t: scores[t])
+        best_score = scores[best_type]
+        total_score = sum(scores.values()) or 1.0
+
+        # Confidence is relative score
+        confidence = min(best_score / total_score, 1.0) if best_score > 0 else 0.3
+
+        # Default to REASONING if no clear signal
+        if best_score == 0:
+            best_type = TaskType.REASONING
+            confidence = 0.3
+            matched[best_type] = []
+
+        return TaskClassification(
+            task_type=best_type,
+            confidence=confidence,
+            matched_tokens=matched[best_type],
+            reason=f"tokens={best_score:.1f}, len={msg_len}, conf={confidence:.2f}",
+        )
 
 
 class RouteReason(str, Enum):

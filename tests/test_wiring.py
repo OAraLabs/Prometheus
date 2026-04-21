@@ -3448,3 +3448,41 @@ class TestRetryEscalationWiring:
         action, _ = engine.handle_failure("bash", "err3", None)
 
         assert action == RetryAction.ABORT
+
+
+# ---------------------------------------------------------------------------
+# GRAFT-ROUTER-WIRE Phase 1 — TaskClassifier relocated to prometheus.router
+# ---------------------------------------------------------------------------
+
+
+class TestGraftRouterWirePhase1:
+    """Phase 1 adds TaskClassifier/TaskType/TaskClassification to prometheus.router.
+
+    No behavior change — adapter/router.py is still the live path. These tests
+    verify the relocated classes are reachable from their new home and that the
+    dormant router still constructs correctly.
+    """
+
+    @pytest.mark.integration
+    def test_model_router_has_task_classifier_class(self):
+        """Phase 1: TaskClassifier/TaskType reachable from prometheus.router."""
+        from prometheus.router import TaskClassifier, TaskType
+
+        tc = TaskClassifier()
+        result = tc.classify("write a python function to parse json")
+        assert result.task_type == TaskType.CODE_GENERATION
+
+    @pytest.mark.integration
+    def test_model_router_still_instantiable_with_primary_provider(self):
+        """Phase 1 regression guard: dormant router constructor still works."""
+        from prometheus.router import ModelRouter, RouterConfig
+
+        config = RouterConfig()
+        router = ModelRouter(
+            config=config,
+            primary_provider=MagicMock(),
+            primary_adapter=MagicMock(),
+            primary_model="test-model",
+        )
+        assert router is not None
+        assert router.primary_model == "test-model"
