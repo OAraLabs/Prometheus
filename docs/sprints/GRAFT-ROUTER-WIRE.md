@@ -1,9 +1,9 @@
-# GRAFT: Router Wire-Up (v2, survey-corrected)
+# GRAFT: Router Wire-Up (v3, review-corrected)
 ## Codename: ROUTER-WIRE
 
-**Date:** April 20, 2026 (v1 authored same day; v2 after survey pass)
+**Date:** April 20, 2026 (v1); April 20, 2026 (v2 after survey pass); April 21, 2026 (v3 after review pass)
 **Purpose:** Consolidate the two parallel routers into one canonical `router/model_router.py`, then wire the full routing stack end-to-end — `RetryAction.ESCALATE`, user-facing provider override commands (direct mode), and a config-driven subagent preset system (delegated mode) with `/spawn`. After this sprint, multi-model juggling works both as a UI toggle (you talk to Claude instead of Gemma) and as delegation (Gemma dispatches a specialist subagent that reports back).
-**Estimated Time:** 5–7 hours across seven phases (up from 4–6 / five phases in v1; the extra hour accounts for the two new integration phases that v1 silently assumed were free)
+**Estimated Time:** 6–8 hours across seven phases. v1 estimated 4–6 / five phases. v2 added two integration phases (1.5 and 3.5), taking it to 5–7. v3 adds ~45 min for Phase 2 (concrete import-site enumeration) and Phase 3.5 (LoopContext plumbing through `AgentLoop.run_async()`).
 **Dependencies:**
 - CLOUD-API-PROVIDERS (complete) — ProviderRegistry, OpenAICompatProvider, AnthropicProvider
 - Sprint 3 (complete) — Model Adapter Layer
@@ -31,6 +31,25 @@ Minor corrections (all folded into the relevant phase sections):
 - Phase 2 test consolidation enumerates **all 11** existing call sites across `tests/test_router.py` (8), `tests/test_wiring.py` (2), `tests/test_model_router.py` (1)
 - `_build_adapter_for` gets renamed to `build_adapter_for` in Phase 5 (decision: remove the leading underscore; it's used across package boundaries in the SubagentRunner, so the Python `_` convention is misleading)
 - Phase 1 adds a small edit to `config/prometheus.yaml.default` so fresh installs inherit the `config/prometheus.yaml` denied_path protection that the local-only config already has
+
+---
+
+## v3 revision notes (what changed since v2)
+
+A review pass against v2 — cross-checking every import site, `LoopContext` construction point, and `AgentLoop.run_async()` caller — surfaced three blockers (B1, B2, B3), four important-but-not-blocking items (I1, I2, I3, C1, C2), and two fresh-eyes observations. All addressed in v3. v3 is a detail-tightening pass, not a structural change — phase ordering and behavioral guarantees from v2 are preserved.
+
+| # | v2 gap | v3 resolution |
+|---|---|---|
+| **B1** | Phase 2's "cross-codebase import sweep" was generic; missed that `adapter/__init__.py` explicitly re-exports `ModelRouter`, `TaskClassifier`, `TaskType`, `ProviderConfig` via `__all__` | Phase 2 gains an **"Import sites to update"** subsection enumerating all 5 concrete sites (adapter/__init__.py:27 + :30-47, engine/agent_loop.py:44, __main__.py:379, tests/test_wiring.py:555+568, tests/test_router.py:5) |
+| **B2** | Phase 3.5 said "LoopContext gains a session_id field" but handwaved through the fact that `LoopContext` is constructed inside `AgentLoop.run_async()` at agent_loop.py:927, plus two more direct-construction sites | Phase 3.5's **"Files to modify"** rewritten to enumerate the 3 LoopContext construction sites (agent_loop.py:927, daemon.py:613, __main__.py:869) and spell out the `AgentLoop.run_async(session_id=...)` parameter addition |
+| **B3** | Phase 4 listed system-session AgentLoop callers (eval/benchmark/smoke) but missed the user-facing `run_async()` callers in the gateways | Phase 4 gains a **"User-facing run_async() callers"** table: telegram.py:648+836 pass `str(chat_id)`, slack.py:400+492 pass `str(channel_id)` |
+| **I1** | Phase 1.5 test stub had `RouteReason.PRIMARY  # or whatever we name this branch` as a literal TODO | Phase 1.5 explicitly adds `TASK_RULE = "task_rule"` to the `RouteReason` enum; test asserts `RouteReason.TASK_RULE` concretely |
+| **I2** | Smart-routing-before-task-rules ordering was defensible but undocumented | Phase 1.5 now has a **"Design note: ordering rationale"** subsection explaining why cost optimization (smart routing at #3) wins over capability matching (task rules at #4) |
+| **I3** | Phase 2's migration story for existing `model_router:` config keys was "optional but recommended" — silent degradation risk | Phase 2 commits to: on daemon startup, if `config["model_router"]` key is present, log a **WARNING** and run with primary-only routing. No auto-migration. No refusal to start. User migrates manually. |
+| **C1** | "Cron audit during Phase 4 prep" was an open bullet | Resolved: grep confirmed zero `AgentLoop`/`LoopContext`/`run_async` references in `gateway/cron_scheduler.py` or `gateway/cron_service.py`. Cron dispatches shell commands only. Phase 4 updated to reflect the confirmation. |
+| **C2** | Phase 1 didn't acknowledge that COPY (not move) creates a Phase 1→2 window where two TaskClassifier classes coexist | Phase 1 adds a one-line acknowledgment that the dual-class window is intentional for the zero-behavior-change guarantee |
+| **FE1** | Unclear whether Phase 3's escalation uses Phase 5's new SubagentRunner (would create a reverse dependency) | Phase 3 now states explicitly that it uses the existing `SubagentSpawner` from Sprint 8, not Phase 5's `SubagentRunner`. Phase 3 does not depend on Phase 5. |
+| **FE2** | Phase 5's `_build_adapter_for` → `build_adapter_for` rename could break out-of-tree consumers | Phase 5 adds a one-release compatibility alias: `_build_adapter_for = build_adapter_for` |
 
 ---
 
@@ -250,6 +269,8 @@ uv run pytest tests/ -v --tb=short
 
 **Regression: what must not break.** Every existing routing decision must happen exactly the same way. The daemon still uses `adapter/router.py`. The new router has TaskClassifier available but isn't using it yet (Phase 1.5's job). This phase is pure class relocation + one small default-config safety improvement.
 
+**Intentional duplicate-class window (C2):** Between Phase 1 completion and Phase 2 completion, **two copies** of `TaskClassifier`, `TaskType`, and `TaskClassification` exist in the codebase — one in `adapter/router.py` (the live path), one in `router/model_router.py` (the new home). `adapter/__init__.py` still re-exports the adapter-router copy, so existing code that does `from prometheus.adapter import TaskClassifier` keeps working throughout the window. The new path `from prometheus.router import TaskClassifier` gets the new copy. Phase 2 deletes the adapter-router copy and redirects imports. This duplication is intentional — it's what makes Phase 1's zero-behavior-change guarantee work.
+
 ---
 
 ## Phase 1.5 — Integrate TaskClassifier into dormant router's route() (NEW in v2)
@@ -260,17 +281,34 @@ uv run pytest tests/ -v --tb=short
 - `src/prometheus/router/model_router.py`:
   - Add `TaskClassifier` instance to `ModelRouter.__init__` (lazy-constructed or eager — eager is simpler)
   - Add `task_rules: list[RoutingRule]` field to `RouterConfig`, parsed from `config["router"]["rules"]` (same schema as adapter router's rules: `task_type`, `provider`, `model`, optional `base_url`, optional `min_confidence`)
-  - Add `_route_by_task_type(message)` method that classifies the message and searches `task_rules` for a matching rule; returns `RouteDecision | None`
+  - **Add `TASK_RULE = "task_rule"` to the `RouteReason` enum** (I1). Existing values: PRIMARY, USER_OVERRIDE, SMART_SIMPLE, SMART_COMPLEX, ESCALATION, FALLBACK, QUEUE, AUXILIARY. The new branch gets its own reason so logs and the `/route` command can distinguish "routed to Claude because task_type=CODE_GENERATION" from "routed to Claude because primary."
+  - Add `_route_by_task_type(message)` method that classifies the message and searches `task_rules` for a matching rule; returns `RouteDecision | None` with `reason=RouteReason.TASK_RULE`
   - In `route()`, insert the task-type branch between smart routing (#3) and primary (#4):
     ```
     1. Override (per-session in Phase 3.5)
     2. Retry escalation
     3. Smart routing (simple → cheap)
-    4. Task-type rules ← NEW in Phase 1.5
+    4. Task-type rules ← NEW in Phase 1.5, reason=TASK_RULE
     5. Primary
     ```
   - Task-type provider instances cached on the router (same lazy pattern as `_escalation_provider`, `_simple_provider`)
-- `src/prometheus/router/__init__.py` — export `RoutingRule` if not already exported
+- `src/prometheus/router/__init__.py` — export `RoutingRule` if not already exported; ensure `RouteReason` export includes the new `TASK_RULE` value
+
+**Design note: ordering rationale (I2)**
+
+Smart routing runs at position #3, task-type rules at #4. This prioritizes **cost optimization over capability matching**. Example:
+
+- User sends `"what is json?"` (short, ambiguous, classifies weakly as QUICK_ANSWER)
+- **Smart routing fires first:** message is under 160 chars with no complex indicators → routed to `simple_provider` (e.g., a cheap local model)
+- **Task-type rule never fires**, even if config has `QUICK_ANSWER → gpt-4o-mini`
+
+The reverse ordering (task rules first, smart as fallback) would prioritize capability matching — "every QUICK_ANSWER goes to gpt-4o-mini regardless of length." We pick cost-first because:
+
+1. Smart routing is opt-in via `smart_routing.enabled = true`; users who don't want this behavior simply leave it off and task rules become the primary decision layer
+2. Short/simple messages by definition don't benefit much from capability matching (the task *is* trivial)
+3. Cost surprises from bypassed smart routing are worse UX than occasional capability mismatches on trivial queries
+
+If a user wants capability-first for a specific task type, they can set `smart_routing.enabled = false` globally or add a long-message indicator to the task rule's trigger conditions (a future extension, not v1).
 
 **Config schema (read but not yet authoritative — daemon still uses adapter router):**
 ```yaml
@@ -303,7 +341,15 @@ def test_dormant_router_classifies_message():
     ])
     decision = router.route("write a python function to parse json")
     assert decision.provider_name == "anthropic"
-    assert decision.reason == RouteReason.PRIMARY  # or whatever we name this branch
+    assert decision.reason == RouteReason.TASK_RULE
+
+def test_task_rule_yields_correct_route_reason():
+    # I1 regression guard: ensure TASK_RULE is distinct from PRIMARY/SMART_SIMPLE/etc.
+    # So /route and logs can distinguish "routed because rule matched" from "routed to default primary"
+    router = build_dormant_router_with_rules([("reasoning", "anthropic", "claude-opus-4-7")])
+    decision = router.route("explain the tradeoffs of immutable data structures in depth")
+    assert decision.reason == RouteReason.TASK_RULE
+    assert decision.reason != RouteReason.PRIMARY
 
 def test_dormant_router_falls_through_to_primary_on_no_rule_match():
     router = build_dormant_router_with_rules([])  # no rules
@@ -375,15 +421,46 @@ uv run pytest tests/ -v --tb=short
 
 **`src/prometheus/adapter/router.py`** — **DELETE** after all imports are moved.
 
-**Cross-codebase import sweep:**
-- Grep for `from prometheus.adapter.router import` and `from prometheus.adapter import router` — update or delete
-- Grep for `adapter.router.ProviderConfig` — should already be zero since `ProviderConfig` is only used internally in the adapter router; if any escape exists, replace with `RouteDecision`
+### Import sites to update (B1)
 
-**`config/prometheus.yaml`** (the user's local config — optional but recommended):
-- Migrate any `model_router:` block to `router:` with updated schema. Spec does not force this — if the user wants the old rules preserved under the new key, it's a one-time mechanical edit. Document this in the PR description as a user-facing migration note.
+All 5 concrete sites that must be updated from `prometheus.adapter.router` → `prometheus.router` **before** `adapter/router.py` is deleted:
+
+| # | File:line | Current | After Phase 2 |
+|---|---|---|---|
+| 1 | `src/prometheus/adapter/__init__.py:27` | `from prometheus.adapter.router import ModelRouter, TaskClassifier, TaskType, ProviderConfig` | Delete this line. The adapter package no longer re-exports router types. |
+| 2 | `src/prometheus/adapter/__init__.py:30-47` | `__all__` list includes `"ModelRouter"`, `"TaskClassifier"`, `"TaskType"`, `"ProviderConfig"` | Remove all four entries from `__all__` |
+| 3 | `src/prometheus/engine/agent_loop.py:44` | `if TYPE_CHECKING: from prometheus.adapter.router import ModelRouter, ProviderConfig` | `if TYPE_CHECKING: from prometheus.router import ModelRouter, RouteDecision` (note: `ProviderConfig` type hint becomes `RouteDecision`) |
+| 4 | `src/prometheus/__main__.py:379` | `from prometheus.adapter.router import ModelRouter` (inside `create_model_router()` factory) | `from prometheus.router import ModelRouter` |
+| 5a | `tests/test_wiring.py:555` | `from prometheus.adapter.router import ModelRouter` | `from prometheus.router import ModelRouter` + constructor call-site update (already tracked in test consolidation table) |
+| 5b | `tests/test_wiring.py:568` | same | same |
+| 5c | `tests/test_router.py:5` | `from prometheus.adapter.router import TaskClassifier, TaskType, ModelRouter` | `from prometheus.router import TaskClassifier, TaskType, ModelRouter` |
+
+**Downstream consumers:** any code doing `from prometheus.adapter import ModelRouter` / `TaskClassifier` / `TaskType` / `ProviderConfig` also breaks when the `adapter/__init__.py` `__all__` entries are removed. Grep-and-replace: `prometheus.adapter` → `prometheus.router` for all four symbols. `ProviderConfig` specifically becomes `RouteDecision` — not a rename, a type change.
+
+**Order of operations inside Phase 2's single PR:**
+1. Update all 5 import sites (+ downstream `from prometheus.adapter import ...` consumers) to import from `prometheus.router`
+2. Update `adapter/__init__.py:27` and `:30-47` to stop re-exporting
+3. Update call sites in `engine/agent_loop.py` (L173-185, L278-294) to consume `RouteDecision`
+4. Update `scripts/daemon.py` L216 + startup order
+5. **Only then** delete `src/prometheus/adapter/router.py`
+6. Run full test suite — any residual import error is a site step #1 missed
+
+### Migration story for existing `model_router:` config keys (I3)
+
+The adapter router reads `config["model_router"]`; the new router reads `config["router"]`. Users with an existing `model_router:` section in their local `config/prometheus.yaml` would silently lose their routing rules without a warning. Pick the non-silent option:
+
+**On daemon startup, if `config["model_router"]` key is present:**
+1. Log a **WARNING** via `prometheus.daemon` logger: `"model_router: config key is deprecated (renamed to router: in GRAFT-ROUTER-WIRE v3). Your existing rules are not being applied. Migrate the block manually: 'model_router:' → 'router:' and rename 'rules:' schema if it differs. Running with primary-only routing until migrated."`
+2. Run the daemon with **primary-only routing** (no rules consulted)
+3. Do **NOT** auto-migrate the file (would require writing to a gitignored user-owned file)
+4. Do **NOT** refuse to start (would break users on upgrade)
+5. The warning fires once per daemon startup, not per routing decision
+
+This gives users an explicit signal to act without forcing a breaking change on upgrade.
 
 **`config/prometheus.yaml.default`**:
-- Update the example config block at L119+ (the old `model_router:` schema) to demonstrate the new `router:` schema. This does not break existing local configs — absence of `router:` falls through to primary — but it guides new users.
+- Update the example config block at L119+ (the old `model_router:` schema) to demonstrate the new `router:` schema with task rules, fallback chain, smart routing, and commented-out escalation.
+- This does not break existing local configs (absence of `router:` falls through to primary-only, same as before) but guides new users toward the canonical schema.
 
 ### Test consolidation — all 11 existing call sites
 
@@ -447,6 +524,8 @@ cp src/prometheus/adapter/router.py /tmp/router.py.pre-wire.backup
 ## Phase 3 — Wire ESCALATE
 
 **Goal:** `RetryAction.ESCALATE` becomes live. When tool retries exceed max and the router has an escalation provider configured, the agent loop spawns a subagent with the escalation provider and returns its result as a tool_result to the main loop.
+
+**Dependency note (FE1):** Phase 3's escalation path uses the existing **`SubagentSpawner` from Sprint 8** (in `src/prometheus/coordinator/subagent.py`), **NOT** Phase 5's new `SubagentRunner`. Phase 3 does not depend on Phase 5. `SubagentSpawner` already knows how to run an isolated agent loop with a given provider + adapter + tool set; that's exactly what escalation needs. `SubagentRunner` (Phase 5) is a higher-level orchestration layer on top of `SubagentSpawner` with preset resolution and transcript persistence — escalation doesn't need those features.
 
 **Files to modify:**
 - `src/prometheus/adapter/__init__.py` — line 96: `RetryEngine(...)` constructor now accepts and stores `router=...`
@@ -512,7 +591,10 @@ uv run pytest tests/ -v --tb=short
 
 **⚠️ v2 correction:** v1 assumed the existing dormant scaffolding was per-session ready. It isn't. See survey Finding C.
 
-**Files to modify:**
+**Files to modify (B2):**
+
+### Router side
+
 - `src/prometheus/router/model_router.py`:
   - Line 129: replace `self._override_config: dict | None = None` with `self._overrides: dict[str, ProviderOverride] = {}`. Define `ProviderOverride` as a small dataclass:
     ```python
@@ -529,12 +611,32 @@ uv run pytest tests/ -v --tb=short
   - `has_override` property — reflect any override for any session, used by diagnostic / status commands
   - `_route_override()` → `_route_override(session_id: str)` — looks up by session, builds on first access (same lazy pattern as before), returns `RouteDecision`
   - `route()` — accept `session_id` from `context` dict (`context.get("session_id")`); the first priority check now uses `get_override_for_session(session_id)`
-- `src/prometheus/engine/agent_loop.py` — plumb `session_id` through to the route call:
-  - `LoopContext` gains a `session_id: str | None = None` field
-  - L173-185 route call passes `context={"session_id": context.session_id}`
-  - `_try_model_fallback(context)` also threads session_id (for consistency — overrides already decided at primary routing time, but the API should be uniform)
-- `scripts/daemon.py` — when constructing `LoopContext` for Telegram messages, pass `session_id=str(chat_id)`. Document this: Telegram `chat_id` (int) is stringified to the session_id namespace.
-- `src/prometheus/gateway/telegram.py` + `src/prometheus/gateway/slack.py` — ensure LoopContext is always constructed with `session_id` set when user-initiated. System-initiated paths (see Phase 4) pass `session_id=None` or `session_id="system"`.
+
+### Agent loop plumbing
+
+- `src/prometheus/engine/agent_loop.py`:
+  - Add `session_id: str | None = None` to `LoopContext` dataclass (new field)
+  - **Add `session_id: str | None = None` parameter to `AgentLoop.run_async()` signature.** This is the key plumbing change — callers pass their session identifier in here, and it flows through to the LoopContext constructed at L927.
+  - At the LoopContext construction at **L927**, forward `session_id=session_id` into the constructor
+  - At L173-185 (the route call), pass `context={"session_id": context.session_id}` so the router's override lookup sees it
+  - `_try_model_fallback(context)` also threads session_id for consistency (overrides are already decided at primary routing time, but API uniformity matters)
+
+### Three LoopContext construction sites — enumerated
+
+| # | Site | Purpose | session_id value after Phase 3.5 |
+|---|---|---|---|
+| 1 | `src/prometheus/engine/agent_loop.py:927` | **Primary production path** — every Telegram/Slack message, every `agent_loop.run_async()` call flows through here | Comes from `run_async(session_id=...)` parameter (new in Phase 3.5) |
+| 2 | `scripts/daemon.py:613` | Web/Beacon bridge LoopContext (separate from Telegram; used by the web bridge server) | Hard-code `session_id="web"` — all web-bridge-initiated requests share this session identifier |
+| 3 | `src/prometheus/__main__.py:869` | CLI REPL / one-shot mode (`prometheus --once "..."` or interactive REPL) | Hard-code `session_id="cli"` — distinct from `"web"` and `"system"` so a user setting `/claude` in CLI doesn't contaminate Telegram (and vice versa) |
+
+**Reserved session IDs:**
+- `None` — "don't apply overrides, ever" (unit tests, ad-hoc constructions)
+- `"system"` — evals, benchmarks, smoke tests, any cron-dispatched agent path if one emerges (Phase 4 enumerates the system call sites)
+- `"web"` — web/Beacon bridge (Phase 3.5 wires this at daemon.py:613)
+- `"cli"` — command-line REPL / one-shot (Phase 3.5 wires this at __main__.py:869)
+- `str(chat_id)` for Telegram, `str(channel_id)` for Slack — set by Phase 4's user-facing callers table
+
+Phase 3.5 itself does NOT modify the gateway `run_async()` callers (Telegram, Slack). Those are the subject of Phase 4's B3 table. After Phase 3.5, the gateway callers invoke `run_async()` without `session_id` → defaults to `None` → no overrides apply → existing behavior preserved (zero-behavior-change guarantee).
 
 **Reserved session IDs:**
 - `None` — "don't apply overrides, ever"
@@ -571,6 +673,29 @@ def test_route_consults_session_override_first():
     decision = router.route("write a python function", context={"session_id": "chat_123"})
     assert decision.provider_name == "anthropic"
     assert decision.reason == RouteReason.USER_OVERRIDE
+
+def test_loop_context_sites_have_expected_session_id():
+    # B2 regression guard: each direct LoopContext construction site gets its reserved session_id
+    # Note: these are spot checks that read the source — the actual wiring is validated at runtime by
+    # tests that actually spin up the web bridge and CLI paths.
+
+    # Site 1: agent_loop.py:927 — session_id comes from run_async() param, tested via run_async() callers
+    loop = make_test_agent_loop()
+    # default (no session_id arg) → None
+    # (pseudo — wrap in a context-capturing shim)
+    assert loop._last_context.session_id is None  # after a run with no session_id
+
+    # Site 2: daemon.py:613 — session_id="web" hard-coded
+    # Site 3: __main__.py:869 — session_id="cli" hard-coded
+    # Both verified via source inspection in this test (import daemon module, read module source)
+    import inspect
+    from scripts import daemon
+    daemon_src = inspect.getsource(daemon)
+    assert 'session_id="web"' in daemon_src
+
+    from prometheus import __main__ as main_mod
+    main_src = inspect.getsource(main_mod)
+    assert 'session_id="cli"' in main_src
 ```
 
 **Acceptance:**
@@ -613,11 +738,30 @@ python -m prometheus daemon --debug
 - `src/prometheus/router/model_router.py` — already has `set_override` / `clear_override` / `get_override_for_session` from Phase 3.5; no changes needed here
 - `src/prometheus/engine/agent_loop.py` — already consults `router.get_override_for_session(context.session_id)` from Phase 3.5
 
-**Enumerated system-invocation sites that must use `session_id="system"` (or `session_id=None`):**
-- `scripts/run_nightly_evals.py:95` — construct `LoopContext(session_id="system", ...)`
-- `src/prometheus/benchmarks/runner.py:151` — same
-- `scripts/smoke_test_tool_calling.py:593` — same
-- **Cron-dispatched paths** — audit `src/prometheus/gateway/cron_scheduler.py` and `src/prometheus/gateway/cron_service.py` for any path that constructs a `LoopContext` for scheduled agent runs; those must also use `session_id="system"`. If cron only executes shell commands (no agent loop), this bullet is a no-op and should be documented as such in the PR.
+### User-facing `run_async()` callers (B3)
+
+These are the gateway call sites where the user's session identifier must be threaded into `AgentLoop.run_async(session_id=...)`. Without these, Phase 4's `/claude` command has nowhere to look up the session override.
+
+| # | File:line | Caller | session_id value |
+|---|---|---|---|
+| 1 | `src/prometheus/gateway/telegram.py:648` | Telegram `/benchmark` handler invocation | `session_id=str(chat_id)` |
+| 2 | `src/prometheus/gateway/telegram.py:836` | Telegram main message dispatch — every user Telegram message routes through here | `session_id=str(chat_id)` |
+| 3 | `src/prometheus/gateway/slack.py:400` | Slack message dispatch | `session_id=str(channel_id)` |
+| 4 | `src/prometheus/gateway/slack.py:492` | Slack alternate dispatch path | `session_id=str(channel_id)` |
+
+**Why string, not int:** Telegram `chat_id` is an int; Slack `channel_id` is a string. The router's `_overrides: dict[str, ProviderOverride]` is keyed by string. Forcing `str(...)` at the call site keeps the key space uniform and avoids `1234567` vs `"1234567"` mismatches.
+
+**Group chat vs private chat:** Telegram `chat_id` is chat-level, not user-level. In a group chat, every member shares the same override. This is intentional — `/claude` in a group chat means "this conversation is now happening via Claude for everyone," not "each user has their own override." If per-user overrides in groups become a need later, key on `f"{chat_id}:{user_id}"` instead. Not in scope for this sprint.
+
+### System-invocation sites that must use `session_id="system"`
+
+| # | File:line | Purpose |
+|---|---|---|
+| 1 | `scripts/run_nightly_evals.py:95` | Eval runner — explicit `session_id="system"` |
+| 2 | `src/prometheus/benchmarks/runner.py:151` | Benchmark runner — explicit `session_id="system"` |
+| 3 | `scripts/smoke_test_tool_calling.py:593` | Smoke test — explicit `session_id="system"` |
+
+**Cron (C1 — resolved):** Confirmed via grep on `src/prometheus/gateway/cron_scheduler.py` and `src/prometheus/gateway/cron_service.py` that neither module constructs `AgentLoop`, `LoopContext`, or calls `run_async()`. Cron dispatches shell commands only — no session plumbing needed. This bullet from v2's "audit during Phase 4 prep" is resolved and removed.
 
 **Explicitly NOT in scope** (these were v1 targets that were misdirected):
 - SENTINEL (`sentinel/autodream.py`, `sentinel/observer.py`, `sentinel/memory_consolidator.py`, `sentinel/knowledge_synth.py`, `sentinel/wiki_lint.py`, `sentinel/telemetry_digest.py`) — grep confirmed these bypass ModelRouter entirely. No session_id plumbing needed.
@@ -730,6 +874,7 @@ class SubagentRunner:
 **Modify:** `src/prometheus/router/model_router.py`
 - **Rename** `_build_adapter_for` → `build_adapter_for` (remove leading underscore). This is a package-boundary function used by `SubagentRunner`; the `_` convention was misleading.
 - Update all call sites (internal `_route_auxiliary`, `_route_simple`, `_route_escalation`, and any others) to the new name.
+- **Compatibility alias (FE2):** after the rename, add `_build_adapter_for = build_adapter_for` as a one-release alias. Any out-of-tree consumer (forks, downstream projects embedding Prometheus, or internal tooling that hasn't been audited) that does `from prometheus.router.model_router import _build_adapter_for` keeps working. Delete the alias in a future release once the ecosystem has caught up.
 
 **Modify:** `src/prometheus/gateway/telegram.py`
 - `/spawn` (no args) — list presets with brief description table
@@ -930,16 +1075,16 @@ uv run pytest tests/ -v --tb=short
 | Component | Net lines (est.) | Complexity |
 |-----------|------------------|-----------|
 | Phase 1 — move TaskClassifier + .default denied_paths | +160 / −0 | Low |
-| Phase 1.5 — integrate classifier into route() decision tree | +120 / −0 | Low |
-| Phase 2 — flip switch + call-site rewrite + delete old | +80 / −500 | **High (risk, not volume)** |
-| Phase 3 — ESCALATE wiring | +80 / −5 | Medium |
-| Phase 3.5 — per-session override refactor | +100 / −30 | Low-Medium |
-| Phase 4 — direct mode commands + system session audit | +170 / −40 | Low |
-| Phase 5 — subagent preset system + build_adapter_for rename | +400 / −0 | Medium |
-| Tests (across all phases) | +400 | — |
-| **Total net** | **~+1050** | **Medium overall** |
+| Phase 1.5 — integrate classifier + `TASK_RULE` enum + ordering note | +130 / −0 | Low |
+| Phase 2 — flip switch + call-site rewrite + 5-site import update + migration warning + delete old | +100 / −500 | **High (risk, not volume)** |
+| Phase 3 — ESCALATE wiring (uses existing SubagentSpawner) | +80 / −5 | Medium |
+| Phase 3.5 — per-session override refactor + `run_async(session_id=...)` plumbing + 3 LoopContext sites | +135 / −30 | Low-Medium |
+| Phase 4 — direct mode commands + 4 user-facing callers + 3 system-session sites | +185 / −40 | Low |
+| Phase 5 — subagent preset system + build_adapter_for rename + compat alias | +400 / −0 | Medium |
+| Tests (across all phases, including new B2/B3 site regression tests) | +420 | — |
+| **Total net** | **~+1110** | **Medium overall** |
 
-Compared to v1 (+570 net): v2 adds ~+300 from the two new integration phases (1.5 and 3.5) plus ~+180 from the more complete test coverage across the test-consolidation set. The extra scope is real work that v1 silently assumed was free; surfacing it is the point of the survey revision.
+Compared to v1 (+570 net): v2 added ~+300 from the two new integration phases (1.5 and 3.5) plus ~+180 from the more complete test coverage across the test-consolidation set. v3 adds another ~+60 on top of v2 from the concrete B1/B2/B3 enumerations — each blocker resolution surfaces small but real work (import updates, `run_async()` parameter plumbing, migration warning logic) that v2 handwaved. The extra scope is real work that v1/v2 silently assumed was free; surfacing it is the point of the survey + review revisions.
 
 After this sprint:
 - **Direct mode:** `/claude`, `/gpt`, `/gemini`, `/xai`, `/grok`, `/local`, `/route` — you talk to a different provider in the same thread, per-session (Phase 3.5)
