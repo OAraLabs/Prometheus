@@ -628,6 +628,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 telemetry=telemetry,
                 model_router=model_router,
                 divergence_detector=divergence_detector,
+                # Phase 3.5: web bridge is its own session namespace.
+                session_id="web",
             )
 
             api_port = web_config.get("api_port", 8005)

@@ -236,6 +236,29 @@ class RouterConfig:
     auxiliary_summarization: dict | None = None
 
 
+# ── Per-session override (Phase 3.5) ──────────────────────────────
+
+# Session IDs that MUST NEVER match an override. Passing one of these to
+# get_override_for_session() always returns None. Eval runners, benchmarks,
+# smoke tests, cron-dispatched paths, and SENTINEL-adjacent code should use
+# "system" (or leave LoopContext.session_id as None) so user-set overrides
+# can never leak into system-invocation flows.
+_RESERVED_NO_OVERRIDE_SESSION_IDS: frozenset[str | None] = frozenset({None, "system"})
+
+
+@dataclass
+class ProviderOverride:
+    """A user-set override entry stored per session_id on the router.
+
+    Built lazily — the provider + adapter are None until first route() call
+    for that session, which populates them via ProviderRegistry.create() and
+    _build_adapter_for().
+    """
+    provider_config: dict           # source config (for diagnostics + lazy rebuild)
+    provider: Any | None = None     # ModelProvider instance (lazy)
+    adapter: Any | None = None      # ModelAdapter instance (lazy)
+
+
 # -- Provider override presets for /claude, /gpt, etc. --
 
 OVERRIDE_PRESETS: dict[str, dict[str, str]] = {
@@ -298,10 +321,12 @@ class ModelRouter:
         # Task classifier (Phase 1.5); used by _route_by_task_type
         self.classifier = TaskClassifier()
 
-        # User override (set by /claude, /gpt; cleared by /local)
-        self._override_config: dict | None = None
-        self._override_provider: Any | None = None
-        self._override_adapter: Any | None = None
+        # Phase 3.5: per-session user overrides (set by /claude, /gpt; cleared
+        # by /local). Keyed by session_id (Telegram chat_id as str, Slack
+        # channel_id, "cli", "web", etc.). Reserved session_ids None and
+        # "system" never match — used by eval/benchmark/cron paths to
+        # guarantee they always see the primary provider.
+        self._overrides: dict[str, ProviderOverride] = {}
 
     # ── Main entry point ──────────────────────────────────────────
 
@@ -310,13 +335,21 @@ class ModelRouter:
 
         Args:
             message: User message text.
-            context: Optional metadata (retry_count, is_subagent, etc.).
+            context: Optional metadata. Recognised keys:
+              - ``session_id`` (str | None): used by the per-session override
+                lookup (Phase 3.5). Reserved values None and "system" never
+                match any override — eval runners, benchmarks, cron paths,
+                and SENTINEL-adjacent flows pass these so user commands
+                can never leak in.
+              - ``retry_count`` (int): used by the escalation branch.
         """
         context = context or {}
 
-        # 1. User override (/claude, /gpt, /local)
-        if self._override_config:
-            return self._route_override()
+        # 1. Per-session user override (Phase 3.5: /claude, /gpt, /local)
+        session_id = context.get("session_id")
+        override = self.get_override_for_session(session_id)
+        if override is not None:
+            return self._route_override(session_id)  # type: ignore[arg-type]
 
         # 2. Retry escalation
         retry_count = context.get("retry_count", 0)
@@ -365,37 +398,67 @@ class ModelRouter:
             provider_name=aux_cfg.get("provider", "unknown"),
         )
 
-    # ── User override ─────────────────────────────────────────────
+    # ── Per-session user override (Phase 3.5) ─────────────────────
 
-    def set_override(self, provider_config: dict) -> None:
-        """Set user override (from /claude, /gpt commands)."""
-        self._override_config = provider_config
-        self._override_provider = None
-        self._override_adapter = None
+    def set_override(self, session_id: str, provider_config: dict) -> None:
+        """Set a per-session user override (called by /claude, /gpt, etc.).
 
-    def clear_override(self) -> None:
-        """Clear user override (from /local command)."""
-        self._override_config = None
-        self._override_provider = None
-        self._override_adapter = None
+        Reserved session_ids (None and "system") cannot hold an override —
+        they're the escape hatch for system-invocation flows. Passing one
+        raises ValueError to catch callsite bugs early.
+        """
+        if session_id in _RESERVED_NO_OVERRIDE_SESSION_IDS:
+            raise ValueError(
+                f"Cannot set override on reserved session_id {session_id!r}. "
+                f"Reserved IDs {tuple(_RESERVED_NO_OVERRIDE_SESSION_IDS)} always "
+                f"resolve to the primary provider."
+            )
+        self._overrides[session_id] = ProviderOverride(
+            provider_config=provider_config,
+        )
+
+    def clear_override(self, session_id: str) -> None:
+        """Clear the override for one session (called by /local).
+
+        Clearing a session that never had an override is a silent no-op.
+        Clearing a reserved session_id is also a silent no-op (nothing to
+        clear — reserved IDs never hold overrides).
+        """
+        self._overrides.pop(session_id, None)
+
+    def get_override_for_session(self, session_id: str | None) -> ProviderOverride | None:
+        """Look up an override for this session.
+
+        Always returns None for reserved session_ids (None, "system") so
+        system flows never inherit user overrides.
+        """
+        if session_id in _RESERVED_NO_OVERRIDE_SESSION_IDS:
+            return None
+        return self._overrides.get(session_id)
 
     @property
     def has_override(self) -> bool:
-        return self._override_config is not None
+        """True if ANY session currently has an override set.
 
-    def _route_override(self) -> RouteDecision:
-        assert self._override_config is not None
-        if self._override_provider is None:
+        Useful for diagnostic / status commands. For per-session checks
+        use ``get_override_for_session(session_id)`` instead.
+        """
+        return bool(self._overrides)
+
+    def _route_override(self, session_id: str) -> RouteDecision:
+        """Build (or reuse cached) override provider+adapter for this session."""
+        entry = self._overrides[session_id]
+        if entry.provider is None:
             from prometheus.providers.registry import ProviderRegistry
-            self._override_provider = ProviderRegistry.create(self._override_config)
-            pname = self._override_config.get("provider", "")
-            self._override_adapter = _build_adapter_for(pname)
+            entry.provider = ProviderRegistry.create(entry.provider_config)
+            pname = entry.provider_config.get("provider", "")
+            entry.adapter = _build_adapter_for(pname)
         return RouteDecision(
-            provider=self._override_provider,
-            adapter=self._override_adapter,
+            provider=entry.provider,
+            adapter=entry.adapter,
             reason=RouteReason.USER_OVERRIDE,
-            model_name=self._override_config.get("model", "unknown"),
-            provider_name=self._override_config.get("provider", "unknown"),
+            model_name=entry.provider_config.get("model", "unknown"),
+            provider_name=entry.provider_config.get("provider", "unknown"),
         )
 
     # ── Smart routing (Hermes pattern) ────────────────────────────
@@ -563,11 +626,23 @@ class ModelRouter:
 
     # ── Status ────────────────────────────────────────────────────
 
-    def status(self) -> dict[str, Any]:
-        """Current router state for /route command."""
+    def status(self, session_id: str | None = None) -> dict[str, Any]:
+        """Current router state for /route command (Phase 3.5 aware).
+
+        If ``session_id`` is provided, ``override`` reflects that specific
+        session's override (or None). Without a session_id, ``override`` is
+        None and ``active_override_count`` reports how many sessions have
+        overrides set.
+        """
+        session_override = self.get_override_for_session(session_id) if session_id else None
         return {
             "primary": self.primary_model,
-            "override": self._override_config.get("model") if self._override_config else None,
+            "override": (
+                session_override.provider_config.get("model")
+                if session_override
+                else None
+            ),
+            "active_override_count": len(self._overrides),
             "smart_routing": self.config.smart_routing_enabled,
             "escalation": (
                 self.config.escalation_provider.get("model")

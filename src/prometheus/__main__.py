@@ -896,6 +896,11 @@ def main() -> None:
     except Exception:
         pass
 
+    # Generate session ID (Phase 3.5: threaded into LoopContext below so the
+    # router's per-session override lookup has a unique namespace per CLI run).
+    import uuid
+    session_id = f"cli-{uuid.uuid4().hex[:8]}"
+
     ctx_cfg = config.get("context", {})
     context = LoopContext(
         provider=provider,
@@ -915,11 +920,8 @@ def main() -> None:
         microcompact_keep_chars=ctx_cfg.get("microcompact_keep_chars", 200),
         microcompact_keep_chars_no_lcm=ctx_cfg.get("microcompact_keep_chars_no_lcm", 500),
         tool_loader=tool_loader,
+        session_id=session_id,
     )
-
-    # Generate session ID
-    import uuid
-    session_id = f"cli-{uuid.uuid4().hex[:8]}"
 
     async def _async_main() -> None:
         # Sprint 12: MCP servers (must live in same async context as agent loop)

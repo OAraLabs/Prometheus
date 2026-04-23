@@ -649,6 +649,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 system_prompt="You are a helpful assistant. Be concise.",
                 user_message="What is 2+2? Reply with just the number.",
                 tools=[],
+                # Phase 3.5: /benchmark is a diagnostic, not a user chat —
+                # use reserved "system" so it never inherits user overrides.
+                session_id="system",
             )
             elapsed = time.monotonic() - t0
 
@@ -837,6 +840,10 @@ class TelegramAdapter(BasePlatformAdapter):
                 system_prompt=self.system_prompt,
                 messages=session.get_messages(),
                 tools=self.tool_registry.list_schemas(),
+                # Phase 3.5: session_id = "telegram:<chat_id>" so any /claude,
+                # /gpt etc. overrides set via Phase 4 commands apply only to
+                # this chat and not other Telegram chats or Slack/CLI/web.
+                session_id=event.session_key(),
             )
             # Append assistant response (and any tool call/result pairs) to session
             session.add_result_messages(result.messages, pre_len)

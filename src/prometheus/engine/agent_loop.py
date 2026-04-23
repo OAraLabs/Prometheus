@@ -152,6 +152,11 @@ class LoopContext:
     microcompact_keep_chars: int = 200    # chars to keep per compacted result
     microcompact_keep_chars_no_lcm: int = 500  # chars if LCM hasn't ingested
     lcm_engine: object | None = None      # LCMEngine for microcompaction checks
+    # Phase 3.5: session_id used by the router's per-session override lookup.
+    # Telegram: str(chat_id). Slack: str(channel_id). CLI: "cli". Web: "web".
+    # Reserved: None and "system" never match any override (eval/benchmark/
+    # cron/SENTINEL-adjacent paths use these so user commands never leak in).
+    session_id: str | None = None
 
 
 async def run_loop(
@@ -174,13 +179,19 @@ async def run_loop(
     # provider + adapter. For the default/primary path the decision's provider
     # is the same instance already on the context (no-op swap). When a rule,
     # smart-routing, override, or escalation branch fires, the swap activates.
+    # Phase 3.5: session_id threaded via context dict so the router's
+    # per-session override lookup can fire (or, for session_id in (None,
+    # "system"), always resolve to primary).
     if context.model_router is not None and messages:
         first_user = next(
             (m.text for m in messages if m.role == "user" and m.text), None
         )
         if first_user:
             try:
-                decision = context.model_router.route(first_user)
+                decision = context.model_router.route(
+                    first_user,
+                    context={"session_id": context.session_id},
+                )
                 reason_repr = (
                     decision.reason.value
                     if hasattr(decision.reason, "value")
@@ -1046,8 +1057,14 @@ class AgentLoop:
         *,
         messages: list[ConversationMessage] | None = None,
         tools: list | None = None,
+        session_id: str | None = None,
     ) -> RunResult:
-        """Run the agent loop asynchronously, return a RunResult."""
+        """Run the agent loop asynchronously, return a RunResult.
+
+        Phase 3.5: ``session_id`` is forwarded into LoopContext so the
+        ModelRouter's per-session override lookup can fire (or bypass,
+        for reserved IDs None/"system").
+        """
         if messages is not None:
             messages = list(messages)  # shallow copy — run_loop mutates in place
             if not user_message:
@@ -1075,6 +1092,7 @@ class AgentLoop:
             divergence_detector=self._divergence_detector,
             post_result_hooks=self._post_result_hooks,
             tool_loader=self._tool_loader,
+            session_id=session_id,
         )
 
         last_text = ""
@@ -1120,8 +1138,15 @@ class AgentLoop:
         *,
         messages: list[ConversationMessage] | None = None,
         tools: list | None = None,
+        session_id: str | None = None,
     ) -> RunResult:
         """Synchronous entry point — wraps run_async() via asyncio.run()."""
         return asyncio.run(
-            self.run_async(system_prompt, user_message, messages=messages, tools=tools)
+            self.run_async(
+                system_prompt,
+                user_message,
+                messages=messages,
+                tools=tools,
+                session_id=session_id,
+            )
         )

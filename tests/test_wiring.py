@@ -4162,3 +4162,226 @@ class TestGraftRouterWirePhase3:
             "Default config must have escalation disabled. Fresh installs "
             "must behave identically to pre-Phase-3."
         )
+
+
+# ---------------------------------------------------------------------------
+# GRAFT-ROUTER-WIRE Phase 3.5 — per-session override storage
+# ---------------------------------------------------------------------------
+
+
+class TestGraftRouterWirePhase3Point5:
+    """Phase 3.5 refactors the single-slot _override_config into a
+    dict[session_id, ProviderOverride]. No user-visible behavior change —
+    this is plumbing so Phase 4's /claude, /gpt, etc. don't leak across
+    every chat, eval, benchmark, and cron job the moment they fire.
+
+    Reserved session IDs (None, "system") always resolve to primary. Every
+    system-invocation site must use one of these.
+    """
+
+    @staticmethod
+    def _build_router():
+        from prometheus.router import ModelRouter, RouterConfig
+        return ModelRouter(
+            config=RouterConfig(),
+            primary_provider=MagicMock(),
+            primary_adapter=MagicMock(),
+            primary_model="primary",
+        )
+
+    @pytest.mark.integration
+    def test_set_override_requires_session_id(self):
+        """set_override(session_id, config) — two required args."""
+        r = self._build_router()
+        r.set_override("chat_A", {"provider": "anthropic", "model": "claude-sonnet-4-6"})
+        assert r.get_override_for_session("chat_A") is not None
+
+    @pytest.mark.integration
+    def test_overrides_are_isolated_per_session(self):
+        """Override in session A does not leak to session B."""
+        r = self._build_router()
+        r.set_override("chat_A", {"provider": "anthropic", "model": "claude-sonnet-4-6"})
+        assert r.get_override_for_session("chat_A") is not None
+        assert r.get_override_for_session("chat_B") is None
+
+    @pytest.mark.integration
+    def test_clear_only_affects_that_session(self):
+        """Clearing chat_A leaves chat_B's override intact."""
+        r = self._build_router()
+        r.set_override("chat_A", {"provider": "anthropic", "model": "claude-sonnet-4-6"})
+        r.set_override("chat_B", {"provider": "openai", "model": "gpt-4o"})
+        r.clear_override("chat_A")
+        assert r.get_override_for_session("chat_A") is None
+        assert r.get_override_for_session("chat_B") is not None
+
+    @pytest.mark.integration
+    def test_clear_unknown_session_is_silent_noop(self):
+        """Clearing a session that never had an override doesn't raise."""
+        r = self._build_router()
+        r.clear_override("never_set")  # must not raise
+        assert r.get_override_for_session("never_set") is None
+
+    @pytest.mark.integration
+    def test_set_override_rejects_reserved_none(self):
+        """None is a reserved "no override ever" marker — set must refuse."""
+        r = self._build_router()
+        with pytest.raises(ValueError, match="reserved session_id"):
+            r.set_override(None, {"provider": "anthropic"})
+
+    @pytest.mark.integration
+    def test_set_override_rejects_reserved_system(self):
+        """'system' is reserved for eval/benchmark/cron paths."""
+        r = self._build_router()
+        with pytest.raises(ValueError, match="reserved session_id"):
+            r.set_override("system", {"provider": "anthropic"})
+
+    @pytest.mark.integration
+    def test_get_override_returns_none_for_reserved_session_ids(self):
+        """Even if we stuffed entries in _overrides directly, reserved IDs return None."""
+        from prometheus.router.model_router import ProviderOverride
+
+        r = self._build_router()
+        r.set_override("chat_A", {"provider": "anthropic", "model": "claude-sonnet-4-6"})
+        # Reserved lookups skip the dict entirely
+        assert r.get_override_for_session(None) is None
+        assert r.get_override_for_session("system") is None
+
+    @pytest.mark.integration
+    def test_has_override_true_if_any_session_active(self):
+        r = self._build_router()
+        assert not r.has_override
+        r.set_override("chat_A", {"provider": "anthropic", "model": "x"})
+        assert r.has_override
+        r.set_override("chat_B", {"provider": "openai", "model": "y"})
+        assert r.has_override
+        r.clear_override("chat_A")
+        assert r.has_override  # chat_B still active
+        r.clear_override("chat_B")
+        assert not r.has_override
+
+    @pytest.mark.integration
+    def test_route_fires_override_for_matching_session(self):
+        """route() with session_id in context dispatches USER_OVERRIDE."""
+        import os
+        from prometheus.router import RouteReason
+
+        r = self._build_router()
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            r.set_override(
+                "chat_A",
+                {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+            )
+            d = r.route("hello", context={"session_id": "chat_A"})
+        assert d.reason == RouteReason.USER_OVERRIDE
+        assert d.model_name == "claude-sonnet-4-6"
+
+    @pytest.mark.integration
+    def test_route_ignores_overrides_for_system_session(self):
+        """Critical safety guarantee: system-session paths NEVER see any override."""
+        import os
+        from prometheus.router import RouteReason
+
+        r = self._build_router()
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            r.set_override("chat_A", {"provider": "anthropic", "model": "claude-sonnet-4-6"})
+            r.set_override("chat_B", {"provider": "openai", "model": "gpt-4o"})
+
+            d_system = r.route("hello", context={"session_id": "system"})
+            d_none = r.route("hello", context={"session_id": None})
+            d_missing = r.route("hello")  # no context at all
+
+        assert d_system.reason == RouteReason.PRIMARY
+        assert d_none.reason == RouteReason.PRIMARY
+        assert d_missing.reason == RouteReason.PRIMARY
+
+    @pytest.mark.integration
+    def test_route_ignores_overrides_for_other_sessions(self):
+        """chat_A's override does not leak into chat_B's route()."""
+        import os
+        from prometheus.router import RouteReason
+
+        r = self._build_router()
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            r.set_override("chat_A", {"provider": "anthropic", "model": "claude-sonnet-4-6"})
+            d = r.route("hello", context={"session_id": "chat_B"})
+        assert d.reason == RouteReason.PRIMARY
+
+    @pytest.mark.integration
+    def test_loop_context_has_session_id_field(self):
+        """Phase 3.5 adds session_id to LoopContext."""
+        import dataclasses as _dc
+
+        field_names = {f.name for f in _dc.fields(LoopContext)}
+        assert "session_id" in field_names
+
+    @pytest.mark.integration
+    def test_loop_context_session_id_defaults_to_none(self):
+        """Existing constructions that don't pass session_id must keep working."""
+        ctx = LoopContext(
+            provider=MagicMock(),
+            model="primary",
+            system_prompt="",
+            max_tokens=256,
+        )
+        assert ctx.session_id is None
+
+    @pytest.mark.integration
+    def test_run_async_forwards_session_id_to_context(self):
+        """AgentLoop.run_async(session_id=X) threads X into the LoopContext
+        it constructs internally, which is what gets passed to route()."""
+        from prometheus.router import ModelRouter, RouterConfig
+
+        provider = ScriptedProvider([_text_response("done")])
+        adapter = MagicMock()
+        adapter.format_request.return_value = ("test", [])
+        router = ModelRouter(
+            config=RouterConfig(),
+            primary_provider=provider,
+            primary_adapter=adapter,
+            primary_model="primary",
+        )
+
+        captured = {}
+        original_route = router.route
+
+        def spy_route(message, context=None):
+            captured["session_id"] = (context or {}).get("session_id")
+            return original_route(message, context=context)
+
+        router.route = spy_route  # type: ignore[assignment]
+
+        loop = AgentLoop(
+            provider=provider,
+            model="primary",
+            adapter=adapter,
+            model_router=router,
+        )
+
+        async def _run():
+            await loop.run_async(
+                system_prompt="test",
+                user_message="hello",
+                session_id="telegram:chat-99",
+            )
+
+        asyncio.run(_run())
+        assert captured.get("session_id") == "telegram:chat-99"
+
+    @pytest.mark.integration
+    def test_status_without_session_reports_count_only(self):
+        """status() without session_id shows 'override': None + count of active overrides."""
+        r = self._build_router()
+        r.set_override("chat_A", {"provider": "anthropic", "model": "x"})
+        r.set_override("chat_B", {"provider": "openai", "model": "y"})
+        st = r.status()
+        assert st["override"] is None
+        assert st["active_override_count"] == 2
+
+    @pytest.mark.integration
+    def test_status_with_session_reports_that_sessions_override(self):
+        """status(session_id='chat_A') returns chat_A's override model."""
+        r = self._build_router()
+        r.set_override("chat_A", {"provider": "anthropic", "model": "claude-sonnet-4-6"})
+        r.set_override("chat_B", {"provider": "openai", "model": "gpt-4o"})
+        st = r.status(session_id="chat_A")
+        assert st["override"] == "claude-sonnet-4-6"

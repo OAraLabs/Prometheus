@@ -401,6 +401,8 @@ class SlackAdapter(BasePlatformAdapter):
                 system_prompt=self.system_prompt,
                 messages=session.get_messages(),
                 tools=self.tool_registry.list_schemas(),
+                # Phase 3.5: per-channel override namespace.
+                session_id=session_id,
             )
             session.add_result_messages(result.messages, pre_len)
             session.trim(self.session_manager.MAX_SESSION_MESSAGES)
@@ -493,6 +495,8 @@ class SlackAdapter(BasePlatformAdapter):
                 system_prompt="You are a helpful assistant. Be concise.",
                 user_message="What is 2+2? Reply with just the number.",
                 tools=[],
+                # Phase 3.5: diagnostic path — never inherit user overrides.
+                session_id="system",
             )
             elapsed = time.monotonic() - t0
 

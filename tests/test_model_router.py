@@ -96,27 +96,30 @@ class TestRouting:
         assert d.provider is r.primary_provider
 
     def test_user_override_returns_override(self):
+        """Phase 3.5: override is per-session, so route() must be given a session_id."""
         r = _make_router()
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
-            r.set_override(OVERRIDE_PRESETS["claude"])
-            d = r.route("hello")
+            r.set_override("chat_test", OVERRIDE_PRESETS["claude"])
+            d = r.route("hello", context={"session_id": "chat_test"})
         assert d.reason == RouteReason.USER_OVERRIDE
         assert d.model_name == "claude-sonnet-4-6"
 
     def test_clear_override_returns_to_primary(self):
+        """Phase 3.5: clear_override takes the session_id whose override to drop."""
         r = _make_router()
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
-            r.set_override(OVERRIDE_PRESETS["claude"])
-            r.clear_override()
-        d = r.route("hello")
+            r.set_override("chat_test", OVERRIDE_PRESETS["claude"])
+            r.clear_override("chat_test")
+        d = r.route("hello", context={"session_id": "chat_test"})
         assert d.reason == RouteReason.PRIMARY
 
     def test_has_override_property(self):
+        """Phase 3.5: has_override is True iff ANY session has an override."""
         r = _make_router()
         assert not r.has_override
-        r.set_override({"provider": "openai", "model": "gpt-4o"})
+        r.set_override("chat_test", {"provider": "openai", "model": "gpt-4o"})
         assert r.has_override
-        r.clear_override()
+        r.clear_override("chat_test")
         assert not r.has_override
 
     def test_smart_routing_simple_goes_to_simple_provider(self):
@@ -295,10 +298,22 @@ class TestStatus:
         assert st["smart_routing"] is False
 
     def test_status_with_override(self):
+        """Phase 3.5: status(session_id=...) reports THAT session's override."""
         r = _make_router()
-        r.set_override({"provider": "anthropic", "model": "claude-sonnet-4-6"})
-        st = r.status()
+        r.set_override("chat_test", {"provider": "anthropic", "model": "claude-sonnet-4-6"})
+        st = r.status(session_id="chat_test")
         assert st["override"] == "claude-sonnet-4-6"
+        assert st["active_override_count"] == 1
+
+    def test_status_without_session_id_hides_override_detail(self):
+        """Phase 3.5: status() with no session_id returns override=None but
+        still exposes the count so diagnostic commands can see overrides exist."""
+        r = _make_router()
+        r.set_override("chat_a", {"provider": "anthropic", "model": "claude-sonnet-4-6"})
+        r.set_override("chat_b", {"provider": "openai", "model": "gpt-4o"})
+        st = r.status()
+        assert st["override"] is None
+        assert st["active_override_count"] == 2
 
     def test_status_with_escalation(self):
         r = _make_router(
