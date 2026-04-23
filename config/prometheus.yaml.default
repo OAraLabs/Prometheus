@@ -93,6 +93,27 @@ whisper:
 model_router:
   enabled: false
 
+# Phase 3 — opt-in cloud escalation for failed tool calls.
+#
+# When a tool call fails validation more times than the adapter's max_retries,
+# the main agent normally aborts. With escalation enabled, the retry engine
+# instead spawns a subagent running on a stronger provider (e.g. Claude,
+# GPT, Grok) to attempt the same tool call, and feeds the result back as a
+# tool_result. The main agent keeps running on the primary provider — only
+# the single failing tool call is delegated.
+#
+# Default: disabled. Uncomment and fill in an api_key_env to enable.
+#
+# router:
+#   escalation:
+#     enabled: false
+#     provider:
+#       provider: anthropic            # anthropic | openai | gemini | xai
+#       api_key_env: ANTHROPIC_API_KEY
+#       model: claude-sonnet-4-6
+#     as_subagent: true                # use isolated SubagentSpawner (recommended)
+#     budget_usd: 1.00                 # soft cost cap per escalation (future enforcement)
+
 divergence:
   enabled: false
 

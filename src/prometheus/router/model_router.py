@@ -437,6 +437,20 @@ class ModelRouter:
 
     # ── Escalation (Claude Code pattern) ──────────────────────────
 
+    def get_escalation_decision(self) -> RouteDecision | None:
+        """Return an escalation RouteDecision if enabled and configured.
+
+        Phase 3 public API: the agent_loop's ESCALATE handler calls this when
+        RetryEngine returns RetryAction.ESCALATE so it can reach the
+        pre-instantiated escalation provider + adapter without poking at
+        private internals.
+        """
+        if not self.config.escalation_enabled:
+            return None
+        if not self.config.escalation_provider:
+            return None
+        return self._route_escalation()
+
     def _route_escalation(self) -> RouteDecision:
         if not self.config.escalation_provider:
             return self._route_primary()

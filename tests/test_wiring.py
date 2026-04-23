@@ -3856,3 +3856,309 @@ class TestGraftRouterWirePhase2:
         assert result.provider is fallback_provider
         # Critical Phase 2 regression guard: must NOT be a tuple anymore
         assert not isinstance(result, tuple)
+
+
+# ---------------------------------------------------------------------------
+# GRAFT-ROUTER-WIRE Phase 3 — wire RetryAction.ESCALATE
+# ---------------------------------------------------------------------------
+
+
+class TestGraftRouterWirePhase3:
+    """Phase 3 wires RetryAction.ESCALATE through the adapter + agent loop.
+
+    Opt-in, off by default: escalation only fires when
+    `router.escalation.enabled: true` is set in config. Default behavior is
+    identical to pre-Phase-3 — retry-then-abort.
+    """
+
+    @staticmethod
+    def _build_router(**overrides):
+        from prometheus.router import ModelRouter, RouterConfig
+        return ModelRouter(
+            config=RouterConfig(**overrides),
+            primary_provider=MagicMock(),
+            primary_adapter=MagicMock(),
+            primary_model="primary",
+        )
+
+    @pytest.mark.integration
+    def test_adapter_forwards_router_to_retry_engine(self):
+        """ModelAdapter(router=X) threads X into its RetryEngine."""
+        from prometheus.adapter import ModelAdapter
+
+        router = self._build_router()
+        adapter = ModelAdapter(router=router)
+        assert adapter.retry.router is router
+
+    @pytest.mark.integration
+    def test_adapter_default_router_is_none(self):
+        """Regression guard: omitting router keeps existing behavior."""
+        from prometheus.adapter import ModelAdapter
+
+        adapter = ModelAdapter()
+        assert adapter.retry.router is None
+
+    @pytest.mark.integration
+    def test_router_get_escalation_decision_none_when_disabled(self):
+        """Default config has escalation disabled → None."""
+        router = self._build_router(escalation_enabled=False)
+        assert router.get_escalation_decision() is None
+
+    @pytest.mark.integration
+    def test_router_get_escalation_decision_none_when_no_provider(self):
+        """Enabled but no provider configured → None (safe fallthrough)."""
+        router = self._build_router(
+            escalation_enabled=True,
+            escalation_provider=None,
+        )
+        assert router.get_escalation_decision() is None
+
+    @pytest.mark.integration
+    def test_router_get_escalation_decision_returns_routedecision_when_enabled(self):
+        """Enabled + configured → RouteDecision with ESCALATION reason."""
+        from prometheus.router import RouteReason
+
+        router = self._build_router(
+            escalation_enabled=True,
+            escalation_provider={
+                "provider": "anthropic",
+                "api_key": "sk-test",
+                "model": "claude-sonnet-4-6",
+            },
+        )
+        decision = router.get_escalation_decision()
+        assert decision is not None
+        assert decision.reason == RouteReason.ESCALATION
+        assert decision.model_name == "claude-sonnet-4-6"
+        assert decision.provider_name == "anthropic"
+
+    @pytest.mark.integration
+    def test_retry_engine_escalate_when_enabled(self):
+        """RetryAction.ESCALATE returned when router has escalation enabled."""
+        from prometheus.adapter.retry import RetryEngine, RetryAction
+
+        router = self._build_router(
+            escalation_enabled=True,
+            escalation_provider={
+                "provider": "anthropic",
+                "api_key": "sk-test",  # inline key so ProviderRegistry skips env lookup
+                "model": "claude-sonnet-4-6",
+            },
+        )
+        engine = RetryEngine(max_retries=2, router=router)
+        engine.handle_failure("bash", "err1", None)
+        engine.handle_failure("bash", "err2", None)
+        action, _ = engine.handle_failure("bash", "err3", None)
+        assert action == RetryAction.ESCALATE
+
+    @pytest.mark.integration
+    def test_retry_engine_abort_when_escalation_disabled(self):
+        """Default behavior preserved: without escalation, retries exhaust → ABORT."""
+        from prometheus.adapter.retry import RetryEngine, RetryAction
+
+        router = self._build_router(escalation_enabled=False)
+        engine = RetryEngine(max_retries=2, router=router)
+        engine.handle_failure("bash", "err1", None)
+        engine.handle_failure("bash", "err2", None)
+        action, _ = engine.handle_failure("bash", "err3", None)
+        assert action == RetryAction.ABORT
+
+    @pytest.mark.integration
+    def test_retry_engine_abort_with_no_router(self):
+        """Pre-Phase-3 code path: no router → ABORT (unchanged)."""
+        from prometheus.adapter.retry import RetryEngine, RetryAction
+
+        engine = RetryEngine(max_retries=2)
+        engine.handle_failure("bash", "e1", None)
+        engine.handle_failure("bash", "e2", None)
+        action, _ = engine.handle_failure("bash", "e3", None)
+        assert action == RetryAction.ABORT
+
+    @pytest.mark.integration
+    def test_escalate_helper_returns_none_when_no_router(self):
+        """_try_escalate_tool_call with no router returns None (caller falls through)."""
+        from prometheus.engine.agent_loop import _try_escalate_tool_call
+
+        ctx = LoopContext(
+            provider=MagicMock(),
+            model="primary",
+            system_prompt="test",
+            max_tokens=256,
+            model_router=None,
+        )
+        result = asyncio.run(
+            _try_escalate_tool_call(ctx, "bash", {"cmd": "x"}, "use-id-1", "bad input")
+        )
+        assert result is None
+
+    @pytest.mark.integration
+    def test_escalate_helper_returns_none_when_escalation_disabled(self):
+        """Router present but escalation disabled → None."""
+        from prometheus.engine.agent_loop import _try_escalate_tool_call
+
+        router = self._build_router(escalation_enabled=False)
+        ctx = LoopContext(
+            provider=MagicMock(),
+            model="primary",
+            system_prompt="test",
+            max_tokens=256,
+            model_router=router,
+        )
+        result = asyncio.run(
+            _try_escalate_tool_call(ctx, "bash", {"cmd": "x"}, "use-id-1", "bad")
+        )
+        assert result is None
+
+    @pytest.mark.integration
+    def test_escalate_helper_catches_subagent_exceptions(self):
+        """Subagent spawn raising does NOT crash the main loop — returns None."""
+        from prometheus.engine.agent_loop import _try_escalate_tool_call
+
+        router = self._build_router(
+            escalation_enabled=True,
+            escalation_provider={
+                "provider": "anthropic",
+                "api_key": "sk-test",  # inline key so ProviderRegistry skips env lookup
+                "model": "claude-sonnet-4-6",
+            },
+        )
+        ctx = LoopContext(
+            provider=MagicMock(),
+            model="primary",
+            system_prompt="test",
+            max_tokens=256,
+            model_router=router,
+        )
+        # Patch SubagentSpawner to blow up on construction
+        with patch(
+            "prometheus.coordinator.subagent.SubagentSpawner",
+            side_effect=RuntimeError("simulated failure"),
+        ):
+            result = asyncio.run(
+                _try_escalate_tool_call(ctx, "bash", {"cmd": "x"}, "use-id-1", "bad")
+            )
+        # None means caller falls through to normal error path — main loop survives
+        assert result is None
+
+    @pytest.mark.integration
+    def test_escalate_helper_returns_tool_result_on_subagent_success(self):
+        """Happy path: subagent returns text → ToolResultBlock(is_error=False)."""
+        from prometheus.engine.agent_loop import _try_escalate_tool_call
+        from prometheus.coordinator.subagent import SubagentResult
+
+        router = self._build_router(
+            escalation_enabled=True,
+            escalation_provider={
+                "provider": "anthropic",
+                "api_key": "sk-test",  # inline key so ProviderRegistry skips env lookup
+                "model": "claude-sonnet-4-6",
+            },
+        )
+        ctx = LoopContext(
+            provider=MagicMock(),
+            model="primary",
+            system_prompt="test",
+            max_tokens=256,
+            model_router=router,
+            tool_registry=MagicMock(),
+        )
+
+        fake_result = SubagentResult(
+            agent_id="sub_test",
+            agent_type="general-purpose",
+            text="escalated output",
+            turns=1,
+            success=True,
+        )
+
+        with patch("prometheus.coordinator.subagent.SubagentSpawner") as SpawnerClass:
+            spawner_instance = SpawnerClass.return_value
+            spawner_instance.spawn = AsyncMock(return_value=fake_result)
+            result = asyncio.run(
+                _try_escalate_tool_call(ctx, "bash", {"cmd": "ls"}, "use-id-2", "bad")
+            )
+
+        assert result is not None
+        assert result.is_error is False
+        assert result.content == "escalated output"
+        assert result.tool_use_id == "use-id-2"
+
+    @pytest.mark.integration
+    def test_escalate_helper_reports_error_on_subagent_failure(self):
+        """Subagent returned failure → ToolResultBlock(is_error=True) with message."""
+        from prometheus.engine.agent_loop import _try_escalate_tool_call
+        from prometheus.coordinator.subagent import SubagentResult
+
+        router = self._build_router(
+            escalation_enabled=True,
+            escalation_provider={
+                "provider": "anthropic",
+                "api_key": "sk-test",  # inline key so ProviderRegistry skips env lookup
+                "model": "claude-sonnet-4-6",
+            },
+        )
+        ctx = LoopContext(
+            provider=MagicMock(),
+            model="primary",
+            system_prompt="test",
+            max_tokens=256,
+            model_router=router,
+            tool_registry=MagicMock(),
+        )
+
+        fake_result = SubagentResult(
+            agent_id="sub_test",
+            agent_type="general-purpose",
+            text="",
+            turns=0,
+            success=False,
+            error="api 500",
+        )
+        with patch("prometheus.coordinator.subagent.SubagentSpawner") as SpawnerClass:
+            spawner_instance = SpawnerClass.return_value
+            spawner_instance.spawn = AsyncMock(return_value=fake_result)
+            result = asyncio.run(
+                _try_escalate_tool_call(ctx, "bash", {"cmd": "ls"}, "use-id-3", "bad")
+            )
+
+        assert result is not None
+        assert result.is_error is True
+        assert "api 500" in result.content
+
+    @pytest.mark.integration
+    def test_load_router_config_reads_escalation_budget(self):
+        """Budget config is loaded even though enforcement is future work."""
+        from prometheus.router import load_router_config
+
+        cfg = load_router_config({
+            "router": {
+                "escalation": {
+                    "enabled": True,
+                    "provider": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+                    "budget_usd": 2.50,
+                    "as_subagent": True,
+                }
+            }
+        })
+        assert cfg.escalation_enabled is True
+        assert cfg.escalation_budget_usd == 2.50
+        assert cfg.escalation_as_subagent is True
+
+    @pytest.mark.integration
+    def test_default_config_has_escalation_commented(self):
+        """config/prometheus.yaml.default must NOT enable escalation by default."""
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parent.parent
+        default_yaml = (repo_root / "config" / "prometheus.yaml.default").read_text()
+        # The phrase "router:\n  escalation:" should only appear inside a comment
+        # block. A safe check: no uncommented "escalation:" anywhere that would
+        # read as enabled by yaml.safe_load.
+        import yaml
+        parsed = yaml.safe_load(default_yaml)
+        router_section = (parsed or {}).get("router", {})
+        escalation = router_section.get("escalation", {}) if router_section else {}
+        assert escalation.get("enabled", False) is False, (
+            "Default config must have escalation disabled. Fresh installs "
+            "must behave identically to pre-Phase-3."
+        )

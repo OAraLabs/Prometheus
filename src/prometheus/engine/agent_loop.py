@@ -406,6 +406,102 @@ def _log_iteration(
         )
 
 
+async def _try_escalate_tool_call(
+    context: LoopContext,
+    tool_name: str,
+    tool_input: dict,
+    tool_use_id: str,
+    last_error: str,
+) -> ToolResultBlock | None:
+    """Phase 3: escalate a repeatedly-failing tool call to a stronger provider.
+
+    Spawns a SubagentSpawner with the router's configured escalation provider
+    and asks it to execute the failing tool. The subagent runs in isolation
+    (fresh context, curated tool subset = just the failing tool). The main
+    agent loop keeps running on the primary provider; only the single tool
+    call is delegated.
+
+    Returns:
+        A ToolResultBlock with the subagent's result (success or error), or
+        None if the router has no escalation configured OR if spawning the
+        subagent raises. In the None case, the caller falls through to the
+        normal ABORT error path — escalation is best-effort, never fatal.
+    """
+    import json
+
+    if context.model_router is None or not hasattr(context.model_router, "get_escalation_decision"):
+        return None
+
+    try:
+        decision = context.model_router.get_escalation_decision()
+    except Exception:
+        log.warning("Escalation lookup failed", exc_info=True)
+        return None
+
+    if decision is None:
+        return None
+
+    try:
+        # Lazy import to avoid circular dependency
+        # (coordinator.subagent → engine.agent_loop)
+        from prometheus.coordinator.subagent import SubagentSpawner
+
+        spawner = SubagentSpawner(
+            provider=decision.provider,
+            parent_tool_registry=context.tool_registry,
+            model=decision.model_name or "unknown",
+            max_tokens=context.max_tokens,
+            cwd=context.cwd,
+            adapter=decision.adapter,
+            telemetry=context.telemetry,
+        )
+
+        try:
+            tool_input_json = json.dumps(tool_input, default=str)
+        except Exception:
+            tool_input_json = str(tool_input)
+
+        task_prompt = (
+            f"The primary model failed validation for the tool `{tool_name}` "
+            f"after repeated attempts. Original arguments: {tool_input_json}\n\n"
+            f"Last error: {last_error}\n\n"
+            f"Please invoke `{tool_name}` with corrected arguments and return "
+            f"its output."
+        )
+
+        log.warning(
+            "Escalating tool call %s to %s/%s (retries exhausted)",
+            tool_name,
+            decision.provider_name,
+            decision.model_name,
+        )
+
+        result = await spawner.spawn(
+            task=task_prompt,
+            agent_type="general-purpose",
+            tools_subset=[tool_name],
+        )
+
+        if result.success and result.text:
+            return ToolResultBlock(
+                tool_use_id=tool_use_id,
+                content=result.text,
+                is_error=False,
+            )
+
+        return ToolResultBlock(
+            tool_use_id=tool_use_id,
+            content=(
+                f"Escalation attempt failed ({decision.provider_name}/"
+                f"{decision.model_name}): {result.error or 'no result text'}"
+            ),
+            is_error=True,
+        )
+    except Exception as exc:
+        log.warning("Escalation raised, falling through: %s", exc, exc_info=True)
+        return None
+
+
 def _try_model_fallback(context: LoopContext):
     """Attempt to switch to a fallback provider for tool-call formatting errors.
 
@@ -709,6 +805,19 @@ async def _execute_tool_call(
                     error_type="validation_failed",
                     error_detail=str(exc),
                 )
+
+            # Phase 3: ESCALATE — retries exhausted + router has escalation
+            # configured. Spawn a subagent with the escalation provider to
+            # attempt the failing tool call. Main agent keeps running on
+            # the primary provider.
+            from prometheus.adapter.retry import RetryAction
+            if action == RetryAction.ESCALATE:
+                escalated = await _try_escalate_tool_call(
+                    context, tool_name, tool_input, tool_use_id, str(exc)
+                )
+                if escalated is not None:
+                    return escalated
+
             return ToolResultBlock(
                 tool_use_id=tool_use_id,
                 content=retry_prompt,

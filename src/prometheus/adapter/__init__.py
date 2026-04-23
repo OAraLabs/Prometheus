@@ -77,6 +77,7 @@ class ModelAdapter:
         strictness_threshold: float = 0.8,
         strictness_window: int = 100,
         tier: str | None = None,
+        router: Any = None,
     ) -> None:
         # If tier is explicitly set, override strictness and max_retries
         if tier == self.TIER_OFF:
@@ -91,7 +92,10 @@ class ModelAdapter:
         self.tier = tier or self.TIER_FULL
         self.formatter = formatter or AnthropicFormatter()
         self.validator = ToolCallValidator(strictness=strictness)
-        self.retry = RetryEngine(max_retries=max_retries)
+        # Phase 3: RetryEngine receives the router so it can consult
+        # router.config.escalation_enabled at the max-retries boundary
+        # and return RetryAction.ESCALATE instead of ABORT.
+        self.retry = RetryEngine(max_retries=max_retries, router=router)
         self.enforcer = StructuredOutputEnforcer()
         self._base_strictness = Strictness(strictness) if isinstance(strictness, str) else strictness
         self._adaptive_strictness = adaptive_strictness

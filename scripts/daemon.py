@@ -215,6 +215,11 @@ async def run_daemon(args: argparse.Namespace) -> None:
     adapter = create_adapter(model_config, config.get("adapter"))
     security_gate = create_security_gate(security_config)
     model_router = create_model_router(config, provider, adapter, model_name)
+    # Phase 3: wire the router back into the adapter's RetryEngine so it can
+    # consult router.config.escalation_enabled at tool-retry exhaustion and
+    # return RetryAction.ESCALATE instead of ABORT.
+    if adapter is not None and hasattr(adapter, "retry"):
+        adapter.retry.router = model_router
     divergence_detector = create_divergence_detector(config)
 
     # Telemetry — shared instance for AgentLoop and SENTINEL digest

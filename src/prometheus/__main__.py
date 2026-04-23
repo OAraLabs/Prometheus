@@ -874,6 +874,9 @@ def main() -> None:
     # Sprint 10 / Phase 2: Model Router + Divergence Detector
     # Router now requires primary provider + adapter + model built beforehand.
     model_router = create_model_router(config, provider, adapter, model_name)
+    # Phase 3: wire router back into adapter.retry so RetryEngine can escalate
+    if adapter is not None and hasattr(adapter, "retry"):
+        adapter.retry.router = model_router
     divergence_detector = create_divergence_detector(config)
 
     # Sprint 15 wiring fix: HookExecutor was built (Sprint 2) but never created
