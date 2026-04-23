@@ -27,6 +27,27 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 
 CREATE INDEX IF NOT EXISTS idx_tool_calls_model ON tool_calls (model);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls (tool_name);
+
+-- Circuit Breaker Self-Diagnosis sprint: per-trip diagnostic rows.
+-- Written by _CircuitBreaker.diagnose_and_recover() when the breaker trips.
+-- SENTINEL's _check_tool_patterns can later query this for richer
+-- alerting (not wired in this sprint).
+CREATE TABLE IF NOT EXISTS circuit_breaker_diagnostics (
+    id                TEXT PRIMARY KEY,
+    timestamp         REAL NOT NULL,
+    model_id          TEXT NOT NULL,
+    adapter_tier      TEXT NOT NULL,
+    tool_name         TEXT NOT NULL,
+    failure_category  TEXT NOT NULL,
+    config_drift      INTEGER NOT NULL DEFAULT 0,   -- 0 or 1
+    raw_sample        TEXT,                          -- first 500 chars of failed output
+    recovered         INTEGER NOT NULL DEFAULT 0,    -- 0 or 1
+    recovery_method   TEXT                           -- "tier_bump", "none", etc.
+);
+
+CREATE INDEX IF NOT EXISTS idx_cb_diag_timestamp ON circuit_breaker_diagnostics (timestamp);
+CREATE INDEX IF NOT EXISTS idx_cb_diag_model ON circuit_breaker_diagnostics (model_id);
+CREATE INDEX IF NOT EXISTS idx_cb_diag_tool ON circuit_breaker_diagnostics (tool_name);
 """
 
 
@@ -84,6 +105,51 @@ class ToolCallTelemetry:
                 latency_ms,
                 error_type,
                 error_detail,
+            ),
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Circuit Breaker diagnostic writes (Circuit Breaker Self-Diagnosis sprint)
+    # ------------------------------------------------------------------
+
+    def record_diagnosis(
+        self,
+        model_id: str,
+        adapter_tier: str,
+        tool_name: str,
+        failure_category: str,
+        config_drift: bool,
+        raw_sample: str | None,
+        recovered: bool,
+        recovery_method: str,
+    ) -> None:
+        """Record a single circuit-breaker diagnostic event.
+
+        Called by _CircuitBreaker.diagnose_and_recover() when the breaker
+        trips. Gives SENTINEL's _check_tool_patterns real diagnostic data
+        beyond "a failure happened".
+        """
+        sample = (raw_sample or "")[:500]
+        self._conn.execute(
+            """
+            INSERT INTO circuit_breaker_diagnostics
+              (id, timestamp, model_id, adapter_tier, tool_name,
+               failure_category, config_drift, raw_sample,
+               recovered, recovery_method)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                uuid4().hex,
+                time.time(),
+                model_id,
+                adapter_tier,
+                tool_name,
+                failure_category,
+                1 if config_drift else 0,
+                sample,
+                1 if recovered else 0,
+                recovery_method,
             ),
         )
         self._conn.commit()

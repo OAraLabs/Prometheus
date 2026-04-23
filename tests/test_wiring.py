@@ -4385,3 +4385,338 @@ class TestGraftRouterWirePhase3Point5:
         r.set_override("chat_B", {"provider": "openai", "model": "gpt-4o"})
         st = r.status(session_id="chat_A")
         assert st["override"] == "claude-sonnet-4-6"
+
+
+# ---------------------------------------------------------------------------
+# Circuit Breaker Self-Diagnosis sprint — diagnose_and_recover on trip
+# ---------------------------------------------------------------------------
+
+
+class TestCircuitBreakerDiagnosis:
+    """Circuit Breaker Self-Diagnosis sprint.
+
+    The circuit breaker already trips after 3 consecutive identical tool
+    failures. This sprint adds ONE diagnose-and-recover attempt between
+    the trip and the user-facing error — categorize the failure, log to
+    telemetry, attempt a tier bump, and either continue or report a
+    structured diagnostic.
+    """
+
+    @pytest.mark.integration
+    def test_categorize_malformed_json(self):
+        """Category: malformed_json — JSON-like but doesn't parse."""
+        from prometheus.engine.agent_loop import _categorize_failure
+        assert _categorize_failure('{"name": "bash", "input":') == "malformed_json"
+
+    @pytest.mark.integration
+    def test_categorize_wrong_schema(self):
+        """Category: wrong_schema — parses but isn't a tool-call shape."""
+        from prometheus.engine.agent_loop import _categorize_failure
+        assert _categorize_failure('{"hello": "world"}') == "wrong_schema"
+
+    @pytest.mark.integration
+    def test_categorize_raw_text(self):
+        """Category: raw_text — plain prose, no JSON delimiters."""
+        from prometheus.engine.agent_loop import _categorize_failure
+        assert _categorize_failure("I will run bash to list the files") == "raw_text"
+
+    @pytest.mark.integration
+    def test_categorize_special_char_escape(self):
+        """Category: special_char_escape — unescaped % breaks JSON."""
+        from prometheus.engine.agent_loop import _categorize_failure
+        assert _categorize_failure('{"command": "ps -o %cpu,%mem"}') == "special_char_escape"
+
+    @pytest.mark.integration
+    def test_categorize_empty_output(self):
+        """Category: empty_output."""
+        from prometheus.engine.agent_loop import _categorize_failure
+        assert _categorize_failure("") == "empty_output"
+        assert _categorize_failure("   \n\t") == "empty_output"
+
+    @pytest.mark.integration
+    def test_tier_bump_off_to_light(self):
+        """Tier off + recoverable trip → bumps to light + clears counters."""
+        from prometheus.engine.agent_loop import _CircuitBreaker
+
+        adapter = MagicMock()
+        adapter.tier = "off"
+        ctx = LoopContext(
+            provider=MagicMock(),
+            model="test-model",
+            system_prompt="",
+            max_tokens=256,
+            adapter=adapter,
+        )
+        breaker = _CircuitBreaker(max_identical=3)
+        breaker.record_error("bash", '{"name": "bash",')
+        breaker.record_error("bash", '{"name": "bash",')
+        breaker.record_error("bash", '{"name": "bash",')
+
+        result = breaker.diagnose_and_recover(
+            context=ctx, tool_name="bash", intended_action='{"cmd": "ls"}',
+        )
+        assert result.recovered is True
+        assert result.new_tier == "light"
+        assert adapter.tier == "light"
+        assert breaker.recovery_attempted is True
+
+    @pytest.mark.integration
+    def test_tier_bump_light_to_full(self):
+        """Tier light → bumps to full."""
+        from prometheus.engine.agent_loop import _CircuitBreaker
+
+        adapter = MagicMock()
+        adapter.tier = "light"
+        ctx = LoopContext(
+            provider=MagicMock(),
+            model="test-model",
+            system_prompt="",
+            max_tokens=256,
+            adapter=adapter,
+        )
+        breaker = _CircuitBreaker(max_identical=3)
+        for _ in range(3):
+            breaker.record_error("bash", "bad output")
+        result = breaker.diagnose_and_recover(context=ctx, tool_name="bash")
+        assert result.recovered is True
+        assert result.new_tier == "full"
+        assert adapter.tier == "full"
+
+    @pytest.mark.integration
+    def test_full_tier_gives_up_with_diagnostic(self):
+        """Tier full + still failing → gives up, emits structured diagnostic."""
+        from prometheus.engine.agent_loop import _CircuitBreaker
+
+        adapter = MagicMock()
+        adapter.tier = "full"
+        ctx = LoopContext(
+            provider=MagicMock(),
+            model="gemma-4-26b",
+            system_prompt="",
+            max_tokens=256,
+            adapter=adapter,
+        )
+        breaker = _CircuitBreaker(max_identical=3)
+        for _ in range(3):
+            breaker.record_error("bash", "bad output")
+        result = breaker.diagnose_and_recover(context=ctx, tool_name="bash")
+        assert result.recovered is False
+        assert result.recovery_method == "no_recovery_available"
+        msg = result.diagnostic_message
+        assert "Model: gemma-4-26b" in msg
+        assert "Adapter tier: full" in msg
+        assert "Failure type:" in msg
+        assert "Config drift:" in msg
+        assert "Recovery:" in msg
+
+    @pytest.mark.integration
+    def test_config_drift_detection_flagged(self, tmp_path, monkeypatch):
+        """Active model != on-disk config model → config_drift=True in diagnosis."""
+        from prometheus.engine.agent_loop import _CircuitBreaker
+
+        fake_cfg = tmp_path / "config" / "prometheus.yaml"
+        fake_cfg.parent.mkdir(parents=True)
+        fake_cfg.write_text("model:\n  model: expected-model\n")
+        # Also shadow the home-dir candidate so we definitely hit tmp_path first
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        adapter = MagicMock()
+        adapter.tier = "full"
+        ctx = LoopContext(
+            provider=MagicMock(),
+            model="actual-different-model",
+            system_prompt="",
+            max_tokens=256,
+            adapter=adapter,
+        )
+        breaker = _CircuitBreaker(max_identical=3)
+        for _ in range(3):
+            breaker.record_error("bash", "bad output")
+        result = breaker.diagnose_and_recover(context=ctx, tool_name="bash")
+        assert result.config_drift is True
+        assert "Config drift: yes" in result.diagnostic_message
+
+    @pytest.mark.integration
+    def test_config_drift_no_mismatch(self, tmp_path, monkeypatch):
+        """Active model == on-disk config model → config_drift=False."""
+        from prometheus.engine.agent_loop import _CircuitBreaker
+
+        fake_cfg = tmp_path / "config" / "prometheus.yaml"
+        fake_cfg.parent.mkdir(parents=True)
+        fake_cfg.write_text("model:\n  model: matching-model\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        adapter = MagicMock()
+        adapter.tier = "full"
+        ctx = LoopContext(
+            provider=MagicMock(),
+            model="matching-model",
+            system_prompt="",
+            max_tokens=256,
+            adapter=adapter,
+        )
+        breaker = _CircuitBreaker(max_identical=3)
+        for _ in range(3):
+            breaker.record_error("bash", "bad output")
+        result = breaker.diagnose_and_recover(context=ctx, tool_name="bash")
+        assert result.config_drift is False
+        assert "Config drift: no" in result.diagnostic_message
+
+    @pytest.mark.integration
+    def test_recovery_is_one_shot(self):
+        """recovery_attempted gates subsequent diagnose_and_recover calls."""
+        from prometheus.engine.agent_loop import _CircuitBreaker
+
+        adapter = MagicMock()
+        adapter.tier = "off"
+        ctx = LoopContext(
+            provider=MagicMock(),
+            model="test-model",
+            system_prompt="",
+            max_tokens=256,
+            adapter=adapter,
+        )
+        breaker = _CircuitBreaker(max_identical=3)
+        for _ in range(3):
+            breaker.record_error("bash", "bad")
+        first = breaker.diagnose_and_recover(context=ctx, tool_name="bash")
+        assert first.recovered is True
+        # Second diagnose on same breaker — must be gated
+        for _ in range(3):
+            breaker.record_error("bash", "still bad")
+        second = breaker.diagnose_and_recover(context=ctx, tool_name="bash")
+        assert second.recovered is False
+        assert second.recovery_method == "already_attempted"
+
+    @pytest.mark.integration
+    def test_diagnostic_row_written_to_sqlite(self, tmp_path):
+        """Integration: diagnose writes a row to circuit_breaker_diagnostics table."""
+        from prometheus.engine.agent_loop import _CircuitBreaker
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+
+        db_path = tmp_path / "telemetry.db"
+        tel = ToolCallTelemetry(db_path=db_path)
+
+        adapter = MagicMock()
+        adapter.tier = "light"
+        ctx = LoopContext(
+            provider=MagicMock(),
+            model="test-model-A",
+            system_prompt="",
+            max_tokens=256,
+            adapter=adapter,
+            telemetry=tel,
+        )
+        breaker = _CircuitBreaker(max_identical=3)
+        for _ in range(3):
+            breaker.record_error("bash", '{"broken json')
+
+        result = breaker.diagnose_and_recover(context=ctx, tool_name="bash")
+        assert result.recovered is True
+
+        conn = sqlite3.connect(str(db_path))
+        rows = conn.execute(
+            "SELECT model_id, adapter_tier, tool_name, failure_category, "
+            "config_drift, recovered, recovery_method "
+            "FROM circuit_breaker_diagnostics"
+        ).fetchall()
+        conn.close()
+        assert len(rows) == 1
+        (model_id, tier, tool, cat, drift, recovered, method) = rows[0]
+        assert model_id == "test-model-A"
+        assert tier == "light"
+        assert tool == "bash"
+        assert cat == "malformed_json"
+        assert recovered == 1
+        assert method == "tier_bump:light->full"
+
+    @pytest.mark.integration
+    def test_diagnose_crash_is_suppressed(self):
+        """If _do_diagnose_and_recover raises, returns a safe fallback result."""
+        from prometheus.engine.agent_loop import _CircuitBreaker
+        import prometheus.engine.agent_loop as loop_mod
+
+        breaker = _CircuitBreaker()
+        for _ in range(3):
+            breaker.record_error("bash", "err")
+
+        def _boom(_):
+            raise RuntimeError("simulated")
+
+        original = loop_mod._categorize_failure
+        loop_mod._categorize_failure = _boom
+        try:
+            ctx = LoopContext(
+                provider=MagicMock(),
+                model="test",
+                system_prompt="",
+                max_tokens=256,
+            )
+            result = breaker.diagnose_and_recover(context=ctx, tool_name="bash")
+        finally:
+            loop_mod._categorize_failure = original
+
+        assert result.recovered is False
+        assert result.recovery_method == "error"
+        assert "Diagnosis unavailable" in result.diagnostic_message
+
+    @pytest.mark.integration
+    def test_trip_handler_calls_diagnose_and_recover(self, tmp_path):
+        """Wiring test: a circuit-breaker trip in run_loop triggers recovery
+        (mock provider emits 3 calls to an unknown tool → adapter validation
+        fails, breaker trips, diagnose_and_recover is invoked before the
+        user-facing error is emitted)."""
+        from prometheus.engine.agent_loop import _CircuitBreaker
+        import prometheus.engine.agent_loop as loop_mod
+
+        # Spy on diagnose_and_recover so we can confirm invocation.
+        original = _CircuitBreaker.diagnose_and_recover
+        call_log = []
+
+        def spy(self, *args, **kwargs):
+            call_log.append({"tool_name": kwargs.get("tool_name")})
+            return original(self, *args, **kwargs)
+
+        loop_mod._CircuitBreaker.diagnose_and_recover = spy
+        try:
+            # Build an adapter that always fails validation — ValueError on
+            # every validate_and_repair. That drives the record_error path
+            # in _execute_tool_call which feeds the circuit breaker.
+            adapter = MagicMock()
+            adapter.tier = "full"   # no tier bump available
+            adapter.validate_and_repair.side_effect = ValueError("malformed tool input")
+            adapter.handle_retry.return_value = ("ABORT", "repeat error")
+            adapter.format_request.return_value = ("sys", [])
+
+            # Scripted provider emits the SAME tool call 3 times so the
+            # breaker's identical-error counter advances.
+            provider = ScriptedProvider([
+                _tool_response("bash", f"use-{i}", {"cmd": "x"})
+                for i in range(3)
+            ])
+
+            registry = MagicMock()
+            registry.get.return_value = None  # unknown tool → is_error=True
+            registry.to_api_schema.return_value = []
+
+            ctx = LoopContext(
+                provider=provider,
+                model="test",
+                system_prompt="test",
+                max_tokens=256,
+                tool_registry=registry,
+                adapter=adapter,
+            )
+            messages = [ConversationMessage.from_user_text("do a thing")]
+
+            async def _run():
+                async for _ in run_loop(ctx, messages):
+                    pass
+
+            asyncio.run(_run())
+            # At minimum one diagnose_and_recover invocation when the breaker trips
+            assert len(call_log) >= 1
+        finally:
+            loop_mod._CircuitBreaker.diagnose_and_recover = original

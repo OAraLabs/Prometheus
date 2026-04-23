@@ -70,6 +70,68 @@ class _IterationReason:
     MODEL_FALLBACK = "model_fallback"
 
 
+_FAILURE_CATEGORIES = (
+    "empty_output",
+    "raw_text",
+    "special_char_escape",
+    "malformed_json",
+    "wrong_schema",
+    "other",
+)
+
+
+def _categorize_failure(raw: str) -> str:
+    """Categorize a failed tool-call attempt from its raw error/output text.
+
+    Circuit Breaker Self-Diagnosis sprint. Pure logic, no LLM call.
+    Exposed at module scope for direct unit testing.
+
+    Categories:
+      - empty_output: output is empty or whitespace
+      - raw_text: no JSON-like delimiters at all (plain prose)
+      - special_char_escape: JSON-like, but contains unescaped special chars
+                            (%, backticks, literal newlines) that break parsing
+      - malformed_json: JSON-like brackets but doesn't parse
+      - wrong_schema: parses as JSON but isn't a tool-call shape
+      - other: catch-all
+    """
+    import json as _json
+    import re as _re
+
+    if raw is None:
+        return "empty_output"
+    stripped = raw.strip()
+    if not stripped:
+        return "empty_output"
+
+    has_brackets = "{" in stripped or "[" in stripped
+    if not has_brackets:
+        return "raw_text"
+
+    # Special-char detection — unescaped % or ` inside what looks like JSON args
+    # These routinely break llama.cpp JSON emission (e.g. `ps -o %cpu,%mem`).
+    # We check the original raw (not stripped) to catch cases like '"command":
+    # "ps %cpu"'.
+    if _re.search(r'(?<!\\)[%`]', raw):
+        # If there's a brackets + unescaped % or `, that's the signature
+        return "special_char_escape"
+
+    # Try to parse. If it parses, decide between wrong_schema and other.
+    try:
+        parsed = _json.loads(stripped)
+    except _json.JSONDecodeError:
+        return "malformed_json"
+
+    # Parsed — check if it looks like a tool call
+    if isinstance(parsed, dict):
+        keys = set(parsed.keys())
+        # Rough tool-call shape markers
+        if not (keys & {"name", "tool", "tool_name", "tool_use", "function"}):
+            return "wrong_schema"
+        return "wrong_schema"
+    return "other"
+
+
 @dataclass
 class _CircuitBreaker:
     """Detect repeated tool-call failures and break the loop.
@@ -77,6 +139,10 @@ class _CircuitBreaker:
     Two thresholds:
       - max_identical: consecutive IDENTICAL errors (same tool+error) → stop
       - max_any: consecutive errors of ANY kind in a single turn → hard stop
+
+    Circuit Breaker Self-Diagnosis sprint: the breaker now retains the last
+    few raw error payloads and can run ONE diagnose-and-recover attempt via
+    ``diagnose_and_recover()`` before the loop gives up.
     """
 
     max_identical: int = 3
@@ -84,11 +150,20 @@ class _CircuitBreaker:
     _last_error_key: str = ""
     _identical_count: int = 0
     _any_error_count: int = 0
+    # Circuit Breaker Self-Diagnosis sprint state:
+    _recent_errors: list[str] = field(default_factory=list)   # last 3 raw messages
+    recovery_attempted: bool = False                           # one-shot guard
+    last_failure_category: str = ""                            # from diagnose()
 
     def record_error(self, tool_name: str, error_msg: str) -> str | None:
         """Record an error. Returns a trip reason string, or None if OK."""
         error_key = f"{tool_name}:{error_msg[:120]}"
         self._any_error_count += 1
+
+        # Retain last 3 raw messages for diagnose_and_recover()
+        self._recent_errors.append(error_msg)
+        if len(self._recent_errors) > self.max_identical:
+            self._recent_errors = self._recent_errors[-self.max_identical:]
 
         if error_key == self._last_error_key:
             self._identical_count += 1
@@ -113,12 +188,241 @@ class _CircuitBreaker:
         self._last_error_key = ""
         self._identical_count = 0
         self._any_error_count = 0
+        self._recent_errors = []
+        # Note: recovery_attempted intentionally NOT reset — a successful tool
+        # call after recovery should not re-arm the breaker for another
+        # recovery in the same run. That's the "only ONE recovery attempt" rule.
 
     @property
     def is_formatting_error(self) -> bool:
         """True if the last trip was likely a tool-call formatting issue."""
         key = self._last_error_key.lower()
         return any(s in key for s in ("empty tool name", "unknown tool: ''", "malformed"))
+
+    def diagnose_and_recover(
+        self,
+        *,
+        context: "LoopContext",
+        tool_name: str,
+        intended_action: str = "",
+    ) -> "_RecoveryResult":
+        """Diagnose the circuit-breaker trip and attempt ONE recovery.
+
+        Steps (per Circuit Breaker Self-Diagnosis sprint):
+          1. Classify each retained raw error into a failure_category
+          2. Log a diagnostic row to telemetry SQLite
+          3. Attempt recovery (tier bump) if possible and not already tried
+          4. Return a structured result with a user-facing message
+
+        Never raises — any failure inside this method logs and returns a
+        "recovery not possible" result so the caller can fall through to the
+        normal circuit-breaker-trip message.
+        """
+        try:
+            return _do_diagnose_and_recover(
+                breaker=self,
+                context=context,
+                tool_name=tool_name,
+                intended_action=intended_action,
+            )
+        except Exception as exc:
+            log.warning("diagnose_and_recover crashed, suppressing: %s", exc, exc_info=True)
+            return _RecoveryResult(
+                recovered=False,
+                recovery_method="error",
+                failure_category="other",
+                diagnostic_message=(
+                    f"⚠️ Tool call failed {self._identical_count} times. "
+                    f"Diagnosis unavailable (internal error)."
+                ),
+            )
+
+
+@dataclass
+class _RecoveryResult:
+    """Structured return value from _CircuitBreaker.diagnose_and_recover().
+
+    Used by run_loop to decide whether to continue (recovered=True) or give
+    up while reporting the diagnostic message to the user.
+    """
+    recovered: bool
+    recovery_method: str                    # "tier_bump", "none", "error", etc.
+    failure_category: str
+    diagnostic_message: str
+    config_drift: bool = False
+    new_tier: str | None = None             # set when tier_bump succeeded
+
+
+_TIER_BUMP_LADDER: dict[str, str] = {
+    "off": "light",
+    "light": "full",
+    # "full" has no bump target — full tier + still failing = give up
+}
+
+
+def _detect_config_drift(active_model: str) -> bool:
+    """Compare the live model id against what's on disk in prometheus.yaml.
+
+    Returns True iff the on-disk config specifies a model different from the
+    one currently running. Silent False when no config file found or the
+    file can't be parsed — we never block or mutate on this signal.
+
+    Note: we intentionally do NOT auto-fix the config (denied_paths protects
+    prometheus.yaml). The result just feeds the user-facing diagnostic.
+    """
+    import yaml
+    candidates = [
+        Path("config") / "prometheus.yaml",
+        Path.home() / ".prometheus" / "prometheus.yaml",
+    ]
+    for candidate in candidates:
+        try:
+            if not candidate.is_file():
+                continue
+            raw = candidate.read_text(encoding="utf-8")
+            cfg = yaml.safe_load(raw) or {}
+            expected = (cfg.get("model") or {}).get("model", "")
+            if expected and expected != active_model:
+                return True
+            return False
+        except Exception:
+            continue
+    return False
+
+
+def _format_diagnostic_message(
+    *,
+    trip_count: int,
+    model_id: str,
+    adapter_tier: str,
+    failure_category: str,
+    config_drift: bool,
+    recovery_status: str,
+    intended_action: str = "",
+) -> str:
+    """Build the user-facing circuit-breaker diagnostic message.
+
+    Replaces the pre-sprint cryptic 'Circuit breaker tripped: ...' with a
+    structured report the user can act on.
+    """
+    lines = [
+        f"⚠️ Tool call failed {trip_count} times. Diagnosis:",
+        f" - Model: {model_id or 'unknown'}",
+        f" - Adapter tier: {adapter_tier or 'unknown'}",
+        f" - Failure type: {failure_category}",
+        f" - Config drift: {'yes' if config_drift else 'no'}",
+        f" - Recovery: {recovery_status}",
+    ]
+    if intended_action and recovery_status.startswith(("not possible", "attempted, failed")):
+        lines.append(f" - Intended action: {intended_action[:300]}")
+    return "\n".join(lines)
+
+
+def _do_diagnose_and_recover(
+    *,
+    breaker: "_CircuitBreaker",
+    context: "LoopContext",
+    tool_name: str,
+    intended_action: str,
+) -> _RecoveryResult:
+    """Actual diagnose + recover implementation (pulled out for try/except wrap)."""
+    # ── Step 1: Diagnose ──────────────────────────────────────────
+    raw_samples = list(breaker._recent_errors)
+    category = (
+        _categorize_failure(raw_samples[-1]) if raw_samples else "empty_output"
+    )
+    breaker.last_failure_category = category
+
+    active_tier = getattr(context.adapter, "tier", "unknown") if context.adapter else "none"
+    active_model_id = context.model or ""
+    config_drift = _detect_config_drift(active_model_id)
+
+    # ── Step 3: Recover (decide method, then act) ─────────────────
+    recovery_method = "none"
+    recovered = False
+    new_tier: str | None = None
+
+    if breaker.recovery_attempted:
+        # Already tried once this run — give up cleanly per the one-shot rule.
+        recovery_method = "already_attempted"
+    elif category == "special_char_escape":
+        # v1: we diagnose it but don't auto-rewrite the arguments. The user's
+        # diagnostic message surfaces the category so they know what broke.
+        recovery_method = "diagnostic_only:special_char_escape"
+    elif active_tier in _TIER_BUMP_LADDER and context.adapter is not None:
+        # Bump the adapter tier one rung up (off → light, light → full).
+        next_tier = _TIER_BUMP_LADDER[active_tier]
+        try:
+            context.adapter.tier = next_tier
+            new_tier = next_tier
+            recovery_method = f"tier_bump:{active_tier}->{next_tier}"
+            recovered = True
+            breaker.record_success()   # clear counters so the loop can continue
+        except Exception as exc:
+            log.warning("Tier bump failed: %s", exc, exc_info=True)
+            recovery_method = "tier_bump_failed"
+    else:
+        # Tier is already full (or unknown) — no recovery available.
+        recovery_method = "no_recovery_available"
+
+    # Mark as attempted regardless of outcome so we don't loop the diagnosis.
+    breaker.recovery_attempted = True
+
+    # ── Step 2: Log (write SQLite row AFTER we know recovery outcome) ─
+    if context.telemetry is not None and hasattr(context.telemetry, "record_diagnosis"):
+        try:
+            context.telemetry.record_diagnosis(
+                model_id=active_model_id,
+                adapter_tier=str(active_tier),
+                tool_name=tool_name,
+                failure_category=category,
+                config_drift=config_drift,
+                raw_sample=(raw_samples[-1] if raw_samples else None),
+                recovered=recovered,
+                recovery_method=recovery_method,
+            )
+        except Exception:
+            log.warning("Telemetry record_diagnosis failed", exc_info=True)
+
+    # ── Step 4: Build user-facing message ─────────────────────────
+    if recovered:
+        status = f"attempted ({recovery_method}), will retry once"
+    elif recovery_method == "already_attempted":
+        status = "not possible (recovery already tried once this run)"
+    elif recovery_method == "diagnostic_only:special_char_escape":
+        status = (
+            "not possible automatically — the model's arguments contained "
+            "unescaped special characters (%, backticks). Simplify the "
+            "command by hand and retry."
+        )
+    elif recovery_method == "no_recovery_available":
+        status = (
+            f"not possible at tier '{active_tier}' — already at the strictest "
+            f"adapter configuration."
+        )
+    elif recovery_method == "tier_bump_failed":
+        status = "attempted, failed (could not bump adapter tier)"
+    else:
+        status = f"not possible ({recovery_method})"
+
+    message = _format_diagnostic_message(
+        trip_count=breaker._identical_count or len(raw_samples),
+        model_id=active_model_id,
+        adapter_tier=str(active_tier),
+        failure_category=category,
+        config_drift=config_drift,
+        recovery_status=status,
+        intended_action=intended_action,
+    )
+
+    return _RecoveryResult(
+        recovered=recovered,
+        recovery_method=recovery_method,
+        failure_category=category,
+        diagnostic_message=message,
+        config_drift=config_drift,
+        new_tier=new_tier,
+    )
 
 
 @dataclass
@@ -330,6 +634,51 @@ async def run_loop(
                         # Feed error results back so the fallback model sees them
                         messages.append(ConversationMessage(role="user", content=tool_results))
                         continue
+
+                # Circuit Breaker Self-Diagnosis sprint: before reporting
+                # failure to the user, run ONE diagnose-and-recover pass.
+                # If recovery succeeded (tier bump), continue the loop once
+                # more. If not, report the structured diagnostic instead of
+                # the old cryptic "Circuit breaker tripped" message.
+                if not circuit_breaker.recovery_attempted:
+                    # Pull the failing tool name + args for the diagnostic
+                    first_failed_tc = tool_calls[0] if tool_calls else None
+                    failing_name = first_failed_tc.name if first_failed_tc else "unknown"
+                    import json as _json
+                    try:
+                        intended = _json.dumps(
+                            first_failed_tc.input if first_failed_tc else {},
+                            default=str,
+                        )
+                    except Exception:
+                        intended = str(first_failed_tc.input if first_failed_tc else "")
+
+                    recovery = circuit_breaker.diagnose_and_recover(
+                        context=context,
+                        tool_name=failing_name,
+                        intended_action=intended,
+                    )
+                    if recovery.recovered:
+                        _log_iteration(
+                            context,
+                            _IterationReason.CIRCUIT_BREAKER_TRIP,
+                            turn,
+                            tool_iteration,
+                            f"recovered via {recovery.recovery_method}",
+                        )
+                        # Re-format for the new tier, feed error back, continue.
+                        if context.adapter is not None and hasattr(context.adapter, "format_request"):
+                            active_system_prompt, active_tools = context.adapter.format_request(
+                                context.system_prompt, tool_schema
+                            )
+                        messages.append(ConversationMessage(role="user", content=tool_results))
+                        continue
+
+                    # Recovery not possible — emit the structured diagnostic.
+                    error_msg = _make_assistant_msg(recovery.diagnostic_message)
+                    messages.append(error_msg)
+                    yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+                    return
 
                 error_msg = _make_assistant_msg(
                     f"Circuit breaker tripped: {trip_msg}. "
