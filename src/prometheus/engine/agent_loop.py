@@ -260,6 +260,42 @@ _TIER_BUMP_LADDER: dict[str, str] = {
 }
 
 
+def _provider_name_for_telemetry(provider_instance: object) -> str:
+    """Best-effort provider-name string for golden-trace flagging.
+
+    Golden Trace Capture sprint: we need to know whether the current
+    provider is cloud (anthropic/openai/gemini/xai/groq) vs local
+    (llama_cpp/ollama) so ``ToolCallTelemetry.record()`` can compute
+    ``is_golden``. Provider instances don't uniformly expose a
+    ``provider_name`` attribute, so this falls back to mapping the
+    concrete class name.
+
+    Returns the provider name string (or "" if unknown — in which case
+    golden flagging auto-fails, which is the safe default).
+    """
+    if provider_instance is None:
+        return ""
+    explicit = getattr(provider_instance, "provider_name", None)
+    if explicit:
+        return str(explicit)
+    class_name = type(provider_instance).__name__.lower()
+    if "anthropic" in class_name:
+        return "anthropic"
+    if "llamacpp" in class_name:
+        return "llama_cpp"
+    if "ollama" in class_name:
+        return "ollama"
+    if "openaicompat" in class_name:
+        # OpenAICompatProvider is shared by openai / gemini / xai / groq.
+        # Without access to the original config dict, we cannot distinguish
+        # them — return "openai" as the most common case. Callers who need
+        # precision should set provider_name on the instance explicitly.
+        return "openai"
+    if "stub" in class_name:
+        return "stub"
+    return ""
+
+
 def _detect_config_drift(active_model: str) -> bool:
     """Compare the live model id against what's on disk in prometheus.yaml.
 
@@ -299,11 +335,17 @@ def _format_diagnostic_message(
     config_drift: bool,
     recovery_status: str,
     intended_action: str = "",
+    golden_reference: str | None = None,
 ) -> str:
     """Build the user-facing circuit-breaker diagnostic message.
 
     Replaces the pre-sprint cryptic 'Circuit breaker tripped: ...' with a
     structured report the user can act on.
+
+    Golden Trace Capture sprint: when ``golden_reference`` is provided, a
+    "Reference" line is appended showing a cloud-teacher's successful call
+    shape. This is purely additive — the diagnostic works unchanged when
+    no golden trace exists.
     """
     lines = [
         f"⚠️ Tool call failed {trip_count} times. Diagnosis:",
@@ -315,6 +357,9 @@ def _format_diagnostic_message(
     ]
     if intended_action and recovery_status.startswith(("not possible", "attempted, failed")):
         lines.append(f" - Intended action: {intended_action[:300]}")
+    if golden_reference:
+        # Truncate for safety — the full reference is on the SQLite row.
+        lines.append(f" - Reference (cloud teacher's call shape): {golden_reference[:400]}")
     return "\n".join(lines)
 
 
@@ -368,6 +413,20 @@ def _do_diagnose_and_recover(
     # Mark as attempted regardless of outcome so we don't loop the diagnosis.
     breaker.recovery_attempted = True
 
+    # ── Golden Trace Capture sprint: fetch golden reference for this tool ─
+    # If cloud teacher models have successfully called this tool with zero
+    # adapter retries, surface the most recent "parsed_tool_call" JSON in
+    # the user-facing diagnostic and persist it on the SQLite row.
+    golden_reference: str | None = None
+    if context.telemetry is not None and hasattr(context.telemetry, "get_golden_traces"):
+        try:
+            golden = context.telemetry.get_golden_traces(tool_name=tool_name, limit=3)
+            if golden:
+                best = golden[0]
+                golden_reference = best.get("parsed_tool_call") or None
+        except Exception:
+            log.debug("get_golden_traces failed in diagnose", exc_info=True)
+
     # ── Step 2: Log (write SQLite row AFTER we know recovery outcome) ─
     if context.telemetry is not None and hasattr(context.telemetry, "record_diagnosis"):
         try:
@@ -380,6 +439,7 @@ def _do_diagnose_and_recover(
                 raw_sample=(raw_samples[-1] if raw_samples else None),
                 recovered=recovered,
                 recovery_method=recovery_method,
+                golden_reference=golden_reference,
             )
         except Exception:
             log.warning("Telemetry record_diagnosis failed", exc_info=True)
@@ -413,6 +473,7 @@ def _do_diagnose_and_recover(
         config_drift=config_drift,
         recovery_status=status,
         intended_action=intended_action,
+        golden_reference=golden_reference,
     )
 
     return _RecoveryResult(
@@ -556,6 +617,12 @@ async def run_loop(
         if final_message is None:
             raise RuntimeError("Model stream finished without a final message")
 
+        # Golden Trace Capture sprint: capture the model's raw output BEFORE
+        # the adapter's extract_tool_calls path rewrites final_message. This
+        # string is what we'd want to train a local model to emit for the
+        # current tool-calling task.
+        raw_model_output_this_turn = final_message.text or ""
+
         # Sprint 3: try to extract tool calls from text when none came back structured
         if (
             not final_message.tool_uses
@@ -592,7 +659,9 @@ async def run_loop(
             yield AssistantTurnComplete(message=error_msg, usage=usage), usage
             return
 
-        tool_results = await _dispatch_tool_calls(context, tool_calls)
+        tool_results = await _dispatch_tool_calls(
+            context, tool_calls, raw_model_output=raw_model_output_this_turn
+        )
 
         # --- Circuit breaker ---
         all_errors = all(r.is_error for r in tool_results)
@@ -1021,16 +1090,25 @@ def _microcompact_old_results(
 async def _dispatch_tool_calls(
     context: LoopContext,
     tool_calls: list,
+    raw_model_output: str | None = None,
 ) -> list[ToolResultBlock]:
     """Dispatch tool calls with parallel execution for read-only tools.
 
     Read-only tools are executed simultaneously via ``asyncio.gather``.
     Mutating tools are executed sequentially afterwards to preserve order.
     Single tool calls skip partitioning entirely.
+
+    Golden Trace Capture sprint: ``raw_model_output`` is the text the
+    model produced for this turn (before adapter parsing). Forwarded to
+    each ``_execute_tool_call`` so successful cloud-provider calls get
+    captured as golden traces in telemetry.
     """
     if len(tool_calls) == 1:
         tc = tool_calls[0]
-        return [await _execute_tool_call(context, tc.name, tc.id, tc.input)]
+        return [await _execute_tool_call(
+            context, tc.name, tc.id, tc.input,
+            raw_model_output=raw_model_output,
+        )]
 
     # Partition into read-only and mutating based on tool.is_read_only()
     read_only: list[tuple[int, object]] = []   # (original_index, tool_call)
@@ -1048,7 +1126,10 @@ async def _dispatch_tool_calls(
     # Run all read-only tools in parallel
     if read_only:
         async def _run_ro(idx, tc):
-            r = await _execute_tool_call(context, tc.name, tc.id, tc.input)
+            r = await _execute_tool_call(
+                context, tc.name, tc.id, tc.input,
+                raw_model_output=raw_model_output,
+            )
             return idx, r
 
         parallel = await asyncio.gather(
@@ -1077,7 +1158,10 @@ async def _dispatch_tool_calls(
 
     # Run mutating tools sequentially (order matters)
     for idx, tc in mutating:
-        result = await _execute_tool_call(context, tc.name, tc.id, tc.input)
+        result = await _execute_tool_call(
+            context, tc.name, tc.id, tc.input,
+            raw_model_output=raw_model_output,
+        )
         results.append((idx, result))
 
     # Restore original order
@@ -1101,8 +1185,17 @@ async def _execute_tool_call(
     tool_name: str,
     tool_use_id: str,
     tool_input: dict[str, object],
+    *,
+    raw_model_output: str | None = None,
 ) -> ToolResultBlock:
-    """Execute a single tool call, running hooks if configured."""
+    """Execute a single tool call, running hooks if configured.
+
+    Golden Trace Capture sprint: ``raw_model_output`` is the text the
+    model produced BEFORE adapter parsing (enforcer/formatter) for this
+    turn. Passed through to ``telemetry.record()`` on the success path
+    so cloud-provider wins with zero adapter retries get flagged as
+    ``is_golden=1`` for later fine-tuning use.
+    """
     # Pre-tool hook (Sprint 2)
     if context.hook_executor is not None:
         from prometheus.hooks import HookEvent
@@ -1294,8 +1387,14 @@ async def _execute_tool_call(
         is_error=result.is_error,
     )
 
-    # Sprint 3: record telemetry
+    # Sprint 3 / Golden Trace Capture: record telemetry with raw + parsed output.
     if context.telemetry is not None:
+        import json as _json
+        try:
+            parsed_tool_json = _json.dumps({"name": tool_name, "input": tool_input}, default=str)
+        except Exception:
+            parsed_tool_json = None
+        provider_name = _provider_name_for_telemetry(context.provider)
         context.telemetry.record(
             model=context.model,
             tool_name=tool_name,
@@ -1303,6 +1402,9 @@ async def _execute_tool_call(
             retries=retries_used,
             latency_ms=_latency_ms,
             error_type="tool_error" if result.is_error else None,
+            raw_model_output=raw_model_output,
+            parsed_tool_call=parsed_tool_json,
+            provider=provider_name,
         )
 
     # Sprint 10: record tool call for divergence detection

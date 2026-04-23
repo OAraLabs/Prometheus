@@ -4663,6 +4663,77 @@ class TestCircuitBreakerDiagnosis:
         assert "Diagnosis unavailable" in result.diagnostic_message
 
     @pytest.mark.integration
+    def test_golden_reference_included_when_available(self, tmp_path):
+        """Golden Trace Capture sprint: diagnose pulls golden ref when present
+        and embeds it in the user-facing message + SQLite row."""
+        from prometheus.engine.agent_loop import _CircuitBreaker
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+
+        db_path = tmp_path / "telemetry.db"
+        tel = ToolCallTelemetry(db_path=db_path)
+        # Seed a golden trace: cloud + success + 0 retries + raw output
+        tel.record(
+            model="claude-sonnet-4-6",
+            tool_name="bash",
+            success=True,
+            retries=0,
+            raw_model_output="I will call bash with ls -la",
+            parsed_tool_call='{"name": "bash", "input": {"command": "ls -la"}}',
+            provider="anthropic",
+        )
+
+        adapter = MagicMock()
+        adapter.tier = "full"
+        ctx = LoopContext(
+            provider=MagicMock(),
+            model="gemma-local",
+            system_prompt="",
+            max_tokens=256,
+            adapter=adapter,
+            telemetry=tel,
+        )
+        breaker = _CircuitBreaker(max_identical=3)
+        for _ in range(3):
+            breaker.record_error("bash", "bad output")
+        result = breaker.diagnose_and_recover(context=ctx, tool_name="bash")
+
+        assert "Reference (cloud teacher's call shape)" in result.diagnostic_message
+        assert "ls -la" in result.diagnostic_message
+
+        # Verify the golden_reference column on the diagnostic row
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT golden_reference FROM circuit_breaker_diagnostics"
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] is not None
+        assert "ls -la" in row[0]
+
+    @pytest.mark.integration
+    def test_diagnose_works_without_any_golden_traces(self, tmp_path):
+        """No golden traces → diagnostic still works, no 'Reference' line, no crash."""
+        from prometheus.engine.agent_loop import _CircuitBreaker
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        adapter = MagicMock()
+        adapter.tier = "full"
+        ctx = LoopContext(
+            provider=MagicMock(),
+            model="gemma-local",
+            system_prompt="",
+            max_tokens=256,
+            adapter=adapter,
+            telemetry=tel,
+        )
+        breaker = _CircuitBreaker(max_identical=3)
+        for _ in range(3):
+            breaker.record_error("bash", "bad output")
+        result = breaker.diagnose_and_recover(context=ctx, tool_name="bash")
+        assert "Reference" not in result.diagnostic_message
+
+    @pytest.mark.integration
     def test_trip_handler_calls_diagnose_and_recover(self, tmp_path):
         """Wiring test: a circuit-breaker trip in run_loop triggers recovery
         (mock provider emits 3 calls to an unknown tool → adapter validation
@@ -4720,3 +4791,300 @@ class TestCircuitBreakerDiagnosis:
             assert len(call_log) >= 1
         finally:
             loop_mod._CircuitBreaker.diagnose_and_recover = original
+
+
+# ---------------------------------------------------------------------------
+# Golden Trace Capture sprint — teacher-model recording for fine-tuning data
+# ---------------------------------------------------------------------------
+
+
+class TestGoldenTraceCapture:
+    """Golden Trace Capture sprint.
+
+    When a cloud teacher model (Claude / GPT / Gemini / Grok / Groq) calls a
+    tool successfully with zero adapter retries, we capture the raw output
+    and parsed call. These become reference data for diagnose_and_recover
+    and training data for future LoRA runs. Local models (llama_cpp /
+    ollama) and any call that needed adapter help are NOT golden.
+    """
+
+    @pytest.mark.integration
+    def test_cloud_success_zero_retries_is_golden(self, tmp_path):
+        """Cloud provider + success + retries=0 + raw output → is_golden=1."""
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        tel.record(
+            model="claude-sonnet-4-6",
+            tool_name="bash",
+            success=True,
+            retries=0,
+            raw_model_output="I'll run bash.",
+            parsed_tool_call='{"name": "bash", "input": {"command": "ls"}}',
+            provider="anthropic",
+        )
+        conn = sqlite3.connect(str(tmp_path / "telemetry.db"))
+        row = conn.execute(
+            "SELECT is_golden FROM tool_calls WHERE tool_name='bash'"
+        ).fetchone()
+        conn.close()
+        assert row[0] == 1
+
+    @pytest.mark.integration
+    def test_cloud_success_with_retries_is_not_golden(self, tmp_path):
+        """Cloud + success + retries > 0 → NOT golden (model needed adapter help)."""
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        tel.record(
+            model="claude-sonnet-4-6",
+            tool_name="bash",
+            success=True,
+            retries=2,
+            raw_model_output="retry",
+            parsed_tool_call='{"name": "bash", "input": {}}',
+            provider="anthropic",
+        )
+        conn = sqlite3.connect(str(tmp_path / "telemetry.db"))
+        row = conn.execute("SELECT is_golden FROM tool_calls").fetchone()
+        conn.close()
+        assert row[0] == 0
+
+    @pytest.mark.integration
+    def test_local_provider_success_is_not_golden(self, tmp_path):
+        """Local provider + success → NOT golden (defeats the teacher purpose)."""
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        tel.record(
+            model="gemma-4-26b",
+            tool_name="bash",
+            success=True,
+            retries=0,
+            raw_model_output="local output",
+            parsed_tool_call='{"name": "bash", "input": {}}',
+            provider="llama_cpp",
+        )
+        conn = sqlite3.connect(str(tmp_path / "telemetry.db"))
+        row = conn.execute("SELECT is_golden FROM tool_calls").fetchone()
+        conn.close()
+        assert row[0] == 0
+
+    @pytest.mark.integration
+    def test_success_without_raw_output_is_not_golden(self, tmp_path):
+        """Cloud + success + 0 retries but NO raw output → NOT golden.
+
+        We can't learn from a row that has no teacher text to copy.
+        """
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        tel.record(
+            model="claude-sonnet-4-6",
+            tool_name="bash",
+            success=True,
+            retries=0,
+            raw_model_output=None,
+            parsed_tool_call='{"name": "bash"}',
+            provider="anthropic",
+        )
+        conn = sqlite3.connect(str(tmp_path / "telemetry.db"))
+        row = conn.execute("SELECT is_golden FROM tool_calls").fetchone()
+        conn.close()
+        assert row[0] == 0
+
+    @pytest.mark.integration
+    def test_failure_is_not_golden(self, tmp_path):
+        """success=False → NOT golden even with cloud + raw output."""
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        tel.record(
+            model="claude-sonnet-4-6",
+            tool_name="bash",
+            success=False,
+            retries=0,
+            raw_model_output="oops",
+            parsed_tool_call='{"name": "bash"}',
+            provider="anthropic",
+        )
+        conn = sqlite3.connect(str(tmp_path / "telemetry.db"))
+        row = conn.execute("SELECT is_golden FROM tool_calls").fetchone()
+        conn.close()
+        assert row[0] == 0
+
+    @pytest.mark.integration
+    def test_get_golden_traces_returns_only_golden(self, tmp_path):
+        """get_golden_traces filters to is_golden=1 rows."""
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        # One golden
+        tel.record(
+            model="gpt-5", tool_name="bash", success=True, retries=0,
+            raw_model_output="A", parsed_tool_call='{"name":"bash"}',
+            provider="openai",
+        )
+        # One non-golden (local)
+        tel.record(
+            model="gemma", tool_name="bash", success=True, retries=0,
+            raw_model_output="B", parsed_tool_call='{"name":"bash"}',
+            provider="llama_cpp",
+        )
+        rows = tel.get_golden_traces()
+        assert len(rows) == 1
+        assert rows[0]["model"] == "gpt-5"
+        assert rows[0]["raw_model_output"] == "A"
+
+    @pytest.mark.integration
+    def test_get_golden_traces_filters_by_tool_name(self, tmp_path):
+        """get_golden_traces(tool_name='X') returns only that tool's traces."""
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        tel.record(
+            model="claude", tool_name="bash", success=True, retries=0,
+            raw_model_output="bash-out", parsed_tool_call='{}',
+            provider="anthropic",
+        )
+        tel.record(
+            model="claude", tool_name="file_read", success=True, retries=0,
+            raw_model_output="read-out", parsed_tool_call='{}',
+            provider="anthropic",
+        )
+        bash_rows = tel.get_golden_traces(tool_name="bash")
+        assert len(bash_rows) == 1
+        assert bash_rows[0]["tool_name"] == "bash"
+
+    @pytest.mark.integration
+    def test_export_golden_traces_writes_valid_jsonl(self, tmp_path):
+        """export_golden_traces writes one valid JSON object per line."""
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+        import json as _json
+
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        tel.record(
+            model="claude", tool_name="bash", success=True, retries=0,
+            raw_model_output="I will run ls", parsed_tool_call='{"name":"bash","input":{"command":"ls"}}',
+            provider="anthropic",
+        )
+        tel.record(
+            model="gpt-5", tool_name="bash", success=True, retries=0,
+            raw_model_output="Running ls -la", parsed_tool_call='{"name":"bash","input":{"command":"ls -la"}}',
+            provider="openai",
+        )
+        path = tel.export_golden_traces(output_dir=tmp_path)
+        assert path.exists()
+        assert path.suffix == ".jsonl"
+        assert path.name.startswith("golden_traces_")
+
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 2
+        # Each line must parse as JSON with the fine-tuning shape
+        for line in lines:
+            obj = _json.loads(line)
+            assert "messages" in obj
+            assert len(obj["messages"]) == 2
+            assert obj["messages"][0]["role"] == "user"
+            assert obj["messages"][1]["role"] == "assistant"
+            assert obj["messages"][1]["content"]  # non-empty
+
+    @pytest.mark.integration
+    def test_export_golden_traces_respects_tool_filter(self, tmp_path):
+        """export_golden_traces(tool_name='X') exports only that tool's traces."""
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+        import json as _json
+
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        tel.record(
+            model="claude", tool_name="bash", success=True, retries=0,
+            raw_model_output="bash-out", parsed_tool_call='{}',
+            provider="anthropic",
+        )
+        tel.record(
+            model="claude", tool_name="file_read", success=True, retries=0,
+            raw_model_output="read-out", parsed_tool_call='{}',
+            provider="anthropic",
+        )
+        path = tel.export_golden_traces(tool_name="bash", output_dir=tmp_path)
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1
+        obj = _json.loads(lines[0])
+        assert obj["_meta"]["tool_name"] == "bash"
+
+    @pytest.mark.integration
+    def test_schema_migration_adds_missing_columns(self, tmp_path):
+        """Existing DB without the new columns gets them added without data loss."""
+        import sqlite3 as _sqlite3
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+
+        # Create an "old" DB manually with only the pre-sprint schema
+        db_path = tmp_path / "old.db"
+        conn = _sqlite3.connect(str(db_path))
+        conn.executescript(
+            """
+            CREATE TABLE tool_calls (
+                id TEXT PRIMARY KEY,
+                timestamp REAL NOT NULL,
+                model TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                success INTEGER NOT NULL,
+                retries INTEGER NOT NULL DEFAULT 0,
+                latency_ms REAL NOT NULL DEFAULT 0.0,
+                error_type TEXT,
+                error_detail TEXT
+            );
+            """
+        )
+        # Insert a row with the old shape
+        conn.execute(
+            "INSERT INTO tool_calls (id, timestamp, model, tool_name, success) "
+            "VALUES ('legacy-row', 1.0, 'old-model', 'bash', 1)"
+        )
+        conn.commit()
+        conn.close()
+
+        # Open via ToolCallTelemetry — should migrate
+        tel = ToolCallTelemetry(db_path=db_path)
+        cols = {
+            row[1] for row in tel._conn.execute("PRAGMA table_info(tool_calls)").fetchall()
+        }
+        assert "raw_model_output" in cols
+        assert "parsed_tool_call" in cols
+        assert "is_golden" in cols
+
+        # Legacy row survived migration
+        preserved = tel._conn.execute(
+            "SELECT id, model, tool_name FROM tool_calls WHERE id='legacy-row'"
+        ).fetchone()
+        assert preserved == ("legacy-row", "old-model", "bash")
+        # And a fresh record still works
+        tel.record(
+            model="claude", tool_name="bash", success=True, retries=0,
+            raw_model_output="new", parsed_tool_call='{"name":"bash"}',
+            provider="anthropic",
+        )
+        assert tel.get_golden_traces()[0]["model"] == "claude"
+
+    @pytest.mark.integration
+    def test_provider_name_for_telemetry_class_fallback(self):
+        """_provider_name_for_telemetry falls back to class-name mapping."""
+        from prometheus.engine.agent_loop import _provider_name_for_telemetry
+
+        class FakeAnthropicProvider: pass
+        class FakeLlamaCppProvider: pass
+        class FakeStubProvider: pass
+
+        assert _provider_name_for_telemetry(FakeAnthropicProvider()) == "anthropic"
+        assert _provider_name_for_telemetry(FakeLlamaCppProvider()) == "llama_cpp"
+        assert _provider_name_for_telemetry(FakeStubProvider()) == "stub"
+        assert _provider_name_for_telemetry(None) == ""
+
+    @pytest.mark.integration
+    def test_provider_name_honors_explicit_attribute(self):
+        """Explicit provider_name attribute wins over class-name mapping."""
+        from prometheus.engine.agent_loop import _provider_name_for_telemetry
+
+        p = MagicMock()
+        p.provider_name = "gemini"
+        assert _provider_name_for_telemetry(p) == "gemini"
