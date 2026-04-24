@@ -575,8 +575,42 @@ async def run_loop(
                     context.adapter = decision.adapter
                 if decision.model_name:
                     context.model = decision.model_name
+                # Phase 4 fix: after the router swap, rewrite the identity
+                # line in the system prompt ("- Model: <name> (provider: <p>)")
+                # to match the *active* provider. Without this, a primary-
+                # baked system prompt says "Model: gemma4-26b" and Claude/GPT
+                # dutifully impersonate the primary when the user asks "what
+                # model is this?". The line is emitted by
+                # prometheus.context.system_prompt._format_environment_section;
+                # we rewrite it in-place rather than rebuilding the whole
+                # prompt to avoid pulling environment detection into the hot
+                # path of every request.
+                if decision.provider_name or decision.model_name:
+                    import re as _re
+                    provider_name = decision.provider_name or "unknown"
+                    model_name = decision.model_name or "unknown"
+                    new_line = f"- Model: {model_name} (provider: {provider_name})"
+                    context.system_prompt = _re.sub(
+                        r"^- Model: .*$",
+                        new_line,
+                        context.system_prompt,
+                        count=1,
+                        flags=_re.MULTILINE,
+                    )
             except Exception:
-                log.debug("ModelRouter: classification failed", exc_info=True)
+                # Phase 4: elevated from DEBUG → WARNING. A silent DEBUG here
+                # hid a real production bug (stale-system-prompt identity)
+                # from the logs. Any exception in route() means the user's
+                # override (or task rule, or escalation) was NOT applied and
+                # we silently fell through to primary — that's not something
+                # we should discover by reading source code.
+                log.warning(
+                    "ModelRouter: route() raised — falling back to primary. "
+                    "session_id=%r, first_user=%r",
+                    context.session_id,
+                    (first_user or "")[:60],
+                    exc_info=True,
+                )
 
     # Sprint 3: format tools + system prompt for the target model
     active_system_prompt = context.system_prompt

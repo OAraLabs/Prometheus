@@ -102,7 +102,8 @@ class TestRouting:
             r.set_override("chat_test", OVERRIDE_PRESETS["claude"])
             d = r.route("hello", context={"session_id": "chat_test"})
         assert d.reason == RouteReason.USER_OVERRIDE
-        assert d.model_name == "claude-sonnet-4-6"
+        # Preset default is Haiku 4.5 (Phase 4 pilot choice — fast + cheap).
+        assert d.model_name == OVERRIDE_PRESETS["claude"]["model"]
 
     def test_clear_override_returns_to_primary(self):
         """Phase 3.5: clear_override takes the session_id whose override to drop."""

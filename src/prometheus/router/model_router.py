@@ -272,7 +272,10 @@ OVERRIDE_PRESETS: dict[str, dict[str, str]] = {
     "claude": {
         "provider": "anthropic",
         "api_key_env": "ANTHROPIC_API_KEY",
-        "model": "claude-sonnet-4-6",
+        # Defaulting to Haiku 4.5 for the /claude pilot: cheap + fast for
+        # interactive chat. Users wanting a heavier model can set an explicit
+        # anthropic: block in their config instead of relying on the preset.
+        "model": "claude-haiku-4-5-20251001",
     },
     "gpt": {
         "provider": "openai",

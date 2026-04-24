@@ -32,7 +32,7 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
         "default_env": "XAI_API_KEY",
     },
     "anthropic": {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-haiku-4-5-20251001",
         "default_env": "ANTHROPIC_API_KEY",
     },
 }
@@ -115,7 +115,7 @@ class ProviderRegistry:
             api_key = _resolve_api_key(config, provider_name)
             return AnthropicProvider(
                 api_key=api_key,
-                model=config.get("model", defaults.get("model", "claude-sonnet-4-6")),
+                model=config.get("model", defaults.get("model", "claude-haiku-4-5-20251001")),
                 timeout=config.get("timeout", 120.0),
                 prompt_caching=config.get("prompt_caching", True),
             )

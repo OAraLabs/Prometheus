@@ -32,7 +32,7 @@ from prometheus.providers.base import (
 log = logging.getLogger(__name__)
 
 _ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-_DEFAULT_MODEL = "claude-sonnet-4-6"
+_DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 _ANTHROPIC_VERSION = "2023-06-01"
 _MAX_RETRIES = 3
 _BASE_DELAY = 1.0

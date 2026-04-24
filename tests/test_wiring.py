@@ -4488,6 +4488,8 @@ class TestGraftRouterWirePhase4:
     def test_telegram_claude_command_sets_session_override(self):
         """/claude in chat 123 → router has 'anthropic' override for telegram:123."""
         import os
+        from prometheus.router.model_router import OVERRIDE_PRESETS
+
         router = self._build_router()
         adapter = self._build_adapter(router=router)
 
@@ -4499,7 +4501,8 @@ class TestGraftRouterWirePhase4:
         ov = router.get_override_for_session("telegram:123")
         assert ov is not None
         assert ov.provider_config["provider"] == "anthropic"
-        assert ov.provider_config["model"] == "claude-sonnet-4-6"
+        # Preset default is Haiku 4.5 per OVERRIDE_PRESETS.
+        assert ov.provider_config["model"] == OVERRIDE_PRESETS["claude"]["model"]
         # Confirmation reply was sent
         adapter.send.assert_called_once()
         sent_text = adapter.send.call_args.args[1]
@@ -4632,6 +4635,8 @@ class TestGraftRouterWirePhase4:
     def test_route_command_reports_effective_provider_override(self):
         """/route with an active override → reports override provider + model."""
         import os
+        from prometheus.router.model_router import OVERRIDE_PRESETS
+
         router = self._build_router()
         adapter = self._build_adapter(router=router)
 
@@ -4647,7 +4652,8 @@ class TestGraftRouterWirePhase4:
         sent_text = adapter.send.call_args.args[1]
         assert "override" in sent_text.lower()
         assert "anthropic" in sent_text
-        assert "claude-sonnet-4-6" in sent_text
+        # Preset default is Haiku 4.5 per OVERRIDE_PRESETS.
+        assert OVERRIDE_PRESETS["claude"]["model"] in sent_text
 
     # ── Isolation + safety ──
 
@@ -4809,6 +4815,182 @@ class TestGraftRouterWirePhase4:
         assert 'session_id="system"' in source, (
             "SmokeTestRunner.run_agent is a system path — its run_async call "
             "must include session_id='system' to bypass user overrides."
+        )
+
+    # ── End-to-end dispatch tests (Phase 4 fix) ──────────────────────
+    #
+    # These exercise the FULL dispatch path, not just router.route() in
+    # isolation:
+    #     set_override() → agent_loop.run_async(session_id=...)
+    #       → run_loop → route() → provider+adapter+model swap
+    #       → context.provider.stream_message()
+    #
+    # The original Phase 4 tests stopped at the override-was-stored step
+    # and missed that the run_loop was (a) actually calling the override
+    # provider and (b) passing a system prompt whose "- Model: X" line
+    # matched the override. The second one — rewritten after the bug
+    # report that triggered this fix branch — is what caused Claude to
+    # impersonate Gemma in production: the API call was correct, but the
+    # system prompt told Claude its identity was gemma4-26b.
+
+    @pytest.mark.integration
+    def test_dispatch_end_to_end_consumes_override(self):
+        """End-to-end: set_override → run_async(session_id) → OVERRIDE
+        provider's stream_message fires, primary's does not.
+
+        This is the test that would have caught the 'override stored but
+        not consumed' theory immediately (had it actually been the bug).
+        It passes today, proving the override IS consumed — the real bug
+        was elsewhere (stale system-prompt identity, see the next test).
+        """
+        from unittest.mock import patch
+        from prometheus.engine.agent_loop import AgentLoop
+        from prometheus.router import ModelRouter, RouterConfig
+        from prometheus.router.model_router import OVERRIDE_PRESETS
+
+        primary = ScriptedProvider([_text_response("PRIMARY-answer")])
+        override_provider = ScriptedProvider([_text_response("OVERRIDE-answer")])
+
+        primary_adapter = MagicMock()
+        primary_adapter.format_request.return_value = ("sys", [])
+        primary_adapter.extract_tool_calls.return_value = None
+
+        router = ModelRouter(
+            config=RouterConfig(),
+            primary_provider=primary,
+            primary_adapter=primary_adapter,
+            primary_model="gemma4-26b",
+        )
+
+        # Short-circuit ProviderRegistry.create so we don't need real env
+        # vars or network. The registry is the only layer that reads
+        # api_key_env; patching it keeps this an integration test for
+        # the dispatch path, not the provider layer.
+        with patch(
+            "prometheus.providers.registry.ProviderRegistry.create",
+            return_value=override_provider,
+        ):
+            router.set_override(
+                "telegram:e2e",
+                dict(OVERRIDE_PRESETS["claude"]),
+            )
+
+            loop = AgentLoop(
+                provider=primary,
+                model="gemma4-26b",
+                adapter=primary_adapter,
+                model_router=router,
+            )
+
+            async def _run():
+                return await loop.run_async(
+                    system_prompt="test",
+                    user_message="what provider answers?",
+                    session_id="telegram:e2e",
+                )
+
+            result = asyncio.run(_run())
+
+        assert primary._call_count == 0, (
+            "Primary was called despite override — override not consumed by dispatch."
+        )
+        assert override_provider._call_count == 1, (
+            "Override provider was not called — run_loop skipped the router swap."
+        )
+        assert result.text == "OVERRIDE-answer"
+
+    @pytest.mark.integration
+    def test_router_swap_rewrites_system_prompt_model_identity(self):
+        """After USER_OVERRIDE swap, the system prompt's '- Model: X
+        (provider: Y)' line is rewritten to match the active provider.
+
+        Root cause of the original 'Gemma answered' bug: the daemon-built
+        system prompt contains '- Model: gemma4-26b (provider: llama_cpp)'.
+        When /claude swapped the provider to Anthropic, this line stayed
+        stale and Claude dutifully self-identified as Gemma. This test
+        guards the fix: after override, the identity line points at the
+        override's model/provider, not the primary's.
+        """
+        from unittest.mock import patch
+        from prometheus.engine.agent_loop import AgentLoop
+        from prometheus.router import ModelRouter, RouterConfig
+        from prometheus.router.model_router import OVERRIDE_PRESETS
+
+        class CapturingProvider(ModelProvider):
+            """Records the request's system_prompt for assertion."""
+            def __init__(self):
+                self.captured_system_prompt = None
+                self._call_count = 0
+            async def stream_message(self, request):
+                self.captured_system_prompt = request.system_prompt
+                self._call_count += 1
+                for event in _text_response("ok"):
+                    yield event
+
+        primary = ScriptedProvider([_text_response("shouldn't fire")])
+        override_provider = CapturingProvider()
+
+        primary_adapter = MagicMock()
+        # Make the adapter a passthrough so we can see the raw system prompt
+        # that was handed to format_request.
+        primary_adapter.format_request.side_effect = lambda p, t: (p, t)
+        primary_adapter.extract_tool_calls.return_value = None
+
+        router = ModelRouter(
+            config=RouterConfig(),
+            primary_provider=primary,
+            primary_adapter=primary_adapter,
+            primary_model="gemma4-26b",
+        )
+
+        with patch(
+            "prometheus.providers.registry.ProviderRegistry.create",
+            return_value=override_provider,
+        ):
+            # Also stub the override adapter to be a passthrough, so the
+            # text we capture is exactly what run_loop passed in after the
+            # rewrite (not post-AnthropicFormatter mangling).
+            with patch(
+                "prometheus.router.model_router._build_adapter_for",
+                return_value=primary_adapter,
+            ):
+                router.set_override(
+                    "telegram:sp_test",
+                    dict(OVERRIDE_PRESETS["claude"]),
+                )
+
+                loop = AgentLoop(
+                    provider=primary,
+                    model="gemma4-26b",
+                    adapter=primary_adapter,
+                    model_router=router,
+                )
+
+                baked_prompt = (
+                    "You are Prometheus, a sovereign AI agent.\n"
+                    "# Environment\n"
+                    "- OS: Linux 6.8.0\n"
+                    "- Model: gemma4-26b (provider: llama_cpp)\n"
+                    "- Date: 2026-04-23\n"
+                )
+
+                async def _run():
+                    return await loop.run_async(
+                        system_prompt=baked_prompt,
+                        user_message="hi",
+                        session_id="telegram:sp_test",
+                    )
+
+                asyncio.run(_run())
+
+        sp = override_provider.captured_system_prompt
+        haiku_model = OVERRIDE_PRESETS["claude"]["model"]
+        assert sp is not None, "Override provider's stream_message never fired"
+        assert f"- Model: {haiku_model} (provider: anthropic)" in sp, (
+            f"System prompt's Model: line was not rewritten. Got:\n{sp}"
+        )
+        assert "- Model: gemma4-26b" not in sp, (
+            f"Stale primary-model identity still in prompt:\n{sp}"
         )
 
 
