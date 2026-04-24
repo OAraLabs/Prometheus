@@ -326,7 +326,21 @@ class TestTelegramCommands:
 
     @pytest.mark.asyncio
     async def test_cmd_model(self):
-        adapter = _make_adapter(model_name="gemma4-26b", model_provider="llama_cpp")
+        """Phase 4: /model delegates to /route (spec: "behavior absorbed by /route").
+
+        /route is override-aware; it reads `agent_loop._model_router` to
+        report primary vs override. The default AsyncMock agent_loop auto-
+        vivifies that attribute into a coroutine-returning mock, so set it
+        to None explicitly to exercise the "no router" branch, which still
+        shows primary model + provider (same as the pre-Phase-4 /model).
+        """
+        agent_loop = AsyncMock()
+        agent_loop._model_router = None
+        adapter = _make_adapter(
+            agent_loop=agent_loop,
+            model_name="gemma4-26b",
+            model_provider="llama_cpp",
+        )
         await adapter._cmd_model(_make_update(), MagicMock())
         text = adapter.send.call_args[0][1]
         assert "gemma4-26b" in text

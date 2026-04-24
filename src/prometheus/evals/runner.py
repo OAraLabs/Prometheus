@@ -81,6 +81,10 @@ class EvalRunner:
                 result = await self._loop.run_async(
                     system_prompt=self._system_prompt,
                     user_message=task.input,
+                    # Phase 4: eval runner is a system path — use the reserved
+                    # "system" session_id so it never inherits user overrides
+                    # set via /claude, /gpt, etc.
+                    session_id="system",
                 )
                 # Copy tool trace immediately — it gets cleared by post-task hook
                 tool_trace = list(self._loop._tool_trace)

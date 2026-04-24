@@ -93,6 +93,29 @@ whisper:
 model_router:
   enabled: false
 
+# Sprint 22 GRAFT-ROUTER-WIRE Phase 4 — direct-mode provider overrides.
+#
+# Lets you switch a single Telegram (or Slack) chat to a different cloud
+# provider on the fly:
+#   /claude   — route this chat through Anthropic Claude
+#   /gpt      — OpenAI GPT
+#   /gemini   — Google Gemini
+#   /xai      — xAI Grok  (alias: /grok)
+#   /local    — clear the override, back to primary
+#   /route    — show which provider this chat is currently using
+#
+# Overrides are scoped to the session (Telegram chat_id / Slack channel_id);
+# other chats, system paths (evals, benchmarks, smoke tests), and SENTINEL
+# are unaffected.
+#
+# Requires the target provider's API key in the environment (e.g.
+# ANTHROPIC_API_KEY for /claude). Add the key to ~/.config/prometheus/env
+# and restart the daemon.
+router:
+  overrides:
+    enabled: true          # direct-mode commands are active
+    sticky: true           # overrides persist until /local (false = one-shot)
+
 # Phase 3 — opt-in cloud escalation for failed tool calls.
 #
 # When a tool call fails validation more times than the adapter's max_retries,

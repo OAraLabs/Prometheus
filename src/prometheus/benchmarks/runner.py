@@ -163,6 +163,10 @@ class BenchmarkRunner:
             result = await loop.run_async(
                 system_prompt="You are a helpful assistant with access to tools. Complete the task.",
                 user_message=case.prompt,
+                # Phase 4: benchmark runner is a system path — use the reserved
+                # "system" session_id so it never inherits user overrides set
+                # via /claude, /gpt, etc.
+                session_id="system",
             )
             latency = (time.monotonic() - t0) * 1000
             score_result = _score_result(case, result, self._cwd)

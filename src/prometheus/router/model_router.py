@@ -235,6 +235,13 @@ class RouterConfig:
     auxiliary_compression: dict | None = None
     auxiliary_summarization: dict | None = None
 
+    # Per-session user overrides (Phase 4: /claude, /gpt, /gemini, /xai, /grok, /local, /route)
+    # overrides_enabled=False → direct-mode commands are no-ops (reply with warning, don't crash)
+    # overrides_sticky=True  → overrides persist until /local
+    # overrides_sticky=False → overrides auto-clear after one route() call (one-shot mode)
+    overrides_enabled: bool = True
+    overrides_sticky: bool = True
+
 
 # ── Per-session override (Phase 3.5) ──────────────────────────────
 
@@ -446,20 +453,31 @@ class ModelRouter:
         return bool(self._overrides)
 
     def _route_override(self, session_id: str) -> RouteDecision:
-        """Build (or reuse cached) override provider+adapter for this session."""
+        """Build (or reuse cached) override provider+adapter for this session.
+
+        Phase 4: if ``router.overrides.sticky`` is False (one-shot mode), the
+        override is cleared after building the decision so the next message
+        on this session routes to primary again. Default is sticky=True, i.e.
+        override persists until /local explicitly clears it.
+        """
         entry = self._overrides[session_id]
         if entry.provider is None:
             from prometheus.providers.registry import ProviderRegistry
             entry.provider = ProviderRegistry.create(entry.provider_config)
             pname = entry.provider_config.get("provider", "")
             entry.adapter = _build_adapter_for(pname)
-        return RouteDecision(
+        decision = RouteDecision(
             provider=entry.provider,
             adapter=entry.adapter,
             reason=RouteReason.USER_OVERRIDE,
             model_name=entry.provider_config.get("model", "unknown"),
             provider_name=entry.provider_config.get("provider", "unknown"),
         )
+        if not self.config.overrides_sticky:
+            # One-shot mode — drop the override so the next message falls
+            # back to primary (or whatever the normal routing decision is).
+            self._overrides.pop(session_id, None)
+        return decision
 
     # ── Smart routing (Hermes pattern) ────────────────────────────
 
@@ -707,6 +725,7 @@ def load_router_config(config: dict) -> RouterConfig:
     smart = rc.get("smart_routing", {})
     esc = rc.get("escalation", {})
     aux = rc.get("auxiliary", {})
+    overrides = rc.get("overrides", {})
 
     return RouterConfig(
         fallback_chain=rc.get("fallback", []),
@@ -722,4 +741,7 @@ def load_router_config(config: dict) -> RouterConfig:
         auxiliary_vision=aux.get("vision"),
         auxiliary_compression=aux.get("compression"),
         auxiliary_summarization=aux.get("summarization"),
+        # Phase 4: direct-mode provider overrides
+        overrides_enabled=overrides.get("enabled", True),
+        overrides_sticky=overrides.get("sticky", True),
     )

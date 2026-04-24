@@ -4388,6 +4388,431 @@ class TestGraftRouterWirePhase3Point5:
 
 
 # ---------------------------------------------------------------------------
+# GRAFT-ROUTER-WIRE Phase 4 — direct-mode provider overrides
+# ---------------------------------------------------------------------------
+
+
+class TestGraftRouterWirePhase4:
+    """Phase 4 wires user-facing Telegram commands onto Phase 3.5's per-session
+    override storage:
+
+      /claude /gpt /gemini /xai /grok   — set session override to cloud provider
+      /local                            — clear override, back to primary
+      /route                            — show current effective provider
+
+    Tests cover:
+      - Each provider command records the correct preset on the router
+      - /grok is an alias for /xai (same preset)
+      - /local clears the override (silent no-op when none set)
+      - /route reports primary vs override correctly
+      - Overrides are isolated per session (/claude in chat A does not affect chat B)
+      - Missing API key env var → helpful error, override NOT set
+      - router.overrides.enabled=False → commands are no-ops with warning
+      - Sticky=False → override auto-clears after first route()
+      - System-invocation runners (benchmarks, evals, smoke) pass
+        session_id="system" so user overrides can never leak into them
+      - /model now delegates to /route (backward-compat alias)
+    """
+
+    @staticmethod
+    def _build_router(overrides_enabled: bool = True, overrides_sticky: bool = True):
+        from prometheus.router import ModelRouter, RouterConfig
+        return ModelRouter(
+            config=RouterConfig(
+                overrides_enabled=overrides_enabled,
+                overrides_sticky=overrides_sticky,
+            ),
+            primary_provider=MagicMock(),
+            primary_adapter=MagicMock(),
+            primary_model="gemma4-26b",
+        )
+
+    @staticmethod
+    def _build_adapter(router=None):
+        """Build a TelegramAdapter wired to a real AgentLoop with the given router.
+
+        send() is replaced with an AsyncMock so tests can assert on outgoing
+        messages without touching Telegram.
+        """
+        from prometheus.engine.agent_loop import AgentLoop
+        from prometheus.gateway.telegram import TelegramAdapter
+        from prometheus.gateway.config import PlatformConfig, Platform
+        from prometheus.gateway.platform_base import SendResult
+
+        provider = MagicMock()
+        registry = _make_registry()
+
+        loop = AgentLoop(
+            provider=provider,
+            model="gemma4-26b",
+            tool_registry=registry,
+            model_router=router,
+        )
+
+        config = PlatformConfig(platform=Platform.TELEGRAM, token="test")
+        adapter = TelegramAdapter(
+            config=config,
+            agent_loop=loop,
+            tool_registry=registry,
+            model_name="gemma4-26b",
+            model_provider="llama_cpp",
+        )
+        adapter.send = AsyncMock(return_value=SendResult(success=True, message_id=1))
+        # Phase 4 inline-dispatch path goes through _dispatch_to_agent — mock
+        # it so tests don't have to spin up the full agent pipeline.
+        adapter._dispatch_to_agent = AsyncMock()
+        return adapter
+
+    @staticmethod
+    def _mock_update(chat_id: int):
+        update = MagicMock()
+        update.effective_chat = MagicMock()
+        update.effective_chat.id = chat_id
+        update.effective_user = MagicMock()
+        update.effective_user.id = 42
+        update.effective_user.username = "tester"
+        update.message = MagicMock()
+        update.message.message_id = 1
+        return update
+
+    @staticmethod
+    def _mock_context(args: list[str] | None = None):
+        """Mock a python-telegram-bot CallbackContext with a known args list."""
+        ctx = MagicMock()
+        ctx.args = list(args) if args else []
+        return ctx
+
+    # ── /claude /gpt /gemini /xai /grok — each sets the right preset ──
+
+    @pytest.mark.integration
+    def test_telegram_claude_command_sets_session_override(self):
+        """/claude in chat 123 → router has 'anthropic' override for telegram:123."""
+        import os
+        router = self._build_router()
+        adapter = self._build_adapter(router=router)
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            asyncio.run(adapter._cmd_claude(
+                self._mock_update(123), self._mock_context()
+            ))
+
+        ov = router.get_override_for_session("telegram:123")
+        assert ov is not None
+        assert ov.provider_config["provider"] == "anthropic"
+        assert ov.provider_config["model"] == "claude-sonnet-4-6"
+        # Confirmation reply was sent
+        adapter.send.assert_called_once()
+        sent_text = adapter.send.call_args.args[1]
+        assert "Claude" in sent_text
+
+    @pytest.mark.integration
+    def test_telegram_gpt_command_sets_openai_override(self):
+        import os
+        router = self._build_router()
+        adapter = self._build_adapter(router=router)
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
+            asyncio.run(adapter._cmd_gpt(
+                self._mock_update(200), self._mock_context()
+            ))
+
+        ov = router.get_override_for_session("telegram:200")
+        assert ov is not None
+        assert ov.provider_config["provider"] == "openai"
+        assert ov.provider_config["model"] == "gpt-4o"
+
+    @pytest.mark.integration
+    def test_telegram_gemini_command_sets_gemini_override(self):
+        import os
+        router = self._build_router()
+        adapter = self._build_adapter(router=router)
+
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "sk-test"}):
+            asyncio.run(adapter._cmd_gemini(
+                self._mock_update(201), self._mock_context()
+            ))
+
+        ov = router.get_override_for_session("telegram:201")
+        assert ov is not None
+        assert ov.provider_config["provider"] == "gemini"
+
+    @pytest.mark.integration
+    def test_telegram_xai_command_sets_xai_override(self):
+        import os
+        router = self._build_router()
+        adapter = self._build_adapter(router=router)
+
+        with patch.dict(os.environ, {"XAI_API_KEY": "sk-test"}):
+            asyncio.run(adapter._cmd_xai(
+                self._mock_update(202), self._mock_context()
+            ))
+
+        ov = router.get_override_for_session("telegram:202")
+        assert ov is not None
+        assert ov.provider_config["provider"] == "xai"
+        assert ov.provider_config["model"] == "grok-3"
+
+    @pytest.mark.integration
+    def test_telegram_grok_is_alias_for_xai(self):
+        """/grok must record the same preset as /xai."""
+        import os
+        router = self._build_router()
+        adapter = self._build_adapter(router=router)
+
+        with patch.dict(os.environ, {"XAI_API_KEY": "sk-test"}):
+            asyncio.run(adapter._cmd_grok(
+                self._mock_update(203), self._mock_context()
+            ))
+
+        ov = router.get_override_for_session("telegram:203")
+        assert ov is not None
+        assert ov.provider_config["provider"] == "xai"
+        assert ov.provider_config["model"] == "grok-3"
+
+    # ── /local — clears override ──
+
+    @pytest.mark.integration
+    def test_telegram_local_clears_session_override(self):
+        """/local clears the override set by /claude; primary routing resumes."""
+        import os
+        router = self._build_router()
+        adapter = self._build_adapter(router=router)
+
+        # Set override first
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            asyncio.run(adapter._cmd_claude(
+                self._mock_update(300), self._mock_context()
+            ))
+        assert router.get_override_for_session("telegram:300") is not None
+
+        # Clear it
+        adapter.send.reset_mock()
+        asyncio.run(adapter._cmd_local(
+            self._mock_update(300), self._mock_context()
+        ))
+
+        assert router.get_override_for_session("telegram:300") is None
+        sent_text = adapter.send.call_args.args[1]
+        assert "primary" in sent_text.lower()
+
+    @pytest.mark.integration
+    def test_telegram_local_without_override_is_silent_noop(self):
+        """/local on a chat that never set an override — reply confirms and no change."""
+        router = self._build_router()
+        adapter = self._build_adapter(router=router)
+
+        asyncio.run(adapter._cmd_local(
+            self._mock_update(301), self._mock_context()
+        ))
+
+        assert router.get_override_for_session("telegram:301") is None
+        sent_text = adapter.send.call_args.args[1]
+        assert "primary" in sent_text.lower()
+        # "Already on primary" phrasing — distinguishes from a real clear
+        assert "already" in sent_text.lower()
+
+    # ── /route — reports state ──
+
+    @pytest.mark.integration
+    def test_route_command_reports_effective_provider_primary(self):
+        """/route with no override → reports primary provider + model."""
+        router = self._build_router()
+        adapter = self._build_adapter(router=router)
+
+        asyncio.run(adapter._cmd_route(
+            self._mock_update(400), self._mock_context()
+        ))
+
+        sent_text = adapter.send.call_args.args[1]
+        assert "primary" in sent_text.lower()
+        assert "gemma4-26b" in sent_text
+        assert "llama_cpp" in sent_text
+
+    @pytest.mark.integration
+    def test_route_command_reports_effective_provider_override(self):
+        """/route with an active override → reports override provider + model."""
+        import os
+        router = self._build_router()
+        adapter = self._build_adapter(router=router)
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            asyncio.run(adapter._cmd_claude(
+                self._mock_update(401), self._mock_context()
+            ))
+            adapter.send.reset_mock()
+            asyncio.run(adapter._cmd_route(
+                self._mock_update(401), self._mock_context()
+            ))
+
+        sent_text = adapter.send.call_args.args[1]
+        assert "override" in sent_text.lower()
+        assert "anthropic" in sent_text
+        assert "claude-sonnet-4-6" in sent_text
+
+    # ── Isolation + safety ──
+
+    @pytest.mark.integration
+    def test_claude_in_chat_A_does_not_affect_chat_B(self):
+        """Critical isolation: /claude in chat A leaves chat B on primary."""
+        import os
+        router = self._build_router()
+        adapter = self._build_adapter(router=router)
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            asyncio.run(adapter._cmd_claude(
+                self._mock_update(500), self._mock_context()
+            ))
+
+        assert router.get_override_for_session("telegram:500") is not None
+        assert router.get_override_for_session("telegram:501") is None
+
+    @pytest.mark.integration
+    def test_missing_api_key_returns_helpful_error_and_no_override(self):
+        """/claude without ANTHROPIC_API_KEY → error message, no override set."""
+        import os
+        router = self._build_router()
+        adapter = self._build_adapter(router=router)
+
+        # Ensure env var is absent
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            asyncio.run(adapter._cmd_claude(
+                self._mock_update(600), self._mock_context()
+            ))
+
+        # Override NOT set — user gets feedback before any routing happens
+        assert router.get_override_for_session("telegram:600") is None
+        sent_text = adapter.send.call_args.args[1]
+        assert "ANTHROPIC_API_KEY" in sent_text
+
+    @pytest.mark.integration
+    def test_overrides_disabled_config_returns_noop(self):
+        """router.overrides.enabled=False → /claude replies disabled, no override."""
+        import os
+        router = self._build_router(overrides_enabled=False)
+        adapter = self._build_adapter(router=router)
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            asyncio.run(adapter._cmd_claude(
+                self._mock_update(700), self._mock_context()
+            ))
+
+        assert router.get_override_for_session("telegram:700") is None
+        sent_text = adapter.send.call_args.args[1]
+        assert "disabled" in sent_text.lower()
+
+    @pytest.mark.integration
+    def test_nonsticky_override_clears_after_first_route(self):
+        """With overrides_sticky=False, one route() resolves and clears the override."""
+        import os
+        from prometheus.router import RouteReason
+
+        router = self._build_router(overrides_sticky=False)
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            router.set_override(
+                "chat_99", {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+            )
+            # First route: picks up override
+            d1 = router.route("hello", context={"session_id": "chat_99"})
+            # Second route: override already cleared, goes to primary
+            d2 = router.route("hello", context={"session_id": "chat_99"})
+
+        assert d1.reason == RouteReason.USER_OVERRIDE
+        assert d2.reason == RouteReason.PRIMARY
+        assert router.get_override_for_session("chat_99") is None
+
+    # ── Inline message dispatch ──
+
+    @pytest.mark.integration
+    def test_inline_message_dispatches_after_override(self):
+        """/claude what is 2+2? → sets override AND dispatches 'what is 2+2?' through it."""
+        import os
+        router = self._build_router()
+        adapter = self._build_adapter(router=router)
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}):
+            asyncio.run(adapter._cmd_claude(
+                self._mock_update(800),
+                self._mock_context(args=["what", "is", "2+2?"]),
+            ))
+
+        # Override set
+        assert router.get_override_for_session("telegram:800") is not None
+        # Dispatch called with the concatenated message
+        adapter._dispatch_to_agent.assert_called_once()
+        event = adapter._dispatch_to_agent.call_args.args[0]
+        assert event.text == "what is 2+2?"
+        assert event.chat_id == 800
+
+    # ── /model delegates to /route (backward-compat alias) ──
+
+    @pytest.mark.integration
+    def test_model_command_delegates_to_route(self):
+        """Phase 4: /model output is the same as /route (override-aware)."""
+        router = self._build_router()
+        adapter = self._build_adapter(router=router)
+
+        asyncio.run(adapter._cmd_model(
+            self._mock_update(900), self._mock_context()
+        ))
+
+        sent_text = adapter.send.call_args.args[1]
+        # /route-specific signals — "Route" header and the override-commands list
+        assert sent_text.startswith("Route")
+        assert "/claude" in sent_text
+        assert "/local" in sent_text
+
+    # ── System-invocation runners never see user overrides ──
+
+    @pytest.mark.integration
+    def test_benchmark_runner_constructs_with_system_session(self):
+        """benchmarks.runner.BenchmarkRunner.run_case must pass session_id='system'
+        to AgentLoop.run_async so user /claude etc. overrides never leak in."""
+        import inspect
+        from prometheus.benchmarks.runner import BenchmarkRunner
+
+        source = inspect.getsource(BenchmarkRunner.run_case)
+        assert 'session_id="system"' in source, (
+            "BenchmarkRunner.run_case is a system path — its run_async call "
+            "must include session_id='system' to bypass user overrides."
+        )
+
+    @pytest.mark.integration
+    def test_eval_runner_constructs_with_system_session(self):
+        """evals.runner.EvalRunner.run_task must pass session_id='system'."""
+        import inspect
+        from prometheus.evals.runner import EvalRunner
+
+        source = inspect.getsource(EvalRunner.run_task)
+        assert 'session_id="system"' in source, (
+            "EvalRunner.run_task is a system path — its run_async call must "
+            "include session_id='system' to bypass user overrides."
+        )
+
+    @pytest.mark.integration
+    def test_smoke_test_constructs_with_system_session(self):
+        """scripts.smoke_test_tool_calling.SmokeTestRunner.run_agent must pass
+        session_id='system'."""
+        import inspect
+        # smoke_test_tool_calling lives under scripts/ — import via its path
+        import importlib.util
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parents[1] / "scripts" / "smoke_test_tool_calling.py"
+        spec = importlib.util.spec_from_file_location("smoke_test_tool_calling", path)
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        source = inspect.getsource(mod.SmokeTestRunner.run_agent)
+        assert 'session_id="system"' in source, (
+            "SmokeTestRunner.run_agent is a system path — its run_async call "
+            "must include session_id='system' to bypass user overrides."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Circuit Breaker Self-Diagnosis sprint — diagnose_and_recover on trip
 # ---------------------------------------------------------------------------
 

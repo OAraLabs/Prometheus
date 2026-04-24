@@ -10,6 +10,7 @@ sends responses back with MarkdownV2 formatting and message chunking.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -46,6 +47,14 @@ _MARKDOWN_V2_ESCAPE = re.compile(r"([_\*\[\]\(\)~`>#+\-=|{}.!\\])")
 
 # Telegram message length limit
 MAX_MESSAGE_LENGTH = 4096
+
+# Sprint 22 GRAFT-ROUTER-WIRE Phase 4: display labels for /claude, /gpt, etc.
+_PRESET_DISPLAY_NAMES: dict[str, str] = {
+    "claude": "Claude (anthropic)",
+    "gpt": "GPT (openai)",
+    "gemini": "Gemini (google)",
+    "xai": "Grok (xai)",
+}
 
 
 def escape_markdown_v2(text: str) -> str:
@@ -157,6 +166,14 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("approve", self._cmd_approve))
         self._app.add_handler(CommandHandler("deny", self._cmd_deny))
         self._app.add_handler(CommandHandler("pending", self._cmd_pending))
+        # Sprint 22 GRAFT-ROUTER-WIRE Phase 4: direct-mode provider override commands
+        self._app.add_handler(CommandHandler("claude", self._cmd_claude))
+        self._app.add_handler(CommandHandler("gpt", self._cmd_gpt))
+        self._app.add_handler(CommandHandler("gemini", self._cmd_gemini))
+        self._app.add_handler(CommandHandler("xai", self._cmd_xai))
+        self._app.add_handler(CommandHandler("grok", self._cmd_grok))
+        self._app.add_handler(CommandHandler("local", self._cmd_local))
+        self._app.add_handler(CommandHandler("route", self._cmd_route))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text)
         )
@@ -193,6 +210,14 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("approve", "Approve a pending tool request"),
                 BotCommand("deny", "Deny a pending tool request"),
                 BotCommand("pending", "List pending approval requests"),
+                # Phase 4: direct-mode provider overrides
+                BotCommand("claude", "Route this chat through Anthropic Claude"),
+                BotCommand("gpt", "Route this chat through OpenAI GPT"),
+                BotCommand("gemini", "Route this chat through Google Gemini"),
+                BotCommand("xai", "Route this chat through xAI Grok"),
+                BotCommand("grok", "Alias for /xai"),
+                BotCommand("local", "Clear override, back to primary"),
+                BotCommand("route", "Show current routing (primary vs override)"),
             ])
         except Exception as exc:
             logger.warning("Failed to register command menu: %s", exc)
@@ -372,7 +397,7 @@ class TelegramAdapter(BasePlatformAdapter):
             "\n"
             "Commands:\n"
             "/status    — Model, uptime, tools, memory, SENTINEL\n"
-            "/model     — Current model name and provider\n"
+            "/route     — Current provider + available overrides\n"
             "/anatomy   — Hardware, GPU, VRAM, infrastructure\n"
             "/doctor    — Diagnostic health check against model registry\n"
             "/wiki      — Wiki stats and recent entries\n"
@@ -382,6 +407,13 @@ class TelegramAdapter(BasePlatformAdapter):
             "/skills    — List available skills\n"
             "/reset     — Clear conversation context\n"
             "/help      — This message\n"
+            "\n"
+            "Provider overrides (this chat only, sticky until /local):\n"
+            "/claude    — Anthropic Claude\n"
+            "/gpt       — OpenAI GPT\n"
+            "/gemini    — Google Gemini\n"
+            "/xai       — xAI Grok  (alias: /grok)\n"
+            "/local     — Back to primary\n"
             "\n"
             "Send any message to chat with the agent."
         )
@@ -404,16 +436,14 @@ class TelegramAdapter(BasePlatformAdapter):
     async def _cmd_model(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Handle /model command — show current model and provider."""
-        if update.effective_chat is None:
-            return
-        name = self.model_name or "(unknown)"
-        provider = self.model_provider or "(unknown)"
-        await self.send(
-            update.effective_chat.id,
-            f"Model: {name}\nProvider: {provider}",
-            parse_mode=None,
-        )
+        """Handle /model command — delegates to /route (Phase 4 absorbed it).
+
+        Kept as a backward-compatibility alias for /route so existing users
+        / external docs that still reference /model keep working. The new
+        /route command is override-aware; /model no longer returns a plain
+        primary-only report.
+        """
+        await self._cmd_route(update, context)
 
     async def _cmd_status(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -755,6 +785,265 @@ class TelegramAdapter(BasePlatformAdapter):
         lines.append(f"[{bar}] {usage_pct:.0f}% used")
 
         await self.send(update.effective_chat.id, "\n".join(lines), parse_mode=None)
+
+    # ------------------------------------------------------------------
+    # Sprint 22 GRAFT-ROUTER-WIRE Phase 4: direct-mode provider overrides
+    # ------------------------------------------------------------------
+    # /claude, /gpt, /gemini, /xai, /grok  — set session override to cloud provider
+    # /local                               — clear override, return to primary
+    # /route                               — show current effective provider
+    #
+    # All of these key the override on the Telegram session_key
+    # ("telegram:<chat_id>"), which matches what `_dispatch_to_agent` threads
+    # into `AgentLoop.run_async(session_id=...)`. Overrides set here apply only
+    # to this chat, not to other chats, Slack, web, or system paths (evals,
+    # benchmarks, smoke tests) — those use reserved session_ids None/"system"
+    # which the router always resolves to primary.
+
+    async def _apply_override(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        preset_name: str,
+    ) -> None:
+        """Shared logic for /claude, /gpt, /gemini, /xai, /grok.
+
+        Validates router availability, overrides_enabled, and API key env var;
+        records the override on the router; if the command had an inline
+        message (e.g., ``/claude what is 2+2?``), dispatches it immediately
+        via the normal agent path so the user gets an answer in one shot.
+        """
+        if update.effective_chat is None:
+            return
+
+        chat_id = update.effective_chat.id
+        session_key = f"{Platform.TELEGRAM.value}:{chat_id}"
+
+        router = getattr(self.agent_loop, "_model_router", None)
+        if router is None:
+            await self.send(
+                chat_id,
+                "Routing is not enabled. Provider overrides require a "
+                "configured router in prometheus.yaml.",
+                parse_mode=None,
+            )
+            return
+
+        if not getattr(router.config, "overrides_enabled", True):
+            logger.warning(
+                "Phase 4 override command /%s invoked in chat %d but "
+                "router.overrides.enabled is False — ignoring.",
+                preset_name, chat_id,
+            )
+            await self.send(
+                chat_id,
+                "Direct-mode provider overrides are disabled.\n"
+                "Set router.overrides.enabled: true in config/prometheus.yaml "
+                "and restart the daemon to enable.",
+                parse_mode=None,
+            )
+            return
+
+        from prometheus.router.model_router import OVERRIDE_PRESETS
+        preset = OVERRIDE_PRESETS.get(preset_name)
+        if preset is None:
+            await self.send(
+                chat_id,
+                f"Unknown override preset '{preset_name}'.",
+                parse_mode=None,
+            )
+            return
+
+        # Early feedback if the API key env var is missing — beats failing on
+        # the user's next message with an opaque ValueError from the provider
+        # registry.
+        api_key_env = preset.get("api_key_env", "")
+        if api_key_env and not os.environ.get(api_key_env):
+            display = _PRESET_DISPLAY_NAMES.get(preset_name, preset_name)
+            await self.send(
+                chat_id,
+                f"{display} requires {api_key_env} to be set in the "
+                f"environment.\n"
+                f"Add it to ~/.config/prometheus/env and restart the daemon "
+                f"(systemctl --user restart prometheus), then try /{preset_name} "
+                f"again.",
+                parse_mode=None,
+            )
+            return
+
+        # Record the override. set_override raises ValueError if called with a
+        # reserved session_id, but "telegram:<chat_id>" is never reserved.
+        router.set_override(session_key, dict(preset))
+        display = _PRESET_DISPLAY_NAMES.get(preset_name, preset_name)
+        logger.info(
+            "Phase 4: set override for session %s → %s/%s",
+            session_key, preset.get("provider"), preset.get("model"),
+        )
+        await self.send(
+            chat_id,
+            f"Switched to {display}.\n"
+            f"Model: {preset.get('model', '?')}\n"
+            f"Use /local to return to primary, /route to check.",
+            parse_mode=None,
+        )
+
+        # Inline message dispatch: /claude <message> answers <message> through
+        # the override provider in one round-trip. No auth check here; the
+        # command handler itself was already authorized by virtue of reaching
+        # this point (same pattern as /benchmark).
+        args = getattr(context, "args", None)
+        if args:
+            inline_message = " ".join(args)
+            event = MessageEvent(
+                chat_id=chat_id,
+                user_id=update.effective_user.id if update.effective_user else 0,
+                text=inline_message,
+                message_id=update.message.message_id if update.message else 0,
+                platform=Platform.TELEGRAM,
+                message_type=MessageType.TEXT,
+                username=(
+                    update.effective_user.username if update.effective_user else None
+                ),
+            )
+            await self._dispatch_to_agent(event)
+
+    async def _cmd_claude(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /claude — set per-session override to Anthropic Claude."""
+        await self._apply_override(update, context, preset_name="claude")
+
+    async def _cmd_gpt(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /gpt — set per-session override to OpenAI GPT."""
+        await self._apply_override(update, context, preset_name="gpt")
+
+    async def _cmd_gemini(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /gemini — set per-session override to Google Gemini."""
+        await self._apply_override(update, context, preset_name="gemini")
+
+    async def _cmd_xai(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /xai — set per-session override to xAI Grok."""
+        await self._apply_override(update, context, preset_name="xai")
+
+    async def _cmd_grok(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /grok — alias for /xai."""
+        await self._apply_override(update, context, preset_name="xai")
+
+    async def _cmd_local(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /local — clear per-session override, return to primary.
+
+        Silent no-op if no override was set. If the command has an inline
+        message, dispatches it through primary.
+        """
+        if update.effective_chat is None:
+            return
+
+        chat_id = update.effective_chat.id
+        session_key = f"{Platform.TELEGRAM.value}:{chat_id}"
+
+        router = getattr(self.agent_loop, "_model_router", None)
+        had_override = False
+        if router is not None:
+            had_override = router.get_override_for_session(session_key) is not None
+            router.clear_override(session_key)
+            if had_override:
+                logger.info(
+                    "Phase 4: cleared override for session %s (back to primary)",
+                    session_key,
+                )
+
+        primary = f"{self.model_provider or '?'}/{self.model_name or '?'}"
+        if had_override:
+            await self.send(
+                chat_id,
+                f"Back to primary ({primary}).",
+                parse_mode=None,
+            )
+        else:
+            await self.send(
+                chat_id,
+                f"Already on primary ({primary}). No override was set.",
+                parse_mode=None,
+            )
+
+        # Inline message dispatch
+        args = getattr(context, "args", None)
+        if args:
+            inline_message = " ".join(args)
+            event = MessageEvent(
+                chat_id=chat_id,
+                user_id=update.effective_user.id if update.effective_user else 0,
+                text=inline_message,
+                message_id=update.message.message_id if update.message else 0,
+                platform=Platform.TELEGRAM,
+                message_type=MessageType.TEXT,
+                username=(
+                    update.effective_user.username if update.effective_user else None
+                ),
+            )
+            await self._dispatch_to_agent(event)
+
+    async def _cmd_route(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /route — show the current effective provider for this chat.
+
+        Reports one of three states:
+          - override active: "{provider}/{model}  (override)"
+          - no router:       "{primary_provider}/{primary_model}  (no router)"
+          - primary:         "{primary_provider}/{primary_model}  (primary)"
+
+        Followed by a list of available override commands.
+        """
+        if update.effective_chat is None:
+            return
+
+        chat_id = update.effective_chat.id
+        session_key = f"{Platform.TELEGRAM.value}:{chat_id}"
+
+        router = getattr(self.agent_loop, "_model_router", None)
+        lines = ["Route"]
+
+        if router is None:
+            lines.append(
+                f"Active: {self.model_provider or '?'}/"
+                f"{self.model_name or '?'}  (no router)"
+            )
+        else:
+            override = router.get_override_for_session(session_key)
+            if override is not None:
+                cfg = override.provider_config
+                lines.append(
+                    f"Active: {cfg.get('provider', '?')}/"
+                    f"{cfg.get('model', '?')}  (override)"
+                )
+                lines.append("Clear with: /local")
+            else:
+                lines.append(
+                    f"Active: {self.model_provider or '?'}/"
+                    f"{self.model_name or '?'}  (primary)"
+                )
+
+        lines.append("")
+        lines.append("Override commands:")
+        lines.append("  /claude  — Anthropic Claude")
+        lines.append("  /gpt     — OpenAI GPT")
+        lines.append("  /gemini  — Google Gemini")
+        lines.append("  /xai     — xAI Grok")
+        lines.append("  /grok    — alias for /xai")
+        lines.append("  /local   — back to primary")
+
+        await self.send(chat_id, "\n".join(lines), parse_mode=None)
 
     async def _handle_text(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

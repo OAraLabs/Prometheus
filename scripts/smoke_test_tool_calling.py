@@ -110,6 +110,10 @@ class SmokeTestRunner:
         result = await self.loop.run_async(
             system_prompt=SYSTEM_PROMPT,
             user_message=message,
+            # Phase 4: smoke test is a system path — use the reserved "system"
+            # session_id so it never inherits user overrides set via /claude,
+            # /gpt, etc.
+            session_id="system",
         )
         elapsed_ms = (time.monotonic() - start) * 1000
 
