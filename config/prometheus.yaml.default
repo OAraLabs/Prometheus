@@ -142,8 +142,31 @@ divergence:
   enabled: false
 
 learning:
-  periodic_nudge_interval: 15
+  # PeriodicNudge — self-reflection prompt every N agent turns.
+  nudge_enabled: true
+  nudge_interval: 15
+  # SkillCreator — auto-generate SKILL.md from successful tool traces.
   auto_skill_creation: true
+  skill_min_tool_calls: 3
+  # SkillRefiner — refine an existing auto-skill when execution deviates beneficially.
+  skill_refinement_enabled: false
+  skill_refiner_model: default
+  # GEPA (SUNRISE Session B) — Generalized Evolutionary Prompt Architecture.
+  gepa_enabled: false
+  gepa_max_skills_per_cycle: 3
+  gepa_variants_per_skill: 3
+  gepa_min_traces_required: 10
+  gepa_judge_threshold: 0.7
+  gepa_min_idle_minutes: 10
+  gepa_max_frequency_hours: 24
+  gepa_model: default
+
+trajectory_export:
+  enabled: false
+  interval_seconds: 86400  # 24h
+  nightly_limit: 1000
+  output_dir: "~/.prometheus/trajectories/"
+  format: jsonl
 
 sentinel:
   enabled: false

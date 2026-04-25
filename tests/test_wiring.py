@@ -5859,3 +5859,364 @@ class TestLCMToolsAgainstRealEngine:
             "AttributeError" in r.getMessage() or "contract drift" in r.getMessage()
             for r in warnings
         ), f"expected a warning about AttributeError, got: {[r.getMessage() for r in warnings]}"
+
+
+# ===========================================================================
+# SUNRISE: Wire dormant systems
+# ===========================================================================
+
+
+class TestSunriseAgentLoopHooksList:
+    """post-task hook list refactor — multiple hooks fire in registration order."""
+
+    def test_add_post_task_hook_appends(self):
+        """add_post_task_hook appends to the hooks list."""
+        from prometheus.engine.agent_loop import AgentLoop
+
+        async def hook_a(_task, _trace):
+            pass
+
+        async def hook_b(_task, _trace):
+            pass
+
+        loop = AgentLoop(provider=MagicMock(), model="test")
+        loop.add_post_task_hook(hook_a)
+        loop.add_post_task_hook(hook_b)
+        hooks = loop.post_task_hooks
+        assert len(hooks) == 2
+        assert hooks[0] is hook_a
+        assert hooks[1] is hook_b
+
+    def test_set_post_task_hook_replaces(self):
+        """Back-compat: set_post_task_hook replaces the entire list."""
+        from prometheus.engine.agent_loop import AgentLoop
+
+        async def hook_a(_task, _trace):
+            pass
+
+        async def hook_b(_task, _trace):
+            pass
+
+        loop = AgentLoop(provider=MagicMock(), model="test")
+        loop.add_post_task_hook(hook_a)
+        loop.set_post_task_hook(hook_b)
+        assert loop.post_task_hooks == [hook_b]
+
+    def test_hooks_fire_in_registration_order(self, tmp_path):
+        """Both hooks fire after a task; failure in one does not block the next."""
+        from prometheus.engine.agent_loop import AgentLoop
+
+        calls: list[str] = []
+
+        async def hook_first(task, trace):
+            calls.append(f"first:{task}:{len(trace)}")
+
+        async def hook_explodes(_task, _trace):
+            calls.append("explodes")
+            raise RuntimeError("boom")
+
+        async def hook_last(task, _trace):
+            calls.append(f"last:{task}")
+
+        # Provider that yields a single AssistantTurnComplete after one tool call,
+        # so the post-task hooks fire on the trace.
+        text_msg = ConversationMessage(role="assistant", content=[TextBlock(text="ok")])
+        scripted = ScriptedProvider([
+            _tool_response("echo", "t1", {"text": "hi"}),
+            _text_response("done"),
+        ])
+        registry = _make_registry()
+        loop = AgentLoop(
+            provider=scripted,
+            model="test",
+            tool_registry=registry,
+            telemetry=_tel(tmp_path),
+        )
+        loop.add_post_task_hook(hook_first)
+        loop.add_post_task_hook(hook_explodes)
+        loop.add_post_task_hook(hook_last)
+
+        asyncio.run(loop.run_async("system", "do thing"))
+        assert calls[0].startswith("first:do thing:")
+        assert calls[1] == "explodes"
+        assert calls[2] == "last:do thing"
+
+
+class TestSunriseSkillRefiner:
+    """SkillRefiner.from_config gating + maybe_refine_recent hook integration."""
+
+    def test_from_config_returns_none_when_disabled(self, tmp_path):
+        """from_config returns None when skill_refinement_enabled is False."""
+        import yaml
+        from prometheus.learning.skill_refiner import SkillRefiner
+
+        cfg = tmp_path / "prometheus.yaml"
+        cfg.write_text(yaml.safe_dump({"learning": {"skill_refinement_enabled": False}}))
+        result = SkillRefiner.from_config(provider=MagicMock(), config_path=str(cfg))
+        assert result is None
+
+    def test_from_config_builds_when_enabled(self, tmp_path):
+        """from_config returns a usable instance when enabled."""
+        import yaml
+        from prometheus.learning.skill_refiner import SkillRefiner
+
+        cfg = tmp_path / "prometheus.yaml"
+        cfg.write_text(yaml.safe_dump({
+            "learning": {
+                "skill_refinement_enabled": True,
+                "skill_refiner_model": "test-model",
+            }
+        }))
+        result = SkillRefiner.from_config(provider=MagicMock(), config_path=str(cfg))
+        assert result is not None
+        assert result._model == "test-model"
+
+    def test_maybe_refine_recent_picks_newest_skill(self, tmp_path, monkeypatch):
+        """maybe_refine_recent finds the most recently modified auto-skill."""
+        import time
+        from prometheus.learning.skill_refiner import SkillRefiner
+
+        auto_dir = tmp_path / "auto"
+        auto_dir.mkdir()
+        old = auto_dir / "old-skill.md"
+        new = auto_dir / "new-skill.md"
+        old.write_text("---\nname: old\n---\nold")
+        time.sleep(0.05)  # ensure mtime ordering
+        new.write_text("---\nname: new\n---\nnew")
+
+        captured: dict[str, Any] = {}
+
+        async def fake_maybe_refine(self, skill_path, tool_trace, outcome):
+            captured["path"] = skill_path
+            captured["trace_len"] = len(tool_trace)
+            captured["outcome"] = outcome
+            return True
+
+        monkeypatch.setattr(SkillRefiner, "maybe_refine", fake_maybe_refine)
+
+        refiner = SkillRefiner(MagicMock(), auto_dir=auto_dir, min_tool_calls=2)
+        trace = [{"tool_name": "Bash"}, {"tool_name": "Read"}, {"tool_name": "Edit"}]
+        ok = asyncio.run(refiner.maybe_refine_recent("did the thing", trace))
+        assert ok is True
+        assert captured["path"] == new
+        assert captured["trace_len"] == 3
+        assert captured["outcome"] == "did the thing"
+
+    def test_maybe_refine_recent_skips_short_traces(self, tmp_path):
+        """maybe_refine_recent returns False if trace is below threshold."""
+        from prometheus.learning.skill_refiner import SkillRefiner
+
+        auto_dir = tmp_path / "auto"
+        auto_dir.mkdir()
+        (auto_dir / "skill.md").write_text("---\nname: x\n---\nbody")
+
+        refiner = SkillRefiner(MagicMock(), auto_dir=auto_dir, min_tool_calls=5)
+        ok = asyncio.run(refiner.maybe_refine_recent("task", [{"tool_name": "Bash"}]))
+        assert ok is False
+
+    def test_maybe_refine_recent_skips_empty_dir(self, tmp_path):
+        """maybe_refine_recent returns False when auto_dir is empty."""
+        from prometheus.learning.skill_refiner import SkillRefiner
+
+        auto_dir = tmp_path / "auto"
+        auto_dir.mkdir()
+        refiner = SkillRefiner(MagicMock(), auto_dir=auto_dir, min_tool_calls=1)
+        trace = [{"tool_name": "Bash"}, {"tool_name": "Read"}]
+        ok = asyncio.run(refiner.maybe_refine_recent("task", trace))
+        assert ok is False
+
+
+class TestSunrisePeriodicNudge:
+    """PeriodicNudge wired into AgentLoop fires at turn intervals."""
+
+    def test_nudge_appended_to_messages_at_interval(self, tmp_path):
+        """After a completed turn at multiple of interval, a nudge user message is appended."""
+        from prometheus.engine.agent_loop import AgentLoop
+        from prometheus.learning.nudge import PeriodicNudge
+
+        nudge = PeriodicNudge(interval=1, enabled=True)
+        # Single tool use → assistant turn complete (1 turn). Should fire nudge at turn 1.
+        scripted = ScriptedProvider([
+            _tool_response("echo", "t1", {"text": "hi"}),
+            _text_response("done"),
+        ])
+        registry = _make_registry()
+        loop = AgentLoop(
+            provider=scripted,
+            model="test",
+            tool_registry=registry,
+            telemetry=_tel(tmp_path),
+            nudge=nudge,
+        )
+        result = asyncio.run(loop.run_async("system", "do thing"))
+        nudge_msgs = [
+            m for m in result.messages
+            if m.role == "user" and "[system-internal]" in m.text
+        ]
+        assert len(nudge_msgs) >= 1, (
+            "Expected at least one [system-internal] nudge message in result.messages, "
+            f"got roles: {[m.role for m in result.messages]}"
+        )
+
+    def test_nudge_disabled_does_not_inject(self, tmp_path):
+        """Disabled nudge never appends messages."""
+        from prometheus.engine.agent_loop import AgentLoop
+        from prometheus.learning.nudge import PeriodicNudge
+
+        nudge = PeriodicNudge(interval=1, enabled=False)
+        scripted = ScriptedProvider([
+            _tool_response("echo", "t1", {"text": "hi"}),
+            _text_response("done"),
+        ])
+        registry = _make_registry()
+        loop = AgentLoop(
+            provider=scripted,
+            model="test",
+            tool_registry=registry,
+            telemetry=_tel(tmp_path),
+            nudge=nudge,
+        )
+        result = asyncio.run(loop.run_async("system", "do thing"))
+        nudge_msgs = [
+            m for m in result.messages
+            if m.role == "user" and "[system-internal]" in m.text
+        ]
+        assert nudge_msgs == []
+
+    def test_no_nudge_when_none_passed(self, tmp_path):
+        """nudge=None means no injection, no AttributeError."""
+        from prometheus.engine.agent_loop import AgentLoop
+
+        scripted = ScriptedProvider([_text_response("done")])
+        registry = _make_registry()
+        loop = AgentLoop(
+            provider=scripted,
+            model="test",
+            tool_registry=registry,
+            telemetry=_tel(tmp_path),
+            nudge=None,
+        )
+        # Should not raise
+        asyncio.run(loop.run_async("system", "hello"))
+
+
+class TestSunriseGoldenTraceExporter:
+    """GoldenTraceExporter writes JSONL and emits a signal on success."""
+
+    def _seed_golden_trace(self, tel, tool_name="bash"):
+        """Insert one golden trace row into the telemetry DB."""
+        tel.record(
+            model="test-cloud-model",
+            tool_name=tool_name,
+            success=True,
+            retries=0,
+            latency_ms=1.0,
+            raw_model_output='I\'ll run a command.',
+            parsed_tool_call='{"name":"bash","input":{"command":"ls"}}',
+            provider="anthropic",
+        )
+
+    def test_run_once_writes_jsonl_and_emits_signal(self, tmp_path):
+        """run_once produces a JSONL file and emits 'golden_traces_exported'."""
+        from prometheus.sentinel.golden_trace_exporter import GoldenTraceExporter
+        from prometheus.sentinel.signals import SignalBus
+
+        tel = _tel(tmp_path)
+        self._seed_golden_trace(tel)
+
+        bus = SignalBus()
+        captured: list = []
+
+        async def listener(signal):
+            captured.append(signal)
+
+        bus.subscribe("golden_traces_exported", listener)
+
+        out_dir = tmp_path / "trajectories"
+        exporter = GoldenTraceExporter(
+            telemetry=tel,
+            signal_bus=bus,
+            config={
+                "enabled": True,
+                "interval_seconds": 60,
+                "nightly_limit": 10,
+                "output_dir": str(out_dir),
+            },
+        )
+        result = asyncio.run(exporter.run_once())
+        assert result is not None
+        assert Path(result).exists()
+        assert Path(result).suffix == ".jsonl"
+        # Each line should be a valid JSON example dict
+        with Path(result).open() as fh:
+            lines = [line for line in fh if line.strip()]
+        assert lines, "Expected at least one JSONL line"
+        import json as _json
+        first = _json.loads(lines[0])
+        assert "messages" in first
+        # Signal emitted
+        assert len(captured) == 1
+        assert captured[0].kind == "golden_traces_exported"
+        assert captured[0].payload["path"] == result
+        assert exporter.cycle_count == 1
+        assert exporter.last_path == result
+
+    def test_run_once_disabled_signal_bus_does_not_raise(self, tmp_path):
+        """signal_bus=None is allowed; export still produces a file."""
+        from prometheus.sentinel.golden_trace_exporter import GoldenTraceExporter
+
+        tel = _tel(tmp_path)
+        self._seed_golden_trace(tel)
+
+        out_dir = tmp_path / "trajectories"
+        exporter = GoldenTraceExporter(
+            telemetry=tel,
+            signal_bus=None,
+            config={
+                "enabled": True,
+                "nightly_limit": 5,
+                "output_dir": str(out_dir),
+            },
+        )
+        result = asyncio.run(exporter.run_once())
+        assert result is not None
+        assert Path(result).exists()
+
+    def test_disabled_start_returns_none(self, tmp_path):
+        """start() is a no-op when enabled=False."""
+        from prometheus.sentinel.golden_trace_exporter import GoldenTraceExporter
+
+        exporter = GoldenTraceExporter(
+            telemetry=_tel(tmp_path),
+            signal_bus=None,
+            config={"enabled": False},
+        )
+        task = asyncio.run(exporter.start())
+        assert task is None
+
+
+class TestSunriseMemoryExtractorTaskName:
+    """Verify that asyncio.create_task with name='memory_extractor' is reachable.
+
+    The daemon wiring is hard to test without booting full subsystems. This
+    test validates the contract: a long-running coroutine spawned with
+    name='memory_extractor' is discoverable via asyncio.all_tasks().
+    """
+
+    def test_named_task_discoverable(self):
+        """A named task shows up in asyncio.all_tasks() while running."""
+        async def _check():
+            async def _idle():
+                await asyncio.sleep(0.1)
+            t = asyncio.create_task(_idle(), name="memory_extractor")
+            try:
+                names = {task.get_name() for task in asyncio.all_tasks()}
+                assert "memory_extractor" in names
+            finally:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+
+        asyncio.run(_check())

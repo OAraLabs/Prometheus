@@ -285,6 +285,22 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     _update_grammar()
 
+    # SUNRISE: PeriodicNudge — self-reflection prompt every N turns.
+    # Optional; ``None`` disables injection in agent loop.
+    nudge: object | None = None
+    try:
+        from prometheus.learning.nudge import PeriodicNudge
+        nudge = PeriodicNudge.from_config(args.config)
+        if nudge is not None and getattr(nudge, "enabled", False):
+            logger.info(
+                "PeriodicNudge: enabled (interval=%d turns)",
+                getattr(nudge, "interval", 15),
+            )
+        else:
+            nudge = None
+    except Exception as exc:
+        logger.warning("PeriodicNudge not available: %s", exc)
+
     # Agent loop
     agent_loop = AgentLoop(
         provider=provider,
@@ -299,6 +315,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
         post_result_hooks=post_result_hooks or None,
         max_tool_iterations=model_config.get("max_tool_iterations", 25),
         tool_loader=tool_loader,
+        nudge=nudge,
     )
 
     # Shared session manager for all gateways
@@ -448,9 +465,13 @@ async def run_daemon(args: argparse.Namespace) -> None:
             lcm_engine.set_memory_extractor(extractor)
             logger.info("Memory extractor wired to LCM pre-compaction flush")
 
-        extractor_task = asyncio.create_task(extractor.run_forever())
+        # SUNRISE: name the task so it's visible in asyncio.all_tasks() and logs.
+        extractor_task = asyncio.create_task(
+            extractor.run_forever(),
+            name="memory_extractor",
+        )
         tasks.append(extractor_task)
-        logger.info("Memory extractor started")
+        logger.info("Memory extractor started (task=memory_extractor)")
     except Exception as exc:
         logger.warning("Memory extractor not available: %s", exc)
 
@@ -513,10 +534,24 @@ async def run_daemon(args: argparse.Namespace) -> None:
     try:
         from prometheus.learning.skill_creator import SkillCreator
         skill_creator = SkillCreator(provider, model=model_name)
-        agent_loop.set_post_task_hook(skill_creator.maybe_create)
+        agent_loop.add_post_task_hook(skill_creator.maybe_create)
         logger.info("SkillCreator wired to agent loop post-task hook")
     except Exception as exc:
         logger.warning("SkillCreator not available: %s", exc)
+
+    # Learning loop — SkillRefiner (refine existing skills when execution deviates beneficially)
+    try:
+        from prometheus.learning.skill_refiner import SkillRefiner
+        skill_refiner = SkillRefiner.from_config(provider, args.config)
+        if skill_refiner is not None:
+            # Override model to match the running model_name (from_config can't know it)
+            skill_refiner._model = model_name
+            agent_loop.add_post_task_hook(skill_refiner.maybe_refine_recent)
+            logger.info("SkillRefiner wired to agent loop post-task hook")
+        else:
+            logger.info("SkillRefiner: disabled by config (learning.skill_refinement_enabled)")
+    except Exception as exc:
+        logger.warning("SkillRefiner not available: %s", exc)
 
     # SENTINEL proactive subsystem (Sprint 9)
     sentinel_config = config.get("sentinel", {})
@@ -601,6 +636,25 @@ async def run_daemon(args: argparse.Namespace) -> None:
             _update_grammar()  # Regenerate grammar to include SENTINEL tools
         except Exception as exc:
             logger.warning("SENTINEL not available: %s", exc)
+
+    # SUNRISE: GoldenTraceExporter — periodic JSONL export of golden traces.
+    # Runs independent of SENTINEL but uses the bus if SENTINEL is up so
+    # downstream consumers (e.g. GEPAEngine) can react to fresh exports.
+    try:
+        trajectory_cfg = config.get("trajectory_export", {})
+        if trajectory_cfg.get("enabled", False):
+            from prometheus.sentinel.golden_trace_exporter import GoldenTraceExporter
+            golden_exporter = GoldenTraceExporter(
+                telemetry=telemetry,
+                signal_bus=signal_bus if "signal_bus" in dir() else None,
+                config=trajectory_cfg,
+            )
+            exporter_task = await golden_exporter.start()
+            if exporter_task is not None:
+                tasks.append(exporter_task)
+                logger.info("GoldenTraceExporter started")
+    except Exception as exc:
+        logger.warning("GoldenTraceExporter not available: %s", exc)
 
     # Web bridge (Beacon dashboard backend)
     web_config = config.get("web", {})

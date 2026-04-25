@@ -3,9 +3,13 @@
 After a task uses a skill, compare what actually happened to what the
 skill prescribed. If the deviation led to a better outcome, update the skill.
 
-Usage:
+Usage (direct):
     refiner = SkillRefiner(provider)
     updated = await refiner.maybe_refine(skill_path, tool_trace, outcome)
+
+Usage (post-task hook on AgentLoop):
+    refiner = SkillRefiner.from_config(provider)
+    agent_loop.add_post_task_hook(refiner.maybe_refine_recent)
 """
 
 from __future__ import annotations
@@ -15,10 +19,20 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from prometheus.config.paths import get_config_dir
+
 if TYPE_CHECKING:
     from prometheus.providers.base import ModelProvider
 
 log = logging.getLogger(__name__)
+
+_AUTO_SKILLS_DIR_NAME = "skills/auto"
+
+
+def _get_auto_skills_dir() -> Path:
+    path = get_config_dir() / _AUTO_SKILLS_DIR_NAME
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 _REFINEMENT_PROMPT = """\
 You are a skill refinement engine. A skill was used to guide a task, but the
@@ -50,6 +64,8 @@ class SkillRefiner:
     Args:
         provider: ModelProvider for refinement analysis.
         model: Model name for the refinement call.
+        auto_dir: Override the auto-skills directory (used by ``maybe_refine_recent``).
+        min_tool_calls: Minimum tool calls in the trace before considering refinement.
     """
 
     def __init__(
@@ -57,9 +73,74 @@ class SkillRefiner:
         provider: ModelProvider,
         *,
         model: str = "default",
+        auto_dir: Path | None = None,
+        min_tool_calls: int = 3,
     ) -> None:
         self._provider = provider
         self._model = model
+        self._auto_dir = auto_dir or _get_auto_skills_dir()
+        self._min_tool_calls = min_tool_calls
+
+    @classmethod
+    def from_config(
+        cls,
+        provider: ModelProvider,
+        config_path: str | None = None,
+    ) -> SkillRefiner | None:
+        """Build from prometheus.yaml learning section.
+
+        Returns ``None`` if ``learning.skill_refinement_enabled`` is False
+        (so callers can skip wiring the hook entirely).
+        """
+        import yaml
+
+        if config_path is None:
+            from prometheus.config.defaults import DEFAULTS_PATH
+            config_path = str(DEFAULTS_PATH)
+
+        try:
+            with open(Path(config_path).expanduser()) as fh:
+                data = yaml.safe_load(fh) or {}
+            learning = data.get("learning", {})
+        except (OSError, Exception):
+            learning = {}
+
+        if not learning.get("skill_refinement_enabled", False):
+            return None
+
+        model = learning.get("skill_refiner_model", "default")
+        return cls(provider, model=model)
+
+    async def maybe_refine_recent(
+        self,
+        task_description: str,
+        tool_trace: list[dict[str, Any]],
+    ) -> bool:
+        """Post-task-hook entry point.
+
+        Find the most recently modified auto-skill and refine it against
+        the trace. Skips if no auto-skills exist or the trace is too short.
+        """
+        if len(tool_trace) < self._min_tool_calls:
+            return False
+        if not self._auto_dir.exists():
+            return False
+
+        skills = sorted(
+            self._auto_dir.glob("*.md"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not skills:
+            log.debug("SkillRefiner: no auto-skills to refine")
+            return False
+
+        target = skills[0]
+        try:
+            return await self.maybe_refine(target, tool_trace, outcome=task_description)
+        except Exception:
+            log.exception("SkillRefiner: maybe_refine_recent failed for %s", target)
+            return False
 
     async def maybe_refine(
         self,

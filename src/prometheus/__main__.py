@@ -763,6 +763,23 @@ def main() -> None:
         help="Skip confirmation prompt",
     )
 
+    # SUNRISE: export-traces — write golden tool-call traces to JSONL for fine-tuning.
+    export_parser = subparsers.add_parser(
+        "export-traces", help="Export golden tool-call traces to a JSONL file",
+    )
+    export_parser.add_argument(
+        "--limit", type=int, default=100,
+        help="Maximum number of traces to export (default: 100)",
+    )
+    export_parser.add_argument(
+        "--output", default="~/.prometheus/trajectories/",
+        help="Output directory (default: ~/.prometheus/trajectories/)",
+    )
+    export_parser.add_argument(
+        "--tool", default=None,
+        help="Filter by tool name (default: all tools)",
+    )
+
     args = parser.parse_args()
 
     # Logging
@@ -802,6 +819,22 @@ def main() -> None:
         from prometheus.cli.migrate import run_migration
         success = run_migration(args)
         sys.exit(0 if success else 1)
+
+    # SUNRISE: export-traces — manual trigger for golden trace JSONL export.
+    if args.command == "export-traces":
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+        telemetry = ToolCallTelemetry()
+        try:
+            output_path = telemetry.export_golden_traces(
+                tool_name=args.tool,
+                limit=args.limit,
+                output_dir=args.output,
+            )
+            print(f"Exported: {output_path}")
+            sys.exit(0)
+        except Exception as exc:
+            print(f"Export failed: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     # Data reset commands
     if args.reset_telemetry:

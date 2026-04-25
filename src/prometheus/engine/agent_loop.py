@@ -1546,6 +1546,7 @@ class AgentLoop:
         divergence_detector: object | None = None,
         post_result_hooks: list[object] | None = None,
         tool_loader: object | None = None,
+        nudge: object | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
@@ -1559,7 +1560,7 @@ class AgentLoop:
         self._adapter = adapter
         self._telemetry = telemetry
         self._cwd = cwd or Path.cwd()
-        self._post_task_hook: Callable | None = None
+        self._post_task_hooks: list[Callable] = []
         self._tool_trace: list[dict] = []
         # Sprint 10
         self._model_router = model_router
@@ -1568,14 +1569,26 @@ class AgentLoop:
         self._post_result_hooks = post_result_hooks
         # Tool Calling Middle Layer
         self._tool_loader = tool_loader
+        # SUNRISE: PeriodicNudge for self-reflection every N turns
+        self._nudge = nudge
+
+    def add_post_task_hook(self, hook: Callable) -> None:
+        """Append a callback invoked after each completed task.
+
+        Hooks fire sequentially in registration order. Each hook receives
+        ``(task_description, tool_trace)`` and should return a coroutine.
+        One hook's failure does not block subsequent hooks.
+        """
+        self._post_task_hooks.append(hook)
 
     def set_post_task_hook(self, hook: Callable) -> None:
-        """Register a callback invoked after each completed task.
+        """Back-compat: replace the hook list with a single hook."""
+        self._post_task_hooks = [hook]
 
-        The hook is called with ``(task_description, tool_trace)`` and
-        should return a coroutine (e.g. ``SkillCreator.maybe_create``).
-        """
-        self._post_task_hook = hook
+    @property
+    def post_task_hooks(self) -> list[Callable]:
+        """Read-only view of registered post-task hooks (for tests)."""
+        return list(self._post_task_hooks)
 
     async def run_async(
         self,
@@ -1633,6 +1646,20 @@ class AgentLoop:
                 last_text = event.message.text
                 last_usage = event.usage
                 turns += 1
+                # PeriodicNudge — inject self-reflection prompt every N turns.
+                # The nudge appears as a [system-internal]-prefixed user message
+                # so the model sees it on the next iteration.
+                if self._nudge is not None:
+                    try:
+                        nudge_msg = self._nudge.maybe_inject(turns)
+                    except Exception:
+                        nudge_msg = None
+                        log.debug("PeriodicNudge: maybe_inject raised", exc_info=True)
+                    if nudge_msg:
+                        messages.append(
+                            ConversationMessage.from_user_text(nudge_msg["content"])
+                        )
+                        log.debug("PeriodicNudge: injected at turn %d", turns)
             elif isinstance(event, ToolExecutionCompleted):
                 self._tool_trace.append({
                     "tool_name": event.tool_name,
@@ -1649,12 +1676,18 @@ class AgentLoop:
             turns=turns,
         )
 
-        # Post-task learning hook — auto-generate skills from traces
-        if self._post_task_hook and self._tool_trace:
-            try:
-                await self._post_task_hook(user_message, self._tool_trace)
-            except Exception:
-                log.debug("Post-task hook failed", exc_info=True)
+        # Post-task learning hooks — fire each in registration order;
+        # a failing hook does not block subsequent hooks.
+        if self._post_task_hooks and self._tool_trace:
+            for hook in self._post_task_hooks:
+                try:
+                    await hook(user_message, self._tool_trace)
+                except Exception:
+                    log.debug(
+                        "Post-task hook %s failed",
+                        getattr(hook, "__qualname__", repr(hook)),
+                        exc_info=True,
+                    )
             self._tool_trace = []
 
         return result
