@@ -169,6 +169,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("pending", self._cmd_pending))
         # SUNRISE Session B: GEPA skill evolution
         self._app.add_handler(CommandHandler("gepa", self._cmd_gepa))
+        # GRAFT-SYMBIOTE Session A: GitHub research → graft pipeline
+        self._app.add_handler(CommandHandler("symbiote", self._cmd_symbiote))
         # Sprint 22 GRAFT-ROUTER-WIRE Phase 4: direct-mode provider override commands
         self._app.add_handler(CommandHandler("claude", self._cmd_claude))
         self._app.add_handler(CommandHandler("gpt", self._cmd_gpt))
@@ -214,6 +216,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("deny", "Deny a pending tool request"),
                 BotCommand("pending", "List pending approval requests"),
                 BotCommand("gepa", "GEPA skill evolution: status | run | history"),
+                BotCommand("symbiote", "GitHub graft pipeline: <problem> | approve | graft | status | abort | history"),
                 # Phase 4: direct-mode provider overrides
                 BotCommand("claude", "Route this chat through Anthropic Claude"),
                 BotCommand("gpt", "Route this chat through OpenAI GPT"),
@@ -1478,6 +1481,325 @@ class TelegramAdapter(BasePlatformAdapter):
             "GEPA cycle complete:\n" + report.to_telegram_summary(),
             parse_mode=None,
         )
+
+    # ------------------------------------------------------------------
+    # GRAFT-SYMBIOTE Session A: /symbiote command
+    # ------------------------------------------------------------------
+
+    async def _cmd_symbiote(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /symbiote subcommands.
+
+        Forms:
+          /symbiote <problem statement>      — start a scout
+          /symbiote approve <full_name>      — request harvest approval, run on /approve
+          /symbiote graft                    — request graft approval, run on /approve
+          /symbiote status [session_id]      — show session state
+          /symbiote abort                    — abort active session
+          /symbiote history [N]              — last N sessions
+        """
+        if not update.message or not update.effective_chat:
+            return
+        chat_id = update.effective_chat.id
+        from prometheus.symbiote import get_coordinator
+        coordinator = get_coordinator()
+        if coordinator is None:
+            await self.send(
+                chat_id,
+                "SYMBIOTE is not active. Set symbiote.enabled in config.",
+                parse_mode=None,
+            )
+            return
+
+        text = (update.message.text or "").strip()
+        # Strip the command itself (handles "/symbiote@bot ...")
+        parts = text.split(maxsplit=1)
+        body = parts[1].strip() if len(parts) > 1 else ""
+
+        # Detect subcommand by first token; otherwise treat whole body as problem.
+        first_token = body.split(maxsplit=1)[0] if body else ""
+        first_lower = first_token.lower()
+        rest = body[len(first_token):].strip()
+
+        known_subcommands = {"approve", "graft", "status", "abort", "history"}
+
+        if not body:
+            await self._symbiote_status(chat_id, coordinator, "")
+            return
+
+        if first_lower not in known_subcommands:
+            # Treat whole body as the problem statement → start scout.
+            await self._symbiote_scout(chat_id, coordinator, body)
+            return
+
+        if first_lower == "status":
+            await self._symbiote_status(chat_id, coordinator, rest)
+            return
+        if first_lower == "history":
+            await self._symbiote_history(chat_id, coordinator, rest)
+            return
+        if first_lower == "abort":
+            await self._symbiote_abort(chat_id, coordinator)
+            return
+        if first_lower == "approve":
+            await self._symbiote_approve(chat_id, coordinator, rest)
+            return
+        if first_lower == "graft":
+            await self._symbiote_graft(chat_id, coordinator)
+            return
+
+    # ------------------------------------------------------------------
+    # /symbiote subcommand handlers
+    # ------------------------------------------------------------------
+
+    async def _symbiote_scout(self, chat_id: int, coordinator, problem: str) -> None:
+        """Run the Scout phase and reply with a candidate summary."""
+        await self.send(
+            chat_id,
+            f"SYMBIOTE: scouting GitHub for {problem!r}...",
+            parse_mode=None,
+        )
+        try:
+            session = await coordinator.start_scout(problem)
+        except RuntimeError as exc:
+            await self.send(chat_id, f"SYMBIOTE: {exc}", parse_mode=None)
+            return
+        except Exception as exc:
+            logger.exception("SYMBIOTE scout failed")
+            await self.send(chat_id, f"SYMBIOTE scout failed: {exc}", parse_mode=None)
+            return
+        if session.error:
+            await self.send(
+                chat_id,
+                f"SYMBIOTE scout: {session.error}",
+                parse_mode=None,
+            )
+            return
+        report = session.scout_report or {}
+        candidates = report.get("candidates") or []
+        if not candidates:
+            note = report.get("notes") or "no viable candidates"
+            await self.send(
+                chat_id,
+                f"SYMBIOTE: no candidates ({note}). Session {session.session_id[:8]}.",
+                parse_mode=None,
+            )
+            return
+        lines = [
+            f"SYMBIOTE session {session.session_id[:8]} — "
+            f"{len(candidates)} candidate(s):",
+        ]
+        for c in candidates[:5]:
+            lic = (c.get("license_check") or {}).get("spdx_id") or "?"
+            lines.append(
+                f"  • {c['full_name']} ({lic}, ★{c.get('stars', 0)}) "
+                f"[{c.get('recommendation', '?')}] "
+                f"score={float(c.get('relevance_score', 0)):.2f}"
+            )
+        lines.append("")
+        lines.append("To proceed: /symbiote approve <full_name>")
+        await self.send(chat_id, "\n".join(lines), parse_mode=None)
+
+    async def _symbiote_approve(self, chat_id: int, coordinator, rest: str) -> None:
+        """Queue an approval; on /approve run harvest."""
+        if not rest:
+            await self.send(
+                chat_id,
+                "Usage: /symbiote approve <owner/repo>",
+                parse_mode=None,
+            )
+            return
+        active = coordinator.get_status()
+        if active is None:
+            await self.send(
+                chat_id,
+                "SYMBIOTE: no active session. Run /symbiote <problem> first.",
+                parse_mode=None,
+            )
+            return
+        candidate_full_name = rest.split()[0]
+        queue = getattr(self, "_approval_queue", None)
+        if queue is None:
+            await self.send(
+                chat_id,
+                "SYMBIOTE: approval queue not active — cannot start harvest.",
+                parse_mode=None,
+            )
+            return
+        asyncio.create_task(
+            self._symbiote_run_with_approval(
+                chat_id, queue, coordinator,
+                phase="harvest",
+                session_id=active.session_id,
+                candidate=candidate_full_name,
+            ),
+            name="symbiote_harvest_approval",
+        )
+        await self.send(
+            chat_id,
+            f"SYMBIOTE: harvest of {candidate_full_name} pending approval. "
+            "Watch for the /approve prompt.",
+            parse_mode=None,
+        )
+
+    async def _symbiote_graft(self, chat_id: int, coordinator) -> None:
+        """Queue an approval; on /approve run graft."""
+        active = coordinator.get_status()
+        if active is None:
+            await self.send(
+                chat_id,
+                "SYMBIOTE: no active session.",
+                parse_mode=None,
+            )
+            return
+        from prometheus.symbiote.coordinator import SymbiotePhase
+        if active.phase != SymbiotePhase.AWAITING_HARVEST_APPROVAL:
+            await self.send(
+                chat_id,
+                f"SYMBIOTE: cannot graft from phase {active.phase.value}.",
+                parse_mode=None,
+            )
+            return
+        queue = getattr(self, "_approval_queue", None)
+        if queue is None:
+            await self.send(
+                chat_id,
+                "SYMBIOTE: approval queue not active — cannot graft.",
+                parse_mode=None,
+            )
+            return
+        asyncio.create_task(
+            self._symbiote_run_with_approval(
+                chat_id, queue, coordinator,
+                phase="graft",
+                session_id=active.session_id,
+            ),
+            name="symbiote_graft_approval",
+        )
+        await self.send(
+            chat_id,
+            "SYMBIOTE: graft pending approval. Watch for the /approve prompt.",
+            parse_mode=None,
+        )
+
+    async def _symbiote_status(self, chat_id: int, coordinator, rest: str) -> None:
+        session_id = rest.split()[0] if rest else None
+        session = coordinator.get_status(session_id)
+        if session is None:
+            await self.send(
+                chat_id,
+                "SYMBIOTE: no active session.",
+                parse_mode=None,
+            )
+            return
+        await self.send(chat_id, session.to_telegram_summary(), parse_mode=None)
+
+    async def _symbiote_history(self, chat_id: int, coordinator, rest: str) -> None:
+        try:
+            limit = int(rest.split()[0]) if rest else 10
+        except ValueError:
+            limit = 10
+        history = coordinator.get_history(limit)
+        if not history:
+            await self.send(chat_id, "SYMBIOTE: no past sessions.", parse_mode=None)
+            return
+        lines = [f"SYMBIOTE history ({len(history)} session(s)):"]
+        for s in history:
+            lines.append(
+                f"  • {s.session_id[:8]} {s.phase.value} — "
+                f"{(s.problem_statement or '')[:60]}"
+            )
+        await self.send(chat_id, "\n".join(lines), parse_mode=None)
+
+    async def _symbiote_abort(self, chat_id: int, coordinator) -> None:
+        active = coordinator.get_status()
+        if active is None:
+            await self.send(chat_id, "SYMBIOTE: no active session.", parse_mode=None)
+            return
+        try:
+            session = await coordinator.abort(active.session_id)
+        except Exception as exc:
+            await self.send(chat_id, f"SYMBIOTE abort failed: {exc}", parse_mode=None)
+            return
+        await self.send(
+            chat_id,
+            f"SYMBIOTE: session {session.session_id[:8]} aborted.",
+            parse_mode=None,
+        )
+
+    async def _symbiote_run_with_approval(
+        self,
+        chat_id: int,
+        queue,
+        coordinator,
+        *,
+        phase: str,
+        session_id: str,
+        candidate: str | None = None,
+    ) -> None:
+        """Background task: queue.request_approval → run phase on APPROVED."""
+        from prometheus.permissions.approval_queue import ApprovalResult
+        descriptions = {
+            "harvest": (
+                f"SYMBIOTE: clone and analyze {candidate!r} "
+                f"(session {session_id[:8]})"
+            ),
+            "graft": (
+                f"SYMBIOTE: write adapted files + run tests "
+                f"(session {session_id[:8]})"
+            ),
+        }
+        try:
+            result = await queue.request_approval(
+                tool_name=f"symbiote_{phase}",
+                description=descriptions.get(phase, f"SYMBIOTE {phase}"),
+                chat_id=chat_id,
+            )
+        except Exception as exc:
+            await self.send(
+                chat_id,
+                f"SYMBIOTE: approval failed: {exc}",
+                parse_mode=None,
+            )
+            return
+        if result == ApprovalResult.DENIED:
+            await self.send(chat_id, f"SYMBIOTE {phase} denied.", parse_mode=None)
+            return
+        if result == ApprovalResult.TIMEOUT:
+            await self.send(
+                chat_id,
+                f"SYMBIOTE {phase} approval timed out.",
+                parse_mode=None,
+            )
+            return
+
+        try:
+            if phase == "harvest":
+                session = await coordinator.approve_scout(session_id, candidate)
+            elif phase == "graft":
+                session = await coordinator.approve_harvest(session_id)
+            else:
+                await self.send(chat_id, f"Unknown phase: {phase}", parse_mode=None)
+                return
+        except Exception as exc:
+            logger.exception("SYMBIOTE %s execution failed", phase)
+            await self.send(
+                chat_id,
+                f"SYMBIOTE {phase} failed: {exc}",
+                parse_mode=None,
+            )
+            return
+
+        if session.error:
+            await self.send(
+                chat_id,
+                f"SYMBIOTE {phase}: {session.error}",
+                parse_mode=None,
+            )
+            return
+
+        await self.send(chat_id, session.to_telegram_summary(), parse_mode=None)
 
     # ------------------------------------------------------------------
     # Sprint 15 GRAFT: media handlers (additive — Hermes parity)

@@ -88,6 +88,19 @@ _BUILTINS: dict[str, AgentProfile] = {
         exclude_tools=[],
         subsystems={"sentinel": False, "wiki": False, "cron": False, "learning": False},
     ),
+    "symbiote": AgentProfile(
+        name="symbiote",
+        description="GitHub research and code assimilation. Scout, harvest, graft.",
+        bootstrap_files=["SOUL.md"],
+        tools=[
+            "github_search",
+            "symbiote_scout", "symbiote_harvest", "symbiote_graft",
+            "symbiote_status",
+            "bash", "file_read", "file_write", "file_edit", "grep", "glob",
+        ],
+        exclude_tools=[],
+        subsystems={"sentinel": False, "wiki": False, "cron": False, "learning": False},
+    ),
 }
 
 

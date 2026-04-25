@@ -6303,3 +6303,101 @@ class TestSunriseGEPAEngineWiring:
         assert len(captured) == 1
         assert captured[0].kind == "gepa_cycle_complete"
         assert "summary" in captured[0].payload
+
+
+# ===========================================================================
+# GRAFT-SYMBIOTE Session A: tools registered, coordinator singleton, command wired
+# ===========================================================================
+
+
+class TestSymbioteWiring:
+    """Verify the SYMBIOTE pipeline is wired into the existing harness."""
+
+    def test_symbiote_tools_registered_in_default_registry(self):
+        """create_tool_registry() includes the 4 symbiote tools + github_search."""
+        from prometheus.__main__ import create_tool_registry
+
+        registry = create_tool_registry({})
+        names = {t.name for t in registry.list_tools()}
+        assert "github_search" in names
+        assert "symbiote_scout" in names
+        assert "symbiote_harvest" in names
+        assert "symbiote_graft" in names
+        assert "symbiote_status" in names
+
+    def test_symbiote_profile_exists(self):
+        """The symbiote profile is in the builtin profile store."""
+        from prometheus.config.profiles import _BUILTINS
+
+        assert "symbiote" in _BUILTINS
+        profile = _BUILTINS["symbiote"]
+        for tool in (
+            "symbiote_scout", "symbiote_harvest",
+            "symbiote_graft", "symbiote_status",
+            "github_search", "bash",
+        ):
+            assert tool in profile.tools, f"{tool} missing from symbiote profile"
+
+    def test_coordinator_singleton_setter(self, tmp_path):
+        """set_coordinator/get_coordinator round-trip."""
+        from prometheus.symbiote import set_coordinator, get_coordinator
+
+        # Reset
+        set_coordinator(None)
+        assert get_coordinator() is None
+
+        marker = object()
+        set_coordinator(marker)
+        try:
+            assert get_coordinator() is marker
+        finally:
+            set_coordinator(None)
+
+    def test_telegram_has_cmd_symbiote(self):
+        """TelegramAdapter._cmd_symbiote exists (wired in start())."""
+        from prometheus.gateway.telegram import TelegramAdapter
+
+        assert hasattr(TelegramAdapter, "_cmd_symbiote")
+        assert hasattr(TelegramAdapter, "_symbiote_run_with_approval")
+
+    def test_symbiote_tool_returns_disabled_when_no_coordinator(self, tmp_path):
+        """If get_coordinator() returns None, scout/harvest/graft tools fail safely."""
+        from prometheus.symbiote import set_coordinator
+        from prometheus.tools.builtin.symbiote_scout import (
+            SymbioteScoutInput,
+            SymbioteScoutTool,
+        )
+        from prometheus.tools.base import ToolExecutionContext
+
+        set_coordinator(None)
+        try:
+            tool = SymbioteScoutTool()
+            result = asyncio.run(tool.execute(
+                SymbioteScoutInput(problem_statement="x"),
+                ToolExecutionContext(cwd=tmp_path),
+            ))
+            assert result.is_error is True
+            assert "not active" in result.output
+        finally:
+            set_coordinator(None)
+
+    def test_status_tool_works_without_coordinator(self, tmp_path):
+        """Status tool returns a structured 'disabled' payload, not an error."""
+        from prometheus.symbiote import set_coordinator
+        from prometheus.tools.builtin.symbiote_status import (
+            SymbioteStatusInput,
+            SymbioteStatusTool,
+        )
+        from prometheus.tools.base import ToolExecutionContext
+
+        set_coordinator(None)
+        tool = SymbioteStatusTool()
+        result = asyncio.run(tool.execute(
+            SymbioteStatusInput(),
+            ToolExecutionContext(cwd=tmp_path),
+        ))
+        assert result.is_error is False
+        import json as _json
+        payload = _json.loads(result.output)
+        assert payload["enabled"] is False
+        assert payload["active"] is None

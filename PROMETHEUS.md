@@ -74,3 +74,78 @@ in `config/prometheus.yaml.default` under `learning:` and `trajectory_export:`.
 - `tests/test_wiring.py::TestSunrise*` (18 tests) — hook list, SkillRefiner
   gating, PeriodicNudge injection, GoldenTraceExporter, GEPAEngine bus
   subscription. Real instances; LLM calls stubbed.
+
+## SYMBIOTE — GitHub research → assimilation pipeline (GRAFT-SYMBIOTE Session A)
+
+Closed Scout → Harvest → Graft loop wired during the GRAFT-SYMBIOTE sprint.
+Disabled by default in `config/prometheus.yaml.default` under `symbiote:`.
+MORPH (blue-green deploy) and BackupVault are Session B scope and are NOT
+in this build.
+
+### Package layout (`src/prometheus/symbiote/`)
+- `license_gate.py` — `LicenseGate` / `LicenseCheck` / `LicenseVerdict`. Hard
+  blocks GPL/AGPL/SSPL/BUSL and unknown licenses. Detects via GitHub API
+  metadata, LICENSE/COPYING file content, or `SPDX-License-Identifier`
+  header comments.
+- `code_scanner.py` — `DangerousCodeScanner` (the Sprint 11/14 component
+  the spec assumed but that didn't exist). AST-based scanner: flags
+  `exec/eval/compile/__import__`, `os.system/popen/exec*`, `pty.spawn` at
+  any scope; `subprocess/socket/httpx/requests/urllib` at module scope.
+  Returns `ScanResult(verdict: clean|suspicious|dangerous)`.
+- `github_search.py` — `GitHubClient` (`search/repositories`, `repos`,
+  `readme`, `contents`) + `GitHubSearchTool` (BaseTool wrapper). Token
+  bucket: 10/min unauthenticated, 30/min authenticated. Token from
+  `symbiote.github_token` config or `PROMETHEUS_GITHUB_TOKEN` env;
+  never logged.
+- `scout.py` — `ScoutEngine` / `ScoutReport` / `ScoutCandidate`. LLM
+  generates 2-3 search queries from a problem statement, deduplicates
+  results, filters BLOCKED licenses, scores remaining candidates with
+  GBNF-enforced JSON output. Classification: recommended | viable |
+  risky | blocked.
+- `harvest.py` — `HarvestEngine` / `HarvestReport` / `ExtractedModule` /
+  `AdaptationStep`. Shallow `git clone` (60s timeout), repo-size guard,
+  LLM file picker, 15-file/50KB read budget, scanner pass on every file
+  (any DANGEROUS aborts), LLM-produced adaptation plan. Persists to
+  `~/.prometheus/symbiote/harvests/<repo>_<ts>/` and deletes the sandbox.
+- `graft.py` — `GraftEngine` / `GraftReport` / `GraftedFile`. Provenance
+  header on every adapted file (matches existing donor-file format),
+  donor-import rewriting, allowed-roots guard (`src/prometheus/`,
+  `tests/`), wiring tests appended to `tests/test_wiring.py`, full
+  pytest run, PROMETHEUS.md update.
+- `coordinator.py` — `SymbioteCoordinator` / `SymbioteSession` /
+  `SymbiotePhase`. State machine, single-session mutex, SQLite
+  persistence at `~/.prometheus/symbiote/sessions.db`.
+
+### Wired in `scripts/daemon.py`
+1. `create_tool_registry()` registers `github_search`,
+   `symbiote_scout`, `symbiote_harvest`, `symbiote_graft`, `symbiote_status`.
+2. The daemon constructs Scout/Harvest/Graft engines plus the coordinator
+   if `symbiote.enabled`, then calls `prometheus.symbiote.set_coordinator()`
+   so the agent-facing tools and `/symbiote` Telegram command can find it.
+
+### CLI / Telegram surface
+- `/symbiote <problem>` — start Scout (read-only, no approval).
+- `/symbiote approve <full_name>` — request Harvest approval via the
+  existing `ApprovalQueue` (Trust Level 1, mirrors `/gepa run`).
+- `/symbiote graft` — request Graft approval via the same queue.
+- `/symbiote status [session_id]`, `/symbiote abort`,
+  `/symbiote history [N]` — read-only.
+
+### Profile
+A new `symbiote` builtin profile exposes the SYMBIOTE tools plus
+`bash` / `file_read` / `file_write` / `file_edit` / `grep` / `glob` /
+`github_search`. Other subsystems (sentinel, wiki, cron, learning) are
+disabled in this profile.
+
+### Tests (105 new)
+- `tests/test_license_gate.py` (24)
+- `tests/test_code_scanner.py` (15)
+- `tests/test_github_search.py` (12)
+- `tests/test_scout.py` (16)
+- `tests/test_harvest.py` (10)
+- `tests/test_graft.py` (11)
+- `tests/test_symbiote_coordinator.py` (10)
+- `tests/test_wiring.py::TestSymbioteWiring` (6)
+
+Real instances throughout; only the GitHub API HTTP calls and the
+provider's `stream_message` are stubbed.

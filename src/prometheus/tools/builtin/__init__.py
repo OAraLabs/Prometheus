@@ -16,6 +16,10 @@ from prometheus.tools.builtin.grep import GrepTool
 from prometheus.tools.builtin.message import MessageTool
 from prometheus.tools.builtin.notebook_edit import NotebookEditTool
 from prometheus.tools.builtin.sentinel_status import SentinelStatusTool
+from prometheus.tools.builtin.symbiote_graft import SymbioteGraftTool
+from prometheus.tools.builtin.symbiote_harvest import SymbioteHarvestTool
+from prometheus.tools.builtin.symbiote_scout import SymbioteScoutTool
+from prometheus.tools.builtin.symbiote_status import SymbioteStatusTool
 from prometheus.tools.builtin.lcm_describe import LCMDescribeTool
 from prometheus.tools.builtin.lcm_expand import LCMExpandTool
 from prometheus.tools.builtin.lcm_expand_query import LCMExpandQueryTool
@@ -49,6 +53,10 @@ __all__ = [
     "MessageTool",
     "NotebookEditTool",
     "SentinelStatusTool",
+    "SymbioteGraftTool",
+    "SymbioteHarvestTool",
+    "SymbioteScoutTool",
+    "SymbioteStatusTool",
     "LCMDescribeTool",
     "LCMExpandTool",
     "LCMExpandQueryTool",

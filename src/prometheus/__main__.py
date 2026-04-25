@@ -203,6 +203,25 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
     if security_gate and hasattr(security_gate, '_audit') and security_gate._audit:
         registry.register(AuditQueryTool(security_gate._audit))
 
+    # GRAFT-SYMBIOTE Session A: GitHub research + scout/harvest/graft tools.
+    # The SYMBIOTE tools route through prometheus.symbiote.get_coordinator(),
+    # which the daemon sets at startup if symbiote.enabled is true.
+    try:
+        from prometheus.symbiote.github_search import GitHubSearchTool, GitHubClient
+        from prometheus.tools.builtin import (
+            SymbioteGraftTool,
+            SymbioteHarvestTool,
+            SymbioteScoutTool,
+            SymbioteStatusTool,
+        )
+        registry.register(GitHubSearchTool(client=GitHubClient.from_config(None)))
+        registry.register(SymbioteScoutTool())
+        registry.register(SymbioteHarvestTool())
+        registry.register(SymbioteGraftTool())
+        registry.register(SymbioteStatusTool())
+    except Exception:
+        pass
+
     # Optional tools — don't fail if deps missing
     try:
         from prometheus.tools.builtin.skill import SkillTool

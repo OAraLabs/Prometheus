@@ -656,6 +656,70 @@ async def run_daemon(args: argparse.Namespace) -> None:
     except Exception as exc:
         logger.warning("GoldenTraceExporter not available: %s", exc)
 
+    # GRAFT-SYMBIOTE Session A: SymbioteCoordinator (Scout → Harvest → Graft).
+    # Tools were registered in create_tool_registry; the coordinator is
+    # exposed via prometheus.symbiote.set_coordinator() so the tools and
+    # /symbiote Telegram command can find it.
+    try:
+        symbiote_cfg = config.get("symbiote", {}) or {}
+        if symbiote_cfg.get("enabled", False):
+            from pathlib import Path as _Path
+            from prometheus.symbiote import set_coordinator
+            from prometheus.symbiote.coordinator import SymbioteCoordinator
+            from prometheus.symbiote.github_search import (
+                GitHubClient,
+                GitHubSearchTool,
+            )
+            from prometheus.symbiote.graft import GraftEngine
+            from prometheus.symbiote.harvest import HarvestEngine
+            from prometheus.symbiote.license_gate import LicenseGate
+            from prometheus.symbiote.scout import ScoutEngine
+            from prometheus.symbiote.code_scanner import DangerousCodeScanner
+
+            sym_license_gate = LicenseGate()
+            sym_scanner = DangerousCodeScanner()
+            sym_gh_client = GitHubClient.from_config(symbiote_cfg)
+            sym_search_tool = GitHubSearchTool(client=sym_gh_client)
+            sym_scout = ScoutEngine(
+                github_search=sym_search_tool,
+                license_gate=sym_license_gate,
+                provider=provider,
+                model=symbiote_cfg.get("scout_model", model_name),
+            )
+            sandbox_dir = _Path(
+                symbiote_cfg.get("sandbox_dir", "~/.prometheus/symbiote/sandbox/")
+            ).expanduser()
+            harvest_dir = _Path(
+                symbiote_cfg.get("harvest_dir", "~/.prometheus/symbiote/harvests/")
+            ).expanduser()
+            sym_harvest = HarvestEngine(
+                scanner=sym_scanner,
+                license_gate=sym_license_gate,
+                provider=provider,
+                model=symbiote_cfg.get("harvest_model", model_name),
+                max_repo_size_mb=int(symbiote_cfg.get("max_repo_size_mb", 100)),
+                file_budget_max=int(symbiote_cfg.get("file_budget_max", 15)),
+                file_budget_kb=int(symbiote_cfg.get("file_budget_kb", 50)),
+                clone_timeout=int(symbiote_cfg.get("clone_timeout_seconds", 60)),
+                sandbox_root=sandbox_dir,
+                harvest_root=harvest_dir,
+            )
+            sym_graft = GraftEngine(scanner=sym_scanner, project_root=Path.cwd())
+            sym_db_path = _Path(
+                symbiote_cfg.get("sessions_db", "~/.prometheus/symbiote/sessions.db")
+            ).expanduser()
+            sym_db_path.parent.mkdir(parents=True, exist_ok=True)
+            symbiote_coordinator = SymbioteCoordinator(
+                scout_engine=sym_scout,
+                harvest_engine=sym_harvest,
+                graft_engine=sym_graft,
+                db_path=sym_db_path,
+            )
+            set_coordinator(symbiote_coordinator)
+            logger.info("SymbioteCoordinator wired (sessions=%s)", sym_db_path)
+    except Exception as exc:
+        logger.warning("SymbioteCoordinator not available: %s", exc)
+
     # SUNRISE Session B: GEPA — idle-time skill evolution.
     # Requires SENTINEL (signal_bus) to be available. Subscribes to idle
     # signals; runs at most once per gepa_max_frequency_hours after

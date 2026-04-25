@@ -168,6 +168,21 @@ trajectory_export:
   output_dir: "~/.prometheus/trajectories/"
   format: jsonl
 
+symbiote:
+  enabled: false                # GRAFT-SYMBIOTE Session A: scout/harvest/graft pipeline
+  github_token: null            # Or set via env: PROMETHEUS_GITHUB_TOKEN (never logged)
+  language_default: Python
+  min_stars_default: 10
+  max_repo_size_mb: 100
+  file_budget_max: 15
+  file_budget_kb: 50
+  clone_timeout_seconds: 60
+  sandbox_dir: "~/.prometheus/symbiote/sandbox/"
+  harvest_dir: "~/.prometheus/symbiote/harvests/"
+  sessions_db: "~/.prometheus/symbiote/sessions.db"
+  scout_model: default          # Model for query gen + relevance scoring
+  harvest_model: default        # Model for file selection + adaptation plan
+
 sentinel:
   enabled: false
   idle_threshold_minutes: 15
