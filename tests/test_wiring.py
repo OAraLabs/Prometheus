@@ -6220,3 +6220,86 @@ class TestSunriseMemoryExtractorTaskName:
                     pass
 
         asyncio.run(_check())
+
+
+# ===========================================================================
+# SUNRISE Session B: GEPAEngine wired to SENTINEL bus
+# ===========================================================================
+
+
+class TestSunriseGEPAEngineWiring:
+    """GEPAEngine subscribes to idle_start / idle_end and runs cycles via run_now()."""
+
+    def test_engine_subscribes_to_idle_signals(self):
+        """After start(), bus has idle_start AND idle_end subscribers from the engine."""
+        from prometheus.learning.gepa import GEPAOptimizer
+        from prometheus.sentinel.gepa_engine import GEPAEngine
+        from prometheus.sentinel.signals import SignalBus
+
+        bus = SignalBus()
+        opt = GEPAOptimizer(provider=None, config={"gepa_enabled": True})
+        engine = GEPAEngine(optimizer=opt, signal_bus=bus, config={
+            "gepa_min_idle_minutes": 10,
+            "gepa_max_frequency_hours": 24,
+        })
+
+        # Before start: no subscribers
+        assert bus.subscriber_count == 0
+        asyncio.run(engine.start())
+        # After start: at least 2 (idle_start, idle_end)
+        assert bus.subscriber_count >= 2
+
+    def test_run_now_invokes_optimizer(self, tmp_path):
+        """run_now triggers the optimizer's run_optimization_cycle directly."""
+        from prometheus.learning.gepa import GEPAOptimizer, GEPAReport
+        from prometheus.sentinel.gepa_engine import GEPAEngine
+        from prometheus.sentinel.signals import SignalBus
+
+        bus = SignalBus()
+
+        # Optimizer disabled → returns immediately with notes='disabled'.
+        opt = GEPAOptimizer(
+            provider=None,
+            config={"gepa_enabled": False},
+            trajectories_dir=tmp_path / "trajectories",
+            skills_auto_dir=tmp_path / "skills" / "auto",
+        )
+        engine = GEPAEngine(optimizer=opt, signal_bus=bus, config={
+            "gepa_min_idle_minutes": 0,
+            "gepa_max_frequency_hours": 0,  # always allow
+        })
+        asyncio.run(engine.start())
+        report = asyncio.run(engine.run_now())
+        assert isinstance(report, GEPAReport)
+        assert report.notes == "disabled"
+        assert engine.last_report is report
+
+    def test_emits_gepa_cycle_complete_signal(self, tmp_path):
+        """A finished cycle emits 'gepa_cycle_complete' on the bus."""
+        from prometheus.learning.gepa import GEPAOptimizer
+        from prometheus.sentinel.gepa_engine import GEPAEngine
+        from prometheus.sentinel.signals import SignalBus
+
+        bus = SignalBus()
+        captured: list = []
+
+        async def listener(signal):
+            captured.append(signal)
+
+        bus.subscribe("gepa_cycle_complete", listener)
+
+        opt = GEPAOptimizer(
+            provider=None,
+            config={"gepa_enabled": False},  # disabled → fast cycle
+            trajectories_dir=tmp_path / "trajectories",
+            skills_auto_dir=tmp_path / "skills" / "auto",
+        )
+        engine = GEPAEngine(optimizer=opt, signal_bus=bus, config={
+            "gepa_min_idle_minutes": 0,
+        })
+        asyncio.run(engine.start())
+        asyncio.run(engine.run_now())
+
+        assert len(captured) == 1
+        assert captured[0].kind == "gepa_cycle_complete"
+        assert "summary" in captured[0].payload

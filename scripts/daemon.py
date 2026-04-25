@@ -656,6 +656,37 @@ async def run_daemon(args: argparse.Namespace) -> None:
     except Exception as exc:
         logger.warning("GoldenTraceExporter not available: %s", exc)
 
+    # SUNRISE Session B: GEPA — idle-time skill evolution.
+    # Requires SENTINEL (signal_bus) to be available. Subscribes to idle
+    # signals; runs at most once per gepa_max_frequency_hours after
+    # gepa_min_idle_minutes of continuous idle.
+    gepa_engine = None
+    try:
+        learning_cfg = config.get("learning", {}) or {}
+        if learning_cfg.get("gepa_enabled", False) and "signal_bus" in dir():
+            from prometheus.learning.gepa import GEPAOptimizer
+            from prometheus.sentinel.gepa_engine import GEPAEngine
+
+            evals_cfg = config.get("evals", {}) or {}
+            gepa_optimizer = GEPAOptimizer(
+                provider=provider,
+                judge_base_url=evals_cfg.get("judge_base_url"),
+                telemetry=telemetry,
+                config=learning_cfg,
+            )
+            gepa_engine = GEPAEngine(
+                optimizer=gepa_optimizer,
+                signal_bus=signal_bus,
+                config=learning_cfg,
+            )
+            await gepa_engine.start()
+            # Expose to Telegram adapter so /gepa commands can find it.
+            if telegram is not None:
+                telegram._gepa_engine = gepa_engine
+            logger.info("GEPAEngine started")
+    except Exception as exc:
+        logger.warning("GEPAEngine not available: %s", exc)
+
     # Web bridge (Beacon dashboard backend)
     web_config = config.get("web", {})
     if web_config.get("enabled", False):

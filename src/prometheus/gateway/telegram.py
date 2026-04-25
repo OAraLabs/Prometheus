@@ -9,6 +9,7 @@ sends responses back with MarkdownV2 formatting and message chunking.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -166,6 +167,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("approve", self._cmd_approve))
         self._app.add_handler(CommandHandler("deny", self._cmd_deny))
         self._app.add_handler(CommandHandler("pending", self._cmd_pending))
+        # SUNRISE Session B: GEPA skill evolution
+        self._app.add_handler(CommandHandler("gepa", self._cmd_gepa))
         # Sprint 22 GRAFT-ROUTER-WIRE Phase 4: direct-mode provider override commands
         self._app.add_handler(CommandHandler("claude", self._cmd_claude))
         self._app.add_handler(CommandHandler("gpt", self._cmd_gpt))
@@ -210,6 +213,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("approve", "Approve a pending tool request"),
                 BotCommand("deny", "Deny a pending tool request"),
                 BotCommand("pending", "List pending approval requests"),
+                BotCommand("gepa", "GEPA skill evolution: status | run | history"),
                 # Phase 4: direct-mode provider overrides
                 BotCommand("claude", "Route this chat through Anthropic Claude"),
                 BotCommand("gpt", "Route this chat through OpenAI GPT"),
@@ -1323,6 +1327,157 @@ class TelegramAdapter(BasePlatformAdapter):
         for action in pending:
             lines.append(f"  {action.request_id}: {action.tool_name} — {action.description}")
         await self.send(update.effective_chat.id, "\n".join(lines), parse_mode=None)
+
+    # ------------------------------------------------------------------
+    # SUNRISE Session B: GEPA skill evolution
+    # ------------------------------------------------------------------
+
+    async def _cmd_gepa(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /gepa {status|run|history} command."""
+        if not update.message or not update.effective_chat:
+            return
+        chat_id = update.effective_chat.id
+        args = (update.message.text or "").split()
+        sub = args[1].strip().lower() if len(args) > 1 else "status"
+
+        engine = getattr(self, "_gepa_engine", None)
+
+        if sub == "status":
+            if engine is None:
+                await self.send(
+                    chat_id,
+                    "GEPA: engine not active (set learning.gepa_enabled in config).",
+                    parse_mode=None,
+                )
+                return
+            report = engine.last_report
+            if report is None:
+                await self.send(
+                    chat_id,
+                    "GEPA: no cycle has run yet. "
+                    "Use /gepa run to trigger one manually.",
+                    parse_mode=None,
+                )
+                return
+            await self.send(chat_id, report.to_telegram_summary(), parse_mode=None)
+            return
+
+        if sub == "run":
+            if engine is None:
+                await self.send(
+                    chat_id,
+                    "GEPA: engine not active (set learning.gepa_enabled in config).",
+                    parse_mode=None,
+                )
+                return
+            queue = getattr(self, "_approval_queue", None)
+            if queue is None:
+                await self.send(
+                    chat_id,
+                    "GEPA: approval queue not active — cannot run on demand.",
+                    parse_mode=None,
+                )
+                return
+            asyncio.create_task(
+                self._gepa_run_with_approval(chat_id, queue, engine),
+                name="gepa_run_with_approval",
+            )
+            await self.send(
+                chat_id,
+                "GEPA run pending approval. Watch for the /approve prompt.",
+                parse_mode=None,
+            )
+            return
+
+        if sub == "history":
+            from prometheus.config.paths import get_config_dir
+            archive_dir = get_config_dir() / "skills" / "auto" / "archive"
+            if not archive_dir.exists():
+                await self.send(
+                    chat_id,
+                    "GEPA history: no promotions yet.",
+                    parse_mode=None,
+                )
+                return
+            archives = sorted(
+                archive_dir.glob("*.md"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if not archives:
+                await self.send(
+                    chat_id,
+                    "GEPA history: archive directory is empty.",
+                    parse_mode=None,
+                )
+                return
+            lines = ["GEPA promotion history:"]
+            for path in archives[:15]:
+                ts = path.stat().st_mtime
+                stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+                lines.append(f"  • {path.stem} ({stamp})")
+            await self.send(chat_id, "\n".join(lines), parse_mode=None)
+            return
+
+        await self.send(
+            chat_id,
+            "Usage: /gepa [status | run | history]",
+            parse_mode=None,
+        )
+
+    async def _gepa_run_with_approval(
+        self,
+        chat_id: int,
+        queue,
+        engine,
+    ) -> None:
+        """Background task: request approval, then run a GEPA cycle if granted."""
+        from prometheus.permissions.approval_queue import ApprovalResult
+        try:
+            result = await queue.request_approval(
+                tool_name="gepa",
+                description="Run GEPA skill evolution cycle now",
+                chat_id=chat_id,
+            )
+        except Exception as exc:
+            await self.send(
+                chat_id,
+                f"GEPA: approval failed: {exc}",
+                parse_mode=None,
+            )
+            return
+
+        if result == ApprovalResult.DENIED:
+            await self.send(chat_id, "GEPA run denied.", parse_mode=None)
+            return
+        if result == ApprovalResult.TIMEOUT:
+            await self.send(chat_id, "GEPA run approval timed out.", parse_mode=None)
+            return
+
+        try:
+            report = await engine.run_now()
+        except Exception as exc:
+            await self.send(
+                chat_id,
+                f"GEPA cycle failed: {exc}",
+                parse_mode=None,
+            )
+            return
+
+        if report is None:
+            await self.send(
+                chat_id,
+                "GEPA: a cycle is already running (or returned no report).",
+                parse_mode=None,
+            )
+            return
+        await self.send(
+            chat_id,
+            "GEPA cycle complete:\n" + report.to_telegram_summary(),
+            parse_mode=None,
+        )
 
     # ------------------------------------------------------------------
     # Sprint 15 GRAFT: media handlers (additive — Hermes parity)
