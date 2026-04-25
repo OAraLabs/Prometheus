@@ -915,6 +915,7 @@ def main() -> None:
         model_router=model_router,
         divergence_detector=divergence_detector,
         max_tool_iterations=config.get("model", {}).get("max_tool_iterations", 25),
+        max_tool_iterations_cloud=config.get("model", {}).get("max_tool_iterations_cloud", 50),
         tool_results_turn_budget=ctx_cfg.get("tool_results_turn_budget", 8000),
         microcompact_after_turns=ctx_cfg.get("microcompact_after_turns", 3),
         microcompact_keep_chars=ctx_cfg.get("microcompact_keep_chars", 200),

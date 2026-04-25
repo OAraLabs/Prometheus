@@ -202,3 +202,103 @@ def test_run_sync_wrapper():
     loop = AgentLoop(provider=provider)
     result = loop.run("You are helpful.", "Test sync.")
     assert result.text == "sync works"
+
+
+# ---------------------------------------------------------------------------
+# Per-provider max_tool_iterations resolver
+# ---------------------------------------------------------------------------
+
+
+def _ctx(
+    *,
+    max_local: int = 25,
+    max_cloud: int | None = None,
+    adapter_tier: str | None = None,
+):
+    """Build a LoopContext with just enough fields to exercise the resolver."""
+    from types import SimpleNamespace
+    adapter = SimpleNamespace(tier=adapter_tier) if adapter_tier is not None else None
+    # provider/model/system_prompt are required by the dataclass; stub them.
+    return LoopContext(
+        provider=MockProvider([]),
+        model="stub",
+        system_prompt="",
+        max_tokens=1024,
+        max_tool_iterations=max_local,
+        max_tool_iterations_cloud=max_cloud,
+        adapter=adapter,
+    )
+
+
+def test_effective_iter_limit_backward_compat_when_cloud_unset():
+    """max_tool_iterations_cloud=None → resolver always returns the local
+    limit, regardless of adapter tier. This is the pre-patch behavior."""
+    from prometheus.engine.agent_loop import _effective_max_tool_iterations
+    # No adapter.
+    assert _effective_max_tool_iterations(_ctx()) == 25
+    # Cloud adapter but no cloud override.
+    assert _effective_max_tool_iterations(_ctx(adapter_tier="off")) == 25
+
+
+def test_effective_iter_limit_uses_cloud_when_tier_off():
+    """With cloud override set AND adapter.tier == 'off', resolver
+    returns the cloud limit."""
+    from prometheus.engine.agent_loop import _effective_max_tool_iterations
+    ctx = _ctx(max_local=25, max_cloud=50, adapter_tier="off")
+    assert _effective_max_tool_iterations(ctx) == 50
+
+
+def test_effective_iter_limit_stays_local_for_tier_light_and_full():
+    """Local tiers use the local limit even when a cloud override is set —
+    Gemma doesn't need 50 iterations, it loops badly past ~20."""
+    from prometheus.engine.agent_loop import _effective_max_tool_iterations
+    assert _effective_max_tool_iterations(
+        _ctx(max_local=25, max_cloud=50, adapter_tier="light")
+    ) == 25
+    assert _effective_max_tool_iterations(
+        _ctx(max_local=25, max_cloud=50, adapter_tier="full")
+    ) == 25
+
+
+def test_effective_iter_limit_no_adapter_uses_local():
+    """No adapter at all (e.g. benchmark harness) falls back to local."""
+    from prometheus.engine.agent_loop import _effective_max_tool_iterations
+    ctx = _ctx(max_local=25, max_cloud=50, adapter_tier=None)
+    assert _effective_max_tool_iterations(ctx) == 25
+
+
+def test_effective_iter_limit_adapter_without_tier_attr_uses_local():
+    """Adapter object that lacks a .tier attribute — treated as local."""
+    from prometheus.engine.agent_loop import _effective_max_tool_iterations
+    from types import SimpleNamespace
+    ctx = LoopContext(
+        provider=MockProvider([]),
+        model="stub",
+        system_prompt="",
+        max_tokens=1024,
+        max_tool_iterations=25,
+        max_tool_iterations_cloud=50,
+        adapter=SimpleNamespace(),  # no .tier
+    )
+    assert _effective_max_tool_iterations(ctx) == 25
+
+
+def test_agent_loop_plumbs_cloud_override_through_to_context():
+    """The constructor kwarg flows into LoopContext.max_tool_iterations_cloud
+    so __main__.py can pass it from config."""
+    import asyncio
+    provider = MockProvider([_text_response("pong")])
+    loop = AgentLoop(provider=provider, max_tool_iterations_cloud=50)
+    # Quick sanity: the field is stored.
+    assert loop._max_tool_iterations_cloud == 50
+    # End-to-end: running doesn't break.
+    result = asyncio.run(loop.run_async("sys", "ping"))
+    assert result.text == "pong"
+
+
+def test_agent_loop_default_cloud_is_none_preserves_old_behavior():
+    """Not passing max_tool_iterations_cloud keeps the old single-limit
+    behavior (backward-compat for downstream harnesses)."""
+    provider = MockProvider([_text_response("ok")])
+    loop = AgentLoop(provider=provider)
+    assert loop._max_tool_iterations_cloud is None

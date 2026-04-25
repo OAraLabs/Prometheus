@@ -16,7 +16,8 @@ model:
   base_url: "http://localhost:8080" # Inference server URL
   model: ""                         # Auto-detected from server if blank
   grammar_enforcement: true             # GBNF constrained decoding for llama.cpp tool calls
-  max_tool_iterations: 25               # Max tool calls per user message before hard stop
+  max_tool_iterations: 25               # Max tool calls per user message before hard stop (local/llama)
+  max_tool_iterations_cloud: 50         # Separate cap for cloud (tier=off): Claude plans multi-step sequences local models wouldn't
   fallback_provider: "ollama"
   fallback_url: "http://localhost:11434"
 

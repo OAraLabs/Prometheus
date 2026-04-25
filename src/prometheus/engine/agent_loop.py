@@ -514,6 +514,12 @@ class LoopContext:
     cwd: Path = field(default_factory=Path.cwd)
     max_turns: int = 200
     max_tool_iterations: int = 25
+    # Cloud providers (adapter.tier == "off") typically chew through
+    # iterations faster — Claude plans multi-step sequences that Gemma
+    # would never attempt. When set, this limit applies whenever the
+    # active adapter is at TIER_OFF; otherwise we fall back to the
+    # local limit above.
+    max_tool_iterations_cloud: int | None = None
     permission_prompt: PermissionPrompt | None = None
     ask_user_prompt: AskUserPrompt | None = None
     tool_metadata: dict[str, object] | None = None
@@ -534,6 +540,27 @@ class LoopContext:
     # Reserved: None and "system" never match any override (eval/benchmark/
     # cron/SENTINEL-adjacent paths use these so user commands never leak in).
     session_id: str | None = None
+
+
+def _effective_max_tool_iterations(context: LoopContext) -> int:
+    """Resolve the iteration limit for the currently-active provider.
+
+    Cloud providers (adapter.tier == "off") use
+    ``max_tool_iterations_cloud`` when configured; everything else —
+    tier=light, tier=full, or no adapter — uses the local
+    ``max_tool_iterations``. If ``max_tool_iterations_cloud`` is None,
+    both paths share the local limit (fully backward-compatible).
+
+    The resolver runs at each guard check rather than at context
+    construction because the active provider/adapter can swap mid-loop
+    via model fallback (see ``_try_model_fallback``).
+    """
+    if context.max_tool_iterations_cloud is None:
+        return context.max_tool_iterations
+    adapter = context.adapter
+    if adapter is not None and getattr(adapter, "tier", None) == "off":
+        return context.max_tool_iterations_cloud
+    return context.max_tool_iterations
 
 
 async def run_loop(
@@ -695,10 +722,11 @@ async def run_loop(
         tool_iteration += len(tool_calls)
 
         # --- Guard: max_tool_iterations ---
-        if tool_iteration > context.max_tool_iterations:
+        effective_iter_limit = _effective_max_tool_iterations(context)
+        if tool_iteration > effective_iter_limit:
             _log_iteration(context, _IterationReason.MAX_ITERATIONS_HIT, turn, tool_iteration)
             error_msg = _make_assistant_msg(
-                f"Tool iteration limit reached ({tool_iteration}/{context.max_tool_iterations}). "
+                f"Tool iteration limit reached ({tool_iteration}/{effective_iter_limit}). "
                 f"Stopping to prevent runaway loops."
             )
             messages.append(error_msg)
@@ -1507,6 +1535,7 @@ class AgentLoop:
         max_tokens: int = 4096,
         max_turns: int = 200,
         max_tool_iterations: int = 25,
+        max_tool_iterations_cloud: int | None = None,
         tool_registry=None,
         hook_executor=None,
         permission_checker=None,
@@ -1523,6 +1552,7 @@ class AgentLoop:
         self._max_tokens = max_tokens
         self._max_turns = max_turns
         self._max_tool_iterations = max_tool_iterations
+        self._max_tool_iterations_cloud = max_tool_iterations_cloud
         self._tool_registry = tool_registry
         self._hook_executor = hook_executor
         self._permission_checker = permission_checker
@@ -1579,6 +1609,7 @@ class AgentLoop:
             max_tokens=self._max_tokens,
             max_turns=self._max_turns,
             max_tool_iterations=self._max_tool_iterations,
+            max_tool_iterations_cloud=self._max_tool_iterations_cloud,
             tool_registry=self._tool_registry,
             hook_executor=self._hook_executor,
             permission_checker=self._permission_checker,
