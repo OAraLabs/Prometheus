@@ -24,6 +24,23 @@
 - Tool results truncated by tool_result_max in config
 - ADDITIVE ONLY: extend existing files, don't replace them
 
+## Security
+Shared security utilities live in `src/prometheus/security/`.
+
+- `SecurityGate` (`permissions/checker.py`) — Trust-level evaluator wired
+  into `AgentLoop` as `permission_checker`.
+- `ExfiltrationDetector` (`permissions/exfiltration.py`) — bash-command
+  pattern detector for credential-leak attempts.
+- **`DangerousCodeScanner`** (`security/code_scanner.py`) — AST-based
+  static-analysis pass on Python source. Flags `exec/eval/compile/__import__`
+  and `os.system/popen/exec*/pty.spawn/ctypes.CDLL` at any scope, plus
+  `subprocess/socket/httpx/requests/urllib` at module scope (suspicious,
+  not blocking). Returns `ScanResult(verdict: clean|suspicious|dangerous)`.
+  First introduced in GRAFT-SYMBIOTE for harvest-time gating; promoted to
+  shared so any subsystem (hooks, audit pipelines, future eval gates) can
+  reuse it. The old import path
+  `prometheus.symbiote.code_scanner` still works via a re-export shim.
+
 ## Self-Improving Loop (SUNRISE)
 
 Closed loop wired during the SUNRISE sprint. Disabled-by-default keys live
@@ -87,11 +104,11 @@ in this build.
   blocks GPL/AGPL/SSPL/BUSL and unknown licenses. Detects via GitHub API
   metadata, LICENSE/COPYING file content, or `SPDX-License-Identifier`
   header comments.
-- `code_scanner.py` — `DangerousCodeScanner` (the Sprint 11/14 component
-  the spec assumed but that didn't exist). AST-based scanner: flags
-  `exec/eval/compile/__import__`, `os.system/popen/exec*`, `pty.spawn` at
-  any scope; `subprocess/socket/httpx/requests/urllib` at module scope.
-  Returns `ScanResult(verdict: clean|suspicious|dangerous)`.
+- `code_scanner.py` — backward-compat shim re-exporting
+  `DangerousCodeScanner` from `prometheus.security.code_scanner`
+  (promoted on 2026-04-25). New code should import from
+  `prometheus.security.code_scanner` directly. See the **Security**
+  section above for the scanner's behavior.
 - `github_search.py` — `GitHubClient` (`search/repositories`, `repos`,
   `readme`, `contents`) + `GitHubSearchTool` (BaseTool wrapper). Token
   bucket: 10/min unauthenticated, 30/min authenticated. Token from

@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from prometheus.config.paths import get_config_dir
-from prometheus.symbiote.code_scanner import (
+from prometheus.security.code_scanner import (
     DangerousCodeScanner,
     ScanResult,
     ScanVerdict,
