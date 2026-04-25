@@ -41,6 +41,24 @@ Shared security utilities live in `src/prometheus/security/`.
   reuse it. The old import path
   `prometheus.symbiote.code_scanner` still works via a re-export shim.
 
+## Security Conventions
+
+### Path Traversal Defense
+Always resolve paths before prefix-checking. Never check prefix on the raw input string.
+
+WRONG:
+
+    if not str(user_path).startswith(str(allowed_root)):  # bypassable with ../
+
+RIGHT:
+
+    resolved = Path(allowed_root / user_path).resolve()
+    if not str(resolved).startswith(str(allowed_root.resolve())):
+        raise SecurityError(f"Path traversal attempt: {user_path}")
+
+First caught in GRAFT-SYMBIOTE Step 5 (`GraftEngine._resolve_target`).
+Test: `tests/test_graft.py::TestAllowedRoots::test_rejects_traversal`.
+
 ## Self-Improving Loop (SUNRISE)
 
 Closed loop wired during the SUNRISE sprint. Disabled-by-default keys live
