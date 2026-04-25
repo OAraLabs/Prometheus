@@ -370,8 +370,9 @@ class TestBuildOpenAIMessages:
 class _FakeSSEResponse:
     """Minimal stand-in for httpx's streaming response context manager."""
 
-    def __init__(self, lines: list[str]) -> None:
+    def __init__(self, lines: list[str], status_code: int = 200) -> None:
         self._lines = lines
+        self.status_code = status_code
 
     async def __aenter__(self) -> "_FakeSSEResponse":
         return self
@@ -600,6 +601,148 @@ class TestAnthropicStreamingToolUse:
         # Malformed partial_json → empty dict, not a raise. The tool call
         # will fail downstream but the parser itself stays robust.
         assert tu.input == {}
+
+
+# -----------------------------------------------------------------------
+# Error-body logging — 400s from Anthropic were previously invisible
+# -----------------------------------------------------------------------
+
+
+class _FakeErrorResponse:
+    """Fake streaming response that simulates an HTTP error with a body.
+
+    Mirrors the minimal shape of httpx.Response that AnthropicProvider
+    touches when status_code >= 400: aread(), text, raise_for_status().
+    """
+
+    def __init__(self, status_code: int, body: str) -> None:
+        self.status_code = status_code
+        self._body = body
+        self.text = body  # Set upfront so aread() is a no-op like after streaming
+
+    async def __aenter__(self) -> "_FakeErrorResponse":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def aread(self) -> bytes:
+        return self._body.encode("utf-8")
+
+    def raise_for_status(self) -> None:
+        import httpx
+        req = MagicMock(spec=httpx.Request)
+        req.method = "POST"
+        req.url = "https://api.anthropic.com/v1/messages"
+        raise httpx.HTTPStatusError(
+            f"Client error '{self.status_code}' for url ...",
+            request=req,
+            response=MagicMock(status_code=self.status_code, text=self._body),
+        )
+
+    async def aiter_lines(self):
+        if False:
+            yield ""  # unreachable — kept so this satisfies AsyncIterator shape
+
+
+class _FakeErrorClient:
+    """httpx.AsyncClient stand-in that yields a _FakeErrorResponse."""
+
+    def __init__(self, status_code: int, body: str) -> None:
+        self._status_code = status_code
+        self._body = body
+
+    async def __aenter__(self) -> "_FakeErrorClient":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    def stream(self, method: str, url: str, **kwargs: object) -> _FakeErrorResponse:
+        return _FakeErrorResponse(self._status_code, self._body)
+
+
+class TestAnthropicErrorBodyLogging:
+    """Anthropic 400s used to propagate as bare httpx.HTTPStatusError with
+    no body logged — the actual API error envelope (which specifies *why*
+    the payload was rejected) was invisible. Other providers (stub,
+    llama_cpp, ollama) log `response.text[:500]` before raising; this
+    test pins that behavior for AnthropicProvider too.
+    """
+
+    @pytest.mark.asyncio
+    async def test_400_response_body_is_logged_before_raise(self, caplog):
+        import httpx
+        import logging
+        from prometheus.providers.anthropic import AnthropicProvider
+
+        body = (
+            '{"type":"error","error":{"type":"invalid_request_error",'
+            '"message":"messages.3.content: Input should be a non-empty array"}}'
+        )
+        fake_client = _FakeErrorClient(status_code=400, body=body)
+        provider = AnthropicProvider(api_key="sk-ant-test")
+        request = ApiMessageRequest(
+            model="claude-haiku-4-5-20251001",
+            messages=[ConversationMessage.from_user_text("hi")],
+        )
+
+        with caplog.at_level(logging.ERROR, logger="prometheus.providers.anthropic"):
+            with patch(
+                "prometheus.providers.anthropic.httpx.AsyncClient",
+                lambda **kw: fake_client,
+            ):
+                with pytest.raises(httpx.HTTPStatusError) as exc_info:
+                    async for _ in provider.stream_message(request):
+                        pass
+
+        # The original exception still propagates (400 is not in the
+        # retryable set).
+        assert exc_info.value.response.status_code == 400
+
+        # And the body is now visible in the log.
+        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert error_records, "expected at least one ERROR log line"
+        combined = "\n".join(r.getMessage() for r in error_records)
+        assert "400" in combined
+        assert "invalid_request_error" in combined
+        assert "non-empty array" in combined
+
+    @pytest.mark.asyncio
+    async def test_429_response_body_is_also_logged(self, caplog):
+        """Retryable statuses (429) also need the body visible so we can
+        distinguish rate limits from quota exhaustion from regional
+        outages. The log must fire on the FIRST failed attempt, not just
+        the final re-raise."""
+        import httpx
+        import logging
+        from prometheus.providers.anthropic import AnthropicProvider
+
+        body = '{"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}'
+        fake_client = _FakeErrorClient(status_code=429, body=body)
+        provider = AnthropicProvider(api_key="sk-ant-test")
+        request = ApiMessageRequest(
+            model="claude-haiku-4-5-20251001",
+            messages=[ConversationMessage.from_user_text("hi")],
+        )
+
+        # Short-circuit the retry backoff so the test doesn't sleep.
+        async def _no_sleep(*_a, **_kw):
+            return None
+
+        with caplog.at_level(logging.ERROR, logger="prometheus.providers.anthropic"):
+            with patch(
+                "prometheus.providers.anthropic.httpx.AsyncClient",
+                lambda **kw: fake_client,
+            ), patch("asyncio.sleep", _no_sleep):
+                with pytest.raises(httpx.HTTPStatusError):
+                    async for _ in provider.stream_message(request):
+                        pass
+
+        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert error_records, "expected at least one ERROR log line for 429"
+        combined = "\n".join(r.getMessage() for r in error_records)
+        assert "rate_limit_error" in combined
 
 
 # -----------------------------------------------------------------------

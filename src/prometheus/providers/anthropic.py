@@ -171,7 +171,11 @@ class AnthropicProvider(ModelProvider):
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    await response.aread()
+                    log.error("HTTP %d from %s: %s",
+                              response.status_code, url, response.text[:500])
+                    response.raise_for_status()
 
                 async for line in response.aiter_lines():
                     if not line.startswith("data: "):
