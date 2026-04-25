@@ -134,6 +134,45 @@ class LCMEngine:
         self._last_compaction_at: float | None = None
 
     # ------------------------------------------------------------------
+    # Public store accessors
+    # ------------------------------------------------------------------
+    #
+    # The LCM tools (lcm_grep, lcm_expand, lcm_expand_query, lcm_describe)
+    # live in a different module and need to reach the stores to run FTS5
+    # queries and fetch summary nodes. These properties are the documented
+    # public contract — read-only views of the internal stores.
+    #
+    # Historical note: the tools were written against `engine.summary_store`
+    # / `engine.conversation_store` long before these properties existed,
+    # but the implementation only ever had `_sum_store` / `_conv_store` as
+    # private attributes (note: `_sum_store`, not `_summary_store` — the
+    # abbreviation is the private name). Four separate tools raised
+    # AttributeError against a bare LCMEngine, but `lcm_grep`'s try/except
+    # hid the failure as a silent "zero results" error string, masking the
+    # bug in production until Claude Haiku picked `lcm_expand_query`
+    # (unguarded) in the Phase 4 pilot.
+
+    @property
+    def summary_store(self) -> LCMSummaryStore:
+        """Public accessor for the summary store.
+
+        Used by LCM tools (lcm_grep, lcm_expand, lcm_expand_query,
+        lcm_describe). Do not access _sum_store directly from outside
+        this module.
+        """
+        return self._sum_store
+
+    @property
+    def conversation_store(self) -> LCMConversationStore:
+        """Public accessor for the conversation store.
+
+        Used by LCM tools (lcm_grep, lcm_expand, lcm_expand_query,
+        lcm_describe). Do not access _conv_store directly from outside
+        this module.
+        """
+        return self._conv_store
+
+    # ------------------------------------------------------------------
     # Ingest
     # ------------------------------------------------------------------
 

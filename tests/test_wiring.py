@@ -5695,3 +5695,167 @@ class TestGoldenTraceCapture:
         p = MagicMock()
         p.provider_name = "gemini"
         assert _provider_name_for_telemetry(p) == "gemini"
+
+
+# ---------------------------------------------------------------------------
+# LCM tools run against a real LCMEngine — regression guard for the
+# "engine.summary_store AttributeError" bug exposed by the Phase 4 Haiku
+# pilot.
+# ---------------------------------------------------------------------------
+#
+# The four LCM tools (lcm_grep, lcm_expand, lcm_expand_query, lcm_describe)
+# all reach into engine.summary_store / engine.conversation_store. Those
+# public accessors existed in tool code long before they existed on the
+# engine, and every pre-fix execution against a bare LCMEngine raised
+# AttributeError. lcm_grep's try/except swallowed it as a silent error
+# string; the other three propagated to the agent loop and showed up as
+# user-visible "Error: ..." messages only when a model (Haiku) actually
+# picked those tools.
+#
+# Pre-fix telemetry: all earlier lcm_* unit tests mocked the engine, so
+# the contract mismatch was invisible. These tests build a *real* engine
+# and drive each tool through its actual execute() method. The assertion
+# is minimal: no AttributeError. Each tool may still return is_error=True
+# for legitimate reasons (empty db, node-not-found, search-kwarg gaps not
+# in scope for this fix); those aren't what we're guarding against.
+
+
+class TestLCMToolsAgainstRealEngine:
+    """Exercise each LCM tool end-to-end against a real LCMEngine.
+
+    Would have caught the Phase 4 follow-up 'engine.summary_store' bug on
+    day one.
+    """
+
+    @staticmethod
+    def _build_engine(tmp_path: Path):
+        from prometheus.memory.lcm_engine import LCMEngine
+        return LCMEngine(
+            provider=MagicMock(),  # read-only tool paths don't invoke the provider
+            db_path=tmp_path / "lcm.db",
+        )
+
+    @staticmethod
+    def _with_engine(engine):
+        """Context manager: set the global _engine used by all four tools,
+        restore on exit. All four tools share the same wiring from
+        ``prometheus.tools.builtin.lcm_grep``."""
+        import prometheus.tools.builtin.lcm_grep as _mod
+        prior = _mod._engine
+
+        class _Ctx:
+            def __enter__(self):
+                _mod._engine = engine
+                return engine
+            def __exit__(self, *exc):
+                _mod._engine = prior
+                return False
+        return _Ctx()
+
+    @pytest.mark.integration
+    def test_lcm_grep_does_not_raise_attribute_error(self, tmp_path):
+        from prometheus.tools.builtin.lcm_grep import (
+            LCMGrepTool, LCMGrepInput,
+        )
+        from prometheus.tools.base import ToolExecutionContext
+
+        engine = self._build_engine(tmp_path)
+        try:
+            with self._with_engine(engine):
+                tool = LCMGrepTool()
+                # AttributeError would raise out of execute() and crash the
+                # test — the assertion is implicit (successful return).
+                asyncio.run(tool.execute(
+                    LCMGrepInput(query="anything"),
+                    ToolExecutionContext(cwd=Path.cwd()),
+                ))
+        finally:
+            engine.close()
+
+    @pytest.mark.integration
+    def test_lcm_expand_query_does_not_raise_attribute_error(self, tmp_path):
+        from prometheus.tools.builtin.lcm_expand_query import (
+            LCMExpandQueryTool, LCMExpandQueryInput,
+        )
+        from prometheus.tools.base import ToolExecutionContext
+
+        engine = self._build_engine(tmp_path)
+        try:
+            with self._with_engine(engine):
+                tool = LCMExpandQueryTool()
+                asyncio.run(tool.execute(
+                    LCMExpandQueryInput(query="anything"),
+                    ToolExecutionContext(cwd=Path.cwd()),
+                ))
+        finally:
+            engine.close()
+
+    @pytest.mark.integration
+    def test_lcm_expand_does_not_raise_attribute_error(self, tmp_path):
+        from prometheus.tools.builtin.lcm_expand import (
+            LCMExpandTool, LCMExpandInput,
+        )
+        from prometheus.tools.base import ToolExecutionContext
+
+        engine = self._build_engine(tmp_path)
+        try:
+            with self._with_engine(engine):
+                tool = LCMExpandTool()
+                # Nonexistent summary_id is fine — the tool should return a
+                # "node not found" ToolResult, not raise AttributeError.
+                asyncio.run(tool.execute(
+                    LCMExpandInput(summary_id="nonexistent-node-id"),
+                    ToolExecutionContext(cwd=Path.cwd()),
+                ))
+        finally:
+            engine.close()
+
+    @pytest.mark.integration
+    def test_lcm_describe_does_not_raise_attribute_error(self, tmp_path):
+        from prometheus.tools.builtin.lcm_describe import (
+            LCMDescribeTool, LCMDescribeInput,
+        )
+        from prometheus.tools.base import ToolExecutionContext
+
+        engine = self._build_engine(tmp_path)
+        try:
+            with self._with_engine(engine):
+                tool = LCMDescribeTool()
+                # No summary_id → stats path, which touches both stores.
+                asyncio.run(tool.execute(
+                    LCMDescribeInput(),
+                    ToolExecutionContext(cwd=Path.cwd()),
+                ))
+        finally:
+            engine.close()
+
+    @pytest.mark.integration
+    def test_lcm_grep_logs_warning_on_attribute_error(self, tmp_path, caplog):
+        """Defense-in-depth: if LCMEngine ever loses the public property
+        again, lcm_grep's catch-all must log.warning rather than silently
+        return zero results. Guards against the exact regression vector
+        that made the original bug invisible."""
+        import logging
+        from prometheus.tools.builtin.lcm_grep import (
+            LCMGrepTool, LCMGrepInput,
+        )
+        from prometheus.tools.base import ToolExecutionContext
+
+        # Simulate a broken engine: stores missing entirely.
+        class _BrokenEngine:
+            pass
+
+        with self._with_engine(_BrokenEngine()), caplog.at_level(
+            logging.WARNING, logger="prometheus.tools.builtin.lcm_grep"
+        ):
+            tool = LCMGrepTool()
+            asyncio.run(tool.execute(
+                LCMGrepInput(query="anything"),
+                ToolExecutionContext(cwd=Path.cwd()),
+            ))
+
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any(
+            "AttributeError" in r.getMessage() or "contract drift" in r.getMessage()
+            for r in warnings
+        ), f"expected a warning about AttributeError, got: {[r.getMessage() for r in warnings]}"

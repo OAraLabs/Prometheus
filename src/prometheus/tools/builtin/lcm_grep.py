@@ -7,11 +7,14 @@ by keyword.
 
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Engine wiring — call set_lcm_engine() at startup to connect stores
@@ -96,6 +99,18 @@ class LCMGrepTool(BaseTool):
                     if len(msg.content) > 300:
                         snippet += "..."
                     results.append(f"{header}\n  {snippet}")
+            except AttributeError as exc:
+                # Defense in depth: LCMEngine exposes conversation_store as a
+                # public property now, but this branch historically masked
+                # the missing-attribute bug as a silent error string. If it
+                # ever regresses, surface a warning in the daemon log
+                # instead of letting it rot.
+                log.warning(
+                    "lcm_grep message-search: AttributeError on LCM engine — "
+                    "likely contract drift with LCMEngine.conversation_store. "
+                    "Error: %s", exc,
+                )
+                results.append(f"[message search error] {exc}")
             except Exception as exc:
                 results.append(f"[message search error] {exc}")
 
@@ -122,6 +137,14 @@ class LCMGrepTool(BaseTool):
                         results.append(f"{header}\n  {snippet}")
                 else:
                     results.append("[summary search] summary store does not support FTS yet")
+            except AttributeError as exc:
+                # Same defense-in-depth as the message-search branch above.
+                log.warning(
+                    "lcm_grep summary-search: AttributeError on LCM engine — "
+                    "likely contract drift with LCMEngine.summary_store. "
+                    "Error: %s", exc,
+                )
+                results.append(f"[summary search error] {exc}")
             except Exception as exc:
                 results.append(f"[summary search error] {exc}")
 
