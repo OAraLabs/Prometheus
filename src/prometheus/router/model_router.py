@@ -679,10 +679,20 @@ class ModelRouter:
 def _build_adapter_for(provider_name: str) -> Any:
     """Build the right ModelAdapter for a given provider name.
 
-    When switching from Gemma to Claude mid-session:
-    - Formatter: GemmaFormatter → PassthroughFormatter
-    - Strictness: MEDIUM → NONE
-    All automatic based on provider name.
+    Cloud providers (anthropic, openai, gemini, xai) all have native tool
+    calling at the API layer — Anthropic returns structured ``tool_use``
+    blocks, OpenAI-compat returns ``function_call`` objects. The adapter's
+    validator, GBNF grammar, and text-based tool-call extraction are all
+    unnecessary (and potentially harmful — tier="full" fires
+    ``extract_tool_calls`` on response text, which could false-match). Pass
+    ``tier="off"`` explicitly so ``ModelAdapter.__init__`` pins
+    strictness=NONE, max_retries=0, and short-circuits the full pipeline.
+    See ``ModelAdapter`` class docstring: '"off" — API enforces structure
+    (Anthropic, OpenAI). Skip everything.'
+
+    Local providers (llama_cpp, ollama) stay on the full adapter pipeline
+    with QwenFormatter — those models need prompt-injected tool scaffolding
+    and text-based extraction because the server can't guarantee structure.
     """
     from prometheus.adapter import ModelAdapter
     from prometheus.adapter.formatter import (
@@ -692,9 +702,15 @@ def _build_adapter_for(provider_name: str) -> Any:
     )
 
     if provider_name == "anthropic":
-        return ModelAdapter(formatter=AnthropicFormatter(), strictness="NONE")
+        return ModelAdapter(
+            formatter=AnthropicFormatter(),
+            tier=ModelAdapter.TIER_OFF,
+        )
     if provider_name in ("openai", "gemini", "xai"):
-        return ModelAdapter(formatter=PassthroughFormatter(), strictness="NONE")
+        return ModelAdapter(
+            formatter=PassthroughFormatter(),
+            tier=ModelAdapter.TIER_OFF,
+        )
     # Local providers default to QwenFormatter (daemon overrides for gemma)
     return ModelAdapter(formatter=QwenFormatter(), strictness="MEDIUM")
 

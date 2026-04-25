@@ -230,12 +230,32 @@ class AnthropicProvider(ModelProvider):
                 if text:
                     msg_content.append(TextBlock(text=text))
             elif btype == "tool_use":
-                raw_input = block.get("input") or {}
-                if not isinstance(raw_input, dict):
-                    partial = block.get("partial_json", "{}")
+                # Anthropic's streaming protocol sends an empty `input: {}` on
+                # `content_block_start` as a placeholder; the real arguments
+                # arrive as `input_json_delta` events whose `partial_json`
+                # fragments we've accumulated in `block["partial_json"]`.
+                #
+                # The pre-fix code read `block.get("input") or {}` first and
+                # only fell back to `partial_json` when `input` was NOT a dict
+                # — but `{}` IS a dict, so the fallback never fired and every
+                # streamed tool_use ended up with empty input. That's what
+                # produced the Phase 4 /claude "malformed_json / Intended
+                # action: {}" symptom.
+                #
+                # Prefer `partial_json` when present (streamed case), fall
+                # back to `block["input"]` only when it isn't (non-streaming /
+                # already-populated block).
+                partial = block.get("partial_json", "")
+                if partial:
                     try:
-                        raw_input = json.loads(partial) if partial else {}
+                        raw_input = json.loads(partial)
                     except json.JSONDecodeError:
+                        raw_input = {}
+                    if not isinstance(raw_input, dict):
+                        raw_input = {}
+                else:
+                    raw_input = block.get("input") or {}
+                    if not isinstance(raw_input, dict):
                         raw_input = {}
                 msg_content.append(
                     ToolUseBlock(

@@ -94,6 +94,18 @@ def _categorize_failure(raw: str) -> str:
       - malformed_json: JSON-like brackets but doesn't parse
       - wrong_schema: parses as JSON but isn't a tool-call shape
       - other: catch-all
+
+    TODO(phase-4-followup): ``malformed_json`` conflates two distinct root
+    causes that look identical from this function's perspective:
+      (a) the MODEL emitted syntactically broken JSON
+      (b) something UPSTREAM (e.g. a provider's streaming tool_use parser)
+          dropped the model's real input and left a bare ``{}`` to be
+          categorized — the model's output was fine, our code ate it.
+    Case (b) is what the Haiku ``/claude`` bug looked like: the label sent
+    users debugging Haiku when the bug was in AnthropicProvider's SSE
+    finalize step. Worth a separate sprint to plumb a richer signal up from
+    the provider layer so this function can return "parser_dropped_input"
+    vs "model_bad_json" instead of the ambiguous shared label.
     """
     import json as _json
     import re as _re

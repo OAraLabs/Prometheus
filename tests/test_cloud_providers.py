@@ -347,3 +347,312 @@ class TestBuildOpenAIMessages:
         assert msgs[0]["role"] == "assistant"
         assert len(msgs[0]["tool_calls"]) == 1
         assert msgs[0]["tool_calls"][0]["function"]["name"] == "bash"
+
+
+# -----------------------------------------------------------------------
+# AnthropicProvider streaming tool_use parse (Phase 4 follow-up fix)
+# -----------------------------------------------------------------------
+#
+# Regression guard: AnthropicProvider.stream_message used to read
+# `block["input"]` first and only fall back to `partial_json` when input
+# wasn't a dict. But Anthropic's SSE streaming ALWAYS sends `input: {}` on
+# content_block_start as an empty placeholder — the real arguments stream
+# in as `input_json_delta` events accumulated into `partial_json`. Since
+# `{}` is a dict, the fallback never fired and every streamed tool_use
+# came back with empty input, which made /claude look like it dropped
+# user queries on tool calls.
+#
+# Fix: prefer `partial_json` when present; fall back to `block["input"]`
+# only for the non-streaming case (block comes in fully populated).
+# These tests lock both paths in place.
+
+
+class _FakeSSEResponse:
+    """Minimal stand-in for httpx's streaming response context manager."""
+
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = lines
+
+    async def __aenter__(self) -> "_FakeSSEResponse":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    def raise_for_status(self) -> None:
+        return None
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+
+class _FakeHttpxClient:
+    """Minimal stand-in for httpx.AsyncClient used in AnthropicProvider."""
+
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = lines
+
+    async def __aenter__(self) -> "_FakeHttpxClient":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    def stream(self, method: str, url: str, **kwargs: object) -> _FakeSSEResponse:
+        return _FakeSSEResponse(self._lines)
+
+
+def _sse(payload: dict) -> str:
+    """Format a dict as one ``data: {...}`` SSE line."""
+    return f"data: {json.dumps(payload)}"
+
+
+async def _collect_stream(provider, request):
+    """Helper: drain stream_message and return (text_events, final_event)."""
+    from prometheus.providers.base import (
+        ApiMessageCompleteEvent,
+        ApiTextDeltaEvent,
+    )
+    text_events: list[ApiTextDeltaEvent] = []
+    final: ApiMessageCompleteEvent | None = None
+    async for event in provider.stream_message(request):
+        if isinstance(event, ApiTextDeltaEvent):
+            text_events.append(event)
+        elif isinstance(event, ApiMessageCompleteEvent):
+            final = event
+    return text_events, final
+
+
+class TestAnthropicStreamingToolUse:
+    """Phase 4 follow-up: streaming tool_use input must come from partial_json."""
+
+    @pytest.mark.asyncio
+    async def test_anthropic_streaming_tool_use_input(self):
+        """SSE tool_use: input arrives across multiple input_json_delta
+        fragments; final ToolUseBlock.input must be the reconstructed dict,
+        NOT the empty `{}` placeholder from content_block_start.
+        """
+        from prometheus.providers.anthropic import AnthropicProvider
+        from prometheus.engine.messages import ToolUseBlock
+
+        fake_lines = [
+            _sse({"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+            "",
+            _sse({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_01",
+                    "name": "lcm_grep",
+                    # The placeholder that used to defeat the fallback path.
+                    "input": {},
+                },
+            }),
+            "",
+            _sse({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": '{"query":'},
+            }),
+            "",
+            _sse({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": ' "NPPES"}'},
+            }),
+            "",
+            _sse({"type": "content_block_stop", "index": 0}),
+            "",
+            _sse({
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"output_tokens": 20},
+            }),
+            "",
+            _sse({"type": "message_stop"}),
+            "",
+        ]
+
+        provider = AnthropicProvider(api_key="sk-ant-test", model="claude-haiku-4-5-20251001")
+        request = ApiMessageRequest(
+            model="claude-haiku-4-5-20251001",
+            messages=[ConversationMessage.from_user_text("search memory")],
+        )
+
+        fake_client = _FakeHttpxClient(fake_lines)
+        with patch(
+            "prometheus.providers.anthropic.httpx.AsyncClient",
+            lambda **kw: fake_client,
+        ):
+            _, final = await _collect_stream(provider, request)
+
+        assert final is not None, "stream_message must emit an ApiMessageCompleteEvent"
+        tool_uses = final.message.tool_uses
+        assert len(tool_uses) == 1
+        tu = tool_uses[0]
+        assert isinstance(tu, ToolUseBlock)
+        assert tu.name == "lcm_grep"
+        assert tu.id == "toolu_01"
+        # The whole point of the fix: input is reconstructed from partial_json,
+        # not left as the `{}` placeholder from content_block_start.
+        assert tu.input == {"query": "NPPES"}
+
+    @pytest.mark.asyncio
+    async def test_anthropic_nonstreaming_tool_use_input_backward_compat(self):
+        """When ``partial_json`` is absent and ``input`` is populated on the
+        block directly (non-streaming-style response), the finalize step
+        still picks up the dict from block['input']."""
+        from prometheus.providers.anthropic import AnthropicProvider
+        from prometheus.engine.messages import ToolUseBlock
+
+        fake_lines = [
+            _sse({"type": "message_start", "message": {"usage": {"input_tokens": 5}}}),
+            "",
+            _sse({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_02",
+                    "name": "bash",
+                    "input": {"command": "ls -la"},
+                },
+            }),
+            "",
+            # No input_json_delta events — block's input is already complete.
+            _sse({"type": "content_block_stop", "index": 0}),
+            "",
+            _sse({
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"output_tokens": 10},
+            }),
+            "",
+            _sse({"type": "message_stop"}),
+            "",
+        ]
+
+        provider = AnthropicProvider(api_key="sk-ant-test")
+        request = ApiMessageRequest(
+            model="claude-haiku-4-5-20251001",
+            messages=[ConversationMessage.from_user_text("run ls")],
+        )
+
+        fake_client = _FakeHttpxClient(fake_lines)
+        with patch(
+            "prometheus.providers.anthropic.httpx.AsyncClient",
+            lambda **kw: fake_client,
+        ):
+            _, final = await _collect_stream(provider, request)
+
+        assert final is not None
+        tool_uses = final.message.tool_uses
+        assert len(tool_uses) == 1
+        tu = tool_uses[0]
+        assert isinstance(tu, ToolUseBlock)
+        assert tu.name == "bash"
+        assert tu.input == {"command": "ls -la"}
+
+    @pytest.mark.asyncio
+    async def test_anthropic_streaming_tool_use_with_invalid_partial_json(self):
+        """Defensive: if partial_json is present but doesn't parse, fall
+        back to empty dict rather than raising."""
+        from prometheus.providers.anthropic import AnthropicProvider
+
+        fake_lines = [
+            _sse({"type": "message_start", "message": {"usage": {"input_tokens": 5}}}),
+            "",
+            _sse({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use", "id": "toolu_03", "name": "x", "input": {},
+                },
+            }),
+            "",
+            _sse({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": '{"broken'},
+            }),
+            "",
+            _sse({"type": "content_block_stop", "index": 0}),
+            "",
+            _sse({"type": "message_stop"}),
+            "",
+        ]
+        provider = AnthropicProvider(api_key="sk-ant-test")
+        request = ApiMessageRequest(
+            model="claude-haiku-4-5-20251001",
+            messages=[ConversationMessage.from_user_text("x")],
+        )
+        fake_client = _FakeHttpxClient(fake_lines)
+        with patch(
+            "prometheus.providers.anthropic.httpx.AsyncClient",
+            lambda **kw: fake_client,
+        ):
+            _, final = await _collect_stream(provider, request)
+
+        assert final is not None
+        tu = final.message.tool_uses[0]
+        # Malformed partial_json → empty dict, not a raise. The tool call
+        # will fail downstream but the parser itself stays robust.
+        assert tu.input == {}
+
+
+# -----------------------------------------------------------------------
+# _build_adapter_for tier contract (Phase 4 follow-up secondary fix)
+# -----------------------------------------------------------------------
+
+
+class TestBuildAdapterForCloudProviderTier:
+    """Cloud providers (anthropic, openai, gemini, xai) must build adapters
+    at tier=off. API-native tool calling means validator/GBNF/enforcer
+    are unnecessary, and tier=off is the documented contract (see
+    ModelAdapter class docstring). Local providers stay on the full
+    pipeline.
+    """
+
+    def test_anthropic_adapter_tier_is_off(self):
+        from prometheus.router.model_router import _build_adapter_for
+        from prometheus.adapter import ModelAdapter
+        adapter = _build_adapter_for("anthropic")
+        assert adapter.tier == ModelAdapter.TIER_OFF
+
+    def test_openai_adapter_tier_is_off(self):
+        from prometheus.router.model_router import _build_adapter_for
+        from prometheus.adapter import ModelAdapter
+        adapter = _build_adapter_for("openai")
+        assert adapter.tier == ModelAdapter.TIER_OFF
+
+    def test_gemini_adapter_tier_is_off(self):
+        from prometheus.router.model_router import _build_adapter_for
+        from prometheus.adapter import ModelAdapter
+        adapter = _build_adapter_for("gemini")
+        assert adapter.tier == ModelAdapter.TIER_OFF
+
+    def test_xai_adapter_tier_is_off(self):
+        from prometheus.router.model_router import _build_adapter_for
+        from prometheus.adapter import ModelAdapter
+        adapter = _build_adapter_for("xai")
+        assert adapter.tier == ModelAdapter.TIER_OFF
+
+    def test_tier_off_implies_no_grammar_no_retries(self):
+        """tier=off should pin strictness=NONE and max_retries=0 per
+        ModelAdapter.__init__ contract."""
+        from prometheus.router.model_router import _build_adapter_for
+        from prometheus.adapter.validator import Strictness
+        adapter = _build_adapter_for("anthropic")
+        assert adapter.validator.strictness == Strictness.NONE
+        assert adapter.retry.max_retries == 0
+
+    def test_local_provider_stays_on_full_pipeline(self):
+        """Local providers (llama_cpp, ollama) keep the full adapter
+        pipeline — their servers don't guarantee tool-call structure."""
+        from prometheus.router.model_router import _build_adapter_for
+        from prometheus.adapter import ModelAdapter
+        adapter = _build_adapter_for("llama_cpp")
+        # tier is not "off" — local models need the validator/enforcer/retry.
+        assert adapter.tier != ModelAdapter.TIER_OFF
