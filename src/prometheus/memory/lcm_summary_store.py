@@ -228,8 +228,20 @@ class LCMSummaryStore:
     # FTS5 search
     # ------------------------------------------------------------------
 
-    def search(self, query: str, *, limit: int = 20) -> list[SummaryNode]:
+    def search(
+        self,
+        query: str,
+        *,
+        session_id: str | None = None,
+        limit: int = 20,
+    ) -> list[SummaryNode]:
         """Full-text search across summary text.
+
+        If *session_id* is given, only summaries whose ``source_message_ids``
+        include at least one message belonging to that session are returned.
+        (The summary table itself has no session column; the filter joins
+        against ``lcm_messages`` via the JSON-encoded id list — same pattern
+        as :meth:`get_children` uses for parent ids.)
 
         An empty or all-punctuation query returns an empty list.
         """
@@ -237,13 +249,24 @@ class LCMSummaryStore:
         if not safe_query:
             return []
 
-        rows = self._conn.execute(
-            "SELECT s.* FROM lcm_summaries s"
-            " JOIN lcm_summaries_fts fts ON s.rowid = fts.rowid"
-            " WHERE lcm_summaries_fts MATCH ?"
-            " ORDER BY fts.rank LIMIT ?",
-            (safe_query, limit),
-        ).fetchall()
+        if session_id is None:
+            rows = self._conn.execute(
+                "SELECT s.* FROM lcm_summaries s"
+                " JOIN lcm_summaries_fts fts ON s.rowid = fts.rowid"
+                " WHERE lcm_summaries_fts MATCH ?"
+                " ORDER BY fts.rank LIMIT ?",
+                (safe_query, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT DISTINCT s.*, fts.rank AS _rank FROM lcm_summaries s"
+                " JOIN lcm_summaries_fts fts ON s.rowid = fts.rowid"
+                " JOIN lcm_messages m"
+                "   ON s.source_message_ids LIKE '%\"' || m.id || '\"%'"
+                " WHERE lcm_summaries_fts MATCH ? AND m.session_id = ?"
+                " ORDER BY _rank LIMIT ?",
+                (safe_query, session_id, limit),
+            ).fetchall()
         return [self._row_to_node(r) for r in rows]
 
     # ------------------------------------------------------------------

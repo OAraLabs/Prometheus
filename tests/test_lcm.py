@@ -272,6 +272,99 @@ class TestSummaryStore:
         results = store.search("nonexistenttermxyz")
         assert len(results) == 0
 
+    def test_summary_store_search_accepts_session_id_kwarg(
+        self, store: LCMSummaryStore
+    ) -> None:
+        """Regression: `lcm_expand_query` and `lcm_grep` call search() with
+        session_id=. Before this fix, that raised TypeError: "search() got
+        an unexpected keyword argument 'session_id'". The kwarg is now
+        accepted, and when None it behaves exactly like the unfiltered
+        form."""
+        store.insert_summary(SummaryNode(summary_text="deployment pipeline"))
+        # No session_id given → legacy behavior preserved.
+        results = store.search("deployment", session_id=None)
+        assert len(results) >= 1
+        assert any("deployment" in r.summary_text for r in results)
+
+    def test_summary_store_search_filters_by_session_id(
+        self, tmp_path: Path
+    ) -> None:
+        """With session_id set, only summaries whose source_message_ids
+        include at least one message in that session are returned. Uses a
+        real conversation store on the same db so the JOIN works."""
+        db = tmp_path / "test_session_filter.db"
+        conv = LCMConversationStore(db_path=db)
+        sums = LCMSummaryStore(db_path=db)
+        try:
+            # Session s1: two messages about deployment.
+            m1 = MessagePart(
+                role="user",
+                content="deploy to prod",
+                timestamp=time.time(),
+                message_id=uuid4().hex,
+                session_id="s1",
+                turn_index=1,
+            )
+            m2 = MessagePart(
+                role="assistant",
+                content="rolling out deployment",
+                timestamp=time.time(),
+                message_id=uuid4().hex,
+                session_id="s1",
+                turn_index=2,
+            )
+            # Session s2: one message, also about deployment.
+            m3 = MessagePart(
+                role="user",
+                content="deploy staging env",
+                timestamp=time.time(),
+                message_id=uuid4().hex,
+                session_id="s2",
+                turn_index=1,
+            )
+            for m in (m1, m2, m3):
+                conv.insert_message(m)
+
+            # Two summary nodes: one references s1 messages, the other
+            # references s2 message. Both match "deployment" via FTS.
+            s1_summary = SummaryNode(
+                summary_text="deployment to prod — discussion",
+                source_message_ids=[m1.message_id, m2.message_id],
+                depth=0,
+            )
+            s2_summary = SummaryNode(
+                summary_text="deployment to staging — notes",
+                source_message_ids=[m3.message_id],
+                depth=0,
+            )
+            sums.insert_summary(s1_summary)
+            sums.insert_summary(s2_summary)
+
+            # Unfiltered: both returned.
+            all_matches = sums.search("deployment")
+            all_ids = {n.id for n in all_matches}
+            assert s1_summary.id in all_ids
+            assert s2_summary.id in all_ids
+
+            # Session s1: only the s1-linked summary.
+            s1_matches = sums.search("deployment", session_id="s1")
+            s1_ids = {n.id for n in s1_matches}
+            assert s1_summary.id in s1_ids
+            assert s2_summary.id not in s1_ids
+
+            # Session s2: only the s2-linked summary.
+            s2_matches = sums.search("deployment", session_id="s2")
+            s2_ids = {n.id for n in s2_matches}
+            assert s2_summary.id in s2_ids
+            assert s1_summary.id not in s2_ids
+
+            # Unknown session → empty.
+            unknown = sums.search("deployment", session_id="does-not-exist")
+            assert unknown == []
+        finally:
+            sums.close()
+            conv.close()
+
 
 # ---------------------------------------------------------------------------
 # LCMAssembler (fresh-only and with-summaries)
