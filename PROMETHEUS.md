@@ -273,3 +273,78 @@ After `SymbioteCoordinator` is instantiated:
   blocked-when-tests-fail
 - `tests/test_morph.py::TestSwap` (4)
 - `tests/test_morph.py::TestPathTraversalGuard` (3)
+
+## WEAVE — Core Web Tools + Capability Audit
+
+Closed loop wired during the WEAVE sprint (commit on 2026-04-26).
+Additive on top of the pre-existing `web_fetch` and `web_search` tools.
+
+### New tools (`src/prometheus/tools/builtin/`)
+- **`youtube_transcript`** (`youtube_transcript.py`) — wraps `yt-dlp`
+  to fetch subtitle tracks without downloading video. Accepts full
+  YouTube URLs, `youtu.be` short URLs, embed/shorts URLs, and bare
+  11-character video IDs. Stdlib-only VTT and SRV3 parsers (no
+  beautifulsoup). Read-only unless `save_to` is set; all errors
+  return `ToolResult(is_error=True)` — never raises.
+- **`download_file`** (`download_file.py`) — streams a URL to disk
+  with `httpx.AsyncClient.stream`. Default destination
+  `~/.prometheus/downloads/`. SSRF protection mirrors `web_fetch`.
+  Path-traversal guard rejects `/etc`, `/sys`, `/boot`, `/proc`,
+  `/dev`, `~/.ssh` by resolving the path before checking the prefix
+  (matches the GraftEngine pattern). Size cap 100MB by default —
+  trips on either the server's `Content-Length` header or
+  bytes-written during streaming.
+
+### Wiring
+- Both tools are exported from `prometheus.tools.builtin` and
+  registered in `__main__.create_tool_registry()` in the
+  "Web + messaging" group, alongside `WebSearchTool` and
+  `WebFetchTool`. The pre-existing tools were not modified.
+- `config/prometheus.yaml.default` adds a `web_tools:` section with
+  `fetch_timeout_seconds`, `fetch_max_chars`, `search_max_results`,
+  `download_dir`, `download_max_mb`, and
+  `youtube_transcript_language`. The corresponding `web_tools`
+  block in `config/prometheus.yaml` is gitignored per project policy.
+
+### `scripts/web_capability_audit.py`
+Subclasses `SmokeTestRunner` from `scripts/smoke_test_tool_calling.py`
+into `WebAuditRunner`. Adds:
+- `expect_in_output_any` (any-of-list matching) and
+  `expect_no_circuit_breaker` assertions.
+- Failure classification: `circuit_breaker`, `wrong_tool`,
+  `execution_failure`, `wrong_answer`, `timeout`.
+- Hard time-budget gating; tasks past the cap are skipped.
+- ~36 audit tasks across 7 categories (search, fetch, youtube,
+  download, research, graceful, railway).
+- JSON + Markdown reports written to `~/.prometheus/audits/`.
+
+### Telegram surface — `/audit`
+Three forms, all additive:
+| Form | Behaviour |
+|---|---|
+| `/audit` | Show summary of the most recent audit JSON |
+| `/audit run` | Spawn the full audit as a background subprocess |
+| `/audit <category>` | Single-category run (search, fetch, etc.) |
+
+The implementation lives at the bottom of `gateway/telegram.py`
+(`_cmd_audit`, `_audit_show_last`, `_audit_kick_off`). It does not
+touch any existing `/symbiote`, `/gepa`, `/sentinel`, or core
+commands.
+
+### Pytest marker
+A new `network` marker is registered in `pyproject.toml` so
+network-dependent tests can be skipped with
+`pytest -m 'not network'`. The existing `integration` marker is
+unchanged.
+
+### Tests
+- `tests/test_web_tools.py` (52 unit tests) — URL normalization,
+  VTT/SRV3 parsing, error classification, path-traversal guard,
+  SSRF guard, file-size formatting, network smoke tests behind the
+  `network` marker.
+- `tests/test_web_audit.py` (18 tests) — category aggregation,
+  failure breakdown, circuit-breaker detection, time-budget gating,
+  JSON/Markdown report generation, `/audit` Telegram wiring.
+- `tests/test_wiring.py::TestWeaveWebToolsWiring` (6) — verifies
+  both new tools are registered and the pre-existing `web_fetch` and
+  `web_search` are still present.

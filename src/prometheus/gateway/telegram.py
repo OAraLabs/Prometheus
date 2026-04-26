@@ -171,6 +171,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("gepa", self._cmd_gepa))
         # GRAFT-SYMBIOTE Session A: GitHub research → graft pipeline
         self._app.add_handler(CommandHandler("symbiote", self._cmd_symbiote))
+        # WEAVE Session B: web capability audit
+        self._app.add_handler(CommandHandler("audit", self._cmd_audit))
         # Sprint 22 GRAFT-ROUTER-WIRE Phase 4: direct-mode provider override commands
         self._app.add_handler(CommandHandler("claude", self._cmd_claude))
         self._app.add_handler(CommandHandler("gpt", self._cmd_gpt))
@@ -217,6 +219,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("pending", "List pending approval requests"),
                 BotCommand("gepa", "GEPA skill evolution: status | run | history"),
                 BotCommand("symbiote", "GitHub graft pipeline: <problem> | approve | graft | morph | swap | backup | backups | restore | status | abort | history"),
+                BotCommand("audit", "Web capability audit: show last | run | web | <category>"),
                 # Phase 4: direct-mode provider overrides
                 BotCommand("claude", "Route this chat through Anthropic Claude"),
                 BotCommand("gpt", "Route this chat through OpenAI GPT"),
@@ -2410,3 +2413,179 @@ class TelegramAdapter(BasePlatformAdapter):
             return self.agent_loop._provider
         except AttributeError:
             return None
+
+    # ------------------------------------------------------------------
+    # WEAVE Session B: /audit command
+    # ------------------------------------------------------------------
+
+    async def _cmd_audit(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /audit subcommands.
+
+        Forms:
+          /audit                  — show summary of the most recent audit
+          /audit run              — start a full web capability audit
+          /audit <category>       — start an audit for a single category
+                                    (search|fetch|youtube|download|research|graceful|railway)
+        """
+        if not update.message or not update.effective_chat:
+            return
+        chat_id = update.effective_chat.id
+
+        text = (update.message.text or "").strip()
+        parts = text.split(maxsplit=1)
+        body = parts[1].strip().lower() if len(parts) > 1 else ""
+
+        if not body:
+            await self._audit_show_last(chat_id)
+            return
+
+        valid_categories = {
+            "search", "fetch", "youtube", "download",
+            "research", "graceful", "railway",
+        }
+
+        if body == "run":
+            await self._audit_kick_off(chat_id, category=None)
+            return
+
+        if body in valid_categories:
+            await self._audit_kick_off(chat_id, category=body)
+            return
+
+        await self.send(
+            chat_id,
+            (
+                "Usage:\n"
+                "  /audit                — show last audit summary\n"
+                "  /audit run            — full audit (~30–60 min)\n"
+                "  /audit <category>     — single category\n"
+                "Categories: search, fetch, youtube, download, research, graceful, railway"
+            ),
+            parse_mode=None,
+        )
+
+    async def _audit_show_last(self, chat_id: int) -> None:
+        """Show summary of the most recent audit JSON, if any."""
+        from prometheus.config.paths import get_config_dir
+
+        audits_dir = get_config_dir() / "audits"
+        if not audits_dir.is_dir():
+            await self.send(
+                chat_id,
+                "No audits yet. Run `/audit run` to start one.",
+                parse_mode=None,
+            )
+            return
+        json_files = sorted(audits_dir.glob("web_audit_*.json"))
+        if not json_files:
+            await self.send(
+                chat_id,
+                "No audits yet. Run `/audit run` to start one.",
+                parse_mode=None,
+            )
+            return
+        latest = json_files[-1]
+        try:
+            import json as _json
+            payload = _json.loads(latest.read_text())
+        except Exception as exc:
+            await self.send(
+                chat_id,
+                f"Could not read latest audit: {exc}",
+                parse_mode=None,
+            )
+            return
+
+        lines = [
+            "🔬 Last Web Capability Audit",
+            f"Date: {payload.get('timestamp', '?')}",
+            f"Model: {payload.get('model', '?')}",
+            (
+                f"Result: {payload.get('passed', 0)}/"
+                f"{payload.get('total_tests', 0)} passed "
+                f"({payload.get('pass_rate', 0) * 100:.0f}%)"
+            ),
+            f"Duration: {payload.get('duration_seconds', 0):.0f}s",
+            "",
+            "By category:",
+        ]
+        for cat, stats in sorted((payload.get("categories") or {}).items()):
+            n = stats["passed"] + stats["failed"]
+            lines.append(f"  {cat}: {stats['passed']}/{n}")
+        fb = payload.get("failure_breakdown") or {}
+        if fb:
+            lines.append("")
+            lines.append("Failure breakdown:")
+            for fc, n in sorted(fb.items(), key=lambda kv: -kv[1]):
+                lines.append(f"  {fc}: {n}")
+        lines.append("")
+        lines.append(f"Full report: {latest}")
+        await self.send(chat_id, "\n".join(lines), parse_mode=None)
+
+    async def _audit_kick_off(
+        self, chat_id: int, category: str | None
+    ) -> None:
+        """Spawn the audit as a background subprocess and notify on completion."""
+        import asyncio as _aio
+        from pathlib import Path as _Path
+
+        repo_root = _Path(__file__).resolve().parents[3]
+        script = repo_root / "scripts" / "web_capability_audit.py"
+        if not script.is_file():
+            await self.send(
+                chat_id,
+                f"Audit script not found at {script}",
+                parse_mode=None,
+            )
+            return
+
+        cmd: list[str] = ["python3", str(script)]
+        if category:
+            cmd += ["--category", category]
+        label = f"category={category}" if category else "full audit"
+
+        await self.send(
+            chat_id,
+            (
+                f"🔬 Audit starting ({label}). "
+                "I'll send a summary when it completes."
+            ),
+            parse_mode=None,
+        )
+
+        async def _runner() -> None:
+            try:
+                proc = await _aio.create_subprocess_exec(
+                    *cmd,
+                    stdout=_aio.subprocess.PIPE,
+                    stderr=_aio.subprocess.STDOUT,
+                    cwd=str(repo_root),
+                )
+                stdout, _ = await proc.communicate()
+                rc = proc.returncode
+                # Read the latest report (the script writes one even on partial runs)
+                from prometheus.config.paths import get_config_dir
+                audits_dir = get_config_dir() / "audits"
+                latest_md = sorted(audits_dir.glob("web_audit_*.md"))[-1] \
+                    if audits_dir.is_dir() and any(
+                        audits_dir.glob("web_audit_*.md")
+                    ) else None
+                if latest_md is not None:
+                    msg = (
+                        f"🔬 Audit complete (exit {rc}). "
+                        f"Report: {latest_md}"
+                    )
+                else:
+                    tail = (stdout or b"").decode("utf-8", errors="replace")[-1500:]
+                    msg = f"🔬 Audit finished (exit {rc}). Output tail:\n{tail}"
+                await self.send(chat_id, msg, parse_mode=None)
+            except Exception as exc:
+                await self.send(
+                    chat_id,
+                    f"Audit failed to launch: {exc}",
+                    parse_mode=None,
+                )
+
+        _aio.create_task(_runner())
