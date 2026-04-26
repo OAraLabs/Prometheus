@@ -6499,3 +6499,50 @@ class TestSymbioteSessionBWiring:
         elapsed = time.monotonic() - start
         assert manager == "pkill"
         assert elapsed < 5.0, f"detection took {elapsed:.1f}s — must not hang"
+
+
+# ===========================================================================
+# WEAVE Session A: youtube_transcript + download_file registered
+# ===========================================================================
+
+
+class TestWeaveWebToolsWiring:
+    """Verify the WEAVE web tools are registered in the default tool registry."""
+
+    def test_youtube_transcript_tool_registered(self):
+        from prometheus.__main__ import create_tool_registry
+
+        registry = create_tool_registry({})
+        names = {t.name for t in registry.list_tools()}
+        assert "youtube_transcript" in names
+
+    def test_download_file_tool_registered(self):
+        from prometheus.__main__ import create_tool_registry
+
+        registry = create_tool_registry({})
+        names = {t.name for t in registry.list_tools()}
+        assert "download_file" in names
+
+    def test_web_fetch_still_registered(self):
+        """Regression — existing web_fetch tool must remain present."""
+        from prometheus.__main__ import create_tool_registry
+
+        registry = create_tool_registry({})
+        names = {t.name for t in registry.list_tools()}
+        assert "web_fetch" in names
+
+    def test_web_search_still_registered(self):
+        """Regression — existing web_search tool must remain present."""
+        from prometheus.__main__ import create_tool_registry
+
+        registry = create_tool_registry({})
+        names = {t.name for t in registry.list_tools()}
+        assert "web_search" in names
+
+    def test_youtube_transcript_exported_from_builtin(self):
+        from prometheus.tools.builtin import YouTubeTranscriptTool
+        assert YouTubeTranscriptTool().name == "youtube_transcript"
+
+    def test_download_file_exported_from_builtin(self):
+        from prometheus.tools.builtin import DownloadFileTool
+        assert DownloadFileTool().name == "download_file"

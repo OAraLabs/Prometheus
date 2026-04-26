@@ -127,6 +127,7 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
         AuditQueryTool,
         BashTool,
         DashboardTool,
+        DownloadFileTool,
         FileEditTool,
         FileReadTool,
         FileWriteTool,
@@ -142,6 +143,7 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
         TTSTool,
         WebFetchTool,
         WebSearchTool,
+        YouTubeTranscriptTool,
         WikiCompileTool,
         WikiLintTool,
         WikiQueryTool,
@@ -172,6 +174,8 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
         # Web + messaging
         WebSearchTool(),
         WebFetchTool(),
+        YouTubeTranscriptTool(),
+        DownloadFileTool(),
         MessageTool(),
         TTSTool(),
         # Visualization

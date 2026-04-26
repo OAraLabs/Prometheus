@@ -215,6 +215,15 @@ web:
   api_port: 8005
   ws_port: 8010
 
+# Core web research tools — web_fetch, web_search, youtube_transcript, download_file
+web_tools:
+  fetch_timeout_seconds: 30                 # web_fetch HTTP timeout
+  fetch_max_chars: 8000                     # web_fetch default truncation limit
+  search_max_results: 8                     # web_search default result count
+  download_dir: "~/.prometheus/downloads"   # download_file default destination
+  download_max_mb: 100                      # download_file size cap (MB)
+  youtube_transcript_language: "en"         # youtube_transcript default language code
+
 lsp:
   enabled: false
 

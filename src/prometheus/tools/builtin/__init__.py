@@ -8,6 +8,7 @@ from prometheus.tools.builtin.cron_create import CronCreateTool
 from prometheus.tools.builtin.cron_delete import CronDeleteTool
 from prometheus.tools.builtin.cron_list import CronListTool
 from prometheus.tools.builtin.dashboard import DashboardTool
+from prometheus.tools.builtin.download_file import DownloadFileTool
 from prometheus.tools.builtin.file_edit import FileEditTool
 from prometheus.tools.builtin.file_read import FileReadTool
 from prometheus.tools.builtin.file_write import FileWriteTool
@@ -31,6 +32,7 @@ from prometheus.tools.builtin.sessions_spawn import SessionsSpawnTool
 from prometheus.tools.builtin.tts import TTSTool
 from prometheus.tools.builtin.web_fetch import WebFetchTool
 from prometheus.tools.builtin.web_search import WebSearchTool
+from prometheus.tools.builtin.youtube_transcript import YouTubeTranscriptTool
 from prometheus.tools.builtin.wiki_compile import WikiCompileTool
 from prometheus.tools.builtin.wiki_lint_tool import WikiLintTool
 from prometheus.tools.builtin.wiki_query import WikiQueryTool
@@ -45,6 +47,7 @@ __all__ = [
     "CronDeleteTool",
     "CronListTool",
     "DashboardTool",
+    "DownloadFileTool",
     "FileEditTool",
     "FileReadTool",
     "FileWriteTool",
@@ -68,6 +71,7 @@ __all__ = [
     "TTSTool",
     "WebFetchTool",
     "WebSearchTool",
+    "YouTubeTranscriptTool",
     "WikiCompileTool",
     "WikiLintTool",
     "WikiQueryTool",

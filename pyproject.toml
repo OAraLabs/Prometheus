@@ -48,7 +48,10 @@ packages = ["src/prometheus"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-markers = ["integration: integration wiring tests (verify components are connected at runtime)"]
+markers = [
+    "integration: integration wiring tests (verify components are connected at runtime)",
+    "network: tests that require live network access (skip with -m 'not network')",
+]
 
 [dependency-groups]
 dev = [
