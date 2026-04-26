@@ -216,7 +216,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("deny", "Deny a pending tool request"),
                 BotCommand("pending", "List pending approval requests"),
                 BotCommand("gepa", "GEPA skill evolution: status | run | history"),
-                BotCommand("symbiote", "GitHub graft pipeline: <problem> | approve | graft | status | abort | history"),
+                BotCommand("symbiote", "GitHub graft pipeline: <problem> | approve | graft | morph | swap | backup | backups | restore | status | abort | history"),
                 # Phase 4: direct-mode provider overrides
                 BotCommand("claude", "Route this chat through Anthropic Claude"),
                 BotCommand("gpt", "Route this chat through OpenAI GPT"),
@@ -1522,7 +1522,12 @@ class TelegramAdapter(BasePlatformAdapter):
         first_lower = first_token.lower()
         rest = body[len(first_token):].strip()
 
-        known_subcommands = {"approve", "graft", "status", "abort", "history"}
+        known_subcommands = {
+            # Session A
+            "approve", "graft", "status", "abort", "history",
+            # Session B
+            "morph", "swap", "backup", "backups", "restore",
+        }
 
         if not body:
             await self._symbiote_status(chat_id, coordinator, "")
@@ -1547,6 +1552,22 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         if first_lower == "graft":
             await self._symbiote_graft(chat_id, coordinator)
+            return
+        # ---- Session B subcommands ------------------------------------
+        if first_lower == "morph":
+            await self._symbiote_morph(chat_id, coordinator)
+            return
+        if first_lower == "swap":
+            await self._symbiote_swap(chat_id, coordinator)
+            return
+        if first_lower == "backup":
+            await self._symbiote_manual_backup(chat_id, rest)
+            return
+        if first_lower == "backups":
+            await self._symbiote_backups(chat_id, rest)
+            return
+        if first_lower == "restore":
+            await self._symbiote_restore(chat_id, rest)
             return
 
     # ------------------------------------------------------------------
@@ -1728,6 +1749,314 @@ class TelegramAdapter(BasePlatformAdapter):
             parse_mode=None,
         )
 
+    # ---- SYMBIOTE Session B subcommands -------------------------------
+
+    async def _symbiote_morph(self, chat_id: int, coordinator) -> None:
+        """Stage a candidate via MorphEngine and produce a MorphReport."""
+        morph_engine = getattr(self, "_morph_engine", None)
+        if morph_engine is None:
+            await self.send(
+                chat_id,
+                "SYMBIOTE: MorphEngine not active. "
+                "Set symbiote.morph.enabled in config.",
+                parse_mode=None,
+            )
+            return
+        active = coordinator.get_status()
+        if active is None:
+            await self.send(chat_id, "SYMBIOTE: no active session.", parse_mode=None)
+            return
+        from prometheus.symbiote.coordinator import SymbiotePhase
+        if active.phase != SymbiotePhase.AWAITING_GRAFT_APPROVAL:
+            await self.send(
+                chat_id,
+                f"SYMBIOTE: cannot morph from phase {active.phase.value}. "
+                "Run /symbiote graft first.",
+                parse_mode=None,
+            )
+            return
+        await self.send(
+            chat_id,
+            "SYMBIOTE: staging candidate (full test run)... this may take a minute.",
+            parse_mode=None,
+        )
+        try:
+            session = await coordinator.start_morph(
+                active.session_id, morph_engine,
+            )
+        except Exception as exc:
+            logger.exception("SYMBIOTE morph failed")
+            await self.send(chat_id, f"SYMBIOTE morph failed: {exc}", parse_mode=None)
+            return
+        if session.morph_report:
+            from prometheus.symbiote.morph import MorphReport
+            report = coordinator._rebuild_morph_report(session.morph_report)
+            await self.send(chat_id, report.to_telegram_summary(), parse_mode=None)
+        elif session.error:
+            await self.send(chat_id, f"SYMBIOTE morph: {session.error}", parse_mode=None)
+
+    async def _symbiote_swap(self, chat_id: int, coordinator) -> None:
+        """Request approval; on /approve run MorphEngine.execute_swap()."""
+        morph_engine = getattr(self, "_morph_engine", None)
+        if morph_engine is None:
+            await self.send(
+                chat_id,
+                "SYMBIOTE: MorphEngine not active.",
+                parse_mode=None,
+            )
+            return
+        active = coordinator.get_status()
+        if active is None:
+            await self.send(chat_id, "SYMBIOTE: no active session.", parse_mode=None)
+            return
+        from prometheus.symbiote.coordinator import SymbiotePhase
+        if active.phase != SymbiotePhase.AWAITING_SWAP_APPROVAL:
+            await self.send(
+                chat_id,
+                f"SYMBIOTE: cannot swap from phase {active.phase.value}. "
+                "Run /symbiote morph first.",
+                parse_mode=None,
+            )
+            return
+        queue = getattr(self, "_approval_queue", None)
+        if queue is None:
+            await self.send(
+                chat_id,
+                "SYMBIOTE: approval queue not active — cannot swap.",
+                parse_mode=None,
+            )
+            return
+        backup_id = active.backup_id or "?"
+        warning = (
+            "⚠️ This will:\n"
+            "  1. Stop the daemon (~2-5s downtime)\n"
+            "  2. Replace live code with the candidate\n"
+            "  3. Restart the daemon\n"
+            "  4. Auto-rollback if health check fails within 60s\n\n"
+            f"Backup {backup_id} retained for manual rollback.\n\n"
+            "Watch for /approve prompt."
+        )
+        await self.send(chat_id, warning, parse_mode=None)
+        asyncio.create_task(
+            self._symbiote_run_with_approval(
+                chat_id, queue, coordinator,
+                phase="swap",
+                session_id=active.session_id,
+            ),
+            name="symbiote_swap_approval",
+        )
+
+    async def _symbiote_manual_backup(self, chat_id: int, rest: str) -> None:
+        """Create a manual backup snapshot. Trust Level 2 (no approval)."""
+        vault = getattr(self, "_backup_vault", None)
+        if vault is None:
+            await self.send(
+                chat_id,
+                "SYMBIOTE: BackupVault not active. Set symbiote.backup.enabled.",
+                parse_mode=None,
+            )
+            return
+        description = rest.strip().strip('"').strip("'") or "manual backup via /symbiote"
+        await self.send(
+            chat_id,
+            "SYMBIOTE: creating backup (running test suite for status capture)...",
+            parse_mode=None,
+        )
+        try:
+            snap = await vault.create_snapshot(
+                description=description,
+                source="manual",
+                metadata={"chat_id": chat_id},
+                capture_test_status=True,
+            )
+        except Exception as exc:
+            logger.exception("SYMBIOTE backup failed")
+            await self.send(chat_id, f"SYMBIOTE backup failed: {exc}", parse_mode=None)
+            return
+        await self.send(
+            chat_id,
+            (
+                f"📦 Backup created: {snap.backup_id}\n"
+                f"  files: {snap.file_count}, size: {snap.size_bytes/1024:.1f}KB\n"
+                f"  tests: {snap.test_status}\n"
+                f"  description: {snap.description}"
+            ),
+            parse_mode=None,
+        )
+
+    async def _symbiote_backups(self, chat_id: int, rest: str) -> None:
+        """List available backups."""
+        vault = getattr(self, "_backup_vault", None)
+        if vault is None:
+            await self.send(
+                chat_id,
+                "SYMBIOTE: BackupVault not active.",
+                parse_mode=None,
+            )
+            return
+        try:
+            limit = int(rest.split()[0]) if rest else 15
+        except ValueError:
+            limit = 15
+        snaps = vault.list_snapshots(limit=limit)
+        if not snaps:
+            await self.send(chat_id, "SYMBIOTE: no backups yet.", parse_mode=None)
+            return
+        lines = [f"📦 Backup Vault ({len(snaps)} snapshot(s)):"]
+        for s in snaps:
+            lines.append(
+                f"  {s.backup_id} — {s.source} — "
+                f"{s.size_bytes/1024:.1f}KB — tests: {s.test_status}"
+            )
+        lines.append("")
+        lines.append("Use: /symbiote restore <backup_id>")
+        await self.send(chat_id, "\n".join(lines), parse_mode=None)
+
+    async def _symbiote_restore(self, chat_id: int, rest: str) -> None:
+        """Restore from a backup. Trust Level 1 — requires approval."""
+        vault = getattr(self, "_backup_vault", None)
+        if vault is None:
+            await self.send(
+                chat_id,
+                "SYMBIOTE: BackupVault not active.",
+                parse_mode=None,
+            )
+            return
+        args = rest.split()
+        dry_run = False
+        backup_id: str | None = None
+        for arg in args:
+            if arg.lower() == "dry":
+                dry_run = True
+            else:
+                backup_id = arg
+        if backup_id is None:
+            latest = vault.get_latest()
+            if latest is None:
+                await self.send(
+                    chat_id,
+                    "SYMBIOTE: no backups available to restore.",
+                    parse_mode=None,
+                )
+                return
+            backup_id = latest.backup_id
+
+        snap = vault.get_snapshot(backup_id)
+        if snap is None:
+            await self.send(
+                chat_id,
+                f"SYMBIOTE: unknown backup_id {backup_id!r}.",
+                parse_mode=None,
+            )
+            return
+
+        if dry_run:
+            await self.send(
+                chat_id,
+                f"SYMBIOTE: dry-run restore of {backup_id}...",
+                parse_mode=None,
+            )
+            try:
+                result = await vault.restore_snapshot(backup_id, dry_run=True)
+            except Exception as exc:
+                await self.send(
+                    chat_id,
+                    f"SYMBIOTE: dry-run failed: {exc}",
+                    parse_mode=None,
+                )
+                return
+            lines = [
+                f"📦 Dry-run restore of {backup_id}:",
+                f"  added: {len(result.files_added)} file(s)",
+                f"  changed: {len(result.files_changed)} file(s)",
+            ]
+            if result.files_changed[:5]:
+                lines.append("  example changed paths:")
+                for p in result.files_changed[:5]:
+                    lines.append(f"    {p}")
+            await self.send(chat_id, "\n".join(lines), parse_mode=None)
+            return
+
+        # Real restore — Trust Level 1.
+        queue = getattr(self, "_approval_queue", None)
+        if queue is None:
+            await self.send(
+                chat_id,
+                "SYMBIOTE: approval queue not active — cannot restore.",
+                parse_mode=None,
+            )
+            return
+        await self.send(
+            chat_id,
+            f"⚠️ /symbiote restore {backup_id} will replace live source files. "
+            "A pre-restore backup will be created automatically. "
+            "Watch for /approve prompt.",
+            parse_mode=None,
+        )
+        asyncio.create_task(
+            self._symbiote_restore_with_approval(chat_id, queue, vault, backup_id),
+            name="symbiote_restore_approval",
+        )
+
+    async def _symbiote_restore_with_approval(
+        self,
+        chat_id: int,
+        queue,
+        vault,
+        backup_id: str,
+    ) -> None:
+        from prometheus.permissions.approval_queue import ApprovalResult
+        try:
+            result = await queue.request_approval(
+                tool_name="symbiote_restore",
+                description=f"SYMBIOTE: restore from {backup_id}",
+                chat_id=chat_id,
+            )
+        except Exception as exc:
+            await self.send(
+                chat_id,
+                f"SYMBIOTE: approval failed: {exc}",
+                parse_mode=None,
+            )
+            return
+        if result == ApprovalResult.DENIED:
+            await self.send(chat_id, "SYMBIOTE: restore denied.", parse_mode=None)
+            return
+        if result == ApprovalResult.TIMEOUT:
+            await self.send(
+                chat_id,
+                "SYMBIOTE: restore approval timed out.",
+                parse_mode=None,
+            )
+            return
+        try:
+            restore = await vault.restore_snapshot(
+                backup_id, capture_test_status=False,
+            )
+        except Exception as exc:
+            await self.send(
+                chat_id,
+                f"SYMBIOTE: restore failed: {exc}",
+                parse_mode=None,
+            )
+            return
+        if restore.error:
+            await self.send(
+                chat_id,
+                f"SYMBIOTE: restore error: {restore.error}",
+                parse_mode=None,
+            )
+            return
+        await self.send(
+            chat_id,
+            (
+                f"📦 Restore complete: {backup_id}\n"
+                f"  files restored: {restore.files_restored}\n"
+                f"  pre-restore backup: {restore.pre_restore_backup_id}"
+            ),
+            parse_mode=None,
+        )
+
     async def _symbiote_run_with_approval(
         self,
         chat_id: int,
@@ -1748,6 +2077,10 @@ class TelegramAdapter(BasePlatformAdapter):
             "graft": (
                 f"SYMBIOTE: write adapted files + run tests "
                 f"(session {session_id[:8]})"
+            ),
+            "swap": (
+                f"SYMBIOTE: HOT SWAP — replace live src/prometheus with "
+                f"candidate (session {session_id[:8]})"
             ),
         }
         try:
@@ -1779,6 +2112,16 @@ class TelegramAdapter(BasePlatformAdapter):
                 session = await coordinator.approve_scout(session_id, candidate)
             elif phase == "graft":
                 session = await coordinator.approve_harvest(session_id)
+            elif phase == "swap":
+                morph_engine = getattr(self, "_morph_engine", None)
+                if morph_engine is None:
+                    await self.send(
+                        chat_id,
+                        "SYMBIOTE swap: MorphEngine not active.",
+                        parse_mode=None,
+                    )
+                    return
+                session = await coordinator.approve_swap(session_id, morph_engine)
             else:
                 await self.send(chat_id, f"Unknown phase: {phase}", parse_mode=None)
                 return

@@ -182,6 +182,28 @@ symbiote:
   sessions_db: "~/.prometheus/symbiote/sessions.db"
   scout_model: default          # Model for query gen + relevance scoring
   harvest_model: default        # Model for file selection + adaptation plan
+  # GRAFT-SYMBIOTE Session B: blue-green hot swap with auto-rollback
+  morph:
+    enabled: false              # Off by default; opt-in per machine
+    health_check_timeout_seconds: 60
+    health_check_interval_seconds: 5
+    consecutive_passes_required: 3
+    auto_rollback: true         # Always true in V1 (not configurable)
+    daemon_manager: auto        # auto | systemd | pidfile | pkill
+    daemon_health_url: null     # Optional HTTP /health endpoint to ping
+    candidate_dir: "~/.prometheus/symbiote/candidate/"
+    post_mortem_dir: "~/.prometheus/symbiote/post_mortem/"
+  backup:
+    enabled: true               # BackupVault is independently useful
+    vault_root: "~/.prometheus/symbiote/backups"
+    max_backups: 10
+    include_identity: true      # Backup SOUL.md, AGENTS.md, ANATOMY.md
+    include_config: true        # Backup config/prometheus.yaml
+    pre_graft_backup: false     # Auto-backup before any graft (off by default)
+    exempt_from_retention:
+      - symbiote_morph
+      - manual
+      - pre_restore
 
 sentinel:
   enabled: false

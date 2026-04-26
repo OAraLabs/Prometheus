@@ -717,6 +717,59 @@ async def run_daemon(args: argparse.Namespace) -> None:
             )
             set_coordinator(symbiote_coordinator)
             logger.info("SymbioteCoordinator wired (sessions=%s)", sym_db_path)
+
+            # GRAFT-SYMBIOTE Session B: BackupVault + MorphEngine.
+            # Attached to the Telegram adapter so /symbiote
+            # backup/backups/restore/morph/swap can find them.
+            backup_cfg = symbiote_cfg.get("backup", {}) or {}
+            morph_cfg = symbiote_cfg.get("morph", {}) or {}
+            sym_backup_vault = None
+            if backup_cfg.get("enabled", True):
+                from prometheus.symbiote.backup_vault import BackupVault
+                sym_backup_vault = BackupVault(
+                    project_root=Path.cwd(),
+                    vault_root=_Path(
+                        backup_cfg.get("vault_root", "~/.prometheus/symbiote/backups")
+                    ).expanduser(),
+                    max_backups=int(backup_cfg.get("max_backups", 10)),
+                    include_identity=bool(backup_cfg.get("include_identity", True)),
+                    include_config=bool(backup_cfg.get("include_config", True)),
+                    exempt_from_retention=set(backup_cfg.get("exempt_from_retention") or []) or None,
+                )
+                if telegram is not None:
+                    telegram._backup_vault = sym_backup_vault
+                logger.info("BackupVault wired (vault_root=%s)", sym_backup_vault._vault_root)
+
+            if morph_cfg.get("enabled", False) and sym_backup_vault is not None:
+                from prometheus.symbiote.morph import MorphEngine
+                manager_override = morph_cfg.get("daemon_manager", "auto")
+                manager_override = manager_override if manager_override != "auto" else None
+                sym_morph_engine = MorphEngine(
+                    backup_vault=sym_backup_vault,
+                    project_root=Path.cwd(),
+                    candidate_root=_Path(
+                        morph_cfg.get("candidate_dir", "~/.prometheus/symbiote/candidate/")
+                    ).expanduser(),
+                    post_mortem_root=_Path(
+                        morph_cfg.get("post_mortem_dir", "~/.prometheus/symbiote/post_mortem/")
+                    ).expanduser(),
+                    health_check_timeout=int(
+                        morph_cfg.get("health_check_timeout_seconds", 60)
+                    ),
+                    health_check_interval=int(
+                        morph_cfg.get("health_check_interval_seconds", 5)
+                    ),
+                    consecutive_passes_required=int(
+                        morph_cfg.get("consecutive_passes_required", 3)
+                    ),
+                    daemon_manager_override=manager_override,
+                    daemon_health_url=morph_cfg.get("daemon_health_url"),
+                )
+                if telegram is not None:
+                    telegram._morph_engine = sym_morph_engine
+                logger.info(
+                    "MorphEngine wired (manager_override=%s)", manager_override or "auto",
+                )
     except Exception as exc:
         logger.warning("SymbioteCoordinator not available: %s", exc)
 

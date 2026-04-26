@@ -6401,3 +6401,101 @@ class TestSymbioteWiring:
         payload = _json.loads(result.output)
         assert payload["enabled"] is False
         assert payload["active"] is None
+
+
+# ===========================================================================
+# GRAFT-SYMBIOTE Session B: BackupVault + MorphEngine wiring
+# ===========================================================================
+
+
+class TestSymbioteSessionBWiring:
+    """BackupVault + MorphEngine + Telegram subcommand registration."""
+
+    def test_backup_vault_imports_and_initializes(self, tmp_path):
+        from prometheus.symbiote.backup_vault import BackupVault
+        vault = BackupVault(
+            project_root=tmp_path / "project",
+            vault_root=tmp_path / "vault",
+            include_identity=False,
+        )
+        assert vault._vault_root.exists()
+        assert vault.list_snapshots() == []
+
+    def test_morph_engine_imports_with_real_vault(self, tmp_path):
+        from prometheus.symbiote.backup_vault import BackupVault
+        from prometheus.symbiote.morph import MorphEngine
+        vault = BackupVault(
+            project_root=tmp_path / "project",
+            vault_root=tmp_path / "vault",
+            include_identity=False,
+        )
+        engine = MorphEngine(
+            backup_vault=vault,
+            project_root=tmp_path / "project",
+            candidate_root=tmp_path / "candidate",
+            post_mortem_root=tmp_path / "post_mortem",
+            daemon_manager_override="pidfile",
+        )
+        assert engine._vault is vault
+
+    def test_telegram_has_session_b_handlers(self):
+        """All five new /symbiote subcommand handlers must exist."""
+        from prometheus.gateway.telegram import TelegramAdapter
+        for method in (
+            "_symbiote_morph",
+            "_symbiote_swap",
+            "_symbiote_manual_backup",
+            "_symbiote_backups",
+            "_symbiote_restore",
+            "_symbiote_restore_with_approval",
+        ):
+            assert hasattr(TelegramAdapter, method), f"missing handler: {method}"
+
+    def test_symbiote_phase_includes_morph_states(self):
+        """The state machine must include the new MORPH/SWAP/HEALTH_CHECK/ROLLED_BACK
+        phases so persisted sessions deserialize correctly."""
+        from prometheus.symbiote.coordinator import SymbiotePhase
+        names = {p.value for p in SymbiotePhase}
+        for required in (
+            "morphing",
+            "awaiting_swap_approval",
+            "swapping",
+            "health_check",
+            "rolled_back",
+        ):
+            assert required in names
+
+    def test_morph_engine_does_not_assume_systemd(self, tmp_path, monkeypatch):
+        """`_detect_daemon_manager` must NOT hang when systemctl is missing."""
+        import time
+        from prometheus.symbiote.backup_vault import BackupVault
+        from prometheus.symbiote.morph import MorphEngine
+        vault = BackupVault(
+            project_root=tmp_path / "project",
+            vault_root=tmp_path / "vault",
+            include_identity=False,
+        )
+        engine = MorphEngine(
+            backup_vault=vault,
+            project_root=tmp_path / "project",
+            candidate_root=tmp_path / "candidate",
+            post_mortem_root=tmp_path / "post_mortem",
+        )
+        # Force systemctl to vanish.
+        original = asyncio.create_subprocess_exec
+
+        async def patched(*args, **kwargs):
+            if args and args[0] == "systemctl":
+                raise FileNotFoundError("systemctl missing")
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", patched)
+        # Lockfile path doesn't exist either.
+        from prometheus.symbiote import morph as morph_mod
+        monkeypatch.setattr(morph_mod, "_daemon_lock_path", lambda: tmp_path / "no_lock")
+
+        start = time.monotonic()
+        manager = asyncio.run(engine._detect_daemon_manager())
+        elapsed = time.monotonic() - start
+        assert manager == "pkill"
+        assert elapsed < 5.0, f"detection took {elapsed:.1f}s — must not hang"

@@ -53,12 +53,23 @@ class SymbiotePhase(str, Enum):
     AWAITING_HARVEST_APPROVAL = "awaiting_harvest_approval"
     GRAFTING = "grafting"
     AWAITING_GRAFT_APPROVAL = "awaiting_graft_approval"
+    # Session B: MORPH phases (added 2026-04-26)
+    MORPHING = "morphing"
+    AWAITING_SWAP_APPROVAL = "awaiting_swap_approval"
+    SWAPPING = "swapping"
+    HEALTH_CHECK = "health_check"
+    ROLLED_BACK = "rolled_back"
     COMPLETE = "complete"
     FAILED = "failed"
     ABORTED = "aborted"
 
 
-_TERMINAL = frozenset({SymbiotePhase.COMPLETE, SymbiotePhase.FAILED, SymbiotePhase.ABORTED})
+_TERMINAL = frozenset({
+    SymbiotePhase.COMPLETE,
+    SymbiotePhase.FAILED,
+    SymbiotePhase.ABORTED,
+    SymbiotePhase.ROLLED_BACK,
+})
 
 
 @dataclass
@@ -70,6 +81,10 @@ class SymbioteSession:
     selected_candidate: str | None = None
     harvest_report: dict[str, Any] | None = None
     graft_report: dict[str, Any] | None = None
+    # Session B (MORPH) additions
+    morph_report: dict[str, Any] | None = None
+    swap_result: dict[str, Any] | None = None
+    backup_id: str | None = None
     started_at: str = ""
     updated_at: str = ""
     error: str = ""
@@ -100,6 +115,25 @@ class SymbioteSession:
             files = len(self.graft_report.get("files_created", []))
             tests = "passed" if self.graft_report.get("tests_passed") else "FAILED"
             lines.append(f"Graft: {files} file(s), tests {tests}")
+        if self.morph_report:
+            ready = self.morph_report.get("ready_to_swap")
+            tests = "passed" if self.morph_report.get("tests_passed") else "FAILED"
+            lines.append(
+                f"Morph: ready={ready}, tests {tests}, "
+                f"backup={self.morph_report.get('backup_snapshot_id', '?')}"
+            )
+        if self.swap_result:
+            if self.swap_result.get("rolled_back"):
+                lines.append(
+                    f"Swap: ROLLED BACK ({self.swap_result.get('rollback_reason', '')})"
+                )
+            elif self.swap_result.get("success"):
+                lines.append(
+                    f"Swap: complete (downtime "
+                    f"{self.swap_result.get('downtime_seconds', 0):.1f}s)"
+                )
+            else:
+                lines.append(f"Swap: failed ({self.swap_result.get('error', '')})")
         if self.error:
             lines.append(f"Error: {self.error}")
         return "\n".join(lines)
@@ -260,10 +294,12 @@ class SymbioteCoordinator:
         return session
 
     async def approve_graft(self, session_id: str) -> SymbioteSession:
-        """User accepted the graft. Mark session COMPLETE.
+        """User accepted the graft. Mark session COMPLETE (no MORPH).
 
-        (Session B will hand off to MORPH here. Session A simply
-        considers the graft final.)
+        Session B's MORPH path is opt-in via ``start_morph()`` from this
+        same phase — call this method when the graft is enough and you
+        do NOT want to hot-swap the daemon. Calling ``start_morph()``
+        instead branches into the blue-green flow.
         """
         session = self._require_session(session_id)
         if session.phase != SymbiotePhase.AWAITING_GRAFT_APPROVAL:
@@ -275,6 +311,98 @@ class SymbioteCoordinator:
             session.error = "graft tests did not pass"
         else:
             session.phase = SymbiotePhase.COMPLETE
+        session.updated_at = _now_iso()
+        self._persist(session)
+        return session
+
+    async def start_morph(
+        self,
+        session_id: str,
+        morph_engine: object,
+    ) -> SymbioteSession:
+        """User approved the graft AND wants to hot-swap.
+
+        Runs ``morph_engine.prepare_candidate(graft_report=...)`` and
+        records the resulting MorphReport on the session. Returns the
+        session in ``AWAITING_SWAP_APPROVAL`` if ready, or ``FAILED`` if
+        the candidate's tests didn't pass.
+        """
+        session = self._require_session(session_id)
+        if session.phase != SymbiotePhase.AWAITING_GRAFT_APPROVAL:
+            raise RuntimeError(
+                f"Cannot start morph from phase {session.phase.value}"
+            )
+
+        session.phase = SymbiotePhase.MORPHING
+        session.updated_at = _now_iso()
+        self._persist(session)
+
+        try:
+            graft = self._rebuild_graft_report(session.graft_report)
+            morph_report = await morph_engine.prepare_candidate(graft)  # type: ignore[attr-defined]
+        except Exception as exc:
+            session.phase = SymbiotePhase.FAILED
+            session.error = f"morph prepare failed: {exc}"
+            session.updated_at = _now_iso()
+            self._persist(session)
+            log.exception("SymbioteCoordinator: prepare_candidate failed")
+            return session
+
+        session.morph_report = morph_report.to_dict()
+        session.backup_id = morph_report.backup_snapshot_id
+        if morph_report.ready_to_swap:
+            session.phase = SymbiotePhase.AWAITING_SWAP_APPROVAL
+        else:
+            session.phase = SymbiotePhase.FAILED
+            session.error = (
+                morph_report.reason_if_not_ready or "candidate not ready to swap"
+            )
+        session.updated_at = _now_iso()
+        self._persist(session)
+        return session
+
+    async def approve_swap(
+        self,
+        session_id: str,
+        morph_engine: object,
+    ) -> SymbioteSession:
+        """User approved the hot swap. Runs ``execute_swap`` and records result."""
+        session = self._require_session(session_id)
+        if session.phase != SymbiotePhase.AWAITING_SWAP_APPROVAL:
+            raise RuntimeError(
+                f"Cannot approve swap from phase {session.phase.value}"
+            )
+        if not session.morph_report:
+            session.phase = SymbiotePhase.FAILED
+            session.error = "no morph report on session"
+            session.updated_at = _now_iso()
+            self._persist(session)
+            return session
+
+        session.phase = SymbiotePhase.SWAPPING
+        session.updated_at = _now_iso()
+        self._persist(session)
+
+        try:
+            morph_report = self._rebuild_morph_report(session.morph_report)
+            swap_result = await morph_engine.execute_swap(morph_report)  # type: ignore[attr-defined]
+        except Exception as exc:
+            session.phase = SymbiotePhase.FAILED
+            session.error = f"swap execution raised: {exc}"
+            session.updated_at = _now_iso()
+            self._persist(session)
+            log.exception("SymbioteCoordinator: execute_swap failed")
+            return session
+
+        session.swap_result = swap_result.to_dict()
+        if swap_result.rolled_back:
+            session.phase = SymbiotePhase.ROLLED_BACK
+            session.error = swap_result.rollback_reason or "rolled back"
+        elif swap_result.success:
+            session.phase = SymbiotePhase.COMPLETE
+        else:
+            session.phase = SymbiotePhase.FAILED
+            session.error = swap_result.error or "swap failed"
         session.updated_at = _now_iso()
         self._persist(session)
         return session
@@ -411,6 +539,9 @@ class SymbioteCoordinator:
             selected_candidate=obj.get("selected_candidate"),
             harvest_report=obj.get("harvest_report"),
             graft_report=obj.get("graft_report"),
+            morph_report=obj.get("morph_report"),
+            swap_result=obj.get("swap_result"),
+            backup_id=obj.get("backup_id"),
             started_at=obj.get("started_at", ""),
             updated_at=obj.get("updated_at", ""),
             error=obj.get("error", ""),
@@ -444,6 +575,52 @@ class SymbioteCoordinator:
             source=d.get("source", "none"),
             obligations=list(d.get("obligations") or []),
             raw_text=d.get("raw_text"),
+        )
+
+    @staticmethod
+    def _rebuild_graft_report(d: dict[str, Any] | None):
+        """Reconstruct a GraftReport-shaped object from the stored dict."""
+        from prometheus.symbiote.graft import GraftedFile, GraftReport
+        if not d:
+            return None
+        files = [
+            GraftedFile(
+                path=f.get("path", ""),
+                original_source=f.get("original_source", ""),
+                lines_added=int(f.get("lines_added", 0)),
+                provenance_header=f.get("provenance_header", ""),
+                scan_verdict=f.get("scan_verdict", "clean"),
+            )
+            for f in d.get("files_created", []) or []
+        ]
+        return GraftReport(
+            repo_full_name=d.get("repo_full_name", ""),
+            files_created=files,
+            files_modified=list(d.get("files_modified") or []),
+            tests_added=list(d.get("tests_added") or []),
+            tests_passed=bool(d.get("tests_passed", False)),
+            tests_output=d.get("tests_output", ""),
+            prometheus_md_updated=bool(d.get("prometheus_md_updated", False)),
+            timestamp=d.get("timestamp", ""),
+            aborted=bool(d.get("aborted", False)),
+            abort_reason=d.get("abort_reason", ""),
+        )
+
+    @staticmethod
+    def _rebuild_morph_report(d: dict[str, Any]):
+        """Reconstruct a MorphReport from a stored dict."""
+        from prometheus.symbiote.morph import MorphReport
+        return MorphReport(
+            backup_snapshot_id=d.get("backup_snapshot_id", ""),
+            candidate_path=d.get("candidate_path", ""),
+            graft_applied=bool(d.get("graft_applied", False)),
+            tests_passed=bool(d.get("tests_passed", False)),
+            tests_output=d.get("tests_output", ""),
+            files_changed=list(d.get("files_changed") or []),
+            new_dependencies=list(d.get("new_dependencies") or []),
+            ready_to_swap=bool(d.get("ready_to_swap", False)),
+            reason_if_not_ready=d.get("reason_if_not_ready", ""),
+            timestamp=d.get("timestamp", ""),
         )
 
     @staticmethod

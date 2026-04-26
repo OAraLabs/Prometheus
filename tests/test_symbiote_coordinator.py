@@ -223,3 +223,115 @@ class TestAbort:
         # abort again is a no-op.
         s2 = asyncio.run(coord.abort(session.session_id))
         assert s2.phase == SymbiotePhase.ABORTED
+
+
+# ---------------------------------------------------------------------------
+# Session B — MORPH / SWAP state transitions
+# ---------------------------------------------------------------------------
+
+
+def _morph_report(*, ready: bool = True, backup_id: str = "v42_test"):
+    """Build a MorphReport stand-in compatible with the engine stub."""
+    from prometheus.symbiote.morph import MorphReport
+    return MorphReport(
+        backup_snapshot_id=backup_id,
+        candidate_path="/tmp/candidate",
+        graft_applied=True,
+        tests_passed=ready,
+        tests_output="ok" if ready else "FAIL",
+        files_changed=[],
+        new_dependencies=[],
+        ready_to_swap=ready,
+        reason_if_not_ready="" if ready else "tests failed",
+        timestamp="2026-04-26T00:00:00Z",
+    )
+
+
+def _swap_result(*, success: bool = True, rolled_back: bool = False):
+    from prometheus.symbiote.morph import SwapResult
+    return SwapResult(
+        success=success and not rolled_back,
+        previous_version="v42_test",
+        new_version="post_swap_1" if success and not rolled_back else "",
+        health_check_passed=success and not rolled_back,
+        rolled_back=rolled_back,
+        rollback_reason="health failed" if rolled_back else "",
+        downtime_seconds=2.5,
+        timestamp="2026-04-26T00:01:00Z",
+    )
+
+
+class TestMorphTransitions:
+    def _drive_to_graft_approval(self, tmp_path):
+        coord = _coordinator(tmp_path)
+        # Need a non-empty graft_report so _rebuild_graft_report works.
+        graft_stub = GraftReport(
+            repo_full_name="alice/mit-tool",
+            tests_passed=True,
+            timestamp="x",
+        )
+        coord._graft.graft = AsyncMock(return_value=graft_stub)
+        session = asyncio.run(coord.start_scout("x"))
+        session = asyncio.run(coord.approve_scout(session.session_id, "alice/mit-tool"))
+        session = asyncio.run(coord.approve_harvest(session.session_id))
+        return coord, session
+
+    def test_start_morph_transitions_to_swap_approval(self, tmp_path):
+        coord, session = self._drive_to_graft_approval(tmp_path)
+        morph_engine = AsyncMock()
+        morph_engine.prepare_candidate = AsyncMock(return_value=_morph_report(ready=True))
+        new = asyncio.run(coord.start_morph(session.session_id, morph_engine))
+        assert new.phase == SymbiotePhase.AWAITING_SWAP_APPROVAL
+        assert new.morph_report is not None
+        assert new.backup_id == "v42_test"
+
+    def test_start_morph_fails_when_candidate_not_ready(self, tmp_path):
+        coord, session = self._drive_to_graft_approval(tmp_path)
+        morph_engine = AsyncMock()
+        morph_engine.prepare_candidate = AsyncMock(return_value=_morph_report(ready=False))
+        new = asyncio.run(coord.start_morph(session.session_id, morph_engine))
+        assert new.phase == SymbiotePhase.FAILED
+        assert "tests failed" in (new.error or "")
+
+    def test_start_morph_rejects_wrong_phase(self, tmp_path):
+        coord = _coordinator(tmp_path)
+        session = asyncio.run(coord.start_scout("x"))
+        morph_engine = AsyncMock()
+        with pytest.raises(RuntimeError):
+            asyncio.run(coord.start_morph(session.session_id, morph_engine))
+
+    def test_approve_swap_success_marks_complete(self, tmp_path):
+        coord, session = self._drive_to_graft_approval(tmp_path)
+        morph_engine = AsyncMock()
+        morph_engine.prepare_candidate = AsyncMock(return_value=_morph_report(ready=True))
+        morph_engine.execute_swap = AsyncMock(return_value=_swap_result(success=True))
+        session = asyncio.run(coord.start_morph(session.session_id, morph_engine))
+        new = asyncio.run(coord.approve_swap(session.session_id, morph_engine))
+        assert new.phase == SymbiotePhase.COMPLETE
+        assert new.swap_result is not None
+
+    def test_approve_swap_rolled_back(self, tmp_path):
+        coord, session = self._drive_to_graft_approval(tmp_path)
+        morph_engine = AsyncMock()
+        morph_engine.prepare_candidate = AsyncMock(return_value=_morph_report(ready=True))
+        morph_engine.execute_swap = AsyncMock(return_value=_swap_result(rolled_back=True))
+        session = asyncio.run(coord.start_morph(session.session_id, morph_engine))
+        new = asyncio.run(coord.approve_swap(session.session_id, morph_engine))
+        assert new.phase == SymbiotePhase.ROLLED_BACK
+
+    def test_approve_swap_rejects_wrong_phase(self, tmp_path):
+        coord, session = self._drive_to_graft_approval(tmp_path)
+        morph_engine = AsyncMock()
+        with pytest.raises(RuntimeError):
+            asyncio.run(coord.approve_swap(session.session_id, morph_engine))
+
+    def test_session_to_dict_includes_morph_fields(self, tmp_path):
+        coord, session = self._drive_to_graft_approval(tmp_path)
+        morph_engine = AsyncMock()
+        morph_engine.prepare_candidate = AsyncMock(return_value=_morph_report(ready=True))
+        new = asyncio.run(coord.start_morph(session.session_id, morph_engine))
+        d = new.to_dict()
+        assert "morph_report" in d
+        assert d["backup_id"] == "v42_test"
+        # Phase serialized as string.
+        assert d["phase"] == "awaiting_swap_approval"
