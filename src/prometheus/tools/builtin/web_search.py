@@ -30,7 +30,14 @@ class WebSearchTool(BaseTool):
     """Search the web via DuckDuckGo and return top results."""
 
     name = "web_search"
-    description = "Search the web and return top results with titles, URLs, and snippets."
+    description = (
+        "Search the web via DuckDuckGo and return top results with titles, "
+        "URLs, and snippets. Use this when you don't know a specific URL: "
+        "finding documentation, looking up current facts (versions, prices, "
+        "news), discovering libraries or repositories, comparing options, or "
+        "researching unfamiliar topics. Once you have a URL from search "
+        "results, use web_fetch to read its full content. No API key required."
+    )
     input_model = WebSearchInput
 
     def is_read_only(self, arguments: WebSearchInput) -> bool:

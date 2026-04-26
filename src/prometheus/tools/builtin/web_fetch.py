@@ -30,7 +30,12 @@ class WebFetchTool(BaseTool):
     """Fetch one web page and return compact readable text."""
 
     name = "web_fetch"
-    description = "Fetch a web page by URL and return its text content."
+    description = (
+        "Fetch any URL (web page, GitHub repo, API endpoint, raw file) and "
+        "return its text content. Use this for: fetching GitHub repos, reading "
+        "documentation, calling JSON APIs, reading any public URL. Handles "
+        "404/403/private URLs gracefully without crashing."
+    )
     input_model = WebFetchInput
 
     def is_read_only(self, arguments: WebFetchInput) -> bool:

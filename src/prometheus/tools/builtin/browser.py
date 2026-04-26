@@ -49,9 +49,10 @@ class BrowserTool(BaseTool):
 
     name = "browser"
     description = (
-        "Automate a headless Chromium browser. Actions: navigate (load URL), "
-        "snapshot (get page text), click (CSS selector), type (text into selector), "
-        "scroll (up/down), close."
+        "Headless browser automation for pages that require JavaScript "
+        "rendering, login flows, or interactive elements. Use web_fetch "
+        "instead for simple URL fetching — only use browser when the page "
+        "won't work without JavaScript."
     )
     input_model = BrowserInput
 
