@@ -26,6 +26,11 @@ from prometheus.tools.builtin.download_file import (
     _is_safe_url,
     _resolve_destination,
 )
+from prometheus.tools.builtin.web_fetch import (
+    WebFetchInput,
+    WebFetchTool,
+    _html_to_text,
+)
 from prometheus.tools.builtin.youtube_transcript import (
     YouTubeTranscriptInput,
     YouTubeTranscriptTool,
@@ -222,6 +227,94 @@ class TestYouTubeToolBehavior:
         schema = tool.to_openai_schema()
         assert schema["type"] == "function"
         assert schema["function"]["name"] == "youtube_transcript"
+
+
+# ===========================================================================
+# WebFetchTool — HTML extractor regression tests
+# ===========================================================================
+
+
+class TestWebFetchHtmlExtractor:
+    def test_inline_tags_no_space_insertion(self):
+        """Inline tags (code, span, a, em, ...) must NOT insert separators
+        when stripped, or dotted names like ``asyncio.gather`` get split into
+        ``asyncio . gather`` which the model can't keyword-match.
+        """
+        html = (
+            "<html><body><p>"
+            "Use <code>asyncio.gather</code> to run coroutines."
+            "</p><p>"
+            "Or write <span>asyncio</span><span>.</span><span>gather</span>"
+            "(...) explicitly."
+            "</p><p>"
+            "See the <a href='/x'>asyncio.gather</a> reference."
+            "</p></body></html>"
+        )
+        out = _html_to_text(html)
+        # Three different inline-tag arrangements all produce the glued name.
+        assert out.count("asyncio.gather") == 3
+        # The buggy regex stripper would have produced "asyncio . gather".
+        assert "asyncio . gather" not in out
+
+    def test_article_tag_preferred_over_body(self):
+        """When <article> exists its content wins; surrounding nav/footer
+        in the body is dropped even though it would be visible to a naive
+        full-body strip.
+        """
+        html = (
+            "<html><body>"
+            "<nav>Site nav: Home About Contact</nav>"
+            "<header>Banner: SUBSCRIBE NOW</header>"
+            "<article>"
+            "<h1>Real article title</h1>"
+            "<p>The actual article body explains how asyncio.gather works "
+            "by scheduling coroutines concurrently.</p>"
+            "</article>"
+            "<footer>Copyright 2026 — all rights reserved boilerplate</footer>"
+            "</body></html>"
+        )
+        out = _html_to_text(html)
+        assert "Real article title" in out
+        assert "actual article body" in out
+        assert "asyncio.gather" in out
+        # Nav/header/footer must be excluded.
+        assert "Site nav" not in out
+        assert "SUBSCRIBE NOW" not in out
+        assert "Copyright 2026" not in out
+
+    def test_div_role_main_keeps_capturing_through_inner_divs(self):
+        """A target-tag match must track which open tag actually matched
+        rather than decrementing on every same-tag close. Pages like the
+        Python docs wrap <div role="main"> around hundreds of inner
+        non-matching <div>s; before this fix the first inner </div> would
+        drop us out of capture mode and we'd return ~500 chars of header
+        instead of the actual content.
+        """
+        # Build a long page with a single <div role="main"> that wraps
+        # many inner <div>s, plus a misleading inner <div role="main"> a
+        # naive matcher could double-count.
+        inner = "".join(
+            f"<div class=section><p>Section {i} mentions asyncio.gather.</p></div>"
+            for i in range(20)
+        )
+        html = (
+            "<html><body>"
+            "<nav>nav junk</nav>"
+            f'<div class="body" role="main">{inner}</div>'
+            "<footer>footer junk</footer>"
+            "</body></html>"
+        )
+        out = _html_to_text(html)
+        # All 20 inner sections should be captured — not just one.
+        assert out.count("asyncio.gather") == 20, (
+            f"Expected 20 'asyncio.gather' hits, got "
+            f"{out.count('asyncio.gather')} — early exit from capture mode?"
+        )
+        # And the dotted name must stay glued.
+        assert "asyncio . gather" not in out
+        # Nav/footer remain excluded.
+        assert "nav junk" not in out
+        assert "footer junk" not in out
 
 
 # ===========================================================================
