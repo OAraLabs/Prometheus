@@ -91,6 +91,38 @@ class TestVibeTaskStructure:
         yt = next(t for t in VIBE_TASKS if t["task_id"] == "19")
         assert yt.get("skip_if_tool_missing") == "youtube_transcript"
 
+    def test_notes_paths_are_absolute_in_messages(self):
+        """Tasks with notes-dir paths must hand the model an absolute path.
+        Gemma 26B can't reliably expand ``~`` and sometimes guesses
+        ``/home/user/`` — handing it the absolute path avoids that failure.
+        """
+        for task in VIBE_TASKS:
+            assert "~/prometheus-notes/" not in task["message"], (
+                f"Task {task['task_id']} still has ~/prometheus-notes/ in "
+                f"message — model would have to guess HOME"
+            )
+            for check in task["auto_checks"]:
+                value = check.get("value")
+                if isinstance(value, str):
+                    assert "~/prometheus-notes/" not in value, (
+                        f"Task {task['task_id']} auto-check has unexpanded path"
+                    )
+            ef = task.get("expect_file")
+            if isinstance(ef, str):
+                assert "~/prometheus-notes/" not in ef, (
+                    f"Task {task['task_id']} expect_file unexpanded"
+                )
+
+    def test_notes_paths_point_to_real_home(self):
+        """The substitution should produce a path under the actual user home."""
+        from pathlib import Path
+        home_prefix = str(Path.home() / "prometheus-notes") + "/"
+        # At least one save task should now have an absolutized path.
+        save_tasks = [t for t in VIBE_TASKS if t["category"] == "save"]
+        assert any(home_prefix in t["message"] for t in save_tasks), (
+            f"No save task contains the absolutized notes path {home_prefix}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Circuit-breaker detection

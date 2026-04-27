@@ -525,7 +525,36 @@ class VibeCheckRunner:
 # ---------------------------------------------------------------------------
 
 
-VIBE_TASKS: list[dict[str, Any]] = [
+def _absolutize_notes_paths(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Replace ``~/prometheus-notes/`` with the absolute notes dir in every
+    task's message, auto-checks, and expect_file. The model can't reliably
+    expand ``~`` (Gemma 26B sometimes guesses ``/home/user/`` instead of the
+    real username), so we hand it the resolved path up front. The auto-check
+    paths are absolutized too so a single source of truth governs both.
+    """
+    needle = "~/prometheus-notes/"
+    abs_prefix = str(VIBE_NOTES_DIR) + "/"
+    out: list[dict[str, Any]] = []
+    for task in tasks:
+        new = dict(task)
+        if needle in new["message"]:
+            new["message"] = new["message"].replace(needle, abs_prefix)
+        new_checks: list[dict[str, Any]] = []
+        for check in new["auto_checks"]:
+            value = check.get("value")
+            if isinstance(value, str) and needle in value:
+                check = dict(check)
+                check["value"] = value.replace(needle, abs_prefix)
+            new_checks.append(check)
+        new["auto_checks"] = new_checks
+        ef = new.get("expect_file")
+        if isinstance(ef, str) and needle in ef:
+            new["expect_file"] = ef.replace(needle, abs_prefix)
+        out.append(new)
+    return out
+
+
+_RAW_VIBE_TASKS: list[dict[str, Any]] = [
     # ── Category 1: lookup ────────────────────────────────────────────
     {
         "task_id": "01",
@@ -850,6 +879,9 @@ VIBE_TASKS: list[dict[str, Any]] = [
         "time_budget_seconds": 180,
     },
 ]
+
+# Public list — paths absolutized so the model never has to guess HOME.
+VIBE_TASKS: list[dict[str, Any]] = _absolutize_notes_paths(_RAW_VIBE_TASKS)
 
 
 # ---------------------------------------------------------------------------
