@@ -254,3 +254,68 @@ def test_store_context_manager():
             store.persist_memory("person", "Ingrid", "data scientist", 0.85)
             results = store.search_memories(entity="Ingrid")
             assert len(results) == 1
+
+
+# ---------------------------------------------------------------------------
+# ObsidianWriter — write boundary (TRUST-CONTEXT)
+# ---------------------------------------------------------------------------
+
+
+class TestObsidianWriterBoundary:
+    """ObsidianWriter must refuse vault paths outside the allow-list.
+
+    The default allow-list is [~/.prometheus] so the autonomous extractor
+    can only write to MEMORY.md / wiki paths under the prometheus home.
+    """
+
+    def test_default_rejects_vault_outside_prometheus(self, tmp_path):
+        from prometheus.memory.extractor import ObsidianWriter
+        # tmp_path is NOT under ~/.prometheus, so default allow-list rejects it
+        with pytest.raises(ValueError, match="not under any allowed root"):
+            ObsidianWriter(tmp_path / "vault")
+
+    def test_explicit_allow_list_lets_test_paths_through(self, tmp_path):
+        from prometheus.memory.extractor import ObsidianWriter
+        # Explicitly widen the allow-list to include tmp_path
+        writer = ObsidianWriter(tmp_path / "vault", allowed_roots=[tmp_path])
+        # Memory subdir created under the configured vault
+        assert (tmp_path / "vault" / "Memory").exists()
+
+    def test_traversal_in_vault_path_rejected(self, tmp_path):
+        from prometheus.memory.extractor import ObsidianWriter
+        # Try to escape via .. — should be rejected even when literal string
+        # starts inside the allowed root
+        sneaky = str(tmp_path / "allowed") + "/../escape"
+        with pytest.raises(ValueError):
+            ObsidianWriter(sneaky, allowed_roots=[tmp_path / "allowed"])
+
+    def test_write_fact_succeeds_inside_allowed_vault(self, tmp_path):
+        from prometheus.memory.extractor import ObsidianWriter
+        writer = ObsidianWriter(tmp_path / "vault", allowed_roots=[tmp_path])
+        writer.write_fact({
+            "entity_name": "Dr. Pham",
+            "entity_type": "person",
+            "fact": "nephrologist candidate",
+            "confidence": 0.95,
+            "tags": [],
+        })
+        # Note landed inside the configured vault
+        notes = list((tmp_path / "vault" / "Memory").glob("*.md"))
+        assert len(notes) == 1
+
+    def test_write_fact_with_traversal_entity_name_stays_in_vault(self, tmp_path):
+        """Defense-in-depth: entity_name with path tricks can't escape vault."""
+        from prometheus.memory.extractor import ObsidianWriter
+        writer = ObsidianWriter(tmp_path / "vault", allowed_roots=[tmp_path])
+        writer.write_fact({
+            "entity_name": "../../etc/passwd",  # tries to escape
+            "fact": "leaked",
+            "confidence": 1.0,
+        })
+        # Existing safe_name regex strips slashes; the file lands in vault/Memory/
+        # with a sanitized filename. Nothing escaped.
+        memory_dir = tmp_path / "vault" / "Memory"
+        assert memory_dir.exists()
+        # All notes are under memory_dir
+        for p in memory_dir.iterdir():
+            assert tmp_path in p.resolve().parents

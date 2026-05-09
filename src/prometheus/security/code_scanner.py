@@ -23,6 +23,12 @@ Flagged constructs:
 A "dangerous" verdict means callers should refuse the input. "suspicious"
 findings are reported but do NOT block.
 
+The ``scan_markdown_content`` method extracts ``python``/``py`` fenced
+code blocks from a markdown document and runs the same AST scan on each
+block. Used by GEPA and SkillRefiner before promoting AI-generated
+skill variants — a self-improving loop that can write arbitrary code
+into skills needs the scanner.
+
 Limitations:
   • Python only (other languages return CLEAN).
   • AST-based — won't catch obfuscated equivalents like
@@ -34,6 +40,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -99,6 +106,17 @@ _SUSPICIOUS_AT_MODULE_SCOPE_MODULES: frozenset[str] = frozenset({
     "ftplib", "telnetlib", "paramiko",
 })
 
+# Python fenced code blocks in markdown. Matches:
+#   ```python\n<code>\n```
+#   ```py\n<code>\n```
+# Other language tags (```bash, ```yaml, ```json, ...) and untagged
+# fences pass through — they're not Python and the AST scanner can't
+# meaningfully analyze them.
+_PY_FENCED_BLOCK_RE = re.compile(
+    r"```(?:python|py)\s*\n(.*?)\n```",
+    re.DOTALL | re.IGNORECASE,
+)
+
 
 class DangerousCodeScanner:
     """AST-based scanner. Returns a ``ScanResult`` per file."""
@@ -152,7 +170,54 @@ class DangerousCodeScanner:
                 )],
                 file_path=str(path),
             )
+        if str(path).endswith(".md"):
+            return self.scan_markdown_content(content, str(path))
         return self.scan_content(content, str(path))
+
+    def scan_markdown_content(
+        self,
+        content: str,
+        file_path: str | None = None,
+    ) -> ScanResult:
+        """Extract Python fenced code blocks from markdown and scan each.
+
+        Only ``​```python`` and ``​```py`` blocks are scanned — bash, yaml,
+        json, etc. fenced blocks pass through clean (the AST scanner is
+        Python-only). A skill markdown with no Python code blocks is
+        always CLEAN from a code-execution standpoint; prompt-injection
+        risks are out of scope for an AST scanner.
+
+        Used by GEPA's promotion gate and SkillRefiner before writing
+        AI-generated skill variants to disk.
+        """
+        blocks = _PY_FENCED_BLOCK_RE.findall(content)
+        if not blocks:
+            return ScanResult(verdict=ScanVerdict.CLEAN, file_path=file_path)
+
+        all_findings: list[ScanFinding] = []
+        for i, block in enumerate(blocks):
+            # Pass file_path=None so scan_content runs the AST pass instead
+            # of short-circuiting on the .md extension. Tag findings with
+            # the block index so callers can locate the offender.
+            sub = self.scan_content(block, file_path=None)
+            for f in sub.findings:
+                tagged_rule = f"md_block_{i}_{f.rule}"
+                all_findings.append(ScanFinding(
+                    severity=f.severity,
+                    rule=tagged_rule,
+                    line=f.line,
+                    detail=f.detail,
+                ))
+
+        if any(f.severity == "dangerous" for f in all_findings):
+            verdict = ScanVerdict.DANGEROUS
+        elif all_findings:
+            verdict = ScanVerdict.SUSPICIOUS
+        else:
+            verdict = ScanVerdict.CLEAN
+        return ScanResult(
+            verdict=verdict, findings=all_findings, file_path=file_path
+        )
 
     # ------------------------------------------------------------------
     # AST visitors

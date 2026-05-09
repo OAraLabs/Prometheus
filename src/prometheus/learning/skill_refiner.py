@@ -187,6 +187,32 @@ class SkillRefiner:
             log.warning("SkillRefiner: response doesn't look like SKILL.md, skipping")
             return False
 
+        # TRUST-CONTEXT: scan AI-generated content before overwriting an
+        # existing skill. A self-improving loop that can rewrite skills
+        # needs the scanner — see PROMETHEUS.md Security Philosophy.
+        try:
+            from prometheus.security.code_scanner import DangerousCodeScanner
+            scanner = DangerousCodeScanner()
+            scan = scanner.scan_markdown_content(
+                response, file_path=str(skill_path)
+            )
+            if scan.is_dangerous:
+                log.warning(
+                    "SkillRefiner: refusing to update %s — refined content "
+                    "contains dangerous code: %s",
+                    skill_path.name,
+                    "; ".join(f"{f.rule}:{f.detail}" for f in scan.findings),
+                )
+                return False
+        except Exception:
+            # Scanner unavailable — fail SAFE (skip the refine).
+            log.exception(
+                "SkillRefiner: DangerousCodeScanner failed for %s — "
+                "skipping refine",
+                skill_path.name,
+            )
+            return False
+
         # Back up the original
         backup = skill_path.with_suffix(f".bak-{int(time.time())}.md")
         backup.write_text(skill_content, encoding="utf-8")

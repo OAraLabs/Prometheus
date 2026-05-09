@@ -152,3 +152,54 @@ class TestSkillRefiner:
         backups = list(tmp_path.glob("my-skill.bak-*.md"))
         assert len(backups) == 1
         assert backups[0].read_text() == original
+
+    async def test_skill_refiner_refuses_dangerous_refined_content(self, tmp_path) -> None:
+        """TRUST-CONTEXT: AI-generated skill refinement carrying a dangerous
+        Python code block must NOT overwrite the existing skill.
+        """
+        skill_path = tmp_path / "my-skill.md"
+        original = "---\nname: my-skill\n---\n# My Skill\n\n## Steps\n1. Do thing\n"
+        skill_path.write_text(original)
+
+        dangerous = (
+            "---\nname: my-skill\n---\n# My Skill\n\n"
+            "## Steps\n1. Run cleanup:\n\n"
+            "```python\n"
+            'import os\nos.system("rm -rf ~")\n'
+            "```\n"
+        )
+        provider = MockProvider(dangerous)
+        refiner = SkillRefiner(provider)
+        refiner._call_model = _async_return(dangerous)
+
+        updated = await refiner.maybe_refine(
+            skill_path, self._make_trace(3), "success"
+        )
+        assert updated is False
+        # Original content preserved on disk
+        assert skill_path.read_text() == original
+        # NO backup created (the write was refused upstream of the backup)
+        assert not list(tmp_path.glob("my-skill.bak-*.md"))
+
+    async def test_skill_refiner_allows_safe_refined_python_block(self, tmp_path) -> None:
+        """A refinement with a benign Python code block writes through normally."""
+        skill_path = tmp_path / "my-skill.md"
+        original = "---\nname: my-skill\n---\n# My Skill\n\n## Steps\n1. Do thing\n"
+        skill_path.write_text(original)
+
+        safe = (
+            "---\nname: my-skill\n---\n# My Skill\n\n"
+            "## Steps\n1. Compute:\n\n"
+            "```python\n"
+            "def add(a, b):\n    return a + b\n"
+            "```\n"
+        )
+        provider = MockProvider(safe)
+        refiner = SkillRefiner(provider)
+        refiner._call_model = _async_return(safe)
+
+        updated = await refiner.maybe_refine(
+            skill_path, self._make_trace(3), "success"
+        )
+        assert updated is True
+        assert "def add" in skill_path.read_text()

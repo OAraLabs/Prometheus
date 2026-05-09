@@ -7,6 +7,19 @@ Changes from original:
   - Retains identical extraction prompt, entity categories, confidence scoring,
     deduplication logic, and batch size (10-20 events per call)
   - Dual-writes to SQLite memories table + optional Obsidian vault
+
+TRUST-CONTEXT: this extractor is an autonomous, model-driven write path
+— there is no human in the loop to sanction each fact. Its file-write
+surface is therefore restricted to:
+  - ``~/.prometheus/MEMORY.md`` (the pointer index)
+  - ``~/.prometheus/wiki/`` (entity pages, written via WikiCompiler)
+  - SQLite (``MemoryStore``, no file path concern)
+
+The optional :class:`ObsidianWriter` enforces this boundary on its
+``vault_path`` at construction time — passing a vault outside
+``~/.prometheus/`` raises ``ValueError``. Callers who want to dual-write
+to a real Obsidian vault outside ``~/.prometheus/`` must opt in
+explicitly via ``ObsidianWriter(vault_path, allowed_roots=[...])``.
 """
 
 from __future__ import annotations
@@ -258,22 +271,58 @@ class MemoryExtractor:
 # ------------------------------------------------------------------
 
 
+def _default_extractor_write_roots() -> list[Path]:
+    """Default allow-list for autonomous memory writes.
+
+    Only paths under ``~/.prometheus/`` are permitted by default. This
+    captures both ``~/.prometheus/MEMORY.md`` (pointer index) and
+    ``~/.prometheus/wiki/`` (entity pages).
+    """
+    return [Path.home() / ".prometheus"]
+
+
 class ObsidianWriter:
     """Write extracted memory facts to an Obsidian vault for human readability.
 
     Each entity gets its own markdown note under ``vault_path/Memory/<entity_name>.md``.
+
+    TRUST-CONTEXT: ``vault_path`` must resolve under one of
+    ``allowed_roots`` (default: ``[~/.prometheus]``). Passing a vault
+    outside the allow-list raises ``ValueError`` at construction. Callers
+    who want a vault elsewhere must pass ``allowed_roots`` explicitly so
+    the boundary widening is recorded at the call site.
     """
 
-    def __init__(self, vault_path: str | Path) -> None:
-        self._vault = Path(vault_path).expanduser()
+    def __init__(
+        self,
+        vault_path: str | Path,
+        *,
+        allowed_roots: list[str | Path] | None = None,
+    ) -> None:
+        from prometheus.security.path_guard import assert_path_under_roots
+
+        roots = allowed_roots if allowed_roots is not None else \
+            _default_extractor_write_roots()
+        # Validates and resolves; raises ValueError if vault_path escapes.
+        self._vault = assert_path_under_roots(vault_path, roots)
+        self._allowed_roots = [
+            Path(r).expanduser().resolve() for r in roots
+        ]
         self._memory_dir = self._vault / "Memory"
         self._memory_dir.mkdir(parents=True, exist_ok=True)
 
     def write_fact(self, fact: dict) -> None:
         """Append a fact to the entity's note in the vault."""
+        from prometheus.security.path_guard import assert_path_under_roots
+
         entity_name = fact.get("entity_name", "Unknown")
         safe_name = re.sub(r'[<>:"/\\|?*]', "_", entity_name)
         note_path = self._memory_dir / f"{safe_name}.md"
+        # Defense-in-depth: even though safe_name strips path separators,
+        # re-validate the resolved write path lands inside the allow-list.
+        # Cheap, eliminates a whole class of escape attempts via novel
+        # entity_name shapes.
+        assert_path_under_roots(note_path, self._allowed_roots)
 
         timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
         confidence = fact.get("confidence", 0.0)

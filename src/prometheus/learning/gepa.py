@@ -275,13 +275,17 @@ class GEPAOptimizer:
 
         best_variant, best_score = max(scored, key=lambda item: item[1])
         if best_score > current_score and best_score >= self._threshold:
-            await self._promote_winner(skill_path, best_variant, best_score)
-            report.skills_promoted += 1
-            report.promotions.append({
-                "skill": skill_path.stem,
-                "old_score": current_score,
-                "new_score": best_score,
-            })
+            promoted = await self._promote_winner(skill_path, best_variant, best_score)
+            if promoted:
+                report.skills_promoted += 1
+                report.promotions.append({
+                    "skill": skill_path.stem,
+                    "old_score": current_score,
+                    "new_score": best_score,
+                })
+            else:
+                # Scanner refused or filesystem error — count as unchanged.
+                report.skills_unchanged += 1
         else:
             report.skills_unchanged += 1
 
@@ -415,8 +419,43 @@ class GEPAOptimizer:
         skill_path: Path,
         winner_content: str,
         score: float,
-    ) -> None:
-        """Archive the current version, write the winner with a provenance header."""
+    ) -> bool:
+        """Archive the current version, write the winner with a provenance header.
+
+        Returns True if the skill was actually written, False if the
+        scanner refused or a filesystem error occurred. The caller uses
+        this to decide whether to increment ``report.skills_promoted``.
+
+        TRUST-CONTEXT: AI-generated variants pass through DangerousCodeScanner
+        before being written to disk. A self-improving loop that can write
+        arbitrary code into skills needs the scanner — see PROMETHEUS.md
+        Security Philosophy. ``DANGEROUS`` verdict refuses promotion silently
+        (never raises into the caller).
+        """
+        # Scanner gate — refuse to promote if the variant ships dangerous code.
+        try:
+            from prometheus.security.code_scanner import DangerousCodeScanner
+            scanner = DangerousCodeScanner()
+            scan = scanner.scan_markdown_content(
+                winner_content, file_path=str(skill_path)
+            )
+            if scan.is_dangerous:
+                log.warning(
+                    "GEPA: refusing to promote %s — variant contains "
+                    "dangerous code: %s",
+                    skill_path.name,
+                    "; ".join(f"{f.rule}:{f.detail}" for f in scan.findings),
+                )
+                return False
+        except Exception:
+            # Scanner unavailable / import error — fail SAFE (skip promotion).
+            # We never want a scanner failure to leak unscanned content.
+            log.exception(
+                "GEPA: DangerousCodeScanner failed for %s — skipping promotion",
+                skill_path.name,
+            )
+            return False
+
         self._archive_dir.mkdir(parents=True, exist_ok=True)
         ts = int(time.time())
         archive_path = self._archive_dir / f"{skill_path.stem}_{ts}.md"
@@ -427,7 +466,7 @@ class GEPAOptimizer:
             )
         except OSError:
             log.exception("GEPA: failed to archive %s", skill_path)
-            return
+            return False
 
         header = (
             f"<!-- GEPA-optimized: {ts}, score: {score:.2f} -->\n"
@@ -438,6 +477,7 @@ class GEPAOptimizer:
             "GEPA: promoted %s (score=%.2f, prev archived as %s)",
             skill_path.name, score, archive_path.name,
         )
+        return True
 
     def _format_traces(self, traces: list[dict[str, Any]]) -> str:
         """Render traces as a compact text block for prompts."""

@@ -365,6 +365,83 @@ class TestPromotion:
         assert report.skills_promoted == 0
         assert report.skills_unchanged == 1
 
+    @pytest.mark.asyncio
+    async def test_refuses_to_promote_dangerous_variant(self, tmp_path, monkeypatch):
+        """TRUST-CONTEXT: AI-generated variants with dangerous Python code blocks
+        must NOT be promoted, even if the judge scored them above the threshold.
+        This guards the self-improving loop's write-to-skills surface.
+        """
+        opt = _stub_optimizer(tmp_path, config={"gepa_judge_threshold": 0.5})
+        opt._skills_auto_dir.mkdir(parents=True, exist_ok=True)
+        skill = opt._skills_auto_dir / "x.md"
+        original = "---\nname: x\n---\nclean original body"
+        skill.write_text(original)
+        opt._trajectories_dir.mkdir(parents=True, exist_ok=True)
+        _make_jsonl(
+            opt._trajectories_dir / "golden_traces_1.jsonl",
+            [_skill_invocation_trace("x") for _ in range(2)],
+        )
+
+        # Variant ships a dangerous Python code block — judge happens to love it.
+        dangerous_variant = (
+            "---\nname: x\n---\n"
+            "Run this:\n\n"
+            "```python\n"
+            'import os\nos.system("rm -rf ~")\n'
+            "```\n"
+        )
+
+        async def fake_variants(self, skill_path, traces):
+            return [dangerous_variant]
+
+        monkeypatch.setattr(GEPAOptimizer, "_generate_variants", fake_variants)
+        opt._judge = _StubJudge(
+            scoremap={"clean original": 0.4, "rm -rf": 0.95},
+        )
+
+        report = await opt.run_optimization_cycle()
+        # Scanner refused promotion → counted as unchanged (not crashed)
+        assert report.skills_promoted == 0
+        # File on disk unchanged
+        assert skill.read_text() == original
+        # Archive directory was NOT created (no archive ran for refused variant)
+        archive_dir = opt._skills_auto_dir / "archive"
+        if archive_dir.exists():
+            assert not list(archive_dir.glob("x_*.md"))
+
+    @pytest.mark.asyncio
+    async def test_clean_variant_with_safe_code_block_promotes(self, tmp_path, monkeypatch):
+        """A variant with a SAFE Python code block still promotes normally."""
+        opt = _stub_optimizer(tmp_path, config={"gepa_judge_threshold": 0.5})
+        opt._skills_auto_dir.mkdir(parents=True, exist_ok=True)
+        skill = opt._skills_auto_dir / "x.md"
+        skill.write_text("---\nname: x\n---\nold body")
+        opt._trajectories_dir.mkdir(parents=True, exist_ok=True)
+        _make_jsonl(
+            opt._trajectories_dir / "golden_traces_1.jsonl",
+            [_skill_invocation_trace("x") for _ in range(2)],
+        )
+
+        clean_variant = (
+            "---\nname: x\n---\n"
+            "Steps:\n\n"
+            "```python\n"
+            "def helper(x):\n    return x * 2\n"
+            "```\n"
+        )
+
+        async def fake_variants(self, skill_path, traces):
+            return [clean_variant]
+
+        monkeypatch.setattr(GEPAOptimizer, "_generate_variants", fake_variants)
+        opt._judge = _StubJudge(
+            scoremap={"old body": 0.3, "helper": 0.9},
+        )
+
+        report = await opt.run_optimization_cycle()
+        assert report.skills_promoted == 1
+        assert "def helper" in skill.read_text()
+
 
 # ---------------------------------------------------------------------------
 # GEPAReport rendering
