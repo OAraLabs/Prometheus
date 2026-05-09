@@ -2,7 +2,15 @@
 
 Sprint 4: implements the 4-level trust model from prometheus.yaml security config.
 Sprint 11: adds audit logging + exfiltration detection.
-Integrates with the permission_checker slot in LoopContext (agent_loop.py:63).
+Sprint TRUST-CONTEXT: ``origin`` parameter distinguishes user-initiated calls
+(Telegram, CLI, Web — the user is in the loop and asked for this) from
+background/automated calls (SENTINEL, GEPA, AutoDream, smoke-tests, cron —
+no human sanction in the moment). User-initiated bash commands skip the
+ExfiltrationDetector and the network/install approve-patterns; everything
+else still applies for both origins (always-blocked patterns, denied_paths,
+denied_commands, write_file workspace gate). The origin is derived from
+``LoopContext.session_id`` per the convention at agent_loop.py:538.
+Integrates with the permission_checker slot in LoopContext.
 """
 
 from __future__ import annotations
@@ -58,6 +66,42 @@ _APPROVE_BASH_PATTERNS: list[str] = [
     r"pip\s+install",
     r"npm\s+install",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Origin classification
+# ---------------------------------------------------------------------------
+
+ORIGIN_USER = "user"
+ORIGIN_SYSTEM = "system"
+
+# Session-id prefixes / values that indicate a real human is in the loop.
+# These match the convention documented at agent_loop.py:538-542
+# (Telegram: "telegram:<chat_id>", Slack: "slack:<channel_id>", etc.).
+_USER_SESSION_PREFIXES: tuple[str, ...] = (
+    "telegram:", "slack:", "discord:", "matrix:", "signal:",
+)
+_USER_SESSION_LITERALS: frozenset[str] = frozenset({"cli", "web"})
+
+
+def origin_from_session_id(session_id: str | None) -> str:
+    """Classify a session_id as user-initiated or system/background.
+
+    Returns ``"user"`` when a real human is in the loop (Telegram chat,
+    CLI prompt, Web bridge, etc.) so they can sanction the next tool call.
+    Returns ``"system"`` for anything else — the reserved ``"system"``
+    sentinel, ``None``, SYMBIOTE/GEPA/SENTINEL UUIDs, smoke-tests,
+    benchmarks, cron — none of which represent a present user.
+    The default is ``"system"`` (the safer/stricter classification) for
+    any unrecognized value.
+    """
+    if not session_id or session_id == "system":
+        return ORIGIN_SYSTEM
+    if session_id in _USER_SESSION_LITERALS:
+        return ORIGIN_USER
+    if any(session_id.startswith(p) for p in _USER_SESSION_PREFIXES):
+        return ORIGIN_USER
+    return ORIGIN_SYSTEM
 
 
 # ---------------------------------------------------------------------------
@@ -230,13 +274,29 @@ class SecurityGate:
         is_read_only: bool = False,
         file_path: str | None = None,
         command: str | None = None,
+        origin: str = ORIGIN_SYSTEM,
     ) -> PermissionDecision:
         """Evaluate whether a tool call is permitted.
 
         Called by agent_loop._execute_tool_call() with keyword args.
+
+        ``origin``:
+          ``"user"``    — request comes from a present human (Telegram, CLI,
+                          Web). Bash commands skip ExfiltrationDetector and
+                          network/install approve-patterns. Always-blocked
+                          patterns, denied_commands, denied_paths, and the
+                          write_file workspace gate STILL apply.
+          ``"system"``  — automated/background (SENTINEL, GEPA, AutoDream,
+                          smoke-tests, cron, SYMBIOTE phases). Full
+                          restrictions apply. This is the safer default.
         """
-        # Sprint 11: exfiltration check (runs in every mode, even AUTONOMOUS)
-        if self._exfil and tool_name == "bash" and command:
+        is_user = (origin == ORIGIN_USER)
+
+        # Sprint 11: exfiltration check (system origin only — when the user
+        # is not in the loop, network+sensitive-file combos are still blocked.
+        # User-initiated bash bypasses exfil per the trust model: a present
+        # human is responsible for what they ask the agent to send.)
+        if not is_user and self._exfil and tool_name == "bash" and command:
             exfil_match = self._exfil.check_command(command)
             if exfil_match:
                 reason = f"Exfiltration blocked: {exfil_match.reason}"
@@ -252,21 +312,22 @@ class SecurityGate:
             self._audit_log(tool_name, AuditDecision.ALLOW, "Auto-allowed (autonomous)")
             return PermissionDecision.allow(level=TrustLevel.AUTONOMOUS)
 
-        # --- LEVEL 0: check always-blocked patterns ---
+        # --- LEVEL 0: check always-blocked patterns (both origins) ---
         if command:
             reason = self._check_blocked_command(command)
             if reason:
                 self._audit_log(tool_name, AuditDecision.DENY, reason, command)
                 return PermissionDecision.deny(reason)
 
-        # --- Check denied_paths ---
+        # --- Check denied_paths (both origins) ---
         if file_path:
             reason = self._check_denied_path(file_path)
             if reason:
                 self._audit_log(tool_name, AuditDecision.DENY, reason, file_path)
                 return PermissionDecision.deny(reason)
 
-        # --- LEVEL 1: write_file / edit_file outside workspace → APPROVE ---
+        # --- LEVEL 1: write_file / edit_file outside workspace → APPROVE
+        # (both origins — this is the path-traversal guarantee) ---
         if tool_name in _APPROVE_TOOLS:
             if self._mode == PermissionMode.STRICT:
                 reason = f"{tool_name} requires confirmation in strict mode"
@@ -277,8 +338,9 @@ class SecurityGate:
                 self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason)
                 return PermissionDecision.approve(reason)
 
-        # --- LEVEL 1: bash with network/push commands → APPROVE ---
-        if tool_name == "bash" and command:
+        # --- LEVEL 1: bash with network/install commands → APPROVE
+        # (system origin only — user-initiated curl/pip/wget/ssh allowed) ---
+        if tool_name == "bash" and command and not is_user:
             if self._is_approve_pattern(command):
                 if self._mode != PermissionMode.AUTONOMOUS:
                     reason = f"Command requires approval: {command!r}"
@@ -287,7 +349,8 @@ class SecurityGate:
 
         # --- LEVEL 2 / 3: allow ---
         level = TrustLevel.AUTO if not is_read_only else TrustLevel.AUTO
-        self._audit_log(tool_name, AuditDecision.ALLOW, "Auto-allowed")
+        reason = "Auto-allowed (user-initiated)" if is_user else "Auto-allowed"
+        self._audit_log(tool_name, AuditDecision.ALLOW, reason)
         return PermissionDecision.allow(level=level)
 
     # ------------------------------------------------------------------
@@ -302,6 +365,11 @@ class SecurityGate:
     ) -> PermissionDecision:
         """Evaluate a tool call from a raw tool_input dict.
 
+        ``context`` may carry ``"origin"`` (``"user"`` or ``"system"``) or
+        ``"session_id"`` from which an origin is derived. Defaults to
+        ``"system"`` for backward compatibility with callers that only pass
+        the bare two-arg shape (existing acceptance test).
+
         Compatible with sprint acceptance test:
             result = gate.pre_tool_use('bash', {'command': 'rm -rf /'}, {})
             assert result.action == 'DENY'
@@ -312,11 +380,17 @@ class SecurityGate:
             or tool_input.get("file_path")
             or tool_input.get("filepath")
         )
+        origin = context.get("origin") if isinstance(context, dict) else None
+        if not origin:
+            origin = origin_from_session_id(
+                context.get("session_id") if isinstance(context, dict) else None
+            )
         return self.evaluate(
             tool_name,
             is_read_only=False,
             file_path=str(file_path) if file_path else None,
             command=str(command) if command else None,
+            origin=origin,
         )
 
     # ------------------------------------------------------------------

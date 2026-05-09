@@ -1399,16 +1399,38 @@ async def _execute_tool_call(
             is_error=True,
         )
 
-    # Permission check (Sprint 4)
+    # Permission check (Sprint 4 + TRUST-CONTEXT)
     if context.permission_checker is not None:
         _file_path = str(tool_input.get("file_path", "")) or None
         _command = str(tool_input.get("command", "")) or None
-        decision = context.permission_checker.evaluate(
-            tool_name,
-            is_read_only=tool.is_read_only(parsed_input),
-            file_path=_file_path,
-            command=_command,
-        )
+        # TRUST-CONTEXT: derive origin from the session_id already
+        # threaded through LoopContext (agent_loop.py:538-542 convention).
+        # User-initiated calls (telegram:/cli/web) skip the
+        # ExfiltrationDetector and the network/install approve-patterns;
+        # background/automated calls (system, None, SYMBIOTE/GEPA/SENTINEL
+        # uuids) get the full restriction set.
+        try:
+            from prometheus.permissions.checker import origin_from_session_id
+            _origin = origin_from_session_id(context.session_id)
+        except Exception:
+            _origin = "system"
+        try:
+            decision = context.permission_checker.evaluate(
+                tool_name,
+                is_read_only=tool.is_read_only(parsed_input),
+                file_path=_file_path,
+                command=_command,
+                origin=_origin,
+            )
+        except TypeError:
+            # Older permission_checker implementations don't accept origin.
+            # Fall back to the legacy call shape so third-party gates keep working.
+            decision = context.permission_checker.evaluate(
+                tool_name,
+                is_read_only=tool.is_read_only(parsed_input),
+                file_path=_file_path,
+                command=_command,
+            )
         if not decision.allowed:
             if decision.requires_confirmation and context.permission_prompt is not None:
                 confirmed = await context.permission_prompt(tool_name, decision.reason)
