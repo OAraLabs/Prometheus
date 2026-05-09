@@ -1254,6 +1254,62 @@ def _is_tool_read_only(tool: object, tool_input: dict) -> bool:
     return getattr(tool, "is_read_only", False)
 
 
+async def _maybe_suggest_printing_press(
+    press: object, bash_output: str
+) -> str | None:
+    """If a bash failure looks like ``command not found: <cli>``, ask
+    the Printing Press registry whether it has a matching CLI and
+    return a one-line suggestion the model can relay to the user.
+
+    Returns ``None`` for any of:
+      • registry is unavailable (no library clone)
+      • no ``command not found`` pattern in the output
+      • no matching CLI found
+      • the matched CLI is already installed (so the failure is something else)
+
+    The hook never installs anything — it just surfaces the option.
+    Installation requires explicit user action (``/press install <name>``)
+    which routes through ApprovalQueue.
+    """
+    try:
+        from prometheus.tools.printing_press import detect_command_not_found
+    except Exception:
+        return None
+    if not hasattr(press, "is_available") or not press.is_available():
+        return None
+    missing = detect_command_not_found(bash_output)
+    if not missing:
+        return None
+    # Strip common suffixes models tend to type (-pp-cli, -cli) for the search
+    candidates = [missing]
+    for suffix in ("-pp-cli", "-cli", "-pp"):
+        if missing.endswith(suffix):
+            candidates.append(missing[: -len(suffix)])
+    seen: set[str] = set()
+    matches = []
+    for cand in candidates:
+        if cand in seen:
+            continue
+        seen.add(cand)
+        try:
+            matches = press.search(cand, limit=3)
+        except Exception:
+            continue
+        if matches:
+            break
+    if not matches:
+        return None
+    best = matches[0]
+    if getattr(best, "installed", False):
+        return None
+    return (
+        f"💡 Printing Press has a CLI for this: **{best.name}** "
+        f"({best.category or 'cli'}). To install, the user can run "
+        f"`/press install {best.name}` — installation requires their "
+        f"explicit approval and will not happen automatically."
+    )
+
+
 async def _execute_tool_call(
     context: LoopContext,
     tool_name: str,
@@ -1477,9 +1533,38 @@ async def _execute_tool_call(
         ),
     )
     _latency_ms = (time.monotonic() - _t0) * 1000.0
+
+    # WEAVE-PRESS: when a user-initiated bash command fails with
+    # "command not found", check the Printing Press library for a
+    # matching CLI and append a suggestion to the tool result. The
+    # model relays this to the user, who decides whether to type
+    # ``/press install <name>``. Never auto-installs; never fires for
+    # background/automated sessions.
+    augmented_output = result.output
+    if (
+        tool_name == "bash"
+        and result.is_error
+        and (context.tool_metadata or {}).get("printing_press") is not None
+    ):
+        try:
+            from prometheus.permissions.checker import (
+                ORIGIN_USER, origin_from_session_id,
+            )
+            if origin_from_session_id(context.session_id) == ORIGIN_USER:
+                press = context.tool_metadata["printing_press"]
+                suggestion = await _maybe_suggest_printing_press(
+                    press, result.output
+                )
+                if suggestion:
+                    augmented_output = result.output + "\n\n" + suggestion
+        except Exception:
+            log.debug(
+                "Printing Press suggestion hook failed", exc_info=True
+            )
+
     tool_result = ToolResultBlock(
         tool_use_id=tool_use_id,
-        content=result.output,
+        content=augmented_output,
         is_error=result.is_error,
     )
 
@@ -1569,6 +1654,7 @@ class AgentLoop:
         post_result_hooks: list[object] | None = None,
         tool_loader: object | None = None,
         nudge: object | None = None,
+        tool_metadata: dict[str, object] | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
@@ -1593,6 +1679,10 @@ class AgentLoop:
         self._tool_loader = tool_loader
         # SUNRISE: PeriodicNudge for self-reflection every N turns
         self._nudge = nudge
+        # WEAVE-PRESS: opaque dict forwarded to ToolExecutionContext.metadata
+        # so subsystems like the Printing Press hook can reach into the
+        # registered registry without changing the LoopContext shape.
+        self._tool_metadata = dict(tool_metadata) if tool_metadata else None
 
     def add_post_task_hook(self, hook: Callable) -> None:
         """Append a callback invoked after each completed task.
@@ -1655,6 +1745,7 @@ class AgentLoop:
             divergence_detector=self._divergence_detector,
             post_result_hooks=self._post_result_hooks,
             tool_loader=self._tool_loader,
+            tool_metadata=self._tool_metadata,
             session_id=session_id,
         )
 

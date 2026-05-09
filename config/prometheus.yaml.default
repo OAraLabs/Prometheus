@@ -224,6 +224,14 @@ web_tools:
   download_max_mb: 100                      # download_file size cap (MB)
   youtube_transcript_language: "en"         # youtube_transcript default language code
 
+# Printing Press CLI library — discover and install Go-based service CLIs
+# from a local clone of github.com/mvanhorn/printing-press-library
+printing_press:
+  enabled: false                            # opt-in
+  library_path: null                        # auto-detect ~/printing-press-library/ → /tmp/printing-press-library/
+  auto_suggest: true                        # suggest install on `command not found` (user-initiated only)
+  auto_update_library: false                # git pull library on daemon startup
+
 lsp:
   enabled: false
 

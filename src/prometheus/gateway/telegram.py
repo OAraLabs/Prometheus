@@ -173,6 +173,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("symbiote", self._cmd_symbiote))
         # WEAVE Session B: web capability audit
         self._app.add_handler(CommandHandler("audit", self._cmd_audit))
+        # WEAVE-PRESS: Printing Press CLI discovery and install
+        self._app.add_handler(CommandHandler("press", self._cmd_press))
         # Sprint 22 GRAFT-ROUTER-WIRE Phase 4: direct-mode provider override commands
         self._app.add_handler(CommandHandler("claude", self._cmd_claude))
         self._app.add_handler(CommandHandler("gpt", self._cmd_gpt))
@@ -220,6 +222,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("gepa", "GEPA skill evolution: status | run | history"),
                 BotCommand("symbiote", "GitHub graft pipeline: <problem> | approve | graft | morph | swap | backup | backups | restore | status | abort | history"),
                 BotCommand("audit", "Web capability audit: show last | run | web | <category>"),
+                BotCommand("press", "Printing Press CLI library: list | search | install | installed | update"),
                 # Phase 4: direct-mode provider overrides
                 BotCommand("claude", "Route this chat through Anthropic Claude"),
                 BotCommand("gpt", "Route this chat through OpenAI GPT"),
@@ -2589,3 +2592,267 @@ class TelegramAdapter(BasePlatformAdapter):
                 )
 
         _aio.create_task(_runner())
+
+    # ------------------------------------------------------------------
+    # WEAVE-PRESS: /press command — Printing Press CLI library
+    # ------------------------------------------------------------------
+
+    async def _cmd_press(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /press subcommands.
+
+        Forms:
+          /press                   — show usage
+          /press list [category]   — list available CLIs (optionally filtered)
+          /press search <query>    — fuzzy search by name / description
+          /press install <name>    — request approval, then go install + skill copy
+          /press installed         — list CLIs whose binary is on PATH or in ~/go/bin
+          /press update            — git pull the library clone
+        """
+        if not update.message or not update.effective_chat:
+            return
+        chat_id = update.effective_chat.id
+
+        press = getattr(self, "_printing_press", None)
+        if press is None or not press.is_available():
+            await self.send(
+                chat_id,
+                "Printing Press is not active. The library clone is missing "
+                "(searched ~/printing-press-library/ and /tmp/printing-press-library/) "
+                "or the feature is disabled in config.",
+                parse_mode=None,
+            )
+            return
+
+        text = (update.message.text or "").strip()
+        parts = text.split(maxsplit=1)
+        body = parts[1].strip() if len(parts) > 1 else ""
+        first_token = body.split(maxsplit=1)[0].lower() if body else ""
+        rest = body[len(first_token):].strip() if first_token else ""
+
+        if first_token == "" or first_token == "help":
+            await self._press_usage(chat_id)
+            return
+        if first_token == "list":
+            await self._press_list(chat_id, press, category=rest or None)
+            return
+        if first_token == "search":
+            await self._press_search(chat_id, press, query=rest)
+            return
+        if first_token == "installed":
+            await self._press_installed(chat_id, press)
+            return
+        if first_token == "update":
+            await self._press_update(chat_id, press)
+            return
+        if first_token == "install":
+            if not rest:
+                await self.send(
+                    chat_id,
+                    "Usage: /press install <cli-name>",
+                    parse_mode=None,
+                )
+                return
+            await self._press_install(chat_id, press, cli_name=rest)
+            return
+        await self._press_usage(chat_id)
+
+    async def _press_usage(self, chat_id: int) -> None:
+        await self.send(
+            chat_id,
+            (
+                "Printing Press — local CLI library\n\n"
+                "  /press list [category]  — list available CLIs\n"
+                "  /press search <query>   — fuzzy search\n"
+                "  /press install <name>   — install (queues approval)\n"
+                "  /press installed        — show what's installed\n"
+                "  /press update           — git pull the library clone\n"
+            ),
+            parse_mode=None,
+        )
+
+    async def _press_list(
+        self, chat_id: int, press: object, *, category: str | None = None,
+    ) -> None:
+        records = press.list_available()
+        if category:
+            cat = category.lower()
+            records = [r for r in records if cat in r.category.lower()]
+        if not records:
+            await self.send(
+                chat_id,
+                f"No CLIs in the library{' for category ' + category if category else ''}.",
+                parse_mode=None,
+            )
+            return
+        # Group by category for readability
+        from collections import defaultdict
+        by_cat: dict[str, list] = defaultdict(list)
+        for r in records:
+            by_cat[r.category or "uncategorized"].append(r)
+        lines = [f"Printing Press CLIs ({len(records)} available):"]
+        for cat in sorted(by_cat):
+            lines.append(f"\n[{cat}]")
+            for r in sorted(by_cat[cat], key=lambda x: x.name):
+                marker = "✓" if r.installed else "·"
+                lines.append(f"  {marker} {r.name} — {r.description[:80]}")
+        # Telegram caps messages around 4096 chars; trim if needed
+        msg = "\n".join(lines)
+        if len(msg) > 3800:
+            msg = msg[:3800] + "\n... (truncated; use /press search to narrow)"
+        await self.send(chat_id, msg, parse_mode=None)
+
+    async def _press_search(
+        self, chat_id: int, press: object, *, query: str,
+    ) -> None:
+        if not query:
+            await self.send(
+                chat_id, "Usage: /press search <query>", parse_mode=None,
+            )
+            return
+        records = press.search(query, limit=10)
+        if not records:
+            await self.send(
+                chat_id,
+                f"No CLI matched '{query}'.",
+                parse_mode=None,
+            )
+            return
+        lines = [f"Matches for '{query}':"]
+        for r in records:
+            marker = "✓" if r.installed else "·"
+            lines.append(
+                f"{marker} {r.name} ({r.category}) — {r.description[:140]}"
+            )
+        await self.send(chat_id, "\n".join(lines), parse_mode=None)
+
+    async def _press_installed(
+        self, chat_id: int, press: object,
+    ) -> None:
+        records = [r for r in press.list_available() if r.installed]
+        if not records:
+            await self.send(
+                chat_id,
+                "No Printing Press CLIs installed yet. Try /press list.",
+                parse_mode=None,
+            )
+            return
+        lines = [f"Installed Printing Press CLIs ({len(records)}):"]
+        for r in sorted(records, key=lambda x: x.name):
+            lines.append(f"  ✓ {r.name} ({r.bin_name})")
+        await self.send(chat_id, "\n".join(lines), parse_mode=None)
+
+    async def _press_update(
+        self, chat_id: int, press: object,
+    ) -> None:
+        ok, msg = await press.update_library()
+        prefix = "✓" if ok else "✗"
+        await self.send(
+            chat_id,
+            f"{prefix} library update: {msg}",
+            parse_mode=None,
+        )
+
+    async def _press_install(
+        self, chat_id: int, press: object, *, cli_name: str,
+    ) -> None:
+        """Approval-queue install. Mirrors the /gepa run / /symbiote pattern."""
+        queue = getattr(self, "_approval_queue", None)
+        if queue is None:
+            await self.send(
+                chat_id,
+                "Approval queue is not active — cannot install.",
+                parse_mode=None,
+            )
+            return
+
+        # Resolve up-front so we can show the user what they're approving
+        records = press.search(cli_name, limit=1)
+        if not records:
+            await self.send(
+                chat_id,
+                f"No CLI matching '{cli_name}' in the library. "
+                "Try /press search first.",
+                parse_mode=None,
+            )
+            return
+        rec = records[0]
+        if rec.installed:
+            await self.send(
+                chat_id,
+                f"{rec.name} ({rec.bin_name}) is already installed.",
+                parse_mode=None,
+            )
+            return
+
+        async def _runner() -> None:
+            from prometheus.permissions.approval_queue import ApprovalResult
+
+            description = (
+                f"go install {rec.install_module}@latest  "
+                f"+ copy SKILL.md → ~/.prometheus/skills/{rec.skill_name}.md"
+            )
+            try:
+                result = await queue.request_approval(
+                    "printing_press_install", description, chat_id=chat_id,
+                )
+            except Exception as exc:
+                await self.send(
+                    chat_id,
+                    f"Approval queue error: {exc}",
+                    parse_mode=None,
+                )
+                return
+            if result == ApprovalResult.DENIED:
+                await self.send(
+                    chat_id,
+                    f"Install denied: {rec.name}.",
+                    parse_mode=None,
+                )
+                return
+            if result == ApprovalResult.TIMEOUT:
+                await self.send(
+                    chat_id,
+                    f"Install request timed out: {rec.name}.",
+                    parse_mode=None,
+                )
+                return
+            await self.send(
+                chat_id,
+                f"Installing {rec.name}…",
+                parse_mode=None,
+            )
+            try:
+                outcome = await press.install(rec.name)
+            except Exception as exc:
+                await self.send(
+                    chat_id,
+                    f"Install failed: {exc}",
+                    parse_mode=None,
+                )
+                return
+            if outcome.success:
+                lines = [
+                    f"✓ Installed {outcome.cli_name} ({outcome.bin_name})",
+                    f"  Skill: {'copied' if outcome.skill_installed else 'NOT copied'}",
+                ]
+                if not outcome.on_path:
+                    lines.append(
+                        "  ⚠ Binary in ~/go/bin but not on $PATH — "
+                        "add `export PATH=$HOME/go/bin:$PATH` to your shell."
+                    )
+                await self.send(chat_id, "\n".join(lines), parse_mode=None)
+            else:
+                await self.send(
+                    chat_id,
+                    f"✗ Install failed: {outcome.error}",
+                    parse_mode=None,
+                )
+
+        asyncio.create_task(_runner(), name=f"press_install_{rec.name}")
+        await self.send(
+            chat_id,
+            f"Install request queued for {rec.name}. Watch for /approve.",
+            parse_mode=None,
+        )

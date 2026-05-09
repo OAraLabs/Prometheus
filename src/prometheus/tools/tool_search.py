@@ -75,6 +75,10 @@ class ToolSearchTool(BaseTool):
         """Inject the skill registry (called after construction)."""
         self._skill_registry = skill_registry
 
+    def get_skill_registry(self) -> Any | None:
+        """Return the skill registry (for hot-reload after install)."""
+        return self._skill_registry
+
     def is_read_only(self, arguments: BaseModel) -> bool:
         del arguments
         return True

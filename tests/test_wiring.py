@@ -6546,3 +6546,67 @@ class TestWeaveWebToolsWiring:
     def test_download_file_exported_from_builtin(self):
         from prometheus.tools.builtin import DownloadFileTool
         assert DownloadFileTool().name == "download_file"
+
+
+# ===========================================================================
+# WEAVE-PRESS: Printing Press CLI registry, /press command, hot-reload hook
+# ===========================================================================
+
+
+class TestWeavePressWiring:
+    """Verify the Printing Press hooks are wired into telegram + agent_loop."""
+
+    def test_telegram_has_cmd_press(self):
+        from prometheus.gateway.telegram import TelegramAdapter
+        assert hasattr(TelegramAdapter, "_cmd_press")
+        assert hasattr(TelegramAdapter, "_press_install")
+        assert hasattr(TelegramAdapter, "_press_search")
+        assert hasattr(TelegramAdapter, "_press_list")
+        assert hasattr(TelegramAdapter, "_press_installed")
+        assert hasattr(TelegramAdapter, "_press_update")
+
+    def test_printing_press_registry_importable(self):
+        from prometheus.tools.printing_press import (
+            PrintingPressRegistry, InstallResult, CLIRecord,
+        )
+        # Constructor accepts an explicit library_path and exposes the
+        # public surface install() / search() / list_available() rely on.
+        reg = PrintingPressRegistry(library_path="/nonexistent/path/xyz")
+        assert hasattr(reg, "is_available")
+        assert hasattr(reg, "list_available")
+        assert hasattr(reg, "search")
+        assert hasattr(reg, "install")
+        assert hasattr(reg, "update_library")
+        assert hasattr(reg, "set_reload_callback")
+
+    def test_agent_loop_has_suggestion_helper(self):
+        """The bash command-not-found hook helper exists at module scope."""
+        from prometheus.engine.agent_loop import _maybe_suggest_printing_press
+        import inspect
+        assert inspect.iscoroutinefunction(_maybe_suggest_printing_press)
+
+    def test_skill_registry_reload_method(self):
+        """SkillRegistry exposes the reload method install relies on."""
+        from prometheus.skills.registry import SkillRegistry
+        reg = SkillRegistry()
+        assert hasattr(reg, "reload_user_skills")
+        # No-op when no skills dir exists is acceptable; just confirm callable
+        result = reg.reload_user_skills()
+        assert isinstance(result, int)
+
+    def test_tool_search_exposes_skill_registry_getter(self):
+        """The daemon needs to fetch the SkillRegistry to wire reload."""
+        from prometheus.tools.tool_search import ToolSearchTool
+        ts = ToolSearchTool()
+        assert hasattr(ts, "get_skill_registry")
+        assert ts.get_skill_registry() is None
+        sentinel = object()
+        ts.set_skill_registry(sentinel)
+        assert ts.get_skill_registry() is sentinel
+
+    def test_agent_loop_accepts_tool_metadata(self):
+        """The new tool_metadata kwarg threads to LoopContext."""
+        import inspect
+        from prometheus.engine.agent_loop import AgentLoop
+        sig = inspect.signature(AgentLoop.__init__)
+        assert "tool_metadata" in sig.parameters

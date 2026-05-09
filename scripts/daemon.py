@@ -379,6 +379,60 @@ async def run_daemon(args: argparse.Namespace) -> None:
             telegram._approval_queue = approval_queue
             logger.info("Approval queue wired to Telegram adapter")
 
+    # WEAVE-PRESS: Printing Press CLI registry
+    press_cfg = config.get("printing_press", {}) or {}
+    if press_cfg.get("enabled", False):
+        try:
+            from prometheus.tools.printing_press import PrintingPressRegistry
+
+            press_registry = PrintingPressRegistry(
+                library_path=press_cfg.get("library_path") or None,
+            )
+            if not press_registry.is_available():
+                logger.info(
+                    "Printing Press: enabled but no library clone found "
+                    "(searched ~/printing-press-library/, /tmp/printing-press-library/)"
+                )
+            else:
+                logger.info(
+                    "Printing Press: library at %s (%d CLIs)",
+                    press_registry.library_path,
+                    len(press_registry.list_available()),
+                )
+                # Wire the skill registry hot-reload callback. The
+                # ToolSearchTool holds the SkillRegistry instance; ask it
+                # for a handle and bind the reload to it.
+                try:
+                    ts = registry.get("tool_search")
+                    skill_reg = ts.get_skill_registry() if ts else None
+                    if skill_reg is not None and hasattr(
+                        skill_reg, "reload_user_skills"
+                    ):
+                        press_registry.set_reload_callback(
+                            skill_reg.reload_user_skills
+                        )
+                        logger.info("Printing Press: skill hot-reload wired")
+                except Exception:
+                    logger.debug(
+                        "Printing Press: failed to wire skill reload callback",
+                        exc_info=True,
+                    )
+                # Library auto-update on startup (don't block startup on it)
+                if press_cfg.get("auto_update_library", False):
+                    asyncio.create_task(
+                        press_registry.update_library(),
+                        name="printing_press_update",
+                    )
+            # Attach to the agent loop so the bash command-not-found hook
+            # can offer suggestions to user-initiated sessions.
+            if agent_loop._tool_metadata is None:
+                agent_loop._tool_metadata = {}
+            agent_loop._tool_metadata["printing_press"] = press_registry
+            # And to the Telegram adapter for /press commands.
+            telegram._printing_press = press_registry
+        except Exception:
+            logger.exception("Printing Press: failed to initialise")
+
     # Slack adapter
     slack_adapter = None
     slack_bot_token = gateway_config.get("slack_bot_token", "") or os.environ.get("PROMETHEUS_SLACK_BOT_TOKEN", "")
