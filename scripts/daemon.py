@@ -224,6 +224,9 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     # Telemetry — shared instance for AgentLoop and SENTINEL digest
     telemetry = ToolCallTelemetry()
+    # Sprint 4 A3: expose to gateway/commands.py for the /health command.
+    from prometheus.telemetry.tracker import set_telemetry_handle
+    set_telemetry_handle(telemetry)
 
     # Sprint 15 wiring fix: HookExecutor was built but never created in daemon
     hook_executor = None

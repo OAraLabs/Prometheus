@@ -776,6 +776,145 @@ def get_notifications_mode(default: str = "quiet") -> str:
     return mode if mode in _VALID_NOTIF_MODES else default
 
 
+def cmd_health(verbose: bool = False, since_hours: float = 24.0) -> str:
+    """Surface silent-failure telemetry — Sprint 4 Work Stream 3.
+
+    Reads from the live ``ToolCallTelemetry`` singleton (set by daemon.py)
+    so the same content powers Telegram, Slack, and any future surface
+    without threading the handle through.
+
+    Args:
+        verbose: when True, include the full per-subsystem breakdown +
+            traceback excerpts from the 5 most recent silent failures.
+        since_hours: lookback window (default 24h).
+
+    Output shape::
+
+        🩺 Prometheus Health — last 24h
+
+        ✅ Tool calls:        1,247  (3 failures, 0 silent)
+        ✅ curator:           3 / 3 successful
+        ⚠  skill_creator:     21 invocations, 19 successful, 2 SILENT FAILURES
+        ...
+
+        Silent failures (most recent 5):
+          2026-05-21 14:32  skill_creator/_call_model  ValueError: …
+          ...
+    """
+    import time as _time
+    from datetime import datetime
+    from prometheus.telemetry.tracker import get_telemetry_handle
+
+    tel = get_telemetry_handle()
+    if tel is None:
+        return (
+            "🩺 Health: telemetry not wired.\n"
+            "(daemon hasn't called set_telemetry_handle — restart required)"
+        )
+
+    since_ts = _time.time() - max(0.0, float(since_hours)) * 3600.0
+    try:
+        summary = tel.health_summary(since=since_ts)
+    except Exception as exc:
+        return f"🩺 Health: telemetry query failed — {exc}"
+
+    lines: list[str] = [
+        f"🩺 Prometheus Health — last {since_hours:.0f}h",
+        "",
+    ]
+
+    tc = summary.get("tool_calls", {})
+    tc_total = int(tc.get("total", 0))
+    tc_fail = int(tc.get("failures", 0))
+    tc_succ_rate = float(tc.get("success_rate", 0.0))
+    tc_icon = "✅" if tc_fail == 0 else ("⚠ " if tc_succ_rate >= 0.8 else "❌")
+    # Use 1-decimal success rate so "4 failures in 1247" doesn't render
+    # as "100% success" via rounding.
+    rate_str = (
+        f"{tc_succ_rate * 100:.1f}%" if tc_succ_rate < 1.0 else "100%"
+    )
+    lines.append(
+        f"{tc_icon} Tool calls:        {tc_total:>5,}  "
+        f"({tc_fail} failures, {rate_str} success)"
+    )
+
+    subsystems = summary.get("subsystems", {}) or {}
+    if not subsystems:
+        lines.append("")
+        lines.append(
+            "_no autonomous-subsystem activity recorded in this window_"
+        )
+    else:
+        lines.append("")
+        for name in sorted(subsystems):
+            row = subsystems[name]
+            runs = int(row.get("runs", 0))
+            success = int(row.get("success", 0))
+            partial = int(row.get("partial", 0))
+            failed = int(row.get("failed", 0))
+            silent = int(row.get("silent_failures", 0))
+            icon = "✅" if (failed == 0 and silent == 0) else (
+                "⚠ " if (success + partial) > 0 else "❌"
+            )
+            tail = (
+                f"{success} / {runs} successful"
+                if (runs and silent == 0)
+                else (
+                    f"{runs} invocations, {success} successful, "
+                    f"{silent} SILENT FAILURES" if silent else
+                    f"{runs} runs ({success} ok, {partial} partial, {failed} failed)"
+                )
+            )
+            lines.append(f"{icon} {name:<18} {tail}")
+
+    recent = summary.get("recent_silent_failures", []) or []
+    if recent:
+        lines.append("")
+        lines.append(f"Silent failures (most recent {len(recent)}):")
+        for row in recent:
+            when = datetime.fromtimestamp(float(row["timestamp"])).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+            sub = row.get("subsystem", "?")
+            op = row.get("operation", "?")
+            exc_type = row.get("exception_type", "?")
+            msg = (row.get("exception_msg") or "")[:100]
+            lines.append(f"  {when}  {sub}/{op}  {exc_type}: {msg}")
+
+    if verbose:
+        # Add traceback excerpts for the recent failures.
+        if recent:
+            lines.append("")
+            lines.append("--- Recent silent-failure tracebacks (verbose) ---")
+            for row in recent:
+                lines.append("")
+                lines.append(
+                    f"# {row.get('subsystem','?')}/{row.get('operation','?')} "
+                    f"@ {datetime.fromtimestamp(float(row['timestamp']))}"
+                )
+                tb = (row.get("traceback") or "").strip()
+                if tb:
+                    # Cap each traceback at ~800 chars to keep Telegram-friendly.
+                    if len(tb) > 800:
+                        tb = tb[:800] + "\n  …truncated…"
+                    lines.append(tb)
+        # Show context JSON for each failure when present.
+        for row in recent:
+            ctx = row.get("context")
+            if ctx:
+                lines.append(f"  context: {ctx}")
+
+    if not recent:
+        lines.append("")
+        lines.append("_no silent failures detected in this window_  ✨")
+
+    lines.append("")
+    lines.append(
+        "Run `/health verbose` for tracebacks. Window: `/health 168` for 7d."
+    )
+    return "\n".join(lines)
+
+
 def cmd_notifications(mode: str = "") -> str:
     """Show or set the notification mode (off | quiet | verbose)."""
     from prometheus.config.paths import get_config_dir

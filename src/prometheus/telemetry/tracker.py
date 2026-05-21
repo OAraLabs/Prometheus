@@ -814,3 +814,27 @@ class ToolCallTelemetry:
             self._conn.close()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Sprint 4 A3 — module-level singleton for /health and other command handlers.
+# ---------------------------------------------------------------------------
+
+_telemetry_singleton: "ToolCallTelemetry | None" = None
+
+
+def set_telemetry_handle(tel: "ToolCallTelemetry | None") -> None:
+    """Register the running ``ToolCallTelemetry`` for command-level access.
+
+    Mirrors the ``set_curator`` / ``set_sentinel_components`` pattern.
+    Called once from ``scripts/daemon.py`` after the tracker is built so
+    ``gateway/commands.py::cmd_health`` can read live telemetry without
+    threading the handle through every command-dispatch layer.
+    """
+    global _telemetry_singleton
+    _telemetry_singleton = tel
+
+
+def get_telemetry_handle() -> "ToolCallTelemetry | None":
+    """Return the registered telemetry handle (None if not wired)."""
+    return _telemetry_singleton

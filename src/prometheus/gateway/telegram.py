@@ -302,6 +302,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("memory", self._cmd_memory))
         self._app.add_handler(CommandHandler("curator", self._cmd_curator))
         self._app.add_handler(CommandHandler("notifications", self._cmd_notifications))
+        # Sprint S4 A3: /health — silent-failure telemetry surface
+        self._app.add_handler(CommandHandler("health", self._cmd_health))
         self._app.add_handler(CommandHandler("anatomy", self._cmd_anatomy))
         self._app.add_handler(CommandHandler("doctor", self._cmd_doctor))
         self._app.add_handler(CommandHandler("profile", self._cmd_profile))
@@ -360,6 +362,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("memory", "Memory: show [user] | limits"),
                 BotCommand("curator", "Curator: status | show | run [dry]"),
                 BotCommand("notifications", "Skill/memory/curator notifications: off | quiet | verbose"),
+                BotCommand("health", "Silent-failure telemetry: last 24h or `/health 168 verbose`"),
                 BotCommand("anatomy", "Infrastructure snapshot"),
                 BotCommand("doctor", "Diagnostic health check"),
                 BotCommand("profile", "Show or switch agent profile"),
@@ -569,6 +572,7 @@ class TelegramAdapter(BasePlatformAdapter):
             "/memory    — show [user] | limits\n"
             "/curator   — status | show | run [dry]\n"
             "/notifications — off | quiet | verbose\n"
+            "/health    — silent-failure telemetry (last 24h)\n"
             "/reset     — Clear conversation context\n"
             "/help      — This message\n"
             "\n"
@@ -1002,6 +1006,36 @@ class TelegramAdapter(BasePlatformAdapter):
                     "Use: /curator [show | status | run [dry]]"
                 )
         await self.send(chat_id, text, parse_mode=None)
+
+    async def _cmd_health(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /health — surface silent-failure telemetry (Sprint 4 A3).
+
+        Args:
+          (no args)             24h summary, top-line per subsystem
+          verbose               24h summary + tracebacks
+          <hours>               numeric window override (e.g. /health 168 → 7d)
+          <hours> verbose       both
+        """
+        if update.effective_chat is None:
+            return
+        args = list(context.args or [])
+        verbose = False
+        since_hours = 24.0
+        for tok in args:
+            t = tok.strip().lower()
+            if t == "verbose":
+                verbose = True
+                continue
+            try:
+                since_hours = float(t)
+            except ValueError:
+                pass
+
+        from prometheus.gateway import commands as _cmds
+        text = _cmds.cmd_health(verbose=verbose, since_hours=since_hours)
+        await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_notifications(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
