@@ -100,6 +100,15 @@ _DEFAULT_ARCHIVE_AFTER_DAYS = 90
 _DEFAULT_MIN_IDLE_SECONDS = 0                   # 0 = always run on tick
 _DEFAULT_MAX_PRUNINGS_PER_RUN = 10              # safety cap
 
+# Sprint 4 A2: eternal-loop escalation. After this many consecutive
+# CuratorRun results with non-empty errors, emit `curator_degraded` on the
+# bus, log at ERROR, and back off exponentially. The previous Sprint 1
+# behaviour was an `except Exception: log.exception(...)` that would keep
+# hammering a broken provider every interval forever (HIGH-RISK #8 in the
+# audit doc).
+_DEGRADED_THRESHOLD = 3
+_MAX_BACKOFF_MULTIPLIER = 8
+
 _REVIEW_PROMPT = """\
 You are the skill library curator. Review the auto-generated skills below
 and recommend consolidations and prunings. Output ONLY a fenced YAML block.
@@ -256,6 +265,13 @@ class Curator:
             telemetry=telemetry,
             on_failure="raise",
         )
+        # Sprint S4 A2: eternal-loop escalation state. Bumped on every
+        # CuratorRun with non-empty errors; reset on success. After
+        # _DEGRADED_THRESHOLD consecutive failures, the loop emits a
+        # curator_degraded signal and applies exponential backoff so a
+        # broken provider doesn't get hammered every interval.
+        self._consecutive_failures: int = 0
+        self._degraded_signal_sent: bool = False
 
     # ---------------------- Construction helpers ----------------------
 
@@ -317,7 +333,13 @@ class Curator:
                 pass
 
     async def _loop(self) -> None:
-        """Background loop: run_once → sleep interval."""
+        """Background loop: run_once → sleep interval, with escalation.
+
+        Sprint 4 A2 — tracks consecutive failures, emits `curator_degraded`
+        after the threshold is crossed, applies exponential backoff up to
+        :data:`_MAX_BACKOFF_MULTIPLIER` × interval so a broken provider
+        doesn't get hammered every cycle.
+        """
         # Defer the first run by one interval to avoid clobbering on every restart.
         # Hermes does the same for first-run safety.
         try:
@@ -328,16 +350,119 @@ class Curator:
             try:
                 if self._state_store.curator().paused:
                     log.debug("Curator: paused, skipping tick")
+                    # A pause is intentional — don't count as a failure or
+                    # back off; just record a skipped row for liveness.
+                    self._record_loop_outcome("skipped", duration_ms=0.0)
                 else:
-                    await self.run_once()
+                    run = await self.run_once()
+                    await self._handle_run_result(run)
             except asyncio.CancelledError:
                 break
-            except Exception:
-                log.exception("Curator: run_once failed")
+            except Exception as exc:
+                # run_once is best-effort and shouldn't normally raise, but
+                # a truly unexpected exception (state-store corruption,
+                # OOM, etc.) bumps the failure counter too. This is the
+                # ed8f1a6-style catch — telemetry records it explicitly.
+                log.exception("Curator: _loop iteration crashed unexpectedly")
+                self._consecutive_failures += 1
+                if self._telemetry is not None:
+                    try:
+                        self._telemetry.record_silent_failure(
+                            "curator", "_loop", exc,
+                            context={"consecutive_failures": self._consecutive_failures},
+                        )
+                    except Exception:
+                        pass
+                self._record_loop_outcome("failed", duration_ms=0.0)
+                await self._maybe_emit_degraded(str(exc))
+
+            sleep_s = self._compute_sleep(self._consecutive_failures)
+            if sleep_s > self._interval:
+                log.warning(
+                    "Curator: %d consecutive failures — backing off to %.0fs "
+                    "(base interval %ds)",
+                    self._consecutive_failures, sleep_s, self._interval,
+                )
             try:
-                await asyncio.sleep(self._interval)
+                await asyncio.sleep(sleep_s)
             except asyncio.CancelledError:
                 break
+
+    def _compute_sleep(self, consecutive_failures: int) -> float:
+        """Exponential backoff capped at ``_MAX_BACKOFF_MULTIPLIER`` × interval."""
+        if consecutive_failures <= 0:
+            return float(self._interval)
+        multiplier = min(2 ** consecutive_failures, _MAX_BACKOFF_MULTIPLIER)
+        return float(self._interval) * float(multiplier)
+
+    async def _handle_run_result(self, run: CuratorRun) -> None:
+        """Update failure counter + (maybe) emit degraded signal."""
+        if run.errors:
+            self._consecutive_failures += 1
+            log.warning(
+                "Curator: run %s completed with %d error(s) "
+                "(consecutive failures: %d)",
+                run.stamp, len(run.errors), self._consecutive_failures,
+            )
+            # The detailed silent_failures rows for the LLM call already
+            # landed via the envelope; the degraded signal coordinates
+            # with the exponential backoff applied in _loop.
+            await self._maybe_emit_degraded(run.errors[-1])
+        else:
+            if self._consecutive_failures > 0:
+                log.info(
+                    "Curator: recovered after %d consecutive failure(s)",
+                    self._consecutive_failures,
+                )
+            self._consecutive_failures = 0
+            self._degraded_signal_sent = False
+
+    async def _maybe_emit_degraded(self, last_error: str) -> None:
+        """Emit `curator_degraded` once when consecutive failures crosses the threshold."""
+        if (
+            self._consecutive_failures < _DEGRADED_THRESHOLD
+            or self._degraded_signal_sent
+        ):
+            return
+        log.error(
+            "Curator: degraded after %d consecutive failures",
+            self._consecutive_failures,
+        )
+        if self._signal_bus is None:
+            self._degraded_signal_sent = True
+            return
+        try:
+            from prometheus.sentinel.signals import ActivitySignal
+
+            await self._signal_bus.emit(ActivitySignal(
+                kind="curator_degraded",
+                payload={
+                    "consecutive_failures": self._consecutive_failures,
+                    "last_error": str(last_error)[:300],
+                    "next_sleep_seconds": self._compute_sleep(
+                        self._consecutive_failures
+                    ),
+                },
+                source="curator",
+            ))
+            self._degraded_signal_sent = True
+        except Exception:
+            log.debug("Curator: degraded signal emission failed", exc_info=True)
+
+    def _record_loop_outcome(self, outcome: str, *, duration_ms: float) -> None:
+        """Write a `subsystem_runs` row for the loop iteration."""
+        if self._telemetry is None:
+            return
+        try:
+            self._telemetry.record_run(
+                subsystem="curator",
+                operation="_loop_iteration",
+                outcome=outcome,
+                duration_ms=duration_ms,
+                summary={"consecutive_failures": self._consecutive_failures},
+            )
+        except Exception:
+            log.debug("Curator: loop telemetry write failed", exc_info=True)
 
     # ---------------------- Manual entry point ----------------------
 
@@ -391,6 +516,11 @@ class Curator:
         # Emit signal (best-effort).
         await self._emit_report_signal(run)
 
+        # Sprint 4 A2: top-level cycle outcome lands in subsystem_runs so
+        # /health can answer "did the Curator actually run today?" even
+        # if no exception fires.
+        self._record_cycle_outcome(run, dry_run=dry_run)
+
         log.info(
             "Curator: run %s — reviewed=%d, auto=%d, consolidations=%d, prunings=%d, errors=%d",
             run.stamp,
@@ -401,6 +531,38 @@ class Curator:
             len(run.errors),
         )
         return run
+
+    def _record_cycle_outcome(self, run: CuratorRun, *, dry_run: bool) -> None:
+        """Write a `subsystem_runs` row capturing the whole-cycle outcome."""
+        if self._telemetry is None or dry_run:
+            return
+        if run.errors:
+            outcome = (
+                "partial"
+                if (run.prunings or run.auto_transitions or run.consolidations)
+                else "failed"
+            )
+        else:
+            outcome = "success"
+        try:
+            self._telemetry.record_run(
+                subsystem="curator",
+                operation="run_once",
+                outcome=outcome,
+                duration_ms=(run.ended_at - run.started_at) * 1000.0,
+                summary={
+                    "stamp": run.stamp,
+                    "skills_reviewed": run.skills_reviewed,
+                    "auto_transitions": len(run.auto_transitions),
+                    "consolidations": len(run.consolidations),
+                    "prunings": len(run.prunings),
+                    "errors": len(run.errors),
+                    "skipped_pinned": len(run.skipped_pinned),
+                    "report_path": run.report_path,
+                },
+            )
+        except Exception:
+            log.debug("Curator: cycle subsystem_runs write failed", exc_info=True)
 
     # ---------------------- Internals: discovery + auto-pass ----------------------
 
