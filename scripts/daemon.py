@@ -512,6 +512,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
             provider=provider,
             model=model_name,
             post_extract_callback=wiki_compiler.compile,
+            telemetry=telemetry,
         )
 
         # Wire extractor into LCM for pre-compaction flush
@@ -587,7 +588,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Learning loop — SkillCreator (auto-generate skills from successful tasks)
     try:
         from prometheus.learning.skill_creator import SkillCreator
-        skill_creator = SkillCreator(provider, model=model_name)
+        skill_creator = SkillCreator(provider, model=model_name, telemetry=telemetry)
         agent_loop.add_post_task_hook(skill_creator.maybe_create)
         logger.info("SkillCreator wired to agent loop post-task hook")
     except Exception as exc:
@@ -596,7 +597,9 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Learning loop — SkillRefiner (refine existing skills when execution deviates beneficially)
     try:
         from prometheus.learning.skill_refiner import SkillRefiner
-        skill_refiner = SkillRefiner.from_config(provider, args.config)
+        skill_refiner = SkillRefiner.from_config(
+            provider, args.config, telemetry=telemetry
+        )
         if skill_refiner is not None:
             # Override model to match the running model_name (from_config can't know it)
             skill_refiner._model = model_name
@@ -752,6 +755,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
             model=model_name,
             signal_bus=signal_bus if "signal_bus" in dir() else None,
             config=config,
+            telemetry=telemetry,
         )
         if curator is not None:
             curator_task = await curator.start()

@@ -229,7 +229,10 @@ class Curator:
         archive_after_days: int = _DEFAULT_ARCHIVE_AFTER_DAYS,
         min_idle_seconds: int = _DEFAULT_MIN_IDLE_SECONDS,
         max_prunings_per_run: int = _DEFAULT_MAX_PRUNINGS_PER_RUN,
+        telemetry: object | None = None,
     ) -> None:
+        from prometheus.learning.llm_envelope import LLMCallEnvelope
+
         self._provider = provider
         self._model = model
         self._signal_bus = signal_bus
@@ -243,6 +246,16 @@ class Curator:
         self._max_prunings = max(0, int(max_prunings_per_run))
         self._running = False
         self._task: asyncio.Task | None = None
+        # Sprint S4 A1/A2: shared LLMCallEnvelope. Curator uses on_failure=
+        # "raise" so the existing run_once try/except keeps recording errors
+        # on the CuratorRun object (visible in REPORT.md). The envelope adds
+        # telemetry.silent_failures + subsystem_runs liveness for /health.
+        self._telemetry = telemetry
+        self._envelope = LLMCallEnvelope(
+            subsystem="curator",
+            telemetry=telemetry,
+            on_failure="raise",
+        )
 
     # ---------------------- Construction helpers ----------------------
 
@@ -254,6 +267,7 @@ class Curator:
         model: str = "default",
         signal_bus: SignalBus | None = None,
         config: dict[str, Any] | None = None,
+        telemetry: object | None = None,
     ) -> Curator | None:
         """Build a Curator from a ``learning`` config dict.
 
@@ -267,6 +281,7 @@ class Curator:
             provider,
             model=model,
             signal_bus=signal_bus,
+            telemetry=telemetry,
             interval_seconds=int(cfg.get("curator_interval_seconds", _DEFAULT_INTERVAL_SECONDS)),
             stale_after_days=int(cfg.get("curator_stale_after_days", _DEFAULT_STALE_AFTER_DAYS)),
             archive_after_days=int(cfg.get("curator_archive_after_days", _DEFAULT_ARCHIVE_AFTER_DAYS)),
@@ -477,24 +492,21 @@ class Curator:
         return consolidations, prunings, raw
 
     async def _call_model(self, prompt: str) -> str:
-        from prometheus.engine.messages import ConversationMessage, TextBlock
-        from prometheus.providers.base import ApiMessageRequest, ApiTextDeltaEvent
+        """Invoke the model via LLMCallEnvelope.
 
-        # ConversationMessage.content is list[ContentBlock]; the existing
-        # SkillCreator / SkillRefiner / MemoryExtractor callers pass a raw
-        # string which fails pydantic validation. Curator uses the correct
-        # list-of-blocks shape; the three pre-existing sites are flagged in
-        # Sprint 1 reporting-back.
-        request = ApiMessageRequest(
+        on_failure="raise" so the existing ``run_once`` outer except keeps
+        recording errors on the ``CuratorRun`` object. The envelope's
+        contribution is the telemetry side: every failure lands in
+        ``silent_failures`` with full traceback regardless of how the
+        caller chooses to recover.
+        """
+        return await self._envelope.call(
+            provider=self._provider,
             model=self._model,
-            messages=[ConversationMessage(role="user", content=[TextBlock(text=prompt)])],
+            prompt=prompt,
             max_tokens=2048,
+            operation="review_skill_library",
         )
-        parts: list[str] = []
-        async for event in self._provider.stream_message(request):
-            if isinstance(event, ApiTextDeltaEvent):
-                parts.append(event.text)
-        return "".join(parts)
 
     @staticmethod
     def _format_library_for_prompt(skills: list[dict[str, Any]]) -> str:

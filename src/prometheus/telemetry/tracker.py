@@ -1,16 +1,30 @@
 """ToolCallTelemetry — per-model, per-tool success/retry/latency tracking.
 
 Storage: SQLite at ~/.prometheus/telemetry.db (or a path you specify).
+
+Sprint 4 additions: two new tables for autonomous-subsystem observability.
+
+- ``silent_failures``  — every exception caught by ``LLMCallEnvelope`` or
+  ``record_silent_failure(...)`` calls from autonomous subsystems lands here
+  with subsystem name, operation, exception type/message, full traceback.
+  Closes the gap that hid PR #1 / ed8f1a6 for weeks.
+- ``subsystem_runs``   — liveness/outcome companion. Every Curator pass,
+  MemoryExtractor cycle, GEPA cycle, etc. writes a row so "no successful
+  run in 7 days" detects hangs even when no exception is thrown.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
+import traceback as _traceback
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+log = logging.getLogger(__name__)
 
 
 # Cloud provider names that qualify for golden-trace capture.
@@ -56,6 +70,35 @@ CREATE TABLE IF NOT EXISTS circuit_breaker_diagnostics (
     recovery_method   TEXT,                          -- "tier_bump", "none", etc.
     golden_reference  TEXT                           -- Golden Trace sprint: best-match golden parsed_tool_call
 );
+
+-- Sprint 4 (Silent Failure Eradication): every exception caught inside an
+-- autonomous subsystem (Curator, SkillCreator, SkillRefiner, MemoryExtractor,
+-- GEPA, SENTINEL phases, ...) writes a row here. Closes the gap that hid
+-- PR #1 / ed8f1a6 (a ValidationError swallowed inside _call_model for an
+-- unknown duration).
+CREATE TABLE IF NOT EXISTS silent_failures (
+    id              TEXT PRIMARY KEY,
+    timestamp       REAL NOT NULL,
+    subsystem       TEXT NOT NULL,        -- "curator" | "skill_creator" | ...
+    operation       TEXT,                  -- "_call_model" | "run_once" | ...
+    exception_type  TEXT NOT NULL,         -- type(exc).__name__
+    exception_msg   TEXT,                  -- str(exc) [:2000]
+    traceback       TEXT,                  -- traceback.format_exc() [:8000]
+    context         TEXT                   -- optional JSON: skill_path, model_id, ...
+);
+
+-- Sprint 4: liveness companion. Every Curator pass, MemoryExtractor cycle,
+-- GEPA cycle etc. writes one row so /health can detect hangs even when no
+-- exception is thrown ("no successful Curator run in 7 days").
+CREATE TABLE IF NOT EXISTS subsystem_runs (
+    id              TEXT PRIMARY KEY,
+    timestamp       REAL NOT NULL,
+    subsystem       TEXT NOT NULL,
+    operation       TEXT,
+    duration_ms     REAL,
+    outcome         TEXT NOT NULL,         -- "success" | "partial" | "failed" | "skipped"
+    summary_json    TEXT                   -- arbitrary JSON the subsystem wants to surface
+);
 """
 
 # Indexes run AFTER _migrate_schema so they can reference columns that are
@@ -69,6 +112,12 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_golden ON tool_calls (is_golden);
 CREATE INDEX IF NOT EXISTS idx_cb_diag_timestamp ON circuit_breaker_diagnostics (timestamp);
 CREATE INDEX IF NOT EXISTS idx_cb_diag_model ON circuit_breaker_diagnostics (model_id);
 CREATE INDEX IF NOT EXISTS idx_cb_diag_tool ON circuit_breaker_diagnostics (tool_name);
+
+-- Sprint 4 indexes
+CREATE INDEX IF NOT EXISTS idx_silent_failures_ts ON silent_failures (timestamp);
+CREATE INDEX IF NOT EXISTS idx_silent_failures_subsystem ON silent_failures (subsystem);
+CREATE INDEX IF NOT EXISTS idx_subsystem_runs_ts ON subsystem_runs (timestamp);
+CREATE INDEX IF NOT EXISTS idx_subsystem_runs_subsystem ON subsystem_runs (subsystem);
 """
 
 
@@ -264,6 +313,285 @@ class ToolCallTelemetry:
             ),
         )
         self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Sprint 4 (Silent Failure Eradication) — autonomous-subsystem writes
+    # ------------------------------------------------------------------
+
+    def record_silent_failure(
+        self,
+        subsystem: str,
+        operation: str,
+        exc: BaseException,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        """Record an exception caught inside an autonomous subsystem.
+
+        Best-effort: this helper never raises. If the DB is read-only or
+        a parallel write fails, we log at WARN and move on — the goal is
+        to make silent failures observable, not to crash the daemon
+        because telemetry is unhappy.
+
+        Args:
+            subsystem: short tag like ``"curator"``, ``"skill_creator"``,
+                ``"memory_extractor"``, ``"gepa"``.
+            operation: optional sub-operation tag such as ``"_call_model"``
+                or ``"run_once"`` — helps disambiguate which path failed.
+            exc: the exception instance.
+            context: optional JSON-serialisable dict (skill path, model
+                id, batch size, etc.). Stored as a JSON string.
+        """
+        try:
+            ctx_json = json.dumps(context, default=str) if context else None
+        except Exception:
+            ctx_json = None
+        try:
+            tb_text = "".join(_traceback.format_exception(type(exc), exc, exc.__traceback__))
+        except Exception:
+            tb_text = ""
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO silent_failures
+                  (id, timestamp, subsystem, operation,
+                   exception_type, exception_msg, traceback, context)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid4().hex,
+                    time.time(),
+                    subsystem,
+                    operation,
+                    type(exc).__name__,
+                    str(exc)[:2000],
+                    tb_text[:8000],
+                    ctx_json,
+                ),
+            )
+            self._conn.commit()
+        except Exception:
+            # Never let telemetry plumbing crash a subsystem path. The whole
+            # point of this table is observability — a write failure here
+            # would be ironic but not load-bearing.
+            log.warning(
+                "ToolCallTelemetry.record_silent_failure: write failed for "
+                "subsystem=%s operation=%s",
+                subsystem, operation, exc_info=True,
+            )
+
+    def record_run(
+        self,
+        subsystem: str,
+        operation: str,
+        outcome: str,
+        duration_ms: float = 0.0,
+        summary: dict[str, Any] | None = None,
+    ) -> None:
+        """Record one autonomous-subsystem cycle / pass / invocation.
+
+        The companion to :meth:`record_silent_failure`. Every Curator pass,
+        MemoryExtractor cycle, etc. writes one row regardless of outcome
+        so ``/health`` can detect a hung subsystem even when no exception
+        is thrown.
+
+        ``outcome`` must be one of ``"success"`` | ``"partial"`` |
+        ``"failed"`` | ``"skipped"`` — anything else is coerced to
+        ``"failed"`` defensively.
+        """
+        if outcome not in {"success", "partial", "failed", "skipped"}:
+            outcome = "failed"
+        try:
+            summary_json = json.dumps(summary, default=str) if summary else None
+        except Exception:
+            summary_json = None
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO subsystem_runs
+                  (id, timestamp, subsystem, operation,
+                   duration_ms, outcome, summary_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid4().hex,
+                    time.time(),
+                    subsystem,
+                    operation,
+                    float(duration_ms),
+                    outcome,
+                    summary_json,
+                ),
+            )
+            self._conn.commit()
+        except Exception:
+            log.warning(
+                "ToolCallTelemetry.record_run: write failed for "
+                "subsystem=%s operation=%s",
+                subsystem, operation, exc_info=True,
+            )
+
+    # ------------------------------------------------------------------
+    # Sprint 4 — readers for /health and audits
+    # ------------------------------------------------------------------
+
+    def silent_failures_since(
+        self,
+        since: float,
+        *,
+        subsystem: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return silent failures with ``timestamp >= since``, newest first."""
+        query = (
+            "SELECT id, timestamp, subsystem, operation, exception_type, "
+            "exception_msg, traceback, context FROM silent_failures "
+            "WHERE timestamp >= ?"
+        )
+        params: list[Any] = [since]
+        if subsystem is not None:
+            query += " AND subsystem = ?"
+            params.append(subsystem)
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        try:
+            rows = self._conn.execute(query, tuple(params)).fetchall()
+        except sqlite3.DatabaseError:
+            return []
+        return [
+            {
+                "id": row[0],
+                "timestamp": row[1],
+                "subsystem": row[2],
+                "operation": row[3],
+                "exception_type": row[4],
+                "exception_msg": row[5],
+                "traceback": row[6],
+                "context": row[7],
+            }
+            for row in rows
+        ]
+
+    def runs_since(
+        self,
+        since: float,
+        *,
+        subsystem: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Return subsystem-run rows with ``timestamp >= since``, newest first."""
+        query = (
+            "SELECT id, timestamp, subsystem, operation, duration_ms, "
+            "outcome, summary_json FROM subsystem_runs WHERE timestamp >= ?"
+        )
+        params: list[Any] = [since]
+        if subsystem is not None:
+            query += " AND subsystem = ?"
+            params.append(subsystem)
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        try:
+            rows = self._conn.execute(query, tuple(params)).fetchall()
+        except sqlite3.DatabaseError:
+            return []
+        return [
+            {
+                "id": row[0],
+                "timestamp": row[1],
+                "subsystem": row[2],
+                "operation": row[3],
+                "duration_ms": row[4],
+                "outcome": row[5],
+                "summary_json": row[6],
+            }
+            for row in rows
+        ]
+
+    def health_summary(self, since: float) -> dict[str, Any]:
+        """Compact aggregate used by the ``/health`` command.
+
+        Returns::
+
+            {
+                "since": <unix-ts>,
+                "tool_calls": {"total": N, "failures": N, "success_rate": 0-1},
+                "subsystems": {
+                    "<name>": {
+                        "runs": N, "success": N, "partial": N, "failed": N,
+                        "skipped": N, "silent_failures": N,
+                        "last_run_at": ts | None,
+                        "last_outcome": "success" | ...,
+                    },
+                    ...
+                },
+                "recent_silent_failures": [ <silent_failure dict>, ... ],
+                    # 5 newest, across all subsystems
+            }
+        """
+        out: dict[str, Any] = {
+            "since": since,
+            "tool_calls": {"total": 0, "failures": 0, "success_rate": 0.0},
+            "subsystems": {},
+            "recent_silent_failures": [],
+        }
+        try:
+            t_total, t_succ = self._conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(success), 0) "
+                "FROM tool_calls WHERE timestamp >= ?",
+                (since,),
+            ).fetchone() or (0, 0)
+            out["tool_calls"]["total"] = int(t_total or 0)
+            out["tool_calls"]["failures"] = int((t_total or 0) - (t_succ or 0))
+            out["tool_calls"]["success_rate"] = (
+                float(t_succ) / float(t_total) if t_total else 0.0
+            )
+        except sqlite3.DatabaseError:
+            pass
+
+        # subsystem_runs aggregated by name + outcome
+        try:
+            for subsystem, outcome, cnt, last_ts in self._conn.execute(
+                "SELECT subsystem, outcome, COUNT(*), MAX(timestamp) "
+                "FROM subsystem_runs WHERE timestamp >= ? "
+                "GROUP BY subsystem, outcome",
+                (since,),
+            ).fetchall():
+                bucket = out["subsystems"].setdefault(
+                    subsystem,
+                    {"runs": 0, "success": 0, "partial": 0, "failed": 0,
+                     "skipped": 0, "silent_failures": 0,
+                     "last_run_at": None, "last_outcome": None},
+                )
+                bucket["runs"] += int(cnt or 0)
+                if outcome in ("success", "partial", "failed", "skipped"):
+                    bucket[outcome] += int(cnt or 0)
+                if last_ts is not None and (
+                    bucket["last_run_at"] is None or last_ts > bucket["last_run_at"]
+                ):
+                    bucket["last_run_at"] = float(last_ts)
+                    bucket["last_outcome"] = outcome
+        except sqlite3.DatabaseError:
+            pass
+
+        # silent_failures grouped by subsystem
+        try:
+            for subsystem, cnt in self._conn.execute(
+                "SELECT subsystem, COUNT(*) FROM silent_failures "
+                "WHERE timestamp >= ? GROUP BY subsystem",
+                (since,),
+            ).fetchall():
+                bucket = out["subsystems"].setdefault(
+                    subsystem,
+                    {"runs": 0, "success": 0, "partial": 0, "failed": 0,
+                     "skipped": 0, "silent_failures": 0,
+                     "last_run_at": None, "last_outcome": None},
+                )
+                bucket["silent_failures"] = int(cnt or 0)
+        except sqlite3.DatabaseError:
+            pass
+
+        # Most-recent 5 silent failures across all subsystems
+        out["recent_silent_failures"] = self.silent_failures_since(since, limit=5)
+        return out
 
     # ------------------------------------------------------------------
     # Golden Trace Capture sprint — query + export

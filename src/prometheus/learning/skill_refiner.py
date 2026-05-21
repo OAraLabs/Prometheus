@@ -76,13 +76,25 @@ class SkillRefiner:
         auto_dir: Path | None = None,
         min_tool_calls: int = 3,
         signal_bus: object | None = None,
+        telemetry: object | None = None,
     ) -> None:
+        from prometheus.learning.llm_envelope import LLMCallEnvelope
+
         self._provider = provider
         self._model = model
         self._auto_dir = auto_dir or _get_auto_skills_dir()
         self._min_tool_calls = min_tool_calls
         # Sprint S1: SignalBus wired by daemon.py after construction.
         self._signal_bus = signal_bus
+        # Sprint S4 A1: shared LLMCallEnvelope. on_failure="return_none" so
+        # `maybe_refine`'s existing "returns False on failure" contract still
+        # holds — the caller checks `if response is None`.
+        self._telemetry = telemetry
+        self._envelope = LLMCallEnvelope(
+            subsystem="skill_refiner",
+            telemetry=telemetry,
+            on_failure="return_none",
+        )
 
     @property
     def signal_bus(self) -> object | None:
@@ -97,6 +109,8 @@ class SkillRefiner:
         cls,
         provider: ModelProvider,
         config_path: str | None = None,
+        *,
+        telemetry: object | None = None,
     ) -> SkillRefiner | None:
         """Build from prometheus.yaml learning section.
 
@@ -128,7 +142,7 @@ class SkillRefiner:
             return None
 
         model = learning.get("skill_refiner_model", "default")
-        return cls(provider, model=model)
+        return cls(provider, model=model, telemetry=telemetry)
 
     async def maybe_refine_recent(
         self,
@@ -190,12 +204,12 @@ class SkillRefiner:
             outcome=outcome,
         )
 
-        try:
-            response = await self._call_model(prompt)
-        except Exception:
-            log.exception("SkillRefiner: model call failed")
+        # Envelope returns None on failure (telemetry written). The outer
+        # try/except this replaces was the second-tier instance of the
+        # ed8f1a6 pattern flagged HIGH-RISK in PR #2's audit.
+        response = await self._call_model(prompt)
+        if response is None:
             return False
-
         response = response.strip()
         if not response or response == "NO_CHANGE":
             log.debug("SkillRefiner: no changes needed for %s", skill_path.name)
@@ -274,24 +288,15 @@ class SkillRefiner:
         except Exception:
             log.debug("SkillRefiner: signal emission failed", exc_info=True)
 
-    async def _call_model(self, prompt: str) -> str:
-        """Call the ModelProvider and return the full text response."""
-        from prometheus.engine.messages import ConversationMessage, TextBlock
-        from prometheus.providers.base import ApiMessageRequest, ApiTextDeltaEvent
-
-        # ConversationMessage.content is list[ContentBlock]; a raw string
-        # fails pydantic validation. (Pre-existing bug found during
-        # Sprint 1 — see commit message.)
-        request = ApiMessageRequest(
+    async def _call_model(self, prompt: str) -> str | None:
+        """Invoke the model via LLMCallEnvelope. Returns None on failure."""
+        return await self._envelope.call(
+            provider=self._provider,
             model=self._model,
-            messages=[ConversationMessage(role="user", content=[TextBlock(text=prompt)])],
+            prompt=prompt,
             max_tokens=2048,
+            operation="refine_skill",
         )
-        text_parts: list[str] = []
-        async for event in self._provider.stream_message(request):
-            if isinstance(event, ApiTextDeltaEvent):
-                text_parts.append(event.text)
-        return "".join(text_parts)
 
     @staticmethod
     def _format_trace(trace: list[dict[str, Any]]) -> str:
