@@ -224,12 +224,15 @@ class MemoryExtractor:
 
     async def _call_model(self, prompt: str) -> str:
         """Call the ModelProvider and return the full text response."""
-        from prometheus.engine.messages import ConversationMessage
+        from prometheus.engine.messages import ConversationMessage, TextBlock
         from prometheus.providers.base import ApiMessageRequest
 
+        # ConversationMessage.content is list[ContentBlock]; a raw string
+        # fails pydantic validation. (Pre-existing bug found during
+        # Sprint 1 — see commit message.)
         request = ApiMessageRequest(
             model=self._model,
-            messages=[ConversationMessage(role="user", content=prompt)],
+            messages=[ConversationMessage(role="user", content=[TextBlock(text=prompt)])],
             max_tokens=2048,
         )
         text_parts: list[str] = []
