@@ -78,6 +78,11 @@ gateway:
   proxy_url: null
   heartbeat_interval: 30
   cron_enabled: true
+  # Sprint S1: user-visible signals (skill_created / skill_refined /
+  # memory_updated / curator_report) post a short notification to the
+  # last active Telegram chat. Modes: off | quiet | verbose.
+  # `/notifications <mode>` toggles at runtime (Stream 3).
+  skill_event_notifications: quiet
   media:
     max_file_size_mb: 20
     cache_dir: "~/.prometheus/cache/media"
@@ -151,6 +156,18 @@ learning:
   # SkillRefiner — refine an existing auto-skill when execution deviates beneficially.
   skill_refinement_enabled: false
   skill_refiner_model: default
+  # Curator — periodic consolidation pass over ~/.prometheus/skills/auto/.
+  # Stage 1 (auto): flip lifecycle state based on mtime (stale/archived).
+  # Stage 2 (LLM): recommend consolidations (report-only) + prunings (applied:
+  # file moved to auto/.archive/, NEVER deleted). Pinned skills are protected.
+  # Adapted from Hermes agent/curator.py (see prometheus/learning/curator.py).
+  curator_enabled: true
+  curator_interval_seconds: 604800        # 7 days
+  curator_stale_after_days: 30            # mtime >= N days → state=stale
+  curator_archive_after_days: 90          # mtime >= N days → state=archived
+  curator_min_idle_seconds: 0             # 0 = always run on tick (reserved)
+  curator_max_prunings_per_run: 10        # safety cap on auto-archives per pass
+  curator_telegram_summary: true          # post a one-line summary to Telegram on run
   # GEPA (SUNRISE Session B) — Generalized Evolutionary Prompt Architecture.
   gepa_enabled: false
   gepa_max_skills_per_cycle: 3

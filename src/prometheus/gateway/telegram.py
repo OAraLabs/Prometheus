@@ -133,6 +133,146 @@ class TelegramAdapter(BasePlatformAdapter):
             session_manager = _SM()
         self.session_manager: SessionManager = session_manager
 
+        # Sprint S1 Stream 2: SignalBus wired by daemon.py inside the
+        # SENTINEL block via the ``signal_bus`` property setter. Until then
+        # it's None and the subscribe path is a no-op.
+        self._signal_bus: object | None = None
+
+    # ------------------------------------------------------------------
+    # Sprint S1 Stream 2: SignalBus subscription for user-visible events
+    # ------------------------------------------------------------------
+
+    @property
+    def signal_bus(self) -> object | None:
+        return self._signal_bus
+
+    @signal_bus.setter
+    def signal_bus(self, bus: object | None) -> None:
+        """Subscribe to skill/memory/curator events on bus assignment.
+
+        Called from daemon.py after the SignalBus is constructed. The
+        subscription wires four signal kinds to handler coroutines that
+        post a short notification to the last active Telegram chat.
+
+        Default behaviour is QUIET (one-line emoji + name). The
+        ``/notifications verbose`` command (Sprint 1 Stream 3) toggles
+        between quiet/verbose/off and persists in
+        ``gateway.telegram.skill_event_notifications`` config.
+        """
+        self._signal_bus = bus
+        if bus is None:
+            return
+        try:
+            bus.subscribe("skill_created", self._on_signal_skill_created)
+            bus.subscribe("skill_refined", self._on_signal_skill_refined)
+            bus.subscribe("memory_updated", self._on_signal_memory_updated)
+            bus.subscribe("curator_report", self._on_signal_curator_report)
+            logger.info(
+                "Telegram: subscribed to skill/memory/curator signals"
+            )
+        except Exception:
+            logger.warning(
+                "Telegram: failed to subscribe to SignalBus", exc_info=True
+            )
+
+    def _notification_mode(self) -> str:
+        """Return 'quiet' | 'verbose' | 'off'.
+
+        Checks the runtime override file first (set via /notifications),
+        then falls back to ``gateway.skill_event_notifications`` in
+        prometheus.yaml.
+        """
+        # Runtime override via /notifications has precedence.
+        try:
+            from prometheus.gateway.commands import get_notifications_mode
+            mode = get_notifications_mode(default="")
+            if mode:
+                return mode
+        except Exception:
+            pass
+        cfg = self._prometheus_config.get("gateway", {})
+        if isinstance(cfg, dict):
+            return str(cfg.get("skill_event_notifications", "quiet")).lower()
+        return "quiet"
+
+    async def _send_notification(self, text: str) -> None:
+        """Send *text* to the last active chat if we have one."""
+        chat_id = self._load_chat_id()
+        if chat_id is None:
+            return
+        try:
+            await self.send(chat_id, text, parse_mode=None)
+        except Exception:
+            logger.debug("Telegram: notification send failed", exc_info=True)
+
+    async def _on_signal_skill_created(self, signal: Any) -> None:
+        mode = self._notification_mode()
+        if mode == "off":
+            return
+        payload = getattr(signal, "payload", {}) or {}
+        name = payload.get("skill_name", "(unnamed)")
+        if mode == "verbose":
+            trigger = payload.get("trigger_task", "")
+            summary = payload.get("summary", "")
+            text = f"🎓 New skill: {name}"
+            if summary:
+                text += f"\n   {summary}"
+            if trigger:
+                text += f"\n   (built while: {trigger[:120]})"
+        else:
+            text = f"🎓 New skill: {name}"
+        await self._send_notification(text)
+
+    async def _on_signal_skill_refined(self, signal: Any) -> None:
+        mode = self._notification_mode()
+        if mode == "off":
+            return
+        payload = getattr(signal, "payload", {}) or {}
+        name = payload.get("skill_name", "(unnamed)")
+        if mode == "verbose":
+            summary = payload.get("summary", "")
+            text = f"📚 Updated skill: {name}"
+            if summary:
+                text += f"\n   {summary}"
+        else:
+            text = f"📚 Updated skill: {name}"
+        await self._send_notification(text)
+
+    async def _on_signal_memory_updated(self, signal: Any) -> None:
+        mode = self._notification_mode()
+        if mode == "off":
+            return
+        payload = getattr(signal, "payload", {}) or {}
+        target = payload.get("target", "memory")
+        operation = payload.get("operation", "updated")
+        if mode == "verbose":
+            preview = payload.get("entry_preview", "")
+            text = f"🧠 {target} {operation}"
+            if preview:
+                text += f"\n   {preview}"
+        else:
+            text = f"🧠 {target} {operation}"
+        await self._send_notification(text)
+
+    async def _on_signal_curator_report(self, signal: Any) -> None:
+        mode = self._notification_mode()
+        if mode == "off":
+            return
+        payload = getattr(signal, "payload", {}) or {}
+        reviewed = payload.get("skills_reviewed", 0)
+        prunings = payload.get("prunings", 0)
+        consolidations = payload.get("consolidations", 0)
+        if mode == "verbose":
+            text = (
+                f"📋 Curator: {reviewed} skills reviewed, "
+                f"{consolidations} consolidation suggestion(s), "
+                f"{prunings} archived\n"
+                f"   /curator show for the full report"
+            )
+        else:
+            text = f"📋 Curator: {reviewed} reviewed, {prunings} archived"
+        await self._send_notification(text)
+
     async def start(self) -> None:
         """Build the telegram Application and start long-polling."""
         if not self.config.token:
@@ -158,6 +298,10 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("benchmark", self._cmd_benchmark))
         self._app.add_handler(CommandHandler("context", self._cmd_context))
         self._app.add_handler(CommandHandler("skills", self._cmd_skills))
+        # Sprint S1 Stream 3: visible memory & skills inspection commands
+        self._app.add_handler(CommandHandler("memory", self._cmd_memory))
+        self._app.add_handler(CommandHandler("curator", self._cmd_curator))
+        self._app.add_handler(CommandHandler("notifications", self._cmd_notifications))
         self._app.add_handler(CommandHandler("anatomy", self._cmd_anatomy))
         self._app.add_handler(CommandHandler("doctor", self._cmd_doctor))
         self._app.add_handler(CommandHandler("profile", self._cmd_profile))
@@ -211,7 +355,11 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("sentinel", "SENTINEL subsystem status"),
                 BotCommand("benchmark", "Run a quick smoke test"),
                 BotCommand("context", "Context window usage"),
-                BotCommand("skills", "List available skills"),
+                BotCommand("skills", "Skills: list | show | pin | unpin | history"),
+                # Sprint S1 Stream 3
+                BotCommand("memory", "Memory: show [user] | limits"),
+                BotCommand("curator", "Curator: status | show | run [dry]"),
+                BotCommand("notifications", "Skill/memory/curator notifications: off | quiet | verbose"),
                 BotCommand("anatomy", "Infrastructure snapshot"),
                 BotCommand("doctor", "Diagnostic health check"),
                 BotCommand("profile", "Show or switch agent profile"),
@@ -417,7 +565,10 @@ class TelegramAdapter(BasePlatformAdapter):
             "/sentinel  — SENTINEL subsystem status\n"
             "/benchmark — Run a quick smoke test\n"
             "/context   — Context window usage\n"
-            "/skills    — List available skills\n"
+            "/skills    — list | show | pin | unpin | history\n"
+            "/memory    — show [user] | limits\n"
+            "/curator   — status | show | run [dry]\n"
+            "/notifications — off | quiet | verbose\n"
             "/reset     — Clear conversation context\n"
             "/help      — This message\n"
             "\n"
@@ -718,39 +869,151 @@ class TelegramAdapter(BasePlatformAdapter):
     async def _cmd_skills(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Handle /skills command — list available skills."""
+        """Handle /skills — subcommand dispatcher.
+
+        Subcommands (Sprint S1 Stream 3):
+          (none)                    list builtin + user skills (existing)
+          list                      list auto-skills with state + last-used
+          show <name>               display SKILL.md content
+          pin <name>                protect from Curator auto-prune
+          unpin <name>
+          history <name>            list SkillRefiner backup files
+        """
         if update.effective_chat is None:
             return
+        chat_id = update.effective_chat.id
+        args = list(context.args or [])
 
-        try:
-            from prometheus.skills.loader import load_skill_registry
-            registry = load_skill_registry()
-            skills = registry.list_skills()
-        except Exception as exc:
-            await self.send(
-                update.effective_chat.id,
-                f"Skills: error loading registry — {exc}",
-                parse_mode=None,
+        # No-arg: keep existing registry-listing behaviour.
+        if not args:
+            try:
+                from prometheus.skills.loader import load_skill_registry
+                registry = load_skill_registry()
+                skills = registry.list_skills()
+            except Exception as exc:
+                await self.send(chat_id, f"Skills: error loading registry — {exc}", parse_mode=None)
+                return
+            if not skills:
+                await self.send(chat_id, "No skills available.", parse_mode=None)
+                return
+            lines = [f"Skills ({len(skills)})\n"]
+            for skill in skills:
+                source_tag = f" [{skill.source}]" if skill.source else ""
+                lines.append(f"  {skill.name}{source_tag}")
+                if skill.description:
+                    lines.append(f"    {skill.description[:80]}")
+            lines.append(
+                "\nSubcommands: /skills list · show <name> · pin <name> "
+                "· unpin <name> · history <name>"
             )
+            await self.send(chat_id, "\n".join(lines), parse_mode=None)
             return
 
-        if not skills:
-            await self.send(
-                update.effective_chat.id,
-                "No skills available.",
-                parse_mode=None,
+        from prometheus.gateway import commands as _cmds
+
+        sub = args[0].lower()
+        name = " ".join(args[1:]).strip()
+
+        if sub == "list":
+            text = _cmds.cmd_skills_auto_list()
+        elif sub == "show":
+            text = _cmds.cmd_skills_show(name)
+        elif sub == "pin":
+            text = _cmds.cmd_skills_pin(name)
+        elif sub == "unpin":
+            text = _cmds.cmd_skills_unpin(name)
+        elif sub == "history":
+            text = _cmds.cmd_skills_history(name)
+        else:
+            text = (
+                f"Unknown subcommand: {sub}\n"
+                "Use: /skills [list | show <name> | pin <name> | "
+                "unpin <name> | history <name>]"
             )
+        await self.send(chat_id, text, parse_mode=None)
+
+    async def _cmd_memory(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /memory — show/limits subcommand dispatcher (Sprint S1 Stream 3).
+
+        Subcommands:
+          show [user]               display MEMORY.md (default) or USER.md
+          limits                    show char ceilings + current usage
+        """
+        if update.effective_chat is None:
             return
+        chat_id = update.effective_chat.id
+        args = list(context.args or [])
+        from prometheus.gateway import commands as _cmds
 
-        lines = [f"Skills ({len(skills)})\n"]
-        for skill in skills:
-            source_tag = f" [{skill.source}]" if skill.source else ""
-            lines.append(f"  {skill.name}{source_tag}")
-            if skill.description:
-                lines.append(f"    {skill.description[:80]}")
+        if not args:
+            text = (
+                "Memory commands:\n"
+                "  /memory show           — MEMORY.md content\n"
+                "  /memory show user      — USER.md content\n"
+                "  /memory limits         — char ceilings + usage"
+            )
+        else:
+            sub = args[0].lower()
+            tail = " ".join(args[1:]).strip().lower()
+            if sub == "show":
+                target = "user" if tail == "user" else "memory"
+                text = _cmds.cmd_memory_show(target=target)
+            elif sub == "limits":
+                text = _cmds.cmd_memory_limits()
+            else:
+                text = (
+                    f"Unknown subcommand: {sub}\n"
+                    "Use: /memory [show [user] | limits]"
+                )
+        await self.send(chat_id, text, parse_mode=None)
 
-        lines.append("\nUse the skill tool to load a skill by name.")
-        await self.send(update.effective_chat.id, "\n".join(lines), parse_mode=None)
+    async def _cmd_curator(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /curator — show/status/run subcommand dispatcher (Sprint S1 Stream 3)."""
+        if update.effective_chat is None:
+            return
+        chat_id = update.effective_chat.id
+        args = list(context.args or [])
+        from prometheus.gateway import commands as _cmds
+
+        if not args:
+            text = (
+                "Curator commands:\n"
+                "  /curator status        — last/next run, pinned skills\n"
+                "  /curator show          — most recent REPORT.md\n"
+                "  /curator run           — trigger an immediate pass\n"
+                "  /curator run dry       — dry-run (no file moves)"
+            )
+        else:
+            sub = args[0].lower()
+            if sub == "show":
+                text = _cmds.cmd_curator_show()
+            elif sub == "status":
+                text = _cmds.cmd_curator_status()
+            elif sub == "run":
+                dry = (len(args) >= 2 and args[1].lower().startswith("dry"))
+                text = await _cmds.cmd_curator_run(dry_run=dry)
+            else:
+                text = (
+                    f"Unknown subcommand: {sub}\n"
+                    "Use: /curator [show | status | run [dry]]"
+                )
+        await self.send(chat_id, text, parse_mode=None)
+
+    async def _cmd_notifications(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /notifications — toggle quiet/verbose/off (Sprint S1 Stream 3)."""
+        if update.effective_chat is None:
+            return
+        from prometheus.gateway import commands as _cmds
+
+        arg = " ".join(context.args or []).strip()
+        text = _cmds.cmd_notifications(mode=arg)
+        await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_context(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

@@ -87,11 +87,24 @@ class SkillCreator:
         model: str = "default",
         min_tool_calls: int = _MIN_TOOL_CALLS,
         auto_dir: Path | None = None,
+        signal_bus: object | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
         self._min_tool_calls = min_tool_calls
         self._auto_dir = auto_dir or _get_auto_skills_dir()
+        # Sprint S1: SignalBus is wired by daemon.py inside the SENTINEL
+        # block (after SignalBus exists, since SkillCreator construction
+        # happens earlier in the daemon startup).
+        self._signal_bus = signal_bus
+
+    @property
+    def signal_bus(self) -> object | None:
+        return self._signal_bus
+
+    @signal_bus.setter
+    def signal_bus(self, bus: object) -> None:
+        self._signal_bus = bus
 
     @classmethod
     def from_config(
@@ -162,16 +175,71 @@ class SkillCreator:
 
         path.write_text(content.strip() + "\n", encoding="utf-8")
         log.info("SkillCreator: created skill at %s", path)
+
+        # Sprint S1 Stream 2: emit skill_created so the Telegram gateway,
+        # Beacon WebSocket, and any future subscribers see the event.
+        await self._emit_created_signal(
+            skill_path=path,
+            task_description=task_description,
+            content=content,
+        )
         return path
+
+    async def _emit_created_signal(
+        self,
+        *,
+        skill_path: Path,
+        task_description: str,
+        content: str,
+    ) -> None:
+        if self._signal_bus is None:
+            return
+        try:
+            from prometheus.sentinel.signals import ActivitySignal
+
+            summary = self._extract_description(content) or skill_path.stem
+            await self._signal_bus.emit(ActivitySignal(
+                kind="skill_created",
+                payload={
+                    "skill_name": skill_path.stem,
+                    "skill_path": str(skill_path),
+                    "trigger_task": task_description[:200],
+                    "summary": summary[:200],
+                },
+                source="skill_creator",
+            ))
+        except Exception:
+            log.debug("SkillCreator: signal emission failed", exc_info=True)
+
+    @staticmethod
+    def _extract_description(content: str) -> str:
+        """Pull `description:` from frontmatter, falling back to first body line."""
+        in_fm = False
+        first_body_line = ""
+        for raw in content.splitlines():
+            line = raw.strip()
+            if line == "---":
+                in_fm = not in_fm
+                continue
+            if in_fm:
+                if line.startswith("description:"):
+                    return line.split(":", 1)[1].strip().strip("'\"")
+            else:
+                if line and not line.startswith("#") and not first_body_line:
+                    first_body_line = line
+        return first_body_line
 
     async def _call_model(self, prompt: str) -> str:
         """Call the ModelProvider and return the full text response."""
-        from prometheus.engine.messages import ConversationMessage
+        from prometheus.engine.messages import ConversationMessage, TextBlock
         from prometheus.providers.base import ApiMessageRequest, ApiTextDeltaEvent
 
+        # ConversationMessage.content is list[ContentBlock]; a raw string
+        # fails pydantic validation. (Pre-existing bug found during
+        # Sprint 1 — see commit message.)
         request = ApiMessageRequest(
             model=self._model,
-            messages=[ConversationMessage(role="user", content=prompt)],
+            messages=[ConversationMessage(role="user", content=[TextBlock(text=prompt)])],
             max_tokens=1024,
         )
         text_parts: list[str] = []

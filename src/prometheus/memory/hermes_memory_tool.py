@@ -34,6 +34,47 @@ _SECURITY_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# Sprint S1 Stream 2: module-level SignalBus reference. Wired by daemon.py
+# inside the SENTINEL block via ``set_memory_signal_bus(signal_bus)``. None
+# until the bus exists; emission is best-effort and never raises.
+_signal_bus: object | None = None
+
+
+def set_memory_signal_bus(bus: object | None) -> None:
+    """Register the SignalBus so MemoryTool can emit memory_updated.
+
+    Matches the pattern used by ``tools/builtin/sentinel_status.py``
+    (set_sentinel_components). Called once from daemon startup after the
+    SignalBus is constructed.
+    """
+    global _signal_bus
+    _signal_bus = bus
+
+
+class MemoryOverflowError(Exception):
+    """Raised when a single entry exceeds the file's character limit.
+
+    Adapted from Hermes's "MEMORY.md at capacity, consolidate before adding
+    new facts" pattern, except Hermes upstream does NOT actually enforce a
+    char limit (verified against agent/memory_manager.py + prompt_builder.py
+    in the public repo) — that's a Prometheus addition. Existing
+    prune-oldest semantics in FileMemoryStore handle the common case
+    silently; this error surfaces ONLY when a single entry is so large
+    that even fully draining the file wouldn't make room. The agent loop
+    is expected to catch and inject a consolidation prompt, then retry.
+
+    See Sprint 1 design notes for the policy choice.
+    """
+
+    def __init__(self, target: str, entry_chars: int, limit: int) -> None:
+        super().__init__(
+            f"{target} entry would be {entry_chars} chars, limit is {limit}. "
+            f"Consolidate before adding new facts."
+        )
+        self.target = target
+        self.entry_chars = entry_chars
+        self.limit = limit
+
 
 def _get_memory_path() -> Path:
     return get_config_dir() / _MEMORY_FILE
@@ -70,10 +111,20 @@ class FileMemoryStore:
     # ------------------------------------------------------------------
 
     def add(self, entry: str) -> str:
-        """Append an entry. Returns 'added' or an error message."""
+        """Append an entry. Returns 'added' or an error message.
+
+        Sprint S1: a single entry longer than ``max_chars`` cannot be made
+        to fit even by draining the file completely; we raise
+        :class:`MemoryOverflowError` so the agent loop can inject a
+        consolidation prompt and retry. Normal (smaller) entries still
+        prune-oldest silently — that's the existing contract.
+        """
         entry = self._sanitize(entry)
         if not entry:
             return "entry is empty or contained prohibited content"
+        # Hard ceiling: even a fully empty file cannot hold this entry.
+        if len(entry) > self._max_chars:
+            raise MemoryOverflowError(self._path.name, len(entry), self._max_chars)
         with _ExclusiveLock(self._path):
             entries = self._parse()
             entries.append(entry)
@@ -223,6 +274,8 @@ class MemoryTool(BaseTool):
         del context
         store = get_memory_store() if arguments.target == "memory" else get_user_store()
 
+        target_label = "MEMORY.md" if arguments.target == "memory" else "USER.md"
+
         if arguments.operation == "list":
             entries = store.list_entries()
             if not entries:
@@ -232,13 +285,37 @@ class MemoryTool(BaseTool):
         if arguments.operation == "add":
             if not arguments.entry:
                 return ToolResult(output="'entry' is required for add", is_error=True)
-            result = store.add(arguments.entry)
+            try:
+                result = store.add(arguments.entry)
+            except MemoryOverflowError as exc:
+                # Surface the overflow plainly so the agent loop / caller
+                # can react. Result is_error so adapters route it to the
+                # retry path.
+                return ToolResult(
+                    output=(
+                        f"MemoryOverflowError: {exc}. "
+                        f"Consolidate {target_label} (merge duplicates, drop "
+                        f"stale items) and try again."
+                    ),
+                    is_error=True,
+                )
+            await _maybe_emit_memory_updated(
+                target=target_label,
+                operation="add",
+                entry=arguments.entry,
+            )
             return ToolResult(output=result, is_error=result not in {"added"})
 
         if arguments.operation == "remove":
             if not arguments.entry:
                 return ToolResult(output="'entry' is required for remove", is_error=True)
             result = store.remove(arguments.entry)
+            if result == "removed":
+                await _maybe_emit_memory_updated(
+                    target=target_label,
+                    operation="remove",
+                    entry=arguments.entry,
+                )
             return ToolResult(output=result)
 
         if arguments.operation == "replace":
@@ -247,10 +324,52 @@ class MemoryTool(BaseTool):
                     output="both 'old_entry' and 'entry' are required for replace",
                     is_error=True,
                 )
-            result = store.replace(arguments.old_entry, arguments.entry)
+            try:
+                result = store.replace(arguments.old_entry, arguments.entry)
+            except MemoryOverflowError as exc:
+                return ToolResult(
+                    output=(
+                        f"MemoryOverflowError: {exc}. "
+                        f"Consolidate {target_label} and try again."
+                    ),
+                    is_error=True,
+                )
+            if result == "replaced":
+                await _maybe_emit_memory_updated(
+                    target=target_label,
+                    operation="replace",
+                    entry=arguments.entry,
+                )
             return ToolResult(output=result)
 
         return ToolResult(output=f"unknown operation: {arguments.operation}", is_error=True)
+
+
+async def _maybe_emit_memory_updated(
+    *,
+    target: str,
+    operation: str,
+    entry: str,
+) -> None:
+    """Best-effort emission of ``memory_updated`` on the module SignalBus."""
+    bus = _signal_bus
+    if bus is None:
+        return
+    try:
+        from prometheus.sentinel.signals import ActivitySignal
+
+        await bus.emit(ActivitySignal(
+            kind="memory_updated",
+            payload={
+                "target": target,
+                "operation": operation,
+                "entry_preview": entry[:120],
+            },
+            source="memory_tool",
+        ))
+    except Exception:
+        # Never let signalling break a memory write.
+        pass
 
 
 # ------------------------------------------------------------------

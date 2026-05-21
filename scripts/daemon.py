@@ -676,6 +676,35 @@ async def run_daemon(args: argparse.Namespace) -> None:
             heartbeat.signal_bus = signal_bus
             if "extractor" in dir():
                 extractor.signal_bus = signal_bus
+            # Sprint S1 (visible memory & skills): SkillCreator/SkillRefiner
+            # also publish to the bus so the gateways and Beacon can surface
+            # skill_created / skill_refined events. The setter pattern lets
+            # us delay the wire until after SignalBus is constructed
+            # (SkillCreator is wired earlier in the daemon, before this block).
+            if "skill_creator" in dir():
+                skill_creator.signal_bus = signal_bus
+            if "skill_refiner" in dir() and skill_refiner is not None:
+                skill_refiner.signal_bus = signal_bus
+            # MemoryTool (hermes_memory_tool) emits memory_updated on
+            # MEMORY.md / USER.md writes. Module-level setter matches the
+            # tools/builtin/sentinel_status.py pattern.
+            try:
+                from prometheus.memory.hermes_memory_tool import (
+                    set_memory_signal_bus,
+                )
+                set_memory_signal_bus(signal_bus)
+            except Exception:
+                logger.debug("memory signal bus wiring skipped", exc_info=True)
+            # Sprint S1 Stream 2: Telegram gateway subscribes to
+            # skill_created / skill_refined / memory_updated / curator_report
+            # for user-facing notifications (default quiet mode).
+            if "telegram" in dir() and telegram is not None:
+                try:
+                    telegram.signal_bus = signal_bus
+                except Exception:
+                    logger.debug(
+                        "telegram signal bus wiring skipped", exc_info=True
+                    )
 
             # Start (signal-reactive, no separate tasks needed)
             await observer.start()
@@ -709,6 +738,37 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 logger.info("GoldenTraceExporter started")
     except Exception as exc:
         logger.warning("GoldenTraceExporter not available: %s", exc)
+
+    # Sprint S1 (visible memory & skills): Curator — periodic consolidation
+    # pass over ~/.prometheus/skills/auto/. Two-stage pipeline (deterministic
+    # state transitions + LLM-suggested consolidations/prunings). Pinned
+    # skills protected. Prunings move files to auto/.archive/ — never delete.
+    # Pattern adapted from Hermes agent/curator.py. See
+    # prometheus/learning/curator.py for the design notes and divergences.
+    try:
+        from prometheus.learning.curator import Curator, set_curator
+        curator = Curator.from_config(
+            provider,
+            model=model_name,
+            signal_bus=signal_bus if "signal_bus" in dir() else None,
+            config=config,
+        )
+        if curator is not None:
+            curator_task = await curator.start()
+            if curator_task is not None:
+                tasks.append(curator_task)
+                logger.info(
+                    "Curator: wired (interval=%ds, stale=%dd, archive=%dd)",
+                    curator._interval,
+                    curator._stale_after_days,
+                    curator._archive_after_days,
+                )
+            # Register the singleton so /curator commands can reach it.
+            set_curator(curator)
+        else:
+            logger.info("Curator: disabled by config (learning.curator_enabled)")
+    except Exception as exc:
+        logger.warning("Curator not available: %s", exc)
 
     # GRAFT-SYMBIOTE Session A: SymbioteCoordinator (Scout → Harvest → Graft).
     # Tools were registered in create_tool_registry; the coordinator is
