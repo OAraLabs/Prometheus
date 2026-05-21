@@ -6204,7 +6204,12 @@ class TestSunriseMemoryExtractorTaskName:
     """
 
     def test_named_task_discoverable(self):
-        """A named task shows up in asyncio.all_tasks() while running."""
+        """A named task shows up in asyncio.all_tasks() while running.
+
+        (Kept as a structural smoke check — see
+        ``test_run_forever_actually_invokes_run_once`` below for the
+        Sprint 4 A5 functional upgrade.)
+        """
         async def _check():
             async def _idle():
                 await asyncio.sleep(0.1)
@@ -6221,6 +6226,55 @@ class TestSunriseMemoryExtractorTaskName:
 
         asyncio.run(_check())
 
+    def test_run_forever_actually_invokes_run_once(self):
+        """Sprint S4 A5 functional upgrade — replaces "asyncio honors name="
+        with "the loop body MemoryExtractor.run_forever spins on actually
+        invokes run_once".
+
+        Drives the same code path daemon.py:523 wraps in a named task.
+        If run_forever regresses to a no-op (the ed8f1a6 pattern), the
+        spy never fires and this fails.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+        from prometheus.memory.extractor import MemoryExtractor
+        from prometheus.memory.store import MemoryStore
+
+        store = MagicMock(spec=MemoryStore)
+        extractor = MemoryExtractor(
+            store=store,
+            provider=MagicMock(),
+            model="m",
+            telemetry=None,
+        )
+        run_once_spy = AsyncMock(return_value=(0, []))
+        extractor.run_once = run_once_spy  # type: ignore[method-assign]
+
+        async def _drive():
+            t = asyncio.create_task(
+                extractor.run_forever(interval=0.01),
+                name="memory_extractor",
+            )
+            try:
+                # Yield a few times so the loop body actually ticks.
+                for _ in range(5):
+                    await asyncio.sleep(0.02)
+                # Sanity: the task exists with the expected name.
+                names = {task.get_name() for task in asyncio.all_tasks()}
+                assert "memory_extractor" in names
+            finally:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+
+        asyncio.run(_drive())
+        # Observable side effect: run_once was actually called.
+        assert run_once_spy.call_count >= 1, (
+            "MemoryExtractor.run_forever didn't invoke run_once — the "
+            "spawned task is named correctly but the loop body is inert."
+        )
+
 
 # ===========================================================================
 # SUNRISE Session B: GEPAEngine wired to SENTINEL bus
@@ -6230,24 +6284,51 @@ class TestSunriseMemoryExtractorTaskName:
 class TestSunriseGEPAEngineWiring:
     """GEPAEngine subscribes to idle_start / idle_end and runs cycles via run_now()."""
 
-    def test_engine_subscribes_to_idle_signals(self):
-        """After start(), bus has idle_start AND idle_end subscribers from the engine."""
+    def test_engine_subscribes_to_idle_signals(self, tmp_path):
+        """Sprint S4 A5 functional upgrade — previously asserted only
+        `bus.subscriber_count >= 2`. Now publishes an `idle_start` signal
+        and verifies an observable side effect (engine internal state
+        transitioned to "idle" / scheduled a run via the bus contract).
+        """
         from prometheus.learning.gepa import GEPAOptimizer
         from prometheus.sentinel.gepa_engine import GEPAEngine
-        from prometheus.sentinel.signals import SignalBus
+        from prometheus.sentinel.signals import ActivitySignal, SignalBus
 
         bus = SignalBus()
-        opt = GEPAOptimizer(provider=None, config={"gepa_enabled": True})
+        # Use disabled optimizer for a fast, side-effect-light cycle.
+        opt = GEPAOptimizer(
+            provider=None,
+            config={"gepa_enabled": False},
+            trajectories_dir=tmp_path / "trajectories",
+            skills_auto_dir=tmp_path / "skills" / "auto",
+        )
         engine = GEPAEngine(optimizer=opt, signal_bus=bus, config={
-            "gepa_min_idle_minutes": 10,
-            "gepa_max_frequency_hours": 24,
+            "gepa_min_idle_minutes": 0,        # don't gate
+            "gepa_max_frequency_hours": 0,     # always allow
         })
 
-        # Before start: no subscribers
+        # Subscriber-count sanity check (kept from the original)
         assert bus.subscriber_count == 0
         asyncio.run(engine.start())
-        # After start: at least 2 (idle_start, idle_end)
         assert bus.subscriber_count >= 2
+
+        # Functional check: publish `idle_start` → engine internal state
+        # reflects it (`_last_idle_start` is the public-ish hook the
+        # engine sets when it sees an idle signal).
+        async def _drive():
+            await bus.emit(ActivitySignal(kind="idle_start", source="test"))
+            # The handler is async; await one more loop tick so the
+            # subscribed callback finishes before we assert.
+            await asyncio.sleep(0)
+
+        asyncio.run(_drive())
+        # The handler sets `_idle_since` to the signal-receipt timestamp.
+        # A non-None value proves the subscription actually fired and
+        # observed state changed — not just that a callback is registered.
+        assert engine._idle_since is not None, (
+            "Engine did not record the idle_start signal — wiring is "
+            "subscribed but the handler doesn't update observable state."
+        )
 
     def test_run_now_invokes_optimizer(self, tmp_path):
         """run_now triggers the optimizer's run_optimization_cycle directly."""
@@ -6313,17 +6394,52 @@ class TestSunriseGEPAEngineWiring:
 class TestSymbioteWiring:
     """Verify the SYMBIOTE pipeline is wired into the existing harness."""
 
-    def test_symbiote_tools_registered_in_default_registry(self):
-        """create_tool_registry() includes the 4 symbiote tools + github_search."""
+    def test_symbiote_tools_registered_in_default_registry(self, tmp_path):
+        """Sprint S4 A5 functional upgrade — previously only asserted set
+        membership (`name in registry.list_tools()`). Now also EXECUTES
+        each symbiote tool against the no-coordinator default to confirm
+        each one is a working `BaseTool` whose `execute()` returns a
+        structured `ToolResult`, not e.g. a `KeyError` from a broken
+        registration.
+        """
         from prometheus.__main__ import create_tool_registry
+        from prometheus.symbiote import set_coordinator
+        from prometheus.tools.base import ToolExecutionContext, ToolResult
 
         registry = create_tool_registry({})
         names = {t.name for t in registry.list_tools()}
-        assert "github_search" in names
-        assert "symbiote_scout" in names
-        assert "symbiote_harvest" in names
-        assert "symbiote_graft" in names
-        assert "symbiote_status" in names
+        for expected in (
+            "github_search",
+            "symbiote_scout",
+            "symbiote_harvest",
+            "symbiote_graft",
+            "symbiote_status",
+        ):
+            assert expected in names, f"{expected} missing from registry"
+
+        # Functional: ensure each tool's execute() returns a ToolResult
+        # (not a raw exception) when invoked without a coordinator.
+        set_coordinator(None)
+        ctx = ToolExecutionContext(cwd=tmp_path)
+        # Minimal valid inputs per tool — the pydantic schema requires
+        # specific fields. Bypassing validators with `model_construct`
+        # would skip the contract we care about, so build proper inputs.
+        _minimal_inputs: dict[str, dict] = {
+            "symbiote_scout": {"problem_statement": "test"},
+            "symbiote_harvest": {"candidate": "owner/repo"},
+            "symbiote_graft": {},  # session_id is optional
+            "symbiote_status": {},
+        }
+        try:
+            for name, kwargs in _minimal_inputs.items():
+                tool = next(t for t in registry.list_tools() if t.name == name)
+                inp = tool.input_model(**kwargs)  # type: ignore[call-arg]
+                result = asyncio.run(tool.execute(inp, ctx))
+                assert isinstance(result, ToolResult), (
+                    f"{name} returned {type(result).__name__}, not ToolResult"
+                )
+        finally:
+            set_coordinator(None)
 
     def test_symbiote_profile_exists(self):
         """The symbiote profile is in the builtin profile store."""
@@ -6546,6 +6662,97 @@ class TestWeaveWebToolsWiring:
     def test_download_file_exported_from_builtin(self):
         from prometheus.tools.builtin import DownloadFileTool
         assert DownloadFileTool().name == "download_file"
+
+    def test_web_tools_execute_returns_tool_result(self, tmp_path, monkeypatch):
+        """Sprint S4 A5 functional upgrade — previously each web-tool test
+        only asserted `name in registry.list_tools()`. Now drives each
+        tool's `execute()` with a stubbed httpx/transport so we verify a
+        structured `ToolResult` actually comes back, instead of an
+        un-handled exception that the registry membership check can't see.
+
+        Mocks at the boundary (httpx.AsyncClient) so no real network is
+        touched.
+        """
+        import httpx
+        from prometheus.__main__ import create_tool_registry
+        from prometheus.tools.base import ToolExecutionContext, ToolResult
+
+        class _FakeResponse:
+            status_code = 200
+            text = "<html><body>fake body</body></html>"
+            content = b"binary"
+            headers: dict = {"content-type": "text/html"}
+            url = "https://example.com/fake"
+
+            def raise_for_status(self) -> None:
+                pass
+
+            async def aiter_bytes(self, chunk_size: int = 8192):
+                yield self.content
+
+        class _FakeAsyncClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, url, **kw): return _FakeResponse()
+            async def post(self, url, **kw): return _FakeResponse()
+            def stream(self, method, url, **kw):
+                fake = self
+                class _Cm:
+                    async def __aenter__(self_inner):
+                        return _FakeResponse()
+                    async def __aexit__(self_inner, *a):
+                        return False
+                return _Cm()
+
+        monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+        registry = create_tool_registry({})
+        ctx = ToolExecutionContext(cwd=tmp_path)
+
+        # web_fetch: take a real URL string; the mock short-circuits the network.
+        web_fetch = next(t for t in registry.list_tools() if t.name == "web_fetch")
+        result = asyncio.run(web_fetch.execute(
+            web_fetch.input_model(url="https://example.com/fake"), ctx,
+        ))
+        assert isinstance(result, ToolResult), (
+            f"web_fetch returned {type(result).__name__}, not ToolResult"
+        )
+
+        # download_file: same mock applies.
+        dl = next(t for t in registry.list_tools() if t.name == "download_file")
+        result = asyncio.run(dl.execute(
+            dl.input_model(url="https://example.com/file.txt"),
+            ctx,
+        ))
+        assert isinstance(result, ToolResult)
+
+        # web_search: may use a different backend; if mocking misses, the
+        # tool's own except still returns ToolResult(is_error=True). Either
+        # way we assert the contract holds.
+        ws = next(t for t in registry.list_tools() if t.name == "web_search")
+        try:
+            result = asyncio.run(ws.execute(
+                ws.input_model(query="anything"), ctx,
+            ))
+            assert isinstance(result, ToolResult)
+        except Exception as exc:
+            pytest.fail(
+                f"web_search.execute raised instead of returning ToolResult: {exc}"
+            )
+
+        # youtube_transcript: invalid id → tool should return ToolResult, not raise.
+        yt = next(t for t in registry.list_tools() if t.name == "youtube_transcript")
+        try:
+            result = asyncio.run(yt.execute(
+                yt.input_model(url="not-a-real-video-id"), ctx,
+            ))
+            assert isinstance(result, ToolResult)
+        except Exception as exc:
+            pytest.fail(
+                f"youtube_transcript.execute raised instead of returning "
+                f"ToolResult: {exc}"
+            )
 
 
 # ===========================================================================
@@ -6946,17 +7153,69 @@ class TestVisibleMemorySkillsWiring:
         assert "1 reviewed" in text
         assert "Report:" in text
 
-    def test_daemon_curator_wiring_block_present(self):
-        """The Curator wiring + signal_bus assignments are present in daemon.py."""
-        from pathlib import Path
+    def test_curator_set_get_round_trip(self):
+        """Sprint S4 A5 functional upgrade — replaces the structural
+        `test_daemon_curator_wiring_block_present` (which greps daemon.py
+        for fixed strings, the exact anti-pattern Sprint 4 is auditing).
 
-        daemon_src = (
-            Path(__file__).parent.parent / "scripts" / "daemon.py"
-        ).read_text()
-        # Sprint S1 daemon-side hooks.
-        assert "from prometheus.learning.curator import Curator" in daemon_src
-        assert "set_curator(curator)" in daemon_src
-        assert "skill_creator.signal_bus = signal_bus" in daemon_src
-        assert "skill_refiner.signal_bus = signal_bus" in daemon_src
-        assert "set_memory_signal_bus" in daemon_src
-        assert "telegram.signal_bus = signal_bus" in daemon_src
+        Verifies the contract `daemon.py` depends on: a constructed
+        Curator is reachable via `get_curator()` after `set_curator(c)`.
+        If the daemon stops calling `set_curator`, this test still
+        passes — that's a known limitation — but it's at least a
+        runtime invariant rather than a grep.
+        """
+        from unittest.mock import MagicMock
+        from prometheus.learning.curator import Curator, get_curator, set_curator
+
+        prior = get_curator()
+        try:
+            c = Curator(MagicMock())
+            set_curator(c)
+            assert get_curator() is c
+        finally:
+            set_curator(prior)
+
+    def test_curator_run_once_emits_signal_and_writes_report(self, tmp_path):
+        """Sprint S4 A5 — paired with the round-trip above. Demonstrates
+        the Sprint 1 wiring works end-to-end: a Curator with a SignalBus
+        emits `curator_report` after run_once, and writes REPORT.md.
+        Closes the "wired but inert" gap that Sprint 1 left behind."""
+        import asyncio
+        from prometheus.learning.curator import Curator
+        from prometheus.learning.skill_state import SkillStateStore
+        from prometheus.providers.base import ApiTextDeltaEvent
+        from prometheus.sentinel.signals import ActivitySignal, SignalBus
+
+        class _Scripted:
+            async def stream_message(self, req):
+                yield ApiTextDeltaEvent(
+                    text="```yaml\nconsolidations: []\nprunings: []\n```"
+                )
+
+        bus = SignalBus()
+        captured: list[ActivitySignal] = []
+
+        async def _capture(s): captured.append(s)
+        bus.subscribe("curator_report", _capture)
+
+        auto = tmp_path / "skills" / "auto"
+        auto.mkdir(parents=True)
+        (auto / "x.md").write_text("---\nname: x\n---\n# X\n")
+
+        c = Curator(
+            _Scripted(),
+            auto_dir=auto,
+            reports_dir=tmp_path / "curator",
+            state_store=SkillStateStore(tmp_path / "_state.json"),
+            signal_bus=bus,
+            interval_seconds=60,
+        )
+        run = asyncio.run(c.run_once())
+
+        # Observable side effect #1: REPORT.md on disk
+        from pathlib import Path as _P
+        assert _P(run.report_path).exists()
+        # Observable side effect #2: curator_report signal fired
+        assert len(captured) == 1
+        assert captured[0].kind == "curator_report"
+        assert captured[0].payload["skills_reviewed"] == 1
