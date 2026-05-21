@@ -77,6 +77,22 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# Module-level singleton — set by daemon.py after Curator is constructed
+# so /curator run / show / status commands can reach it. Matches the
+# tools/builtin/sentinel_status.py set_sentinel_components pattern.
+_curator_instance: "Curator | None" = None
+
+
+def set_curator(curator: "Curator | None") -> None:
+    """Register the running Curator instance for command access."""
+    global _curator_instance
+    _curator_instance = curator
+
+
+def get_curator() -> "Curator | None":
+    """Return the registered Curator instance (None if not wired)."""
+    return _curator_instance
+
 # Defaults match Hermes constants.
 _DEFAULT_INTERVAL_SECONDS = 7 * 24 * 3600       # 7 days
 _DEFAULT_STALE_AFTER_DAYS = 30
@@ -461,12 +477,17 @@ class Curator:
         return consolidations, prunings, raw
 
     async def _call_model(self, prompt: str) -> str:
-        from prometheus.engine.messages import ConversationMessage
+        from prometheus.engine.messages import ConversationMessage, TextBlock
         from prometheus.providers.base import ApiMessageRequest, ApiTextDeltaEvent
 
+        # ConversationMessage.content is list[ContentBlock]; the existing
+        # SkillCreator / SkillRefiner / MemoryExtractor callers pass a raw
+        # string which fails pydantic validation. Curator uses the correct
+        # list-of-blocks shape; the three pre-existing sites are flagged in
+        # Sprint 1 reporting-back.
         request = ApiMessageRequest(
             model=self._model,
-            messages=[ConversationMessage(role="user", content=prompt)],
+            messages=[ConversationMessage(role="user", content=[TextBlock(text=prompt)])],
             max_tokens=2048,
         )
         parts: list[str] = []

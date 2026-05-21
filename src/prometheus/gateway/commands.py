@@ -479,6 +479,321 @@ def cmd_skills() -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Sprint S1 Stream 3: visible memory & skills inspection commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_memory_show(target: str = "memory") -> str:
+    """Display the contents of MEMORY.md or USER.md with char count + limit.
+
+    Args:
+        target: ``"memory"`` (MEMORY.md, the agent's note-to-self file) or
+            ``"user"`` (USER.md, the persistent user-model file).
+    """
+    from prometheus.memory.hermes_memory_tool import (
+        _MEMORY_MAX_CHARS,
+        _USER_MAX_CHARS,
+        get_memory_store,
+        get_user_store,
+    )
+
+    if target == "user":
+        store = get_user_store()
+        limit = _USER_MAX_CHARS
+        label = "USER.md"
+    else:
+        store = get_memory_store()
+        limit = _MEMORY_MAX_CHARS
+        label = "MEMORY.md"
+
+    entries = store.list_entries()
+    chars = sum(len(e) + 1 for e in entries)
+    header = f"{label} — {chars}/{limit} chars, {len(entries)} entries"
+    if not entries:
+        return f"{header}\n\n(empty)"
+    body = "\n".join(f"- {e}" for e in entries)
+    # Cap reply size; full content readable via the file on disk.
+    if len(body) > 3500:
+        body = body[:3500] + f"\n\n…truncated. Read {label} on disk for full content."
+    return f"{header}\n\n{body}"
+
+
+def cmd_memory_limits() -> str:
+    """Show the hard char ceilings + current usage for MEMORY.md and USER.md."""
+    from prometheus.memory.hermes_memory_tool import (
+        _MEMORY_MAX_CHARS,
+        _USER_MAX_CHARS,
+        get_memory_store,
+        get_user_store,
+    )
+
+    mem_entries = get_memory_store().list_entries()
+    mem_chars = sum(len(e) + 1 for e in mem_entries)
+    user_entries = get_user_store().list_entries()
+    user_chars = sum(len(e) + 1 for e in user_entries)
+
+    return (
+        "Memory limits (hard ceiling + prune-oldest)\n"
+        f"  MEMORY.md: {mem_chars}/{_MEMORY_MAX_CHARS} chars, {len(mem_entries)} entries\n"
+        f"  USER.md:   {user_chars}/{_USER_MAX_CHARS} chars, {len(user_entries)} entries\n"
+        "\n"
+        "Single entries larger than the limit raise MemoryOverflowError\n"
+        "and the agent loop is expected to consolidate before retry."
+    )
+
+
+def cmd_skills_auto_list() -> str:
+    """List skills under ~/.prometheus/skills/auto/ with state + mtime.
+
+    Uses the SkillStateStore for `pinned` and `state`; mtime as last_used.
+    """
+    import time as _time
+    from datetime import datetime
+    from prometheus.config.paths import get_config_dir
+    from prometheus.learning.skill_state import SkillStateStore
+
+    auto_dir = get_config_dir() / "skills" / "auto"
+    if not auto_dir.is_dir():
+        return "Auto skills directory not initialised yet (no skills created)."
+
+    store = SkillStateStore()
+    skills = sorted(auto_dir.glob("*.md"))
+    if not skills:
+        return "No auto-skills yet. They appear here when SkillCreator fires."
+
+    now = _time.time()
+    lines: list[str] = [f"Auto-skills ({len(skills)})"]
+    for path in skills:
+        rec = store.get_skill(path.stem)
+        try:
+            mtime = path.stat().st_mtime
+            days = int((now - mtime) / 86400)
+            last_used = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+        except OSError:
+            days = 0
+            last_used = "?"
+        pin = " 📌" if rec.pinned else ""
+        state_tag = "" if rec.state == "active" else f" [{rec.state}]"
+        lines.append(
+            f"  {path.stem}{pin}{state_tag} — last used {last_used} ({days}d ago)"
+        )
+    lines.append("")
+    lines.append("Use /skills show <name> · /skills pin <name> · /skills history <name>")
+    return "\n".join(lines)
+
+
+def cmd_skills_show(name: str) -> str:
+    """Display the SKILL.md content for *name* (from auto/ first, then root)."""
+    from prometheus.config.paths import get_config_dir
+
+    if not name:
+        return "Usage: /skills show <name>"
+
+    skills_root = get_config_dir() / "skills"
+    candidates = [
+        skills_root / "auto" / f"{name}.md",
+        skills_root / f"{name}.md",
+    ]
+    for path in candidates:
+        if path.exists():
+            content = path.read_text(encoding="utf-8")
+            if len(content) > 3500:
+                content = content[:3500] + "\n\n…truncated."
+            return f"{path}\n\n{content}"
+    return f"Skill not found: {name}"
+
+
+def cmd_skills_pin(name: str) -> str:
+    """Mark *name* as pinned so the Curator never auto-prunes it."""
+    from prometheus.learning.skill_state import SkillStateStore
+
+    if not name:
+        return "Usage: /skills pin <name>"
+    store = SkillStateStore()
+    rec = store.set_pinned(name, True)
+    return f"📌 Pinned: {name} (state: {rec.state})"
+
+
+def cmd_skills_unpin(name: str) -> str:
+    from prometheus.learning.skill_state import SkillStateStore
+
+    if not name:
+        return "Usage: /skills unpin <name>"
+    store = SkillStateStore()
+    rec = store.set_pinned(name, False)
+    return f"Unpinned: {name} (state: {rec.state})"
+
+
+def cmd_skills_history(name: str) -> str:
+    """List the SkillRefiner-created backups for *name*."""
+    from datetime import datetime
+    from prometheus.config.paths import get_config_dir
+
+    if not name:
+        return "Usage: /skills history <name>"
+
+    auto_dir = get_config_dir() / "skills" / "auto"
+    if not auto_dir.is_dir():
+        return "No auto-skills directory."
+
+    # SkillRefiner writes <name>.bak-<ts>.md alongside <name>.md before
+    # each refine. List those sorted by timestamp.
+    backups = sorted(
+        auto_dir.glob(f"{name}.bak-*.md"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    current = auto_dir / f"{name}.md"
+
+    lines: list[str] = [f"History for {name}"]
+    if current.exists():
+        when = datetime.fromtimestamp(current.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        lines.append(f"  current: {when}")
+    else:
+        lines.append("  current: (file not found in auto/)")
+
+    if not backups:
+        lines.append("  no refinement backups")
+    else:
+        for b in backups[:20]:
+            when = datetime.fromtimestamp(b.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            lines.append(f"  {b.name} — {when}")
+        if len(backups) > 20:
+            lines.append(f"  …and {len(backups) - 20} older")
+    return "\n".join(lines)
+
+
+def cmd_curator_show() -> str:
+    """Display the most recent Curator REPORT.md."""
+    from prometheus.config.paths import get_config_dir
+    from prometheus.learning.skill_state import SkillStateStore
+
+    store = SkillStateStore()
+    cur = store.curator()
+    path = cur.last_report_path
+    if path:
+        try:
+            content = Path(path).read_text(encoding="utf-8")
+            if len(content) > 3500:
+                content = content[:3500] + "\n\n…truncated."
+            return content
+        except OSError:
+            pass
+    # Fall back to most-recent on disk under ~/.prometheus/curator/.
+    reports_root = get_config_dir() / "curator"
+    if reports_root.is_dir():
+        runs = sorted(reports_root.glob("*/REPORT.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if runs:
+            content = runs[0].read_text(encoding="utf-8")
+            if len(content) > 3500:
+                content = content[:3500] + "\n\n…truncated."
+            return content
+    return "No Curator runs yet. Try /curator run to trigger one."
+
+
+def cmd_curator_status() -> str:
+    """Show last/next run, run count, pinned skills."""
+    import time as _time
+    from datetime import datetime
+    from prometheus.learning.curator import get_curator
+    from prometheus.learning.skill_state import SkillStateStore
+
+    store = SkillStateStore()
+    cur = store.curator()
+    skills = store.list_skills()
+    pinned = [name for name, rec in skills.items() if rec.pinned]
+
+    lines: list[str] = ["Curator status"]
+    instance = get_curator()
+    if instance is None:
+        lines.append("  daemon: not wired (disabled in config?)")
+    else:
+        lines.append(
+            f"  interval: {instance._interval}s "
+            f"({instance._interval / 86400:.1f}d)"
+        )
+
+    if cur.last_run_at:
+        when = datetime.fromtimestamp(cur.last_run_at).strftime("%Y-%m-%d %H:%M")
+        ago = int((_time.time() - cur.last_run_at) / 60)
+        lines.append(f"  last run: {when} ({ago}m ago)")
+        if instance is not None:
+            next_at = cur.last_run_at + instance._interval
+            lines.append(
+                f"  next run: {datetime.fromtimestamp(next_at).strftime('%Y-%m-%d %H:%M')}"
+            )
+    else:
+        lines.append("  last run: (none yet)")
+
+    lines.append(f"  total runs: {cur.run_count}")
+    lines.append(f"  paused: {cur.paused}")
+    lines.append(f"  pinned skills: {len(pinned)}")
+    if pinned:
+        lines.append(f"    {', '.join(pinned[:10])}")
+        if len(pinned) > 10:
+            lines.append(f"    …and {len(pinned) - 10} more")
+    if cur.last_report_path:
+        lines.append(f"  last report: {cur.last_report_path}")
+    return "\n".join(lines)
+
+
+async def cmd_curator_run(*, dry_run: bool = False) -> str:
+    """Trigger an immediate Curator pass. Returns a one-line summary."""
+    from prometheus.learning.curator import get_curator
+
+    instance = get_curator()
+    if instance is None:
+        return "Curator not wired (check learning.curator_enabled in config)."
+    try:
+        run = await instance.run_once(dry_run=dry_run)
+    except Exception as exc:
+        return f"Curator run failed: {exc}"
+    mode = " (dry-run)" if dry_run else ""
+    return (
+        f"📋 Curator run{mode} — {run.skills_reviewed} reviewed, "
+        f"{len(run.auto_transitions)} auto-transitions, "
+        f"{len(run.consolidations)} consolidation suggestions, "
+        f"{len(run.prunings)} archived.\n"
+        f"Report: {run.report_path}"
+    )
+
+
+# Notification mode persistence — /notifications quiet|verbose|off
+_NOTIFICATIONS_MODE_FILE = "notifications_mode"
+_VALID_NOTIF_MODES = ("off", "quiet", "verbose")
+
+
+def get_notifications_mode(default: str = "quiet") -> str:
+    """Read the runtime notification override (or *default*)."""
+    from prometheus.config.paths import get_config_dir
+
+    path = get_config_dir() / _NOTIFICATIONS_MODE_FILE
+    try:
+        mode = path.read_text(encoding="utf-8").strip().lower()
+    except OSError:
+        return default
+    return mode if mode in _VALID_NOTIF_MODES else default
+
+
+def cmd_notifications(mode: str = "") -> str:
+    """Show or set the notification mode (off | quiet | verbose)."""
+    from prometheus.config.paths import get_config_dir
+
+    arg = (mode or "").strip().lower()
+    current = get_notifications_mode()
+    if not arg:
+        return (
+            f"Notifications: {current}\n"
+            "Set: /notifications off | quiet | verbose"
+        )
+    if arg not in _VALID_NOTIF_MODES:
+        return f"Unknown mode: {arg}. Use one of: {' | '.join(_VALID_NOTIF_MODES)}"
+    path = get_config_dir() / _NOTIFICATIONS_MODE_FILE
+    path.write_text(arg + "\n", encoding="utf-8")
+    return f"Notifications: {arg} (was {current})"
+
+
 def cmd_beacon(config: dict) -> str:
     """Report web bridge / Beacon dashboard status."""
     import platform as _platform

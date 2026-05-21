@@ -746,7 +746,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Pattern adapted from Hermes agent/curator.py. See
     # prometheus/learning/curator.py for the design notes and divergences.
     try:
-        from prometheus.learning.curator import Curator
+        from prometheus.learning.curator import Curator, set_curator
         curator = Curator.from_config(
             provider,
             model=model_name,
@@ -763,6 +763,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     curator._stale_after_days,
                     curator._archive_after_days,
                 )
+            # Register the singleton so /curator commands can reach it.
+            set_curator(curator)
         else:
             logger.info("Curator: disabled by config (learning.curator_enabled)")
     except Exception as exc:
