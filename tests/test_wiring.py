@@ -6610,3 +6610,353 @@ class TestWeavePressWiring:
         from prometheus.engine.agent_loop import AgentLoop
         sig = inspect.signature(AgentLoop.__init__)
         assert "tool_metadata" in sig.parameters
+
+
+# ===========================================================================
+# Sprint S1 — Visible Memory & Skills
+# ===========================================================================
+
+
+class TestVisibleMemorySkillsWiring:
+    """Wiring tests for the Sprint S1 visible-memory & visible-skills surface.
+
+    Covers:
+      * SkillStateStore atomic-write roundtrip + pin/state.
+      * Curator: end-to-end run, auto-transitions, LLM-pruning applied,
+        archive-not-delete, pin protection, REPORT.md/run.json on disk.
+      * Signal emission from SkillCreator/SkillRefiner/MemoryTool/Curator.
+      * Beacon WS first-class event-type mapping for the four new kinds.
+      * Telegram subscription side-effect of `signal_bus` setter.
+      * MemoryOverflowError raised for oversized entries.
+      * Platform-agnostic command surface importable.
+      * Daemon wires Curator + signal_bus into SkillCreator/SkillRefiner.
+    """
+
+    def test_skill_state_store_roundtrip(self, tmp_path):
+        from prometheus.learning.skill_state import (
+            SKILL_STATE_ACTIVE,
+            SKILL_STATE_STALE,
+            SkillStateStore,
+        )
+
+        store = SkillStateStore(tmp_path / "_state.json")
+        rec = store.get_skill("foo")
+        assert rec.pinned is False
+        assert rec.state == SKILL_STATE_ACTIVE
+
+        store.set_pinned("foo", True)
+        store.set_state("foo", SKILL_STATE_STALE)
+
+        rec2 = store.get_skill("foo")
+        assert rec2.pinned is True
+        assert rec2.state == SKILL_STATE_STALE
+
+        # Curator bookkeeping increments run_count.
+        import time as _t
+        store.update_curator(last_run_at=_t.time(), last_report_path="/tmp/r")
+        assert store.curator().run_count == 1
+
+    def test_curator_run_writes_report_and_archives(self, tmp_path):
+        """test_curator_writes_report + test_curator_archives_dont_delete"""
+        import asyncio
+        import time as _t
+        import os
+        from prometheus.learning.skill_state import SkillStateStore
+        from prometheus.learning.curator import Curator
+        from prometheus.providers.base import ApiTextDeltaEvent
+
+        auto = tmp_path / "skills" / "auto"
+        auto.mkdir(parents=True)
+        (auto / "a.md").write_text("---\nname: a\n---\n# A\n")
+        (auto / "b.md").write_text("---\nname: b\n---\n# B\n")
+        # Make 'a' old enough to be archived by mtime.
+        old_t = _t.time() - 200 * 86400
+        os.utime(auto / "a.md", (old_t, old_t))
+
+        class P:
+            async def stream_message(self, req):
+                yield ApiTextDeltaEvent(
+                    text="```yaml\nconsolidations: []\nprunings:\n"
+                    "  - name: a\n    reason: stale\n```"
+                )
+
+        c = Curator(
+            P(),
+            auto_dir=auto,
+            reports_dir=tmp_path / "curator",
+            state_store=SkillStateStore(tmp_path / "_state.json"),
+            interval_seconds=60,
+        )
+        run = asyncio.run(c.run_once())
+
+        # REPORT.md and run.json both exist.
+        from pathlib import Path
+        assert run.report_path and Path(run.report_path).exists()
+        assert run.json_path and Path(run.json_path).exists()
+
+        # a.md was archived, NOT deleted.
+        assert not (auto / "a.md").exists()
+        archive = auto / ".archive" / "a.md"
+        assert archive.exists()
+
+        # b.md (recent) is untouched.
+        assert (auto / "b.md").exists()
+        assert run.skills_reviewed == 2
+        assert any(p["name"] == "a" for p in run.prunings)
+
+    def test_curator_respects_pins(self, tmp_path):
+        """test_curator_respects_pins + test_skills_pin_protects_from_curator"""
+        import asyncio
+        import os
+        import time as _t
+        from prometheus.learning.skill_state import SkillStateStore
+        from prometheus.learning.curator import Curator
+        from prometheus.providers.base import ApiTextDeltaEvent
+
+        auto = tmp_path / "skills" / "auto"
+        auto.mkdir(parents=True)
+        (auto / "pinned.md").write_text("---\nname: pinned\n---\n# P\n")
+        old_t = _t.time() - 365 * 86400  # 1y old
+        os.utime(auto / "pinned.md", (old_t, old_t))
+
+        store = SkillStateStore(tmp_path / "_state.json")
+        store.set_pinned("pinned", True)
+
+        class P:
+            async def stream_message(self, req):
+                # Model tries to prune the pinned skill anyway.
+                yield ApiTextDeltaEvent(
+                    text="```yaml\nconsolidations: []\nprunings:\n"
+                    "  - name: pinned\n    reason: very old\n```"
+                )
+
+        c = Curator(
+            P(),
+            auto_dir=auto,
+            reports_dir=tmp_path / "curator",
+            state_store=store,
+            interval_seconds=60,
+        )
+        run = asyncio.run(c.run_once())
+
+        # Auto-pass skipped the pinned skill (no state transition).
+        assert run.auto_transitions == []
+        # LLM-suggested prune was rejected.
+        assert "pinned" in run.skipped_pinned
+        assert run.prunings == []
+        # File still exists in auto/.
+        assert (auto / "pinned.md").exists()
+        assert not (auto / ".archive" / "pinned.md").exists()
+
+    def test_skill_creator_emits_signal_when_bus_set(self, tmp_path):
+        """test_skill_created_emits_signal — emission path through _emit_created_signal."""
+        import asyncio
+        from prometheus.learning.skill_creator import SkillCreator
+        from prometheus.sentinel.signals import ActivitySignal
+
+        class Bus:
+            def __init__(self): self.events: list[ActivitySignal] = []
+            async def emit(self, s): self.events.append(s)
+            def subscribe(self, k, cb): pass
+
+        class P:
+            async def stream_message(self, req):
+                if False:
+                    yield  # never used; we call the helper directly
+
+        bus = Bus()
+        creator = SkillCreator(P(), auto_dir=tmp_path, signal_bus=bus)
+
+        skill = tmp_path / "my-skill.md"
+        skill.write_text(
+            "---\nname: my-skill\ndescription: A test skill\n---\n# T\nBody line\n"
+        )
+        asyncio.run(creator._emit_created_signal(
+            skill_path=skill,
+            task_description="some task",
+            content=skill.read_text(),
+        ))
+        assert len(bus.events) == 1
+        sig = bus.events[0]
+        assert sig.kind == "skill_created"
+        assert sig.payload["skill_name"] == "my-skill"
+        assert sig.payload["summary"] == "A test skill"
+
+    def test_beacon_first_class_event_types(self):
+        """test_signal_routes_to_beacon_ws — _on_signal maps the four new kinds."""
+        import asyncio
+        from prometheus.sentinel.signals import ActivitySignal
+        from prometheus.web.ws_server import WebSocketBridge
+
+        bridge = WebSocketBridge(signal_bus=None)
+        captured: list[dict] = []
+
+        async def fake_broadcast(event):
+            captured.append(event)
+
+        bridge.broadcast = fake_broadcast  # type: ignore[assignment]
+
+        async def run():
+            for kind in (
+                "skill_created",
+                "skill_refined",
+                "memory_updated",
+                "curator_report",
+            ):
+                await bridge._on_signal(
+                    ActivitySignal(kind=kind, payload={"k": kind}, source="t")
+                )
+
+        asyncio.run(run())
+        types = [e["type"] for e in captured]
+        assert types == [
+            "skill_created",
+            "skill_refined",
+            "memory_updated",
+            "curator_report",
+        ]
+
+    def test_telegram_signal_bus_setter_subscribes(self):
+        """test_signal_routes_to_telegram — setter wires the four signal kinds."""
+        from prometheus.gateway.telegram import TelegramAdapter
+
+        subscribed: list[tuple[str, object]] = []
+
+        class FakeBus:
+            def subscribe(self, kind, cb):
+                subscribed.append((kind, cb))
+
+        # We don't construct a full adapter (too heavy); reach the setter
+        # through the class descriptor.
+        prop = TelegramAdapter.signal_bus
+        assert isinstance(prop, property)
+
+        class Holder:
+            _signal_bus = None
+            _prometheus_config: dict = {}
+            # The setter calls subscribe(kind, callback) only; we don't
+            # invoke the callbacks here.
+            _on_signal_skill_created = lambda self, s: None
+            _on_signal_skill_refined = lambda self, s: None
+            _on_signal_memory_updated = lambda self, s: None
+            _on_signal_curator_report = lambda self, s: None
+
+        # Manually invoke the setter on a Holder via the unbound function.
+        setter = prop.fset
+        assert setter is not None
+        bus = FakeBus()
+        setter(Holder(), bus)
+        kinds = [k for k, _ in subscribed]
+        assert kinds == [
+            "skill_created",
+            "skill_refined",
+            "memory_updated",
+            "curator_report",
+        ]
+
+    def test_memory_overflow_triggers_consolidation_path(self, tmp_path):
+        """test_memory_overflow_triggers_consolidation — hard ceiling raises."""
+        from prometheus.memory.hermes_memory_tool import (
+            FileMemoryStore,
+            MemoryOverflowError,
+        )
+
+        store = FileMemoryStore(tmp_path / "M.md", max_chars=100)
+        store.add("small entry")  # fits
+        try:
+            store.add("x" * 250)
+        except MemoryOverflowError as exc:
+            assert exc.limit == 100
+            assert exc.entry_chars == 250
+        else:
+            raise AssertionError("expected MemoryOverflowError for oversize entry")
+
+    def test_commands_module_exposes_new_handlers(self):
+        """Ensure the Stream 3 platform-agnostic helpers are present."""
+        from prometheus.gateway import commands
+
+        for name in (
+            "cmd_memory_show",
+            "cmd_memory_limits",
+            "cmd_skills_auto_list",
+            "cmd_skills_show",
+            "cmd_skills_pin",
+            "cmd_skills_unpin",
+            "cmd_skills_history",
+            "cmd_curator_show",
+            "cmd_curator_status",
+            "cmd_curator_run",
+            "cmd_notifications",
+            "get_notifications_mode",
+        ):
+            assert hasattr(commands, name), f"missing {name}"
+
+        # The Telegram adapter wires three new top-level commands.
+        from prometheus.gateway.telegram import TelegramAdapter
+        for attr in ("_cmd_memory", "_cmd_curator", "_cmd_notifications"):
+            assert hasattr(TelegramAdapter, attr), f"missing {attr}"
+
+    def test_skills_list_includes_auto_state(self, tmp_path, monkeypatch):
+        """test_skills_list_includes_usage — /skills list reflects mtime + state."""
+        # Redirect config dir so the test doesn't read the real ~/.prometheus.
+        from prometheus.config import paths
+        monkeypatch.setattr(paths, "get_config_dir", lambda: tmp_path)
+
+        auto = tmp_path / "skills" / "auto"
+        auto.mkdir(parents=True)
+        (auto / "hello.md").write_text("---\nname: hello\n---\n# H\n")
+
+        # Reload commands module to pick up the new paths.
+        from prometheus.gateway import commands
+        out = commands.cmd_skills_auto_list()
+        assert "hello" in out
+        assert "d ago" in out  # mtime annotation present
+
+    def test_curator_run_immediate_returns_report(self, tmp_path):
+        """test_curator_run_immediate_returns_report — `/curator run` summary."""
+        import asyncio
+        from prometheus.learning.curator import Curator, set_curator
+        from prometheus.learning.skill_state import SkillStateStore
+        from prometheus.gateway.commands import cmd_curator_run
+        from prometheus.providers.base import ApiTextDeltaEvent
+
+        auto = tmp_path / "skills" / "auto"
+        auto.mkdir(parents=True)
+        (auto / "k.md").write_text("---\nname: k\n---\n# K\n")
+
+        class P:
+            async def stream_message(self, req):
+                yield ApiTextDeltaEvent(
+                    text="```yaml\nconsolidations: []\nprunings: []\n```"
+                )
+
+        c = Curator(
+            P(),
+            auto_dir=auto,
+            reports_dir=tmp_path / "curator",
+            state_store=SkillStateStore(tmp_path / "_state.json"),
+            interval_seconds=60,
+        )
+        try:
+            set_curator(c)
+            text = asyncio.run(cmd_curator_run())
+        finally:
+            set_curator(None)
+        assert "Curator run" in text
+        assert "1 reviewed" in text
+        assert "Report:" in text
+
+    def test_daemon_curator_wiring_block_present(self):
+        """The Curator wiring + signal_bus assignments are present in daemon.py."""
+        from pathlib import Path
+
+        daemon_src = (
+            Path(__file__).parent.parent / "scripts" / "daemon.py"
+        ).read_text()
+        # Sprint S1 daemon-side hooks.
+        assert "from prometheus.learning.curator import Curator" in daemon_src
+        assert "set_curator(curator)" in daemon_src
+        assert "skill_creator.signal_bus = signal_bus" in daemon_src
+        assert "skill_refiner.signal_bus = signal_bus" in daemon_src
+        assert "set_memory_signal_bus" in daemon_src
+        assert "telegram.signal_bus = signal_bus" in daemon_src
