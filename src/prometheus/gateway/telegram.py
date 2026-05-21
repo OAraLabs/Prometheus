@@ -133,6 +133,133 @@ class TelegramAdapter(BasePlatformAdapter):
             session_manager = _SM()
         self.session_manager: SessionManager = session_manager
 
+        # Sprint S1 Stream 2: SignalBus wired by daemon.py inside the
+        # SENTINEL block via the ``signal_bus`` property setter. Until then
+        # it's None and the subscribe path is a no-op.
+        self._signal_bus: object | None = None
+
+    # ------------------------------------------------------------------
+    # Sprint S1 Stream 2: SignalBus subscription for user-visible events
+    # ------------------------------------------------------------------
+
+    @property
+    def signal_bus(self) -> object | None:
+        return self._signal_bus
+
+    @signal_bus.setter
+    def signal_bus(self, bus: object | None) -> None:
+        """Subscribe to skill/memory/curator events on bus assignment.
+
+        Called from daemon.py after the SignalBus is constructed. The
+        subscription wires four signal kinds to handler coroutines that
+        post a short notification to the last active Telegram chat.
+
+        Default behaviour is QUIET (one-line emoji + name). The
+        ``/notifications verbose`` command (Sprint 1 Stream 3) toggles
+        between quiet/verbose/off and persists in
+        ``gateway.telegram.skill_event_notifications`` config.
+        """
+        self._signal_bus = bus
+        if bus is None:
+            return
+        try:
+            bus.subscribe("skill_created", self._on_signal_skill_created)
+            bus.subscribe("skill_refined", self._on_signal_skill_refined)
+            bus.subscribe("memory_updated", self._on_signal_memory_updated)
+            bus.subscribe("curator_report", self._on_signal_curator_report)
+            logger.info(
+                "Telegram: subscribed to skill/memory/curator signals"
+            )
+        except Exception:
+            logger.warning(
+                "Telegram: failed to subscribe to SignalBus", exc_info=True
+            )
+
+    def _notification_mode(self) -> str:
+        """Return 'quiet' | 'verbose' | 'off' from prometheus.yaml."""
+        cfg = self._prometheus_config.get("gateway", {})
+        if isinstance(cfg, dict):
+            return str(cfg.get("skill_event_notifications", "quiet")).lower()
+        return "quiet"
+
+    async def _send_notification(self, text: str) -> None:
+        """Send *text* to the last active chat if we have one."""
+        chat_id = self._load_chat_id()
+        if chat_id is None:
+            return
+        try:
+            await self.send(chat_id, text, parse_mode=None)
+        except Exception:
+            logger.debug("Telegram: notification send failed", exc_info=True)
+
+    async def _on_signal_skill_created(self, signal: Any) -> None:
+        mode = self._notification_mode()
+        if mode == "off":
+            return
+        payload = getattr(signal, "payload", {}) or {}
+        name = payload.get("skill_name", "(unnamed)")
+        if mode == "verbose":
+            trigger = payload.get("trigger_task", "")
+            summary = payload.get("summary", "")
+            text = f"🎓 New skill: {name}"
+            if summary:
+                text += f"\n   {summary}"
+            if trigger:
+                text += f"\n   (built while: {trigger[:120]})"
+        else:
+            text = f"🎓 New skill: {name}"
+        await self._send_notification(text)
+
+    async def _on_signal_skill_refined(self, signal: Any) -> None:
+        mode = self._notification_mode()
+        if mode == "off":
+            return
+        payload = getattr(signal, "payload", {}) or {}
+        name = payload.get("skill_name", "(unnamed)")
+        if mode == "verbose":
+            summary = payload.get("summary", "")
+            text = f"📚 Updated skill: {name}"
+            if summary:
+                text += f"\n   {summary}"
+        else:
+            text = f"📚 Updated skill: {name}"
+        await self._send_notification(text)
+
+    async def _on_signal_memory_updated(self, signal: Any) -> None:
+        mode = self._notification_mode()
+        if mode == "off":
+            return
+        payload = getattr(signal, "payload", {}) or {}
+        target = payload.get("target", "memory")
+        operation = payload.get("operation", "updated")
+        if mode == "verbose":
+            preview = payload.get("entry_preview", "")
+            text = f"🧠 {target} {operation}"
+            if preview:
+                text += f"\n   {preview}"
+        else:
+            text = f"🧠 {target} {operation}"
+        await self._send_notification(text)
+
+    async def _on_signal_curator_report(self, signal: Any) -> None:
+        mode = self._notification_mode()
+        if mode == "off":
+            return
+        payload = getattr(signal, "payload", {}) or {}
+        reviewed = payload.get("skills_reviewed", 0)
+        prunings = payload.get("prunings", 0)
+        consolidations = payload.get("consolidations", 0)
+        if mode == "verbose":
+            text = (
+                f"📋 Curator: {reviewed} skills reviewed, "
+                f"{consolidations} consolidation suggestion(s), "
+                f"{prunings} archived\n"
+                f"   /curator show for the full report"
+            )
+        else:
+            text = f"📋 Curator: {reviewed} reviewed, {prunings} archived"
+        await self._send_notification(text)
+
     async def start(self) -> None:
         """Build the telegram Application and start long-polling."""
         if not self.config.token:

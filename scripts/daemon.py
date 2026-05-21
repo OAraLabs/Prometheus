@@ -685,6 +685,26 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 skill_creator.signal_bus = signal_bus
             if "skill_refiner" in dir() and skill_refiner is not None:
                 skill_refiner.signal_bus = signal_bus
+            # MemoryTool (hermes_memory_tool) emits memory_updated on
+            # MEMORY.md / USER.md writes. Module-level setter matches the
+            # tools/builtin/sentinel_status.py pattern.
+            try:
+                from prometheus.memory.hermes_memory_tool import (
+                    set_memory_signal_bus,
+                )
+                set_memory_signal_bus(signal_bus)
+            except Exception:
+                logger.debug("memory signal bus wiring skipped", exc_info=True)
+            # Sprint S1 Stream 2: Telegram gateway subscribes to
+            # skill_created / skill_refined / memory_updated / curator_report
+            # for user-facing notifications (default quiet mode).
+            if "telegram" in dir() and telegram is not None:
+                try:
+                    telegram.signal_bus = signal_bus
+                except Exception:
+                    logger.debug(
+                        "telegram signal bus wiring skipped", exc_info=True
+                    )
 
             # Start (signal-reactive, no separate tasks needed)
             await observer.start()

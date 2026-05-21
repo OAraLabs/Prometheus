@@ -382,6 +382,21 @@ class WebSocketBridge:
         elif signal.kind == "dream_complete":
             event["type"] = "dream_complete"
             event["payload"] = signal.payload
+        # Sprint S1 Stream 2: first-class event types for visible memory &
+        # skill activity, matching the dream_* pattern so Beacon's
+        # frontend can route them to dedicated UI panes (Sprint 3 polish).
+        elif signal.kind == "skill_created":
+            event["type"] = "skill_created"
+            event["payload"] = signal.payload
+        elif signal.kind == "skill_refined":
+            event["type"] = "skill_refined"
+            event["payload"] = signal.payload
+        elif signal.kind == "memory_updated":
+            event["type"] = "memory_updated"
+            event["payload"] = signal.payload
+        elif signal.kind == "curator_report":
+            event["type"] = "curator_report"
+            event["payload"] = signal.payload
 
         await self.broadcast(event)
 

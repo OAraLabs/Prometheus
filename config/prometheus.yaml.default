@@ -78,6 +78,11 @@ gateway:
   proxy_url: null
   heartbeat_interval: 30
   cron_enabled: true
+  # Sprint S1: user-visible signals (skill_created / skill_refined /
+  # memory_updated / curator_report) post a short notification to the
+  # last active Telegram chat. Modes: off | quiet | verbose.
+  # `/notifications <mode>` toggles at runtime (Stream 3).
+  skill_event_notifications: quiet
   media:
     max_file_size_mb: 20
     cache_dir: "~/.prometheus/cache/media"

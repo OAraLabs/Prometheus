@@ -75,11 +75,22 @@ class SkillRefiner:
         model: str = "default",
         auto_dir: Path | None = None,
         min_tool_calls: int = 3,
+        signal_bus: object | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
         self._auto_dir = auto_dir or _get_auto_skills_dir()
         self._min_tool_calls = min_tool_calls
+        # Sprint S1: SignalBus wired by daemon.py after construction.
+        self._signal_bus = signal_bus
+
+    @property
+    def signal_bus(self) -> object | None:
+        return self._signal_bus
+
+    @signal_bus.setter
+    def signal_bus(self, bus: object) -> None:
+        self._signal_bus = bus
 
     @classmethod
     def from_config(
@@ -220,7 +231,40 @@ class SkillRefiner:
         # Write the refined version
         skill_path.write_text(response + "\n", encoding="utf-8")
         log.info("SkillRefiner: updated %s (backup at %s)", skill_path.name, backup.name)
+
+        # Sprint S1 Stream 2: surface the refinement to gateways + Beacon.
+        await self._emit_refined_signal(
+            skill_path=skill_path,
+            outcome=outcome,
+            backup=backup,
+        )
         return True
+
+    async def _emit_refined_signal(
+        self,
+        *,
+        skill_path: Path,
+        outcome: str,
+        backup: Path,
+    ) -> None:
+        if self._signal_bus is None:
+            return
+        try:
+            from prometheus.sentinel.signals import ActivitySignal
+
+            await self._signal_bus.emit(ActivitySignal(
+                kind="skill_refined",
+                payload={
+                    "skill_name": skill_path.stem,
+                    "skill_path": str(skill_path),
+                    "trigger_task": outcome[:200],
+                    "summary": f"Refined from execution trace; backup at {backup.name}",
+                    "backup_path": str(backup),
+                },
+                source="skill_refiner",
+            ))
+        except Exception:
+            log.debug("SkillRefiner: signal emission failed", exc_info=True)
 
     async def _call_model(self, prompt: str) -> str:
         """Call the ModelProvider and return the full text response."""
