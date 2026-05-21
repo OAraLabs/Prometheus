@@ -119,12 +119,22 @@ class SkillCreator:
             from prometheus.config.defaults import DEFAULTS_PATH
             config_path = str(DEFAULTS_PATH)
 
+        # Narrow the catch to genuine I/O + YAML-parse errors so any other
+        # exception (e.g., a future config-schema upgrade that introduces
+        # validation) propagates instead of silently demoting the
+        # subsystem to defaults. See docs/audits/SILENT-FAILURE-AUDIT.md
+        # Tier-1 hotfix and the PR #1 / ed8f1a6 incident.
         try:
             with open(Path(config_path).expanduser()) as fh:
-                data = yaml.safe_load(fh)
-            learning = data.get("learning", {})
+                data = yaml.safe_load(fh) or {}
+            learning = data.get("learning", {}) or {}
             min_calls = learning.get("skill_min_tool_calls", _MIN_TOOL_CALLS)
-        except (OSError, Exception):
+        except (OSError, yaml.YAMLError) as exc:
+            log.warning(
+                "SkillCreator.from_config: failed to load %s (%s: %s); "
+                "using default skill_min_tool_calls=%d",
+                config_path, type(exc).__name__, exc, _MIN_TOOL_CALLS,
+            )
             min_calls = _MIN_TOOL_CALLS
 
         return cls(provider, min_tool_calls=min_calls)

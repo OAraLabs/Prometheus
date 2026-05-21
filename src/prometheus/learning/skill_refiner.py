@@ -109,11 +109,19 @@ class SkillRefiner:
             from prometheus.config.defaults import DEFAULTS_PATH
             config_path = str(DEFAULTS_PATH)
 
+        # Narrow the catch — see SkillCreator.from_config for the rationale
+        # (Tier-1 hotfix from docs/audits/SILENT-FAILURE-AUDIT.md). Any
+        # exception type other than I/O or YAML-parse should propagate.
         try:
             with open(Path(config_path).expanduser()) as fh:
                 data = yaml.safe_load(fh) or {}
-            learning = data.get("learning", {})
-        except (OSError, Exception):
+            learning = data.get("learning", {}) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            log.warning(
+                "SkillRefiner.from_config: failed to load %s (%s: %s); "
+                "treating learning config as empty",
+                config_path, type(exc).__name__, exc,
+            )
             learning = {}
 
         if not learning.get("skill_refinement_enabled", False):
