@@ -901,14 +901,19 @@ def cmd_health(verbose: bool = False, since_hours: float = 24.0) -> str:
     tc_fail = int(tc.get("failures", 0))
     tc_succ_rate = float(tc.get("success_rate", 0.0))
     tc_icon = "✅" if tc_fail == 0 else ("⚠ " if tc_succ_rate >= 0.8 else "❌")
-    # Use 1-decimal success rate so "4 failures in 1247" doesn't render
-    # as "100% success" via rounding.
-    rate_str = (
-        f"{tc_succ_rate * 100:.1f}%" if tc_succ_rate < 1.0 else "100%"
-    )
+    # With zero invocations, "0.0% success" is mathematically meaningless —
+    # render "n/a" instead. Otherwise use a 1-decimal success rate so
+    # "4 failures in 1247" doesn't render as "100% success" via rounding.
+    if tc_total == 0:
+        rate_str = "n/a"
+    else:
+        rate_str = (
+            f"{tc_succ_rate * 100:.1f}% success"
+            if tc_succ_rate < 1.0 else "100% success"
+        )
     lines.append(
         f"{tc_icon} Tool calls:        {tc_total:>5,}  "
-        f"({tc_fail} failures, {rate_str} success)"
+        f"({tc_fail} failures, {rate_str})"
     )
 
     subsystems = summary.get("subsystems", {}) or {}
