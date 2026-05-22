@@ -1,6 +1,6 @@
 """Pre-Phase-2 hotfix regression tests — SPRINT 4 Tier-1.
 
-Verifies the three `except (OSError, Exception)` swallows identified in
+Verifies the redundant-except-tuple swallows identified in
 ``docs/audits/SILENT-FAILURE-AUDIT.md`` now:
 
 1. Catch ``OSError`` (file-not-found / permission-denied) and emit a WARN.
@@ -10,9 +10,10 @@ Verifies the three `except (OSError, Exception)` swallows identified in
    unknown duration; the hotfix makes them surface).
 
 Sites:
-- ``src/prometheus/learning/skill_creator.py:from_config``
-- ``src/prometheus/learning/skill_refiner.py:from_config``
-- ``src/prometheus/learning/gepa.py:from_config``
+- ``src/prometheus/learning/skill_creator.py:from_config``  (PR #3)
+- ``src/prometheus/learning/skill_refiner.py:from_config``  (PR #3)
+- ``src/prometheus/learning/gepa.py:from_config``           (PR #3)
+- ``src/prometheus/learning/nudge.py:from_config``          (PR #5)
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import pytest
 import yaml
 
 from prometheus.learning.gepa import GEPAOptimizer
+from prometheus.learning.nudge import PeriodicNudge
 from prometheus.learning.skill_creator import SkillCreator
 from prometheus.learning.skill_refiner import SkillRefiner
 
@@ -208,3 +210,62 @@ class TestGEPAOptimizerConfigLoad:
         monkeypatch.setattr(yaml, "safe_load", _boom)
         with pytest.raises(RuntimeError, match="synthetic sprint 4 regression"):
             GEPAOptimizer.from_config(fake_provider, config_path=str(valid_yaml))
+
+
+# ---------------------------------------------------------------------------
+# PeriodicNudge.from_config — three scenarios (PR #5 follow-up)
+# ---------------------------------------------------------------------------
+
+
+class TestPeriodicNudgeConfigLoad:
+    """Verifies the narrowed catch at learning/nudge.py:from_config.
+
+    PeriodicNudge.from_config has no ``provider`` argument; it builds a
+    bare ``PeriodicNudge(interval=..., enabled=...)`` from the
+    ``learning:`` section of prometheus.yaml. Lower-risk than the other
+    three sites because PeriodicNudge falls back to safe defaults
+    regardless, but it shared the same anti-pattern shape so it
+    deserved the same fix per the audit's "out of scope for PR #3
+    only because of branch scope" note.
+    """
+
+    def test_malformed_yaml_warns_and_uses_defaults(
+        self, malformed_yaml: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.WARNING, logger="prometheus.learning.nudge")
+        nudge = PeriodicNudge.from_config(config_path=str(malformed_yaml))
+        # Defaults still ship.
+        assert nudge.interval == 15  # _DEFAULT_INTERVAL
+        assert nudge.enabled is True
+        # Warning surfaced.
+        assert any(
+            "PeriodicNudge.from_config: failed to load" in rec.message
+            for rec in caplog.records
+            if rec.levelno == logging.WARNING
+        ), caplog.text
+
+    def test_missing_file_warns_and_uses_defaults(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.WARNING, logger="prometheus.learning.nudge")
+        missing = tmp_path / "no-such-file.yaml"
+        nudge = PeriodicNudge.from_config(config_path=str(missing))
+        assert nudge.interval == 15
+        assert nudge.enabled is True
+        assert any("failed to load" in rec.message for rec in caplog.records), caplog.text
+
+    def test_unexpected_exception_propagates(
+        self, valid_yaml: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The Sprint 4 invariant — non-OSError / non-YAMLError exceptions surface.
+
+        Before the hotfix the ``except (OSError, Exception)`` would swallow this
+        RuntimeError and silently demote the nudge to defaults. After the
+        hotfix, the exception propagates so the operator sees it on startup.
+        """
+        def _boom(_):
+            raise RuntimeError("synthetic sprint 4 regression — nudge")
+
+        monkeypatch.setattr(yaml, "safe_load", _boom)
+        with pytest.raises(RuntimeError, match="synthetic sprint 4 regression — nudge"):
+            PeriodicNudge.from_config(config_path=str(valid_yaml))
