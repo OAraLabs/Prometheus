@@ -71,22 +71,13 @@ def build_tool_registry(security_cfg: dict[str, Any] | None = None) -> ToolRegis
     """Create the tool registry with all builtin tools (same as CLI).
 
     Reuses create_tool_registry() from __main__ so daemon and CLI
-    always have the same tool set.
+    always have the same tool set. WikiCompileTool and WikiQueryTool
+    are unconditionally registered by ``create_tool_registry`` (see
+    ``__main__.py:188-189``) — no daemon-specific addition needed.
     """
     if security_cfg is None:
         security_cfg = {}
-    registry = create_tool_registry(security_cfg)
-
-    # Add wiki tools (daemon-specific, not in CLI)
-    try:
-        from prometheus.tools.builtin.wiki_compile import WikiCompileTool
-        from prometheus.tools.builtin.wiki_query import WikiQueryTool
-        registry.register(WikiCompileTool())
-        registry.register(WikiQueryTool())
-    except Exception:
-        pass
-
-    return registry
+    return create_tool_registry(security_cfg)
 
 
 async def run_daemon(args: argparse.Namespace) -> None:
