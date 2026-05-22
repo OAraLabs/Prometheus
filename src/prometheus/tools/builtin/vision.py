@@ -1,5 +1,26 @@
 """VisionTool — describe images via multimodal LLM or preprocessor.
 
+Intentional non-tool: subclasses :class:`BaseTool` for its
+``execute(arguments, context)`` interface, but is **not** registered with
+the agent's :class:`ToolRegistry`. It is invoked directly as a utility
+class by gateways that handle inbound media:
+
+  - ``src/prometheus/gateway/telegram.py`` (``_describe_image``) — converts
+    inbound Telegram photo attachments to text before the agent sees them.
+  - ``src/prometheus/web/ws_server.py`` — same role for the WebSocket
+    surface.
+
+Why utility-only instead of agent-callable: the agent doesn't typically
+hold raw image paths, and the existing gateway pipeline preprocesses
+images into the agent's context. Registering it as well would just add a
+second path with no caller. See ``docs/audits/ORPHAN-TOOLS-AUDIT.md``
+(Phase 1) for the audit that classified this as INTENTIONAL-NON-TOOL.
+
+If a future workflow needs the agent to invoke vision directly (e.g.
+"describe this screenshot I just produced"), register via
+``prometheus.tools.registration.try_register`` in
+``src/prometheus/__main__.py``.
+
 Donor pattern: NousResearch/hermes-agent tools/vision_tools.py.
 Adapted for Prometheus: uses ModelProvider, BaseTool interface, base64 encoding.
 """
