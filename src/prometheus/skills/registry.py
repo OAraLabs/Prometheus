@@ -35,15 +35,30 @@ class SkillRegistry:
         restart required. Returns the number of skills added or
         replaced. Existing skills with no on-disk match are kept
         (this is purely additive).
+
+        Idempotency: if two ``.md`` files declare the same ``name:`` in
+        their frontmatter (e.g. ``foo.md`` and a Curator-generated
+        ``foo.bak-<ts>.md``), the loader returns both as separate
+        entries. We dedupe by name *before* comparing against existing
+        state — last entry wins, matching ``load_skill_registry``'s
+        ``register`` semantics — so a second back-to-back call with no
+        on-disk changes always returns 0. Without dedupe, the two entries
+        would flip the registry's bound path/content on each call and
+        every reload would report N > 0.
         """
         # Lazy import — registry.py is imported by loader.py, avoid a cycle.
         from prometheus.skills.loader import load_user_skills
 
-        added = 0
+        # Dedupe by name, last-write-wins (mirrors load_skill_registry).
+        latest: dict[str, SkillDefinition] = {}
         for skill in load_user_skills():
-            existing = self._skills.get(skill.name)
+            latest[skill.name] = skill
+
+        added = 0
+        for name, skill in latest.items():
+            existing = self._skills.get(name)
             if existing is None or existing.path != skill.path or \
                     existing.content != skill.content:
-                self._skills[skill.name] = skill
+                self._skills[name] = skill
                 added += 1
         return added
