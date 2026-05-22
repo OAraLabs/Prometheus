@@ -396,13 +396,29 @@ class TestInstall:
 
 
 class TestSkillHotReload:
+    """Skill hot-reload — uses ``PROMETHEUS_CONFIG_DIR`` env var to redirect
+    the user-skills directory, not a monkeypatch on ``get_config_dir``.
+
+    Why env var: ``prometheus.skills.loader`` imports ``get_config_dir`` by
+    name at module load — ``from prometheus.config.paths import get_config_dir``.
+    Once loader is in ``sys.modules`` (which happens when *any* prior test
+    imports anything from ``prometheus.skills.loader``, e.g. tests/test_skills.py
+    does so at module top level), ``loader.get_config_dir`` is a frozen
+    reference to the original function. A later
+    ``monkeypatch.setattr("prometheus.config.paths.get_config_dir", ...)``
+    only swaps the binding on ``prometheus.config.paths``, not on
+    ``prometheus.skills.loader`` — so ``load_user_skills()`` continues to
+    read from the real ``~/.prometheus/skills/``.
+
+    ``get_config_dir`` reads ``PROMETHEUS_CONFIG_DIR`` *fresh on every call*,
+    so the env-var approach is order-independent. See
+    ``test_isolation_post_loader_import_in_test_skills`` below for the
+    regression test that pins this.
+    """
+
     def test_reload_picks_up_new_skill(self, tmp_path, monkeypatch):
         # Point ~/.prometheus/ at tmp_path so user-skills dir is isolated
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setattr(
-            "prometheus.config.paths.get_config_dir",
-            lambda: tmp_path / ".prometheus",
-        )
+        monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path / ".prometheus"))
         skills_dir = tmp_path / ".prometheus" / "skills"
         skills_dir.mkdir(parents=True)
 
@@ -422,10 +438,7 @@ class TestSkillHotReload:
         assert "pp-slack" in names
 
     def test_reload_idempotent_for_unchanged_skills(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            "prometheus.config.paths.get_config_dir",
-            lambda: tmp_path / ".prometheus",
-        )
+        monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path / ".prometheus"))
         skills_dir = tmp_path / ".prometheus" / "skills"
         skills_dir.mkdir(parents=True)
         (skills_dir / "x.md").write_text(
@@ -437,6 +450,86 @@ class TestSkillHotReload:
         # Second reload with no on-disk changes should add 0
         added = registry.reload_user_skills()
         assert added == 0
+
+    def test_isolation_post_loader_import_in_test_skills(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression test: simulate the polluted-import state that broke
+        ``test_reload_idempotent_for_unchanged_skills`` before the fix.
+
+        tests/test_skills.py does ``from prometheus.skills.loader import …``
+        at module load, which freezes ``loader.get_config_dir`` to the
+        original function. A naive
+        ``monkeypatch.setattr("prometheus.config.paths.get_config_dir", …)``
+        does not reach that binding — and the real user's
+        ``~/.prometheus/skills/`` gets scanned instead, with whatever
+        contents it happens to have. If a user has two ``.md`` files whose
+        frontmatter declares the same ``name:`` (e.g. ``foo.md`` and a
+        Curator-generated ``foo.bak-<ts>.md``), ``reload_user_skills``
+        flips the same-named entry back and forth between the two paths on
+        each call — making the second reload report N > 0 instead of 0.
+
+        This test imports ``prometheus.skills.loader`` *first* — ensuring
+        its ``get_config_dir`` binding is frozen — then exercises the
+        env-var fix. If a future refactor reverts to monkeypatching the
+        function name, this test fails because the real user skills dir
+        gets scanned.
+        """
+        # Force-import loader BEFORE we set up the env var. This mimics the
+        # state after tests/test_skills.py has run (its module-level
+        # imports execute on collection, well before any test in this
+        # class).
+        import importlib
+        loader_mod = importlib.import_module("prometheus.skills.loader")
+        assert hasattr(loader_mod, "get_config_dir"), (
+            "Production code stopped importing get_config_dir into "
+            "loader's namespace — this regression test no longer "
+            "exercises the original bug shape. Update or remove."
+        )
+
+        # The env-var path. Same shape as the two tests above.
+        monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path / ".prometheus"))
+        skills_dir = tmp_path / ".prometheus" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "x.md").write_text(
+            "---\nname: x\ndescription: y\n---\n", encoding="utf-8",
+        )
+        # Also place a "duplicate-name backup" sibling like the one that
+        # exposed the original bug — same frontmatter name at a different
+        # path. If the env var ever fails to redirect, the real-home scan
+        # would not contain this exact pair under tmp_path, so the test
+        # would fail one way or another.
+        (skills_dir / "x.bak-1.md").write_text(
+            "---\nname: x\ndescription: y\n---\n# older copy\n",
+            encoding="utf-8",
+        )
+
+        from prometheus.skills.registry import SkillRegistry
+        registry = SkillRegistry()
+        registry.reload_user_skills()
+        # Layer 1 check: the redirect actually reached the loader. Skills
+        # in the registry must come from tmp_path, not the real user dir.
+        # If env var didn't reach loader (e.g. someone reverted to
+        # patching get_config_dir), this assertion fires with paths under
+        # ``/home/.../.prometheus/skills/`` instead of tmp_path.
+        loaded_paths = [s.path for s in registry.list_skills()]
+        assert all(str(skills_dir) in p for p in loaded_paths), (
+            f"Loaded skills aren't under tmp_path — "
+            f"PROMETHEUS_CONFIG_DIR redirect didn't take effect. "
+            f"Paths: {loaded_paths}"
+        )
+
+        # Layer 2 check: second reload with no on-disk changes must add 0,
+        # even with same-name duplicates on disk. Before the dedupe fix in
+        # registry.py, ``reload_user_skills`` would oscillate the same-name
+        # entry between the two paths on each call and return N > 0.
+        added = registry.reload_user_skills()
+        assert added == 0, (
+            f"Second reload added {added} entries despite no on-disk "
+            f"change. Likely cause: reload_user_skills lost its dedupe "
+            f"behaviour under same-name duplicates. Skills loaded: "
+            f"{[(s.name, s.path) for s in registry.list_skills()]}"
+        )
 
 
 # ---------------------------------------------------------------------------
