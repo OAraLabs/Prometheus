@@ -202,6 +202,15 @@ async def run_daemon(args: argparse.Namespace) -> None:
         from prometheus.telemetry.cost import CostTracker
         cost_tracker = CostTracker()
 
+    # Telemetry — shared instance for AgentLoop and SENTINEL digest.
+    # Wired BEFORE build_tool_registry so per-tool registration failures
+    # (Phase 2 — see prometheus.tools.registration.try_register) land in
+    # ``subsystem_runs`` and surface to /health on the very first startup.
+    telemetry = ToolCallTelemetry()
+    # Sprint 4 A3: expose to gateway/commands.py for the /health command.
+    from prometheus.telemetry.tracker import set_telemetry_handle
+    set_telemetry_handle(telemetry)
+
     # Tool registry — same tools as CLI mode
     registry = build_tool_registry(security_cfg=security_config)
 
@@ -221,12 +230,6 @@ async def run_daemon(args: argparse.Namespace) -> None:
     if adapter is not None and hasattr(adapter, "retry"):
         adapter.retry.router = model_router
     divergence_detector = create_divergence_detector(config)
-
-    # Telemetry — shared instance for AgentLoop and SENTINEL digest
-    telemetry = ToolCallTelemetry()
-    # Sprint 4 A3: expose to gateway/commands.py for the /health command.
-    from prometheus.telemetry.tracker import set_telemetry_handle
-    set_telemetry_handle(telemetry)
 
     # Sprint 15 wiring fix: HookExecutor was built but never created in daemon
     hook_executor = None

@@ -207,86 +207,86 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
     if security_gate and hasattr(security_gate, '_audit') and security_gate._audit:
         registry.register(AuditQueryTool(security_gate._audit))
 
+    # ------------------------------------------------------------------
+    # Per-tool fault-tolerant registration (Phase 2 — orphan-tool fix).
+    #
+    # Previously, several tool groups were wrapped in ``try/except: pass``
+    # blocks. A single import failure silently disabled the whole group
+    # with no log line and no /health signal. See
+    # docs/audits/ORPHAN-TOOLS-AUDIT.md (Phase 1).
+    #
+    # ``try_register`` from prometheus.tools.registration:
+    #   - imports + instantiates + registers each tool independently
+    #   - logs INFO on success, WARN with traceback on failure
+    #   - writes a row to telemetry.subsystem_runs (subsystem="tool_registration",
+    #     operation=<tool_name>) so /health can surface failures
+    #   - never raises — the caller below stays linear and readable
+    # ------------------------------------------------------------------
+    from prometheus.tools.registration import try_register
+
     # GRAFT-SYMBIOTE Session A: GitHub research + scout/harvest/graft tools.
     # The SYMBIOTE tools route through prometheus.symbiote.get_coordinator(),
     # which the daemon sets at startup if symbiote.enabled is true.
-    try:
+    def _make_github_search_tool():
         from prometheus.symbiote.github_search import GitHubSearchTool, GitHubClient
-        from prometheus.tools.builtin import (
-            SymbioteGraftTool,
-            SymbioteHarvestTool,
-            SymbioteScoutTool,
-            SymbioteStatusTool,
-        )
-        registry.register(GitHubSearchTool(client=GitHubClient.from_config(None)))
-        registry.register(SymbioteScoutTool())
-        registry.register(SymbioteHarvestTool())
-        registry.register(SymbioteGraftTool())
-        registry.register(SymbioteStatusTool())
-    except Exception:
-        pass
+        return GitHubSearchTool(client=GitHubClient.from_config(None))
+
+    try_register(registry, "GitHubSearchTool",
+                 "prometheus.symbiote.github_search", "GitHubSearchTool",
+                 factory=_make_github_search_tool)
+    try_register(registry, "SymbioteScoutTool",
+                 "prometheus.tools.builtin.symbiote_scout", "SymbioteScoutTool")
+    try_register(registry, "SymbioteHarvestTool",
+                 "prometheus.tools.builtin.symbiote_harvest", "SymbioteHarvestTool")
+    try_register(registry, "SymbioteGraftTool",
+                 "prometheus.tools.builtin.symbiote_graft", "SymbioteGraftTool")
+    try_register(registry, "SymbioteStatusTool",
+                 "prometheus.tools.builtin.symbiote_status", "SymbioteStatusTool")
 
     # Optional tools — don't fail if deps missing
-    try:
-        from prometheus.tools.builtin.skill import SkillTool
-        registry.register(SkillTool())
-    except Exception:
-        pass
+    try_register(registry, "SkillTool",
+                 "prometheus.tools.builtin.skill", "SkillTool")
     # Sprint 4 A4: MemoryTool was defined since the initial commit but never
     # registered — root cause of MEMORY.md / USER.md sitting at 0 bytes for
     # weeks per Phase 1 baseline. format_memory_for_prompt() reads these
     # files into every system prompt; without a tool, the agent had no way
-    # to write them. See docs/audits/SILENT-FAILURE-AUDIT.md "Re-baseline
-    # metrics" → "Stated vs reality".
-    try:
-        from prometheus.memory.hermes_memory_tool import MemoryTool
-        registry.register(MemoryTool())
-    except Exception as exc:
-        import logging as _logging
-        _logging.getLogger(__name__).warning(
-            "MemoryTool registration failed: %s — MEMORY.md / USER.md "
-            "will remain read-only", exc, exc_info=True,
-        )
-    try:
-        from prometheus.tools.builtin.todo_write import TodoWriteTool
-        registry.register(TodoWriteTool())
-    except Exception:
-        pass
+    # to write them. See docs/audits/SILENT-FAILURE-AUDIT.md.
+    try_register(registry, "MemoryTool",
+                 "prometheus.memory.hermes_memory_tool", "MemoryTool")
+    try_register(registry, "TodoWriteTool",
+                 "prometheus.tools.builtin.todo_write", "TodoWriteTool")
+
+    # AnatomyTool — daemon wires ``set_anatomy_components`` at startup
+    # (scripts/daemon.py:550); execute() degrades gracefully when the
+    # scanner isn't initialised (e.g. CLI mode). Audit B3 / Phase 1 orphan.
+    try_register(registry, "AnatomyTool",
+                 "prometheus.tools.builtin.anatomy", "AnatomyTool")
 
     # Browser — requires optional playwright dependency
-    try:
-        from prometheus.tools.builtin.browser import BrowserTool
-        registry.register(BrowserTool())
-    except Exception:
-        pass
+    try_register(registry, "BrowserTool",
+                 "prometheus.tools.builtin.browser", "BrowserTool")
 
     # Session tools — require task manager
-    try:
-        from prometheus.tools.builtin.sessions_list import SessionsListTool
-        from prometheus.tools.builtin.sessions_send import SessionsSendTool
-        from prometheus.tools.builtin.sessions_spawn import SessionsSpawnTool
-        registry.register(SessionsListTool())
-        registry.register(SessionsSendTool())
-        registry.register(SessionsSpawnTool())
-    except Exception:
-        pass
+    try_register(registry, "SessionsListTool",
+                 "prometheus.tools.builtin.sessions_list", "SessionsListTool")
+    try_register(registry, "SessionsSendTool",
+                 "prometheus.tools.builtin.sessions_send", "SessionsSendTool")
+    try_register(registry, "SessionsSpawnTool",
+                 "prometheus.tools.builtin.sessions_spawn", "SessionsSpawnTool")
 
     # Task tools — require task manager
-    try:
-        from prometheus.tools.builtin.task_create import TaskCreateTool
-        from prometheus.tools.builtin.task_get import TaskGetTool
-        from prometheus.tools.builtin.task_list import TaskListTool
-        from prometheus.tools.builtin.task_update import TaskUpdateTool
-        from prometheus.tools.builtin.task_stop import TaskStopTool
-        from prometheus.tools.builtin.task_output import TaskOutputTool
-        registry.register(TaskCreateTool())
-        registry.register(TaskGetTool())
-        registry.register(TaskListTool())
-        registry.register(TaskUpdateTool())
-        registry.register(TaskStopTool())
-        registry.register(TaskOutputTool())
-    except Exception:
-        pass
+    try_register(registry, "TaskCreateTool",
+                 "prometheus.tools.builtin.task_create", "TaskCreateTool")
+    try_register(registry, "TaskGetTool",
+                 "prometheus.tools.builtin.task_get", "TaskGetTool")
+    try_register(registry, "TaskListTool",
+                 "prometheus.tools.builtin.task_list", "TaskListTool")
+    try_register(registry, "TaskUpdateTool",
+                 "prometheus.tools.builtin.task_update", "TaskUpdateTool")
+    try_register(registry, "TaskStopTool",
+                 "prometheus.tools.builtin.task_stop", "TaskStopTool")
+    try_register(registry, "TaskOutputTool",
+                 "prometheus.tools.builtin.task_output", "TaskOutputTool")
 
     return registry
 
