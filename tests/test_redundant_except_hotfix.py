@@ -25,6 +25,7 @@ import pytest
 import yaml
 
 from prometheus.learning.gepa import GEPAOptimizer
+from prometheus.learning.nudge import PeriodicNudge, _DEFAULT_INTERVAL
 from prometheus.learning.skill_creator import SkillCreator
 from prometheus.learning.skill_refiner import SkillRefiner
 
@@ -208,3 +209,62 @@ class TestGEPAOptimizerConfigLoad:
         monkeypatch.setattr(yaml, "safe_load", _boom)
         with pytest.raises(RuntimeError, match="synthetic sprint 4 regression"):
             GEPAOptimizer.from_config(fake_provider, config_path=str(valid_yaml))
+
+
+# ---------------------------------------------------------------------------
+# PeriodicNudge.from_config — three scenarios (post-PR-#7 cleanup)
+#
+# Originally specced as PR #5 but never shipped; folded into the
+# chore/post-orphan-cleanup pass for delivery. Same fix shape as the three
+# above — narrowed catch from ``(OSError, Exception)`` to
+# ``(OSError, yaml.YAMLError)`` with a logged WARN, so any other exception
+# surfaces on startup instead of silently demoting to defaults.
+# ---------------------------------------------------------------------------
+
+
+class TestPeriodicNudgeConfigLoad:
+    """Verifies the narrowed catch at learning/nudge.py:from_config."""
+
+    def test_malformed_yaml_warns_and_uses_defaults(
+        self, malformed_yaml: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.WARNING, logger="prometheus.learning.nudge")
+        nudge = PeriodicNudge.from_config(config_path=str(malformed_yaml))
+        # Defaults still ship.
+        assert isinstance(nudge, PeriodicNudge)
+        assert nudge.interval == _DEFAULT_INTERVAL
+        assert nudge.enabled is True
+        # Warning surfaced with the canonical "failed to load" stem.
+        assert any(
+            "PeriodicNudge.from_config: failed to load" in rec.message
+            for rec in caplog.records
+            if rec.levelno == logging.WARNING
+        ), caplog.text
+
+    def test_missing_file_warns_and_uses_defaults(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.WARNING, logger="prometheus.learning.nudge")
+        missing = tmp_path / "no-such-file.yaml"
+        nudge = PeriodicNudge.from_config(config_path=str(missing))
+        assert nudge.interval == _DEFAULT_INTERVAL
+        assert nudge.enabled is True
+        assert any(
+            "failed to load" in rec.message for rec in caplog.records
+        ), caplog.text
+
+    def test_unexpected_exception_propagates(
+        self,
+        valid_yaml: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The Sprint 4 invariant for the nudge site — a non-(OSError, YAMLError)
+        exception must propagate so the operator sees it, not get swallowed."""
+        def _boom(_):
+            raise RuntimeError("synthetic post-PR-7 cleanup regression")
+
+        monkeypatch.setattr(yaml, "safe_load", _boom)
+        with pytest.raises(
+            RuntimeError, match="synthetic post-PR-7 cleanup regression"
+        ):
+            PeriodicNudge.from_config(config_path=str(valid_yaml))

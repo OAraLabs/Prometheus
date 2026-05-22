@@ -56,13 +56,22 @@ class PeriodicNudge:
             from prometheus.config.defaults import DEFAULTS_PATH
             config_path = str(DEFAULTS_PATH)
 
+        # Narrow the catch to genuine I/O + YAML-parse errors so any other
+        # exception (e.g., a future config-schema upgrade that introduces
+        # validation) propagates instead of silently demoting the
+        # subsystem to defaults. Same fix shape as PR #3 / 035f1fb.
         try:
             with open(Path(config_path).expanduser()) as fh:
-                data = yaml.safe_load(fh)
-            learning = data.get("learning", {})
+                data = yaml.safe_load(fh) or {}
+            learning = data.get("learning", {}) or {}
             interval = learning.get("nudge_interval", _DEFAULT_INTERVAL)
             enabled = learning.get("nudge_enabled", True)
-        except (OSError, Exception):
+        except (OSError, yaml.YAMLError) as exc:
+            log.warning(
+                "PeriodicNudge.from_config: failed to load %s (%s: %s); "
+                "using defaults (interval=%d, enabled=True)",
+                config_path, type(exc).__name__, exc, _DEFAULT_INTERVAL,
+            )
             interval = _DEFAULT_INTERVAL
             enabled = True
 
