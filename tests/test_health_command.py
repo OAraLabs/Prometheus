@@ -163,6 +163,34 @@ class TestHealthCommandEdgeCases:
         plain = cmd_health(verbose=False)
         assert "Recent silent-failure tracebacks" not in plain
 
+    def test_zero_tool_calls_renders_n_a_instead_of_0_pct(
+        self, tel_with_handle: ToolCallTelemetry
+    ) -> None:
+        """Post-PR-#7 cleanup: with 0 tool calls in the window, the
+        success-rate string must be ``n/a`` rather than the mathematically
+        meaningless ``0.0% success``. Behaviour is identical for non-zero
+        cases."""
+        # Telemetry handle is wired by the fixture but we deliberately record
+        # zero tool calls. A non-empty subsystems block keeps the rest of
+        # the output well-formed.
+        tel = tel_with_handle
+        tel.record_run("curator", "run_once", "success", duration_ms=1.0)
+
+        text = cmd_health()
+        # The /health line for tool calls should show "n/a" — never "0.0%".
+        assert "0.0% success" not in text, (
+            "Zero tool calls should render 'n/a', not '0.0% success'. "
+            f"Got:\n{text}"
+        )
+        # And the new "n/a" token must be present, in the tool-calls line.
+        tool_calls_line = next(
+            (ln for ln in text.splitlines() if "Tool calls:" in ln),
+            "",
+        )
+        assert "n/a" in tool_calls_line, (
+            f"Expected 'n/a' in tool-calls line. Got: {tool_calls_line!r}"
+        )
+
 
 class TestHealthCommandWiring:
     """Sanity: both Telegram and Slack adapters expose a /health handler."""
