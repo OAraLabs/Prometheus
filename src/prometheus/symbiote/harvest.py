@@ -29,7 +29,7 @@ import re
 import shutil
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -721,4 +721,5 @@ class HarvestEngine:
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    # See backup_vault._now_iso: utcnow() deprecated; preserve "...Z" suffix.
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -169,6 +169,61 @@ class TestRetention:
         snaps = vault.list_snapshots(limit=20)
         assert len(snaps) == 3
 
+    def test_enforce_retention_today_check_does_not_use_local_date(self):
+        """Regression guard against the pre-fix antipattern.
+
+        The original bug:
+          * ``_enforce_retention`` computed ``today_str = date.today().isoformat()``
+            (LOCAL timezone).
+          * Snapshot timestamps were written by ``_now_iso`` in UTC.
+          * When local date ≠ UTC date (e.g. evening EDT), the
+            ``ts.startswith(today_str)`` exemption check silently failed
+            and same-day scheduled snapshots got pruned past max_backups.
+
+        The functional sister test ``test_multiple_snapshots_same_day_all_retained``
+        catches the symptom but only when the developer's wall clock + TZ
+        land in a mismatch window — it was a real flake on main for an
+        undetermined duration.
+
+        A truly deterministic functional test would need ``freezegun`` to
+        force a controlled wall-clock + TZ pair. Rather than adding a
+        dependency for one assertion, this test does structural source
+        inspection: it parses ``_enforce_retention``'s AST and rejects
+        any reference to ``date.today``. If a future refactor brings
+        back local-TZ today-computation, this test fires deterministically
+        regardless of the test environment."""
+        import ast
+        import inspect
+        import textwrap
+
+        from prometheus.symbiote import backup_vault
+
+        # getsource preserves the class-level indent; dedent so ast.parse
+        # sees a syntactically-valid top-level def.
+        src = textwrap.dedent(inspect.getsource(
+            backup_vault.BackupVault._enforce_retention
+        ))
+        tree = ast.parse(src)
+
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == "today":
+                # ``date.today()`` shows up as Attribute(value=Name('date'), attr='today').
+                if (
+                    isinstance(node.value, ast.Name) and node.value.id == "date"
+                ):
+                    offenders.append(
+                        f"line {node.lineno}: date.today() — local timezone, "
+                        f"snapshots are stored in UTC"
+                    )
+
+        assert not offenders, (
+            "_enforce_retention contains the pre-fix antipattern "
+            "(local-TZ today-check vs UTC-stored timestamps):\n  "
+            + "\n  ".join(offenders)
+            + "\nUse datetime.now(timezone.utc).date().isoformat() instead."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Restore

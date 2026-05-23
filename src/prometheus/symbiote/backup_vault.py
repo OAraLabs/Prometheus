@@ -43,7 +43,7 @@ import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, date
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -601,7 +601,14 @@ class BackupVault:
             )
             rows = cur.fetchall()
         # Identify candidates that COULD be deleted (non-exempt, not today).
-        today_str = date.today().isoformat()
+        # Compare in UTC: the stored timestamps come from ``_now_iso`` which
+        # is UTC, so ``today_str`` must also be UTC. Using local ``date.today()``
+        # here causes today-detection to fail whenever local and UTC dates
+        # differ (e.g. evening EDT, when local is yesterday and UTC is today),
+        # leaking same-day snapshots into the deletable set and ultimately
+        # pruning them. See tests/test_backup_vault.py::TestRetention::
+        # test_multiple_snapshots_same_day_all_retained.
+        today_str = datetime.now(timezone.utc).date().isoformat()
         deletable = []
         retained = 0
         for backup_id, source, ts, tarball in rows:
@@ -723,7 +730,11 @@ class BackupVault:
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    # ``datetime.utcnow`` deprecated in Python 3.12, removed in 3.13. Use the
+    # timezone-aware ``now(timezone.utc)`` and ``strftime`` so the textual
+    # output ("...Z" suffix) stays byte-identical to the legacy format —
+    # downstream parsers and stored manifest timestamps depend on that shape.
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _sha256_file(path: Path, *, block_size: int = 65536) -> str:

@@ -29,7 +29,7 @@ import logging
 import re
 import subprocess
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -426,8 +426,9 @@ class GraftEngine:
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    # See backup_vault._now_iso: utcnow() deprecated; preserve "...Z" suffix.
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _now_epoch() -> float:
-    return datetime.utcnow().timestamp()
+    return datetime.now(timezone.utc).timestamp()
