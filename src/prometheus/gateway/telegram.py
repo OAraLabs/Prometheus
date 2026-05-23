@@ -306,6 +306,12 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("health", self._cmd_health))
         # SignalBus Persistence sprint: /events — persisted signal-bus events
         self._app.add_handler(CommandHandler("events", self._cmd_events))
+        # SPRINT-2 WS1: Durability & Steering — mid-turn steer + queued prompts
+        self._app.add_handler(CommandHandler("steer", self._cmd_steer))
+        self._app.add_handler(CommandHandler("queue", self._cmd_queue))
+        self._app.add_handler(CommandHandler("unqueue", self._cmd_unqueue))
+        # Telegram strips dashes from command names — use compact form.
+        self._app.add_handler(CommandHandler("clearsteers", self._cmd_clear_steers))
         self._app.add_handler(CommandHandler("anatomy", self._cmd_anatomy))
         self._app.add_handler(CommandHandler("doctor", self._cmd_doctor))
         self._app.add_handler(CommandHandler("profile", self._cmd_profile))
@@ -675,6 +681,35 @@ class TelegramAdapter(BasePlatformAdapter):
         except Exception:
             lines.append("\nSENTINEL: unavailable")
 
+        # SPRINT-2 WS1: queued steers + queued prompts for THIS chat.
+        # Per-session counters live on the ChatSession instance; surface
+        # them here so /status doubles as the canonical "what's in flight"
+        # view.
+        session = self._resolve_session_for_command(update)
+        if session is not None:
+            if session.queued_steers:
+                lines.append(
+                    f"\n📍 Queued steers: {len(session.queued_steers)}"
+                )
+                for s in session.queued_steers[:3]:
+                    preview = s if len(s) <= 60 else s[:57] + "..."
+                    lines.append(f"   - {preview}")
+                if len(session.queued_steers) > 3:
+                    lines.append(
+                        f"   ... and {len(session.queued_steers) - 3} more"
+                    )
+            if session.queued_prompts:
+                lines.append(
+                    f"📥 Queued prompts: {len(session.queued_prompts)}"
+                )
+                for p in session.queued_prompts[:3]:
+                    preview = p if len(p) <= 60 else p[:57] + "..."
+                    lines.append(f"   - {preview}")
+                if len(session.queued_prompts) > 3:
+                    lines.append(
+                        f"   ... and {len(session.queued_prompts) - 3} more"
+                    )
+
         await self.send(update.effective_chat.id, "\n".join(lines), parse_mode=None)
 
     async def _cmd_tools(
@@ -1038,6 +1073,150 @@ class TelegramAdapter(BasePlatformAdapter):
         from prometheus.gateway import commands as _cmds
         text = _cmds.cmd_health(verbose=verbose, since_hours=since_hours)
         await self.send(update.effective_chat.id, text, parse_mode=None)
+
+    # ------------------------------------------------------------------
+    # SPRINT-2 WS1 — Mid-turn steer + queued prompts
+    # ------------------------------------------------------------------
+
+    def _resolve_session_for_command(
+        self, update: Update,
+    ) -> "ChatSession | None":  # noqa: F821 — forward ref, ChatSession imported in module
+        """Return the live ChatSession for the user's chat, or None.
+
+        Used by /steer, /queue, /unqueue, /clear-steers to find the
+        session-state object the agent loop is consuming. We don't
+        ``get_or_create`` here — if there's no active session, the
+        command is a no-op.
+        """
+        if update.effective_chat is None:
+            return None
+        # Build the session key the same way _dispatch_to_agent does.
+        # MessageEvent.session_key() = f"{platform}:{chat_id}"
+        # which here resolves to "telegram:<chat_id>".
+        session_key = f"telegram:{update.effective_chat.id}"
+        return self.session_manager._sessions.get(session_key)
+
+    async def _cmd_steer(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /steer — inject text into the current session.
+
+        Arrives at the agent as a system-prompt addendum on the next
+        model call (after the current tool batch finishes). Does NOT
+        interrupt the agent or start a new user turn.
+        """
+        if update.effective_chat is None:
+            return
+        text = " ".join(context.args or []).strip()
+        if not text:
+            await self.send(
+                update.effective_chat.id,
+                "/steer <text> — inject mid-turn guidance.\n"
+                "Arrives after the next tool call. Example:\n"
+                "/steer focus on Ubuntu, skip the Mac instructions",
+                parse_mode=None,
+            )
+            return
+        session = self._resolve_session_for_command(update)
+        if session is None:
+            await self.send(
+                update.effective_chat.id,
+                "No active session yet. Send a message first, then "
+                "/steer while the agent is running.",
+                parse_mode=None,
+            )
+            return
+        if not session.enqueue_steer(text):
+            await self.send(
+                update.effective_chat.id, "Empty steer — nothing queued.",
+                parse_mode=None,
+            )
+            return
+        preview = text if len(text) <= 80 else text[:77] + "..."
+        await self.send(
+            update.effective_chat.id,
+            f"📍 Steered: {preview}\n"
+            f"   Arrives after the next tool call. "
+            f"Pending: {len(session.queued_steers)}.",
+            parse_mode=None,
+        )
+
+    async def _cmd_queue(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /queue — fire <text> as a fresh turn after the current
+        one ends."""
+        if update.effective_chat is None:
+            return
+        text = " ".join(context.args or []).strip()
+        if not text:
+            await self.send(
+                update.effective_chat.id,
+                "/queue <text> — line up a follow-up turn.\n"
+                "Runs after the current task ends.",
+                parse_mode=None,
+            )
+            return
+        # /queue creates the session if missing so a queued prompt on a
+        # quiet chat fires when the user kicks off their first message.
+        session_key = f"telegram:{update.effective_chat.id}"
+        session = self.session_manager.get_or_create(session_key)
+        if not session.enqueue_prompt(text):
+            await self.send(
+                update.effective_chat.id, "Empty prompt — nothing queued.",
+                parse_mode=None,
+            )
+            return
+        preview = text if len(text) <= 80 else text[:77] + "..."
+        position = len(session.queued_prompts)
+        await self.send(
+            update.effective_chat.id,
+            f"📥 Queued: {preview}\n"
+            f"   Position: {position}. Fires when current turn ends.",
+            parse_mode=None,
+        )
+
+    async def _cmd_unqueue(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /unqueue — drop the most recently queued prompt."""
+        if update.effective_chat is None:
+            return
+        session = self._resolve_session_for_command(update)
+        if session is None or not session.queued_prompts:
+            await self.send(
+                update.effective_chat.id, "No queued prompts to drop.",
+                parse_mode=None,
+            )
+            return
+        dropped = session.queued_prompts.pop()
+        preview = dropped if len(dropped) <= 80 else dropped[:77] + "..."
+        remaining = len(session.queued_prompts)
+        await self.send(
+            update.effective_chat.id,
+            f"🗑  Unqueued: {preview}\n   Remaining: {remaining}.",
+            parse_mode=None,
+        )
+
+    async def _cmd_clear_steers(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /clearsteers — drop all pending steers without injection."""
+        if update.effective_chat is None:
+            return
+        session = self._resolve_session_for_command(update)
+        if session is None:
+            await self.send(
+                update.effective_chat.id, "No active session.",
+                parse_mode=None,
+            )
+            return
+        n = session.clear_steers()
+        await self.send(
+            update.effective_chat.id,
+            f"🧹 Cleared {n} pending steer{'s' if n != 1 else ''}.",
+            parse_mode=None,
+        )
 
     async def _cmd_events(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1465,6 +1644,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 # /gpt etc. overrides set via Phase 4 commands apply only to
                 # this chat and not other Telegram chats or Slack/CLI/web.
                 session_id=event.session_key(),
+                # SPRINT-2 WS1: pass the live ChatSession so the loop can
+                # drain ``queued_steers`` between tool batches.
+                session_state=session,
             )
             # Append assistant response (and any tool call/result pairs) to session
             session.add_result_messages(result.messages, pre_len)
@@ -1484,6 +1666,25 @@ class TelegramAdapter(BasePlatformAdapter):
             strip_markdown(response_text),
             reply_to=event.message_id,
         )
+
+        # SPRINT-2 WS1: after the turn ends, drain any queued prompts and
+        # fire the next one as a fresh user turn. Loop until the queue is
+        # empty so back-to-back ``/queue`` calls all run. Steers are NOT
+        # drained here — they live on the session's queue and the next
+        # loop iteration consumes them inside run_loop.
+        while True:
+            next_prompt = session.drain_prompt()
+            if not next_prompt:
+                break
+            queued_event = MessageEvent(
+                chat_id=event.chat_id,
+                user_id=event.user_id,
+                text=next_prompt,
+                message_id=event.message_id,
+                platform=event.platform,
+                username=event.username,
+            )
+            await self._dispatch_to_agent(queued_event)
 
     # ------------------------------------------------------------------
     # Sprint 18 ANATOMY: infrastructure self-awareness

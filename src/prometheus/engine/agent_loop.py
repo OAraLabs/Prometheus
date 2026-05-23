@@ -46,6 +46,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+# SPRINT-4 audit HIGH-RISK #13 — one-shot WARN guard for legacy
+# permission_checker.evaluate signature (without `origin` kwarg). Flipped
+# True the first time the TypeError fallback fires per process so the
+# deprecation surfaces without spamming logs every tool call.
+_LEGACY_PERMISSION_CHECKER_WARNED: bool = False
+
 PermissionPrompt = Callable[[str, str], Awaitable[bool]]
 AskUserPrompt = Callable[[str], Awaitable[str]]
 
@@ -239,6 +245,30 @@ class _CircuitBreaker:
             )
         except Exception as exc:
             log.warning("diagnose_and_recover crashed, suppressing: %s", exc, exc_info=True)
+            # SPRINT-4 audit HIGH-RISK #10 fix: write a silent_failures row
+            # alongside the WARN so /health can detect when the breaker's
+            # own diagnostic path is failing. Pre-fix, the WARN-only path
+            # meant a chronically-broken diagnose_and_recover would never
+            # show up in telemetry. Best-effort — never raises.
+            tel = getattr(context, "telemetry", None)
+            if tel is not None and hasattr(tel, "record_silent_failure"):
+                try:
+                    tel.record_silent_failure(
+                        subsystem="circuit_breaker",
+                        operation="diagnose_and_recover",
+                        exc=exc,
+                        context={
+                            "tool_name": tool_name,
+                            "intended_action": intended_action,
+                            "identical_count": self._identical_count,
+                            "last_error_key": self._last_error_key[:200],
+                        },
+                    )
+                except Exception:
+                    log.debug(
+                        "circuit_breaker: silent_failure write failed",
+                        exc_info=True,
+                    )
             return _RecoveryResult(
                 recovered=False,
                 recovery_method="error",
@@ -324,6 +354,11 @@ def _detect_config_drift(active_model: str) -> bool:
         Path.home() / ".prometheus" / "prometheus.yaml",
     ]
     for candidate in candidates:
+        # SPRINT-4 audit HIGH-RISK #9 fix: narrow the catch to genuine I/O +
+        # YAML-parse errors and log them. Pre-fix, ``except Exception:
+        # continue`` silently swallowed any error (including programming
+        # bugs in the parser walker) — config drift would go undetected
+        # without a warning. Same fix shape as PR #3 / 035f1fb.
         try:
             if not candidate.is_file():
                 continue
@@ -333,7 +368,12 @@ def _detect_config_drift(active_model: str) -> bool:
             if expected and expected != active_model:
                 return True
             return False
-        except Exception:
+        except (OSError, yaml.YAMLError) as exc:
+            log.warning(
+                "_detect_config_drift: could not read/parse %s (%s: %s); "
+                "skipping this candidate",
+                candidate, type(exc).__name__, exc, exc_info=True,
+            )
             continue
     return False
 
@@ -540,6 +580,19 @@ class LoopContext:
     # Reserved: None and "system" never match any override (eval/benchmark/
     # cron/SENTINEL-adjacent paths use these so user commands never leak in).
     session_id: str | None = None
+    # SPRINT-2 WS1: live ChatSession handle. When wired, run_loop drains the
+    # ``queued_steers`` list before each model call and appends them to the
+    # system prompt as a "[STEER FROM USER, mid-turn]: ..." addendum. None
+    # when run from contexts that don't have a persistent session
+    # (benchmarks, evals, cron). See engine/session.py module docstring.
+    session_state: object | None = None
+    # SPRINT-2 WS2: file-mutation verifier. When wired, the loop calls
+    # ``pre_tool_use`` / ``post_tool_use`` around every tool dispatch and
+    # ``post_turn`` when a turn ends without further tool calls. A summary
+    # of claimed-vs-actual filesystem changes is appended as a synthetic
+    # user-role message so the agent sees it on its next turn. See
+    # prometheus/hooks/file_mutation_verifier.py.
+    file_mutation_verifier: object | None = None
 
 
 def _effective_max_tool_iterations(context: LoopContext) -> int:
@@ -670,11 +723,34 @@ async def run_loop(
         final_message: ConversationMessage | None = None
         usage = UsageSnapshot()
 
+        # SPRINT-2 WS1: drain queued steers as a system-prompt addendum
+        # for THIS model call only. Steers arrive from the gateway's
+        # /steer command path and accumulate while the loop is mid-turn
+        # awaiting a tool result. Combined here so the model sees them
+        # on its very next iteration — no role-alternation violation,
+        # no fresh user turn.
+        per_call_system_prompt = active_system_prompt
+        _drain_steers = getattr(context.session_state, "drain_steers", None)
+        if callable(_drain_steers):
+            try:
+                steer_text = _drain_steers()
+            except Exception:
+                steer_text = None
+                log.debug(
+                    "run_loop: drain_steers raised, treating as no-op",
+                    exc_info=True,
+                )
+            if steer_text:
+                per_call_system_prompt = (
+                    f"{active_system_prompt}\n\n"
+                    f"[STEER FROM USER, mid-turn]: {steer_text}"
+                )
+
         async for event in context.provider.stream_message(
             ApiMessageRequest(
                 model=context.model,
                 messages=messages,
-                system_prompt=active_system_prompt,
+                system_prompt=per_call_system_prompt,
                 max_tokens=context.max_tokens,
                 tools=active_tools,
             )
@@ -716,6 +792,23 @@ async def run_loop(
         yield AssistantTurnComplete(message=final_message, usage=usage), usage
 
         if not final_message.tool_uses:
+            # SPRINT-2 WS2: turn ended without further tool calls — drain
+            # the file-mutation verifier and append its summary as a
+            # synthetic user-role message so the model sees it on its
+            # next turn. Same channel as PeriodicNudge. None when no
+            # mutations were tracked.
+            fmv = getattr(context, "file_mutation_verifier", None)
+            if fmv is not None:
+                try:
+                    summary = fmv.post_turn()
+                except Exception:
+                    summary = None
+                    log.debug(
+                        "FileMutationVerifier.post_turn raised — "
+                        "skipping summary append", exc_info=True,
+                    )
+                if summary:
+                    messages.append(ConversationMessage.from_user_text(summary))
             return
 
         tool_calls = final_message.tool_uses
@@ -733,9 +826,37 @@ async def run_loop(
             yield AssistantTurnComplete(message=error_msg, usage=usage), usage
             return
 
+        # SPRINT-2 WS2: snapshot every path the upcoming tool batch may
+        # touch BEFORE dispatch. Best-effort; verifier swallows its own
+        # exceptions so loop progress is unaffected.
+        fmv = getattr(context, "file_mutation_verifier", None)
+        if fmv is not None:
+            for _tc in tool_calls:
+                try:
+                    fmv.pre_tool_use(_tc.name, _tc.input or {}, _tc.id)
+                except Exception:
+                    log.debug(
+                        "FileMutationVerifier.pre_tool_use raised",
+                        exc_info=True,
+                    )
+
         tool_results = await _dispatch_tool_calls(
             context, tool_calls, raw_model_output=raw_model_output_this_turn
         )
+
+        # SPRINT-2 WS2: post-snapshot + diff after every tool result.
+        if fmv is not None:
+            for _tc, _r in zip(tool_calls, tool_results):
+                try:
+                    fmv.post_tool_use(
+                        _tc.name, _tc.input or {}, _tc.id,
+                        output=_r.content, is_error=_r.is_error,
+                    )
+                except Exception:
+                    log.debug(
+                        "FileMutationVerifier.post_tool_use raised",
+                        exc_info=True,
+                    )
 
         # --- Circuit breaker ---
         all_errors = all(r.is_error for r in tool_results)
@@ -1249,7 +1370,20 @@ def _is_tool_read_only(tool: object, tool_input: dict) -> bool:
         try:
             parsed = tool.input_model.model_validate(tool_input)
             return tool.is_read_only(parsed)
-        except Exception:
+        except Exception as exc:
+            # SPRINT-4 audit HIGH-RISK #11 fix: surface validator / handler
+            # failures at debug level. ``return False`` keeps the fail-safe
+            # direction (unknown → treat as write, requires permission), so
+            # the silent swallow doesn't change the security stance — but
+            # without the log line we'd never know a tool's input_model is
+            # broken until the user files a "why does this tool keep
+            # prompting" bug.
+            log.debug(
+                "_is_tool_read_only: %s.is_read_only check failed (%s: %s); "
+                "defaulting to False (treat as write)",
+                type(tool).__name__, type(exc).__name__, exc,
+                exc_info=True,
+            )
             return False
     return getattr(tool, "is_read_only", False)
 
@@ -1468,7 +1602,20 @@ async def _execute_tool_call(
         try:
             from prometheus.permissions.checker import origin_from_session_id
             _origin = origin_from_session_id(context.session_id)
-        except Exception:
+        except Exception as exc:
+            # SPRINT-4 audit HIGH-RISK #12 fix: log a WARN with a session_id
+            # snippet so the next deploy that regresses origin resolution
+            # surfaces. Falling back to "system" is the correct SAFE choice
+            # (system origin gets the FULL restriction set, not the relaxed
+            # user-initiated one), but a chronic regression would silently
+            # restrict everything without anyone noticing. Truncate the
+            # session_id so we don't leak full chat ids into logs.
+            _session_snippet = (str(context.session_id) or "")[:16]
+            log.warning(
+                "origin_from_session_id failed for session=%s... (%s: %s); "
+                "defaulting to 'system' origin (full restrictions apply)",
+                _session_snippet, type(exc).__name__, exc, exc_info=True,
+            )
             _origin = "system"
         try:
             decision = context.permission_checker.evaluate(
@@ -1481,6 +1628,19 @@ async def _execute_tool_call(
         except TypeError:
             # Older permission_checker implementations don't accept origin.
             # Fall back to the legacy call shape so third-party gates keep working.
+            # SPRINT-4 audit HIGH-RISK #13 fix: one-shot WARN so the
+            # deprecation is observable. Module-level guard avoids spamming
+            # logs every tool call when a legacy gate is in place.
+            global _LEGACY_PERMISSION_CHECKER_WARNED
+            if not _LEGACY_PERMISSION_CHECKER_WARNED:
+                log.warning(
+                    "permission_checker.evaluate accepted as legacy signature "
+                    "(no `origin` kwarg). %s should be updated to accept "
+                    "`origin: str` per the TRUST-CONTEXT change; logging "
+                    "this once per process.",
+                    type(context.permission_checker).__name__,
+                )
+                _LEGACY_PERMISSION_CHECKER_WARNED = True
             decision = context.permission_checker.evaluate(
                 tool_name,
                 is_read_only=tool.is_read_only(parsed_input),
@@ -1655,6 +1815,7 @@ class AgentLoop:
         tool_loader: object | None = None,
         nudge: object | None = None,
         tool_metadata: dict[str, object] | None = None,
+        file_mutation_verifier: object | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
@@ -1683,6 +1844,11 @@ class AgentLoop:
         # so subsystems like the Printing Press hook can reach into the
         # registered registry without changing the LoopContext shape.
         self._tool_metadata = dict(tool_metadata) if tool_metadata else None
+        # SPRINT-2 WS2: file-mutation verifier — see
+        # prometheus/hooks/file_mutation_verifier.py. Optional; when None
+        # the loop runs without verification (back-compat for benchmarks
+        # and unit tests that build AgentLoop without supplying a config).
+        self._file_mutation_verifier = file_mutation_verifier
 
     def add_post_task_hook(self, hook: Callable) -> None:
         """Append a callback invoked after each completed task.
@@ -1710,12 +1876,18 @@ class AgentLoop:
         messages: list[ConversationMessage] | None = None,
         tools: list | None = None,
         session_id: str | None = None,
+        session_state: object | None = None,
     ) -> RunResult:
         """Run the agent loop asynchronously, return a RunResult.
 
         Phase 3.5: ``session_id`` is forwarded into LoopContext so the
         ModelRouter's per-session override lookup can fire (or bypass,
         for reserved IDs None/"system").
+
+        SPRINT-2 WS1: ``session_state`` is the live ChatSession (or any
+        object exposing ``drain_steers() -> str | None``). When supplied,
+        the loop drains queued steers before each model call. None for
+        contexts without a persistent session (benchmarks, evals, cron).
         """
         if messages is not None:
             messages = list(messages)  # shallow copy — run_loop mutates in place
@@ -1747,6 +1919,8 @@ class AgentLoop:
             tool_loader=self._tool_loader,
             tool_metadata=self._tool_metadata,
             session_id=session_id,
+            session_state=session_state,
+            file_mutation_verifier=self._file_mutation_verifier,
         )
 
         last_text = ""

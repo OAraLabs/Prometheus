@@ -298,6 +298,19 @@ async def run_daemon(args: argparse.Namespace) -> None:
     except Exception as exc:
         logger.warning("PeriodicNudge not available: %s", exc)
 
+    # SPRINT-2 WS2: file-mutation verifier — per-turn audit of claimed vs
+    # actual filesystem changes. Opt-out via config, on by default.
+    fmv: object | None = None
+    try:
+        from prometheus.hooks.file_mutation_verifier import make_default_verifier
+        fmv = make_default_verifier(config)
+        if fmv is not None and getattr(fmv, "enabled", False):
+            logger.info("FileMutationVerifier: enabled (turn-end audit)")
+        else:
+            fmv = None
+    except Exception as exc:
+        logger.warning("FileMutationVerifier not available: %s", exc)
+
     # Agent loop
     agent_loop = AgentLoop(
         provider=provider,
@@ -313,6 +326,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
         max_tool_iterations=model_config.get("max_tool_iterations", 25),
         tool_loader=tool_loader,
         nudge=nudge,
+        file_mutation_verifier=fmv,
     )
 
     # Shared session manager for all gateways
