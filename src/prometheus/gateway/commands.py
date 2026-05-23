@@ -776,6 +776,79 @@ def get_notifications_mode(default: str = "quiet") -> str:
     return mode if mode in _VALID_NOTIF_MODES else default
 
 
+def _render_tool_registration_section(
+    lines: list[str],
+    tel: Any,
+    since_ts: float,
+    aggregate: dict[str, Any],
+) -> None:
+    """Render the per-tool registration-failure breakdown into ``lines``.
+
+    Phase 2 (orphan-tools): every ``try_register`` call writes a
+    ``subsystem_runs`` row with ``subsystem='tool_registration'`` and
+    ``operation=<display_name>``. Failures carry the exception type/msg
+    in ``summary_json`` so we can show *which* tool broke *how*, not just
+    a count.
+
+    Only called when ``aggregate['failed'] > 0`` — the section is
+    suppressed for clean startups per the audit spec.
+    """
+    import json as _json
+    runs = int(aggregate.get("runs", 0))
+    success = int(aggregate.get("success", 0))
+    failed = int(aggregate.get("failed", 0))
+
+    lines.append("")
+    lines.append("🛠  Tool registration:")
+    lines.append(f"   ✅ {success} of {runs} registered")
+    lines.append(f"   ⚠  {failed} failed:")
+
+    try:
+        rows = tel.runs_since(since_ts, subsystem="tool_registration", limit=500)
+    except Exception:
+        rows = []
+
+    # Group failures by (tool, exception_type) and tally occurrences.
+    # The most-recent message and module_path for the group are kept so the
+    # rendered line is "this is what happened the last time it broke".
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        if row.get("outcome") != "failed":
+            continue
+        tool = row.get("operation") or "?"
+        summary_json = row.get("summary_json") or "{}"
+        try:
+            summary = _json.loads(summary_json) if summary_json else {}
+        except Exception:
+            summary = {}
+        exc_type = str(summary.get("exception_type") or "Exception")
+        key = (tool, exc_type)
+        entry = grouped.setdefault(key, {
+            "occurrences": 0,
+            "exception_msg": summary.get("exception_msg") or "",
+            "module_path": summary.get("module_path") or "",
+        })
+        entry["occurrences"] += 1
+        # Newer rows come first from runs_since (ORDER BY timestamp DESC);
+        # the first one we see for a group is the most recent.
+        if not entry["exception_msg"] and summary.get("exception_msg"):
+            entry["exception_msg"] = summary.get("exception_msg") or ""
+
+    # Render in stable order: most recent failure first
+    for (tool, exc_type), entry in sorted(
+        grouped.items(),
+        key=lambda kv: (-int(kv[1]["occurrences"]), kv[0][0]),
+    ):
+        msg = (entry["exception_msg"] or "").strip()
+        msg = (msg[:80] + "…") if len(msg) > 80 else msg
+        occ = int(entry["occurrences"])
+        suffix = f" [{occ} occurrences]" if occ > 1 else ""
+        if msg:
+            lines.append(f"      - {tool}: {exc_type} ({msg}){suffix}")
+        else:
+            lines.append(f"      - {tool}: {exc_type}{suffix}")
+
+
 def cmd_health(verbose: bool = False, since_hours: float = 24.0) -> str:
     """Surface silent-failure telemetry — Sprint 4 Work Stream 3.
 
@@ -839,6 +912,11 @@ def cmd_health(verbose: bool = False, since_hours: float = 24.0) -> str:
     )
 
     subsystems = summary.get("subsystems", {}) or {}
+    # Phase 2 (orphan-tools): tool_registration gets its own dedicated
+    # section below — pop it here so the generic loop doesn't render the
+    # row twice. The detailed section is suppressed entirely when clean
+    # (no failures), per docs/audits/ORPHAN-TOOLS-AUDIT.md Phase 2 spec.
+    tool_reg_aggregate = subsystems.pop("tool_registration", None)
     if not subsystems:
         lines.append("")
         lines.append(
@@ -866,6 +944,14 @@ def cmd_health(verbose: bool = False, since_hours: float = 24.0) -> str:
                 )
             )
             lines.append(f"{icon} {name:<18} {tail}")
+
+    # Tool registration section (Phase 2 — orphan-tools). Shown only when
+    # at least one tool failed to register in the window. Each per-tool
+    # row carries the import-time exception, grouped by (tool, type).
+    if tool_reg_aggregate and int(tool_reg_aggregate.get("failed", 0)) > 0:
+        _render_tool_registration_section(
+            lines, tel, since_ts, tool_reg_aggregate,
+        )
 
     recent = summary.get("recent_silent_failures", []) or []
     if recent:

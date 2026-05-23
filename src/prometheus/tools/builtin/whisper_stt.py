@@ -1,5 +1,24 @@
 """WhisperSTT — speech-to-text via local Whisper binary.
 
+Intentional non-tool: subclasses :class:`BaseTool` for its
+``execute(arguments, context)`` interface, but is **not** registered with
+the agent's :class:`ToolRegistry`. It is invoked directly as a utility
+class by the Telegram gateway:
+
+  - ``src/prometheus/gateway/telegram.py`` (``_transcribe_audio``) —
+    converts inbound voice memos to text before the agent sees them.
+
+Why utility-only instead of agent-callable: the agent doesn't typically
+hold raw audio paths, and the existing Telegram pipeline preprocesses
+voice memos into the agent's context. Registering it as well would just
+add a second path with no caller. See ``docs/audits/ORPHAN-TOOLS-AUDIT.md``
+(Phase 1) for the audit that classified this as INTENTIONAL-NON-TOOL.
+
+If a future workflow needs the agent to invoke STT directly (e.g.
+transcribing audio it just produced via TTS), register via
+``prometheus.tools.registration.try_register`` in
+``src/prometheus/__main__.py``.
+
 Counterpart to the existing TTSTool (tts.py).  Accepts an audio file path
 (typically .ogg from Telegram voice memos), converts to WAV if needed via
 ffmpeg, then transcribes via whisper CLI or faster-whisper.
