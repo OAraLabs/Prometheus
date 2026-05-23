@@ -304,6 +304,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("notifications", self._cmd_notifications))
         # Sprint S4 A3: /health — silent-failure telemetry surface
         self._app.add_handler(CommandHandler("health", self._cmd_health))
+        # SignalBus Persistence sprint: /events — persisted signal-bus events
+        self._app.add_handler(CommandHandler("events", self._cmd_events))
         self._app.add_handler(CommandHandler("anatomy", self._cmd_anatomy))
         self._app.add_handler(CommandHandler("doctor", self._cmd_doctor))
         self._app.add_handler(CommandHandler("profile", self._cmd_profile))
@@ -1035,6 +1037,26 @@ class TelegramAdapter(BasePlatformAdapter):
 
         from prometheus.gateway import commands as _cmds
         text = _cmds.cmd_health(verbose=verbose, since_hours=since_hours)
+        await self.send(update.effective_chat.id, text, parse_mode=None)
+
+    async def _cmd_events(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /events — surface persisted SignalBus events.
+
+        Subcommands:
+          (no args) | recent  → last 20 events across all types
+          skills              → recent skill_created / skill_refined
+          memory              → recent memory_updated
+          curator             → recent curator_report / curator_degraded
+          show <id>           → full payload for a specific event
+        """
+        if update.effective_chat is None:
+            return
+        from prometheus.gateway import commands as _cmds
+
+        arg = " ".join(context.args or []).strip()
+        text = _cmds.cmd_events(arg=arg)
         await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_notifications(

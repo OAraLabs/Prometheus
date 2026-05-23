@@ -27,6 +27,7 @@ def cmd_help() -> str:
         "/doctor    — Diagnostic health check against model registry\n"
         "/wiki      — Wiki stats and recent entries\n"
         "/sentinel  — SENTINEL subsystem status\n"
+        "/events    — Recent signal-bus events (recent | skills | memory | curator | show <id>)\n"
         "/benchmark — Run a quick smoke test\n"
         "/context   — Context window usage\n"
         "/skills    — List available skills\n"
@@ -774,6 +775,120 @@ def get_notifications_mode(default: str = "quiet") -> str:
     except OSError:
         return default
     return mode if mode in _VALID_NOTIF_MODES else default
+
+
+# ---------------------------------------------------------------------------
+# /events — SignalBus Persistence sprint
+# ---------------------------------------------------------------------------
+
+# Logical groups for the subcommands. Maps "skills" → ["skill_created", ...].
+# Membership lives here (not in signal_bus.py) so the command surface can
+# evolve independently of the bus.
+_EVENT_GROUPS: dict[str, list[str]] = {
+    "skills":  ["skill_created", "skill_refined"],
+    "memory":  ["memory_updated"],
+    "curator": ["curator_report", "curator_degraded"],
+}
+
+
+def _summarise_event_payload(signal_type: str, payload: dict[str, Any]) -> str:
+    """One-line summary of an event payload for the /events recent feed.
+
+    Best-effort: the payload schema varies by signal_type, so we pull a few
+    common keys and fall back to the raw type name when none apply.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    # Common high-signal keys, in priority order.
+    for key in ("name", "skill_name", "path", "skill_path", "summary",
+                "outcome", "message", "reason", "memory_kind", "target"):
+        val = payload.get(key)
+        if val:
+            text = str(val)
+            return text if len(text) <= 80 else text[:77] + "..."
+    return ""
+
+
+def cmd_events(arg: str = "") -> str:
+    """Surface persisted SignalBus events.
+
+    Subcommands:
+      (empty) | recent   → last 20 events across all types
+      skills             → recent skill_created / skill_refined
+      memory             → recent memory_updated
+      curator            → recent curator_report / curator_degraded
+      show <id>          → full payload for a specific event
+
+    Reads from telemetry.signal_events — the durable tail. Survives daemon
+    restart, unlike the in-memory ``SignalBus.recent`` deque.
+    """
+    from prometheus.telemetry.tracker import get_telemetry_handle
+
+    tel = get_telemetry_handle()
+    if tel is None:
+        return (
+            "📡 /events: telemetry not wired.\n"
+            "(daemon hasn't called set_telemetry_handle — restart required)"
+        )
+
+    parts = (arg or "").strip().split(maxsplit=1)
+    sub = (parts[0] or "recent").lower() if parts else "recent"
+    rest = parts[1] if len(parts) > 1 else ""
+
+    if sub == "show":
+        return _cmd_events_show(tel, rest)
+
+    if sub in _EVENT_GROUPS:
+        types = _EVENT_GROUPS[sub]
+        header = f"📡 /events {sub} — recent"
+        rows = tel.signal_events_since(signal_types=types, limit=20)
+    elif sub == "recent":
+        header = "📡 /events recent — last 20"
+        rows = tel.signal_events_since(limit=20)
+    else:
+        valid = ", ".join(["recent", *sorted(_EVENT_GROUPS.keys()), "show <id>"])
+        return f"📡 /events: unknown subcommand {sub!r}. Valid: {valid}."
+
+    if not rows:
+        return f"{header}\n\n_no events recorded in this window yet_"
+
+    lines = [header, ""]
+    for row in rows:
+        ts = (row.get("timestamp") or "")[:19]  # YYYY-MM-DDTHH:MM:SS
+        st = row.get("signal_type", "?")
+        summary = _summarise_event_payload(st, row.get("payload") or {})
+        tail = f"  {summary}" if summary else ""
+        lines.append(f"  [{row.get('id'):>4}] {ts}  {st}{tail}")
+    lines.append("")
+    lines.append("Run `/events show <id>` for the full payload.")
+    return "\n".join(lines)
+
+
+def _cmd_events_show(tel: Any, rest: str) -> str:
+    """Render the full row for a specific event id."""
+    import json as _json
+
+    raw = (rest or "").strip()
+    if not raw.isdigit():
+        return "📡 /events show: provide a numeric event id, e.g. `/events show 42`."
+    event_id = int(raw)
+    row = tel.signal_event_by_id(event_id)
+    if row is None:
+        return f"📡 /events show: no event with id={event_id}."
+
+    try:
+        payload_pretty = _json.dumps(row["payload"], indent=2, ensure_ascii=False)
+    except Exception:
+        payload_pretty = str(row["payload"])
+
+    return (
+        f"📡 Event #{row['id']}\n"
+        f"  timestamp:  {row['timestamp']}\n"
+        f"  type:       {row['signal_type']}\n"
+        f"  source:     {row['source_subsystem']}\n"
+        f"  read_at:    {row['read_at'] or '(unread)'}\n"
+        f"\nPayload:\n{payload_pretty}"
+    )
 
 
 def _render_tool_registration_section(

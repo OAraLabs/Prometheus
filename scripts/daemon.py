@@ -625,7 +625,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
             from prometheus.tools.builtin.sentinel_status import SentinelStatusTool
             from prometheus.tools.builtin.wiki_lint_tool import WikiLintTool
 
-            signal_bus = SignalBus()
+            # SignalBus Persistence sprint: pass the live telemetry handle so
+            # emissions land in signal_events synchronously. Falls back to
+            # get_telemetry_handle() if omitted, but explicit is clearer.
+            signal_bus = SignalBus(telemetry=telemetry)
 
             # Leaf components
             wiki_linter = WikiLinter()

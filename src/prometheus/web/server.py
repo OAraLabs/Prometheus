@@ -91,7 +91,7 @@ def create_app(
                 "/api/status", "/api/sessions", "/api/telemetry",
                 "/api/cron", "/api/approvals", "/api/chat",
                 "/api/config", "/api/skills", "/api/profiles",
-                "/api/wiki/stats", "/api/sentinel",
+                "/api/wiki/stats", "/api/sentinel", "/api/events/recent",
             ],
         }
 
@@ -305,6 +305,35 @@ def create_app(
             "idle_since": idle_signals[0].timestamp if idle_signals else None,
             "dream_log_tail": [],  # Populated from dream_log.md in production
         }
+
+    # ── Events (SignalBus Persistence sprint) ──────────────────────
+
+    @app.get("/api/events/recent")
+    async def get_events_recent(limit: int = 50, type: str | None = None):
+        """Hydrate Beacon's activity feed from the durable signal_events tail.
+
+        Closes the "blank activity feed until something happens" UX gap:
+        the UI calls this on mount, then subscribes to live events via the
+        existing WebSocket bridge (which broadcasts emissions in real time).
+
+        Query params:
+          - limit (int, default 50, capped to 500): max rows.
+          - type (str, optional): single signal_type filter
+            (``skill_created``, ``memory_updated``, …).
+        """
+        from prometheus.telemetry.tracker import get_telemetry_handle
+
+        tel = get_telemetry_handle()
+        if tel is None:
+            return []
+        capped_limit = max(1, min(int(limit), 500))
+        rows = tel.signal_events_since(
+            signal_type=type,
+            limit=capped_limit,
+        )
+        # Already shaped as the spec expects (dicts with id, timestamp,
+        # signal_type, payload, source_subsystem). Return as-is.
+        return rows
 
     # ── Cron ────────────────────────────────────────────────────────
 

@@ -212,6 +212,8 @@ class SlackAdapter(BasePlatformAdapter):
         self._app.command("/prometheus-skills")(self._slash_skills)
         # Sprint S4 A3: silent-failure telemetry surface.
         self._app.command("/prometheus-health")(self._slash_health)
+        # SignalBus Persistence sprint: persisted signal-bus events.
+        self._app.command("/prometheus-events")(self._slash_events)
 
         # Start Socket Mode connection
         self._handler = AsyncSocketModeHandler(self._app, self.config.app_token)
@@ -553,3 +555,19 @@ class SlackAdapter(BasePlatformAdapter):
             except ValueError:
                 pass
         await respond(text=cmd_health(verbose=verbose, since_hours=since_hours))
+
+    async def _slash_events(self, ack: Any, command: Any, respond: Any) -> None:
+        """Mirror of the Telegram /events command (SignalBus Persistence sprint).
+
+        Slack passes the command text via ``command["text"]``. Passed verbatim
+        to ``cmd_events`` which parses its own subcommands
+        (``recent`` | ``skills`` | ``memory`` | ``curator`` | ``show <id>``).
+        """
+        await ack()
+        from prometheus.gateway.commands import cmd_events
+
+        try:
+            text_arg = (command.get("text") or "").strip()
+        except AttributeError:
+            text_arg = ""
+        await respond(text=cmd_events(arg=text_arg))

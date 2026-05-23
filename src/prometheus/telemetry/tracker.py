@@ -99,6 +99,26 @@ CREATE TABLE IF NOT EXISTS subsystem_runs (
     outcome         TEXT NOT NULL,         -- "success" | "partial" | "failed" | "skipped"
     summary_json    TEXT                   -- arbitrary JSON the subsystem wants to surface
 );
+
+-- SignalBus Persistence sprint: every emission on the in-process SignalBus
+-- (skill_created, skill_refined, memory_updated, curator_report, dream_*,
+-- idle_*, ...) writes one row so event history survives daemon restarts.
+-- The in-memory ``deque(maxlen=500)`` on SignalBus remains the hot cache;
+-- this table is the cold tail + the source of truth for /events and the
+-- Beacon ``/api/events/recent`` endpoint.
+--
+-- ``timestamp`` is ISO8601 TEXT here (not REAL like the other tables) per
+-- the sprint spec — sortable lexicographically and human-readable in raw
+-- queries. ``read_at`` is reserved for a future "has this surfaced to the
+-- user" marker; nullable for backcompat with this sprint.
+CREATE TABLE IF NOT EXISTS signal_events (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp         TEXT NOT NULL,        -- ISO8601 UTC
+    signal_type       TEXT NOT NULL,        -- ActivitySignal.kind: "skill_created", ...
+    payload           TEXT NOT NULL,        -- JSON blob of ActivitySignal.payload
+    source_subsystem  TEXT NOT NULL,        -- ActivitySignal.source: "SkillCreator", ...
+    read_at           TEXT                  -- nullable: when surfaced to user (reserved)
+);
 """
 
 # Indexes run AFTER _migrate_schema so they can reference columns that are
@@ -118,6 +138,12 @@ CREATE INDEX IF NOT EXISTS idx_silent_failures_ts ON silent_failures (timestamp)
 CREATE INDEX IF NOT EXISTS idx_silent_failures_subsystem ON silent_failures (subsystem);
 CREATE INDEX IF NOT EXISTS idx_subsystem_runs_ts ON subsystem_runs (timestamp);
 CREATE INDEX IF NOT EXISTS idx_subsystem_runs_subsystem ON subsystem_runs (subsystem);
+
+-- SignalBus Persistence sprint: (signal_type, timestamp DESC) is the natural
+-- read pattern for /events filtered queries and Beacon's recent-events
+-- hydration; the composite index serves both.
+CREATE INDEX IF NOT EXISTS idx_signal_events_type_time
+    ON signal_events (signal_type, timestamp DESC);
 """
 
 
@@ -429,6 +455,169 @@ class ToolCallTelemetry:
                 "subsystem=%s operation=%s",
                 subsystem, operation, exc_info=True,
             )
+
+    # ------------------------------------------------------------------
+    # SignalBus Persistence sprint — signal_events writer + reader
+    # ------------------------------------------------------------------
+
+    def record_signal_event(
+        self,
+        signal_type: str,
+        payload: dict[str, Any] | None,
+        source_subsystem: str,
+        *,
+        timestamp_iso: str | None = None,
+    ) -> int | None:
+        """Persist one SignalBus emission to the ``signal_events`` table.
+
+        Called synchronously by ``SignalBus.emit`` BEFORE broadcasting to
+        in-process subscribers. The contract is: if this method returns
+        a row id, the event is durable; if it returns None, persistence
+        failed (but a silent_failure row was already written, and the
+        broadcast will continue regardless — per the sprint spec, "live
+        event stream must never be blocked by persistence").
+
+        Args:
+            signal_type: ``ActivitySignal.kind`` (e.g. ``"skill_created"``).
+            payload: ``ActivitySignal.payload`` dict — serialised to JSON.
+            source_subsystem: ``ActivitySignal.source`` (e.g. ``"SkillCreator"``).
+            timestamp_iso: ISO8601 UTC string. Defaults to ``datetime.utcnow()``
+                rendered. Callers that already have a unix-timestamp from
+                ``ActivitySignal.timestamp`` can pre-convert and pass it
+                so the persisted row and the broadcast share the same
+                wall-clock moment to the microsecond.
+
+        Returns:
+            The new row's ``id`` on success, ``None`` on failure.
+        """
+        from datetime import datetime, timezone
+
+        ts = timestamp_iso or datetime.now(timezone.utc).isoformat()
+        try:
+            payload_json = json.dumps(payload or {}, default=str)
+        except Exception:
+            payload_json = "{}"
+
+        try:
+            cur = self._conn.execute(
+                """
+                INSERT INTO signal_events
+                  (timestamp, signal_type, payload, source_subsystem)
+                VALUES (?, ?, ?, ?)
+                """,
+                (ts, signal_type, payload_json, source_subsystem),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid) if cur.lastrowid is not None else None
+        except Exception as exc:
+            log.warning(
+                "ToolCallTelemetry.record_signal_event: write failed for "
+                "signal_type=%s source=%s",
+                signal_type, source_subsystem, exc_info=True,
+            )
+            # Surface to /health via silent_failures so a flaky DB doesn't
+            # hide. Best-effort — record_silent_failure is itself best-effort.
+            try:
+                self.record_silent_failure(
+                    subsystem="signal_bus",
+                    operation="persist_event",
+                    exc=exc,
+                    context={
+                        "signal_type": signal_type,
+                        "source": source_subsystem,
+                    },
+                )
+            except Exception:
+                pass
+            return None
+
+    def signal_events_since(
+        self,
+        since: str | None = None,
+        *,
+        signal_type: str | None = None,
+        signal_types: list[str] | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return ``signal_events`` rows, newest first.
+
+        Args:
+            since: optional ISO8601 lower bound. ``None`` = no lower bound.
+            signal_type: single-type filter (convenience for the common case).
+            signal_types: multi-type filter; takes precedence over
+                ``signal_type`` if both are supplied.
+            limit: max rows to return.
+
+        The composite index ``idx_signal_events_type_time`` makes the
+        single-type + ``ORDER BY timestamp DESC`` path index-only.
+        """
+        query_parts = [
+            "SELECT id, timestamp, signal_type, payload, source_subsystem, "
+            "read_at FROM signal_events"
+        ]
+        where: list[str] = []
+        params: list[Any] = []
+        if since is not None:
+            where.append("timestamp >= ?")
+            params.append(since)
+        if signal_types:
+            placeholders = ",".join(["?"] * len(signal_types))
+            where.append(f"signal_type IN ({placeholders})")
+            params.extend(signal_types)
+        elif signal_type is not None:
+            where.append("signal_type = ?")
+            params.append(signal_type)
+        if where:
+            query_parts.append("WHERE " + " AND ".join(where))
+        query_parts.append("ORDER BY timestamp DESC LIMIT ?")
+        params.append(max(1, int(limit)))
+        query = " ".join(query_parts)
+
+        try:
+            rows = self._conn.execute(query, tuple(params)).fetchall()
+        except sqlite3.DatabaseError:
+            return []
+
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload_obj = json.loads(row[3]) if row[3] else {}
+            except Exception:
+                payload_obj = {}
+            out.append({
+                "id": int(row[0]),
+                "timestamp": row[1],
+                "signal_type": row[2],
+                "payload": payload_obj,
+                "source_subsystem": row[4],
+                "read_at": row[5],
+            })
+        return out
+
+    def signal_event_by_id(self, event_id: int) -> dict[str, Any] | None:
+        """Return a single ``signal_events`` row by id, or ``None``."""
+        try:
+            row = self._conn.execute(
+                "SELECT id, timestamp, signal_type, payload, "
+                "source_subsystem, read_at FROM signal_events WHERE id = ?",
+                (int(event_id),),
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return None
+        if row is None:
+            return None
+        try:
+            payload_obj = json.loads(row[3]) if row[3] else {}
+        except Exception:
+            payload_obj = {}
+        return {
+            "id": int(row[0]),
+            "timestamp": row[1],
+            "signal_type": row[2],
+            "payload": payload_obj,
+            "source_subsystem": row[4],
+            "read_at": row[5],
+        }
 
     # ------------------------------------------------------------------
     # Sprint 4 — readers for /health and audits
