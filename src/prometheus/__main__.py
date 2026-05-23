@@ -232,6 +232,21 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
         registry.register(SkillTool())
     except Exception:
         pass
+    # Sprint 4 A4: MemoryTool was defined since the initial commit but never
+    # registered — root cause of MEMORY.md / USER.md sitting at 0 bytes for
+    # weeks per Phase 1 baseline. format_memory_for_prompt() reads these
+    # files into every system prompt; without a tool, the agent had no way
+    # to write them. See docs/audits/SILENT-FAILURE-AUDIT.md "Re-baseline
+    # metrics" → "Stated vs reality".
+    try:
+        from prometheus.memory.hermes_memory_tool import MemoryTool
+        registry.register(MemoryTool())
+    except Exception as exc:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "MemoryTool registration failed: %s — MEMORY.md / USER.md "
+            "will remain read-only", exc, exc_info=True,
+        )
     try:
         from prometheus.tools.builtin.todo_write import TodoWriteTool
         registry.register(TodoWriteTool())

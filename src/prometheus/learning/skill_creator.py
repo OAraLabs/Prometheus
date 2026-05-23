@@ -88,7 +88,10 @@ class SkillCreator:
         min_tool_calls: int = _MIN_TOOL_CALLS,
         auto_dir: Path | None = None,
         signal_bus: object | None = None,
+        telemetry: object | None = None,
     ) -> None:
+        from prometheus.learning.llm_envelope import LLMCallEnvelope
+
         self._provider = provider
         self._model = model
         self._min_tool_calls = min_tool_calls
@@ -97,6 +100,16 @@ class SkillCreator:
         # block (after SignalBus exists, since SkillCreator construction
         # happens earlier in the daemon startup).
         self._signal_bus = signal_bus
+        # Sprint S4 A1: LLMCallEnvelope replaces the per-subsystem _call_model
+        # exception-swallow pattern from ed8f1a6. on_failure="return_none"
+        # preserves the legacy maybe_create contract (returns None on failure)
+        # while making every failure visible in telemetry.silent_failures.
+        self._telemetry = telemetry
+        self._envelope = LLMCallEnvelope(
+            subsystem="skill_creator",
+            telemetry=telemetry,
+            on_failure="return_none",
+        )
 
     @property
     def signal_bus(self) -> object | None:
@@ -111,6 +124,8 @@ class SkillCreator:
         cls,
         provider: ModelProvider,
         config_path: str | None = None,
+        *,
+        telemetry: object | None = None,
     ) -> SkillCreator:
         """Build from prometheus.yaml learning section."""
         import yaml
@@ -137,7 +152,7 @@ class SkillCreator:
             )
             min_calls = _MIN_TOOL_CALLS
 
-        return cls(provider, min_tool_calls=min_calls)
+        return cls(provider, min_tool_calls=min_calls, telemetry=telemetry)
 
     async def maybe_create(
         self,
@@ -167,13 +182,11 @@ class SkillCreator:
             trace=trace_text,
         )
 
-        try:
-            content = await self._call_model(prompt)
-        except Exception:
-            log.exception("SkillCreator: model call failed")
-            return None
-
-        if not content.strip():
+        # Envelope returns None on failure (see __init__ on_failure mode); the
+        # surrounding try/except is no longer needed because the envelope wrote
+        # to telemetry.silent_failures with the full traceback.
+        content = await self._call_model(prompt)
+        if content is None or not content.strip():
             return None
 
         slug = _slugify(task_description) or f"skill-{int(time.time())}"
@@ -239,24 +252,20 @@ class SkillCreator:
                     first_body_line = line
         return first_body_line
 
-    async def _call_model(self, prompt: str) -> str:
-        """Call the ModelProvider and return the full text response."""
-        from prometheus.engine.messages import ConversationMessage, TextBlock
-        from prometheus.providers.base import ApiMessageRequest, ApiTextDeltaEvent
+    async def _call_model(self, prompt: str) -> str | None:
+        """Invoke the model via LLMCallEnvelope. Returns None on failure.
 
-        # ConversationMessage.content is list[ContentBlock]; a raw string
-        # fails pydantic validation. (Pre-existing bug found during
-        # Sprint 1 — see commit message.)
-        request = ApiMessageRequest(
+        Thin wrapper around the shared envelope so future _call_model
+        bugs (ed8f1a6-shaped or otherwise) surface in
+        telemetry.silent_failures instead of being silently swallowed.
+        """
+        return await self._envelope.call(
+            provider=self._provider,
             model=self._model,
-            messages=[ConversationMessage(role="user", content=[TextBlock(text=prompt)])],
+            prompt=prompt,
             max_tokens=1024,
+            operation="generate_skill",
         )
-        text_parts: list[str] = []
-        async for event in self._provider.stream_message(request):
-            if isinstance(event, ApiTextDeltaEvent):
-                text_parts.append(event.text)
-        return "".join(text_parts)
 
     @staticmethod
     def _format_trace(trace: list[dict[str, Any]]) -> str:

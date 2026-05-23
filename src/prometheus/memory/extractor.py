@@ -91,7 +91,10 @@ class MemoryExtractor:
         batch_size: int = _BATCH_SIZE,
         post_extract_callback: Callable[[list[dict]], None] | None = None,
         signal_bus: object | None = None,
+        telemetry: object | None = None,
     ) -> None:
+        from prometheus.learning.llm_envelope import LLMCallEnvelope
+
         self._store = store
         self._provider = provider
         self._model = model
@@ -101,6 +104,16 @@ class MemoryExtractor:
         self._signal_bus = signal_bus
         self._last_run: float = 0.0
         self._last_processed_ts: float = 0.0
+        # Sprint S4 A1: shared LLMCallEnvelope. on_failure="return_none" so
+        # _process_batch preserves its "returns (0, []) on failure" contract
+        # without the redundant try/except. Failures still land in
+        # telemetry.silent_failures with full traceback.
+        self._telemetry = telemetry
+        self._envelope = LLMCallEnvelope(
+            subsystem="memory_extractor",
+            telemetry=telemetry,
+            on_failure="return_none",
+        )
 
     @property
     def signal_bus(self) -> object | None:
@@ -193,10 +206,10 @@ class MemoryExtractor:
         formatted = self._format_messages(messages)
         prompt = _EXTRACTION_PROMPT.format(messages=formatted)
 
-        try:
-            raw = await self._call_model(prompt)
-        except Exception:
-            log.exception("MemoryExtractor: model call failed for batch of %d", len(messages))
+        # Envelope returns None on failure (writes telemetry.silent_failures).
+        # Drops the redundant outer try/except per Sprint 4 audit.
+        raw = await self._call_model(prompt)
+        if raw is None:
             return 0, []
 
         facts = self._parse_facts(raw)
@@ -222,25 +235,15 @@ class MemoryExtractor:
                 log.exception("MemoryExtractor: failed to persist fact: %s", fact)
         return persisted, persisted_facts
 
-    async def _call_model(self, prompt: str) -> str:
-        """Call the ModelProvider and return the full text response."""
-        from prometheus.engine.messages import ConversationMessage, TextBlock
-        from prometheus.providers.base import ApiMessageRequest
-
-        # ConversationMessage.content is list[ContentBlock]; a raw string
-        # fails pydantic validation. (Pre-existing bug found during
-        # Sprint 1 — see commit message.)
-        request = ApiMessageRequest(
+    async def _call_model(self, prompt: str) -> str | None:
+        """Invoke the model via LLMCallEnvelope. Returns None on failure."""
+        return await self._envelope.call(
+            provider=self._provider,
             model=self._model,
-            messages=[ConversationMessage(role="user", content=[TextBlock(text=prompt)])],
+            prompt=prompt,
             max_tokens=2048,
+            operation="extract_memory_batch",
         )
-        text_parts: list[str] = []
-        async for event in self._provider.stream_message(request):
-            from prometheus.providers.base import ApiTextDeltaEvent
-            if isinstance(event, ApiTextDeltaEvent):
-                text_parts.append(event.text)
-        return "".join(text_parts)
 
     @staticmethod
     def _format_messages(messages: list[dict]) -> str:

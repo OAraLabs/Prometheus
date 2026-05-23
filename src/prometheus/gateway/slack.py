@@ -210,6 +210,8 @@ class SlackAdapter(BasePlatformAdapter):
         self._app.command("/prometheus-benchmark")(self._slash_benchmark)
         self._app.command("/prometheus-context")(self._slash_context)
         self._app.command("/prometheus-skills")(self._slash_skills)
+        # Sprint S4 A3: silent-failure telemetry surface.
+        self._app.command("/prometheus-health")(self._slash_health)
 
         # Start Socket Mode connection
         self._handler = AsyncSocketModeHandler(self._app, self.config.app_token)
@@ -524,3 +526,30 @@ class SlackAdapter(BasePlatformAdapter):
         from prometheus.gateway.commands import cmd_skills
 
         await respond(text=cmd_skills())
+
+    async def _slash_health(self, ack: Any, command: Any, respond: Any) -> None:
+        """Mirror of the Telegram /health command (Sprint 4 A3).
+
+        Slack passes the command text via ``command["text"]``. Supported
+        args mirror Telegram: ``verbose``, a numeric hours override, or both.
+        """
+        await ack()
+        from prometheus.gateway.commands import cmd_health
+
+        text_arg = ""
+        try:
+            text_arg = (command.get("text") or "").strip()
+        except AttributeError:
+            text_arg = ""
+        verbose = False
+        since_hours = 24.0
+        for tok in text_arg.split():
+            t = tok.strip().lower()
+            if t == "verbose":
+                verbose = True
+                continue
+            try:
+                since_hours = float(t)
+            except ValueError:
+                pass
+        await respond(text=cmd_health(verbose=verbose, since_hours=since_hours))
