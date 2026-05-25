@@ -220,6 +220,14 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # return RetryAction.ESCALATE instead of ABORT.
     if adapter is not None and hasattr(adapter, "retry"):
         adapter.retry.router = model_router
+
+    # Emit one INFO line per /claude /gpt /gemini /xai slash command showing
+    # the provider+model it'll route to. Lets the user grep journalctl for
+    # "slash_commands" instead of source-archaeology when /claude returns
+    # something unexpected.
+    from prometheus.router.model_router import log_slash_command_wiring
+    log_slash_command_wiring(config, logger)
+
     divergence_detector = create_divergence_detector(config)
 
     # Sprint 15 wiring fix: HookExecutor was built but never created in daemon

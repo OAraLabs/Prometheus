@@ -443,3 +443,161 @@ class TestTaskClassifier:
         assert "tokens=" in result.reason
         assert "len=" in result.reason
         assert "conf=" in result.reason
+
+
+# -- Per-slash-command config resolution (PR #18) ---------------------------
+#
+# `resolve_slash_command_target` is the new config-aware layer over
+# OVERRIDE_PRESETS. Each handler call goes through it so users can pin
+# specific models per slash command via prometheus.yaml.
+
+class TestResolveSlashCommandTarget:
+    def setup_method(self) -> None:
+        # The fallback-warned set is module-global so we get one WARN per
+        # process per command. Clear it between tests so each test sees the
+        # warn behavior in isolation.
+        from prometheus.router import model_router as mr
+        mr._FALLBACK_WARNED.clear()
+
+    def test_returns_user_config_when_set(self):
+        """slash_commands.claude.model in config overrides the preset."""
+        from prometheus.router.model_router import resolve_slash_command_target
+        cfg = {
+            "slash_commands": {
+                "claude": {
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4-5",
+                    "api_key_env": "ANTHROPIC_API_KEY",
+                },
+            },
+        }
+        target = resolve_slash_command_target("claude", cfg)
+        assert target["provider"] == "anthropic"
+        assert target["model"] == "claude-sonnet-4-5"
+        assert target["api_key_env"] == "ANTHROPIC_API_KEY"
+
+    def test_falls_back_to_preset_when_config_missing(self, caplog):
+        """No slash_commands section at all → preset default + WARN once."""
+        from prometheus.router.model_router import (
+            OVERRIDE_PRESETS,
+            resolve_slash_command_target,
+        )
+        import logging
+
+        caplog.set_level(logging.WARNING, logger="prometheus.router.model_router")
+        target = resolve_slash_command_target("claude", {})
+        assert target == OVERRIDE_PRESETS["claude"]
+        # Exactly one WARN naming the missing section.
+        warn_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("slash_commands.claude" in r.message for r in warn_records)
+
+    def test_falls_back_when_specific_command_missing(self):
+        """slash_commands section exists but doesn't include this command."""
+        from prometheus.router.model_router import (
+            OVERRIDE_PRESETS,
+            resolve_slash_command_target,
+        )
+        cfg = {"slash_commands": {"gpt": {"model": "gpt-4o"}}}
+        target = resolve_slash_command_target("claude", cfg)
+        assert target == OVERRIDE_PRESETS["claude"]
+
+    def test_partial_override_keeps_preset_defaults(self):
+        """User overrides only ``model`` → preset's provider + api_key_env preserved."""
+        from prometheus.router.model_router import resolve_slash_command_target
+        cfg = {"slash_commands": {"claude": {"model": "claude-sonnet-4-5"}}}
+        target = resolve_slash_command_target("claude", cfg)
+        assert target["model"] == "claude-sonnet-4-5"
+        assert target["provider"] == "anthropic"  # from preset
+        assert target["api_key_env"] == "ANTHROPIC_API_KEY"  # from preset
+
+    def test_unknown_command_returns_none(self):
+        """A name not in OVERRIDE_PRESETS yields None — caller handles."""
+        from prometheus.router.model_router import resolve_slash_command_target
+        assert resolve_slash_command_target("definitely-not-real", {}) is None
+
+    def test_warn_emitted_only_once_per_command(self, caplog):
+        """First fallback emits WARN; subsequent calls for same command stay quiet."""
+        from prometheus.router.model_router import resolve_slash_command_target
+        import logging
+
+        caplog.set_level(logging.WARNING, logger="prometheus.router.model_router")
+        resolve_slash_command_target("claude", {})
+        first_count = sum(
+            1
+            for r in caplog.records
+            if "slash_commands.claude" in r.message and r.levelno == logging.WARNING
+        )
+        resolve_slash_command_target("claude", {})
+        resolve_slash_command_target("claude", {})
+        second_count = sum(
+            1
+            for r in caplog.records
+            if "slash_commands.claude" in r.message and r.levelno == logging.WARNING
+        )
+        assert first_count == 1
+        assert second_count == 1  # still 1 — not 3
+
+    def test_resolves_each_known_command(self):
+        """All four /claude /gpt /gemini /xai resolve to their provider preset by default."""
+        from prometheus.router.model_router import resolve_slash_command_target
+        assert resolve_slash_command_target("claude", {})["provider"] == "anthropic"
+        assert resolve_slash_command_target("gpt", {})["provider"] == "openai"
+        assert resolve_slash_command_target("gemini", {})["provider"] == "gemini"
+        assert resolve_slash_command_target("xai", {})["provider"] == "xai"
+
+
+class TestLogSlashCommandWiring:
+    def setup_method(self) -> None:
+        from prometheus.router import model_router as mr
+        mr._FALLBACK_WARNED.clear()
+
+    def test_logs_one_info_per_command(self, caplog):
+        """Startup emits one INFO line per known slash command."""
+        from prometheus.router.model_router import (
+            SLASH_COMMAND_NAMES,
+            log_slash_command_wiring,
+        )
+        import logging
+
+        cfg = {
+            "slash_commands": {
+                "claude": {"model": "claude-sonnet-4-5"},
+                "gpt": {"model": "gpt-4o"},
+                "gemini": {"model": "gemini-2.5-pro"},
+                "xai": {"model": "grok-3"},
+            },
+        }
+        caplog.set_level(logging.INFO, logger="prometheus.router.model_router")
+        log_slash_command_wiring(cfg)
+        info_msgs = [
+            r.message
+            for r in caplog.records
+            if r.levelno == logging.INFO and "slash_commands." in r.message
+        ]
+        # One line per known command, each showing provider / model.
+        assert len(info_msgs) == len(SLASH_COMMAND_NAMES)
+        joined = "\n".join(info_msgs)
+        assert "claude" in joined
+        assert "claude-sonnet-4-5" in joined
+        assert "gpt-4o" in joined
+        assert "gemini-2.5-pro" in joined
+        assert "grok-3" in joined
+
+    def test_logs_fall_back_to_preset_when_unconfigured(self, caplog):
+        """No slash_commands section → INFO lines still emitted with preset defaults."""
+        from prometheus.router.model_router import (
+            OVERRIDE_PRESETS,
+            log_slash_command_wiring,
+        )
+        import logging
+
+        caplog.set_level(logging.INFO, logger="prometheus.router.model_router")
+        log_slash_command_wiring({})
+        info_msgs = [
+            r.message
+            for r in caplog.records
+            if r.levelno == logging.INFO and "slash_commands." in r.message
+        ]
+        joined = "\n".join(info_msgs)
+        assert OVERRIDE_PRESETS["claude"]["model"] in joined
+        assert OVERRIDE_PRESETS["gpt"]["model"] in joined
