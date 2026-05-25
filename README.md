@@ -329,6 +329,48 @@ profile:
 | `/anatomy` | Infrastructure snapshot |
 | `/beacon` | Web dashboard status, start/stop/restart |
 | `/approve` / `/deny` / `/pending` | Manage approval queue |
+| `/claude` / `/gpt` / `/gemini` / `/xai` | Per-session cloud provider override |
+| `/local` | Clear override, return to primary local model |
+| `/route` | Show this chat's current provider + model |
+
+### Configuring cloud slash commands
+
+`/claude`, `/gpt`, `/gemini`, and `/xai` each route to a configurable
+provider + model. Edit `config/prometheus.yaml`:
+
+```yaml
+slash_commands:
+  claude:
+    provider: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+    model: claude-sonnet-4-5    # alias OR dated snapshot — Anthropic resolves either
+  gpt:
+    provider: openai
+    api_key_env: OPENAI_API_KEY
+    model: gpt-4o
+  gemini:
+    provider: gemini
+    api_key_env: GEMINI_API_KEY
+    model: gemini-2.5-pro
+  xai:
+    provider: xai
+    api_key_env: XAI_API_KEY
+    model: grok-3
+```
+
+Restart the daemon and grep the journal to verify the wiring:
+
+```bash
+systemctl --user restart prometheus.service
+journalctl --user -u prometheus.service | grep slash_commands
+# INFO  slash_commands.claude  → anthropic / claude-sonnet-4-5
+# INFO  slash_commands.gpt     → openai / gpt-4o
+# ...
+```
+
+Omit a command (or the whole section) to fall back to the conservative
+defaults baked into the source — the daemon logs a one-time WARN noting
+the fallback so the source-archaeology problem isn't load-bearing.
 
 ---
 

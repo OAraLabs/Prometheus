@@ -1355,8 +1355,8 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             return
 
-        from prometheus.router.model_router import OVERRIDE_PRESETS
-        preset = OVERRIDE_PRESETS.get(preset_name)
+        from prometheus.router.model_router import resolve_slash_command_target
+        preset = resolve_slash_command_target(preset_name, self._prometheus_config)
         if preset is None:
             await self.send(
                 chat_id,

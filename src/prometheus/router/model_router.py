@@ -274,7 +274,8 @@ OVERRIDE_PRESETS: dict[str, dict[str, str]] = {
         "api_key_env": "ANTHROPIC_API_KEY",
         # Defaulting to Haiku 4.5 for the /claude pilot: cheap + fast for
         # interactive chat. Users wanting a heavier model can set an explicit
-        # anthropic: block in their config instead of relying on the preset.
+        # slash_commands.claude block in prometheus.yaml — see
+        # resolve_slash_command_target() below.
         "model": "claude-haiku-4-5-20251001",
     },
     "gpt": {
@@ -293,6 +294,91 @@ OVERRIDE_PRESETS: dict[str, dict[str, str]] = {
         "model": "grok-3",
     },
 }
+
+# Known slash commands that route through OVERRIDE_PRESETS. Used by
+# log_slash_command_wiring() at startup and by tests.
+SLASH_COMMAND_NAMES: tuple[str, ...] = ("claude", "gpt", "gemini", "xai")
+
+# Track which slash commands we've already warned about falling back to
+# the hardcoded preset. Set semantics: warn once per process per command,
+# not once per Telegram message.
+_FALLBACK_WARNED: set[str] = set()
+
+
+def resolve_slash_command_target(
+    command_name: str,
+    prometheus_config: dict[str, Any] | None = None,
+) -> dict[str, str] | None:
+    """Resolve provider + model for a slash command.
+
+    Looks up ``prometheus_config["slash_commands"][command_name]`` first;
+    merges any ``provider`` / ``model`` / ``api_key_env`` keys over the
+    matching :data:`OVERRIDE_PRESETS` entry. If the user's config is missing
+    the section or the specific command, falls back to the preset alone and
+    emits a one-time WARN log so the user knows the daemon used a default.
+
+    Returns ``None`` for unknown command names (i.e., names that don't exist
+    in :data:`OVERRIDE_PRESETS`).
+    """
+    default_preset = OVERRIDE_PRESETS.get(command_name)
+    if default_preset is None:
+        return None
+
+    cfg = prometheus_config or {}
+    slash_section = cfg.get("slash_commands") or {}
+    user_entry = slash_section.get(command_name) or {}
+
+    if not user_entry:
+        if command_name not in _FALLBACK_WARNED:
+            _FALLBACK_WARNED.add(command_name)
+            log.warning(
+                "slash_commands.%s not configured — using built-in default "
+                "(%s / %s). Add a slash_commands section to prometheus.yaml "
+                "to override.",
+                command_name,
+                default_preset.get("provider", "?"),
+                default_preset.get("model", "?"),
+            )
+        return dict(default_preset)
+
+    resolved = dict(default_preset)
+    if user_entry.get("provider"):
+        resolved["provider"] = user_entry["provider"]
+    if user_entry.get("model"):
+        resolved["model"] = user_entry["model"]
+    if user_entry.get("api_key_env"):
+        resolved["api_key_env"] = user_entry["api_key_env"]
+    return resolved
+
+
+def log_slash_command_wiring(
+    prometheus_config: dict[str, Any] | None,
+    logger_obj: logging.Logger | None = None,
+) -> None:
+    """Emit one INFO line per known slash command at startup.
+
+    Output shape:
+
+        INFO  slash_commands.claude  → anthropic / claude-sonnet-4-5
+        INFO  slash_commands.gpt     → openai / gpt-4o
+        INFO  slash_commands.gemini  → gemini / gemini-2.5-flash
+        INFO  slash_commands.xai     → xai / grok-3
+
+    This is the diagnostic that makes "why is /claude returning Haiku?"
+    answerable in 5 seconds: ``journalctl --user -u prometheus.service |
+    grep "slash_commands"``.
+    """
+    target_log = logger_obj or log
+    for cmd in SLASH_COMMAND_NAMES:
+        target = resolve_slash_command_target(cmd, prometheus_config)
+        if target is None:
+            continue
+        target_log.info(
+            "slash_commands.%-7s → %s / %s",
+            cmd,
+            target.get("provider", "?"),
+            target.get("model", "?"),
+        )
 
 
 class ModelRouter:

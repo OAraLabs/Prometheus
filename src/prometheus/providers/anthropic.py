@@ -42,6 +42,36 @@ _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 529}
 # Enable prompt caching when system prompt exceeds this many chars
 _CACHE_THRESHOLD_CHARS = 1024
 
+# Anthropic model aliases.
+#
+# Per https://docs.anthropic.com/en/docs/about-claude/models/overview, aliases
+# below the 4.6 generation are convenience pointers that resolve server-side to
+# a dated snapshot. Models from 4.6 onward use a "dateless" ID that is itself
+# a pinned snapshot. The Anthropic API accepts both forms, so client-side
+# resolution is informational only — used for logs and tests that want the
+# fully-pinned ID. ``resolve_model_alias`` returns the input unchanged when
+# the alias is not in this map.
+_MODEL_ALIASES: dict[str, str] = {
+    "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
+    "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+    "claude-opus-4-5": "claude-opus-4-5-20251101",
+    "claude-opus-4-1": "claude-opus-4-1-20250805",
+    "claude-sonnet-4-0": "claude-sonnet-4-20250514",
+    "claude-opus-4-0": "claude-opus-4-20250514",
+    # 4.6+ IDs (claude-sonnet-4-6, claude-opus-4-6, claude-opus-4-7, etc.)
+    # are dateless pinned snapshots; no entry needed.
+}
+
+
+def resolve_model_alias(model: str) -> str:
+    """Return the dated snapshot ID for a known alias, else return input.
+
+    The Anthropic API accepts both alias and dated forms; this helper is
+    informational — for telemetry, log lines, and tests that want to verify
+    a user's config string resolves to a known snapshot.
+    """
+    return _MODEL_ALIASES.get(model, model)
+
 
 class AnthropicProvider(ModelProvider):
     """Anthropic Messages API provider.

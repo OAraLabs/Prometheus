@@ -122,6 +122,43 @@ router:
     enabled: true          # direct-mode commands are active
     sticky: true           # overrides persist until /local (false = one-shot)
 
+# Per-slash-command model selection.
+#
+# Each /claude /gpt /gemini /xai command in Telegram (and /grok as a /xai
+# alias) uses the provider + model below. If you omit this section, or omit
+# a specific command, the daemon falls back to the built-in default
+# (logged as WARN once at first use) — the defaults are conservative
+# (cheap/fast) and listed in src/prometheus/router/model_router.py
+# under OVERRIDE_PRESETS.
+#
+# Model field accepts either a provider alias (e.g. claude-sonnet-4-5,
+# claude-haiku-4-5) or a fully pinned snapshot ID
+# (claude-sonnet-4-5-20250929). Anthropic pre-4.6 aliases resolve
+# server-side; 4.6+ IDs are already dateless pinned snapshots. For
+# OpenAI / Gemini / xAI use the model name the provider exposes
+# (e.g. gpt-4o, gemini-2.5-pro, grok-3).
+#
+# After editing, restart the daemon and grep journalctl for "slash_commands"
+# to verify the wiring:
+#   journalctl --user -u prometheus.service | grep slash_commands
+slash_commands:
+  claude:
+    provider: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+    model: claude-haiku-4-5    # cheap + fast default; user pins heavier model
+  gpt:
+    provider: openai
+    api_key_env: OPENAI_API_KEY
+    model: gpt-4o
+  gemini:
+    provider: gemini
+    api_key_env: GEMINI_API_KEY
+    model: gemini-2.5-flash
+  xai:
+    provider: xai
+    api_key_env: XAI_API_KEY
+    model: grok-3
+
 # Phase 3 — opt-in cloud escalation for failed tool calls.
 #
 # When a tool call fails validation more times than the adapter's max_retries,
