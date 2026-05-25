@@ -3,7 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "prometheus"
+# PyPI: `prometheus` is taken by prometheus-client; we publish as
+# `oara-prometheus` but the import path / console scripts stay as `prometheus`.
+name = "oara-prometheus"
 version = "0.1.0"
 description = "Sovereign AI agent harness — extract, adapt, integrate"
 readme = "README.md"
@@ -27,23 +29,52 @@ anthropic = ["anthropic>=0.40"]
 browser = ["playwright>=1.40"]
 mcp = ["mcp>=1.0"]
 slack = ["slack-bolt>=1.18.0", "slack-sdk>=3.27.0"]
+# Polish sprint WS2: Beacon dashboard backend + WS bridge. Optional so the
+# CLI/Telegram-only path stays slim.
+web = ["fastapi>=0.110", "uvicorn>=0.27", "websockets>=12"]
 evals = [
     "deepeval>=2.0",
     "arize-phoenix>=5.0",
     "opentelemetry-api>=1.20",
     "opentelemetry-sdk>=1.20",
 ]
+# Polish sprint WS4: meta-extra so `pip install oara-prometheus[full]`
+# pulls in every optional surface. The README docs install
+#     `pip install oara-prometheus` for the minimal CLI/Telegram path
+#     `pip install oara-prometheus[full]` to get the dashboard, Slack,
+#       browser tools, MCP, and the Anthropic provider in one step.
+full = [
+    "anthropic>=0.40",
+    "playwright>=1.40",
+    "mcp>=1.0",
+    "slack-bolt>=1.18.0",
+    "slack-sdk>=3.27.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "websockets>=12",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
+    "fastapi>=0.110",
+    "httpx>=0.27",
 ]
 
 [project.scripts]
 prometheus = "prometheus.__main__:main"
+prometheus-init = "prometheus.cli.init:main"
+prometheus-daemon = "prometheus.daemon:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/prometheus"]
+# Polish sprint WS2: ship the Beacon frontend (static index.html) inside
+# the wheel so `prometheus daemon` can serve the dashboard without an
+# extra checkout step.
+include = ["src/prometheus/web/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

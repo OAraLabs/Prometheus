@@ -8,6 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# mcp is an optional dep; without it the prometheus.mcp.* imports below
+# fail. Skip the whole module so bare installs don't error during collection.
+pytest.importorskip("mcp")
+
 from prometheus.mcp.adapter import McpToolAdapter, register_mcp_tools
 from prometheus.mcp.runtime import McpRuntime, _list_all_tools
 from prometheus.mcp.types import (

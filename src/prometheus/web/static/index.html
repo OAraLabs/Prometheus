@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prometheus Beacon</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a2028;
+    --panel-2: #232b35;
+    --border: #2d3742;
+    --text: #d6deeb;
+    --text-dim: #8693a8;
+    --accent: #ffae57;
+    --accent-2: #82aaff;
+    --success: #6ee7b7;
+    --warn: #fcd34d;
+    --error: #f87171;
+    --shadow: 0 1px 2px rgba(0,0,0,0.4);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    height: 100%;
+  }
+  body { display: flex; flex-direction: column; }
+  header {
+    padding: 12px 20px; border-bottom: 1px solid var(--border);
+    background: var(--panel); display: flex; justify-content: space-between;
+    align-items: center; box-shadow: var(--shadow);
+  }
+  header h1 { margin: 0; font-size: 18px; color: var(--accent); letter-spacing: 0.5px; }
+  header .status {
+    display: flex; gap: 16px; font-size: 12px; color: var(--text-dim);
+    align-items: center;
+  }
+  header .status .pill {
+    padding: 3px 10px; border-radius: 12px; background: var(--panel-2);
+    border: 1px solid var(--border);
+  }
+  header .status .ws-state.up { color: var(--success); border-color: var(--success); }
+  header .status .ws-state.down { color: var(--error); border-color: var(--error); }
+  main {
+    flex: 1; display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    gap: 16px; padding: 16px;
+    overflow: hidden;
+  }
+  .col { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px; box-shadow: var(--shadow);
+    min-height: 0; display: flex; flex-direction: column;
+  }
+  .panel h2 {
+    margin: 0 0 8px 0; font-size: 13px; text-transform: uppercase;
+    letter-spacing: 1px; color: var(--text-dim); display: flex;
+    justify-content: space-between; align-items: center;
+  }
+  .panel h2 .badge {
+    font-size: 11px; padding: 2px 8px; background: var(--panel-2);
+    border-radius: 10px; color: var(--text);
+  }
+  .panel-body {
+    flex: 1; overflow-y: auto; padding-right: 4px;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  }
+  .panel-body::-webkit-scrollbar { width: 8px; }
+  .panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  /* Activity feed */
+  .feed-row {
+    padding: 8px 6px; border-bottom: 1px solid var(--border);
+    display: grid; grid-template-columns: 28px 1fr auto; gap: 8px;
+    align-items: start; cursor: pointer; transition: background 0.1s;
+  }
+  .feed-row:hover { background: var(--panel-2); }
+  .feed-row.expanded { background: var(--panel-2); }
+  .feed-icon { font-size: 16px; line-height: 22px; }
+  .feed-meta { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+  .feed-payload {
+    grid-column: 2 / span 2; margin-top: 6px;
+    padding: 8px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 4px; font-family: ui-monospace, Menlo, monospace;
+    font-size: 11px; white-space: pre-wrap; word-break: break-word;
+    color: var(--text-dim); display: none; max-height: 240px; overflow-y: auto;
+  }
+  .feed-row.expanded .feed-payload { display: block; }
+  .feed-summary { font-size: 13px; }
+  .feed-type { font-weight: 500; color: var(--accent-2); }
+  .feed-empty { padding: 20px; text-align: center; color: var(--text-dim); }
+  .feed-time { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+
+  /* Memory panel */
+  .mem-section {
+    margin-bottom: 14px; padding: 8px; background: var(--panel-2);
+    border-radius: 6px; border: 1px solid var(--border);
+  }
+  .mem-section h3 {
+    margin: 0 0 6px 0; font-size: 12px; color: var(--accent);
+    display: flex; justify-content: space-between;
+  }
+  .mem-section .bar {
+    height: 4px; background: var(--bg); border-radius: 2px; overflow: hidden;
+    margin: 4px 0;
+  }
+  .mem-section .bar > div {
+    height: 100%; background: var(--accent-2); transition: width 0.3s;
+  }
+  .mem-section .bar > div.warn { background: var(--warn); }
+  .mem-section .bar > div.error { background: var(--error); }
+  .mem-section pre {
+    margin: 6px 0 0 0; padding: 6px; background: var(--bg);
+    border-radius: 4px; font-size: 11px; max-height: 220px;
+    overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+    color: var(--text-dim);
+  }
+  .mem-section .meta { font-size: 11px; color: var(--text-dim); }
+
+  /* Skills panel */
+  .skill-row {
+    padding: 8px; margin-bottom: 6px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 6px; display: flex; justify-content: space-between;
+    align-items: center; gap: 8px;
+  }
+  .skill-row .name {
+    font-weight: 500; cursor: pointer; flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .skill-row .name:hover { color: var(--accent); }
+  .skill-row .state {
+    font-size: 11px; padding: 2px 6px; border-radius: 3px;
+    background: var(--bg); color: var(--text-dim);
+  }
+  .skill-row .state.active { color: var(--success); }
+  .skill-row .state.stale { color: var(--warn); }
+  .skill-row .state.archived { color: var(--text-dim); }
+  .skill-row button.pin {
+    background: var(--bg); border: 1px solid var(--border);
+    color: var(--text-dim); padding: 2px 8px; border-radius: 4px;
+    cursor: pointer; font-size: 12px;
+  }
+  .skill-row button.pin:hover { color: var(--accent); border-color: var(--accent); }
+  .skill-row button.pin.pinned { color: var(--accent); border-color: var(--accent); }
+
+  /* Modal for skill content */
+  .modal-overlay {
+    display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.7); z-index: 10;
+    justify-content: center; align-items: center; padding: 40px;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; max-width: 800px; width: 100%;
+    max-height: 80vh; display: flex; flex-direction: column;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+  }
+  .modal h3 {
+    margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--border);
+    color: var(--accent); display: flex; justify-content: space-between;
+    align-items: center;
+  }
+  .modal h3 button {
+    background: transparent; border: none; color: var(--text-dim);
+    cursor: pointer; font-size: 18px;
+  }
+  .modal pre {
+    margin: 0; padding: 16px; overflow-y: auto; flex: 1;
+    font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+    color: var(--text); white-space: pre-wrap; word-break: break-word;
+  }
+
+  /* Responsive — single column on narrow viewports */
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Prometheus Beacon</h1>
+  <div class="status">
+    <span class="pill" id="model-pill">Model: …</span>
+    <span class="pill" id="uptime-pill">Uptime: …</span>
+    <span class="pill ws-state" id="ws-pill">WS: connecting</span>
+  </div>
+</header>
+
+<main>
+  <div class="col">
+    <div class="panel" style="height: 100%;">
+      <h2>Activity Feed <span class="badge" id="feed-count">0</span></h2>
+      <div class="panel-body" id="feed">
+        <div class="feed-empty">Connecting…</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="panel" style="flex: 0 0 auto; max-height: 50%;">
+      <h2>Memory</h2>
+      <div class="panel-body" id="memory">
+        <div class="feed-empty">Loading…</div>
+      </div>
+    </div>
+
+    <div class="panel" style="flex: 1;">
+      <h2>Skills <span class="badge" id="skills-count">0</span></h2>
+      <div class="panel-body" id="skills">
+        <div class="feed-empty">Loading…</div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div class="modal-overlay" id="modal-overlay" onclick="closeModalIfBackdrop(event)">
+  <div class="modal" onclick="event.stopPropagation()">
+    <h3>
+      <span id="modal-title">Skill</span>
+      <button onclick="closeModal()">×</button>
+    </h3>
+    <pre id="modal-body">Loading…</pre>
+  </div>
+</div>
+
+<script>
+  // -------------- config / API endpoints -----------------
+  const API_BASE = `${window.location.protocol}//${window.location.host}`;
+  // The WS bridge runs on a separate port (default 8010) — let the API
+  // tell us where to connect by reading the host and switching port. If
+  // the user has reverse-proxied everything to one port, /ws would be the
+  // upgrade path; we'll try the conventional port first, then fall back.
+  const WS_URL = (() => {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const host = window.location.hostname || "localhost";
+    return `${proto}//${host}:8010`;
+  })();
+  const ICONS = {
+    tool_call_start: "🔧", tool_call_end: "🔧", tool_call_complete: "🔧",
+    model_call_start: "🧠", model_call_complete: "🧠",
+    skill_created: "🎓", skill_refined: "📚",
+    memory_updated: "📝", curator_report: "📋",
+    steer_received: "📍", prompt_queued: "📥",
+    file_mutation_summary: "📁",
+    dream_start: "💤", dream_phase: "💤", dream_complete: "✨",
+    chat_message: "💬", chat_delta: "💬",
+    sentinel_signal: "📡",
+    connected: "🔌", subscribed: "🔌",
+    agent_state: "⚙️",
+  };
+
+  // -------------- state ---------------------------------
+  const feedEl = document.getElementById("feed");
+  const memoryEl = document.getElementById("memory");
+  const skillsEl = document.getElementById("skills");
+  const feedCountEl = document.getElementById("feed-count");
+  const skillsCountEl = document.getElementById("skills-count");
+  const modelPill = document.getElementById("model-pill");
+  const uptimePill = document.getElementById("uptime-pill");
+  const wsPill = document.getElementById("ws-pill");
+
+  let feedEvents = [];   // newest first
+  const FEED_LIMIT = 200;
+
+  // -------------- formatting helpers --------------------
+  function escapeHtml(s) {
+    if (s == null) return "";
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function relativeTime(timestamp) {
+    if (!timestamp) return "?";
+    let ms;
+    if (typeof timestamp === "string") {
+      const d = new Date(timestamp);
+      if (isNaN(d.getTime())) return timestamp;
+      ms = d.getTime();
+    } else {
+      // Treat as seconds since epoch if small enough, else ms.
+      ms = timestamp < 1e12 ? timestamp * 1000 : timestamp;
+    }
+    const diff = (Date.now() - ms) / 1000;
+    if (diff < 5) return "just now";
+    if (diff < 60) return Math.floor(diff) + "s ago";
+    if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+    if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+    return Math.floor(diff / 86400) + "d ago";
+  }
+
+  function summarisePayload(type, payload) {
+    if (!payload) return "";
+    // Common high-signal fields, in priority order.
+    const KEYS = [
+      "skill_name", "name", "path", "summary", "tool_name", "operation",
+      "target", "message", "kind", "state", "session_id",
+    ];
+    for (const k of KEYS) {
+      if (payload[k]) {
+        const v = String(payload[k]);
+        return v.length > 100 ? v.slice(0, 97) + "..." : v;
+      }
+    }
+    return "";
+  }
+
+  // -------------- feed rendering ------------------------
+  function renderFeed() {
+    feedCountEl.textContent = feedEvents.length;
+    if (feedEvents.length === 0) {
+      feedEl.innerHTML = '<div class="feed-empty">No activity yet — interact with the agent to populate.</div>';
+      return;
+    }
+    const rows = feedEvents.map((ev, idx) => {
+      const icon = ICONS[ev.type] || ICONS[ev.signal_type] || "•";
+      const type = ev.type || ev.signal_type || "event";
+      const summary = ev.summary || summarisePayload(type, ev.payload);
+      const time = relativeTime(ev.timestamp);
+      const payloadJson = JSON.stringify(ev.payload || {}, null, 2);
+      return `
+        <div class="feed-row" data-idx="${idx}" onclick="toggleRow(this)">
+          <div class="feed-icon">${icon}</div>
+          <div>
+            <div class="feed-summary"><span class="feed-type">${escapeHtml(type)}</span>${
+              summary ? " — " + escapeHtml(summary) : ""
+            }</div>
+            <div class="feed-meta">${escapeHtml(ev.source || "")}</div>
+            <div class="feed-payload">${escapeHtml(payloadJson)}</div>
+          </div>
+          <div class="feed-time">${time}</div>
+        </div>
+      `;
+    });
+    feedEl.innerHTML = rows.join("");
+  }
+  window.toggleRow = function(row) { row.classList.toggle("expanded"); };
+
+  function pushEvent(ev) {
+    // Normalise event shape: hydrated rows have signal_type + payload + timestamp.
+    const normalised = {
+      type: ev.type || ev.signal_type,
+      signal_type: ev.signal_type,
+      payload: ev.payload || {},
+      source: ev.source || ev.source_subsystem || "",
+      timestamp: ev.timestamp,
+      summary: ev.summary,
+    };
+    feedEvents.unshift(normalised);
+    if (feedEvents.length > FEED_LIMIT) feedEvents.length = FEED_LIMIT;
+    renderFeed();
+  }
+
+  // -------------- memory rendering ----------------------
+  function renderMemory(data) {
+    if (!data) {
+      memoryEl.innerHTML = '<div class="feed-empty">Memory module unavailable.</div>';
+      return;
+    }
+    const sections = [];
+    for (const [key, label] of [["memory", "MEMORY.md"], ["user", "USER.md"]]) {
+      const section = data[key];
+      if (!section) {
+        sections.push(`<div class="mem-section"><h3>${label}</h3><div class="meta">unavailable</div></div>`);
+        continue;
+      }
+      const pct = section.char_limit > 0
+        ? Math.min(100, (section.char_count / section.char_limit) * 100)
+        : 0;
+      const barClass = pct > 90 ? "error" : pct > 75 ? "warn" : "";
+      const preview = (section.content || "").slice(0, 4000);
+      const truncated = (section.content || "").length > 4000;
+      sections.push(`
+        <div class="mem-section">
+          <h3>
+            <span>${label}</span>
+            <span class="meta">${section.char_count}/${section.char_limit} · ${section.entry_count} entries</span>
+          </h3>
+          <div class="bar"><div class="${barClass}" style="width: ${pct.toFixed(1)}%"></div></div>
+          <pre>${escapeHtml(preview) || "(empty)"}${truncated ? "\n… (truncated)" : ""}</pre>
+        </div>
+      `);
+    }
+    memoryEl.innerHTML = sections.join("");
+  }
+
+  // -------------- skills rendering ----------------------
+  function renderSkills(list) {
+    skillsCountEl.textContent = list.length;
+    if (!list || list.length === 0) {
+      skillsEl.innerHTML = '<div class="feed-empty">No auto-skills yet. They appear when SkillCreator fires.</div>';
+      return;
+    }
+    skillsEl.innerHTML = list.map(s => {
+      const stateClass = (s.state || "active").toLowerCase();
+      const pinLabel = s.pinned ? "📌 pinned" : "📌";
+      return `
+        <div class="skill-row">
+          <div class="name" onclick="openSkill(${JSON.stringify(s.name).replace(/"/g, '&quot;')})">${escapeHtml(s.name)}</div>
+          <span class="state ${stateClass}">${escapeHtml(s.state)}</span>
+          <button class="pin ${s.pinned ? "pinned" : ""}" onclick="togglePin(${JSON.stringify(s.name).replace(/"/g, '&quot;')}, ${s.pinned})">${pinLabel}</button>
+        </div>
+      `;
+    }).join("");
+  }
+
+  // -------------- skill modal ---------------------------
+  const modalOverlay = document.getElementById("modal-overlay");
+  const modalTitle = document.getElementById("modal-title");
+  const modalBody = document.getElementById("modal-body");
+
+  window.openSkill = async function(name) {
+    modalTitle.textContent = name;
+    modalBody.textContent = "Loading…";
+    modalOverlay.classList.add("open");
+    try {
+      const resp = await fetch(`${API_BASE}/api/skills/${encodeURIComponent(name)}`);
+      if (!resp.ok) {
+        modalBody.textContent = `(error fetching skill: HTTP ${resp.status})`;
+        return;
+      }
+      const data = await resp.json();
+      modalBody.textContent = data.content || "(empty skill file)";
+    } catch (e) {
+      modalBody.textContent = `(network error: ${e.message})`;
+    }
+  };
+  window.closeModal = function() { modalOverlay.classList.remove("open"); };
+  window.closeModalIfBackdrop = function(e) {
+    if (e.target === modalOverlay) closeModal();
+  };
+
+  window.togglePin = async function(name, currentlyPinned) {
+    const method = currentlyPinned ? "DELETE" : "POST";
+    try {
+      const resp = await fetch(`${API_BASE}/api/skills/${encodeURIComponent(name)}/pin`, { method });
+      if (resp.ok) {
+        await refreshSkills();
+      }
+    } catch (e) {
+      console.error("pin toggle failed", e);
+    }
+  };
+
+  // -------------- header status -------------------------
+  async function refreshStatus() {
+    try {
+      const resp = await fetch(`${API_BASE}/api/status`);
+      const s = await resp.json();
+      modelPill.textContent = `Model: ${s.model || "?"} (${s.provider || "?"})`;
+      const up = Math.floor(s.uptime_seconds || 0);
+      const h = Math.floor(up / 3600), m = Math.floor((up % 3600) / 60);
+      uptimePill.textContent = `Uptime: ${h}h ${m}m`;
+    } catch {
+      modelPill.textContent = "Model: (unavailable)";
+      uptimePill.textContent = "Uptime: ?";
+    }
+  }
+
+  async function refreshMemory() {
+    try {
+      const resp = await fetch(`${API_BASE}/api/memory/current`);
+      const data = await resp.json();
+      renderMemory(data);
+    } catch (e) {
+      memoryEl.innerHTML = `<div class="feed-empty">Memory error: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  async function refreshSkills() {
+    try {
+      const resp = await fetch(`${API_BASE}/api/skills/list`);
+      const data = await resp.json();
+      renderSkills(data);
+    } catch (e) {
+      skillsEl.innerHTML = `<div class="feed-empty">Skills error: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  async function hydrateFeed() {
+    try {
+      const resp = await fetch(`${API_BASE}/api/activity/recent?limit=100`);
+      const rows = await resp.json();
+      // Hydrated rows are in DESC order already.
+      feedEvents = rows.map(r => ({
+        type: r.signal_type,
+        signal_type: r.signal_type,
+        payload: r.payload || {},
+        source: r.source_subsystem || "",
+        timestamp: r.timestamp,
+      }));
+      renderFeed();
+    } catch (e) {
+      feedEl.innerHTML = `<div class="feed-empty">Feed hydration failed: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  // -------------- websocket -----------------------------
+  let ws = null;
+  let reconnectTimer = null;
+
+  function connectWs() {
+    try {
+      ws = new WebSocket(WS_URL);
+    } catch (e) {
+      wsPill.textContent = "WS: error";
+      wsPill.className = "pill ws-state down";
+      return;
+    }
+    ws.onopen = () => {
+      wsPill.textContent = "WS: live";
+      wsPill.className = "pill ws-state up";
+      try { ws.send(JSON.stringify({ type: "subscribe", payload: { channels: ["*"] } })); } catch {}
+    };
+    ws.onclose = () => {
+      wsPill.textContent = "WS: down — reconnecting…";
+      wsPill.className = "pill ws-state down";
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connectWs, 3000);
+    };
+    ws.onerror = () => { /* close will follow */ };
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        // Filter out the noisy welcome / subscribe ack from the feed.
+        if (msg.type === "connected" || msg.type === "subscribed") return;
+        pushEvent(msg);
+        // Side-effect: refresh memory/skills panels when something interesting lands.
+        if (msg.type === "memory_updated") refreshMemory();
+        if (msg.type === "skill_created" || msg.type === "skill_refined") refreshSkills();
+      } catch {
+        // ignore malformed
+      }
+    };
+  }
+
+  // -------------- init ---------------------------------
+  connectWs();
+  hydrateFeed();
+  refreshStatus();
+  refreshMemory();
+  refreshSkills();
+  // Light periodic refresh — covers cases where signals don't trigger.
+  setInterval(refreshStatus, 30_000);
+  setInterval(() => { feedEvents = [...feedEvents]; renderFeed(); }, 10_000);
+</script>
+
+</body>
+</html>

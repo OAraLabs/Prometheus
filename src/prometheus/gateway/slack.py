@@ -26,13 +26,17 @@ from prometheus.gateway.platform_base import (
 
 if TYPE_CHECKING:
     from prometheus.engine.agent_loop import AgentLoop
-    from prometheus.engine.session import SessionManager
+    from prometheus.engine.session import ChatSession, SessionManager
     from prometheus.tools.base import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 # Slack message length limit (text field)
 MAX_MESSAGE_LENGTH = 3900
+
+# Sprint Polish: default threshold for moving long replies into a thread.
+# Override via gateway.slack.long_reply_threshold in prometheus.yaml.
+DEFAULT_LONG_REPLY_THRESHOLD = 800
 
 
 def chunk_message(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> list[str]:
@@ -154,6 +158,7 @@ class SlackAdapter(BasePlatformAdapter):
         model_name: str = "",
         model_provider: str = "",
         session_manager: SessionManager | None = None,
+        prometheus_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(config)
         self.agent_loop = agent_loop
@@ -164,6 +169,7 @@ class SlackAdapter(BasePlatformAdapter):
         self._app: Any = None
         self._handler: Any = None
         self._start_time: float = 0.0
+        self._prometheus_config: dict[str, Any] = prometheus_config or {}
 
         if session_manager is None:
             from prometheus.engine.session import SessionManager as _SM
@@ -175,6 +181,194 @@ class SlackAdapter(BasePlatformAdapter):
         self._seen_messages: dict[str, float] = {}
         self._SEEN_TTL = 300  # 5 minutes
         self._SEEN_MAX = 2000  # prune threshold
+
+        # Sprint Polish: SignalBus wired by daemon.py via the property setter.
+        # Until then it's None and the subscribe path is a no-op (mirror of
+        # Telegram's pattern).
+        self._signal_bus: object | None = None
+
+    # ------------------------------------------------------------------
+    # Sprint Polish: SignalBus subscription + last-channel tracking
+    # ------------------------------------------------------------------
+
+    @property
+    def signal_bus(self) -> object | None:
+        return self._signal_bus
+
+    @signal_bus.setter
+    def signal_bus(self, bus: object | None) -> None:
+        """Subscribe to skill/memory/curator events on bus assignment.
+
+        Called from daemon.py after the SignalBus is constructed. Mirrors
+        the Telegram subscription so SKILL_CREATED / SKILL_REFINED /
+        MEMORY_UPDATED / CURATOR_REPORT notifications land in Slack too
+        when Slack is enabled — not just whichever gateway was the
+        originating one.
+        """
+        self._signal_bus = bus
+        if bus is None:
+            return
+        try:
+            bus.subscribe("skill_created", self._on_signal_skill_created)
+            bus.subscribe("skill_refined", self._on_signal_skill_refined)
+            bus.subscribe("memory_updated", self._on_signal_memory_updated)
+            bus.subscribe("curator_report", self._on_signal_curator_report)
+            logger.info("Slack: subscribed to skill/memory/curator signals")
+        except Exception:
+            logger.warning(
+                "Slack: failed to subscribe to SignalBus", exc_info=True
+            )
+
+    def _notification_mode(self) -> str:
+        """Return 'quiet' | 'verbose' | 'off'.
+
+        Runtime override (set via /prometheus-notifications) wins. Falls
+        back to gateway.slack.skill_event_notifications, then
+        gateway.skill_event_notifications, then "quiet".
+        """
+        try:
+            from prometheus.gateway.commands import get_notifications_mode
+            mode = get_notifications_mode(default="")
+            if mode:
+                return mode
+        except Exception:
+            pass
+        gw = self._prometheus_config.get("gateway", {}) or {}
+        slack_cfg = gw.get("slack", {}) if isinstance(gw, dict) else {}
+        if isinstance(slack_cfg, dict):
+            mode = slack_cfg.get("skill_event_notifications")
+            if mode:
+                return str(mode).lower()
+        if isinstance(gw, dict):
+            return str(gw.get("skill_event_notifications", "quiet")).lower()
+        return "quiet"
+
+    def _long_reply_threshold(self) -> int:
+        """Return char threshold above which replies move into a thread."""
+        gw = self._prometheus_config.get("gateway", {}) or {}
+        slack_cfg = gw.get("slack", {}) if isinstance(gw, dict) else {}
+        if isinstance(slack_cfg, dict):
+            try:
+                return int(slack_cfg.get("long_reply_threshold", DEFAULT_LONG_REPLY_THRESHOLD))
+            except (TypeError, ValueError):
+                pass
+        return DEFAULT_LONG_REPLY_THRESHOLD
+
+    def _last_channel_path(self) -> str:
+        from prometheus.config.paths import get_config_dir
+        return str(get_config_dir() / "last_slack_channel")
+
+    def _save_channel(self, channel: str) -> None:
+        """Persist the last active Slack channel for signal notifications."""
+        if not channel:
+            return
+        try:
+            with open(self._last_channel_path(), "w") as f:
+                f.write(channel)
+        except Exception:
+            pass
+
+    def _load_channel(self) -> str | None:
+        try:
+            with open(self._last_channel_path()) as f:
+                ch = f.read().strip()
+                return ch or None
+        except Exception:
+            return None
+
+    async def _send_notification(self, text: str) -> None:
+        """Post *text* to the last active Slack channel (best-effort)."""
+        channel = self._load_channel()
+        if not channel:
+            # Fall back to first allowed_channel if configured.
+            if self.config.allowed_channels:
+                channel = self.config.allowed_channels[0]
+        if not channel or not self._app:
+            return
+        try:
+            await self._app.client.chat_postMessage(channel=channel, text=text)
+        except Exception:
+            logger.debug("Slack: notification send failed", exc_info=True)
+
+    async def _on_signal_skill_created(self, signal: Any) -> None:
+        mode = self._notification_mode()
+        if mode == "off":
+            return
+        payload = getattr(signal, "payload", {}) or {}
+        name = payload.get("skill_name", "(unnamed)")
+        if mode == "verbose":
+            trigger = payload.get("trigger_task", "")
+            summary = payload.get("summary", "")
+            text = f":mortar_board: New skill: *{name}*"
+            if summary:
+                text += f"\n   {summary}"
+            if trigger:
+                text += f"\n   (built while: {trigger[:120]})"
+        else:
+            text = f":mortar_board: New skill: *{name}*"
+        await self._send_notification(text)
+
+    async def _on_signal_skill_refined(self, signal: Any) -> None:
+        mode = self._notification_mode()
+        if mode == "off":
+            return
+        payload = getattr(signal, "payload", {}) or {}
+        name = payload.get("skill_name", "(unnamed)")
+        if mode == "verbose":
+            summary = payload.get("summary", "")
+            text = f":books: Updated skill: *{name}*"
+            if summary:
+                text += f"\n   {summary}"
+        else:
+            text = f":books: Updated skill: *{name}*"
+        await self._send_notification(text)
+
+    async def _on_signal_memory_updated(self, signal: Any) -> None:
+        mode = self._notification_mode()
+        if mode == "off":
+            return
+        payload = getattr(signal, "payload", {}) or {}
+        target = payload.get("target", "memory")
+        operation = payload.get("operation", "updated")
+        if mode == "verbose":
+            preview = payload.get("entry_preview", "")
+            text = f":brain: {target} {operation}"
+            if preview:
+                text += f"\n   {preview}"
+        else:
+            text = f":brain: {target} {operation}"
+        await self._send_notification(text)
+
+    async def _on_signal_curator_report(self, signal: Any) -> None:
+        mode = self._notification_mode()
+        if mode == "off":
+            return
+        payload = getattr(signal, "payload", {}) or {}
+        reviewed = payload.get("skills_reviewed", 0)
+        prunings = payload.get("prunings", 0)
+        consolidations = payload.get("consolidations", 0)
+        if mode == "verbose":
+            text = (
+                f":clipboard: Curator: {reviewed} skills reviewed, "
+                f"{consolidations} consolidation suggestion(s), "
+                f"{prunings} archived\n"
+                "   `/prometheus-curator show` for the full report"
+            )
+        else:
+            text = f":clipboard: Curator: {reviewed} reviewed, {prunings} archived"
+        await self._send_notification(text)
+
+    def _resolve_session_for_command(self, channel_id: str) -> "ChatSession | None":
+        """Return the live ChatSession for *channel_id*, or None.
+
+        Mirrors Telegram's helper: used by /steer, /unqueue, /clearsteers
+        to find the session-state object the agent loop is consuming.
+        Does NOT create a session — if there's no active session yet,
+        the command is a no-op.
+        """
+        if not channel_id:
+            return None
+        return self.session_manager._sessions.get(f"slack:{channel_id}")
 
     async def start(self) -> None:
         """Build the Slack app with Socket Mode and start listening."""
@@ -214,6 +408,19 @@ class SlackAdapter(BasePlatformAdapter):
         self._app.command("/prometheus-health")(self._slash_health)
         # SignalBus Persistence sprint: persisted signal-bus events.
         self._app.command("/prometheus-events")(self._slash_events)
+        # Sprint Polish (Telegram parity): Sprint 1 / Sprint 2 surface
+        self._app.command("/prometheus-memory")(self._slash_memory)
+        self._app.command("/prometheus-curator")(self._slash_curator)
+        self._app.command("/prometheus-notifications")(self._slash_notifications)
+        self._app.command("/prometheus-steer")(self._slash_steer)
+        self._app.command("/prometheus-queue")(self._slash_queue)
+        self._app.command("/prometheus-unqueue")(self._slash_unqueue)
+        self._app.command("/prometheus-clearsteers")(self._slash_clearsteers)
+        self._app.command("/prometheus-profile")(self._slash_profile)
+        self._app.command("/prometheus-anatomy")(self._slash_anatomy)
+        self._app.command("/prometheus-doctor")(self._slash_doctor)
+        self._app.command("/prometheus-beacon")(self._slash_beacon)
+        self._app.command("/prometheus-tools")(self._slash_tools)
 
         # Start Socket Mode connection
         self._handler = AsyncSocketModeHandler(self._app, self.config.app_token)
@@ -395,6 +602,10 @@ class SlackAdapter(BasePlatformAdapter):
         # Add eyes reaction to acknowledge receipt
         await self._add_reaction(channel, ts, "eyes")
 
+        # Sprint Polish: remember the last active channel so SignalBus
+        # notifications land somewhere meaningful.
+        self._save_channel(channel)
+
         session_id = f"slack:{channel}"
         session = self.session_manager.get_or_create(session_id)
         session.add_user_message(text)
@@ -419,8 +630,18 @@ class SlackAdapter(BasePlatformAdapter):
         # Convert markdown to Slack mrkdwn format
         response_text = format_markdown_to_mrkdwn(response_text)
 
-        # Reply in thread if the original message was in a thread
-        reply_thread = thread_ts or ts if thread_ts else None
+        # Threading policy:
+        #   - If the user wrote in a thread, reply in that thread.
+        #   - If the reply is long (> threshold), open a new thread off the
+        #     user's message rather than flooding the channel.
+        #   - Otherwise reply in the channel.
+        reply_thread: str | None
+        if thread_ts:
+            reply_thread = thread_ts
+        elif len(response_text) > self._long_reply_threshold():
+            reply_thread = ts
+        else:
+            reply_thread = None
 
         chunks = chunk_message(response_text)
         for chunk in chunks:
@@ -449,19 +670,54 @@ class SlackAdapter(BasePlatformAdapter):
 
     async def _slash_help(self, ack: Any, respond: Any) -> None:
         await ack()
-        from prometheus.gateway.commands import cmd_help
-
-        # Adapt command names for Slack (prefix with prometheus-)
-        text = cmd_help().replace("/status", "/prometheus-status")
-        text = text.replace("/model", "/prometheus-model")
-        text = text.replace("/wiki", "/prometheus-wiki")
-        text = text.replace("/sentinel", "/prometheus-sentinel")
-        text = text.replace("/benchmark", "/prometheus-benchmark")
-        text = text.replace("/context", "/prometheus-context")
-        text = text.replace("/skills", "/prometheus-skills")
-        text = text.replace("/reset", "/prometheus-reset")
-        text = text.replace("/help", "/prometheus-help")
-        await respond(text=text)
+        # Slack help is hand-rolled rather than ported from cmd_help() because
+        # every command is prefixed with ``/prometheus-`` (Slack workspace
+        # commands are workspace-global, so we namespace ours).
+        lines = [
+            "Prometheus — Sovereign AI Agent",
+            "",
+            "Core:",
+            "  /prometheus-status         — model, uptime, tools, memory, SENTINEL",
+            "  /prometheus-help           — this message",
+            "  /prometheus-reset          — clear conversation context for this channel",
+            "  /prometheus-model          — current model and provider",
+            "  /prometheus-profile [name] — show / switch agent profile",
+            "  /prometheus-context        — context window usage",
+            "  /prometheus-benchmark      — quick smoke test",
+            "  /prometheus-beacon         — web bridge / dashboard URL",
+            "  /prometheus-wiki           — wiki stats + recent entries",
+            "  /prometheus-anatomy        — host, GPU, VRAM, Tailscale",
+            "  /prometheus-doctor         — diagnostic health check",
+            "  /prometheus-tools          — tool-call stats (24h)",
+            "",
+            "Memory & skills (Sprint S1):",
+            "  /prometheus-memory show [user]  — MEMORY.md / USER.md content",
+            "  /prometheus-memory limits       — char ceilings + usage",
+            "  /prometheus-skills              — registry list",
+            "  /prometheus-skills list         — auto-skills with state",
+            "  /prometheus-skills show <name>  — display SKILL.md",
+            "  /prometheus-skills pin <name>   — protect from Curator prune",
+            "  /prometheus-skills unpin <name>",
+            "  /prometheus-skills history <name>",
+            "  /prometheus-curator status      — last/next run + pinned",
+            "  /prometheus-curator show        — most recent REPORT.md",
+            "  /prometheus-curator run [dry]   — trigger an immediate pass",
+            "  /prometheus-notifications [off|quiet|verbose]",
+            "  /prometheus-events [recent|skills|memory|curator|show <id>]",
+            "",
+            "Durability & steering (Sprint 2):",
+            "  /prometheus-steer <text>        — mid-turn guidance",
+            "  /prometheus-queue <text>        — queue a follow-up turn",
+            "  /prometheus-unqueue             — drop the last queued prompt",
+            "  /prometheus-clearsteers         — drop all pending steers",
+            "",
+            "Observability:",
+            "  /prometheus-health [hours] [verbose] — silent-failure telemetry",
+            "  /prometheus-sentinel            — SENTINEL subsystem state",
+            "",
+            "Send a message or @mention the bot to chat with the agent.",
+        ]
+        await respond(text="\n".join(lines))
 
     async def _slash_reset(self, ack: Any, respond: Any, body: dict | None = None) -> None:
         await ack()
@@ -523,11 +779,43 @@ class SlackAdapter(BasePlatformAdapter):
 
         await respond(text=cmd_context(self.system_prompt, self.model_name))
 
-    async def _slash_skills(self, ack: Any, respond: Any) -> None:
+    async def _slash_skills(
+        self, ack: Any, command: Any, respond: Any
+    ) -> None:
+        """Mirror Telegram /skills with subcommand dispatch (Sprint S1)."""
         await ack()
-        from prometheus.gateway.commands import cmd_skills
+        from prometheus.gateway import commands as _cmds
 
-        await respond(text=cmd_skills())
+        try:
+            text_arg = (command.get("text") or "").strip()
+        except AttributeError:
+            text_arg = ""
+
+        if not text_arg:
+            await respond(text=_cmds.cmd_skills())
+            return
+
+        parts = text_arg.split(maxsplit=1)
+        sub = parts[0].lower()
+        name = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub == "list":
+            text = _cmds.cmd_skills_auto_list()
+        elif sub == "show":
+            text = _cmds.cmd_skills_show(name)
+        elif sub == "pin":
+            text = _cmds.cmd_skills_pin(name)
+        elif sub == "unpin":
+            text = _cmds.cmd_skills_unpin(name)
+        elif sub == "history":
+            text = _cmds.cmd_skills_history(name)
+        else:
+            text = (
+                f"Unknown subcommand: {sub}\n"
+                "Use: /prometheus-skills [list | show <name> | pin <name> | "
+                "unpin <name> | history <name>]"
+            )
+        await respond(text=text)
 
     async def _slash_health(self, ack: Any, command: Any, respond: Any) -> None:
         """Mirror of the Telegram /health command (Sprint 4 A3).
@@ -571,3 +859,264 @@ class SlackAdapter(BasePlatformAdapter):
         except AttributeError:
             text_arg = ""
         await respond(text=cmd_events(arg=text_arg))
+
+    # ------------------------------------------------------------------
+    # Sprint Polish: Sprint 1 / Sprint 2 surface — Telegram parity
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cmd_text(command: Any) -> str:
+        """Pull the trailing ``text`` field from a Slack slash-command payload."""
+        try:
+            return (command.get("text") or "").strip()
+        except AttributeError:
+            return ""
+
+    @staticmethod
+    def _cmd_channel(command: Any) -> str:
+        try:
+            return command.get("channel_id") or ""
+        except AttributeError:
+            return ""
+
+    async def _slash_memory(
+        self, ack: Any, command: Any, respond: Any
+    ) -> None:
+        """Mirror /memory — show MEMORY.md / USER.md, or show limits."""
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        text_arg = self._cmd_text(command)
+        if not text_arg:
+            await respond(text=(
+                "Memory commands:\n"
+                "  /prometheus-memory show         — MEMORY.md content\n"
+                "  /prometheus-memory show user    — USER.md content\n"
+                "  /prometheus-memory limits       — char ceilings + usage"
+            ))
+            return
+
+        parts = text_arg.split(maxsplit=1)
+        sub = parts[0].lower()
+        tail = parts[1].strip().lower() if len(parts) > 1 else ""
+
+        if sub == "show":
+            target = "user" if tail == "user" else "memory"
+            text = _cmds.cmd_memory_show(target=target)
+        elif sub == "limits":
+            text = _cmds.cmd_memory_limits()
+        else:
+            text = (
+                f"Unknown subcommand: {sub}\n"
+                "Use: /prometheus-memory [show [user] | limits]"
+            )
+        await respond(text=text)
+
+    async def _slash_curator(
+        self, ack: Any, command: Any, respond: Any
+    ) -> None:
+        """Mirror /curator — show/status/run subcommand dispatcher."""
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        text_arg = self._cmd_text(command)
+        if not text_arg:
+            await respond(text=(
+                "Curator commands:\n"
+                "  /prometheus-curator status      — last/next run, pinned skills\n"
+                "  /prometheus-curator show        — most recent REPORT.md\n"
+                "  /prometheus-curator run         — trigger an immediate pass\n"
+                "  /prometheus-curator run dry     — dry-run (no file moves)"
+            ))
+            return
+
+        parts = text_arg.split()
+        sub = parts[0].lower()
+        if sub == "show":
+            text = _cmds.cmd_curator_show()
+        elif sub == "status":
+            text = _cmds.cmd_curator_status()
+        elif sub == "run":
+            dry = len(parts) >= 2 and parts[1].lower().startswith("dry")
+            text = await _cmds.cmd_curator_run(dry_run=dry)
+        else:
+            text = (
+                f"Unknown subcommand: {sub}\n"
+                "Use: /prometheus-curator [show | status | run [dry]]"
+            )
+        await respond(text=text)
+
+    async def _slash_notifications(
+        self, ack: Any, command: Any, respond: Any
+    ) -> None:
+        """Toggle skill/memory/curator notification verbosity (Sprint S1)."""
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        text_arg = self._cmd_text(command)
+        await respond(text=_cmds.cmd_notifications(mode=text_arg))
+
+    async def _slash_steer(
+        self, ack: Any, command: Any, respond: Any
+    ) -> None:
+        """Mid-turn guidance — arrives after the current tool batch (Sprint 2)."""
+        await ack()
+        text_arg = self._cmd_text(command)
+        if not text_arg:
+            await respond(text=(
+                "/prometheus-steer <text> — inject mid-turn guidance.\n"
+                "Arrives after the next tool call. Example:\n"
+                "/prometheus-steer focus on Ubuntu, skip the Mac instructions"
+            ))
+            return
+        channel = self._cmd_channel(command)
+        session = self._resolve_session_for_command(channel)
+        if session is None:
+            await respond(text=(
+                "No active session yet. Send a message first, then "
+                "/prometheus-steer while the agent is running."
+            ))
+            return
+        if not session.enqueue_steer(text_arg):
+            await respond(text="Empty steer — nothing queued.")
+            return
+        preview = text_arg if len(text_arg) <= 80 else text_arg[:77] + "..."
+        await respond(text=(
+            f":round_pushpin: Steered: {preview}\n"
+            f"   Arrives after the next tool call. "
+            f"Pending: {len(session.queued_steers)}."
+        ))
+
+    async def _slash_queue(
+        self, ack: Any, command: Any, respond: Any
+    ) -> None:
+        """Queue a follow-up turn that fires after the current one ends."""
+        await ack()
+        text_arg = self._cmd_text(command)
+        if not text_arg:
+            await respond(text=(
+                "/prometheus-queue <text> — line up a follow-up turn.\n"
+                "Runs after the current task ends."
+            ))
+            return
+        channel = self._cmd_channel(command)
+        if not channel:
+            await respond(text="Channel id missing from slash payload.")
+            return
+        # /queue creates the session if missing so a queued prompt on a
+        # quiet channel fires when the user kicks off their first message.
+        session = self.session_manager.get_or_create(f"slack:{channel}")
+        if not session.enqueue_prompt(text_arg):
+            await respond(text="Empty prompt — nothing queued.")
+            return
+        preview = text_arg if len(text_arg) <= 80 else text_arg[:77] + "..."
+        position = len(session.queued_prompts)
+        await respond(text=(
+            f":inbox_tray: Queued: {preview}\n"
+            f"   Position: {position}. Fires when current turn ends."
+        ))
+
+    async def _slash_unqueue(
+        self, ack: Any, command: Any, respond: Any
+    ) -> None:
+        """Drop the most recently queued prompt."""
+        await ack()
+        channel = self._cmd_channel(command)
+        session = self._resolve_session_for_command(channel)
+        if session is None or not session.queued_prompts:
+            await respond(text="No queued prompts to drop.")
+            return
+        dropped = session.queued_prompts.pop()
+        preview = dropped if len(dropped) <= 80 else dropped[:77] + "..."
+        remaining = len(session.queued_prompts)
+        await respond(text=(
+            f":wastebasket: Unqueued: {preview}\n"
+            f"   Remaining: {remaining}."
+        ))
+
+    async def _slash_clearsteers(
+        self, ack: Any, command: Any, respond: Any
+    ) -> None:
+        """Drop all pending steers without surfacing them to the agent."""
+        await ack()
+        channel = self._cmd_channel(command)
+        session = self._resolve_session_for_command(channel)
+        if session is None:
+            await respond(text="No active session.")
+            return
+        n = session.clear_steers()
+        await respond(text=(
+            f":broom: Cleared {n} pending steer{'s' if n != 1 else ''}."
+        ))
+
+    async def _slash_profile(
+        self, ack: Any, command: Any, respond: Any
+    ) -> None:
+        """Show or switch agent profile."""
+        await ack()
+        from prometheus.gateway.commands import cmd_profile
+
+        text_arg = self._cmd_text(command)
+        current = getattr(self, "_active_profile_name", "full")
+        text = cmd_profile(arg=text_arg, current=current)
+
+        if text_arg:
+            try:
+                from prometheus.config.profiles import ProfileStore
+                store = ProfileStore()
+                profile = store.get(text_arg.strip())
+                if profile is not None:
+                    self._active_profile_name = profile.name
+            except Exception:
+                logger.debug("profile switch persistence skipped", exc_info=True)
+
+        await respond(text=text)
+
+    async def _slash_anatomy(self, ack: Any, respond: Any) -> None:
+        await ack()
+        from prometheus.gateway.commands import cmd_anatomy
+
+        await respond(text=await cmd_anatomy())
+
+    async def _slash_doctor(self, ack: Any, respond: Any) -> None:
+        await ack()
+        from prometheus.gateway.commands import cmd_doctor
+
+        await respond(text=await cmd_doctor(self._prometheus_config))
+
+    async def _slash_beacon(self, ack: Any, respond: Any) -> None:
+        await ack()
+        from prometheus.gateway.commands import cmd_beacon
+
+        await respond(text=cmd_beacon(self._prometheus_config))
+
+    async def _slash_tools(self, ack: Any, respond: Any) -> None:
+        """Tool-call telemetry dashboard (24h)."""
+        await ack()
+        try:
+            from prometheus.telemetry.dashboard import ToolDashboard
+            dashboard = ToolDashboard()
+            stats = dashboard.get_stats(hours=24)
+
+            lines = ["Tool Call Stats (24h)\n"]
+            lines.append(f"Total calls: {stats['total_calls']}")
+            lines.append(f"Success rate: {stats['overall_success_rate']:.0%}")
+
+            if stats["most_called"]:
+                lines.append("\nMost called:")
+                for name, count in stats["most_called"][:5]:
+                    rate = stats["success_rate_by_tool"].get(name, 0)
+                    lines.append(f"  {name}: {count} calls ({rate:.0%} ok)")
+
+            if stats["circuit_breaker_trips"]:
+                lines.append(
+                    f"\nCircuit breaker trips: {stats['circuit_breaker_trips']}"
+                )
+            if stats["adapter_repairs"]:
+                lines.append(f"Adapter repairs: {stats['adapter_repairs']}")
+            if stats["lucky_guesses"]:
+                lines.append(f"Lucky guesses (deferred): {stats['lucky_guesses']}")
+
+            await respond(text="\n".join(lines))
+        except Exception as exc:
+            await respond(text=f"Tool stats unavailable: {exc}")

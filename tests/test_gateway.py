@@ -633,7 +633,9 @@ class TestCronTools:
         )
         result = await tool.execute(args, ctx)
         assert result.is_error
-        assert "Invalid" in result.output
+        # Polish sprint WS3 added NL fallback parsing; the rejection message
+        # now hints at both cron syntax and natural-language phrases.
+        assert "parse" in result.output.lower() or "Invalid" in result.output
 
     @pytest.mark.asyncio
     async def test_cron_delete(self, tmp_data_dir, ctx):

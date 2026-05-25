@@ -39,8 +39,22 @@ async def launch_web(
 ) -> None:
     """Start both REST API and WebSocket servers."""
 
+    from pathlib import Path
     from prometheus.web.server import create_app, start_web
     from prometheus.web.ws_server import WebSocketBridge
+
+    # Polish sprint WS2: when no explicit static_dir is passed, fall back to
+    # the shipped frontend at <package>/web/static/. Users can override via
+    # config.web.static_dir, but the package default means a fresh install
+    # gets a working dashboard without extra wiring.
+    if static_dir is None:
+        cfg_static = config.get("web", {}).get("static_dir")
+        if cfg_static:
+            static_dir = str(cfg_static)
+        else:
+            shipped = Path(__file__).resolve().parent / "static"
+            if shipped.exists():
+                static_dir = str(shipped)
 
     # Shared mutable state ref for agent state
     agent_state_ref = {"state": "idle"}

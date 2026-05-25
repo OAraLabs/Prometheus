@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.daemon import build_tool_registry
+from prometheus.daemon import build_tool_registry
 
 
 pytestmark = pytest.mark.integration

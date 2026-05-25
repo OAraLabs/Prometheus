@@ -514,3 +514,309 @@ class TestMessageDedup:
         adapter._SEEN_TTL = 300
         adapter._SEEN_MAX = 2000
         assert adapter._dedup_check("") is False
+
+
+# ---------------------------------------------------------------------------
+# Sprint Polish: Telegram parity surface (status / signals / threading / filter)
+# ---------------------------------------------------------------------------
+
+
+class TestSlackStatusCommand:
+    """`/status` (the Slack /prometheus-status slash) returns the same shape
+    that Telegram /status returns. Both wrap ``cmd_status`` from the shared
+    commands module — the smoke test below verifies the shape is intact."""
+
+    def test_slack_status_matches_telegram_shape(self):
+        from prometheus.gateway.commands import cmd_status
+
+        registry = MagicMock()
+        registry.list_tools.return_value = ["t1", "t2", "t3"]
+        text = cmd_status("gemma4-26b", "llama_cpp", 0.0, registry)
+
+        # Both Telegram and Slack call this same helper, so any shape change
+        # affecting one affects both. We assert the headline + key fields.
+        assert "Prometheus Status" in text
+        assert "Model:" in text
+        assert "Provider:" in text
+        assert "Tools: 3" in text
+        # SENTINEL block is always rendered even when "not initialized"
+        assert "SENTINEL" in text
+
+
+class TestSlackSkillEventRoutes:
+    """SKILL_CREATED reaches Slack when Slack is enabled — not only the
+    originating gateway. Mirrors the Telegram subscription contract."""
+
+    def test_signal_bus_setter_subscribes_to_four_kinds(self):
+        from prometheus.gateway.slack import SlackAdapter
+
+        adapter = SlackAdapter.__new__(SlackAdapter)
+        adapter._signal_bus = None
+
+        bus = MagicMock()
+        adapter.signal_bus = bus
+
+        # Four subscribe() calls — one per signal kind we surface.
+        subscribed_kinds = {call.args[0] for call in bus.subscribe.call_args_list}
+        assert subscribed_kinds == {
+            "skill_created", "skill_refined",
+            "memory_updated", "curator_report",
+        }
+
+    @pytest.mark.asyncio
+    async def test_skill_created_signal_triggers_notification(
+        self, slack_config, tmp_path, monkeypatch,
+    ):
+        from prometheus.gateway.slack import SlackAdapter
+
+        adapter = SlackAdapter.__new__(SlackAdapter)
+        adapter._signal_bus = None
+        adapter._prometheus_config = {}
+        adapter.config = slack_config
+
+        # Steer _load_channel to a stable test channel, _save_channel to no-op.
+        monkeypatch.setattr(adapter, "_load_channel", lambda: "C-TEST")
+        monkeypatch.setattr(adapter, "_save_channel", lambda ch: None)
+
+        # Mock the bolt app's client.chat_postMessage.
+        app = MagicMock()
+        app.client = MagicMock()
+        app.client.chat_postMessage = AsyncMock(return_value={"ts": "1.2"})
+        adapter._app = app
+
+        # Fabricate a signal-like object.
+        signal = MagicMock()
+        signal.payload = {"skill_name": "build-pancakes"}
+
+        await adapter._on_signal_skill_created(signal)
+
+        app.client.chat_postMessage.assert_awaited_once()
+        kwargs = app.client.chat_postMessage.await_args.kwargs
+        assert kwargs["channel"] == "C-TEST"
+        assert "build-pancakes" in kwargs["text"]
+        assert ":mortar_board:" in kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_notifications_off_silences(self, slack_config, monkeypatch):
+        from prometheus.gateway.slack import SlackAdapter
+
+        adapter = SlackAdapter.__new__(SlackAdapter)
+        adapter._signal_bus = None
+        adapter._prometheus_config = {
+            "gateway": {"skill_event_notifications": "off"},
+        }
+        adapter.config = slack_config
+        monkeypatch.setattr(adapter, "_load_channel", lambda: "C-TEST")
+
+        # Patch out the shared runtime override read so it doesn't override "off".
+        from prometheus.gateway import commands as _cmds
+        monkeypatch.setattr(_cmds, "get_notifications_mode", lambda default="": "")
+
+        app = MagicMock()
+        app.client = MagicMock()
+        app.client.chat_postMessage = AsyncMock()
+        adapter._app = app
+
+        signal = MagicMock()
+        signal.payload = {"skill_name": "x"}
+
+        await adapter._on_signal_skill_created(signal)
+        app.client.chat_postMessage.assert_not_awaited()
+
+
+class TestSlackLongReplyThreads:
+    """Replies above the configured threshold open a new thread off the
+    user's message rather than flooding the channel."""
+
+    @pytest.mark.asyncio
+    async def test_long_reply_uses_thread_when_user_did_not_thread(
+        self, slack_config, monkeypatch,
+    ):
+        from prometheus.gateway.slack import SlackAdapter
+
+        adapter = SlackAdapter.__new__(SlackAdapter)
+        adapter._signal_bus = None
+        adapter._prometheus_config = {
+            "gateway": {"slack": {"long_reply_threshold": 100}},
+        }
+        adapter.config = slack_config
+        adapter._seen_messages = {}
+        adapter._SEEN_TTL = 300
+        adapter._SEEN_MAX = 2000
+
+        # Wire fake session manager + agent loop.
+        from prometheus.engine.session import SessionManager
+        adapter.session_manager = SessionManager()
+
+        # AgentLoop result with a long response.
+        long_text = "x" * 500
+        agent_result = MagicMock()
+        agent_result.messages = []
+        agent_result.text = long_text
+        adapter.agent_loop = MagicMock()
+        adapter.agent_loop.run_async = AsyncMock(return_value=agent_result)
+
+        adapter.tool_registry = MagicMock()
+        adapter.tool_registry.list_schemas.return_value = []
+        adapter.system_prompt = "sys"
+
+        # Stub reactions, channel persistence so they don't fail.
+        monkeypatch.setattr(adapter, "_add_reaction", AsyncMock())
+        monkeypatch.setattr(adapter, "_remove_reaction", AsyncMock())
+        monkeypatch.setattr(adapter, "_save_channel", lambda ch: None)
+
+        say = AsyncMock()
+        await adapter._dispatch_to_agent(
+            channel="C-X", user="U-X", text="hi",
+            ts="100.0", thread_ts=None, say=say,
+        )
+
+        say.assert_awaited()
+        # thread_ts on the reply should be the original message ts because
+        # the response (500 chars) exceeds the 100-char threshold.
+        kwargs = say.await_args.kwargs
+        assert kwargs["thread_ts"] == "100.0"
+
+    @pytest.mark.asyncio
+    async def test_short_reply_stays_in_channel(self, slack_config, monkeypatch):
+        from prometheus.gateway.slack import SlackAdapter
+
+        adapter = SlackAdapter.__new__(SlackAdapter)
+        adapter._signal_bus = None
+        adapter._prometheus_config = {
+            "gateway": {"slack": {"long_reply_threshold": 800}},
+        }
+        adapter.config = slack_config
+        adapter._seen_messages = {}
+        adapter._SEEN_TTL = 300
+        adapter._SEEN_MAX = 2000
+
+        from prometheus.engine.session import SessionManager
+        adapter.session_manager = SessionManager()
+
+        agent_result = MagicMock()
+        agent_result.messages = []
+        agent_result.text = "short reply"
+        adapter.agent_loop = MagicMock()
+        adapter.agent_loop.run_async = AsyncMock(return_value=agent_result)
+
+        adapter.tool_registry = MagicMock()
+        adapter.tool_registry.list_schemas.return_value = []
+        adapter.system_prompt = "sys"
+
+        monkeypatch.setattr(adapter, "_add_reaction", AsyncMock())
+        monkeypatch.setattr(adapter, "_remove_reaction", AsyncMock())
+        monkeypatch.setattr(adapter, "_save_channel", lambda ch: None)
+
+        say = AsyncMock()
+        await adapter._dispatch_to_agent(
+            channel="C-X", user="U-X", text="hi",
+            ts="100.0", thread_ts=None, say=say,
+        )
+
+        say.assert_awaited()
+        kwargs = say.await_args.kwargs
+        # Short reply → channel-level, no thread.
+        assert kwargs["thread_ts"] is None
+
+
+class TestSlackAllowedChannelsFilter:
+    """Bot ignores messages from non-whitelisted channels at the handler level."""
+
+    @pytest.mark.asyncio
+    async def test_non_allowed_channel_is_silently_dropped(self):
+        from prometheus.gateway.slack import SlackAdapter
+
+        adapter = SlackAdapter.__new__(SlackAdapter)
+        adapter._seen_messages = {}
+        adapter._SEEN_TTL = 300
+        adapter._SEEN_MAX = 2000
+        adapter.config = PlatformConfig(
+            platform=Platform.SLACK,
+            token="xoxb-test",
+            app_token="xapp-test",
+            allowed_channels=["C-ALLOWED"],
+        )
+
+        adapter._dispatch_to_agent = AsyncMock()
+        say = AsyncMock()
+
+        event = {
+            "channel": "C-BLOCKED",
+            "user": "U-X",
+            "text": "hello",
+            "ts": "200.0",
+        }
+        await adapter._handle_message(event, say)
+
+        adapter._dispatch_to_agent.assert_not_called()
+        say.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_allowed_channel_dispatches(self):
+        from prometheus.gateway.slack import SlackAdapter
+
+        adapter = SlackAdapter.__new__(SlackAdapter)
+        adapter._seen_messages = {}
+        adapter._SEEN_TTL = 300
+        adapter._SEEN_MAX = 2000
+        adapter.config = PlatformConfig(
+            platform=Platform.SLACK,
+            token="xoxb-test",
+            app_token="xapp-test",
+            allowed_channels=["C-ALLOWED"],
+        )
+
+        adapter._dispatch_to_agent = AsyncMock()
+        say = AsyncMock()
+
+        event = {
+            "channel": "C-ALLOWED",
+            "user": "U-X",
+            "text": "hello",
+            "ts": "200.0",
+        }
+        await adapter._handle_message(event, say)
+        adapter._dispatch_to_agent.assert_awaited_once()
+
+
+class TestSlackSubcommandDispatch:
+    """The /prometheus-skills slash supports list/show/pin/unpin subcommands."""
+
+    @pytest.mark.asyncio
+    async def test_skills_list_dispatches_to_auto_list(self, monkeypatch):
+        from prometheus.gateway.slack import SlackAdapter
+        from prometheus.gateway import commands as _cmds
+
+        adapter = SlackAdapter.__new__(SlackAdapter)
+
+        sentinel = "AUTO-LIST-OUTPUT"
+        monkeypatch.setattr(_cmds, "cmd_skills_auto_list", lambda: sentinel)
+
+        ack = AsyncMock()
+        respond = AsyncMock()
+        await adapter._slash_skills(ack, {"text": "list"}, respond)
+
+        ack.assert_awaited_once()
+        respond.assert_awaited_once_with(text=sentinel)
+
+    @pytest.mark.asyncio
+    async def test_skills_pin_passes_name(self, monkeypatch):
+        from prometheus.gateway.slack import SlackAdapter
+        from prometheus.gateway import commands as _cmds
+
+        adapter = SlackAdapter.__new__(SlackAdapter)
+        captured: dict = {}
+
+        def _pin(name):
+            captured["name"] = name
+            return f"pinned:{name}"
+
+        monkeypatch.setattr(_cmds, "cmd_skills_pin", _pin)
+
+        ack = AsyncMock()
+        respond = AsyncMock()
+        await adapter._slash_skills(ack, {"text": "pin build-pancakes"}, respond)
+
+        assert captured["name"] == "build-pancakes"
+        respond.assert_awaited_once_with(text="pinned:build-pancakes")
