@@ -883,9 +883,10 @@ def main() -> None:
         _reset_data()
         sys.exit(0)
 
-    # Daemon subcommand — delegate to scripts/daemon.py
+    # Daemon subcommand — delegate to the packaged daemon module so wheel
+    # installs work (scripts/ is not part of the wheel).
     if args.command == "daemon":
-        from scripts.daemon import main as daemon_main
+        from prometheus.daemon import main as daemon_main
         # Re-inject args so daemon sees them
         sys.argv = ["prometheus-daemon"]
         if args.config:

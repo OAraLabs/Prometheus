@@ -335,6 +335,142 @@ def create_app(
         # signal_type, payload, source_subsystem). Return as-is.
         return rows
 
+    # ── Activity feed (Polish sprint WS2) ──────────────────────────
+    # Alias for /api/events/recent under the "activity" namespace. The
+    # Beacon frontend calls this on mount to hydrate the live feed before
+    # subscribing to the WebSocket.
+
+    @app.get("/api/activity/recent")
+    async def get_activity_recent(limit: int = 100, type: str | None = None):
+        """Recent durable signal-bus events, capped at *limit* (max 500)."""
+        from prometheus.telemetry.tracker import get_telemetry_handle
+
+        tel = get_telemetry_handle()
+        if tel is None:
+            return []
+        capped = max(1, min(int(limit), 500))
+        return tel.signal_events_since(signal_type=type, limit=capped)
+
+    # ── Memory (Polish sprint WS2) ─────────────────────────────────
+
+    @app.get("/api/memory/current")
+    async def get_memory_current():
+        """Return current MEMORY.md and USER.md content with usage stats."""
+        try:
+            from prometheus.memory.hermes_memory_tool import (
+                _MEMORY_MAX_CHARS,
+                _USER_MAX_CHARS,
+                get_memory_store,
+                get_user_store,
+            )
+        except Exception:
+            return {"memory": None, "user": None, "error": "memory module unavailable"}
+
+        def _snapshot(store, limit: int) -> dict[str, Any]:
+            entries = store.list_entries()
+            chars = sum(len(e) + 1 for e in entries)
+            return {
+                "entries": list(entries),
+                "char_count": chars,
+                "char_limit": limit,
+                "entry_count": len(entries),
+                "content": "\n".join(entries),
+            }
+
+        return {
+            "memory": _snapshot(get_memory_store(), _MEMORY_MAX_CHARS),
+            "user": _snapshot(get_user_store(), _USER_MAX_CHARS),
+        }
+
+    # ── Skills (richer list + content + pin/unpin) ─────────────────
+
+    @app.get("/api/skills/list")
+    async def get_skills_list():
+        """Auto-skills with state, pinned flag, last-used mtime.
+
+        Mirrors the cmd_skills_auto_list shape so the Beacon panel and
+        the Telegram /skills command can be reasoned about together.
+        """
+        try:
+            from prometheus.config.paths import get_config_dir
+            from prometheus.learning.skill_state import SkillStateStore
+        except Exception:
+            return []
+
+        auto_dir = get_config_dir() / "skills" / "auto"
+        if not auto_dir.is_dir():
+            return []
+
+        store = SkillStateStore()
+        rows: list[dict[str, Any]] = []
+        for path in sorted(auto_dir.glob("*.md")):
+            if path.name.startswith("_"):
+                continue
+            name = path.stem
+            rec = store.get_skill(name)
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            rows.append({
+                "name": name,
+                "pinned": rec.pinned,
+                "state": rec.state,
+                "first_seen_at": rec.first_seen_at,
+                "last_modified": mtime,
+                "size_bytes": path.stat().st_size if path.exists() else 0,
+                "notes": rec.notes,
+            })
+        return rows
+
+    @app.get("/api/skills/{name}")
+    async def get_skill_content(name: str):
+        """Return the SKILL.md content for *name* (auto/ first, then root)."""
+        from prometheus.config.paths import get_config_dir
+
+        if not name or "/" in name or ".." in name:
+            return JSONResponse(status_code=400, content={"error": "invalid name"})
+
+        skills_root = get_config_dir() / "skills"
+        for candidate in (
+            skills_root / "auto" / f"{name}.md",
+            skills_root / f"{name}.md",
+        ):
+            if candidate.exists():
+                try:
+                    return {
+                        "name": name,
+                        "path": str(candidate),
+                        "content": candidate.read_text(encoding="utf-8"),
+                        "size_bytes": candidate.stat().st_size,
+                        "last_modified": candidate.stat().st_mtime,
+                    }
+                except OSError as exc:
+                    return JSONResponse(status_code=500, content={"error": str(exc)})
+        return JSONResponse(status_code=404, content={"error": "skill not found"})
+
+    @app.post("/api/skills/{name}/pin")
+    async def pin_skill(name: str):
+        try:
+            from prometheus.learning.skill_state import SkillStateStore
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": str(exc)})
+        if not name or "/" in name or ".." in name:
+            return JSONResponse(status_code=400, content={"error": "invalid name"})
+        rec = SkillStateStore().set_pinned(name, True)
+        return {"name": name, "pinned": rec.pinned, "state": rec.state}
+
+    @app.delete("/api/skills/{name}/pin")
+    async def unpin_skill(name: str):
+        try:
+            from prometheus.learning.skill_state import SkillStateStore
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": str(exc)})
+        if not name or "/" in name or ".." in name:
+            return JSONResponse(status_code=400, content={"error": "invalid name"})
+        rec = SkillStateStore().set_pinned(name, False)
+        return {"name": name, "pinned": rec.pinned, "state": rec.state}
+
     # ── Cron ────────────────────────────────────────────────────────
 
     @app.get("/api/cron")

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+# Importing any submodule of prometheus.mcp triggers prometheus/mcp/__init__.py
+# which eagerly loads the adapter/runtime → requires the `mcp` optional dep.
+pytest.importorskip("mcp")
+
 from prometheus.mcp.names import (
     TOOL_NAME_SEPARATOR,
     build_safe_tool_name,

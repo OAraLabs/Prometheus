@@ -693,6 +693,7 @@ class TestSprint12Wiring:
 
     def test_mcp_tool_adapter_has_execute(self):
         """McpToolAdapter has the BaseTool execute interface."""
+        pytest.importorskip("mcp")
         from prometheus.mcp.adapter import McpToolAdapter
 
         # name is an instance attribute set in __init__, not a class attribute
@@ -3372,9 +3373,13 @@ class TestDoctorWiring:
 
     @pytest.mark.integration
     def test_daemon_has_doctor_startup_wiring(self):
-        """daemon.py imports Doctor and runs startup check after anatomy scan."""
-        import ast
-        daemon_path = Path(__file__).resolve().parents[1] / "scripts" / "daemon.py"
+        """daemon imports Doctor and runs startup check after anatomy scan.
+
+        WS5 (packaging integrity): the daemon source moved from
+        scripts/daemon.py into the package; check the canonical file.
+        """
+        import prometheus.daemon as _daemon
+        daemon_path = Path(_daemon.__file__)
         source = daemon_path.read_text(encoding="utf-8")
         assert "from prometheus.infra.doctor import Doctor" in source
         assert "doctor.diagnose" in source

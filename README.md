@@ -1,23 +1,30 @@
 # Prometheus
 
-A sovereign, model-agnostic agent framework for local hardware. Built by assembling the strongest ideas from proven agent projects — Claude Code's orchestration patterns, Hermes' always-on gateway, OpenHarness' tool pipeline, and a DAG-based lossless context engine — into a new skeleton, with a validation layer that makes open models actually reliable in a tool-calling loop.
+**A sovereign agent harness for local LLMs — the validation layer that makes open models actually reliable in a tool loop.**
 
-Built in the open, shipped while still rough, improving weekly.
+The model is the agent. The harness is the vehicle.
 
-**The model is the agent. The harness is the vehicle.**
+```bash
+pip install oara-prometheus[full]
+prometheus init           # auto-detects llama.cpp / Ollama / LM Studio / vLLM
+prometheus daemon         # starts agent, Beacon dashboard, gateways
+```
+
+`prometheus init` probes for a running local inference server, asks two or three questions, writes a working `~/.prometheus/prometheus.yaml`, and points you at the Beacon dashboard. Five minutes from `pip install` to a working agent.
+
+What it gives you:
+
+- **Reliable tool calls on open models** — a Model Adapter Layer validates every call, auto-repairs common errors (fuzzy names, JSON inside markdown fences, type coercion), and enforces output schemas at the token level via GBNF for llama.cpp.
+- **Always-on gateways** — Telegram and Slack at parity (23 slash commands each), with mid-turn `/steer` and `/queue` for durability while the agent is mid-task.
+- **Visible memory and skills** — `MEMORY.md` and `USER.md` you can read, skills the agent writes for itself that you can pin, plus a weekly Curator pass that consolidates and prunes.
+- **Lossless context** — DAG-based compression with full-text search so long sessions don't drop facts.
+- **Beacon dashboard** — live activity feed, memory viewer, skills browser at `http://localhost:8005` once the daemon is up.
 
 > **Status:** Active development. Expect rough edges. Fixes land weekly. Feedback welcome.
 
-```bash
-git clone https://github.com/OAraLabs/Prometheus-.git
-cd Prometheus-
-pip install -e .
-python3 -m prometheus --setup
-```
+Deeper docs live under [`docs/`](docs/) — architecture, model registry, adapter strictness tuning, sprint reports. The rest of this README is the high-level tour; jump to the section you care about.
 
-Four questions. Five minutes. Working agent.
-
-MIT License · Python 3.11+ · Active Development · 1,179+ Tests
+MIT License · Python 3.11+ · 1,179+ tests
 
 ---
 
@@ -148,10 +155,10 @@ Markdown skill files in `skills/` that teach the agent patterns — from code re
 ### Always-On
 
 - Telegram gateway with photo, voice, document (20+ formats), and sticker handling
-- Slack gateway with Socket Mode, 9 slash commands, thread-based conversations
+- Slack gateway (Socket Mode) at Telegram-parity: 23 slash commands, thread-based long replies, channel-scoped permissions, skill/memory/curator notification routing
 - Vision support (VisionTool) and voice transcription (Whisper STT)
 - Cron scheduler, heartbeat monitoring, systemd service
-- 16 slash commands (Telegram), 9 slash commands (Slack)
+- 40+ slash commands (Telegram), 23 slash commands (Slack)
 - Hook hot reload — modify `prometheus.yaml` at runtime, hooks rebuild automatically via mtime polling
 
 ### Migration Tool
@@ -405,7 +412,7 @@ All evaluation runs locally — the LLM judge uses constrained decoding on your 
 - [x] Lossless Context Management (DAG compression, FTS5 search)
 - [x] Security (4-level trust, audit, exfiltration, approval queue)
 - [x] Telegram gateway with media/vision/voice
-- [x] Slack gateway with Socket Mode
+- [x] Slack gateway with Socket Mode + Telegram-parity command surface (23 commands, thread-based long replies, signal-bus notifications)
 - [x] Wiki knowledge system (Karpathy-inspired, Obsidian-compatible)
 - [x] SENTINEL proactive layer (observer + AutoDream)
 - [x] Model router with fallback chains + divergence detection

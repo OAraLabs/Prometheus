@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+# Importing any submodule of prometheus.mcp triggers prometheus/mcp/__init__.py
+# which eagerly loads the adapter/runtime → requires the `mcp` optional dep.
+pytest.importorskip("mcp")
+
 from prometheus.mcp.transport import (
     DEFAULT_CONNECTION_TIMEOUT_MS,
     ResolvedHttpTransport,
