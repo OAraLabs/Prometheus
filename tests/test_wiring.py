@@ -6994,6 +6994,59 @@ class TestVisibleMemorySkillsWiring:
         assert sig.payload["skill_name"] == "my-skill"
         assert sig.payload["summary"] == "A test skill"
 
+    def test_skill_creator_uses_frontmatter_name(self, tmp_path):
+        """PR #20 wiring: real SkillCreator path uses LLM ``name:``, not user msg.
+
+        Constructs a real ``SkillCreator`` (not the helper from
+        test_skill_creator.py), drives the full ``maybe_create`` flow with
+        a stubbed envelope, and asserts the filename on disk derives from
+        the frontmatter ``name:`` field — not from the noisy
+        ``task_description`` the agent passed in. The pre-PR-#20 path
+        would have produced a filename slugified from the user message;
+        the post-fix path produces the LLM-supplied kebab-case name.
+        """
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from prometheus.learning.skill_creator import SkillCreator
+
+        creator = SkillCreator(
+            provider=MagicMock(),
+            model="test-model",
+            auto_dir=tmp_path,
+        )
+        # Stub the envelope so no real provider/LLM is touched. The LLM's
+        # frontmatter says name: replace-service-by-port; the user message
+        # is a long run-on string of the shape that produced pre-fix
+        # pathological filenames.
+        creator._envelope.call = AsyncMock(return_value=(
+            "---\n"
+            "name: replace-service-by-port\n"
+            "description: Identify and stop a process bound to a port.\n"
+            "---\n"
+            "\n"
+            "# Replace Service by Port\n"
+            "\n"
+            "## When to use\n"
+            "When swapping services on a fixed port.\n"
+        ))
+
+        path = asyncio.run(creator.maybe_create(
+            task_description=(
+                "please go ahead and take down the legacy dashboard that's "
+                "old and was before all this other infrastructure"
+            ),
+            tool_trace=[
+                {"tool_name": "bash", "arguments": {}, "result": "ok"}
+                for _ in range(5)
+            ],
+        ))
+
+        assert path is not None
+        # Filename derives from LLM frontmatter, not task_description.
+        assert path.name == "replace-service-by-port.md"
+        assert "please-go-ahead" not in path.name
+        assert "legacy-dashboard" not in path.name
+
     def test_beacon_first_class_event_types(self):
         """test_signal_routes_to_beacon_ws — _on_signal maps the four new kinds."""
         import asyncio
