@@ -65,9 +65,28 @@ def _get_auto_skills_dir() -> Path:
 
 
 def _slugify(text: str) -> str:
-    """Convert text to a kebab-case filename slug."""
+    """Convert text to a kebab-case filename slug.
+
+    Bounded at 64 chars. Order matters: strip leading/trailing dashes from
+    the substitution result, *then* truncate, *then* rstrip any dash that
+    a mid-word truncation left behind. The pre-PR-#20 implementation
+    (``slug.strip("-")[:60]``) stripped before truncating, leaving a
+    trailing ``-`` whenever the 60th char was in the middle of a token
+    — that's how filenames like ``you-can-take-down-…-before-.md``
+    landed in ``~/.prometheus/skills/auto/``.
+    """
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower().strip())
-    return slug.strip("-")[:60]
+    return slug.strip("-")[:64].rstrip("-")
+
+
+class SkillNameExtractionError(ValueError):
+    """Raised internally when the LLM's response lacks a usable ``name:``.
+
+    Never propagated to callers — caught at the SkillCreator boundary and
+    surfaced via ``telemetry.record_silent_failure`` so missing-name
+    failures are observable in /health verbose. Carries a descriptive
+    message for the silent_failures row.
+    """
 
 
 class SkillCreator:
@@ -189,7 +208,38 @@ class SkillCreator:
         if content is None or not content.strip():
             return None
 
-        slug = _slugify(task_description) or f"skill-{int(time.time())}"
+        # PR #20: derive the slug from the LLM's frontmatter ``name:``, not
+        # from the raw user message. The pre-PR-#20 path slugified
+        # ``task_description``, which produced filenames like
+        # ``<long-run-on-user-message-truncated-mid-word>-.md`` (trailing
+        # dash from the strip-before-truncate bug in _slugify) even though
+        # the LLM was correctly emitting a clean ``name: <kebab-case>``
+        # in the frontmatter.
+        #
+        # If the LLM output lacks a usable ``name:``, we DO NOT fall back to
+        # slugifying ``task_description`` — that's the bug. Skip the write
+        # and record the failure so it surfaces in /health verbose.
+        name = self._extract_name(content)
+        if not name:
+            self._record_name_failure(
+                content=content,
+                task_description=task_description,
+                reason="LLM output missing or empty 'name:' frontmatter field",
+            )
+            return None
+
+        slug = _slugify(name)
+        if not slug:
+            # A name like ``"!!!"`` or ``"🚀"`` slugifies to empty. Same skip
+            # path — don't write junk to disk.
+            self._record_name_failure(
+                content=content,
+                task_description=task_description,
+                reason=f"LLM 'name:' field {name!r} slugified to empty",
+                name_raw=name,
+            )
+            return None
+
         path = self._auto_dir / f"{slug}.md"
 
         # Don't overwrite existing skills
@@ -251,6 +301,63 @@ class SkillCreator:
                 if line and not line.startswith("#") and not first_body_line:
                     first_body_line = line
         return first_body_line
+
+    @staticmethod
+    def _extract_name(content: str) -> str | None:
+        """Pull ``name:`` from YAML frontmatter. Returns ``None`` when absent or empty.
+
+        Unlike :meth:`_extract_description`, this method has NO fallback —
+        a missing or empty ``name`` is a hard failure (the LLM produced
+        an unusable response) and the caller should skip writing rather
+        than guess a name from elsewhere.
+        """
+        in_fm = False
+        for raw in content.splitlines():
+            line = raw.strip()
+            if line == "---":
+                in_fm = not in_fm
+                continue
+            if in_fm and line.startswith("name:"):
+                value = line.split(":", 1)[1].strip().strip("'\"")
+                return value or None
+        return None
+
+    def _record_name_failure(
+        self,
+        *,
+        content: str,
+        task_description: str,
+        reason: str,
+        name_raw: str | None = None,
+    ) -> None:
+        """Surface a missing-or-unusable ``name:`` to telemetry + logs.
+
+        Constructs a :class:`SkillNameExtractionError` (never raised — only
+        passed to ``telemetry.record_silent_failure`` for the ``exc=`` field)
+        so the failure mode is queryable by exception type.
+        """
+        log.warning("SkillCreator: %s — skipping skill write", reason)
+        if self._telemetry is None:
+            return
+        try:
+            ctx: dict[str, Any] = {
+                "content_preview": content[:200],
+                "task_description": task_description[:200],
+            }
+            if name_raw is not None:
+                ctx["name_raw"] = name_raw
+            self._telemetry.record_silent_failure(
+                subsystem="skill_creator",
+                operation="extract_name",
+                exc=SkillNameExtractionError(reason),
+                context=ctx,
+            )
+        except Exception:
+            log.warning(
+                "SkillCreator: failed to record silent_failure for name "
+                "extraction (best-effort)",
+                exc_info=True,
+            )
 
     async def _call_model(self, prompt: str) -> str | None:
         """Invoke the model via LLMCallEnvelope. Returns None on failure.
