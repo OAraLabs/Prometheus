@@ -108,6 +108,22 @@ class LCMConversationStore:
     # Insert
     # ------------------------------------------------------------------
 
+    def add_message(self, session_id: str, msg: MessagePart) -> str:
+        """Insert a message, forcing ``msg.session_id = session_id``.
+
+        Thin adapter that closes the contract gap between ``LCMEngine``
+        (which constructs ``MessagePart`` then passes session_id as a
+        separate arg) and the internal ``insert_message`` (which derives
+        session_id from the MessagePart). Overwrites unconditionally so
+        the caller's argument always wins, matching the long-standing
+        test-shim behaviour before this method landed in the class.
+
+        Prefer :meth:`insert_message` for internal callers that already
+        construct the MessagePart with session_id set.
+        """
+        msg.session_id = session_id
+        return self.insert_message(msg)
+
     def insert_message(self, msg: MessagePart) -> str:
         """Insert a message and update the FTS5 index. Returns the message id."""
         mid = msg.message_id or uuid4().hex
@@ -222,6 +238,94 @@ class LCMConversationStore:
             (session_id,),
         ).fetchone()
         return row["cnt"] if row else 0
+
+    def count_all(self, session_id: str) -> int:
+        """Return the total number of messages in a session, compacted or not.
+
+        Counterpart to :meth:`count_uncompacted` used by ``LCMAssembler``
+        for total-tokens accounting.
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS cnt FROM lcm_messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return int(row["cnt"]) if row else 0
+
+    def get_all_messages(self, session_id: str) -> list[MessagePart]:
+        """All messages for a session ordered by turn_index ASC, no limit.
+
+        Includes compacted messages. Unlike :meth:`get_messages` (which
+        caps at ``limit=500``), this returns the full session — used by
+        ``LCMAssembler`` to compute total token counts before deciding
+        what fits in the assembly budget.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM lcm_messages WHERE session_id = ? "
+            "ORDER BY turn_index ASC",
+            (session_id,),
+        ).fetchall()
+        return [self._row_to_message(r) for r in rows]
+
+    def get_uncompacted_messages(self, session_id: str) -> list[MessagePart]:
+        """All uncompacted messages for a session, turn_index ASC, no limit.
+
+        Used by :class:`LCMCompactor` (to decide which messages to fold
+        into the next summary) and :class:`LCMAssembler` (fresh-tail
+        candidates). Differs from :meth:`get_fresh_tail` in that
+        ``get_fresh_tail`` caps at ``count`` from the newest end; this
+        returns every uncompacted row in chronological order.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM lcm_messages WHERE session_id = ? AND compacted = 0 "
+            "ORDER BY turn_index ASC",
+            (session_id,),
+        ).fetchall()
+        return [self._row_to_message(r) for r in rows]
+
+    def messages_since(
+        self,
+        watermark: float,
+        *,
+        limit: int = 500,
+        session_id: str | None = None,
+        include_compacted: bool = False,
+    ) -> list[MessagePart]:
+        """Strictly-greater watermark read, ordered by timestamp ASC.
+
+        Returns messages with ``timestamp > watermark``. The MemoryExtractor
+        read path: matches its existing ``_last_processed_ts`` invariant
+        exactly (strictly greater than, not ``>=``).
+
+        By default skips compacted messages so the extractor doesn't
+        re-process summaries-of-summaries — pass ``include_compacted=True``
+        to override. ``session_id=None`` (the default) reads across
+        sessions.
+        """
+        sql = "SELECT * FROM lcm_messages WHERE timestamp > ?"
+        params: list[object] = [watermark]
+        if session_id is not None:
+            sql += " AND session_id = ?"
+            params.append(session_id)
+        if not include_compacted:
+            sql += " AND compacted = 0"
+        sql += " ORDER BY timestamp ASC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_message(r) for r in rows]
+
+    def has_message(self, message_id: str) -> bool:
+        """Return ``True`` iff a row with this id is persisted.
+
+        Used by :meth:`LCMEngine.is_ingested` to answer "is this message
+        durably stored?" without round-tripping a full row.
+        """
+        if not message_id:
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM lcm_messages WHERE id = ? LIMIT 1",
+            (message_id,),
+        ).fetchone()
+        return row is not None
 
     # ------------------------------------------------------------------
     # Lifecycle

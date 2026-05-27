@@ -533,6 +533,15 @@ async def run_daemon(args: argparse.Namespace) -> None:
     except Exception as exc:
         logger.warning("LCM engine not available: %s", exc)
 
+    # PR fix/memory-lcm-full-rewire (2026-05-26) — wire LCM into the
+    # session manager so ChatSession.add_result_messages can persist
+    # conversation messages to LCM. session_manager was constructed
+    # earlier (line ~342) when lcm_engine wasn't yet available; assign
+    # here. Sessions are created lazily by the gateway on first message,
+    # which happens after this point, so this ordering is safe.
+    if lcm_engine is not None:
+        session_manager.lcm_engine = lcm_engine
+
     # Memory extractor (optional, from Sprint 5)
     try:
         from prometheus.memory.extractor import MemoryExtractor

@@ -201,6 +201,129 @@ class TestConversationStore:
         results = store.search("nonexistenttermxyz")
         assert len(results) == 0
 
+    # ----------------------------------------------------------------
+    # PR fix/memory-lcm-full-rewire (2026-05-26): tests for the five
+    # methods that closed the LCMEngine ⇄ LCMConversationStore contract
+    # gap.  Pre-PR-#21, these methods only existed as monkey-patches
+    # in tests; the production paths AttributeError'd.
+    # ----------------------------------------------------------------
+
+    def test_add_message_uses_arg_session_id(self, store: LCMConversationStore) -> None:
+        """``add_message(session_id, msg)`` overwrites ``msg.session_id``."""
+        msg = MessagePart(role="user", content="hello", session_id="WRONG", turn_index=0)
+        mid = store.add_message("right-session", msg)
+        assert mid
+        rows = store.get_messages("right-session")
+        assert len(rows) == 1
+        assert rows[0].content == "hello"
+        # And the wrong session_id should have nothing.
+        assert store.get_messages("WRONG") == []
+
+    def test_count_all_includes_compacted(self, store: LCMConversationStore) -> None:
+        for i in range(5):
+            store.insert_message(
+                MessagePart(role="user", content=f"m{i}", session_id="s1", turn_index=i)
+            )
+        # Mark two as compacted
+        rows = store.get_messages("s1")
+        store.mark_compacted([rows[0].message_id, rows[1].message_id])
+        assert store.count_all("s1") == 5
+        assert store.count_uncompacted("s1") == 3
+
+    def test_count_all_empty(self, store: LCMConversationStore) -> None:
+        assert store.count_all("never-existed") == 0
+
+    def test_get_all_messages_includes_compacted_ordered_by_turn(
+        self, store: LCMConversationStore
+    ) -> None:
+        for i in range(4):
+            store.insert_message(
+                MessagePart(role="user", content=f"m{i}", session_id="s1", turn_index=i)
+            )
+        rows = store.get_messages("s1")
+        store.mark_compacted([rows[1].message_id])  # m1 compacted
+        all_msgs = store.get_all_messages("s1")
+        assert [m.content for m in all_msgs] == ["m0", "m1", "m2", "m3"]
+
+    def test_get_uncompacted_messages_filters_and_orders(
+        self, store: LCMConversationStore
+    ) -> None:
+        for i in range(4):
+            store.insert_message(
+                MessagePart(role="user", content=f"m{i}", session_id="s1", turn_index=i)
+            )
+        rows = store.get_messages("s1")
+        store.mark_compacted([rows[0].message_id, rows[2].message_id])
+        uncompacted = store.get_uncompacted_messages("s1")
+        assert [m.content for m in uncompacted] == ["m1", "m3"]
+
+    def test_messages_since_strictly_greater(self, store: LCMConversationStore) -> None:
+        """``messages_since`` uses ``>`` not ``>=`` — boundary excluded."""
+        t0 = 1000.0
+        # Three messages at t0, t0+1, t0+2
+        for i in range(3):
+            store.insert_message(
+                MessagePart(
+                    role="user", content=f"m{i}",
+                    session_id="s1", turn_index=i,
+                    timestamp=t0 + i,
+                )
+            )
+        # watermark = t0 → should return m1, m2 (NOT m0)
+        result = store.messages_since(t0)
+        assert [m.content for m in result] == ["m1", "m2"]
+        # watermark = t0 + 2 → returns nothing (boundary excluded)
+        assert store.messages_since(t0 + 2) == []
+        # watermark = 0 → returns all
+        assert len(store.messages_since(0.0)) == 3
+
+    def test_messages_since_session_filter(self, store: LCMConversationStore) -> None:
+        store.insert_message(MessagePart(role="user", content="a", session_id="s1",
+                                          timestamp=1.0))
+        store.insert_message(MessagePart(role="user", content="b", session_id="s2",
+                                          timestamp=2.0))
+        store.insert_message(MessagePart(role="user", content="c", session_id="s1",
+                                          timestamp=3.0))
+        # No session_id: all sessions
+        all_msgs = store.messages_since(0.0)
+        assert len(all_msgs) == 3
+        # session_id="s1": just s1
+        s1 = store.messages_since(0.0, session_id="s1")
+        assert [m.content for m in s1] == ["a", "c"]
+
+    def test_messages_since_compacted_filter(self, store: LCMConversationStore) -> None:
+        """Default ``include_compacted=False`` — compacted rows skipped."""
+        store.insert_message(MessagePart(role="user", content="a", session_id="s1",
+                                          timestamp=1.0))
+        store.insert_message(MessagePart(role="user", content="b", session_id="s1",
+                                          timestamp=2.0))
+        rows = store.get_messages("s1")
+        store.mark_compacted([rows[0].message_id])
+        # Default skips compacted
+        default = store.messages_since(0.0)
+        assert [m.content for m in default] == ["b"]
+        # Override includes them
+        with_compacted = store.messages_since(0.0, include_compacted=True)
+        assert [m.content for m in with_compacted] == ["a", "b"]
+
+    def test_messages_since_limit_honored(self, store: LCMConversationStore) -> None:
+        for i in range(10):
+            store.insert_message(
+                MessagePart(role="user", content=f"m{i}", session_id="s1",
+                            timestamp=float(i + 1))
+            )
+        result = store.messages_since(0.0, limit=3)
+        assert len(result) == 3
+        # Ordered ASC, so we get the earliest three
+        assert [m.content for m in result] == ["m0", "m1", "m2"]
+
+    def test_has_message(self, store: LCMConversationStore) -> None:
+        msg = MessagePart(role="user", content="x", session_id="s1", turn_index=0)
+        mid = store.insert_message(msg)
+        assert store.has_message(mid) is True
+        assert store.has_message("no-such-id") is False
+        assert store.has_message("") is False
+
 
 # ---------------------------------------------------------------------------
 # LCMSummaryStore
@@ -542,19 +665,18 @@ class TestLCMEngine:
 
         engine = LCMEngine(provider, config=config, db_path=db)
 
-        # Patch the store methods the assembler/compactor expect
-        engine._conv_store.get_uncompacted_messages = lambda sid: engine._conv_store.get_messages(sid)
-        engine._conv_store.count_all = lambda sid: len(engine._conv_store.get_messages(sid))
-        engine._conv_store.get_all_messages = lambda sid: engine._conv_store.get_messages(sid)
+        # PR fix/memory-lcm-full-rewire (2026-05-26): the four
+        # _conv_store.* monkey-patches that used to live here are gone —
+        # the methods (add_message, count_all, get_all_messages,
+        # get_uncompacted_messages) are now part of the real
+        # LCMConversationStore contract.
+        #
+        # TODO (separate PR): _sum_store.get_leaf_summaries and
+        # .get_leaf_summaries_at_depth are still missing on
+        # LCMSummaryStore. Stubbed here so this test (which exercises
+        # the assembler path) keeps passing. Remove this shim once
+        # LCMSummaryStore implements the methods properly.
         engine._sum_store.get_leaf_summaries = lambda sid: []
-        # Patch add_message to use insert_message
-        original_insert = engine._conv_store.insert_message
-
-        def add_message_shim(session_id, msg):
-            msg.session_id = session_id
-            return original_insert(msg)
-
-        engine._conv_store.add_message = add_message_shim
 
         try:
             mid = await engine.ingest("s1", "user", "Hello!", turn_index=0)
@@ -565,6 +687,38 @@ class TestLCMEngine:
             result = engine.assemble("s1", token_budget=50000)
             assert isinstance(result, AssemblyResult)
             assert len(result.fresh_messages) == 2
+        finally:
+            engine.close()
+
+    async def test_engine_is_ingested(self, tmp_path: Path) -> None:
+        """PR fix/memory-lcm-full-rewire — LCMEngine.is_ingested
+        returns True for persisted message_ids, False otherwise."""
+        from prometheus.memory.lcm_engine import LCMEngine
+        engine = LCMEngine(MockProvider("ok"), db_path=tmp_path / "isin.db")
+        try:
+            assert engine.is_ingested("not-a-real-id") is False
+            assert engine.is_ingested("") is False
+            mid = await engine.ingest("s1", "user", "hello", turn_index=0)
+            assert engine.is_ingested(mid) is True
+        finally:
+            engine.close()
+
+    def test_engine_ingest_sync(self, tmp_path: Path) -> None:
+        """PR fix/memory-lcm-full-rewire — ingest_sync is the sync
+        sibling used by ChatSession.add_result_messages (which can't
+        await)."""
+        from prometheus.memory.lcm_engine import LCMEngine
+        engine = LCMEngine(MockProvider("ok"), db_path=tmp_path / "isync.db")
+        try:
+            mid = engine.ingest_sync(
+                session_id="s-sync", role="user",
+                content="written via sync path", turn_index=0,
+            )
+            assert mid
+            assert engine.is_ingested(mid) is True
+            rows = engine._conv_store.get_messages("s-sync")
+            assert len(rows) == 1
+            assert rows[0].content == "written via sync path"
         finally:
             engine.close()
 
@@ -584,31 +738,11 @@ class TestLCMEngine:
         engine._summarizer = MockSummarizer("Mock summary of compacted messages.")
         engine._compactor._summarizer = engine._summarizer
 
-        # Patch store methods
-        original_insert = engine._conv_store.insert_message
-
-        def add_message_shim(session_id, msg):
-            msg.session_id = session_id
-            return original_insert(msg)
-
-        engine._conv_store.add_message = add_message_shim
-
-        def get_uncompacted(sid):
-            return [
-                m
-                for m in engine._conv_store.get_messages(sid)
-                if not _is_compacted(engine._conv_store, m.message_id)
-            ]
-
-        def _is_compacted(store, mid):
-            row = store._conn.execute(
-                "SELECT compacted FROM lcm_messages WHERE id = ?", (mid,)
-            ).fetchone()
-            return bool(row and row["compacted"])
-
-        engine._conv_store.get_uncompacted_messages = get_uncompacted
-        engine._conv_store.count_all = lambda sid: len(engine._conv_store.get_messages(sid))
-        engine._conv_store.get_all_messages = lambda sid: engine._conv_store.get_messages(sid)
+        # PR fix/memory-lcm-full-rewire (2026-05-26): the four
+        # _conv_store.* monkey-patches that used to live here are gone —
+        # the real LCMConversationStore now implements add_message,
+        # count_all, get_all_messages, and get_uncompacted_messages with
+        # the same behaviour the shims provided.
 
         # Track summaries per session
         _session_summaries: dict[str, list] = {}

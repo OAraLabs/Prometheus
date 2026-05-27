@@ -1260,12 +1260,18 @@ def _microcompact_old_results(
             if len(content) <= context.microcompact_keep_chars:
                 continue
 
-            # Check LCM ingestion for keep_chars decision
+            # Check LCM ingestion for keep_chars decision. PR
+            # fix/memory-lcm-full-rewire removed the hasattr guard now
+            # that LCMEngine.is_ingested exists. Note: until the
+            # follow-up that maps tool_use_id ↔ message_id, is_ingested
+            # returns False for every tool_use_id, so this branch
+            # effectively always takes the no-LCM-coverage path for
+            # tool results — same behaviour as before the guard removal,
+            # just no longer hidden behind defensive ``hasattr``.
             keep_chars = context.microcompact_keep_chars
-            if context.lcm_engine is not None and hasattr(context.lcm_engine, "is_ingested"):
-                if not context.lcm_engine.is_ingested(getattr(block, "tool_use_id", "")):
-                    keep_chars = context.microcompact_keep_chars_no_lcm
-            elif context.lcm_engine is None:
+            if context.lcm_engine is None or not context.lcm_engine.is_ingested(
+                getattr(block, "tool_use_id", "")
+            ):
                 keep_chars = context.microcompact_keep_chars_no_lcm
 
             # Extract tool name from the block or content

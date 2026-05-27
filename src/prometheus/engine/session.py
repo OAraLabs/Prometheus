@@ -39,9 +39,12 @@ by session_id, so the queues ride along with the same handle.
 
 from __future__ import annotations
 
+import logging
 import time
 
 from prometheus.engine.messages import ConversationMessage
+
+log = logging.getLogger(__name__)
 
 MAX_SESSION_MESSAGES = 50
 
@@ -63,15 +66,26 @@ class ChatSession:
     __slots__ = (
         "session_id", "messages", "created_at",
         "queued_steers", "queued_prompts",
+        "_lcm_engine",
     )
 
-    def __init__(self, session_id: str) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        *,
+        lcm_engine: object | None = None,
+    ) -> None:
         self.session_id = session_id
         self.messages: list[ConversationMessage] = []
         self.created_at: float = time.time()
         # SPRINT-2 WS1 — see module docstring for semantics.
         self.queued_steers: list[str] = []
         self.queued_prompts: list[str] = []
+        # PR fix/memory-lcm-full-rewire (2026-05-26) — LCM persistence
+        # handle, set by SessionManager when the daemon has wired LCM.
+        # ``None`` when the session was created before LCM was available
+        # (e.g. tests, CLI without LCM) — persistence becomes a no-op.
+        self._lcm_engine = lcm_engine
 
     # ------------------------------------------------------------------
     # SPRINT-2 WS1 — /steer and /queue plumbing
@@ -129,8 +143,24 @@ class ChatSession:
         return n
 
     def add_user_message(self, text: str) -> None:
-        """Append a user message to the conversation."""
+        """Append a user message to the conversation.
+
+        PR fix/memory-lcm-full-rewire (2026-05-26): also persists to
+        LCM (best-effort) when an engine is wired. Without this hook,
+        the user-message half of every turn would be invisible to
+        LCM/MemoryExtractor — only the loop-appended tail would land
+        in the durable store.
+        """
+        # turn_index = position the message will occupy in self.messages
+        # AFTER the append (matches what add_result_messages will use
+        # for downstream turns).
+        new_turn_index = len(self.messages)
         self.messages.append(ConversationMessage.from_user_text(text))
+        if self._lcm_engine is not None:
+            self._persist_to_lcm(
+                [self.messages[-1]],
+                base_turn_index=new_turn_index,
+            )
 
     def add_result_messages(
         self,
@@ -145,10 +175,72 @@ class ChatSession:
         appended).  *original_len* is the index into *result_messages* at
         which the new content starts (i.e. ``len(session.messages) - 1``
         before the call, since the user message was already appended).
+
+        PR fix/memory-lcm-full-rewire (2026-05-26): after the in-memory
+        append, persist the new messages to LCM (when wired). LCM is the
+        durable conversation store that MemoryExtractor and future LCM
+        compaction read from. Persistence is best-effort and never
+        raises into the agent's path — failures are surfaced via
+        ``telemetry.record_silent_failure``.
         """
         new = result_messages[original_len:]
         if new:
             self.messages.extend(new)
+            if self._lcm_engine is not None:
+                self._persist_to_lcm(new, base_turn_index=original_len)
+
+    def _persist_to_lcm(
+        self,
+        new_messages: list[ConversationMessage],
+        *,
+        base_turn_index: int,
+    ) -> None:
+        """Persist new messages to LCM. Best-effort — never raises.
+
+        ``turn_index`` is set to ``base_turn_index + i`` so it matches
+        the position in ``self.messages`` after the extend.
+        """
+        try:
+            for i, msg in enumerate(new_messages):
+                self._lcm_engine.ingest_sync(  # type: ignore[union-attr]
+                    session_id=self.session_id,
+                    role=msg.role,
+                    content=msg.text,
+                    turn_index=base_turn_index + i,
+                )
+        except Exception as exc:
+            # Memory persistence MUST NOT be in the agent's critical
+            # path. Surface to silent_failures and continue. The
+            # nested try around the telemetry call covers the rare
+            # case where telemetry itself is unavailable — we log a
+            # warning rather than a bare pass so the primary error
+            # still leaves a trace.
+            try:
+                from prometheus.telemetry.tracker import get_telemetry_handle
+                tel = get_telemetry_handle()
+                if tel is not None:
+                    tel.record_silent_failure(
+                        subsystem="chat_session",
+                        operation="persist_to_lcm",
+                        exc=exc,
+                        context={
+                            "session_id": self.session_id,
+                            "new_msgs": len(new_messages),
+                            "base_turn_index": base_turn_index,
+                        },
+                    )
+            except Exception as nested_exc:
+                log.warning(
+                    "ChatSession: record_silent_failure ALSO failed "
+                    "(%r); primary error was: %r",
+                    nested_exc, exc,
+                )
+            log.warning(
+                "ChatSession: LCM persist failed for session=%s "
+                "(%d new messages) — agent loop unaffected",
+                self.session_id, len(new_messages),
+                exc_info=True,
+            )
 
     def rollback_last(self) -> None:
         """Remove the most recently appended message (error recovery)."""
@@ -176,11 +268,20 @@ class SessionManager:
 
     def __init__(self) -> None:
         self._sessions: dict[str, ChatSession] = {}
+        # PR fix/memory-lcm-full-rewire — set by the daemon after LCM
+        # init. Sessions created after this is wired get LCM persistence;
+        # sessions created before (none, in practice — daemon order
+        # guarantees this) silently no-op. Public attribute (not a setter
+        # method) keeps the wire site terse: ``session_manager.lcm_engine
+        # = lcm_engine``.
+        self.lcm_engine: object | None = None
 
     def get_or_create(self, session_id: str) -> ChatSession:
         """Return the existing session or create a new one."""
         if session_id not in self._sessions:
-            self._sessions[session_id] = ChatSession(session_id)
+            self._sessions[session_id] = ChatSession(
+                session_id, lcm_engine=self.lcm_engine
+            )
         return self._sessions[session_id]
 
     def clear(self, session_id: str) -> None:

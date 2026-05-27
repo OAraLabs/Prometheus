@@ -44,6 +44,11 @@ class MemoryStore:
         cur.executescript("""
             PRAGMA journal_mode=WAL;
 
+            -- DEPRECATED 2026-05-26 — superseded by LCM (LCMConversationStore)
+            -- as the conversation store. Kept temporarily because tests still
+            -- exercise this path; remove in follow-up PR alongside the test
+            -- cleanup. No new code should call this. See:
+            -- fix/memory-lcm-full-rewire commit message.
             CREATE TABLE IF NOT EXISTS messages (
                 id          TEXT PRIMARY KEY,
                 session_id  TEXT NOT NULL,
@@ -96,6 +101,11 @@ class MemoryStore:
     # Messages
     # ------------------------------------------------------------------
 
+    # DEPRECATED 2026-05-26 — superseded by LCM (LCMConversationStore)
+    # as the conversation store. Kept temporarily because tests still
+    # exercise this path; remove in follow-up PR alongside the test
+    # cleanup. No new code should call this. See:
+    # fix/memory-lcm-full-rewire commit message.
     def add_message(
         self,
         session_id: str,
