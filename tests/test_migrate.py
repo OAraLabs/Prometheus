@@ -83,15 +83,6 @@ def _opts(src: str, src_path: Path, dst: Path, **kw) -> MigrationOptions:
     return MigrationOptions(source=src, source_path=src_path, dest_path=dst, **kw)
 
 
-def _redirect_remap_items(report, tmp_path: Path) -> None:
-    """Redirect config remap items to tmp_path to avoid writing the real config."""
-    config_path = tmp_path / "config" / "prometheus.yaml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    for item in report.items:
-        if item.action == "remap":
-            item.dest_path = config_path
-
-
 # ------------------------------------------------------------------
 # detect_sources
 # ------------------------------------------------------------------
@@ -215,18 +206,11 @@ class TestHermesScan:
 # ------------------------------------------------------------------
 
 class TestHermesExecute:
-    def _execute_safe(self, migrator: HermesMigrator, tmp_path: Path) -> "MigrationReport":
-        """Execute migration with remap items redirected to tmp_path."""
-        report = migrator.scan()
-        _redirect_remap_items(report, tmp_path)
-        migrator._execute_items(report)
-        return report
-
     def test_copies_files(self, tmp_path: Path):
         hermes = _hermes_tree(tmp_path)
         dst = tmp_path / "prom"
         m = HermesMigrator(_opts("hermes", hermes, dst))
-        report = self._execute_safe(m, tmp_path)
+        report = m.execute()
         assert (dst / "SOUL.md").exists()
         assert (dst / "SOUL.md").read_text() == "# Hermes Soul\nI am Hermes."
         assert (dst / "MEMORY.md").exists()
@@ -247,7 +231,7 @@ class TestHermesExecute:
         dst.mkdir()
         (dst / "SOUL.md").write_text("keep me")
         m = HermesMigrator(_opts("hermes", hermes, dst))
-        report = self._execute_safe(m, tmp_path)
+        report = m.execute()
         assert (dst / "SOUL.md").read_text() == "keep me"
         soul = [i for i in report.items if "SOUL" in i.description][0]
         assert soul.status == "conflict"
@@ -258,7 +242,7 @@ class TestHermesExecute:
         dst.mkdir()
         (dst / "SOUL.md").write_text("old soul")
         m = HermesMigrator(_opts("hermes", hermes, dst, overwrite=True))
-        report = self._execute_safe(m, tmp_path)
+        report = m.execute()
         assert (dst / "SOUL.md").read_text() == "# Hermes Soul\nI am Hermes."
         archive_dirs = list((dst / "migration" / "hermes").iterdir())
         assert len(archive_dirs) == 1
@@ -270,7 +254,7 @@ class TestHermesExecute:
         hermes = _hermes_tree(tmp_path)
         dst = tmp_path / "prom"
         m = HermesMigrator(_opts("hermes", hermes, dst))
-        self._execute_safe(m, tmp_path)
+        m.execute()
         reports = list((dst / "migration" / "hermes").rglob("migration_report.yaml"))
         assert len(reports) == 1
         data = yaml.safe_load(reports[0].read_text())
@@ -280,15 +264,10 @@ class TestHermesExecute:
     def test_config_remap(self, tmp_path: Path):
         hermes = _hermes_tree(tmp_path)
         dst = tmp_path / "prom"
-        config_path = tmp_path / "config" / "prometheus.yaml"
-        config_path.parent.mkdir(parents=True)
-        config_path.write_text("system:\n  name: Prometheus\n")
         m = HermesMigrator(_opts("hermes", hermes, dst))
-        report = m.scan()
-        for item in report.items:
-            if item.action == "remap":
-                item.dest_path = config_path
-        m._execute_items(report)
+        m.execute()
+        config_path = dst / "config" / "prometheus.yaml"
+        assert config_path.exists()
         result = yaml.safe_load(config_path.read_text())
         assert result["model"]["provider"] == "openai"  # openrouter -> openai
         assert result["gateway"]["telegram_token"] == "bot-token-123"
@@ -351,9 +330,7 @@ class TestOpenClawScan:
         oc = tmp_path / ".openclaw"
         dst = tmp_path / "prom"
         m = OpenClawMigrator(_opts("openclaw", oc, dst))
-        report = m.scan()
-        _redirect_remap_items(report, tmp_path)
-        m._execute_items(report)
+        report = m.execute()
         assert (dst / "SOUL.md").exists()
         assert (dst / "SOUL.md").read_text() == "# OpenClaw Soul"
         assert len(report.migrated) > 0
