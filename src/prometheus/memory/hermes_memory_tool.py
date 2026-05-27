@@ -261,9 +261,12 @@ class MemoryTool(BaseTool):
 
     name = "memory"
     description = (
-        "Manage persistent memory entries. "
-        "Use 'add' to store a new fact, 'replace' to update, "
-        "'remove' to delete, 'list' to read all entries."
+        "Manage persistent memory entries. Call 'add' when the user "
+        "shares a durable fact about themselves (preferences, key "
+        "contacts, ongoing projects) or about the system "
+        "(infrastructure, conventions, decisions) that should persist "
+        "across sessions. Use 'replace' to update, 'remove' to delete, "
+        "'list' to read all entries."
     )
     input_model = MemoryToolInput
 

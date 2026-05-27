@@ -504,6 +504,192 @@ class TestSprint5Wiring:
 
 
 # ===========================================================================
+# PR fix/memory-lcm-full-rewire (2026-05-26) — LCM persistence end-to-end
+# ===========================================================================
+
+
+class TestMemoryLCMRewireWiring:
+    """End-to-end wiring tests for the May 2026 memory rewire.
+
+    Validates the three new contracts:
+    1. ``ChatSession.add_result_messages`` persists to LCM when wired.
+    2. ``MemoryExtractor`` reads from LCM via ``messages_since``.
+    3. ``MemoryTool.description`` includes the behavioural-trigger
+       language so the agent knows *when* to call it.
+    """
+
+    def test_chat_session_persists_new_messages_to_lcm(self, tmp_path):
+        """ChatSession.add_result_messages → LCMConversationStore.add_message.
+
+        Wires a real ChatSession to a real LCMEngine and asserts that
+        after a fake "agent turn" the LCM conversation store has the
+        expected rows.
+
+        Mirrors the gateway pattern from telegram.py:1639-1652:
+        ``pre_len = len(session.get_messages())`` (after user-append),
+        agent loop appends to a copy of the messages list, gateway then
+        calls ``add_result_messages(result.messages, pre_len)``. The
+        slice ``result_messages[pre_len:]`` is just the loop-appended
+        portion.
+        """
+        from prometheus.engine.messages import ConversationMessage, TextBlock
+        from prometheus.engine.session import ChatSession
+        from prometheus.memory.lcm_engine import LCMEngine
+        from unittest.mock import MagicMock
+
+        engine = LCMEngine(MagicMock(), db_path=tmp_path / "session_lcm.db")
+        try:
+            session = ChatSession("telegram:42", lcm_engine=engine)
+
+            session.add_user_message("hi prometheus")     # persists user → LCM
+            pre_len = len(session.get_messages())         # 1
+            # Simulate run_async returning a copy with extra messages.
+            result_messages = list(session.get_messages()) + [
+                ConversationMessage(role="assistant",
+                                    content=[TextBlock(text="hello will")]),
+                ConversationMessage(role="user",
+                                    content=[TextBlock(text="[tool result] ok")]),
+            ]
+            session.add_result_messages(result_messages, original_len=pre_len)
+
+            # In-memory: original user + 2 appended.
+            assert len(session.messages) == 3
+            roles_inmem = [m.role for m in session.messages]
+            assert roles_inmem == ["user", "assistant", "user"]
+
+            # LCM persisted all three: the user message (via
+            # add_user_message hook) plus the two new ones (via
+            # add_result_messages hook).
+            assert engine._conv_store.count_all("telegram:42") == 3
+            rows = engine._conv_store.get_all_messages("telegram:42")
+            assert [r.role for r in rows] == ["user", "assistant", "user"]
+            assert "hi prometheus" in rows[0].content
+            assert "hello will" in rows[1].content
+            assert "[tool result] ok" in rows[2].content
+        finally:
+            engine.close()
+
+    def test_chat_session_without_lcm_engine_is_inert(self, tmp_path):
+        """No LCMEngine → ChatSession works exactly as pre-PR (no persist)."""
+        from prometheus.engine.messages import ConversationMessage, TextBlock
+        from prometheus.engine.session import ChatSession
+
+        session = ChatSession("nolcm:1", lcm_engine=None)
+        session.add_user_message("hi")
+        pre_len = len(session.get_messages())
+        result_messages = list(session.get_messages()) + [
+            ConversationMessage(role="assistant",
+                                content=[TextBlock(text="hi back")]),
+        ]
+        # Should not raise even without LCM engine.
+        session.add_result_messages(result_messages, original_len=pre_len)
+        assert len(session.messages) == 2
+
+    def test_session_manager_wires_lcm_to_sessions(self, tmp_path):
+        """Setting ``session_manager.lcm_engine`` propagates to new sessions."""
+        from prometheus.engine.session import SessionManager
+        from prometheus.memory.lcm_engine import LCMEngine
+        from unittest.mock import MagicMock
+
+        engine = LCMEngine(MagicMock(), db_path=tmp_path / "sm_lcm.db")
+        try:
+            sm = SessionManager()
+            sm.lcm_engine = engine
+            session = sm.get_or_create("telegram:99")
+            assert session._lcm_engine is engine
+        finally:
+            engine.close()
+
+    def test_memory_extractor_reads_from_lcm(self, tmp_path):
+        """MemoryExtractor's read path goes through LCMConversationStore.messages_since.
+
+        Populate LCM with conversation messages, run extractor against
+        it, assert the extractor advances its watermark and stops on
+        the next call (idempotency).
+        """
+        import asyncio
+        from prometheus.memory.extractor import MemoryExtractor
+        from prometheus.memory.lcm_conversation_store import LCMConversationStore
+        from prometheus.memory.lcm_types import MessagePart
+        from prometheus.memory.store import MemoryStore
+        from unittest.mock import AsyncMock, MagicMock
+
+        # Real LCM conversation store seeded with a couple of messages.
+        conv_store = LCMConversationStore(db_path=tmp_path / "ext_lcm.db")
+        for i, content in enumerate([
+            "Will prefers kebab-case file names.",
+            "The project uses sqlite for telemetry storage.",
+        ]):
+            conv_store.insert_message(MessagePart(
+                role="user", content=content,
+                session_id="s1", turn_index=i,
+                timestamp=1.0 + i,
+            ))
+
+        # Build a MemoryExtractor with LCM injected directly + a stubbed
+        # envelope so no real LLM call happens.
+        facts_store = MemoryStore(db_path=tmp_path / "facts.db")
+        extractor = MemoryExtractor(
+            store=facts_store,
+            provider=MagicMock(),
+            lcm_conversation_store=conv_store,
+        )
+        # Stub the LLM envelope to return one extracted-fact JSON line.
+        extractor._envelope.call = AsyncMock(return_value=(
+            '{"entity_type":"person","entity_name":"Will",'
+            '"fact":"prefers kebab-case","confidence":0.9,"tags":[]}'
+        ))
+
+        # First run: should see 2 messages, advance watermark to 2.0.
+        count, facts = asyncio.run(extractor.run_once())
+        assert extractor._last_processed_ts == 2.0
+        assert count >= 1  # at least one fact persisted
+
+        # Second run: no new messages → early-return, watermark unchanged.
+        count2, facts2 = asyncio.run(extractor.run_once())
+        assert count2 == 0
+        assert facts2 == []
+        assert extractor._last_processed_ts == 2.0
+
+        conv_store.close()
+        facts_store.close()
+
+    def test_memory_extractor_skips_when_lcm_unavailable(self, tmp_path):
+        """Extractor with no LCM and no module engine wired → graceful no-op."""
+        import asyncio
+        from prometheus.memory.extractor import MemoryExtractor
+        from prometheus.memory.store import MemoryStore
+        from prometheus.tools.builtin import lcm_grep
+        from unittest.mock import MagicMock
+
+        # Belt-and-suspenders: clear the module-level engine handle so
+        # the resolver returns None.
+        saved_engine = getattr(lcm_grep, "_engine", None)
+        lcm_grep._engine = None
+        try:
+            facts_store = MemoryStore(db_path=tmp_path / "noLCM_facts.db")
+            extractor = MemoryExtractor(
+                store=facts_store,
+                provider=MagicMock(),
+                lcm_conversation_store=None,
+            )
+            count, facts = asyncio.run(extractor.run_once())
+            assert count == 0 and facts == []
+            facts_store.close()
+        finally:
+            lcm_grep._engine = saved_engine
+
+    def test_memory_tool_description_has_write_trigger(self):
+        """Gap 2a: tool description tells the agent *when* to call 'add'."""
+        from prometheus.memory.hermes_memory_tool import MemoryTool
+        # Behavioural-trigger language landed in the description.
+        assert "durable fact" in MemoryTool.description
+        assert "preferences" in MemoryTool.description
+        # Existing operation language preserved.
+        assert "'replace'" in MemoryTool.description
+
+
+# ===========================================================================
 # Sprint 9: SENTINEL
 # ===========================================================================
 

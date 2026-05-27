@@ -205,6 +205,55 @@ class LCMEngine:
         self._conv_store.add_message(session_id, msg)
         return msg.message_id
 
+    def ingest_sync(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        *,
+        turn_index: int = 0,
+    ) -> str:
+        """Synchronous sibling of :meth:`ingest` for sync call sites.
+
+        SQLite writes are synchronous anyway — ``ingest`` is ``async``
+        only because it shares the public ingest surface with future
+        consumers that may want to await downstream signal emission.
+        ``ChatSession.add_result_messages`` is a synchronous method
+        (per its module's "no thread crossing, append is atomic against
+        await checkpoints" contract); calling an async method from there
+        would require ``asyncio.create_task`` and lose the
+        ``record_silent_failure`` surfacing on write errors.
+
+        Same return semantics as :meth:`ingest`.
+        """
+        msg = MessagePart(
+            role=role,
+            content=content,
+            session_id=session_id,
+            turn_index=turn_index,
+            token_count=estimate_tokens(content),
+        )
+        self._conv_store.add_message(session_id, msg)
+        return msg.message_id
+
+    def is_ingested(self, message_id: str) -> bool:
+        """Return ``True`` iff this message_id is durably persisted.
+
+        Delegates to :meth:`LCMConversationStore.has_message`. Used by
+        the agent loop's microcompactor to decide whether to keep more
+        of a tool-result inline (LCM doesn't have it; need to keep
+        context locally) vs. less (LCM has it; safe to trim aggressively
+        because the loop can re-fetch).
+
+        Caveat: the agent_loop currently passes a tool_use_id here,
+        but LCM message_ids are per-message, not per-block. Until a
+        follow-up redesigns tool_result persistence to one row per block
+        keyed by tool_use_id, this returns ``False`` for every
+        tool_use_id — matching the conservative branch that the
+        previous ``hasattr`` guard fell through to anyway.
+        """
+        return self._conv_store.has_message(message_id)
+
     # ------------------------------------------------------------------
     # Assembly
     # ------------------------------------------------------------------

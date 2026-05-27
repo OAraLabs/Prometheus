@@ -92,10 +92,11 @@ class MemoryExtractor:
         post_extract_callback: Callable[[list[dict]], None] | None = None,
         signal_bus: object | None = None,
         telemetry: object | None = None,
+        lcm_conversation_store: object | None = None,
     ) -> None:
         from prometheus.learning.llm_envelope import LLMCallEnvelope
 
-        self._store = store
+        self._store = store  # facts store (.persist_memory + .search_memories)
         self._provider = provider
         self._model = model
         self._obsidian = obsidian_writer
@@ -104,6 +105,14 @@ class MemoryExtractor:
         self._signal_bus = signal_bus
         self._last_run: float = 0.0
         self._last_processed_ts: float = 0.0
+        # PR fix/memory-lcm-full-rewire (2026-05-26): conversation reads
+        # now come from LCM, not MemoryStore.messages (which was unwired
+        # — nothing produced to it). If ``lcm_conversation_store`` is
+        # None at construction time (e.g. CLI / unit tests where LCM
+        # isn't set up), ``run_once`` lazily looks it up via
+        # ``LCMEngine.conversation_store`` if a wired engine is later
+        # set on the daemon. The injection point keeps unit tests simple.
+        self._lcm_conv_store = lcm_conversation_store
         # Sprint S4 A1: shared LLMCallEnvelope. on_failure="return_none" so
         # _process_batch preserves its "returns (0, []) on failure" contract
         # without the redundant try/except. Failures still land in
@@ -129,20 +138,40 @@ class MemoryExtractor:
 
         Returns ``(count_persisted, list_of_fact_dicts)`` so callers
         (e.g. WikiCompiler) can act on the freshly-extracted facts.
+
+        PR fix/memory-lcm-full-rewire (2026-05-26): read path is now
+        LCMConversationStore.messages_since(self._last_processed_ts).
+        The watermark semantics — strictly greater than, global across
+        sessions (when session_id is None), excludes compacted — match
+        the pre-PR MemoryStore.messages query exactly.
         """
         since = self._last_processed_ts
-        if session_id:
-            messages = self._store.get_messages(
-                session_id, since=since or None, compressed=False, limit=500
+        conv_store = self._resolve_lcm_conv_store()
+        if conv_store is None:
+            log.debug(
+                "MemoryExtractor: LCM conversation store unavailable, "
+                "skipping pass"
             )
-        else:
-            messages = self._store._conn.execute(
-                "SELECT * FROM messages WHERE compressed = 0"
-                + (" AND timestamp > ?" if since else "")
-                + " ORDER BY timestamp ASC LIMIT 500",
-                (since,) if since else (),
-            ).fetchall()
-            messages = [dict(m) for m in messages]
+            return 0, []
+
+        # LCM read — returns list[MessagePart]. Convert to the dict shape
+        # _process_batch / _format_messages expect (matching the legacy
+        # MemoryStore.messages row dict: id, session_id, role, content,
+        # timestamp). Token counts come from the MessagePart for free
+        # but aren't used downstream.
+        parts = conv_store.messages_since(
+            since, limit=500, session_id=session_id
+        )
+        messages = [
+            {
+                "id": part.message_id,
+                "session_id": part.session_id,
+                "role": part.role,
+                "content": part.content,
+                "timestamp": part.timestamp,
+            }
+            for part in parts
+        ]
 
         if not messages:
             log.debug("MemoryExtractor: no new messages to process")
@@ -244,6 +273,33 @@ class MemoryExtractor:
             max_tokens=2048,
             operation="extract_memory_batch",
         )
+
+    def _resolve_lcm_conv_store(self) -> object | None:
+        """Return the LCMConversationStore handle, or ``None`` if unavailable.
+
+        Resolution order:
+          1. Explicitly-injected ``lcm_conversation_store`` from ``__init__``
+             (used by unit tests for direct control)
+          2. The conversation store on the module-level LCM engine, if a
+             daemon has wired one via ``LCMEngine`` initialisation
+             (production path)
+
+        Returns ``None`` if neither path yields a store — in that case
+        ``run_once`` skips the pass without raising.
+        """
+        if self._lcm_conv_store is not None:
+            return self._lcm_conv_store
+        try:
+            from prometheus.tools.builtin import lcm_grep
+        except Exception:
+            return None
+        engine = getattr(lcm_grep, "_engine", None)
+        if engine is None:
+            return None
+        try:
+            return engine.conversation_store
+        except Exception:
+            return None
 
     @staticmethod
     def _format_messages(messages: list[dict]) -> str:
