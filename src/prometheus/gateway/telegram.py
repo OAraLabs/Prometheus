@@ -302,6 +302,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("memory", self._cmd_memory))
         self._app.add_handler(CommandHandler("curator", self._cmd_curator))
         self._app.add_handler(CommandHandler("notifications", self._cmd_notifications))
+        # Voice mode toggle (TTS-out): auto | on | off
+        self._app.add_handler(CommandHandler("voice", self._cmd_voice))
         # Sprint S4 A3: /health — silent-failure telemetry surface
         self._app.add_handler(CommandHandler("health", self._cmd_health))
         # SignalBus Persistence sprint: /events — persisted signal-bus events
@@ -370,6 +372,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("memory", "Memory: show [user] | limits"),
                 BotCommand("curator", "Curator: status | show | run [dry]"),
                 BotCommand("notifications", "Skill/memory/curator notifications: off | quiet | verbose"),
+                BotCommand("voice", "Voice replies: auto | on | off (auto mirrors input modality)"),
                 BotCommand("health", "Silent-failure telemetry: last 24h or `/health 168 verbose`"),
                 BotCommand("anatomy", "Infrastructure snapshot"),
                 BotCommand("doctor", "Diagnostic health check"),
@@ -580,6 +583,7 @@ class TelegramAdapter(BasePlatformAdapter):
             "/memory    — show [user] | limits\n"
             "/curator   — status | show | run [dry]\n"
             "/notifications — off | quiet | verbose\n"
+            "/voice     — voice replies: auto | on | off (auto mirrors input)\n"
             "/health    — silent-failure telemetry (last 24h)\n"
             "/reset     — Clear conversation context\n"
             "/help      — This message\n"
@@ -1250,6 +1254,61 @@ class TelegramAdapter(BasePlatformAdapter):
         text = _cmds.cmd_notifications(mode=arg)
         await self.send(update.effective_chat.id, text, parse_mode=None)
 
+    async def _cmd_voice(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /voice — per-chat voice reply mode.
+
+        Modes:
+          auto  (default) — mirror input modality (voice in → voice out)
+          on              — always reply with voice (TTS for every response)
+          off             — always reply with text (disable voice replies)
+
+        With no argument, reports the current effective mode. Persists
+        across daemon restarts in ~/.prometheus/voice_modes.json.
+        """
+        if update.effective_chat is None:
+            return
+        chat_id = update.effective_chat.id
+        arg = (" ".join(context.args or []).strip()).lower()
+
+        if not arg:
+            current = self._get_voice_mode(chat_id)
+            cfg = self._voice_config()
+            engine = cfg.get("engine", "piper")
+            model = cfg.get("model_path", "(unset)")
+            await self.send(
+                chat_id,
+                f"Voice mode: {current}\n"
+                f"  auto — mirror input modality (default)\n"
+                f"  on   — always voice reply\n"
+                f"  off  — always text reply\n"
+                f"\nEngine: {engine}\nModel:  {model}\n"
+                f"Set with: /voice [auto|on|off]",
+                parse_mode=None,
+            )
+            return
+
+        if arg not in ("auto", "on", "off"):
+            await self.send(
+                chat_id,
+                f"Unknown voice mode: {arg}\nUse: /voice [auto|on|off]",
+                parse_mode=None,
+            )
+            return
+
+        self._set_voice_mode(chat_id, arg)
+        descriptions = {
+            "auto": "mirror input modality (voice in → voice out)",
+            "on": "always reply with voice",
+            "off": "always reply with text",
+        }
+        await self.send(
+            chat_id,
+            f"Voice mode set to: {arg}\n  ({descriptions[arg]})",
+            parse_mode=None,
+        )
+
     async def _cmd_context(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1661,11 +1720,32 @@ class TelegramAdapter(BasePlatformAdapter):
             session.rollback_last()
             response_text = f"Error: {exc}"
 
-        await self.send(
-            event.chat_id,
-            strip_markdown(response_text),
-            reply_to=event.message_id,
-        )
+        # Voice-mode routing — prefer voice reply when the chat is in
+        # voice mode (and synthesis succeeds); fall back to plain text on
+        # any failure so a missing piper binary or bad model path never
+        # silences the bot. See _voice_should_reply / _synthesize_voice.
+        sent_voice = False
+        if self._voice_should_reply(event):
+            try:
+                ogg_path = await self._synthesize_voice(response_text)
+            except Exception as exc:
+                logger.warning(
+                    "Voice synthesis raised for chat %d: %s",
+                    event.chat_id, exc,
+                )
+                ogg_path = None
+            if ogg_path:
+                voice_result = await self._send_voice(
+                    event.chat_id, ogg_path, reply_to=event.message_id,
+                )
+                sent_voice = voice_result.success
+
+        if not sent_voice:
+            await self.send(
+                event.chat_id,
+                strip_markdown(response_text),
+                reply_to=event.message_id,
+            )
 
         # SPRINT-2 WS1: after the turn ends, drain any queued prompts and
         # fire the next one as a fresh user turn. Loop until the queue is
@@ -2936,6 +3016,289 @@ class TelegramAdapter(BasePlatformAdapter):
             return self.agent_loop._provider
         except AttributeError:
             return None
+
+    # ------------------------------------------------------------------
+    # Voice mode (TTS-out for Telegram) — added 2026-05
+    # ------------------------------------------------------------------
+    #
+    # Pipeline: agent text reply → strip markdown for speech → piper TTS
+    # → WAV → ffmpeg opus encode → ogg → bot.send_voice().
+    #
+    # Routing decision per chat:
+    #   "auto" (default) — mirror input modality (voice in → voice out)
+    #   "on"             — always reply with voice
+    #   "off"            — always reply with text (disables voice replies)
+    #
+    # Per-chat mode is persisted to ~/.prometheus/voice_modes.json so
+    # /voice toggles survive daemon restarts. Falls through to the
+    # gateway.voice.default_mode config value when no override is set.
+    #
+    # Failure mode: if TTS synthesis or ffmpeg encoding fails (binary
+    # missing, model path bad, etc.) the method returns None and
+    # _dispatch_to_agent falls back to a normal text reply. A voice
+    # mode is opt-in: an unconfigured deployment never tries to speak.
+
+    def _voice_config(self) -> dict[str, Any]:
+        """Return the gateway.voice config block (or empty dict).
+
+        Defensive: tests construct ``TelegramAdapter.__new__(TelegramAdapter)``
+        without running ``__init__``, so ``_prometheus_config`` may be
+        missing entirely. Treat that as "no voice config" rather than
+        raising — voice mode is opt-in and an unconfigured adapter
+        should still dispatch text replies normally.
+        """
+        cfg = getattr(self, "_prometheus_config", None)
+        if not isinstance(cfg, dict):
+            return {}
+        gw = cfg.get("gateway", {})
+        if isinstance(gw, dict):
+            voice = gw.get("voice", {})
+            if isinstance(voice, dict):
+                return voice
+        return {}
+
+    def _voice_modes_path(self) -> str:
+        """Path to the per-chat voice mode override JSON file."""
+        from prometheus.config.paths import get_config_dir
+        return str(get_config_dir() / "voice_modes.json")
+
+    def _load_voice_modes(self) -> dict[str, str]:
+        """Read per-chat voice mode overrides. Returns {chat_id_str: mode}."""
+        import json
+        try:
+            with open(self._voice_modes_path()) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
+        except (FileNotFoundError, ValueError, OSError):
+            pass
+        return {}
+
+    def _save_voice_modes(self, modes: dict[str, str]) -> None:
+        """Persist per-chat voice mode overrides."""
+        import json
+        try:
+            with open(self._voice_modes_path(), "w") as f:
+                json.dump(modes, f, indent=2)
+        except OSError as exc:
+            logger.warning("Failed to persist voice modes: %s", exc)
+
+    def _get_voice_mode(self, chat_id: int) -> str:
+        """Return the effective voice mode for a chat ('auto' | 'on' | 'off')."""
+        overrides = self._load_voice_modes()
+        mode = overrides.get(str(chat_id))
+        if mode in ("auto", "on", "off"):
+            return mode
+        default = self._voice_config().get("default_mode", "auto")
+        return default if default in ("auto", "on", "off") else "auto"
+
+    def _set_voice_mode(self, chat_id: int, mode: str) -> None:
+        """Persist a per-chat voice mode override."""
+        if mode not in ("auto", "on", "off"):
+            return
+        modes = self._load_voice_modes()
+        modes[str(chat_id)] = mode
+        self._save_voice_modes(modes)
+
+    def _voice_should_reply(self, event: MessageEvent) -> bool:
+        """Decide whether the reply to *event* should be a voice message."""
+        mode = self._get_voice_mode(event.chat_id)
+        if mode == "off":
+            return False
+        if mode == "on":
+            return True
+        # auto: mirror input modality
+        return event.message_type == MessageType.VOICE
+
+    def _strip_text_for_tts(self, text: str) -> str:
+        """Strip markdown/symbols that TTS would mispronounce.
+
+        More aggressive than strip_markdown — also removes code blocks
+        entirely (TTS reading code is unintelligible), URLs, and bullet
+        glyphs. Caller truncates to gateway.voice.max_chars.
+        """
+        # Drop fenced code blocks wholesale
+        text = re.sub(r"```[\s\S]*?```", " [code omitted] ", text)
+        text = re.sub(r"`([^`]+)`", r"\1", text)
+        # Headings, bold, italics
+        text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+        text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"\1", text)
+        text = re.sub(r"_([^_]+)_", r"\1", text)
+        # Bullets, list markers
+        text = re.sub(r"^\s*[\*\-•]\s+", "", text, flags=re.MULTILINE)
+        # URLs — speak as "link" rather than reading the whole URL aloud
+        text = re.sub(r"https?://\S+", "link", text)
+        # Collapse whitespace
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    async def _synthesize_voice(self, text: str) -> str | None:
+        """Synthesize *text* to an opus-encoded .ogg file for Telegram.
+
+        Returns the absolute path on success, None on any failure
+        (caller should fall back to text). Uses piper if configured,
+        else espeak. Output is an opus-encoded ogg suitable for
+        bot.send_voice() — Telegram voice messages require this format
+        for the in-app waveform/playback UI.
+        """
+        import tempfile
+
+        cfg = self._voice_config()
+        max_chars = int(cfg.get("max_chars", 800))
+        clean = self._strip_text_for_tts(text)
+        if not clean:
+            return None
+        if len(clean) > max_chars:
+            clean = clean[: max_chars - 1].rsplit(" ", 1)[0] + "…"
+
+        engine = (cfg.get("engine") or "piper").lower()
+        wav_path = tempfile.mktemp(suffix=".wav")
+
+        if engine == "piper":
+            ok = await self._run_piper(clean, wav_path, cfg.get("model_path"))
+        elif engine == "espeak":
+            ok = await self._run_espeak(clean, wav_path)
+        else:
+            logger.warning("Unknown TTS engine: %s", engine)
+            return None
+
+        if not ok:
+            Path(wav_path).unlink(missing_ok=True)
+            return None
+
+        bitrate = str(cfg.get("opus_bitrate", "32k"))
+        ogg_path = await self._wav_to_opus_ogg(wav_path, bitrate)
+        Path(wav_path).unlink(missing_ok=True)
+        return ogg_path
+
+    async def _run_piper(
+        self, text: str, out_wav: str, model_path: str | None
+    ) -> bool:
+        """Invoke the piper TTS CLI. Returns True on success."""
+        import shutil
+        piper_bin = shutil.which("piper")
+        if piper_bin is None:
+            logger.debug("piper binary not found on PATH")
+            return False
+        if not model_path:
+            logger.debug("No piper model_path configured in gateway.voice")
+            return False
+        model = Path(model_path).expanduser()
+        if not model.is_file():
+            logger.warning("Piper model not found: %s", model)
+            return False
+
+        proc = await asyncio.create_subprocess_exec(
+            piper_bin, "-m", str(model), "-f", out_wav,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(text.encode("utf-8")), timeout=60
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            logger.warning("piper timed out after 60s")
+            return False
+        if proc.returncode != 0:
+            logger.warning(
+                "piper failed (rc=%s): %s",
+                proc.returncode, stderr.decode(errors="replace")[:300],
+            )
+            return False
+        return Path(out_wav).is_file() and Path(out_wav).stat().st_size > 0
+
+    async def _run_espeak(self, text: str, out_wav: str) -> bool:
+        """Invoke espeak-ng (or espeak) as a piper fallback."""
+        import shutil
+        bin_path = shutil.which("espeak-ng") or shutil.which("espeak")
+        if bin_path is None:
+            return False
+        proc = await asyncio.create_subprocess_exec(
+            bin_path, "-w", out_wav,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(text.encode("utf-8")), timeout=30
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return False
+        if proc.returncode != 0:
+            logger.warning(
+                "espeak failed (rc=%s): %s",
+                proc.returncode, stderr.decode(errors="replace")[:300],
+            )
+            return False
+        return Path(out_wav).is_file() and Path(out_wav).stat().st_size > 0
+
+    async def _wav_to_opus_ogg(self, wav_path: str, bitrate: str) -> str | None:
+        """Re-encode a WAV to opus-in-ogg via ffmpeg. Returns the .ogg path or None."""
+        import shutil
+        import tempfile
+        if shutil.which("ffmpeg") is None:
+            logger.warning("ffmpeg not on PATH — cannot encode voice reply")
+            return None
+        ogg_path = tempfile.mktemp(suffix=".ogg")
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", wav_path,
+            "-c:a", "libopus", "-b:a", bitrate,
+            "-application", "voip",
+            ogg_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return None
+        if proc.returncode != 0:
+            logger.warning(
+                "ffmpeg opus encode failed (rc=%s): %s",
+                proc.returncode, stderr.decode(errors="replace")[:300],
+            )
+            Path(ogg_path).unlink(missing_ok=True)
+            return None
+        if not Path(ogg_path).is_file() or Path(ogg_path).stat().st_size == 0:
+            return None
+        return ogg_path
+
+    async def _send_voice(
+        self,
+        chat_id: int,
+        ogg_path: str,
+        *,
+        reply_to: int | None = None,
+        caption: str | None = None,
+    ) -> SendResult:
+        """Upload an opus .ogg as a Telegram voice message."""
+        if not self._app:
+            return SendResult(success=False, error="Bot not initialized")
+        try:
+            with open(ogg_path, "rb") as f:
+                msg = await self._app.bot.send_voice(
+                    chat_id=chat_id,
+                    voice=f,
+                    caption=caption,
+                    reply_to_message_id=reply_to,
+                )
+            return SendResult(success=True, message_id=msg.message_id)
+        except Exception as exc:
+            logger.error("Failed to send voice to chat %d: %s", chat_id, exc)
+            return SendResult(success=False, error=str(exc))
+        finally:
+            # Best-effort cleanup; cache files are short-lived
+            Path(ogg_path).unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # WEAVE Session B: /audit command

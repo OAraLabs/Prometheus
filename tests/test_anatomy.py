@@ -108,38 +108,89 @@ class TestAnatomyScanner:
         assert state.gpu_vram_used_mb == 18432
         assert state.gpu_vram_free_mb == 6144
 
-    def test_gpu_remote_fallback_via_ssh(self) -> None:
+    def test_gpu_remote_inference_probes_remote_first(self) -> None:
+        """When inference is remote, SSH the remote box for the inference GPU.
+
+        Regression guard: the old behavior probed local nvidia-smi first
+        and only fell back to SSH if local failed — so on a box with both
+        a local card AND remote inference, the local card was reported
+        as the inference GPU (then labeled "(remote)"). The agent then
+        ran local nvidia-smi to "verify" and confidently confirmed the
+        wrong story. New behavior: when URL is remote, SSH first; the
+        local card is reported as a separate ``local_gpu_*`` field.
+        """
         scanner = AnatomyScanner(
             llama_cpp_url="http://192.0.2.1:8080",
             inference_engine="llama_cpp",
+            ssh_user="gpu-host-user",  # any non-empty value triggers the SSH probe path
         )
         state = AnatomyState()
 
-        # Local nvidia-smi fails
-        local_proc = AsyncMock()
-        local_proc.communicate = AsyncMock(return_value=(b"", b"not found"))
-        local_proc.returncode = 1
-
-        # Remote SSH nvidia-smi succeeds
+        # Remote SSH (called FIRST now) returns the 4090
         remote_proc = AsyncMock()
         remote_proc.communicate = AsyncMock(
             return_value=(b"NVIDIA RTX 4090, 24576, 18432, 6144\n", b"")
         )
         remote_proc.returncode = 0
 
+        # Local probe (called second, as secondary) returns the 3090 Ti
+        local_proc = AsyncMock()
+        local_proc.communicate = AsyncMock(
+            return_value=(b"NVIDIA RTX 3090 Ti, 24564, 23000, 1564\n", b"")
+        )
+        local_proc.returncode = 0
+
         call_count = 0
         async def mock_exec(*args, **kwargs):
             nonlocal call_count
             call_count += 1
-            if call_count == 1:
-                return local_proc  # first call: local nvidia-smi
-            return remote_proc  # second call: ssh nvidia-smi
+            # First call is SSH (remote inference probe); second is local secondary
+            return remote_proc if call_count == 1 else local_proc
 
         with patch("asyncio.create_subprocess_exec", side_effect=mock_exec):
             asyncio.run(scanner._detect_gpu(state))
 
+        # Primary GPU fields = inference GPU = the remote 4090
         assert state.gpu_name == "NVIDIA RTX 4090"
         assert state.gpu_vram_total_mb == 24576
+        assert state.gpu_is_remote is True
+        assert state.gpu_inference_host == "192.0.2.1"
+        assert state.gpu_probe_method == "ssh"
+        # Local 3090 Ti reported separately, not conflated with the inference card
+        assert state.local_gpu_name == "NVIDIA RTX 3090 Ti"
+        assert state.local_gpu_vram_total_mb == 24564
+
+    def test_gpu_remote_no_ssh_credentials_reports_clear_error(self) -> None:
+        """Without ssh_user, the remote probe fails loudly — does NOT substitute local stats.
+
+        This is the core anti-bug: we want a clear "couldn't reach remote"
+        error rather than silently reporting local-card stats as if they
+        were remote (which is what the old code did).
+        """
+        scanner = AnatomyScanner(
+            llama_cpp_url="http://192.0.2.1:8080",
+            inference_engine="llama_cpp",
+            # No ssh_user — anatomy.ssh_user not configured
+        )
+        state = AnatomyState()
+
+        # Even if local nvidia-smi works, it must NOT be reported as the inference GPU
+        local_proc = AsyncMock()
+        local_proc.communicate = AsyncMock(
+            return_value=(b"NVIDIA RTX 3090 Ti, 24564, 23000, 1564\n", b"")
+        )
+        local_proc.returncode = 0
+
+        with patch("asyncio.create_subprocess_exec", return_value=local_proc):
+            asyncio.run(scanner._detect_gpu(state))
+
+        # Primary (inference) GPU stays None — we couldn't probe it
+        assert state.gpu_name is None
+        assert state.gpu_is_remote is True
+        assert state.gpu_probe_error is not None
+        assert "SSH credentials" in state.gpu_probe_error
+        # Local card surfaces as the secondary field — properly attributed
+        assert state.local_gpu_name == "NVIDIA RTX 3090 Ti"
 
     def test_gpu_remote_skipped_for_localhost(self) -> None:
         scanner = AnatomyScanner(
@@ -577,7 +628,10 @@ class TestCmdAnatomy:
         assert "test-brain" in text
         assert "remote inference" in text
         assert "NVIDIA RTX 4090" in text
-        assert "GPU:" in text
+        # New label: "GPU (inference, ...):" instead of bare "GPU:" — the
+        # change avoids the old bug where local stats were shown under a
+        # plain "GPU:" header with a misleading "(remote)" suffix.
+        assert "GPU (inference" in text
         assert "VRAM:" in text
         assert "Tailscale:" in text
         assert "test-gpu" in text or "test-brain" in text
@@ -585,7 +639,7 @@ class TestCmdAnatomy:
         assert "Model:" in text
 
     async def test_cmd_anatomy_graceful_gpu_unavailable(self) -> None:
-        """When GPU detection fails, should show 'remote (stats unavailable)'."""
+        """When remote GPU probe fails, surface the error — never substitute local stats."""
         import prometheus.tools.builtin.anatomy as mod
         from prometheus.gateway.commands import cmd_anatomy
 
@@ -597,6 +651,9 @@ class TestCmdAnatomy:
             gpu_vram_total_mb=None,
             gpu_vram_used_mb=None,
             gpu_vram_free_mb=None,
+            gpu_is_remote=True,
+            gpu_inference_host="192.0.2.1",
+            gpu_probe_error="SSH credentials not configured",
             inference_url="http://192.0.2.1:8080",
         )
         mock_scanner.scan = AsyncMock(return_value=state)
@@ -609,7 +666,11 @@ class TestCmdAnatomy:
         finally:
             mod._scanner, mod._writer, mod._project_store = old_s, old_w, old_p
 
-        assert "remote (stats unavailable)" in text
+        # Honest failure — names the inference host AND the reason. Old
+        # code printed "GPU: remote (stats unavailable)" with no detail.
+        assert "unreachable" in text
+        assert "192.0.2.1" in text
+        assert "SSH credentials" in text
 
     async def test_cmd_anatomy_no_tailscale(self) -> None:
         """When Tailscale is not available, skip that section."""
