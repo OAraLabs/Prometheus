@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from croniter import croniter
 
 from prometheus.config.paths import get_cron_registry_path
+
+DEFAULT_CRON_TIMEZONE = "America/New_York"
 
 
 def load_cron_jobs() -> list[dict[str, Any]]:
@@ -40,9 +44,51 @@ def validate_cron_expression(expression: str) -> bool:
     return croniter.is_valid(expression)
 
 
-def next_run_time(expression: str, base: datetime | None = None) -> datetime:
-    """Return the next run time for a cron expression."""
-    base = base or datetime.now(timezone.utc)
+def _default_cron_tz() -> ZoneInfo:
+    """Resolve the cron timezone.
+
+    Reads ``gateway.cron_timezone`` from prometheus.yaml when the config file is
+    reachable; otherwise defaults to ``America/New_York``. A missing config is a
+    normal condition (use the default), but a malformed config or an invalid
+    timezone name is allowed to raise — no silent fallback.
+    """
+    tz_name = DEFAULT_CRON_TIMEZONE
+    cfg_path = Path("config/prometheus.yaml")
+    if not cfg_path.exists():
+        from prometheus.config.paths import get_config_dir
+
+        cfg_path = get_config_dir() / "prometheus.yaml"
+    if cfg_path.exists():
+        import yaml
+
+        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        configured = (data.get("gateway") or {}).get("cron_timezone")
+        if configured:
+            tz_name = str(configured)
+    return ZoneInfo(tz_name)
+
+
+def next_run_time(
+    expression: str,
+    base: datetime | None = None,
+    tz: ZoneInfo | None = None,
+) -> datetime:
+    """Return the next run time for a cron expression, evaluated in local time.
+
+    The expression is interpreted in *tz* (default: ``gateway.cron_timezone`` or
+    ``America/New_York``), NOT UTC — so ``"30 7 * * *"`` means 07:30 *local*.
+    A naive *base* is treated as local; an aware *base* (e.g. the UTC ``now``
+    that ``mark_job_run`` passes) is converted into *tz* first. The result is
+    tz-aware, so ``isoformat()`` preserves the offset and the scheduler's
+    ``next_run <= datetime.now(timezone.utc)`` compares the correct instant.
+    """
+    tz = tz or _default_cron_tz()
+    if base is None:
+        base = datetime.now(tz)
+    elif base.tzinfo is None:
+        base = base.replace(tzinfo=tz)
+    else:
+        base = base.astimezone(tz)
     return croniter(expression, base).get_next(datetime)
 
 
