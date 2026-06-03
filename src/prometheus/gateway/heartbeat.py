@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL = 30  # seconds
 DEFAULT_IDLE_THRESHOLD = 900  # 15 minutes
+DEFAULT_TASK_PROGRESS_INTERVAL = 600  # 10 minutes between "still running" pings
+
+# Background-task statuses that mean the task has stopped running.
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "killed"})
 
 
 class Heartbeat:
@@ -37,6 +41,8 @@ class Heartbeat:
         task_manager: BackgroundTaskManager | None = None,
         signal_bus: SignalBus | None = None,
         idle_threshold: int = DEFAULT_IDLE_THRESHOLD,
+        notify_chat_id: int | None = None,
+        task_progress_interval: int = DEFAULT_TASK_PROGRESS_INTERVAL,
     ) -> None:
         self.interval = interval
         self.gateway = gateway
@@ -48,6 +54,15 @@ class Heartbeat:
         self._idle_threshold = idle_threshold
         self._last_activity: float = time.time()
         self._idle_emitted = False
+
+        # Proactive background-task notifications (audit fix #3): push a
+        # Telegram message on finish/fail and periodic "still running" pings
+        # so the user doesn't have to poll task_list. No-op unless both a
+        # gateway and a notify_chat_id are wired.
+        self._notify_chat_id = notify_chat_id
+        self._task_progress_interval = task_progress_interval
+        self._task_status_seen: dict[str, str] = {}
+        self._task_progress_last: dict[str, float] = {}
 
     @property
     def signal_bus(self) -> SignalBus | None:
@@ -134,6 +149,9 @@ class Heartbeat:
                     # SENTINEL idle detection (Sprint 9)
                     await self._check_idle()
 
+                    # Proactive background-task notifications (audit fix #3)
+                    await self._check_task_transitions()
+
                 except Exception as exc:
                     logger.error("Heartbeat check failed: %s", exc)
 
@@ -168,6 +186,96 @@ class Heartbeat:
                 source="heartbeat",
             ))
             logger.info("Heartbeat: activity resumed")
+
+    # ------------------------------------------------------------------
+    # Proactive background-task notifications (audit fix #3)
+    # ------------------------------------------------------------------
+
+    async def _check_task_transitions(self) -> None:
+        """Notify on background-task finish/fail and emit periodic progress pings.
+
+        Compares each task's status against the previous tick. Only tasks we
+        previously witnessed *active* trigger a terminal notification, so
+        pre-existing finished tasks present at startup don't spam the chat.
+        """
+        if not (self.task_manager and self.gateway and self._notify_chat_id):
+            return
+
+        now = time.time()
+        live_ids: set[str] = set()
+
+        for task in self.task_manager.list_tasks():
+            live_ids.add(task.id)
+            prev = self._task_status_seen.get(task.id)
+            cur = task.status
+
+            if cur in _TERMINAL_STATUSES:
+                # Notify once, and only if we saw it running/pending before —
+                # otherwise an already-finished task at startup would ping.
+                if prev is not None and prev not in _TERMINAL_STATUSES:
+                    await self._notify(self._format_terminal(task, now))
+                self._task_progress_last.pop(task.id, None)
+            elif cur == "running":
+                last = self._task_progress_last.get(task.id)
+                if last is None:
+                    # First sighting: baseline from start time so a fresh task
+                    # isn't pinged immediately; a long-runner pings when due.
+                    last = task.started_at or now
+                    self._task_progress_last[task.id] = last
+                if now - last >= self._task_progress_interval:
+                    await self._notify(
+                        f"⏳ Still running ({self._format_elapsed(task, now=now)} "
+                        f"elapsed): {task.description}\nID: {task.id}"
+                    )
+                    self._task_progress_last[task.id] = now
+
+            self._task_status_seen[task.id] = cur
+
+        # Forget tasks the manager no longer reports, to bound memory.
+        for gone in set(self._task_status_seen) - live_ids:
+            self._task_status_seen.pop(gone, None)
+            self._task_progress_last.pop(gone, None)
+
+    async def _notify(self, text: str) -> None:
+        """Push a proactive message to the configured chat.
+
+        Logs (never silently swallows) on failure so a Telegram hiccup can't
+        kill the heartbeat loop.
+        """
+        if not (self.gateway and self._notify_chat_id):
+            return
+        try:
+            await self.gateway.send(self._notify_chat_id, text)
+        except Exception:
+            logger.exception("Heartbeat: failed to send task notification")
+
+    def _format_terminal(self, task: Any, now: float) -> str:
+        """Compose the finish/fail message for a terminal task."""
+        elapsed = self._format_elapsed(task, now=now)
+        if task.status == "completed":
+            rc = "" if task.return_code in (None, 0) else f" (rc={task.return_code})"
+            return (
+                f"✅ Task done: {task.description}{rc}\n"
+                f"Elapsed: {elapsed}\nID: {task.id}"
+            )
+        verb = "failed" if task.status == "failed" else "was killed"
+        rc = "" if task.return_code is None else f" (rc={task.return_code})"
+        return (
+            f"⚠️ Task {verb}: {task.description}{rc}\n"
+            f"Elapsed: {elapsed}\nID: {task.id}"
+        )
+
+    @staticmethod
+    def _format_elapsed(task: Any, *, now: float | None = None) -> str:
+        """Human-readable elapsed time for a task."""
+        start = task.started_at or task.created_at or 0.0
+        end = task.ended_at or (now if now is not None else time.time())
+        secs = max(0, int(end - start))
+        if secs < 60:
+            return f"{secs}s"
+        if secs < 3600:
+            return f"{secs // 60}m {secs % 60}s"
+        return f"{secs // 3600}h {(secs % 3600) // 60}m"
 
     def stop(self) -> None:
         """Signal the heartbeat to stop on the next iteration."""

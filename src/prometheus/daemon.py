@@ -511,8 +511,17 @@ async def run_daemon(args: argparse.Namespace) -> None:
         except Exception as exc:
             logger.error("Failed to start Slack adapter: %s", exc)
 
-    # Heartbeat
-    heartbeat = Heartbeat(gateway=telegram)
+    # Heartbeat — also watches background tasks and pushes proactive
+    # finish/fail + progress notifications to the user (audit fix #3).
+    from prometheus.tasks.manager import get_task_manager
+    _notify_chat = gateway_config.get("briefing_chat_id") or (
+        gateway_config.get("allowed_chat_ids") or [None]
+    )[0]
+    heartbeat = Heartbeat(
+        gateway=telegram,
+        task_manager=get_task_manager(),
+        notify_chat_id=_notify_chat,
+    )
     heartbeat_task = asyncio.create_task(heartbeat.run_forever())
     tasks.append(heartbeat_task)
 
