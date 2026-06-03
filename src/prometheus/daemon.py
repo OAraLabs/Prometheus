@@ -559,11 +559,19 @@ async def run_daemon(args: argparse.Namespace) -> None:
     heartbeat_task = asyncio.create_task(heartbeat.run_forever())
     tasks.append(heartbeat_task)
 
-    # Cron scheduler (skip if --telegram-only)
+    # Cron scheduler (skip if --telegram-only). Wire a failure-notification
+    # path so cron job failures push a Telegram message — the heartbeat
+    # task-watcher only sees BackgroundTaskManager tasks, not cron
+    # subprocesses, so without this a failing daily briefing is silent.
     if not args.telegram_only:
+        from prometheus.gateway.cron_scheduler import set_cron_notifier
+        set_cron_notifier(telegram, _notify_chat)
         cron_task = asyncio.create_task(run_scheduler_loop())
         tasks.append(cron_task)
-        logger.info("Cron scheduler started")
+        logger.info(
+            "Cron scheduler started (failure notifier %s)",
+            "wired" if (telegram is not None and _notify_chat) else "disabled",
+        )
 
     # LCM engine (optional, from Sprint 7)
     lcm_engine = None

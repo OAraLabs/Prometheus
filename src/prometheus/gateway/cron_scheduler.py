@@ -30,6 +30,72 @@ logger = logging.getLogger(__name__)
 TICK_INTERVAL_SECONDS = 30
 """How often the scheduler checks for due jobs."""
 
+# ---------------------------------------------------------------------------
+# Failure notifications (audit follow-up: cron failures must surface)
+# ---------------------------------------------------------------------------
+#
+# The Heartbeat task-notification path watches BackgroundTaskManager only —
+# cron jobs run via asyncio.create_subprocess_exec and never appear there. So
+# without this hook, a failing cron job (like a broken daily briefing) is
+# silent unless the user explicitly polls cron_list. The daemon wires a
+# notifier at startup; if none is set, this is a no-op.
+
+NOTIFY_COOLDOWN_SECONDS = 3600
+"""Per-job throttle. Without it, a chronically broken hourly job would push
+24 identical messages a day. One per hour per job is enough to surface
+regressions without spamming."""
+
+_NOTIFIER_GATEWAY: Any | None = None
+_NOTIFIER_CHAT_ID: int | None = None
+_LAST_NOTIFY: dict[str, float] = {}
+
+
+def set_cron_notifier(gateway: Any | None, chat_id: int | None) -> None:
+    """Register a Telegram-style gateway + destination chat id.
+
+    Passing ``None`` for either argument disables notifications (the daemon
+    does that when no chat target is configured). Subsequent successful calls
+    replace the prior wiring; the per-job throttle map is NOT cleared so a
+    restart-driven re-wiring doesn't re-spam in-flight failures.
+    """
+    global _NOTIFIER_GATEWAY, _NOTIFIER_CHAT_ID
+    _NOTIFIER_GATEWAY = gateway
+    _NOTIFIER_CHAT_ID = chat_id
+
+
+async def _maybe_notify_failure(entry: dict[str, Any]) -> None:
+    """Push a failure message if a notifier is wired and the throttle allows.
+
+    No-op on success, no-op when the gateway/chat are unset, and throttled per
+    job name by NOTIFY_COOLDOWN_SECONDS. Send errors are logged, never raised,
+    so a flaky Telegram can't kill the scheduler.
+    """
+    if entry.get("status") == "success":
+        return
+    if _NOTIFIER_GATEWAY is None or _NOTIFIER_CHAT_ID is None:
+        return
+    name = str(entry.get("name", "?"))
+    now = time.time()
+    if now - _LAST_NOTIFY.get(name, 0) < NOTIFY_COOLDOWN_SECONDS:
+        logger.info("Cron failure notification throttled for %r", name)
+        return
+    stderr_tail = "\n".join(
+        (entry.get("stderr") or "").strip().splitlines()[-5:]
+    ) or "(no stderr)"
+    cmd_preview = str(entry.get("command", ""))[:120]
+    text = (
+        f"⚠️ Cron job failed: {name}\n"
+        f"status={entry.get('status')} rc={entry.get('returncode')}\n"
+        f"command: {cmd_preview}\n"
+        f"stderr (last 5 lines):\n{stderr_tail}"
+    )
+    try:
+        await _NOTIFIER_GATEWAY.send(_NOTIFIER_CHAT_ID, text)
+        _LAST_NOTIFY[name] = now
+        logger.info("Cron failure notification sent for %r", name)
+    except Exception:
+        logger.exception("Failed to send cron failure notification for %r", name)
+
 
 # ---------------------------------------------------------------------------
 # History helpers
@@ -185,6 +251,7 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
         }
         mark_job_run(name, success=False)
         append_history(entry)
+        await _maybe_notify_failure(entry)
         return entry
     except Exception as exc:
         entry = {
@@ -199,6 +266,7 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
         }
         mark_job_run(name, success=False)
         append_history(entry)
+        await _maybe_notify_failure(entry)
         return entry
 
     success = process.returncode == 0
@@ -218,6 +286,7 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
     }
     mark_job_run(name, success=success)
     append_history(entry)
+    await _maybe_notify_failure(entry)
     logger.info(
         "Job %r finished: %s (rc=%s)", name, entry["status"], process.returncode
     )
