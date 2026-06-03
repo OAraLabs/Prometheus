@@ -95,6 +95,17 @@ def create_app(
             ],
         }
 
+    # ── Health (unauthenticated; for external monitors) ─────────────
+    # Lives outside /api/ so the bearer-token middleware never blocks it.
+    # Fixes the 404 flood from the host polling GET /health (audit #6).
+    @app.get("/health")
+    async def health():
+        return {
+            "status": "ok",
+            "service": "prometheus",
+            "uptime_seconds": time.time() - app.state.start_time,
+        }
+
     # ── Status ──────────────────────────────────────────────────────
 
     @app.get("/api/status")
