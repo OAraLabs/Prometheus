@@ -232,6 +232,19 @@ class WebSocketBridge:
             logger.warning("Vision analysis failed for %s: %s", image_path, exc)
         return None
 
+    async def dispatch_user_message(self, session_id: str, content: str) -> None:
+        """Public dispatch entry point — kicks off the same flow as a WS-borne
+        ``send_message`` command.
+
+        Used by the FastAPI ``POST /api/chat/send`` route so Beacon's chat
+        surface (and any other HTTP caller) doesn't need to maintain its own
+        WebSocket. Returns once the dispatch coroutine is queued; the actual
+        agent work runs in a background task and streams back over the
+        bridge's broadcast — the HTTP caller's job is to be a WS subscriber
+        (which Beacon already is) to receive the response deltas.
+        """
+        await self._handle_send_message(session_id, content)
+
     async def _handle_send_message(self, session_id: str, content: str) -> None:
         """Process a user message — add to session and run agent loop if context available.
 
