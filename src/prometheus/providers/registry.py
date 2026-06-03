@@ -126,6 +126,11 @@ class ProviderRegistry:
             return LlamaCppProvider(
                 base_url=config.get("base_url", "http://localhost:8080"),
                 timeout=config.get("timeout", 120.0),
+                # Defaults to True. The model.suppress_thinking key gates the
+                # chat_template_kwargs injection that prevents gemma/qwen from
+                # burning their token budgets on a thought channel and emitting
+                # empty content (briefing, memory extractor, tool calls).
+                suppress_thinking=config.get("suppress_thinking", True),
             )
 
         if provider_name == "ollama":

@@ -23,6 +23,11 @@ class ApiMessageRequest:
     system_prompt: str | None = None
     max_tokens: int = 4096
     tools: list[dict[str, Any]] = field(default_factory=list)
+    # Per-call override for the provider's thinking-suppression default.
+    # ``None`` (the default) means "use provider's configured default" —
+    # currently True for LlamaCppProvider. Set to ``False`` to opt a call
+    # back INTO chain-of-thought (e.g. a task that wants reasoning_content).
+    suppress_thinking: bool | None = None
 
 
 @dataclass(frozen=True)
