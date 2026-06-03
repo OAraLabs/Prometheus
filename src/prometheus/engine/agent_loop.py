@@ -1749,6 +1749,9 @@ async def _execute_tool_call(
             retries=retries_used,
             latency_ms=_latency_ms,
             error_type="tool_error" if result.is_error else None,
+            # Capture the tool's own error message so `tool_error` rows are
+            # diagnosable instead of blank (audit fix #4).
+            error_detail=(result.output or "")[:2000] if result.is_error else None,
             raw_model_output=raw_model_output,
             parsed_tool_call=parsed_tool_json,
             provider=provider_name,
