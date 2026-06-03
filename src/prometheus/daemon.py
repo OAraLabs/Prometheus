@@ -80,6 +80,35 @@ def build_tool_registry(security_cfg: dict[str, Any] | None = None) -> ToolRegis
     return create_tool_registry(security_cfg)
 
 
+async def _detect_loaded_model_with_retry(
+    provider: Any,
+    *,
+    attempts: int = 5,
+    sleep=asyncio.sleep,
+) -> str | None:
+    """Probe ``detect_loaded_model`` with linear backoff before giving up.
+
+    The model server frequently co-boots with the daemon, so a single probe can
+    race it. Audit #7: a boot-time miss previously stranded a stale model name
+    until the next restart. Retries ``attempts`` times (1s, 2s, … between tries)
+    and returns the detected id, or None if every attempt fails. ``sleep`` is
+    injectable so tests don't actually wait.
+    """
+    detected: str | None = None
+    for attempt in range(1, attempts + 1):
+        detected = await provider.detect_loaded_model()
+        if detected:
+            return detected
+        if attempt < attempts:
+            logger.info(
+                "Model detection attempt %d/%d failed (server unreachable); "
+                "retrying in %ds",
+                attempt, attempts, attempt,
+            )
+            await sleep(attempt)
+    return detected
+
+
 async def run_daemon(args: argparse.Namespace) -> None:
     """Main async entry point — start all subsystems."""
     config = load_config(args.config)
@@ -153,15 +182,20 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Model provider — ProviderRegistry handles all provider types
     provider = ProviderRegistry.create(model_config)
 
-    # Detect actual loaded model from the server (local providers only)
+    # Detect actual loaded model from the server (local providers only).
+    # Retries a few times so a model server that co-boots with the daemon
+    # isn't missed and stranded on a stale name (audit #7).
     config_model = model_config.get("model", "qwen3.5-32b")
     if hasattr(provider, "detect_loaded_model"):
-        detected = await provider.detect_loaded_model()
+        detected = await _detect_loaded_model_with_retry(provider)
         model_name = detected or config_model
         if detected:
             model_config["model"] = detected
         else:
-            logger.info("Using model name from config: %s", config_model)
+            logger.warning(
+                "Model detection failed after retries; using config name %s. "
+                "Restart once the server is up to re-detect.", config_model,
+            )
     else:
         model_name = config_model
         logger.info("Cloud provider: %s, model: %s", model_config.get("provider"), model_name)
@@ -511,8 +545,17 @@ async def run_daemon(args: argparse.Namespace) -> None:
         except Exception as exc:
             logger.error("Failed to start Slack adapter: %s", exc)
 
-    # Heartbeat
-    heartbeat = Heartbeat(gateway=telegram)
+    # Heartbeat — also watches background tasks and pushes proactive
+    # finish/fail + progress notifications to the user (audit fix #3).
+    from prometheus.tasks.manager import get_task_manager
+    _notify_chat = gateway_config.get("briefing_chat_id") or (
+        gateway_config.get("allowed_chat_ids") or [None]
+    )[0]
+    heartbeat = Heartbeat(
+        gateway=telegram,
+        task_manager=get_task_manager(),
+        notify_chat_id=_notify_chat,
+    )
     heartbeat_task = asyncio.create_task(heartbeat.run_forever())
     tasks.append(heartbeat_task)
 
