@@ -141,6 +141,68 @@ def create_app(
             session_mgr.get_or_create(sid)
         return {"session_id": sid}
 
+    @app.post("/api/chat/send")
+    async def send_chat(request: Request):
+        """Dispatch a user message into a Prometheus session.
+
+        Body: ``{ "session_id": str, "message": str, "idempotency_key"?: str }``
+        Returns: ``{ "run_id": str, "status": "sent" }``
+
+        This is the HTTP entry point Beacon's chat surface needs (its tRPC
+        ``sessions.send`` router POSTs here first, then falls back to the
+        WebSocket bridge). The actual agent work is kicked off as a
+        background task on the shared WebSocketBridge — the response streams
+        back over the bridge's broadcast so any connected WS client sees
+        deltas. The 200 returns as soon as the dispatch is queued.
+
+        Failure modes (fail loud, no silent fallbacks):
+          * 400 when ``session_id`` or ``message`` is missing/empty
+          * 503 when the daemon hasn't wired a ``ws_bridge`` (e.g. ``web``
+            disabled but route still mounted) — explicit so the caller
+            doesn't think a queued message succeeded
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "invalid JSON body"},
+            )
+
+        if not isinstance(body, dict):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "body must be a JSON object"},
+            )
+
+        session_id = (body.get("session_id") or "").strip()
+        message = (body.get("message") or "").strip()
+        if not session_id:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "session_id is required"},
+            )
+        if not message:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "message is required and must be non-empty"},
+            )
+
+        bridge = getattr(app.state, "ws_bridge", None)
+        if bridge is None or not hasattr(bridge, "dispatch_user_message"):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "chat dispatch unavailable — ws_bridge not wired",
+                },
+            )
+
+        import uuid as _uuid
+
+        idempotency_key = (body.get("idempotency_key") or "").strip() or _uuid.uuid4().hex
+        await bridge.dispatch_user_message(session_id, message)
+        return {"run_id": idempotency_key, "status": "sent"}
+
     @app.get("/api/sessions/{session_id}/messages")
     async def get_messages(session_id: str):
         if not session_mgr:

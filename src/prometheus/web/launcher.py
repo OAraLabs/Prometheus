@@ -84,6 +84,11 @@ async def launch_web(
         agent_state_ref=agent_state_ref,
     )
 
+    # Expose the bridge on the FastAPI app so REST routes (e.g.
+    # POST /api/chat/send) can dispatch user messages through the same flow
+    # the WebSocket uses, without duplicating the session+agent plumbing.
+    app.state.ws_bridge = bridge
+
     logger.info("Starting Mission Control — REST on :%d, WebSocket on :%d", api_port, ws_port)
 
     # Run both servers concurrently
