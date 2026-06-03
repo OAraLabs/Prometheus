@@ -22,6 +22,20 @@ log = logging.getLogger(__name__)
 
 
 @dataclass
+class GPUProcess:
+    """One compute process holding VRAM on a GPU.
+
+    Populated from ``nvidia-smi --query-compute-apps`` on whichever box
+    the GPU lives on. ``memory_mb`` is per-process VRAM, not total card
+    usage — so a card with three workers shows three entries summing to
+    less than total used (driver overhead lives outside the sum).
+    """
+    pid: int
+    name: str
+    memory_mb: int
+
+
+@dataclass
 class AnatomyState:
     """Snapshot of the current infrastructure."""
 
@@ -32,11 +46,42 @@ class AnatomyState:
     ram_total_gb: float = 0.0
     ram_available_gb: float = 0.0
 
-    # GPU
+    # GPU — ``gpu_*`` always reflects the *inference* GPU (where the agent's
+    # LLM actually runs). When inference is local, that's the local card.
+    # When inference is remote, we probe via SSH so the report doesn't
+    # lie about a local card being the inference card.
+    #
+    # ``gpu_is_remote`` flags which case applies — ``gpu_inference_host``
+    # carries the IP/hostname of the inference box (matches the hostname
+    # parsed from the inference URL). Both are None when no GPU was
+    # detected at all.
+    #
+    # ``local_gpu_*`` is populated *only when* inference is remote AND
+    # this box has its own GPU. Lets us show both honestly — e.g. for
+    # this deployment, gemma runs on the 4090 (inference) while the
+    # local 3090 Ti hosts Ollama/ComfyUI. Without these fields the agent
+    # confidently confuses the two.
     gpu_name: str | None = None
     gpu_vram_total_mb: int | None = None
     gpu_vram_used_mb: int | None = None
     gpu_vram_free_mb: int | None = None
+    gpu_is_remote: bool = False
+    gpu_inference_host: str | None = None
+    gpu_probe_method: str = "none"  # "local" | "ssh" | "none" — how we got the data
+    gpu_probe_error: str | None = None  # populated when probe failed; tells user why
+
+    local_gpu_name: str | None = None
+    local_gpu_vram_total_mb: int | None = None
+    local_gpu_vram_used_mb: int | None = None
+    local_gpu_vram_free_mb: int | None = None
+
+    # VRAM-holding processes per GPU. ``gpu_processes`` matches the
+    # inference GPU (remote or local), ``local_gpu_processes`` matches
+    # the secondary local card when inference is remote. Empty list
+    # means probed-but-nothing-there; we don't disambiguate "no probe"
+    # vs "no processes" because that's never the user's question.
+    gpu_processes: list[GPUProcess] = field(default_factory=list)
+    local_gpu_processes: list[GPUProcess] = field(default_factory=list)
 
     # Active model
     model_name: str | None = None
@@ -190,41 +235,77 @@ class AnatomyScanner:
             state.prometheus_data_size_mb = round(total / (1024**2), 1)
 
     async def _detect_gpu(self, state: AnatomyState) -> None:
-        # Try local nvidia-smi first
-        if await self._detect_gpu_local(state):
-            return
-        # Fall back to remote nvidia-smi via SSH on the inference host
-        await self._detect_gpu_remote(state)
+        """Probe the **inference** GPU, not "whichever GPU happens to be local".
 
-    async def _detect_gpu_local(self, state: AnatomyState) -> bool:
-        """Try local nvidia-smi. Returns True if successful."""
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "nvidia-smi",
-                "--query-gpu=name,memory.total,memory.used,memory.free",
-                "--format=csv,noheader,nounits",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-            if proc.returncode != 0:
-                return False
-            return self._parse_nvidia_smi(state, stdout.decode())
-        except Exception:
-            log.debug("Local GPU detection failed (nvidia-smi not available)")
-            return False
+        Old behavior: tried local nvidia-smi first; only fell back to SSH if
+        local was missing. On a box with both a local card *and* remote
+        inference, the local card always won — and the display layer then
+        slapped "(remote)" on it. The agent read the lie, ran local
+        ``nvidia-smi`` to "verify", saw the same numbers, and confidently
+        confirmed the wrong story.
 
-    async def _detect_gpu_remote(self, state: AnatomyState) -> bool:
-        """Try nvidia-smi on the remote inference host via SSH."""
+        New behavior:
+        - Decide where inference lives by parsing ``inference_url``.
+        - If remote: probe the remote box via SSH first. That's the GPU the
+          model actually runs on. Record the local GPU as a *secondary*
+          field so we can still surface it (ComfyUI / local Ollama may use
+          it) without conflating the two.
+        - If local (or no remote configured): probe local. No second probe.
+        - Always record ``gpu_probe_method`` and ``gpu_probe_error`` so the
+          display + the agent can both tell honestly what was reachable.
+        """
         from urllib.parse import urlparse
+
         url = self._llama_url if self._engine == "llama_cpp" else self._ollama_url
         parsed = urlparse(url)
-        host = parsed.hostname or ""
-        if not host or host in ("localhost", "127.0.0.1", "::1"):
-            return False
+        host = (parsed.hostname or "").lower()
+        local_host_aliases = {
+            "", "localhost", "127.0.0.1", "::1",
+            platform.node().lower(),
+        }
+        inference_is_remote = host not in local_host_aliases
+        state.gpu_inference_host = host or None
 
-        # Build SSH command with optional user and key
-        ssh_target = f"{self._ssh_user}@{host}" if self._ssh_user else host
+        if inference_is_remote:
+            # Probe the inference GPU first — that's the source of truth.
+            state.gpu_is_remote = True
+            remote_ok, remote_err = await self._probe_remote_gpu(state, host)
+            if not remote_ok:
+                state.gpu_probe_error = remote_err
+                # Don't fall back to local-as-inference — that's the bug
+                # we're fixing. The probe failure is itself the truth to
+                # report; the user/agent needs to know the remote box is
+                # unreachable, not get a substitute reading from this box.
+                log.warning(
+                    "Inference GPU probe failed for host %s: %s",
+                    host, remote_err,
+                )
+            # Also record the local GPU (if any) as a separate field, so
+            # callers can show "this box has a card too" without conflating.
+            await self._probe_local_gpu_as_secondary(state)
+        else:
+            # Inference is local — the local GPU IS the inference GPU.
+            local_ok, local_err = await self._probe_local_gpu_as_primary(state)
+            if not local_ok:
+                state.gpu_probe_error = local_err
+
+    async def _probe_remote_gpu(
+        self, state: AnatomyState, host: str,
+    ) -> tuple[bool, str | None]:
+        """SSH the remote host and read nvidia-smi. Fills primary GPU fields.
+
+        Returns ``(success, error_message_or_None)``. Error messages are
+        meant for users — they get surfaced in /anatomy output and explain
+        what's wrong: "SSH credentials not configured", "connection refused",
+        "no nvidia-smi on remote", etc.
+        """
+        if not self._ssh_user:
+            return False, (
+                "SSH credentials not configured "
+                "(set anatomy.ssh_user + anatomy.ssh_key in prometheus.yaml)"
+            )
+
+        ssh_target = f"{self._ssh_user}@{host}"
         ssh_args = [
             "ssh", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no",
             "-o", "BatchMode=yes",
@@ -243,27 +324,184 @@ class AnatomyScanner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+        except asyncio.TimeoutError:
+            return False, f"SSH to {host} timed out after 15s"
+        except FileNotFoundError:
+            return False, "ssh binary not on PATH on this box"
+        except Exception as exc:
+            return False, f"SSH error: {exc}"
+
+        if proc.returncode != 0:
+            err = stderr.decode(errors="replace").strip()[:300] or f"rc={proc.returncode}"
+            return False, f"remote nvidia-smi failed: {err}"
+
+        if self._parse_nvidia_smi_primary(state, stdout.decode()):
+            state.gpu_probe_method = "ssh"
+            # Also pull the process list from the same remote box. Best-
+            # effort: a failure here doesn't invalidate the card-level
+            # stats we already have.
+            state.gpu_processes = await self._probe_remote_gpu_processes(host)
+            return True, None
+        return False, "remote nvidia-smi returned no data"
+
+    async def _probe_local_gpu_as_primary(
+        self, state: AnatomyState,
+    ) -> tuple[bool, str | None]:
+        """Run local nvidia-smi, fill the primary GPU fields."""
+        ok, err = await self._run_local_nvidia_smi()
+        if ok is None:
+            return False, err
+        if not self._parse_nvidia_smi_primary(state, ok):
+            return False, "local nvidia-smi returned unparseable output"
+        state.gpu_probe_method = "local"
+        state.gpu_processes = await self._probe_local_gpu_processes()
+        return True, None
+
+    async def _probe_local_gpu_as_secondary(self, state: AnatomyState) -> None:
+        """Run local nvidia-smi, fill the *secondary* local_gpu_* fields.
+
+        Used when inference is remote but this box also has a card —
+        we want to report both. Silent on failure (the local card is a
+        nice-to-have here, not the source of truth).
+        """
+        ok, _ = await self._run_local_nvidia_smi()
+        if ok is None:
+            return
+        line = ok.strip().split("\n")[0]
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 4:
+            try:
+                state.local_gpu_name = parts[0]
+                state.local_gpu_vram_total_mb = int(float(parts[1]))
+                state.local_gpu_vram_used_mb = int(float(parts[2]))
+                state.local_gpu_vram_free_mb = int(float(parts[3]))
+            except ValueError:
+                pass
+        # Process list — the "what's actually holding VRAM on this card?"
+        # answer. Best-effort; failure is silent.
+        state.local_gpu_processes = await self._probe_local_gpu_processes()
+
+    async def _probe_local_gpu_processes(self) -> list[GPUProcess]:
+        """Read VRAM-holding processes from local nvidia-smi."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "nvidia-smi",
+                "--query-compute-apps=pid,process_name,used_memory",
+                "--format=csv,noheader,nounits",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            if proc.returncode != 0:
+                return []
+        except Exception:
+            return []
+        return self._parse_compute_apps(stdout.decode())
+
+    async def _probe_remote_gpu_processes(self, host: str) -> list[GPUProcess]:
+        """Read VRAM-holding processes from the remote inference host via SSH.
+
+        Reuses the same ssh_user/ssh_key that ``_probe_remote_gpu`` used —
+        if SSH worked once it'll work again. Best-effort: silent failure.
+        """
+        if not self._ssh_user:
+            return []
+        ssh_target = f"{self._ssh_user}@{host}"
+        ssh_args = [
+            "ssh", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no",
+            "-o", "BatchMode=yes",
+        ]
+        if self._ssh_key:
+            ssh_args.extend(["-i", self._ssh_key])
+        ssh_args.extend([
+            ssh_target,
+            "nvidia-smi",
+            "--query-compute-apps=pid,process_name,used_memory",
+            "--format=csv,noheader,nounits",
+        ])
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ssh_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
             if proc.returncode != 0:
-                log.debug("Remote GPU detection via SSH failed (rc=%d)", proc.returncode)
-                return False
-            return self._parse_nvidia_smi(state, stdout.decode())
+                return []
         except Exception:
-            log.debug("Remote GPU detection failed for host %s", host)
-            return False
+            return []
+        return self._parse_compute_apps(stdout.decode())
 
     @staticmethod
-    def _parse_nvidia_smi(state: AnatomyState, output: str) -> bool:
-        """Parse nvidia-smi CSV output into state. Returns True if successful."""
+    def _parse_compute_apps(output: str) -> list[GPUProcess]:
+        """Parse the CSV ``pid,process_name,used_memory`` lines into GPUProcess objects.
+
+        Skips header-like or malformed lines silently — nvidia-smi
+        occasionally emits a "[N/A]" placeholder for the memory field on
+        compute exclusive mode; treat as 0 rather than crashing.
+        """
+        out: list[GPUProcess] = []
+        for line in output.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            try:
+                pid = int(parts[0])
+            except ValueError:
+                continue
+            try:
+                mem = int(float(parts[2]))
+            except ValueError:
+                mem = 0
+            # nvidia-smi gives the full executable path — keep the
+            # basename so display lines stay short.
+            name = parts[1].rsplit("/", 1)[-1] or parts[1]
+            out.append(GPUProcess(pid=pid, name=name, memory_mb=mem))
+        return out
+
+    async def _run_local_nvidia_smi(self) -> tuple[str | None, str | None]:
+        """Run local nvidia-smi. Returns (stdout, None) on success or (None, error)."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "nvidia-smi",
+                "--query-gpu=name,memory.total,memory.used,memory.free",
+                "--format=csv,noheader,nounits",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        except asyncio.TimeoutError:
+            return None, "local nvidia-smi timed out"
+        except FileNotFoundError:
+            return None, "nvidia-smi not installed on this box"
+        except Exception as exc:
+            return None, f"nvidia-smi error: {exc}"
+        if proc.returncode != 0:
+            err = stderr.decode(errors="replace").strip()[:200]
+            return None, f"local nvidia-smi failed: {err or f'rc={proc.returncode}'}"
+        return stdout.decode(), None
+
+    @staticmethod
+    def _parse_nvidia_smi_primary(state: AnatomyState, output: str) -> bool:
+        """Parse nvidia-smi CSV into the primary GPU fields. Returns True on success."""
         line = output.strip().split("\n")[0]
         parts = [p.strip() for p in line.split(",")]
         if len(parts) >= 4:
-            state.gpu_name = parts[0]
-            state.gpu_vram_total_mb = int(float(parts[1]))
-            state.gpu_vram_used_mb = int(float(parts[2]))
-            state.gpu_vram_free_mb = int(float(parts[3]))
-            return True
+            try:
+                state.gpu_name = parts[0]
+                state.gpu_vram_total_mb = int(float(parts[1]))
+                state.gpu_vram_used_mb = int(float(parts[2]))
+                state.gpu_vram_free_mb = int(float(parts[3]))
+                return True
+            except ValueError:
+                return False
         return False
+
+    @staticmethod
+    def _parse_nvidia_smi(state: AnatomyState, output: str) -> bool:
+        """Backwards-compatible alias — kept for any external callers."""
+        return AnatomyScanner._parse_nvidia_smi_primary(state, output)
 
     async def _detect_model(self, state: AnatomyState) -> None:
         if self._engine == "llama_cpp":

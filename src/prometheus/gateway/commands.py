@@ -279,6 +279,31 @@ def cmd_profile(arg: str = "", current: str = "full") -> str:
     return "\n".join(lines)
 
 
+def _format_gpu_processes(procs: list) -> list[str]:
+    """Render the per-GPU process list under a GPU section.
+
+    Returns one indented line per process (PID, name, VRAM in MB or GB).
+    Empty list yields no lines so the section just shows VRAM totals
+    without an awkward "Processes:" header followed by nothing.
+    Processes are sorted by VRAM descending so the heaviest user shows
+    first — that's almost always the question the reader is asking.
+    """
+    if not procs:
+        return []
+    sorted_procs = sorted(procs, key=lambda p: p.memory_mb, reverse=True)
+    out: list[str] = ["Processes:"]
+    for p in sorted_procs:
+        # Display VRAM as GB when >=1024 MB, else MB. Keeps the most
+        # common case (model loaded, multi-GB) clean while still
+        # reporting tiny helpers (browser/X server) honestly.
+        if p.memory_mb >= 1024:
+            mem_str = f"{p.memory_mb / 1024:.1f} GB"
+        else:
+            mem_str = f"{p.memory_mb} MB"
+        out.append(f"  {p.name} (PID {p.pid}): {mem_str}")
+    return out
+
+
 async def cmd_anatomy() -> str:
     """Return infrastructure summary text."""
     try:
@@ -328,19 +353,54 @@ async def cmd_anatomy() -> str:
     lines.append(f"Engine: {engine_label} @ {state.inference_url}")
     lines.append(f"Vision: {'enabled' if state.vision_enabled else 'disabled'}")
 
-    # GPU
+    # GPU — honest two-card reporting.
+    #
+    # state.gpu_* now always reflects the *inference* GPU (the box where
+    # the LLM runs). When inference is remote, state.local_gpu_* may
+    # also be populated for this box's own card (used by ComfyUI / local
+    # Ollama / etc.). We label each line so the agent can't conflate them.
+    inference_host_label = state.gpu_inference_host or inf_host
     if state.gpu_name:
-        gpu_label = state.gpu_name
-        if is_remote:
-            gpu_label += " (remote)"
-        lines.append(f"\nGPU: {gpu_label}")
+        if state.gpu_is_remote:
+            header = f"\nGPU (inference, remote @ {inference_host_label}): {state.gpu_name}"
+        else:
+            header = f"\nGPU (inference, local): {state.gpu_name}"
+        lines.append(header)
         if state.gpu_vram_total_mb:
             used_gb = (state.gpu_vram_used_mb or 0) / 1024
             free_gb = (state.gpu_vram_free_mb or 0) / 1024
             total_gb = state.gpu_vram_total_mb / 1024
-            lines.append(f"VRAM: {used_gb:.1f} / {total_gb:.1f} GB ({free_gb:.1f} GB free)")
-    elif is_remote:
-        lines.append("\nGPU: remote (stats unavailable)")
+            lines.append(
+                f"VRAM: {used_gb:.1f} / {total_gb:.1f} GB ({free_gb:.1f} GB free)"
+            )
+        lines.extend(_format_gpu_processes(state.gpu_processes))
+    elif state.gpu_is_remote:
+        # Remote inference but probe failed — be loud about WHY rather
+        # than substituting local stats (the old bug). The agent should
+        # see the probe error so it doesn't make claims about a GPU we
+        # couldn't reach.
+        reason = state.gpu_probe_error or "stats unavailable"
+        lines.append(
+            f"\nGPU (inference, remote @ {inference_host_label}): "
+            f"unreachable — {reason}"
+        )
+    elif state.gpu_probe_error:
+        lines.append(f"\nGPU: probe failed — {state.gpu_probe_error}")
+
+    # Secondary local GPU — only relevant when inference is remote and
+    # this box has its own card (e.g. ComfyUI here, Gemma on the remote).
+    # Suppressed when same hostname/card as inference to avoid clutter.
+    if state.local_gpu_name and state.gpu_is_remote:
+        lines.append(f"\nGPU (local, this box): {state.local_gpu_name}")
+        if state.local_gpu_vram_total_mb:
+            l_used_gb = (state.local_gpu_vram_used_mb or 0) / 1024
+            l_free_gb = (state.local_gpu_vram_free_mb or 0) / 1024
+            l_total_gb = state.local_gpu_vram_total_mb / 1024
+            lines.append(
+                f"VRAM: {l_used_gb:.1f} / {l_total_gb:.1f} GB "
+                f"({l_free_gb:.1f} GB free)"
+            )
+        lines.extend(_format_gpu_processes(state.local_gpu_processes))
 
     # Tailscale
     if state.tailscale_ip:

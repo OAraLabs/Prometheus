@@ -288,6 +288,10 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
     try_register(registry, "TaskOutputTool",
                  "prometheus.tools.builtin.task_output", "TaskOutputTool")
 
+    # Image generation — free Pollinations.ai endpoint, no API key
+    try_register(registry, "ImageGenerateTool",
+                 "prometheus.tools.builtin.image_generate", "ImageGenerateTool")
+
     return registry
 
 
@@ -533,18 +537,86 @@ async def run_interactive(
     context: LoopContext,
     lcm_engine: Any | None,
     session_id: str,
+    *,
+    voice_mode: bool = False,
+    voice_config: dict[str, Any] | None = None,
 ) -> None:
-    """Run an interactive conversation loop with streaming output."""
+    """Run an interactive conversation loop with streaming output.
+
+    Voice mode (opt-in via ``--voice`` flag or ``:voice on`` REPL command):
+    every turn captures mic audio, transcribes via Whisper, and speaks
+    the agent reply via piper. ``:voice`` / ``:v`` does a single voice
+    turn from text mode without flipping the sticky flag. ``:text`` or
+    ``:voice off`` leaves voice mode.
+    """
     messages: list[ConversationMessage] = []
     turn_index = 0
+    voice_config = voice_config or {}
 
     print(f"Prometheus {__version__} — interactive mode")
     print(f"Model: {context.model} | Provider: type(provider)")
-    print("Type your message (Ctrl+D or 'exit' to quit)\n")
+    if voice_mode:
+        print("Voice mode ON. Press Enter to record, ':text' to type instead.")
+    else:
+        print("Type your message. ':v' for one voice turn, ':voice on' for sticky.")
+    print("(Ctrl+D or 'exit' to quit)\n")
 
     while True:
+        # Each turn decides whether THIS reply should be spoken — sticky
+        # voice_mode applies always; the per-turn ``:v`` command sets it
+        # locally without flipping the sticky flag.
+        voice_this_turn = voice_mode
+        user_input: str | None = None
+
         try:
-            user_input = input(">>> ").strip()
+            if voice_mode:
+                # In sticky voice mode: a bare Enter triggers recording;
+                # typed text is interpreted as a command (exit, :text).
+                print(">>> 🎤", flush=True)
+                line = sys.stdin.readline()
+                if not line:  # EOF
+                    print("Goodbye.")
+                    break
+                line = line.strip().lower()
+                if line in ("exit", "quit", "/exit", "/quit"):
+                    print("Goodbye.")
+                    break
+                if line in (":text", ":t", ":voice off"):
+                    voice_mode = False
+                    print("Switched to text mode.\n")
+                    continue
+                # Anything else (including empty): start the capture
+                from prometheus.cli.voice import cli_voice_capture
+                user_input = await cli_voice_capture()
+                if not user_input:
+                    continue
+            else:
+                line = input(">>> ").strip()
+                if not line:
+                    continue
+                lower = line.lower()
+                if lower in ("exit", "quit", "/exit", "/quit"):
+                    print("Goodbye.")
+                    break
+                if lower in (":voice", ":v"):
+                    from prometheus.cli.voice import cli_voice_capture
+                    user_input = await cli_voice_capture()
+                    voice_this_turn = True
+                    if not user_input:
+                        continue
+                elif lower in (":voice on", ":voice mode"):
+                    voice_mode = True
+                    print(
+                        "Voice mode ON. Enter to record, "
+                        "':text' to switch back.\n"
+                    )
+                    continue
+                elif lower == ":voice off":
+                    # Idempotent — already off
+                    print("Voice mode already OFF.\n")
+                    continue
+                else:
+                    user_input = line
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye.")
             break
@@ -595,6 +667,16 @@ async def run_interactive(
                 session_id, "assistant", response_text, turn_index=turn_index
             )
             await lcm_engine.maybe_compact(session_id)
+
+        # Voice output — speak the reply if this turn was voice-flagged
+        # (sticky voice_mode OR per-turn ``:v``). Silent fallback if
+        # piper isn't installed or the model path is bad.
+        if voice_this_turn and response_text:
+            try:
+                from prometheus.cli.voice import cli_voice_speak
+                await cli_voice_speak(response_text, voice_config)
+            except Exception as exc:
+                log.debug("Voice playback failed: %s", exc)
 
         turn_index += 1
 
@@ -748,6 +830,10 @@ def main() -> None:
     parser.add_argument(
         "--reset-data", action="store_true",
         help="Delete all user data (telemetry, memory, LCM, audit, evals, wiki, sentinel, skills/auto) and exit",
+    )
+    parser.add_argument(
+        "--voice", action="store_true",
+        help="Start interactive mode with voice in/out enabled (push-to-talk via Enter).",
     )
 
     subparsers = parser.add_subparsers(dest="command")
@@ -1018,7 +1104,16 @@ def main() -> None:
             if args.once:
                 await run_once(context, args.once)
             else:
-                await run_interactive(context, lcm_engine, session_id)
+                # Voice-mode plumbing: pull gateway.voice block from the
+                # loaded config so CLI and Telegram share engine/model
+                # settings, and respect --voice for sticky-on at start.
+                from prometheus.cli.voice import get_voice_config
+                voice_cfg = get_voice_config(config)
+                await run_interactive(
+                    context, lcm_engine, session_id,
+                    voice_mode=bool(getattr(args, "voice", False)),
+                    voice_config=voice_cfg,
+                )
         finally:
             if mcp_runtime:
                 await mcp_runtime.close()
