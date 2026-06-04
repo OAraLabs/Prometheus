@@ -22,6 +22,10 @@ class MessagePart:
     session_id: str = ""
     turn_index: int = 0
     token_count: int = 0
+    # Durable SQLite rowid, populated by the store on insert/read. Monotonic, unique,
+    # restart-stable (the store is append-only) — the canonical on-the-wire message id.
+    # 0 means "not yet persisted / unknown".
+    row_id: int = 0
 
 
 @dataclass

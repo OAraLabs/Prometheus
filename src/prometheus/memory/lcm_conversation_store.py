@@ -94,6 +94,7 @@ class LCMConversationStore:
 
     @staticmethod
     def _row_to_message(row: sqlite3.Row) -> MessagePart:
+        keys = row.keys()
         return MessagePart(
             role=row["role"],
             content=row["content"],
@@ -102,6 +103,9 @@ class LCMConversationStore:
             session_id=row["session_id"],
             turn_index=row["turn_index"],
             token_count=row["token_count"],
+            # Present only when the query SELECTs `rowid AS row_id` (messages_after_id);
+            # other read paths don't need it.
+            row_id=row["row_id"] if "row_id" in keys else 0,
         )
 
     # ------------------------------------------------------------------
@@ -140,6 +144,8 @@ class LCMConversationStore:
         rowid = self._conn.execute(
             "SELECT rowid FROM lcm_messages WHERE id = ?", (mid,)
         ).fetchone()[0]
+        # Surface the durable rowid back to the caller (canonical wire message id).
+        msg.row_id = int(rowid)
         self._conn.execute(
             "INSERT OR REPLACE INTO lcm_messages_fts (rowid, content) VALUES (?, ?)",
             (rowid, msg.content),
@@ -325,6 +331,48 @@ class LCMConversationStore:
             (session_id,),
         ).fetchone()
         return float(row["mx"]) if row and row["mx"] is not None else 0.0
+
+    def messages_after_id(
+        self,
+        row_id: int,
+        *,
+        limit: int = 10_000,
+        session_id: str | None = None,
+        include_compacted: bool = True,
+    ) -> list[MessagePart]:
+        """Durable, restart-stable read: messages with ``rowid > row_id``, ordered by
+        ``rowid`` ASC (insertion order — monotonic and unique, unlike ``turn_index``,
+        which is the in-memory list position and repeats across restart/trim).
+
+        This is the canonical history + incremental cursor for the REST surface: the
+        rowid is the durable message identity (the store is append-only, so rowids never
+        reset or repeat). Distinct from :meth:`messages_since`, which filters by
+        timestamp for the MemoryExtractor's ``_last_processed_ts`` contract — that one
+        must stay timestamp-based, so this is a separate method.
+        """
+        sql = "SELECT rowid AS row_id, * FROM lcm_messages WHERE rowid > ?"
+        params: list[object] = [row_id]
+        if session_id is not None:
+            sql += " AND session_id = ?"
+            params.append(session_id)
+        if not include_compacted:
+            sql += " AND compacted = 0"
+        sql += " ORDER BY rowid ASC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_message(r) for r in rows]
+
+    def max_rowid(self, session_id: str) -> int:
+        """Current max ``rowid`` for a session, or ``0`` if it has none.
+
+        The durable, monotonic, restart-stable watermark the REST history route returns
+        and that the WS user-echo reports as the just-persisted message's canonical id.
+        """
+        row = self._conn.execute(
+            "SELECT MAX(rowid) AS mx FROM lcm_messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return int(row["mx"]) if row and row["mx"] is not None else 0
 
     def has_message(self, message_id: str) -> bool:
         """Return ``True`` iff a row with this id is persisted.
