@@ -287,10 +287,12 @@ class WebSocketBridge:
 
         session = self.session_mgr.get_or_create(session_id)
         turn_index = session.add_user_message(content)
+        row_id = session.last_persisted_row_id()
 
-        # Broadcast the user message. message_id is the canonical durable ordinal
-        # (msg-{turn_index}) — the SAME id GET /api/sessions/{id}/messages reports —
-        # so a client can correlate its optimistic client_msg_id to the real row.
+        # Broadcast the user message. message_id is the durable, restart-stable LCM rowid
+        # — the SAME canonical id GET /api/sessions/{id}/messages reports — so a client can
+        # correlate its optimistic client_msg_id to the real row. ordinal (turn_index) is a
+        # NON-UNIQUE display position only.
         ts = time.time()
         await self.broadcast({
             "type": "chat_message",
@@ -299,7 +301,8 @@ class WebSocketBridge:
                 "session_id": session_id,
                 "role": "user",
                 "content": content,
-                "message_id": f"msg-{turn_index}",
+                "message_id": row_id,
+                "ordinal": turn_index,
                 "client_msg_id": client_msg_id,
                 "created_at": ts,
             },

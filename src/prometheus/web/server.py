@@ -208,15 +208,20 @@ def create_app(
     async def get_messages(session_id: str, since: str | None = None):
         """Durable conversation history from the LCM store.
 
-        Response: ``{ "messages": [...], "watermark": <float> }``. Each message is
-        ``{message_id: "msg-{turn_index}", session_id, role, content, timestamp,
-        watermark}`` where ``watermark == timestamp`` (a real epoch float). The
-        top-level ``watermark`` is the session's CURRENT max timestamp, so a
-        client knows it is caught up even when an incremental read is empty.
+        Response: ``{ "messages": [...], "watermark": <int> }``. Each message is
+        ``{message_id: <int>, ordinal: <int>, session_id, role, content, timestamp}``.
 
-        ``?since=<watermark>`` returns only messages with ``timestamp > since``
-        (incremental sync via the engine's ``messages_since``). FAIL LOUD: an
-        unparseable ``since`` is a 400 — never silently accepted-and-ignored.
+        * ``message_id`` is the durable LCM rowid — **monotonic, unique, restart-stable**
+          (the store is append-only). It is BOTH the canonical identity AND the cursor.
+        * ``ordinal`` is ``turn_index`` (the in-memory list position) — an explicitly
+          NON-UNIQUE display position that repeats across restart/trim. Do not key on it.
+        * ``timestamp`` is display-only — a whole turn can share one timestamp; order by
+          ``message_id`` instead.
+        * top-level ``watermark`` is the session's current max ``message_id`` (so a client
+          knows it is caught up even when an incremental read is empty).
+
+        ``?since=<message_id>`` returns only messages with ``rowid > since`` (incremental
+        sync). FAIL LOUD: an unparseable ``since`` is a 400 — never silently ignored.
         """
         lcm = getattr(app.state, "lcm_engine", None)
         if lcm is None:
@@ -226,32 +231,29 @@ def create_app(
             )
         store = lcm.conversation_store
 
+        since_id = 0
         if since is not None:
             try:
-                since_ts = float(since)
+                since_id = int(since)
             except (TypeError, ValueError):
                 return JSONResponse(
                     status_code=400,
-                    content={"error": f"invalid 'since' watermark {since!r}: expected a float timestamp"},
+                    content={"error": f"invalid 'since' cursor {since!r}: expected an integer message_id"},
                 )
-            parts = store.messages_since(
-                since_ts, session_id=session_id, include_compacted=True, limit=10000
-            )
-        else:
-            parts = store.get_all_messages(session_id)
 
+        parts = store.messages_after_id(since_id, session_id=session_id, include_compacted=True)
         messages = [
             {
-                "message_id": f"msg-{p.turn_index}",
+                "message_id": p.row_id,
+                "ordinal": p.turn_index,
                 "session_id": session_id,
                 "role": p.role,
                 "content": p.content,
                 "timestamp": p.timestamp,
-                "watermark": p.timestamp,
             }
             for p in parts
         ]
-        return {"messages": messages, "watermark": store.max_timestamp(session_id)}
+        return {"messages": messages, "watermark": store.max_rowid(session_id)}
 
     @app.delete("/api/sessions/{session_id}")
     async def clear_session(session_id: str):

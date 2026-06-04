@@ -1,9 +1,10 @@
-"""Wire-contract fixes surfaced by Beacon Desktop Step 3 (branch feat/api-wire-contract).
+"""Wire-contract fixes surfaced by Beacon Desktop Step 3 (branch feat/api-wire-contract),
+updated for durable message identity (branch fix/durable-message-id).
 
 Every test asserts the SIDE EFFECT, not just shape:
-  #1 messages_since route actually FILTERS (timestamp > since) + returns the current
-     watermark, and FAILS LOUD (400) on an unparseable ``since``.
-  #2 client_msg_id is echoed on the WS user frame, correlated to the canonical msg-{turn_index}.
+  #1 messages route actually FILTERS by the durable rowid cursor + returns the watermark,
+     and FAILS LOUD (400) on an unparseable ``since``.
+  #2 client_msg_id is echoed on the WS user frame, correlated to the durable rowid message_id.
   #3 a new message's created_at is a real (non-zero) timestamp.
   #4 tool_call_start/end frames carry a consistent call_id.
   + the prerequisite bug fix: the WS/Beacon assistant turn is persisted to LCM.
@@ -30,6 +31,24 @@ from prometheus.web.server import create_app  # noqa: E402
 from prometheus.web.ws_server import WebSocketBridge  # noqa: E402
 
 
+def _lcm_manager(tmp_path):
+    """A SessionManager wired to a real LCM store on a temp db (so sessions persist and
+    expose real, monotonic rowids)."""
+    store = LCMConversationStore(tmp_path / "lcm.db")
+
+    class _Engine:
+        conversation_store = store
+
+        def ingest_sync(self, session_id, role, content, turn_index=0):
+            m = MessagePart(role=role, content=content, session_id=session_id, turn_index=turn_index)
+            store.add_message(session_id, m)
+            return m.message_id
+
+    mgr = SessionManager()
+    mgr.lcm_engine = _Engine()
+    return mgr, store
+
+
 # --------------------------------------------------------------------------- #
 # #4 — tool_call_* frames carry a consistent call_id
 # --------------------------------------------------------------------------- #
@@ -42,7 +61,6 @@ def test_tool_frames_carry_consistent_call_id(monkeypatch):
         yield ToolExecutionStarted(tool_name="web_search", tool_input={"q": "x"}, tool_use_id="toolu_abc"), None
         yield ToolExecutionCompleted(tool_name="web_search", output="result", is_error=False, tool_use_id="toolu_abc"), None
 
-    # _run_agent does `from prometheus.engine.agent_loop import run_loop` at call time.
     monkeypatch.setattr(al, "run_loop", fake_run_loop)
 
     captured: list[dict] = []
@@ -58,21 +76,20 @@ def test_tool_frames_carry_consistent_call_id(monkeypatch):
     starts = [e for e in captured if e["type"] == "tool_call_start"]
     ends = [e for e in captured if e["type"] == "tool_call_end"]
     assert len(starts) == 1 and len(ends) == 1
-    # SIDE EFFECT: the id is present AND the same on start + end (correlatable).
     assert starts[0]["payload"]["call_id"] == "toolu_abc"
     assert ends[0]["payload"]["call_id"] == "toolu_abc"
     assert starts[0]["payload"]["call_id"] == ends[0]["payload"]["call_id"]
 
 
 # --------------------------------------------------------------------------- #
-# #2 + #3 — user echo carries client_msg_id + canonical msg-N + real created_at
+# #2 + #3 — user echo carries client_msg_id + durable rowid message_id + real created_at
 # --------------------------------------------------------------------------- #
 
 
-def test_user_echo_correlates_client_msg_id_to_msg_n_with_real_timestamp():
+def test_user_echo_uses_durable_rowid_and_correlates_client_msg_id(tmp_path):
+    mgr, store = _lcm_manager(tmp_path)
     captured: list[dict] = []
-    # loop_context=None → _handle_send_message broadcasts the echo but does NOT run an agent.
-    bridge = WebSocketBridge(session_mgr=SessionManager())
+    bridge = WebSocketBridge(session_mgr=mgr)  # loop_context=None → echo only, no agent
 
     async def cap(ev):
         captured.append(ev)
@@ -84,16 +101,18 @@ def test_user_echo_correlates_client_msg_id_to_msg_n_with_real_timestamp():
     assert len(msgs) == 1
     p = msgs[0]["payload"]
     assert p["role"] == "user"
-    # #2: echoed client id, correlated to the canonical durable ordinal (first msg → turn_index 0).
-    assert p["client_msg_id"] == "cli-42"
-    assert p["message_id"] == "msg-0"
-    # #3: real timestamp, not 0.
-    assert p["created_at"] > 0
+    assert p["client_msg_id"] == "cli-42"  # #2 echoed
+    # message_id is the durable LCM rowid (int, >0) and equals the just-persisted row.
+    assert isinstance(p["message_id"], int) and p["message_id"] > 0
+    assert p["message_id"] == store.max_rowid("desktop:test")
+    assert p["ordinal"] == 0  # turn_index is the (non-unique) display position
+    assert p["created_at"] > 0  # #3 real timestamp
 
 
-def test_second_user_message_increments_msg_n():
+def test_message_id_is_durable_rowid_not_resetting_ordinal(tmp_path):
+    mgr, _ = _lcm_manager(tmp_path)
     captured: list[dict] = []
-    bridge = WebSocketBridge(session_mgr=SessionManager())
+    bridge = WebSocketBridge(session_mgr=mgr)
 
     async def cap(ev):
         captured.append(ev)
@@ -101,8 +120,13 @@ def test_second_user_message_increments_msg_n():
     bridge.broadcast = cap
     asyncio.run(bridge.dispatch_user_message("s", "first", client_msg_id="a"))
     asyncio.run(bridge.dispatch_user_message("s", "second", client_msg_id="b"))
-    ids = [e["payload"]["message_id"] for e in captured if e["type"] == "chat_message"]
-    assert ids == ["msg-0", "msg-1"]
+    payloads = [e["payload"] for e in captured if e["type"] == "chat_message"]
+    ids = [p["message_id"] for p in payloads]
+    ordinals = [p["ordinal"] for p in payloads]
+    assert ordinals == [0, 1]
+    # Durable ids are distinct + strictly increasing (monotonic), not "msg-0"/"msg-1".
+    assert ids[0] < ids[1]
+    assert len(set(ids)) == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -125,14 +149,11 @@ def test_persist_loop_result_persists_tail_without_double_append():
     s.add_user_message("hi")  # turn 0 (persisted by add_user_message)
     pre = len(s.get_messages())  # 1
 
-    # Simulate run_loop appending the assistant turn IN PLACE (as it does).
     s.messages.append(ConversationMessage(role="assistant", content=[TextBlock(text="hello back")]))
     s.persist_loop_result(pre)
 
-    # SIDE EFFECT: the assistant message reached LCM exactly once at turn_index 1...
     assert ("assistant", "hello back", 1) in fake.ingested
     assert sum(1 for r in fake.ingested if r[0] == "assistant") == 1
-    # ...and was NOT re-appended to the in-memory list (still user + assistant).
     assert len(s.get_messages()) == 2
 
 
@@ -140,7 +161,6 @@ def test_run_agent_persists_assistant_turn(monkeypatch):
     from prometheus.engine import agent_loop as al
 
     async def fake_run_loop(ctx, messages):
-        # run_loop mutates the list in place; mimic that for the assistant turn.
         messages.append(ConversationMessage(role="assistant", content=[TextBlock(text="answer")]))
         if False:
             yield  # make this an async generator
@@ -148,8 +168,6 @@ def test_run_agent_persists_assistant_turn(monkeypatch):
     monkeypatch.setattr(al, "run_loop", fake_run_loop)
 
     fake = _FakeLCM()
-    # _run_agent operates on the session it's handed — drive it directly (dispatch
-    # schedules it as a fire-and-forget task that wouldn't finish inside asyncio.run).
     session = ChatSession("s", lcm_engine=fake)
     session.add_user_message("question")  # turn 0
 
@@ -160,62 +178,59 @@ def test_run_agent_persists_assistant_turn(monkeypatch):
 
     bridge.broadcast = cap
     asyncio.run(bridge._run_agent("s", session))
-    # The assistant turn run_loop appended in place must reach LCM at turn_index 1.
     assert ("assistant", "answer", 1) in fake.ingested
 
 
 # --------------------------------------------------------------------------- #
-# #1 — messages_since route filters + returns watermark + fails loud
+# #1 — messages route filters by the rowid cursor + returns watermark + fails loud
 # --------------------------------------------------------------------------- #
 
 
 def _app_with_messages(tmp_path):
     store = LCMConversationStore(tmp_path / "lcm.db")
-    for i, ts in enumerate([100.0, 200.0, 300.0]):
-        store.insert_message(
-            MessagePart(
-                role="user" if i % 2 == 0 else "assistant",
-                content=f"m{i}",
-                session_id="s",
-                turn_index=i,
-                timestamp=ts,
-            )
+    rowids = []
+    for i in range(3):
+        m = MessagePart(
+            role="user" if i % 2 == 0 else "assistant",
+            content=f"m{i}",
+            session_id="s",
+            turn_index=i,
+            timestamp=100.0 * (i + 1),
         )
+        store.insert_message(m)
+        rowids.append(m.row_id)
 
     class _LCM:  # the route only needs `.conversation_store`
         conversation_store = store
 
-    app = create_app({}, lcm_engine=_LCM())
-    return TestClient(app)
+    return TestClient(create_app({}, lcm_engine=_LCM())), rowids
 
 
-def test_messages_full_read_has_real_timestamps_and_watermark(tmp_path):
-    client = _app_with_messages(tmp_path)
+def test_messages_full_read_returns_rowid_ids_and_ordinals(tmp_path):
+    client, rowids = _app_with_messages(tmp_path)
     body = client.get("/api/sessions/s/messages").json()
-    assert [m["message_id"] for m in body["messages"]] == ["msg-0", "msg-1", "msg-2"]
-    # #3: real timestamps, not 0.
+    assert [m["message_id"] for m in body["messages"]] == rowids          # durable rowids
+    assert [m["ordinal"] for m in body["messages"]] == [0, 1, 2]          # turn_index display
     assert [m["timestamp"] for m in body["messages"]] == [100.0, 200.0, 300.0]
-    assert body["watermark"] == 300.0
+    assert body["watermark"] == rowids[-1]                                # max rowid
 
 
-def test_messages_since_filters_strictly_greater(tmp_path):
-    client = _app_with_messages(tmp_path)
-    body = client.get("/api/sessions/s/messages?since=150").json()
-    # SIDE EFFECT: only messages with timestamp > 150 come back.
-    assert [m["content"] for m in body["messages"]] == ["m1", "m2"]
-    assert body["watermark"] == 300.0
+def test_messages_since_filters_by_rowid_cursor(tmp_path):
+    client, rowids = _app_with_messages(tmp_path)
+    body = client.get(f"/api/sessions/s/messages?since={rowids[0]}").json()
+    assert [m["message_id"] for m in body["messages"]] == rowids[1:]
+    assert body["watermark"] == rowids[-1]
 
 
 def test_messages_since_caught_up_returns_empty_delta_but_current_watermark(tmp_path):
-    client = _app_with_messages(tmp_path)
-    body = client.get("/api/sessions/s/messages?since=300").json()
+    client, rowids = _app_with_messages(tmp_path)
+    body = client.get(f"/api/sessions/s/messages?since={rowids[-1]}").json()
     assert body["messages"] == []
-    # Empty delta, but the client still learns it's at the head.
-    assert body["watermark"] == 300.0
+    assert body["watermark"] == rowids[-1]
 
 
 def test_messages_since_invalid_is_400_not_silently_ignored(tmp_path):
-    client = _app_with_messages(tmp_path)
+    client, _ = _app_with_messages(tmp_path)
     resp = client.get("/api/sessions/s/messages?since=notanumber")
     assert resp.status_code == 400
     assert "since" in resp.json()["error"]

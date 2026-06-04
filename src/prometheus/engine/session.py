@@ -275,6 +275,22 @@ class ChatSession:
         """Return the conversation history."""
         return self.messages
 
+    def last_persisted_row_id(self) -> int:
+        """Durable LCM rowid of this session's most-recently persisted message, or 0
+        when no LCM engine is wired.
+
+        Used as the canonical ``message_id`` on the WS user echo — the SAME id
+        ``GET /api/sessions/{id}/messages`` reports for that row. Correct in the daemon's
+        single-event-loop model: persistence is synchronous, so right after
+        ``add_user_message`` the session's max rowid IS the just-inserted message.
+        """
+        if self._lcm_engine is None:
+            return 0
+        try:
+            return self._lcm_engine.conversation_store.max_rowid(self.session_id)
+        except Exception:
+            return 0
+
     def clear(self) -> None:
         """Reset conversation history."""
         self.messages = []
