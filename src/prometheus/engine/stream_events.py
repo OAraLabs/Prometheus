@@ -35,6 +35,10 @@ class ToolExecutionStarted:
 
     tool_name: str
     tool_input: dict[str, Any]
+    # Stable id correlating this start to its ToolExecutionCompleted — the
+    # ToolUseBlock id (``toolu_<hex>``) the model assigned. Defaulted so older
+    # construction sites keep working.
+    tool_use_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,8 @@ class ToolExecutionCompleted:
     tool_name: str
     output: str
     is_error: bool = False
+    # Same id as the matching ToolExecutionStarted (see above).
+    tool_use_id: str = ""
 
 
 StreamEvent = (

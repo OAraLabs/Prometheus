@@ -962,11 +962,12 @@ async def run_loop(
             tool_results = _apply_cross_result_budget(context, tool_calls, tool_results)
 
         for tc, result in zip(tool_calls, tool_results):
-            yield ToolExecutionStarted(tool_name=tc.name, tool_input=tc.input), None
+            yield ToolExecutionStarted(tool_name=tc.name, tool_input=tc.input, tool_use_id=tc.id), None
             yield ToolExecutionCompleted(
                 tool_name=tc.name,
                 output=result.content,
                 is_error=result.is_error,
+                tool_use_id=tc.id,
             ), None
 
         messages.append(ConversationMessage(role="user", content=tool_results))

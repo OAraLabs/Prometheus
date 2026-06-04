@@ -142,8 +142,12 @@ class ChatSession:
         self.queued_prompts.clear()
         return n
 
-    def add_user_message(self, text: str) -> None:
-        """Append a user message to the conversation.
+    def add_user_message(self, text: str) -> int:
+        """Append a user message to the conversation. Returns its ``turn_index``.
+
+        The returned turn_index is the durable per-session ordinal the message
+        is persisted under — callers use it as the ``msg-{turn_index}`` wire id
+        (e.g. the WS user-echo correlates a client_msg_id to it).
 
         PR fix/memory-lcm-full-rewire (2026-05-26): also persists to
         LCM (best-effort) when an engine is wired. Without this hook,
@@ -161,6 +165,7 @@ class ChatSession:
                 [self.messages[-1]],
                 base_turn_index=new_turn_index,
             )
+        return new_turn_index
 
     def add_result_messages(
         self,
@@ -188,6 +193,25 @@ class ChatSession:
             self.messages.extend(new)
             if self._lcm_engine is not None:
                 self._persist_to_lcm(new, base_turn_index=original_len)
+
+    def persist_loop_result(self, original_len: int) -> None:
+        """Persist messages that ``run_loop`` appended IN PLACE to LCM.
+
+        The streaming WS path (``web/ws_server.py:_run_agent``) passes
+        ``session.get_messages()`` straight into ``run_loop``, which appends the
+        assistant + tool-result messages directly onto ``self.messages``. So
+        unlike :meth:`add_result_messages` (which extends from a *separate*
+        RunResult list), the rows are ALREADY in ``self.messages`` — we persist
+        the new tail WITHOUT re-appending. Without this, web/Beacon assistant
+        turns stream but never reach LCM (the gateway adapters call
+        ``add_result_messages``; the WS bridge had no equivalent).
+
+        ``original_len`` is ``len(self.messages)`` captured before the loop ran.
+        Best-effort, same contract as :meth:`_persist_to_lcm` — never raises.
+        """
+        new = self.messages[original_len:]
+        if new and self._lcm_engine is not None:
+            self._persist_to_lcm(new, base_turn_index=original_len)
 
     def _persist_to_lcm(
         self,

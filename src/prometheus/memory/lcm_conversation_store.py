@@ -313,6 +313,19 @@ class LCMConversationStore:
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_message(r) for r in rows]
 
+    def max_timestamp(self, session_id: str) -> float:
+        """Current max ``timestamp`` for a session, or ``0.0`` if it has none.
+
+        This is the "current watermark" the REST history route returns so a
+        client can tell it has caught up even when an incremental ``since`` read
+        comes back empty.
+        """
+        row = self._conn.execute(
+            "SELECT MAX(timestamp) AS mx FROM lcm_messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return float(row["mx"]) if row and row["mx"] is not None else 0.0
+
     def has_message(self, message_id: str) -> bool:
         """Return ``True`` iff a row with this id is persisted.
 

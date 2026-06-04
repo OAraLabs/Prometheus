@@ -232,7 +232,9 @@ class WebSocketBridge:
             logger.warning("Vision analysis failed for %s: %s", image_path, exc)
         return None
 
-    async def dispatch_user_message(self, session_id: str, content: str) -> None:
+    async def dispatch_user_message(
+        self, session_id: str, content: str, client_msg_id: str | None = None
+    ) -> None:
         """Public dispatch entry point — kicks off the same flow as a WS-borne
         ``send_message`` command.
 
@@ -242,10 +244,16 @@ class WebSocketBridge:
         agent work runs in a background task and streams back over the
         bridge's broadcast — the HTTP caller's job is to be a WS subscriber
         (which Beacon already is) to receive the response deltas.
-        """
-        await self._handle_send_message(session_id, content)
 
-    async def _handle_send_message(self, session_id: str, content: str) -> None:
+        ``client_msg_id`` (optional) is echoed on the user ``chat_message`` frame
+        alongside the canonical ``msg-{turn_index}`` id, so a client that rendered
+        the message optimistically can correlate its local id to the durable one.
+        """
+        await self._handle_send_message(session_id, content, client_msg_id=client_msg_id)
+
+    async def _handle_send_message(
+        self, session_id: str, content: str, client_msg_id: str | None = None
+    ) -> None:
         """Process a user message — add to session and run agent loop if context available.
 
         If the content contains [Image: /path/to/file] references (from Beacon
@@ -278,17 +286,22 @@ class WebSocketBridge:
             content = processed
 
         session = self.session_mgr.get_or_create(session_id)
-        session.add_user_message(content)
+        turn_index = session.add_user_message(content)
 
-        # Broadcast the user message
+        # Broadcast the user message. message_id is the canonical durable ordinal
+        # (msg-{turn_index}) — the SAME id GET /api/sessions/{id}/messages reports —
+        # so a client can correlate its optimistic client_msg_id to the real row.
+        ts = time.time()
         await self.broadcast({
             "type": "chat_message",
-            "timestamp": time.time(),
+            "timestamp": ts,
             "payload": {
                 "session_id": session_id,
                 "role": "user",
                 "content": content,
-                "message_id": f"user-{int(time.time() * 1000)}",
+                "message_id": f"msg-{turn_index}",
+                "client_msg_id": client_msg_id,
+                "created_at": ts,
             },
         })
 
@@ -314,6 +327,7 @@ class WebSocketBridge:
 
         try:
             messages = session.get_messages()
+            original_len = len(messages)
             async for event, _usage in run_loop(self.loop_context, messages):
                 event_type = type(event).__name__
 
@@ -334,6 +348,7 @@ class WebSocketBridge:
                         "type": "tool_call_start",
                         "timestamp": time.time(),
                         "payload": {
+                            "call_id": event.tool_use_id,
                             "tool_name": event.tool_name,
                             "inputs": event.tool_input,
                         },
@@ -344,11 +359,17 @@ class WebSocketBridge:
                         "type": "tool_call_end",
                         "timestamp": time.time(),
                         "payload": {
+                            "call_id": event.tool_use_id,
                             "tool_name": event.tool_name,
                             "success": not event.is_error,
                             "result": event.output[:2000] if event.output else "",
                         },
                     })
+
+            # Persist the assistant turn that run_loop appended in place onto
+            # session.messages (parity with the Telegram/Slack gateways). Without
+            # this the web/Beacon assistant half never reaches LCM/memory.
+            session.persist_loop_result(original_len)
 
             # Stream done
             await self.broadcast({
