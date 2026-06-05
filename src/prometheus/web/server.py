@@ -271,8 +271,15 @@ def create_app(
 
     @app.delete("/api/sessions/{session_id}")
     async def clear_session(session_id: str):
+        # "Forget session": REMOVE the in-memory entry so the session stops
+        # being listed by GET /api/sessions (which enumerates
+        # session_mgr._sessions). NOT session_mgr.clear() — that only empties
+        # the message list and leaves the entry listed until a daemon restart,
+        # so junk/test sessions could never be made to disappear. Durable LCM
+        # rows are append-only and deliberately left intact; we forget only the
+        # live session handle. See SessionManager.remove().
         if session_mgr:
-            session_mgr.clear(session_id)
+            session_mgr.remove(session_id)
         return {"ok": True}
 
     # ── Telemetry ───────────────────────────────────────────────────

@@ -331,5 +331,17 @@ class SessionManager:
             self._sessions[session_id].clear()
 
     def remove(self, session_id: str) -> None:
-        """Delete a session entirely."""
+        """Forget a session: drop its in-memory entry from ``self._sessions``.
+
+        This is what makes a junk/test session disappear for good: ``GET
+        /api/sessions`` enumerates ``self._sessions``, so once the entry is
+        popped the session stops being listed (``clear`` only empties the
+        message list, leaving the entry — and thus the listing — in place
+        until a daemon restart).
+
+        Deliberately does NOT touch the durable LCM conversation store: that
+        store is append-only and is the system of record for history, so we
+        only forget the live in-memory handle, never the persisted rows.
+        No-op (safe) when the id is unknown.
+        """
         self._sessions.pop(session_id, None)
