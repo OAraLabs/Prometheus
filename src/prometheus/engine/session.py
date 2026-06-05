@@ -230,6 +230,7 @@ class ChatSession:
                     session_id=self.session_id,
                     role=msg.role,
                     content=msg.text,
+                    content_json=msg.content_json,
                     turn_index=base_turn_index + i,
                 )
         except Exception as exc:

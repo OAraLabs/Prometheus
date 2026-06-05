@@ -52,6 +52,7 @@ class LCMConversationStore:
                 turn_index  INTEGER NOT NULL DEFAULT 0,
                 role        TEXT NOT NULL,
                 content     TEXT NOT NULL,
+                content_json TEXT,
                 token_count INTEGER NOT NULL DEFAULT 0,
                 timestamp   REAL NOT NULL,
                 compacted   INTEGER NOT NULL DEFAULT 0
@@ -87,6 +88,20 @@ class LCMConversationStore:
                 ON checkpoints(task_id, step_number DESC);
         """)
         self._conn.commit()
+        self._migrate_add_content_json()
+
+    def _migrate_add_content_json(self) -> None:
+        """Additive, idempotent migration for the structured-content column.
+
+        Older DBs predate ``content_json``. ``ALTER TABLE ADD COLUMN`` is O(1) in SQLite
+        (metadata-only — the append-only rows are never rewritten and read back as NULL), and
+        the guard makes reopening an already-migrated DB a no-op. Fresh DBs already have the
+        column from ``CREATE TABLE`` above, so this is a no-op for them too.
+        """
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(lcm_messages)")}
+        if "content_json" not in cols:
+            self._conn.execute("ALTER TABLE lcm_messages ADD COLUMN content_json TEXT")
+            self._conn.commit()
 
     # ------------------------------------------------------------------
     # Row <-> dataclass helpers
@@ -106,6 +121,7 @@ class LCMConversationStore:
             # Present only when the query SELECTs `rowid AS row_id` (messages_after_id);
             # other read paths don't need it.
             row_id=row["row_id"] if "row_id" in keys else 0,
+            content_json=row["content_json"] if "content_json" in keys else None,
         )
 
     # ------------------------------------------------------------------
@@ -135,9 +151,9 @@ class LCMConversationStore:
 
         self._conn.execute(
             "INSERT OR REPLACE INTO lcm_messages"
-            " (id, session_id, turn_index, role, content, token_count, timestamp, compacted)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
-            (mid, msg.session_id, msg.turn_index, msg.role, msg.content, msg.token_count, ts),
+            " (id, session_id, turn_index, role, content, content_json, token_count, timestamp, compacted)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            (mid, msg.session_id, msg.turn_index, msg.role, msg.content, msg.content_json, msg.token_count, ts),
         )
 
         # Sync FTS index — use the rowid of the just-inserted row.

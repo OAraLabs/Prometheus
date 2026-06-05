@@ -262,6 +262,7 @@ def create_app(
                 "session_id": session_id,
                 "role": p.role,
                 "content": p.content,
+                "content_json": p.content_json,
                 "timestamp": p.timestamp,
             }
             for p in parts

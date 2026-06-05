@@ -26,6 +26,10 @@ class MessagePart:
     # restart-stable (the store is append-only) — the canonical on-the-wire message id.
     # 0 means "not yet persisted / unknown".
     row_id: int = 0
+    # Lossless JSON of the structured content blocks (text / tool_use / tool_result), persisted
+    # alongside the flat-text ``content``. ``None`` for legacy rows written before this field
+    # existed (unrecoverable). Added LAST so positional MessagePart construction stays valid.
+    content_json: str | None = None
 
 
 @dataclass

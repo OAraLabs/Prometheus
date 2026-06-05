@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Annotated, Literal
 from uuid import uuid4
 
@@ -59,6 +60,17 @@ class ConversationMessage(BaseModel):
         return "".join(
             block.text for block in self.content if isinstance(block, TextBlock)
         )
+
+    @property
+    def content_json(self) -> str:
+        """Serialize the FULL structured content (every block type) to a JSON string.
+
+        Lossless counterpart to :attr:`text` — which keeps only ``TextBlock`` text and so
+        renders tool_use / tool_result turns as ``""``. Persisted alongside the flat text as
+        ``MessagePart.content_json`` so structured turns survive the LCM round-trip; round-trips
+        back via ``ConversationMessage(role=..., content=json.loads(...))``.
+        """
+        return json.dumps([block.model_dump(mode="json") for block in self.content])
 
     @property
     def tool_uses(self) -> list[ToolUseBlock]:

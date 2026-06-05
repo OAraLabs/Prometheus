@@ -39,7 +39,7 @@ def _lcm_manager(tmp_path):
     class _Engine:
         conversation_store = store
 
-        def ingest_sync(self, session_id, role, content, turn_index=0):
+        def ingest_sync(self, session_id, role, content, turn_index=0, content_json=None):
             m = MessagePart(role=role, content=content, session_id=session_id, turn_index=turn_index)
             store.add_message(session_id, m)
             return m.message_id
@@ -138,7 +138,7 @@ class _FakeLCM:
     def __init__(self) -> None:
         self.ingested: list[tuple[str, str, int]] = []
 
-    def ingest_sync(self, session_id, role, content, turn_index=0):
+    def ingest_sync(self, session_id, role, content, turn_index=0, content_json=None):
         self.ingested.append((role, content, turn_index))
         return f"id-{turn_index}"
 

@@ -134,6 +134,7 @@ class WebSocketBridge:
                             "session_id": session_id,
                             "role": m.role,
                             "content": m.content if isinstance(m.content, str) else str(m.content),
+                            "content_json": m.content_json,
                             "message_id": f"hist-{i}",
                         },
                     })
@@ -301,6 +302,7 @@ class WebSocketBridge:
                 "session_id": session_id,
                 "role": "user",
                 "content": content,
+                "content_json": json.dumps([{"type": "text", "text": content}]),
                 "message_id": row_id,
                 "ordinal": turn_index,
                 "client_msg_id": client_msg_id,
