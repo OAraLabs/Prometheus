@@ -92,6 +92,7 @@ def create_app(
                 "/api/cron", "/api/approvals", "/api/chat",
                 "/api/config", "/api/skills", "/api/profiles",
                 "/api/wiki/stats", "/api/sentinel", "/api/events/recent",
+                "/api/files",
             ],
         }
 
@@ -608,6 +609,82 @@ def create_app(
             return load_cron_jobs()
         except Exception:
             return []
+
+    # ── Files (Beacon file browser) ─────────────────────────────────
+    #
+    # Sandboxed read-only browse of the agent WORKSPACE (get_workspace_dir() —
+    # ~/.prometheus/workspace, or $PROMETHEUS_WORKSPACE_DIR). Beacon Desktop runs
+    # REMOTE from this host, so it can't read the workspace via local fs — this is
+    # its only file access. Every path is resolved and confined to the root:
+    # .. / absolute / symlink escapes are rejected (resolve() follows symlinks).
+
+    from prometheus.config.paths import get_workspace_dir
+
+    _FILES_READ_CAP = 256 * 1024  # 256 KB text-preview cap
+
+    def _files_root() -> Path:
+        return get_workspace_dir().resolve()
+
+    def _safe_file_path(rel: str) -> Path | None:
+        """Resolve `rel` under the workspace root; None if it escapes the root."""
+        root = _files_root()
+        candidate = (root / rel.lstrip("/")).resolve()
+        if candidate == root or root in candidate.parents:
+            return candidate
+        return None
+
+    @app.get("/api/files")
+    async def list_files(path: str = ""):
+        root = _files_root()
+        target = _safe_file_path(path)
+        if target is None:
+            return JSONResponse(status_code=403, content={"error": "path escapes workspace"})
+        if not target.exists() or not target.is_dir():
+            return JSONResponse(status_code=404, content={"error": "directory not found"})
+        try:
+            children = sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+        except OSError as exc:
+            return JSONResponse(status_code=500, content={"error": f"listdir failed: {exc}"})
+        entries = []
+        for child in children:
+            try:
+                st = child.stat()
+                is_dir = child.is_dir()
+            except OSError:
+                continue  # skip dangling symlinks / unreadable entries
+            entries.append({
+                "name": child.name,
+                "type": "dir" if is_dir else "file",
+                "size": 0 if is_dir else st.st_size,
+                "mtime": st.st_mtime,
+            })
+        return {"path": "" if target == root else str(target.relative_to(root)), "entries": entries}
+
+    @app.get("/api/files/read")
+    async def read_file(path: str = ""):
+        root = _files_root()
+        target = _safe_file_path(path)
+        if target is None:
+            return JSONResponse(status_code=403, content={"error": "path escapes workspace"})
+        if not target.exists() or not target.is_file():
+            return JSONResponse(status_code=404, content={"error": "file not found"})
+        size = target.stat().st_size
+        with target.open("rb") as fh:
+            raw = fh.read(_FILES_READ_CAP)
+        binary = b"\x00" in raw
+        content = ""
+        if not binary:
+            try:
+                content = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                binary = True
+        return {
+            "path": str(target.relative_to(root)),
+            "size": size,
+            "truncated": size > _FILES_READ_CAP,
+            "binary": binary,
+            "content": content,
+        }
 
     # ── Approvals ──────────────────────────────────────────────────
 
