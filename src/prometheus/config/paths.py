@@ -105,6 +105,11 @@ def get_cron_registry_path() -> Path:
     return get_data_dir() / "cron_jobs.json"
 
 
+def get_kanban_db_path() -> Path:
+    """Return the Kanban (projects/stories board) SQLite database path."""
+    return get_data_dir() / "kanban.db"
+
+
 def get_project_config_dir(cwd: str | Path) -> Path:
     """Return the per-project .prometheus directory."""
     project_dir = Path(cwd).resolve() / ".prometheus"

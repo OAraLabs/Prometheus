@@ -871,6 +871,172 @@ def create_app(
     async def run_benchmarks(body: dict | None = None):
         return {"status": "not_implemented", "message": "Benchmark runner not yet wired"}
 
+    # ── Kanban (Projects + Stories board — Beacon Desktop) ──────────
+    #
+    # Daemon-backed projects/stories store (prometheus.kanban). Mirrors the
+    # Beacon web app's model so a client pointed at this daemon shares state.
+    # snake_case out; `labels` is a list; timestamps are epoch seconds.
+
+    @app.get("/api/projects")
+    async def list_projects():
+        from prometheus.kanban import get_kanban_store
+
+        return get_kanban_store().list_projects()
+
+    @app.post("/api/projects")
+    async def create_project(body: dict):
+        from prometheus.kanban import get_kanban_store
+
+        name = str(body.get("name", "")).strip()
+        if not name:
+            return JSONResponse(status_code=400, content={"error": "name is required"})
+        project = get_kanban_store().create_project(
+            name=name,
+            description=(body.get("description") or None),
+            color=str(body.get("color") or "#58a6ff"),
+        )
+        return JSONResponse(status_code=201, content={"ok": True, "project": project})
+
+    @app.put("/api/projects/{project_id}")
+    async def update_project(project_id: str, body: dict):
+        from prometheus.kanban import get_kanban_store
+
+        if "name" in body and not str(body["name"]).strip():
+            return JSONResponse(status_code=400, content={"error": "name cannot be empty"})
+        fields = {k: body[k] for k in ("name", "description", "color") if k in body}
+        updated = get_kanban_store().update_project(project_id, **fields)
+        if updated is None:
+            return JSONResponse(status_code=404, content={"error": "project not found"})
+        return {"ok": True, "project": updated}
+
+    @app.delete("/api/projects/{project_id}")
+    async def delete_project(project_id: str):
+        from prometheus.kanban import get_kanban_store
+
+        if not get_kanban_store().delete_project(project_id):
+            return JSONResponse(status_code=404, content={"error": "project not found"})
+        return {"ok": True, "id": project_id}
+
+    @app.get("/api/stories")
+    async def list_stories(project_id: str | None = None):
+        from prometheus.kanban import get_kanban_store
+
+        return get_kanban_store().list_stories(project_id=project_id)
+
+    @app.post("/api/stories")
+    async def create_story(body: dict):
+        from prometheus.kanban import STORY_PRIORITIES, STORY_STATUSES, get_kanban_store
+
+        story_id = str(body.get("story_id", "")).strip()
+        title = str(body.get("title", "")).strip()
+        if not story_id or not title:
+            return JSONResponse(status_code=400, content={"error": "story_id and title are required"})
+        status = str(body.get("status") or "todo")
+        priority = str(body.get("priority") or "medium")
+        if status not in STORY_STATUSES:
+            return JSONResponse(status_code=400, content={"error": f"invalid status: {status!r}"})
+        if priority not in STORY_PRIORITIES:
+            return JSONResponse(status_code=400, content={"error": f"invalid priority: {priority!r}"})
+        labels = body.get("labels")
+        story = get_kanban_store().create_story(
+            story_id=story_id,
+            title=title,
+            project_id=(body.get("project_id") or None),
+            description=(body.get("description") or None),
+            status=status,
+            priority=priority,
+            assigned_agent=(body.get("assigned_agent") or None),
+            labels=labels if isinstance(labels, list) else [],
+            position=float(body.get("position") or 0),
+        )
+        return JSONResponse(status_code=201, content={"ok": True, "story": story})
+
+    @app.put("/api/stories/{story_pk}")
+    async def update_story(story_pk: str, body: dict):
+        from prometheus.kanban import STORY_PRIORITIES, STORY_STATUSES, get_kanban_store
+
+        if "status" in body and str(body["status"]) not in STORY_STATUSES:
+            return JSONResponse(status_code=400, content={"error": f"invalid status: {body['status']!r}"})
+        if "priority" in body and str(body["priority"]) not in STORY_PRIORITIES:
+            return JSONResponse(status_code=400, content={"error": f"invalid priority: {body['priority']!r}"})
+        allowed = (
+            "project_id", "story_id", "title", "description", "status",
+            "priority", "assigned_agent", "blocked_reason", "labels", "position",
+        )
+        fields = {k: body[k] for k in allowed if k in body}
+        updated = get_kanban_store().update_story(story_pk, **fields)
+        if updated is None:
+            return JSONResponse(status_code=404, content={"error": "story not found"})
+        return {"ok": True, "story": updated}
+
+    @app.delete("/api/stories/{story_pk}")
+    async def delete_story(story_pk: str):
+        from prometheus.kanban import get_kanban_store
+
+        if not get_kanban_store().delete_story(story_pk):
+            return JSONResponse(status_code=404, content={"error": "story not found"})
+        return {"ok": True, "id": story_pk}
+
+    @app.post("/api/stories/reorder")
+    async def reorder_stories(body: dict):
+        from prometheus.kanban import STORY_STATUSES, get_kanban_store
+
+        items = body.get("items")
+        if not isinstance(items, list):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "items (list of {id, position, status}) is required"},
+            )
+        for item in items:
+            st = str((item or {}).get("status", ""))
+            if st and st not in STORY_STATUSES:
+                return JSONResponse(status_code=400, content={"error": f"invalid status: {st!r}"})
+        get_kanban_store().reorder_stories(items)
+        return {"ok": True, "count": len(items)}
+
+    @app.post("/api/stories/{story_pk}/dispatch")
+    async def dispatch_story(story_pk: str, body: dict):
+        """Send a story's task to a gateway session, then stamp it in-progress.
+
+        Reuses the same ws_bridge path as POST /api/chat/send. Matches the web
+        semantics: if no bridge is wired, 503 WITHOUT stamping (the task did not
+        actually go out)."""
+        from prometheus.kanban import get_kanban_store
+
+        store = get_kanban_store()
+        story = store.get_story(story_pk)
+        if story is None:
+            return JSONResponse(status_code=404, content={"error": "story not found"})
+        session_key = str(body.get("session_key", "")).strip()
+        if not session_key:
+            return JSONResponse(status_code=400, content={"error": "session_key is required"})
+
+        bridge = getattr(app.state, "ws_bridge", None)
+        if bridge is None or not hasattr(bridge, "dispatch_user_message"):
+            return JSONResponse(
+                status_code=503,
+                content={"error": "chat dispatch unavailable — ws_bridge not wired; story NOT dispatched"},
+            )
+
+        parts = [f"**Task: {story.get('title', '')}**"]
+        if story.get("description"):
+            parts.append(str(story["description"]))
+        if story.get("story_id"):
+            parts.append(f"_Task ID: {story['story_id']}_")
+        await bridge.dispatch_user_message(session_key, "\n".join(parts), client_msg_id=None)
+
+        updated = store.mark_dispatched(story_pk, session_key)
+        return {"ok": True, "story": updated, "session_key": session_key}
+
+    @app.post("/api/stories/{story_pk}/undispatch")
+    async def undispatch_story(story_pk: str):
+        from prometheus.kanban import get_kanban_store
+
+        updated = get_kanban_store().undispatch(story_pk)
+        if updated is None:
+            return JSONResponse(status_code=404, content={"error": "story not found"})
+        return {"ok": True, "story": updated}
+
     # ── Static files (must be last — catch-all) ─────────────────────
 
     if static_dir:
