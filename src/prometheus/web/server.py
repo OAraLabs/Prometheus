@@ -610,6 +610,113 @@ def create_app(
         except Exception:
             return []
 
+    @app.post("/api/cron")
+    async def create_cron_job(body: dict):
+        """Create a cron job. Body: {name, schedule, command, cwd?, enabled?}.
+
+        `schedule` must be a valid 5-field cron expression (the REST surface is
+        strict — natural-language parsing stays in the cron_create tool). Names
+        are unique: a duplicate is 409, not a silent overwrite (use PUT to edit).
+        """
+        from prometheus.gateway.cron_service import (
+            get_cron_job,
+            upsert_cron_job,
+            validate_cron_expression,
+        )
+
+        name = str(body.get("name", "")).strip()
+        schedule = str(body.get("schedule", "")).strip()
+        command = str(body.get("command", "")).strip()
+        if not name or not schedule or not command:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "name, schedule and command are required"},
+            )
+        if not validate_cron_expression(schedule):
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"invalid cron expression: {schedule!r}"},
+            )
+        if get_cron_job(name) is not None:
+            return JSONResponse(
+                status_code=409,
+                content={"error": f"cron job {name!r} already exists"},
+            )
+        job: dict[str, Any] = {
+            "name": name,
+            "schedule": schedule,
+            "command": command,
+            "enabled": bool(body.get("enabled", True)),
+        }
+        if body.get("cwd"):
+            job["cwd"] = str(body["cwd"])
+        upsert_cron_job(job)
+        return JSONResponse(status_code=201, content={"ok": True, "job": get_cron_job(name)})
+
+    @app.put("/api/cron/{name}")
+    async def update_cron_job(name: str, body: dict):
+        """Edit an existing cron job in place (merge of any of schedule/command/
+        cwd/enabled). 404 if the name is unknown; 400 on an invalid schedule."""
+        from prometheus.gateway.cron_service import (
+            get_cron_job,
+            upsert_cron_job,
+            validate_cron_expression,
+        )
+
+        existing = get_cron_job(name)
+        if existing is None:
+            return JSONResponse(status_code=404, content={"error": "cron job not found"})
+        if "schedule" in body:
+            schedule = str(body.get("schedule", "")).strip()
+            if not validate_cron_expression(schedule):
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"invalid cron expression: {schedule!r}"},
+                )
+            existing["schedule"] = schedule
+        if "command" in body:
+            command = str(body.get("command", "")).strip()
+            if not command:
+                return JSONResponse(status_code=400, content={"error": "command cannot be empty"})
+            existing["command"] = command
+        if "cwd" in body:
+            existing["cwd"] = str(body["cwd"]) if body["cwd"] else None
+        if "enabled" in body:
+            existing["enabled"] = bool(body["enabled"])
+        upsert_cron_job(existing)  # replaces by name + recomputes next_run
+        return {"ok": True, "job": get_cron_job(name)}
+
+    @app.delete("/api/cron/{name}")
+    async def remove_cron_job(name: str):
+        from prometheus.gateway.cron_service import delete_cron_job
+
+        if not delete_cron_job(name):
+            return JSONResponse(status_code=404, content={"error": "cron job not found"})
+        return {"ok": True, "name": name}
+
+    @app.post("/api/cron/{name}/run")
+    async def run_cron_job_now(name: str):
+        """Trigger a job immediately. Fire-and-forget: a job may run up to 300s, so
+        the executor is dispatched as a background task and the call returns at once;
+        the outcome surfaces via the job's last_run/last_status (re-GET /api/cron)."""
+        import asyncio
+
+        from prometheus.gateway.cron_scheduler import execute_job
+        from prometheus.gateway.cron_service import get_cron_job
+
+        job = get_cron_job(name)
+        if job is None:
+            return JSONResponse(status_code=404, content={"error": "cron job not found"})
+
+        async def _run() -> None:
+            try:
+                await execute_job(job)
+            except Exception:  # never leave a fire-and-forget task's exception unretrieved
+                pass
+
+        asyncio.create_task(_run())
+        return {"ok": True, "name": name, "started": True}
+
     # ── Files (Beacon file browser) ─────────────────────────────────
     #
     # Sandboxed read-only browse of the agent WORKSPACE (get_workspace_dir() —
