@@ -98,6 +98,63 @@ async def _maybe_notify_failure(entry: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# SecurityGate — cron runs UNATTENDED, so every command is vetted at SYSTEM
+# (restricted) trust before a shell is spawned. This closes the gap where cron
+# was a way to schedule command execution that bypassed the SecurityGate the
+# agent's interactive/background commands all pass through: always-blocked
+# patterns (rm -rf /, mkfs, fork bomb), denied_commands/paths, exfiltration,
+# and network/install commands that need a human (no approver exists for an
+# unattended job → refused). Only an ALLOW decision runs.
+# ---------------------------------------------------------------------------
+
+_SECURITY_GATE: Any | None = None
+
+
+def set_cron_security_gate(gate: Any | None) -> None:
+    """Wire the SecurityGate used to vet cron commands. The daemon passes its
+    shared gate so cron enforces the same policy as the agent. Passing None
+    resets to the lazily-built config default — cron is never left ungated."""
+    global _SECURITY_GATE
+    _SECURITY_GATE = gate
+
+
+def _get_security_gate() -> Any | None:
+    """Return the wired gate, else lazily build SecurityGate.from_config() so
+    cron is ALWAYS gated — even if the daemon never wired one (or under tests)."""
+    global _SECURITY_GATE
+    if _SECURITY_GATE is None:
+        try:
+            from prometheus.permissions.checker import SecurityGate
+
+            _SECURITY_GATE = SecurityGate.from_config()
+        except Exception:
+            logger.exception("Cron: could not build a default SecurityGate")
+            return None
+    return _SECURITY_GATE
+
+
+def vet_cron_command(command: str) -> tuple[bool, str]:
+    """Vet a cron command through SecurityGate at SYSTEM (restricted) trust.
+
+    Returns ``(allowed, reason)``. Used by BOTH the create/edit API (fail fast →
+    400) and execute_job (the unattended backstop covering every path that runs
+    a job, including the scheduler loop). Fails CLOSED: if no gate can be built
+    or evaluation raises, the command is refused rather than run ungated.
+    """
+    gate = _get_security_gate()
+    if gate is None:
+        return False, "SecurityGate unavailable — refusing to run a cron command ungated"
+    try:
+        decision = gate.evaluate("bash", command=command, origin="system")
+    except Exception as exc:  # never let a gate error reopen the bypass
+        logger.exception("Cron: SecurityGate.evaluate raised")
+        return False, f"SecurityGate error: {exc}"
+    if decision.action == "ALLOW":
+        return True, ""
+    return False, decision.reason or f"blocked by SecurityGate ({decision.action})"
+
+
+# ---------------------------------------------------------------------------
 # History helpers
 # ---------------------------------------------------------------------------
 
@@ -218,6 +275,28 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
     command = job["command"]
     cwd = Path(job.get("cwd") or ".").expanduser()
     started_at = datetime.now(timezone.utc)
+
+    # SECURITY: vet the command at system (restricted) trust BEFORE spawning a
+    # shell. Cron is unattended, so a non-ALLOW decision refuses execution — cron
+    # is not a SecurityGate bypass. Covers the scheduler loop, run-now, and any
+    # job created outside the API.
+    allowed, reason = vet_cron_command(command)
+    if not allowed:
+        logger.warning("Cron job %r BLOCKED by SecurityGate: %s", name, reason)
+        entry = {
+            "name": name,
+            "command": command,
+            "started_at": started_at.isoformat(),
+            "ended_at": datetime.now(timezone.utc).isoformat(),
+            "returncode": 126,
+            "status": "blocked",
+            "stdout": "",
+            "stderr": f"SecurityGate refused this command at system trust: {reason}",
+        }
+        mark_job_run(name, success=False)
+        append_history(entry)
+        await _maybe_notify_failure(entry)
+        return entry
 
     logger.info("Executing cron job %r: %s", name, command)
     try:

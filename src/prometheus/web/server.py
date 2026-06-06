@@ -54,10 +54,22 @@ def create_app(
         allow_headers=["*"],
     )
 
-    # ── Bearer token auth on /api/* routes ──────────────────────────
+    # ── Bearer token auth + body-size guard on /api/* routes ────────
+
+    _MAX_BODY_BYTES = 2 * 1024 * 1024  # REST bodies are JSON/text; file uploads use the WS, not /api
 
     @app.middleware("http")
     async def _check_bearer_token(request: Request, call_next):
+        # Reject oversized bodies up front (by Content-Length, before any read).
+        # NOTE: a chunked request without Content-Length sidesteps this — a hard
+        # streaming cap belongs at the uvicorn/reverse-proxy layer.
+        cl = request.headers.get("content-length")
+        if cl is not None:
+            try:
+                if int(cl) > _MAX_BODY_BYTES:
+                    return JSONResponse(status_code=413, content={"error": "request body too large"})
+            except ValueError:
+                return JSONResponse(status_code=400, content={"error": "invalid Content-Length"})
         if _api_token and request.url.path.startswith("/api/"):
             auth = request.headers.get("authorization", "")
             if auth != f"Bearer {_api_token}":
@@ -642,6 +654,16 @@ def create_app(
                 status_code=409,
                 content={"error": f"cron job {name!r} already exists"},
             )
+        # SECURITY: refuse to even store a job whose command would be blocked at
+        # system trust (the execute path enforces this too — this is fail-fast).
+        from prometheus.gateway.cron_scheduler import vet_cron_command
+
+        allowed, reason = vet_cron_command(command)
+        if not allowed:
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"command rejected by SecurityGate: {reason}"},
+            )
         job: dict[str, Any] = {
             "name": name,
             "schedule": schedule,
@@ -678,6 +700,14 @@ def create_app(
             command = str(body.get("command", "")).strip()
             if not command:
                 return JSONResponse(status_code=400, content={"error": "command cannot be empty"})
+            from prometheus.gateway.cron_scheduler import vet_cron_command
+
+            allowed, reason = vet_cron_command(command)
+            if not allowed:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"command rejected by SecurityGate: {reason}"},
+                )
             existing["command"] = command
         if "cwd" in body:
             existing["cwd"] = str(body["cwd"]) if body["cwd"] else None

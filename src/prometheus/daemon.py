@@ -564,8 +564,14 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # task-watcher only sees BackgroundTaskManager tasks, not cron
     # subprocesses, so without this a failing daily briefing is silent.
     if not args.telegram_only:
-        from prometheus.gateway.cron_scheduler import set_cron_notifier
+        from prometheus.gateway.cron_scheduler import (
+            set_cron_notifier,
+            set_cron_security_gate,
+        )
         set_cron_notifier(telegram, _notify_chat)
+        # Vet cron commands through the SAME SecurityGate as the agent, at system
+        # (restricted) trust, before they run unattended (see cron_scheduler).
+        set_cron_security_gate(security_gate)
         cron_task = asyncio.create_task(run_scheduler_loop())
         tasks.append(cron_task)
         logger.info(
