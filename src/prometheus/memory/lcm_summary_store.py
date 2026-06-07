@@ -172,6 +172,24 @@ class LCMSummaryStore:
             ).fetchall()
         return [self._row_to_node(r) for r in rows]
 
+    def get_leaf_summaries(self, session_id: str) -> list[SummaryNode]:
+        """Leaf summary nodes — the session-scoped accessor the assembler and
+        compactor call as ``get_leaf_summaries(session_id)``.
+
+        Restores a method the callers always expected but the store never
+        provided: its absence made ``LCMAssembler.assemble`` raise
+        ``AttributeError`` on every call, which ``GET /api/lcm`` silently turned
+        into all-zeros (the context-window readout never worked).
+
+        NOTE: ``lcm_summaries`` has no ``session_id`` column today, so the store
+        is GLOBAL — ``session_id`` is accepted for the caller API but every leaf
+        is returned regardless of session. True per-session partitioning is a
+        tracked follow-up; until then a single-operator daemon's summaries are
+        one pool. (Moot in practice right now: compaction creates no summaries
+        yet, so this returns ``[]``.)
+        """
+        return self.get_leaves()
+
     def get_by_depth(self, depth: int, *, limit: int = 100) -> list[SummaryNode]:
         """Return summaries at the given depth, oldest first."""
         rows = self._conn.execute(

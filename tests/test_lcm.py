@@ -580,6 +580,31 @@ class TestAssembler:
         assert "[Earlier conversation context (compressed)]" in preamble
         assert "architecture" in preamble
 
+    def test_real_store_has_get_leaf_summaries(self, stores) -> None:
+        # Regression: the assembler + compactor call get_leaf_summaries(session_id);
+        # the real store must provide it (its absence raised AttributeError, which
+        # GET /api/lcm swallowed → the context-window stat was always 0).
+        _, sums = stores
+        sums.insert_summary(SummaryNode(summary_text="a leaf summary", depth=0))
+        leaves = sums.get_leaf_summaries("any-session")
+        assert len(leaves) == 1 and leaves[0].summary_text == "a leaf summary"
+
+    def test_assemble_real_stores_no_patch(self, stores) -> None:
+        # The PRODUCTION path: assemble against the real stores with NO monkeypatching
+        # of get_leaf_summaries. This is exactly what GET /api/lcm does; it used to
+        # raise AttributeError and report 0 tokens.
+        conv, sums = stores
+        self._insert_messages(conv, 5)
+        from prometheus.memory.lcm_assembler import LCMAssembler
+
+        config = CompactionConfig(fresh_tail_count=32)
+        assembler = LCMAssembler(conv, sums, config)
+        result = assembler.assemble("s1", token_budget=50000)  # must NOT raise
+        assert isinstance(result, AssemblyResult)
+        assert len(result.fresh_messages) == 5
+        assert result.total_tokens > 0  # the number the Status card shows — now non-zero
+        assert result.summaries == []  # no summaries exist yet (global store empty)
+
 
 # ---------------------------------------------------------------------------
 # LCMCompactor.should_compact

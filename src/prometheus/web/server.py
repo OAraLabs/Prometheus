@@ -398,6 +398,14 @@ def create_app(
                 "summary_count": len(result.summaries),
             }
         except Exception:
+            # Don't silently disguise a real failure as "no data" — that hid the
+            # missing get_leaf_summaries for a long time. Log it; still return a
+            # safe zeros shape so the panel degrades instead of 500-ing.
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "LCM assemble failed for session %s — returning empty context state", session_id
+            )
             return {
                 "session_id": session_id,
                 "total_tokens": 0,
