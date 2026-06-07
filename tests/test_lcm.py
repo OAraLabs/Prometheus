@@ -580,14 +580,23 @@ class TestAssembler:
         assert "[Earlier conversation context (compressed)]" in preamble
         assert "architecture" in preamble
 
-    def test_real_store_has_get_leaf_summaries(self, stores) -> None:
-        # Regression: the assembler + compactor call get_leaf_summaries(session_id);
-        # the real store must provide it (its absence raised AttributeError, which
-        # GET /api/lcm swallowed → the context-window stat was always 0).
+    def test_summary_store_session_scoped_accessors(self, stores) -> None:
+        # Regression + session-scoping: the assembler/compactor call
+        # get_leaf_summaries(session_id), add_summary(session_id, node), get_max_depth,
+        # get_leaf_summaries_at_depth, mark_non_leaf — none existed, so assemble raised
+        # AttributeError → /api/lcm reported 0. They must exist AND isolate sessions.
         _, sums = stores
-        sums.insert_summary(SummaryNode(summary_text="a leaf summary", depth=0))
-        leaves = sums.get_leaf_summaries("any-session")
-        assert len(leaves) == 1 and leaves[0].summary_text == "a leaf summary"
+        sums.add_summary("s1", SummaryNode(summary_text="s1 leaf", depth=0))
+        sums.add_summary("s2", SummaryNode(summary_text="s2 leaf", depth=0))
+        s1 = sums.get_leaf_summaries("s1")
+        assert len(s1) == 1 and s1[0].summary_text == "s1 leaf"
+        assert sums.get_leaf_summaries("s2")[0].summary_text == "s2 leaf"  # isolated
+        assert sums.get_leaf_summaries("nope") == []
+        assert sums.get_max_depth("s1") == 0 and sums.get_max_depth("nope") == 0
+        assert len(sums.get_leaf_summaries_at_depth("s1", 0)) == 1
+        assert sums.get_leaf_summaries_at_depth("s1", 1) == []
+        sums.mark_non_leaf([s1[0].id])
+        assert sums.get_leaf_summaries("s1") == []  # no longer a leaf
 
     def test_assemble_real_stores_no_patch(self, stores) -> None:
         # The PRODUCTION path: assemble against the real stores with NO monkeypatching
@@ -603,7 +612,34 @@ class TestAssembler:
         assert isinstance(result, AssemblyResult)
         assert len(result.fresh_messages) == 5
         assert result.total_tokens > 0  # the number the Status card shows — now non-zero
-        assert result.summaries == []  # no summaries exist yet (global store empty)
+        assert result.summaries == []  # no summaries for s1 yet
+
+    async def test_compaction_runs_and_is_session_scoped(self, stores) -> None:
+        # End-to-end: compaction was dead (AttributeError on add_summary /
+        # get_leaf_summaries / get_max_depth / get_leaf_summaries_at_depth). It must now
+        # run, create session-scoped leaf summaries, mark sources compacted, and leave
+        # other sessions untouched.
+        conv, sums = stores
+        self._insert_messages(conv, 10, session="s1")
+        self._insert_messages(conv, 3, session="s2")
+        from prometheus.memory.lcm_compaction import LCMCompactor
+
+        class _FakeSummarizer:
+            async def summarize_messages(self, messages):
+                return f"summary of {len(messages)} messages"
+
+            async def summarize_summaries(self, nodes):
+                return f"meta-summary of {len(nodes)} nodes"
+
+        config = CompactionConfig(fresh_tail_count=2, compaction_batch_size=3)
+        compactor = LCMCompactor(conv, sums, _FakeSummarizer(), config)
+        result = await compactor.compact("s1")  # must NOT raise (was AttributeError)
+
+        assert result.summaries_created >= 1
+        assert result.messages_compacted >= 1
+        assert len(sums.get_leaf_summaries("s1")) >= 1  # s1 got summaries
+        assert sums.get_leaf_summaries("s2") == []  # session isolation
+        assert conv.count_uncompacted("s1") <= config.fresh_tail_count + config.compaction_batch_size
 
 
 # ---------------------------------------------------------------------------

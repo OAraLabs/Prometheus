@@ -48,6 +48,7 @@ class LCMSummaryStore:
 
             CREATE TABLE IF NOT EXISTS lcm_summaries (
                 id                  TEXT PRIMARY KEY,
+                session_id          TEXT,
                 parent_ids          TEXT NOT NULL DEFAULT '[]',
                 source_message_ids  TEXT NOT NULL DEFAULT '[]',
                 summary_text        TEXT NOT NULL,
@@ -69,6 +70,26 @@ class LCMSummaryStore:
                 content_rowid='rowid'
             );
         """)
+        self._conn.commit()
+        self._migrate_add_session_id()
+
+    def _migrate_add_session_id(self) -> None:
+        """Additive, idempotent migration: session-scope the summary DAG.
+
+        Older DBs predate per-session summaries (the table was global, which left
+        the assembler/compactor's ``get_leaf_summaries(session_id)`` etc. with no
+        column to filter on). ``ALTER TABLE ADD COLUMN`` is O(1) metadata-only in
+        SQLite, and the guard makes reopening a no-op. Fresh DBs already have the
+        column from ``CREATE TABLE``. The session index is created here, after the
+        column is guaranteed to exist.
+        """
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(lcm_summaries)")}
+        if "session_id" not in cols:
+            self._conn.execute("ALTER TABLE lcm_summaries ADD COLUMN session_id TEXT")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_lcm_summaries_session"
+            " ON lcm_summaries (session_id, is_leaf)"
+        )
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -92,23 +113,28 @@ class LCMSummaryStore:
     # Insert
     # ------------------------------------------------------------------
 
-    def insert_summary(self, node: SummaryNode) -> str:
+    def insert_summary(self, node: SummaryNode, *, session_id: str | None = None) -> str:
         """Insert a summary node into the DAG.
 
         * Marks all parent nodes as ``is_leaf = 0``.
         * Updates the FTS5 index.
         * Returns the node id.
+
+        ``session_id`` partitions the DAG per conversation (the compactor inserts
+        via :meth:`add_summary`); it is optional for back-compat with global
+        callers/tests (stored as NULL).
         """
         nid = node.id or uuid4().hex
         created = node.created_at or time.time()
 
         self._conn.execute(
             "INSERT OR REPLACE INTO lcm_summaries"
-            " (id, parent_ids, source_message_ids, summary_text,"
+            " (id, session_id, parent_ids, source_message_ids, summary_text,"
             "  depth, token_count, created_at, is_leaf)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 nid,
+                session_id,
                 json.dumps(node.parent_ids),
                 json.dumps(node.source_message_ids),
                 node.summary_text,
@@ -172,23 +198,53 @@ class LCMSummaryStore:
             ).fetchall()
         return [self._row_to_node(r) for r in rows]
 
+    def add_summary(self, session_id: str, node: SummaryNode) -> str:
+        """Session-scoped insert — the compactor's accessor (mirrors the
+        conversation store's ``add_message(session_id, msg)``)."""
+        return self.insert_summary(node, session_id=session_id)
+
     def get_leaf_summaries(self, session_id: str) -> list[SummaryNode]:
-        """Leaf summary nodes — the session-scoped accessor the assembler and
-        compactor call as ``get_leaf_summaries(session_id)``.
+        """Leaf summary nodes for one session (assembler + compactor accessor).
 
-        Restores a method the callers always expected but the store never
-        provided: its absence made ``LCMAssembler.assemble`` raise
-        ``AttributeError`` on every call, which ``GET /api/lcm`` silently turned
-        into all-zeros (the context-window readout never worked).
-
-        NOTE: ``lcm_summaries`` has no ``session_id`` column today, so the store
-        is GLOBAL — ``session_id`` is accepted for the caller API but every leaf
-        is returned regardless of session. True per-session partitioning is a
-        tracked follow-up; until then a single-operator daemon's summaries are
-        one pool. (Moot in practice right now: compaction creates no summaries
-        yet, so this returns ``[]``.)
+        Restores a method the callers always expected but the store never had:
+        its absence made ``LCMAssembler.assemble`` raise ``AttributeError`` on
+        every call, which ``GET /api/lcm`` silently turned into all-zeros.
         """
-        return self.get_leaves()
+        rows = self._conn.execute(
+            "SELECT * FROM lcm_summaries WHERE session_id = ? AND is_leaf = 1"
+            " ORDER BY created_at ASC",
+            (session_id,),
+        ).fetchall()
+        return [self._row_to_node(r) for r in rows]
+
+    def get_leaf_summaries_at_depth(self, session_id: str, depth: int) -> list[SummaryNode]:
+        """Leaf summary nodes at exactly *depth* for one session (cascade input)."""
+        rows = self._conn.execute(
+            "SELECT * FROM lcm_summaries"
+            " WHERE session_id = ? AND is_leaf = 1 AND depth = ?"
+            " ORDER BY created_at ASC",
+            (session_id, depth),
+        ).fetchall()
+        return [self._row_to_node(r) for r in rows]
+
+    def get_max_depth(self, session_id: str) -> int:
+        """Highest summary depth present for a session (0 when there are none)."""
+        row = self._conn.execute(
+            "SELECT MAX(depth) AS d FROM lcm_summaries WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return int(row["d"]) if row and row["d"] is not None else 0
+
+    def mark_non_leaf(self, summary_ids: list[str]) -> None:
+        """Mark nodes as non-leaf — they've been merged into a higher-depth parent."""
+        if not summary_ids:
+            return
+        placeholders = ",".join("?" for _ in summary_ids)
+        self._conn.execute(
+            f"UPDATE lcm_summaries SET is_leaf = 0 WHERE id IN ({placeholders})",
+            summary_ids,
+        )
+        self._conn.commit()
 
     def get_by_depth(self, depth: int, *, limit: int = 100) -> list[SummaryNode]:
         """Return summaries at the given depth, oldest first."""
