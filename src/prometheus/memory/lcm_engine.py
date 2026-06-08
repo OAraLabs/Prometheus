@@ -184,6 +184,8 @@ class LCMEngine:
         *,
         turn_index: int = 0,
         content_json: str | None = None,
+        provenance: str = "user",
+        is_trusted: bool = True,
     ) -> str:
         """Persist a new message and return its ID.
 
@@ -194,6 +196,10 @@ class LCMEngine:
             turn_index: Turn counter within the session.
             content_json: Optional lossless JSON of the structured content blocks
                 (additive — defaults to ``None``, i.e. legacy flat-text behaviour).
+            provenance: Turn origin (``"user"`` / ``"task_supervisor"`` / ...).
+            is_trusted: Whether the content may be trusted. Defaults are the SAFE
+                values ``("user", True)`` so an omitting caller is never tagged
+                untrusted; injected turns pass their real values explicitly.
 
         Returns:
             The generated message ID.
@@ -205,6 +211,8 @@ class LCMEngine:
             turn_index=turn_index,
             token_count=estimate_tokens(content),
             content_json=content_json,
+            provenance=provenance,
+            is_trusted=is_trusted,
         )
         self._conv_store.add_message(session_id, msg)
         return msg.message_id
@@ -217,6 +225,8 @@ class LCMEngine:
         *,
         turn_index: int = 0,
         content_json: str | None = None,
+        provenance: str = "user",
+        is_trusted: bool = True,
     ) -> str:
         """Synchronous sibling of :meth:`ingest` for sync call sites.
 
@@ -231,6 +241,8 @@ class LCMEngine:
 
         ``content_json`` (additive, optional) carries the lossless JSON of the
         structured content blocks alongside the flat ``content`` text.
+        ``provenance`` / ``is_trusted`` carry the turn's trust tag (safe defaults
+        ``("user", True)``; the caller passes a message's real values).
 
         Same return semantics as :meth:`ingest`.
         """
@@ -241,6 +253,8 @@ class LCMEngine:
             turn_index=turn_index,
             token_count=estimate_tokens(content),
             content_json=content_json,
+            provenance=provenance,
+            is_trusted=is_trusted,
         )
         self._conv_store.add_message(session_id, msg)
         return msg.message_id

@@ -249,6 +249,11 @@ class ChatSession:
                     content=msg.text,
                     content_json=msg.content_json,
                     turn_index=base_turn_index + i,
+                    # Persist the turn's trust tag so an injected (untrusted)
+                    # task result survives the LCM round-trip rather than being
+                    # silently dropped to the trusted default.
+                    provenance=msg.provenance,
+                    is_trusted=msg.is_trusted,
                 )
         except Exception as exc:
             # Memory persistence MUST NOT be in the agent's critical

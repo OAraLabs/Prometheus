@@ -55,7 +55,9 @@ class LCMConversationStore:
                 content_json TEXT,
                 token_count INTEGER NOT NULL DEFAULT 0,
                 timestamp   REAL NOT NULL,
-                compacted   INTEGER NOT NULL DEFAULT 0
+                compacted   INTEGER NOT NULL DEFAULT 0,
+                provenance  TEXT NOT NULL DEFAULT 'user',
+                is_trusted  INTEGER NOT NULL DEFAULT 1
             );
 
             CREATE INDEX IF NOT EXISTS idx_lcm_messages_session
@@ -89,6 +91,7 @@ class LCMConversationStore:
         """)
         self._conn.commit()
         self._migrate_add_content_json()
+        self._migrate_add_trust_fields()
 
     def _migrate_add_content_json(self) -> None:
         """Additive, idempotent migration for the structured-content column.
@@ -101,6 +104,34 @@ class LCMConversationStore:
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(lcm_messages)")}
         if "content_json" not in cols:
             self._conn.execute("ALTER TABLE lcm_messages ADD COLUMN content_json TEXT")
+            self._conn.commit()
+
+    def _migrate_add_trust_fields(self) -> None:
+        """Additive, idempotent migration for the provenance / is_trusted columns.
+
+        Persists the per-turn trust tag set by ``inject_turn`` so it survives the
+        LCM write→read round-trip. ``ALTER TABLE ADD COLUMN`` with a constant
+        ``DEFAULT`` is O(1) and **backfills every pre-existing row**: those rows
+        predate task injection and are legitimate history, so they resolve to
+        ``provenance='user'`` / ``is_trusted=1`` (trusted) — never mis-tagged as
+        untrusted. Fresh DBs already have the columns from ``CREATE TABLE`` above,
+        so this is a no-op for them. New inserts always write the columns
+        explicitly (see :meth:`insert_message`), so they never depend on the
+        column default.
+        """
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(lcm_messages)")}
+        changed = False
+        if "provenance" not in cols:
+            self._conn.execute(
+                "ALTER TABLE lcm_messages ADD COLUMN provenance TEXT NOT NULL DEFAULT 'user'"
+            )
+            changed = True
+        if "is_trusted" not in cols:
+            self._conn.execute(
+                "ALTER TABLE lcm_messages ADD COLUMN is_trusted INTEGER NOT NULL DEFAULT 1"
+            )
+            changed = True
+        if changed:
             self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -122,6 +153,15 @@ class LCMConversationStore:
             # other read paths don't need it.
             row_id=row["row_id"] if "row_id" in keys else 0,
             content_json=row["content_json"] if "content_json" in keys else None,
+            # Trust tag. All read paths SELECT *, so these are present; the guards
+            # (and the None check on is_trusted) keep the SAFE (user, trusted)
+            # fallback for any partial-column read — never a false untrusted tag.
+            provenance=row["provenance"] if "provenance" in keys else "user",
+            is_trusted=(
+                bool(row["is_trusted"])
+                if "is_trusted" in keys and row["is_trusted"] is not None
+                else True
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -149,11 +189,18 @@ class LCMConversationStore:
         mid = msg.message_id or uuid4().hex
         ts = msg.timestamp or time.time()
 
+        # Trust columns are written EXPLICITLY from the MessagePart — never left
+        # to the column DEFAULT — so a (task_supervisor, False) turn can never be
+        # silently up-tagged to the trusted default on insert.
         self._conn.execute(
             "INSERT OR REPLACE INTO lcm_messages"
-            " (id, session_id, turn_index, role, content, content_json, token_count, timestamp, compacted)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
-            (mid, msg.session_id, msg.turn_index, msg.role, msg.content, msg.content_json, msg.token_count, ts),
+            " (id, session_id, turn_index, role, content, content_json, token_count, timestamp, compacted,"
+            " provenance, is_trusted)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+            (
+                mid, msg.session_id, msg.turn_index, msg.role, msg.content, msg.content_json,
+                msg.token_count, ts, msg.provenance, 1 if msg.is_trusted else 0,
+            ),
         )
 
         # Sync FTS index — use the rowid of the just-inserted row.

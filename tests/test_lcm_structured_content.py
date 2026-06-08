@@ -44,7 +44,10 @@ class _StoreEngine:
         self._store = store
         self.conversation_store = store
 
-    def ingest_sync(self, session_id, role, content, *, turn_index=0, content_json=None):
+    def ingest_sync(
+        self, session_id, role, content, *, turn_index=0, content_json=None,
+        provenance="user", is_trusted=True,
+    ):
         self._store.add_message(
             session_id,
             MessagePart(
@@ -53,6 +56,8 @@ class _StoreEngine:
                 session_id=session_id,
                 turn_index=turn_index,
                 content_json=content_json,
+                provenance=provenance,
+                is_trusted=is_trusted,
             ),
         )
         return "id"

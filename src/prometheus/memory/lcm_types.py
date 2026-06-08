@@ -30,6 +30,14 @@ class MessagePart:
     # alongside the flat-text ``content``. ``None`` for legacy rows written before this field
     # existed (unrecoverable). Added LAST so positional MessagePart construction stays valid.
     content_json: str | None = None
+    # Trust provenance for the turn this part belongs to — persisted so the
+    # inject_turn tag survives the LCM write→read round-trip. Defaults are the
+    # SAFE history values: a caller (or legacy row) that omits them reads back as
+    # a trusted user turn, NEVER mis-tagged as untrusted. Injected turns (e.g. a
+    # task_supervisor result) pass their real values explicitly (is_trusted=False).
+    # Appended last so positional MessagePart construction stays valid.
+    provenance: str = "user"
+    is_trusted: bool = True
 
 
 @dataclass

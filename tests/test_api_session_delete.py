@@ -25,8 +25,10 @@ def _engine(store: LCMConversationStore):
     class _Engine:
         conversation_store = store
 
-        def ingest_sync(self, session_id, role, content, turn_index=0, content_json=None):
-            m = MessagePart(role=role, content=content, session_id=session_id, turn_index=turn_index)
+        def ingest_sync(self, session_id, role, content, turn_index=0, content_json=None,
+                        provenance="user", is_trusted=True):
+            m = MessagePart(role=role, content=content, session_id=session_id, turn_index=turn_index,
+                            provenance=provenance, is_trusted=is_trusted)
             store.add_message(session_id, m)
             return m.message_id
 
