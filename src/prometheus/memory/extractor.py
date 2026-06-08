@@ -162,6 +162,29 @@ class MemoryExtractor:
         parts = conv_store.messages_since(
             since, limit=500, session_id=session_id
         )
+
+        # Watermark advances over EVERY row read this pass — including the
+        # non-user rows skipped below — so untrusted turns aren't re-scanned on
+        # each cadence. Computed before filtering for exactly that reason.
+        max_ts_seen = max((part.timestamp for part in parts), default=None)
+
+        # TRUST-CONTEXT: only mine genuine conversation. Injected non-"user"
+        # provenance turns (task_supervisor job output now; cron / orchestrator
+        # later) are UNTRUSTED data, not statements by the user — they must
+        # never be extracted as user facts. Filter on the PERSISTED provenance
+        # column (durable as of the trust-tag plumbing); never re-derive trust
+        # from message text.
+        user_parts = [
+            part for part in parts
+            if (getattr(part, "provenance", "user") or "user") == "user"
+        ]
+        skipped = len(parts) - len(user_parts)
+        if skipped:
+            log.debug(
+                "MemoryExtractor: skipped %d non-user-provenance message(s) — "
+                "not mined into memory", skipped,
+            )
+
         messages = [
             {
                 "id": part.message_id,
@@ -170,11 +193,14 @@ class MemoryExtractor:
                 "content": part.content,
                 "timestamp": part.timestamp,
             }
-            for part in parts
+            for part in user_parts
         ]
 
         if not messages:
-            log.debug("MemoryExtractor: no new messages to process")
+            # Still advance past any skipped non-user rows so they aren't re-read.
+            if max_ts_seen is not None:
+                self._last_processed_ts = max(self._last_processed_ts, max_ts_seen)
+            log.debug("MemoryExtractor: no new user-provenance messages to process")
             return 0, []
 
         total_persisted = 0
@@ -185,8 +211,10 @@ class MemoryExtractor:
             total_persisted += persisted
             all_facts.extend(facts)
 
-        if messages:
-            self._last_processed_ts = max(float(m["timestamp"]) for m in messages)
+        # Advance over all rows seen this pass (mined + skipped), so a trailing
+        # run of skipped task turns isn't re-read on the next pass.
+        if max_ts_seen is not None:
+            self._last_processed_ts = max(self._last_processed_ts, max_ts_seen)
         self._last_run = time.time()
         log.info("MemoryExtractor: persisted %d memories from %d messages", total_persisted, len(messages))
 
