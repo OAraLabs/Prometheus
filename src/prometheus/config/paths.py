@@ -110,6 +110,16 @@ def get_kanban_db_path() -> Path:
     return get_data_dir() / "kanban.db"
 
 
+def get_tasks_db_path() -> Path:
+    """Return the managed-task durable store SQLite database path.
+
+    Separate from :func:`get_tasks_dir` (which holds per-task ``.log`` output
+    files): this DB persists ``TaskRecord`` rows so the supervisor can resume
+    or reap ``running`` tasks across a daemon restart.
+    """
+    return get_data_dir() / "tasks.db"
+
+
 def get_project_config_dir(cwd: str | Path) -> Path:
     """Return the per-project .prometheus directory."""
     project_dir = Path(cwd).resolve() / ".prometheus"

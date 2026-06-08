@@ -548,12 +548,35 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Heartbeat — also watches background tasks and pushes proactive
     # finish/fail + progress notifications to the user (audit fix #3).
     from prometheus.tasks.manager import get_task_manager
+    from prometheus.tasks.store import TaskStore
+    tasks_config = config.get("tasks", {})
     _notify_chat = gateway_config.get("briefing_chat_id") or (
         gateway_config.get("allowed_chat_ids") or [None]
     )[0]
+    # Managed tasks: configure the singleton manager with durability (TaskStore)
+    # and system-trust command vetting (same SecurityGate as cron/agent). The
+    # SignalBus is wired later (after SENTINEL init) so task_completed/_failed
+    # can drive re-engagement; notification stays in the heartbeat regardless.
+    task_manager = get_task_manager()
+    try:
+        task_manager.store = TaskStore()
+    except Exception:
+        logger.warning(
+            "TaskStore init failed — tasks will not survive restart", exc_info=True
+        )
+    task_manager.security_gate = security_gate
+    task_manager.default_timeout_seconds = int(
+        tasks_config.get("default_timeout_seconds", task_manager.default_timeout_seconds)
+    )
+    task_manager.poll_initial_interval = float(
+        tasks_config.get("poll_initial_interval_seconds", task_manager.poll_initial_interval)
+    )
+    task_manager.poll_max_interval = float(
+        tasks_config.get("poll_max_interval_seconds", task_manager.poll_max_interval)
+    )
     heartbeat = Heartbeat(
         gateway=telegram,
-        task_manager=get_task_manager(),
+        task_manager=task_manager,
         notify_chat_id=_notify_chat,
     )
     heartbeat_task = asyncio.create_task(heartbeat.run_forever())
@@ -817,6 +840,29 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     logger.debug(
                         "telegram signal bus wiring skipped", exc_info=True
                     )
+            # Managed tasks: wire the bus so task_completed/task_failed drive
+            # re-engagement. The completion handler injects task results back
+            # into the creating session via the shared inject_turn primitive
+            # (notification stays in the heartbeat). Re-engagement requires the
+            # bus, so it is off when SENTINEL is disabled; notification still works.
+            task_manager.signal_bus = signal_bus
+            try:
+                from prometheus.tasks.completion_handler import TaskCompletionHandler
+
+                task_completion = TaskCompletionHandler(
+                    signal_bus=signal_bus,
+                    inject_turn=(
+                        getattr(telegram, "inject_turn", None)
+                        if "telegram" in dir() and telegram is not None
+                        else None
+                    ),
+                    config=tasks_config,
+                )
+                await task_completion.start()
+                logger.info("TaskCompletionHandler subscribed (managed-task reengage)")
+            except Exception:
+                logger.warning("TaskCompletionHandler wiring failed", exc_info=True)
+
             # Sprint Polish: Slack gateway gets the same wiring so signal
             # notifications fan out to whichever gateways the user enables,
             # not just the originating one.
@@ -1089,6 +1135,15 @@ async def run_daemon(args: argparse.Namespace) -> None:
             logger.info("Web bridge started (REST :%d, WS :%d)", api_port, ws_port)
         except Exception as exc:
             logger.warning("Web bridge not available: %s", exc)
+
+    # Managed tasks durability: resume file_watch/poll watchers and reap
+    # orphaned process tasks left "running" by a previous daemon process, so no
+    # zombie rows survive a restart. Unconditional (runs even if SENTINEL/bus is
+    # off) — reaping updates the durable store regardless of signal emission.
+    try:
+        await task_manager.resume_running()
+    except Exception:
+        logger.warning("Task resume_running failed", exc_info=True)
 
     logger.info("Prometheus daemon running. Press Ctrl+C to stop.")
 

@@ -213,7 +213,10 @@ class Heartbeat:
                 # Notify once, and only if we saw it running/pending before —
                 # otherwise an already-finished task at startup would ping.
                 if prev is not None and prev not in _TERMINAL_STATUSES:
-                    await self._notify(self._format_terminal(task, now))
+                    await self._notify(
+                        self._format_terminal(task, now),
+                        chat_id=self._task_chat_id(task),
+                    )
                 self._task_progress_last.pop(task.id, None)
             elif cur == "running":
                 last = self._task_progress_last.get(task.id)
@@ -225,7 +228,8 @@ class Heartbeat:
                 if now - last >= self._task_progress_interval:
                     await self._notify(
                         f"⏳ Still running ({self._format_elapsed(task, now=now)} "
-                        f"elapsed): {task.description}\nID: {task.id}"
+                        f"elapsed): {task.description}\nID: {task.id}",
+                        chat_id=self._task_chat_id(task),
                     )
                     self._task_progress_last[task.id] = now
 
@@ -236,18 +240,35 @@ class Heartbeat:
             self._task_status_seen.pop(gone, None)
             self._task_progress_last.pop(gone, None)
 
-    async def _notify(self, text: str) -> None:
-        """Push a proactive message to the configured chat.
+    async def _notify(self, text: str, *, chat_id: int | None = None) -> None:
+        """Push a proactive message to *chat_id*, or the configured default.
+
+        Managed tasks: a task created from a session carries its own
+        ``notify_target`` (the creating chat). When present we route there;
+        otherwise we fall back to the globally-configured ``notify_chat_id`` —
+        preserving the original single-chat behavior for tasks without a target.
 
         Logs (never silently swallows) on failure so a Telegram hiccup can't
         kill the heartbeat loop.
         """
-        if not (self.gateway and self._notify_chat_id):
+        target = chat_id if chat_id is not None else self._notify_chat_id
+        if not (self.gateway and target):
             return
         try:
-            await self.gateway.send(self._notify_chat_id, text)
+            await self.gateway.send(target, text)
         except Exception:
             logger.exception("Heartbeat: failed to send task notification")
+
+    @staticmethod
+    def _task_chat_id(task: Any) -> int | None:
+        """Per-task notify override (the creating session's chat id), if any."""
+        target = getattr(task, "notify_target", None)
+        if target in (None, ""):
+            return None
+        try:
+            return int(target)
+        except (TypeError, ValueError):
+            return None
 
     def _format_terminal(self, task: Any, now: float) -> str:
         """Compose the finish/fail message for a terminal task."""

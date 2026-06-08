@@ -1,4 +1,14 @@
-"""Tool for creating background tasks."""
+"""Tool for creating managed background tasks.
+
+Agent-facing replacement for raw ``nohup … &``. A task is registered, its id is
+returned immediately (the turn can end), and the daemon's non-LLM supervisor
+detects completion and (a) always notifies via Telegram and (b) optionally
+re-engages the agent with the result.
+
+The notify target and creating-session id are resolved from the TRUSTED
+execution context (threaded from the agent loop), never from tool arguments —
+arguments could originate in observed/injected content.
+"""
 
 from __future__ import annotations
 
@@ -15,45 +25,145 @@ class TaskCreateToolInput(BaseModel):
 
     type: str = Field(
         default="local_bash",
-        description="Task type: 'local_bash' or 'local_agent'.",
+        description="Task type: 'local_bash', 'local_agent', 'file_watch', or 'poll'.",
     )
     description: str = Field(description="Short human-readable task description.")
     command: str | None = Field(default=None, description="Shell command (local_bash only).")
     prompt: str | None = Field(default=None, description="Agent prompt (local_agent only).")
     model: str | None = Field(default=None, description="Model override for agent tasks.")
+    watch_dir: str | None = Field(
+        default=None, description="Directory to watch (file_watch only)."
+    )
+    watch_pattern: str | None = Field(
+        default=None,
+        description="Glob pattern for the file to wait for, e.g. '*.done' (file_watch only).",
+    )
+    poll_predicate: str | None = Field(
+        default=None,
+        description="Shell command polled until it exits 0 (poll only; fallback detector).",
+    )
+    on_complete: str = Field(
+        default="notify",
+        description=(
+            "What to do on completion: 'notify' (Telegram only), 'reengage' "
+            "(also inject the result back to the agent), or 'both'."
+        ),
+    )
+    reengage_prompt: str | None = Field(
+        default=None,
+        description="Optional template for the synthetic re-engagement turn.",
+    )
+    timeout_seconds: int | None = Field(
+        default=None,
+        description="Hard ceiling; on expiry the task is marked failed (timeout).",
+    )
+
+
+def _notify_target_from_session(session_id: str | None) -> str | None:
+    """Derive a Telegram chat id from the creating session id.
+
+    Sessions are keyed like ``telegram:<chat_id>``. Only Telegram targets are
+    resolved here; other platforms return None and notification falls back to the
+    heartbeat's globally-configured chat.
+    """
+    if not session_id:
+        return None
+    if session_id.startswith("telegram:"):
+        return session_id.split(":", 1)[1] or None
+    return None
 
 
 class TaskCreateTool(BaseTool):
-    """Create a background shell or agent task."""
+    """Create a managed background task (shell, agent, file-watch, or poll)."""
 
     name = "task_create"
-    description = "Create a background task (shell command or local agent)."
+    description = (
+        "Create a managed background task instead of running a long job with "
+        "'nohup … &'. Types: local_bash (shell command), local_agent (sub-agent "
+        "prompt), file_watch (wait for a file matching a glob), poll (run a "
+        "predicate command until it succeeds). The daemon detects completion and "
+        "sends a Telegram notification; set on_complete='reengage'/'both' to also "
+        "have the agent act on the result. Returns a task id immediately."
+    )
     input_model = TaskCreateToolInput
 
-    async def execute(self, arguments: TaskCreateToolInput, context: ToolExecutionContext) -> ToolResult:
+    async def execute(
+        self, arguments: TaskCreateToolInput, context: ToolExecutionContext
+    ) -> ToolResult:
         manager = get_task_manager()
-        if arguments.type == "local_bash":
-            if not arguments.command:
-                return ToolResult(output="'command' is required for local_bash tasks", is_error=True)
-            task = await manager.create_shell_task(
-                command=arguments.command,
-                description=arguments.description,
-                cwd=context.cwd,
-            )
-        elif arguments.type == "local_agent":
-            if not arguments.prompt:
-                return ToolResult(output="'prompt' is required for local_agent tasks", is_error=True)
-            try:
+
+        # Trusted context — NOT from arguments.
+        session_id = context.metadata.get("session_id") if context.metadata else None
+        notify_target = _notify_target_from_session(session_id)
+
+        on_complete = arguments.on_complete if arguments.on_complete in (
+            "notify", "reengage", "both",
+        ) else "notify"
+
+        common = dict(
+            description=arguments.description,
+            cwd=context.cwd,
+            session_id=session_id,
+            notify_target=notify_target,
+            on_complete=on_complete,
+            reengage_prompt=arguments.reengage_prompt,
+            timeout_seconds=arguments.timeout_seconds,
+        )
+
+        try:
+            if arguments.type == "local_bash":
+                if not arguments.command:
+                    return ToolResult(output="'command' is required for local_bash tasks", is_error=True)
+                task = await manager.create_shell_task(command=arguments.command, **common)
+            elif arguments.type == "local_agent":
+                if not arguments.prompt:
+                    return ToolResult(output="'prompt' is required for local_agent tasks", is_error=True)
                 task = await manager.create_agent_task(
                     prompt=arguments.prompt,
-                    description=arguments.description,
-                    cwd=context.cwd,
                     model=arguments.model,
                     api_key=os.environ.get("ANTHROPIC_API_KEY"),
+                    **common,
                 )
-            except ValueError as exc:
-                return ToolResult(output=str(exc), is_error=True)
-        else:
-            return ToolResult(output=f"unsupported task type: {arguments.type}", is_error=True)
+            elif arguments.type == "file_watch":
+                if not arguments.watch_dir or not arguments.watch_pattern:
+                    return ToolResult(
+                        output="'watch_dir' and 'watch_pattern' are required for file_watch tasks",
+                        is_error=True,
+                    )
+                task = await manager.create_file_watch_task(
+                    watch_dir=arguments.watch_dir,
+                    watch_pattern=arguments.watch_pattern,
+                    **common,
+                )
+            elif arguments.type == "poll":
+                if not arguments.poll_predicate:
+                    return ToolResult(output="'poll_predicate' is required for poll tasks", is_error=True)
+                task = await manager.create_poll_task(
+                    poll_predicate=arguments.poll_predicate, **common
+                )
+            else:
+                return ToolResult(output=f"unsupported task type: {arguments.type}", is_error=True)
+        except ValueError as exc:
+            return ToolResult(output=str(exc), is_error=True)
 
-        return ToolResult(output=f"Created task {task.id} ({task.type}): {task.description}")
+        if task.status == "failed":
+            return ToolResult(
+                output=f"Task rejected ({task.id}): {task.error or 'unknown reason'}",
+                is_error=True,
+            )
+
+        notify_note = (
+            "I'll notify you on Telegram when it finishes"
+            if notify_target
+            else "completion will be reported to the configured chat"
+        )
+        reengage_note = (
+            " and re-engage with the result" if on_complete in ("reengage", "both") else ""
+        )
+        return ToolResult(
+            output=(
+                f"Started managed task {task.id} ({task.type}): {task.description}. "
+                f"{notify_note}{reengage_note}."
+            ),
+            metadata={"task_id": task.id, "task_type": task.type, "on_complete": on_complete},
+        )

@@ -142,12 +142,23 @@ class ChatSession:
         self.queued_prompts.clear()
         return n
 
-    def add_user_message(self, text: str) -> int:
-        """Append a user message to the conversation. Returns its ``turn_index``.
+    def add_user_message(
+        self,
+        text: str,
+        *,
+        provenance: str = "user",
+        is_trusted: bool = True,
+    ) -> int:
+        """Append a user-role message to the conversation. Returns its ``turn_index``.
 
         The returned turn_index is the durable per-session ordinal the message
         is persisted under — callers use it as the ``msg-{turn_index}`` wire id
         (e.g. the WS user-echo correlates a client_msg_id to it).
+
+        Managed-tasks sprint: ``provenance`` + ``is_trusted`` let the shared
+        ``inject_turn`` primitive record a non-user, untrusted turn (e.g. a task
+        result) on the same path. Defaults keep the human-user behavior
+        (``provenance="user"``, ``is_trusted=True``) for all existing callers.
 
         PR fix/memory-lcm-full-rewire (2026-05-26): also persists to
         LCM (best-effort) when an engine is wired. Without this hook,
@@ -159,7 +170,13 @@ class ChatSession:
         # AFTER the append (matches what add_result_messages will use
         # for downstream turns).
         new_turn_index = len(self.messages)
-        self.messages.append(ConversationMessage.from_user_text(text))
+        if provenance == "user" and is_trusted:
+            message = ConversationMessage.from_user_text(text)
+        else:
+            message = ConversationMessage.from_injected(
+                text, provenance=provenance, is_trusted=is_trusted
+            )
+        self.messages.append(message)
         if self._lcm_engine is not None:
             self._persist_to_lcm(
                 [self.messages[-1]],

@@ -19,7 +19,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable
 
-from prometheus.engine.messages import ConversationMessage, ToolResultBlock
+from prometheus.engine.messages import (
+    ConversationMessage,
+    ToolResultBlock,
+    render_messages_for_model,
+)
 from prometheus.engine.stream_events import (
     AssistantTextDelta,
     AssistantTurnComplete,
@@ -749,7 +753,11 @@ async def run_loop(
         async for event in context.provider.stream_message(
             ApiMessageRequest(
                 model=context.model,
-                messages=messages,
+                # Context-assembly: fence any untrusted injected turns (task
+                # output, watched-file contents, cron data) with the derived
+                # banner before the provider serializes them. The session/LCM
+                # copies stay clean — this projection is per-call only.
+                messages=render_messages_for_model(messages),
                 system_prompt=per_call_system_prompt,
                 max_tokens=context.max_tokens,
                 tools=active_tools,
@@ -1695,6 +1703,10 @@ async def _execute_tool_call(
             metadata={
                 "tool_registry": context.tool_registry,
                 "ask_user_prompt": context.ask_user_prompt,
+                # Managed tasks: the creating session id, so task_create can
+                # resolve session_id + notify_target from trusted context
+                # rather than from (potentially injected) tool arguments.
+                "session_id": context.session_id,
                 **(context.tool_metadata or {}),
             },
         ),

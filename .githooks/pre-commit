@@ -20,6 +20,16 @@ if [ -z "$STAGED_FILES" ]; then
     exit 0
 fi
 
+# Allowlist (precommit:allow-*): explicit, auditable exemptions for tokens that
+# look like a flagged pattern but are known-safe. A flagged line is cleared ONLY
+# if, after masking the allowlisted token(s), the sensitive pattern no longer
+# matches — so a real secret sharing a line with an allowed token is never
+# hidden. Add one ERE per known-safe case, each with a justifying comment.
+#   - oara-prometheus : the project's PyPI *distribution name* (pyproject.toml
+#       [project].name and uv.lock), NOT an "OAra-*" infrastructure hostname.
+#       No real OAra host contains "prometheus", so masking it cannot hide one.
+ALLOWLIST_REGEX='oara-prometheus'
+
 check_pattern() {
     local label="$1"
     local pattern="$2"
@@ -28,14 +38,18 @@ check_pattern() {
         [ -f "$file" ] || continue
         # Use git show to read the staged version, not the working copy
         matches=$(git show ":$file" 2>/dev/null | grep -nP "$pattern" || true)
-        if [ -n "$matches" ]; then
-            while IFS= read -r match; do
-                echo "  BLOCKED  $file:$match"
-                echo "           reason: $label"
-                echo ""
-            done <<< "$matches"
+        [ -n "$matches" ] || continue
+        while IFS= read -r match; do
+            [ -n "$match" ] || continue
+            # Mask allowlisted tokens, then re-test: if the sensitive pattern no
+            # longer matches, the only hit was an allowlisted false positive.
+            stripped=$(printf '%s' "$match" | sed -E "s/${ALLOWLIST_REGEX}//g")
+            printf '%s' "$stripped" | grep -qP "$pattern" || continue
+            echo "  BLOCKED  $file:$match"
+            echo "           reason: $label"
+            echo ""
             BLOCKED=1
-        fi
+        done <<< "$matches"
     done <<< "$STAGED_FILES"
 }
 
@@ -63,7 +77,9 @@ check_pattern "API key (sk-live/sk-test/sk_live/sk_test)" \
 check_pattern "Hardcoded user SSH key path" \
     '/home/[^/]+/\.ssh/id_'
 
-# 6. OAra machine hostnames (Brain-Node, GPU-Node, etc. — not "OAra AI Lab" attribution)
+# 6. OAra machine hostnames (Brain-Node, GPU-Node, etc. — not "OAra AI Lab"
+#    attribution). The "oara-prometheus" distribution name is exempted via
+#    ALLOWLIST_REGEX above (a package name, not a host).
 check_pattern "Infrastructure hostname (OAra-*)" \
     'OAra-|oara-'
 

@@ -41,7 +41,11 @@ log = logging.getLogger(__name__)
 class ActivitySignal:
     """A single activity event flowing through the SENTINEL bus."""
 
-    kind: str  # "idle_start", "idle_end", "extraction_complete", etc.
+    # e.g. "idle_start", "idle_end", "extraction_complete", "skill_created".
+    # Managed-tasks sprint adds "task_completed" / "task_failed" (emitted by the
+    # BackgroundTaskManager when a task resolves; consumed by the task completion
+    # handler for re-engagement). The dataclass itself is unchanged.
+    kind: str
     timestamp: float = field(default_factory=time.time)
     payload: dict[str, Any] = field(default_factory=dict)
     source: str = ""

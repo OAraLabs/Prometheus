@@ -1676,6 +1676,105 @@ class TelegramAdapter(BasePlatformAdapter):
             )
         return text
 
+    @staticmethod
+    def _chat_id_from_session_id(session_id: str) -> int | None:
+        """Parse the Telegram chat id from a ``telegram:<chat_id>`` session key."""
+        if session_id and session_id.startswith("telegram:"):
+            try:
+                return int(session_id.split(":", 1)[1])
+            except (ValueError, IndexError):
+                return None
+        return None
+
+    async def _run_agent_turn(
+        self,
+        session,
+        content: str,
+        *,
+        session_id: str,
+        provenance: str = "user",
+        is_trusted: bool = True,
+    ) -> str:
+        """Shared agent-turn core: append the turn, run the loop, persist, return text.
+
+        Used by both Telegram inbound (``provenance="user"``, trusted) and the
+        managed-task completion handler via :meth:`inject_turn`
+        (``provenance="task_supervisor"``, untrusted). Does NOT send anything —
+        the caller delivers the reply (Telegram inbound adds voice/queue handling;
+        :meth:`inject_turn` delivers plain text to the resolved chat).
+        """
+        session.add_user_message(content, provenance=provenance, is_trusted=is_trusted)
+        pre_len = len(session.get_messages())
+        logger.debug(
+            "THREAD session=%s messages=%d provenance=%s trusted=%s",
+            session_id, pre_len, provenance, is_trusted,
+        )
+        try:
+            result = await self.agent_loop.run_async(
+                system_prompt=self.system_prompt,
+                messages=session.get_messages(),
+                tools=self.tool_registry.list_schemas(),
+                # Phase 3.5: session_id = "telegram:<chat_id>" so any /claude,
+                # /gpt etc. overrides set via Phase 4 commands apply only to
+                # this chat and not other Telegram chats or Slack/CLI/web.
+                session_id=session_id,
+                # SPRINT-2 WS1: pass the live ChatSession so the loop can
+                # drain ``queued_steers`` between tool batches.
+                session_state=session,
+            )
+            # Append assistant response (and any tool call/result pairs) to session
+            session.add_result_messages(result.messages, pre_len)
+            session.trim(self.session_manager.MAX_SESSION_MESSAGES)
+            logger.debug(
+                "THREAD after: session=%s total_messages=%d result_messages=%d",
+                session_id, len(session.get_messages()), len(result.messages),
+            )
+            return result.text or "(no response)"
+        except Exception as exc:
+            logger.error("Agent error for session %s: %s", session_id, exc)
+            session.rollback_last()
+            return f"Error: {exc}"
+
+    async def inject_turn(
+        self,
+        session_id: str,
+        content: str,
+        *,
+        provenance: str = "task_supervisor",
+        is_trusted: bool = False,
+    ) -> str:
+        """Inject a non-user turn into a session, run the agent, deliver the reply.
+
+        The shared re-engagement primitive — the managed-task completion handler
+        (and, in future, cron / the orchestrator) all converge here instead of
+        building parallel mechanisms. ``content`` is recorded with structured
+        ``provenance`` + ``is_trusted``; the untrusted banner is a derived
+        rendering applied at context-assembly. The reply is delivered to the
+        Telegram chat encoded in ``session_id`` (``telegram:<chat_id>``); for a
+        non-Telegram session the turn still runs and persists, but this adapter
+        cannot deliver the reply.
+        """
+        session = self.session_manager.get_or_create(session_id)
+        response_text = await self._run_agent_turn(
+            session,
+            content,
+            session_id=session_id,
+            provenance=provenance,
+            is_trusted=is_trusted,
+        )
+        chat_id = self._chat_id_from_session_id(session_id)
+        if chat_id is not None:
+            try:
+                await self.send(chat_id, strip_markdown(response_text))
+            except Exception:
+                logger.exception("inject_turn: failed to deliver reply for %s", session_id)
+        else:
+            logger.info(
+                "inject_turn: session %s is not a Telegram chat — reply not "
+                "delivered (turn ran and persisted)", session_id,
+            )
+        return response_text
+
     async def _dispatch_to_agent(self, event: MessageEvent) -> None:
         """Route a message through AgentLoop and send the response."""
         if self._app:
@@ -1687,38 +1786,15 @@ class TelegramAdapter(BasePlatformAdapter):
                 pass  # typing indicator is best-effort
 
         session = self.session_manager.get_or_create(event.session_key())
-        session.add_user_message(event.text)
-        pre_len = len(session.get_messages())
-        logger.debug(
-            "THREAD session=%s messages=%d new_user=%r",
-            event.session_key(), pre_len, event.text,
+        # Telegram inbound is a real human: provenance="user", trusted. Routes
+        # through the same shared core as inject_turn (the re-engagement path).
+        response_text = await self._run_agent_turn(
+            session,
+            event.text,
+            session_id=event.session_key(),
+            provenance="user",
+            is_trusted=True,
         )
-
-        try:
-            result = await self.agent_loop.run_async(
-                system_prompt=self.system_prompt,
-                messages=session.get_messages(),
-                tools=self.tool_registry.list_schemas(),
-                # Phase 3.5: session_id = "telegram:<chat_id>" so any /claude,
-                # /gpt etc. overrides set via Phase 4 commands apply only to
-                # this chat and not other Telegram chats or Slack/CLI/web.
-                session_id=event.session_key(),
-                # SPRINT-2 WS1: pass the live ChatSession so the loop can
-                # drain ``queued_steers`` between tool batches.
-                session_state=session,
-            )
-            # Append assistant response (and any tool call/result pairs) to session
-            session.add_result_messages(result.messages, pre_len)
-            session.trim(self.session_manager.MAX_SESSION_MESSAGES)
-            logger.debug(
-                "THREAD after: session=%s total_messages=%d result_messages=%d",
-                event.session_key(), len(session.get_messages()), len(result.messages),
-            )
-            response_text = result.text or "(no response)"
-        except Exception as exc:
-            logger.error("Agent error for chat %d: %s", event.chat_id, exc)
-            session.rollback_last()
-            response_text = f"Error: {exc}"
 
         # Voice-mode routing — prefer voice reply when the chat is in
         # voice mode (and synthesis succeeds); fall back to plain text on
