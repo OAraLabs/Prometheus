@@ -37,7 +37,12 @@ class BashTool(BaseTool):
     """
 
     name = "bash"
-    description = "Run a shell command in the local repository."
+    description = (
+        "Run a short shell command in the local repository. For work that "
+        "outlives this turn (long builds, downloads, file watches) use "
+        "task_create instead of 'nohup … &' — a backgrounded Bash job is killed "
+        "at the timeout and left untracked."
+    )
     input_model = BashToolInput
     example_call = {"command": "ls -la"}
 

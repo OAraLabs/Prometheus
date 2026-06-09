@@ -35,7 +35,7 @@ context:
 tools:
   deferred_loading:
     enabled: false                          # all tool schemas in prompt by default
-    always_loaded: [bash, read_file, write_file, edit_file, grep, glob, tool_search]
+    always_loaded: [bash, task_create, read_file, write_file, edit_file, grep, glob, tool_search]
     mcp_always_deferred: true
     search_mcp: true
 
