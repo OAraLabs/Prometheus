@@ -558,6 +558,12 @@ class LoopContext:
     cwd: Path = field(default_factory=Path.cwd)
     max_turns: int = 200
     max_tool_iterations: int = 25
+    # M5: hard ceiling on a single tool's execution. A hung tool (browser,
+    # LSP, MCP, TTS — anything without its own deadline) otherwise freezes the
+    # turn AND the session. Generous default so legitimate slow tools survive;
+    # a tool can raise its own bar via the ``execution_timeout_seconds`` class
+    # attribute on BaseTool.
+    tool_timeout_seconds: float = 300.0
     # Cloud providers (adapter.tier == "off") typically chew through
     # iterations faster — Claude plans multi-step sequences that Gemma
     # would never attempt. When set, this limit applies whenever the
@@ -644,13 +650,19 @@ async def run_loop(
     # per-session override lookup can fire (or, for session_id in (None,
     # "system"), always resolve to primary).
     if context.model_router is not None and messages:
-        first_user = next(
-            (m.text for m in messages if m.role == "user" and m.text), None
+        # M4: route on the MOST RECENT user message, not the first. In a long
+        # session the first message is stale — the current turn's request is the
+        # latest user turn, which is what smart-routing / task classification
+        # should see. (Per-session overrides are keyed on session_id and are
+        # unaffected by which message text we pass.)
+        latest_user = next(
+            (m.text for m in reversed(messages) if m.role == "user" and m.text),
+            None,
         )
-        if first_user:
+        if latest_user:
             try:
                 decision = context.model_router.route(
-                    first_user,
+                    latest_user,
                     context={"session_id": context.session_id},
                 )
                 reason_repr = (
@@ -660,7 +672,7 @@ async def run_loop(
                 )
                 log.debug(
                     "ModelRouter: %s → %s/%s (%s)",
-                    first_user[:60],
+                    latest_user[:60],
                     decision.provider_name,
                     decision.model_name,
                     reason_repr,
@@ -702,9 +714,9 @@ async def run_loop(
                 # we should discover by reading source code.
                 log.warning(
                     "ModelRouter: route() raised — falling back to primary. "
-                    "session_id=%r, first_user=%r",
+                    "session_id=%r, latest_user=%r",
                     context.session_id,
-                    (first_user or "")[:60],
+                    (latest_user or "")[:60],
                     exc_info=True,
                 )
 
@@ -1533,12 +1545,22 @@ async def _execute_tool_call(
     # Sprint 3: validate + auto-repair the tool call before execution
     retries_used = 0
     repair_log: list[str] = []
+    _original_tool_name = tool_name
     _adapter_tier = getattr(context.adapter, "tier", None) if context.adapter else None
     if context.adapter is not None and _adapter_tier != "off":
         try:
             tool_name, tool_input, repair_log = context.adapter.validate_and_repair(
                 tool_name, tool_input, context.tool_registry
             )
+            # M2: a name-changing repair (fuzzy match) silently executes a
+            # DIFFERENT tool than the model named — for a mutating tool that's a
+            # real surprise. Surface it; the repair count reaches telemetry on
+            # the success record() below.
+            if repair_log and tool_name != _original_tool_name:
+                log.warning(
+                    "Adapter repaired tool name %r → %r before execution: %s",
+                    _original_tool_name, tool_name, "; ".join(repair_log),
+                )
         except ValueError as exc:
             # Validation failed and repair failed — ask retry engine
             action, retry_prompt = context.adapter.handle_retry(
@@ -1713,22 +1735,57 @@ async def _execute_tool_call(
                 )
 
     from prometheus.tools.base import ToolExecutionContext
+    # M5: bound tool execution so a hung tool can't freeze the turn/session.
+    # The timeout wraps ONLY tool.execute() — not the permission prompt above,
+    # which may legitimately wait on a human approval. A per-tool override
+    # (execution_timeout_seconds) wins over the LoopContext default.
+    _tool_override = getattr(tool, "execution_timeout_seconds", None)
+    _timeout = _tool_override if _tool_override is not None else context.tool_timeout_seconds
     _t0 = time.monotonic()
-    result = await tool.execute(
-        parsed_input,
-        ToolExecutionContext(
-            cwd=context.cwd,
-            metadata={
-                "tool_registry": context.tool_registry,
-                "ask_user_prompt": context.ask_user_prompt,
-                # Managed tasks: the creating session id, so task_create can
-                # resolve session_id + notify_target from trusted context
-                # rather than from (potentially injected) tool arguments.
-                "session_id": context.session_id,
-                **(context.tool_metadata or {}),
-            },
-        ),
-    )
+    try:
+        result = await asyncio.wait_for(
+            tool.execute(
+                parsed_input,
+                ToolExecutionContext(
+                    cwd=context.cwd,
+                    metadata={
+                        "tool_registry": context.tool_registry,
+                        "ask_user_prompt": context.ask_user_prompt,
+                        # Managed tasks: the creating session id, so task_create
+                        # can resolve session_id + notify_target from trusted
+                        # context rather than from (injected) tool arguments.
+                        "session_id": context.session_id,
+                        **(context.tool_metadata or {}),
+                    },
+                ),
+            ),
+            timeout=_timeout,
+        )
+    except asyncio.TimeoutError:
+        _latency_ms = (time.monotonic() - _t0) * 1000.0
+        log.error(
+            "Tool %s exceeded %.0fs timeout and was cancelled", tool_name, _timeout,
+        )
+        if context.telemetry is not None:
+            context.telemetry.record(
+                model=context.model,
+                tool_name=tool_name,
+                success=False,
+                retries=retries_used,
+                latency_ms=_latency_ms,
+                error_type="tool_timeout",
+                error_detail=f"Tool execution exceeded {_timeout:.0f}s timeout",
+                repairs=len(repair_log),
+            )
+        return ToolResultBlock(
+            tool_use_id=tool_use_id,
+            content=(
+                f"Tool {tool_name} timed out after {_timeout:.0f}s and was "
+                f"cancelled. If this tool legitimately needs longer, it can set "
+                f"a higher execution_timeout_seconds."
+            ),
+            is_error=True,
+        )
     _latency_ms = (time.monotonic() - _t0) * 1000.0
 
     # WEAVE-PRESS: when a user-initiated bash command fails with
@@ -1786,6 +1843,7 @@ async def _execute_tool_call(
             raw_model_output=raw_model_output,
             parsed_tool_call=parsed_tool_json,
             provider=provider_name,
+            repairs=len(repair_log),
         )
 
     # Sprint 10: record tool call for divergence detection

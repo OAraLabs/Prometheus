@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     -- Golden Trace Capture sprint additions (nullable for backcompat):
     raw_model_output  TEXT,                -- raw text the model produced BEFORE adapter parsing
     parsed_tool_call  TEXT,                -- validated tool call as JSON {"name": ..., "input": {...}}
-    is_golden         INTEGER NOT NULL DEFAULT 0  -- 1 = cloud + success + zero retries + captured raw
+    is_golden         INTEGER NOT NULL DEFAULT 0, -- 1 = cloud + success + zero retries + captured raw
+    repairs           INTEGER NOT NULL DEFAULT 0  -- M2: adapter repairs applied (fuzzy name, coercion, ...)
 );
 
 -- Circuit Breaker Self-Diagnosis sprint: per-trip diagnostic rows.
@@ -155,6 +156,7 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("raw_model_output", "TEXT"),
         ("parsed_tool_call", "TEXT"),
         ("is_golden", "INTEGER NOT NULL DEFAULT 0"),
+        ("repairs", "INTEGER NOT NULL DEFAULT 0"),
     ],
     "circuit_breaker_diagnostics": [
         ("golden_reference", "TEXT"),
@@ -239,6 +241,7 @@ class ToolCallTelemetry:
         raw_model_output: str | None = None,
         parsed_tool_call: str | None = None,
         provider: str = "",
+        repairs: int = 0,
     ) -> None:
         """Record a single tool-call outcome.
 
@@ -267,8 +270,8 @@ class ToolCallTelemetry:
             INSERT INTO tool_calls
               (id, timestamp, model, tool_name, success, retries, latency_ms,
                error_type, error_detail,
-               raw_model_output, parsed_tool_call, is_golden)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               raw_model_output, parsed_tool_call, is_golden, repairs)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 uuid4().hex,
@@ -283,6 +286,7 @@ class ToolCallTelemetry:
                 raw_model_output,
                 parsed_tool_call,
                 1 if is_golden else 0,
+                int(repairs),
             ),
         )
         self._conn.commit()
@@ -723,9 +727,13 @@ class ToolCallTelemetry:
             "recent_silent_failures": [],
         }
         try:
+            # M1: exclude the synthetic ``_loop_transition`` rows the agent loop
+            # writes per iteration — they echo every real tool failure, so
+            # counting them double-counts failures in the success rate.
             t_total, t_succ = self._conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(success), 0) "
-                "FROM tool_calls WHERE timestamp >= ?",
+                "FROM tool_calls WHERE timestamp >= ? "
+                "AND tool_name != '_loop_transition'",
                 (since,),
             ).fetchone() or (0, 0)
             out["tool_calls"]["total"] = int(t_total or 0)
@@ -916,13 +924,16 @@ class ToolCallTelemetry:
                 "overall_success_rate": float,
             }
         """
+        # M1: drop synthetic ``_loop_transition`` rows so the per-tool breakdown
+        # doesn't list a fake "tool" and the totals aren't inflated by the loop
+        # echo of every real tool call.
         query = (
             "SELECT model, tool_name, success, retries, latency_ms, error_type"
-            " FROM tool_calls"
+            " FROM tool_calls WHERE tool_name != '_loop_transition'"
         )
         params: tuple = ()
         if since is not None:
-            query += " WHERE timestamp >= ?"
+            query += " AND timestamp >= ?"
             params = (since,)
         rows = self._conn.execute(query, params).fetchall()
 

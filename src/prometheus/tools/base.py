@@ -41,6 +41,10 @@ class BaseTool(ABC):
     description: str
     input_model: type[BaseModel]
     example_call: dict[str, Any] | None = None  # Static example for error feedback
+    # M5: per-tool override for the agent loop's execution timeout. None means
+    # "use LoopContext.tool_timeout_seconds". Tools that legitimately run longer
+    # than the global default (e.g. a full test run) set a larger value here.
+    execution_timeout_seconds: float | None = None
 
     @abstractmethod
     async def execute(self, arguments: BaseModel, context: ToolExecutionContext) -> ToolResult:
