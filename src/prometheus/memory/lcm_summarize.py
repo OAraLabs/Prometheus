@@ -155,12 +155,14 @@ class LCMSummarizer:
         for attempt in range(1 + self._max_retries):
             try:
                 # Build a minimal single-user-turn request.
-                from prometheus.engine.messages import ConversationMessage
+                from prometheus.engine.messages import ConversationMessage, TextBlock
 
                 request = ApiMessageRequest(
                     model=self._model,
                     messages=[
-                        ConversationMessage(role="user", content=prompt),
+                        ConversationMessage(
+                            role="user", content=[TextBlock(text=prompt)]
+                        ),
                     ],
                     system_prompt=(
                         "You are a precise summarization engine.  "

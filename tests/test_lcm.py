@@ -64,6 +64,18 @@ class MockSummarizer:
         return False
 
 
+class RecordingProvider(MockProvider):
+    """MockProvider that also records every request it receives."""
+
+    def __init__(self, response: str = "Summary of the conversation.") -> None:
+        super().__init__(response)
+        self.requests: list = []
+
+    async def stream_message(self, request):  # noqa: ANN001
+        self.requests.append(request)
+        yield ApiTextDeltaEvent(text=self._response)
+
+
 # ---------------------------------------------------------------------------
 # LCM types
 # ---------------------------------------------------------------------------
@@ -707,6 +719,102 @@ class TestCompactor:
         # 5 uncompacted <= 5 + 3 = 8, so should NOT compact
         assert compactor.should_compact("s1") is False
 
+        conv.close()
+        sums.close()
+
+
+# ---------------------------------------------------------------------------
+# LCMSummarizer — REAL model-call path
+# ---------------------------------------------------------------------------
+
+
+class TestRealSummarizerCallPath:
+    """Drive the real LCMSummarizer._call_model through a scripted provider.
+
+    Regression guard (2026-06 audit C1): _call_model built
+    ``ConversationMessage(role="user", content=<str>)`` — content is typed
+    ``list[ContentBlock]``, so every summarization call raised ValidationError
+    and compaction never produced a single summary row in production. No prior
+    test caught it because compaction tests used MockSummarizer/_FakeSummarizer
+    (bypassing _call_model) and the only real-LCMSummarizer tests stopped at
+    should_compact(). These tests assert produced OUTPUT, not just that a call
+    happened.
+    """
+
+    async def test_summarize_messages_real_call_path(self) -> None:
+        from prometheus.memory.lcm_summarize import LCMSummarizer
+
+        provider = RecordingProvider("Scripted message summary.")
+        summarizer = LCMSummarizer(provider)
+        messages = [
+            MessagePart(role="user", content="hello", session_id="s1", turn_index=0),
+            MessagePart(role="assistant", content="hi!", session_id="s1", turn_index=1),
+        ]
+        result = await summarizer.summarize_messages(messages)
+        assert result == "Scripted message summary."
+        assert summarizer.circuit_open is False
+
+        # Pin the exact bug shape: the request must carry the prompt as
+        # content BLOCKS (list), never a raw str.
+        [request] = provider.requests
+        content = request.messages[0].content
+        assert isinstance(content, list)
+        assert "hello" in content[0].text and "hi!" in content[0].text
+
+    async def test_summarize_summaries_real_call_path(self) -> None:
+        from prometheus.memory.lcm_summarize import LCMSummarizer
+
+        provider = RecordingProvider("Scripted merged summary.")
+        summarizer = LCMSummarizer(provider)
+        nodes = [
+            SummaryNode(summary_text="first leaf", depth=0),
+            SummaryNode(summary_text="second leaf", depth=0),
+        ]
+        result = await summarizer.summarize_summaries(nodes)
+        assert result == "Scripted merged summary."
+
+        [request] = provider.requests
+        content = request.messages[0].content
+        assert isinstance(content, list)
+        assert "first leaf" in content[0].text and "second leaf" in content[0].text
+
+    async def test_compaction_e2e_real_summarizer_creates_summary_rows(
+        self, tmp_path: Path
+    ) -> None:
+        """Real LCMCompactor + real LCMSummarizer + scripted provider: summary
+        node rows must actually land in the summary store and sources must be
+        marked compacted (in production this had never happened — 0 rows)."""
+        from prometheus.memory.lcm_compaction import LCMCompactor
+        from prometheus.memory.lcm_summarize import LCMSummarizer
+
+        db = tmp_path / "real_e2e.db"
+        conv = LCMConversationStore(db_path=db)
+        sums = LCMSummaryStore(db_path=db)
+        config = CompactionConfig(fresh_tail_count=2, compaction_batch_size=3)
+        summarizer = LCMSummarizer(MockProvider("Real-path e2e summary."))
+        compactor = LCMCompactor(conv, sums, summarizer, config)
+
+        for i in range(10):
+            conv.insert_message(
+                MessagePart(
+                    role="user",
+                    content=f"message {i}",
+                    session_id="s1",
+                    turn_index=i,
+                    token_count=5,
+                )
+            )
+        assert compactor.should_compact("s1") is True
+
+        result = await compactor.compact("s1")
+
+        assert result.summaries_created >= 1
+        assert result.messages_compacted >= 1
+        leaves = sums.get_leaf_summaries("s1")
+        assert len(leaves) >= 1
+        # The stored row carries the REAL model-path output, verbatim.
+        assert leaves[0].summary_text == "Real-path e2e summary."
+        assert summarizer.circuit_open is False
         conv.close()
         sums.close()
 
