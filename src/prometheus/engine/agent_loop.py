@@ -78,6 +78,9 @@ class _IterationReason:
     CIRCUIT_BREAKER_TRIP = "circuit_breaker_trip"
     MAX_ITERATIONS_HIT = "max_iterations_hit"
     MODEL_FALLBACK = "model_fallback"
+    # Provider dropped every tool call as malformed-empty (no name); the
+    # loop fed structured guidance back and is retrying, breaker-bounded.
+    MALFORMED_DROPPED = "malformed_dropped"
 
 
 _FAILURE_CATEGORIES = (
@@ -743,6 +746,7 @@ async def run_loop(
 
         final_message: ConversationMessage | None = None
         usage = UsageSnapshot()
+        dropped_malformed = 0
 
         # SPRINT-2 WS1: drain queued steers as a system-prompt addendum
         # for THIS model call only. Steers arrive from the gateway's
@@ -821,6 +825,10 @@ async def run_loop(
             if isinstance(event, ApiMessageCompleteEvent):
                 final_message = event.message
                 usage = event.usage
+                # malformed_empty guard: count of tool-call entries the
+                # provider dropped at parse time (empty function name).
+                # getattr for providers predating the field.
+                dropped_malformed = getattr(event, "dropped_malformed", 0)
 
         if _markup_filter is not None:
             # Release any withheld tag-lookalike text now that the stream ended.
@@ -857,6 +865,47 @@ async def run_loop(
         yield AssistantTurnComplete(message=final_message, usage=usage), usage
 
         if not final_message.tool_uses:
+            # malformed_empty guard: the provider dropped every tool call in
+            # this turn as structurally empty and the model produced no prose
+            # either. Silently ending the turn here is the old dead-turn
+            # outcome (D1 collapse arcs) — instead, feed structured guidance
+            # back and retry, bounded by the same circuit breaker that guards
+            # tool-error loops.
+            if dropped_malformed and not final_message.text.strip():
+                trip_reason = circuit_breaker.record_error(
+                    "_malformed", "empty tool-call envelope (dropped at provider)"
+                )
+                if trip_reason is None:
+                    _log_iteration(
+                        context,
+                        _IterationReason.MALFORMED_DROPPED,
+                        turn,
+                        tool_iteration,
+                        f"dropped={dropped_malformed}",
+                    )
+                    messages.append(
+                        ConversationMessage.from_injected(
+                            _malformed_retry_feedback(context, dropped_malformed),
+                            provenance="orchestrator",
+                            is_trusted=True,
+                        )
+                    )
+                    continue
+                _log_iteration(
+                    context,
+                    _IterationReason.CIRCUIT_BREAKER_TRIP,
+                    turn,
+                    tool_iteration,
+                    trip_reason,
+                )
+                error_msg = _make_assistant_msg(
+                    f"Circuit breaker tripped: {trip_reason}. "
+                    f"The model cannot produce valid tool calls for this request."
+                )
+                messages.append(error_msg)
+                yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+                return
+
             # SPRINT-2 WS2: turn ended without further tool calls — drain
             # the file-mutation verifier and append its summary as a
             # synthetic user-role message so the model sees it on its
@@ -1075,6 +1124,31 @@ def _make_assistant_msg(text: str) -> ConversationMessage:
     """Build a synthetic assistant message."""
     from prometheus.engine.messages import TextBlock
     return ConversationMessage(role="assistant", content=[TextBlock(text=text)])
+
+
+def _malformed_retry_feedback(context: LoopContext, dropped: int) -> str:
+    """Structured guidance after the provider dropped malformed-empty calls.
+
+    Mirrors the validator's structured-error shape (what went wrong, the
+    expected format, the available names) so the model has something to
+    self-correct against — the old path fed it the bare "Unknown tool: ".
+    """
+    names = ""
+    registry = context.tool_registry
+    if registry is not None and hasattr(registry, "list_tools"):
+        try:
+            names = ", ".join(t.name for t in registry.list_tools())
+        except Exception:
+            names = ""
+    parts = [
+        f"Your previous response contained {dropped} malformed tool call(s) "
+        "with an empty name — they could not be executed.",
+        "Either answer in plain text, or emit a valid tool call: "
+        '{"name": "<tool_name>", "arguments": {...}}.',
+    ]
+    if names:
+        parts.append(f"Available tools: {names}.")
+    return " ".join(parts)
 
 
 def _log_iteration(

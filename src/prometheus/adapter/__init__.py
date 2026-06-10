@@ -49,11 +49,18 @@ class ModelAdapter:
     """High-level adapter that wires together all Sprint 3 components.
 
     Three adapter tiers:
-      - "off"   — API enforces structure (Anthropic, OpenAI). Skip everything.
+      - "off"   — API enforces structure (Anthropic, OpenAI). Skip everything:
+                  the provider class structurally cannot emit an empty/unknown
+                  tool name, and the loop's own registry/pydantic checks still
+                  cover it. This is a provider-class statement, not a
+                  strictness level — the invariants-vs-policy split below
+                  applies to strictness, not to this tier.
       - "light" — Model has native tool calling but server doesn't guarantee
                   structure (Gemma 4/Qwen on llama.cpp). GBNF on, validator
-                  at NONE, enforcer ON (model may emit tool calls as text),
-                  max_retries=1.
+                  at NONE (= structural invariants only: non-empty name,
+                  name in registry, dict input — repair/retry machinery
+                  engages on invariant failures), enforcer ON (model may
+                  emit tool calls as text), max_retries=1.
       - "full"  — Model lacks tool calling training. Full adapter pipeline.
 
     Args:

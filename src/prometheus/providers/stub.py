@@ -87,9 +87,56 @@ def _build_openai_messages(request: ApiMessageRequest) -> list[dict[str, Any]]:
     return result
 
 
-def _parse_assistant_message(choice: dict[str, Any]) -> ConversationMessage:
-    """Parse an OpenAI choice dict into a ConversationMessage."""
+def _record_malformed_entry(model: str, entry: dict[str, Any]) -> None:
+    """Loud, non-blocking telemetry for a dropped malformed tool-call entry.
+
+    Records under the sentinel tool name ``_malformed`` (visible in per-tool
+    breakdowns, unlike the historical empty-string rows) with the raw entry
+    preserved so the failure shape is diagnosable from telemetry alone —
+    the D1 investigation had to dig it out of the LCM.
+    """
+    try:
+        raw = json.dumps(entry, default=str)[:500]
+    except Exception:
+        raw = repr(entry)[:500]
+    log.error(
+        "Dropped malformed tool-call entry from %s (empty function name): %s",
+        model or "unknown-model", raw,
+    )
+    try:
+        from prometheus.telemetry.tracker import get_telemetry_handle
+
+        tel = get_telemetry_handle()
+        if tel is not None:
+            tel.record(
+                model=model or "unknown",
+                tool_name="_malformed",
+                success=False,
+                error_type="malformed_empty",
+                error_detail=raw,
+                raw_model_output=raw,
+            )
+    except Exception:
+        log.exception("telemetry record for malformed tool call failed")
+
+
+def _parse_assistant_message(
+    choice: dict[str, Any], *, model: str = ""
+) -> tuple[ConversationMessage, int]:
+    """Parse an OpenAI choice dict into a ConversationMessage.
+
+    Returns ``(message, dropped_malformed)``. Tool-call entries with an
+    empty/whitespace function name never become ToolUseBlocks — the agent
+    loop must not see unexecutable garbage (D1: 232 empty-envelope calls
+    flowed through as ``ToolUseBlock(name="")``). Each drop is recorded
+    loudly via :func:`_record_malformed_entry`; the count is surfaced on
+    ``ApiMessageCompleteEvent.dropped_malformed`` so the loop can give the
+    model structured feedback. A valid name with an empty/unparseable
+    arguments string is NOT dropped — no-arg tools legitimately stream
+    empty arguments; pydantic validation downstream judges those.
+    """
     content_blocks: list[Any] = []
+    dropped = 0
     message = choice.get("message", {})
 
     raw_content = message.get("content") or ""
@@ -98,6 +145,11 @@ def _parse_assistant_message(choice: dict[str, Any]) -> ConversationMessage:
 
     for tc in message.get("tool_calls") or []:
         fn = tc.get("function", {})
+        name = fn.get("name", "")
+        if not isinstance(name, str) or not name.strip():
+            dropped += 1
+            _record_malformed_entry(model, tc)
+            continue
         try:
             args = json.loads(fn.get("arguments", "{}"))
         except json.JSONDecodeError:
@@ -105,12 +157,12 @@ def _parse_assistant_message(choice: dict[str, Any]) -> ConversationMessage:
         content_blocks.append(
             ToolUseBlock(
                 id=tc.get("id", f"toolu_{uuid4().hex}"),
-                name=fn.get("name", ""),
+                name=name,
                 input=args,
             )
         )
 
-    return ConversationMessage(role="assistant", content=content_blocks)
+    return ConversationMessage(role="assistant", content=content_blocks), dropped
 
 
 class StubProvider(ModelProvider):
@@ -259,7 +311,9 @@ class StubProvider(ModelProvider):
                 "tool_calls": list(accumulated_tool_calls.values()) if accumulated_tool_calls else None,
             }
         }
-        final_message = _parse_assistant_message(final_choice)
+        final_message, dropped_malformed = _parse_assistant_message(
+            final_choice, model=request.model
+        )
 
         yield ApiMessageCompleteEvent(
             message=final_message,
@@ -268,4 +322,5 @@ class StubProvider(ModelProvider):
                 output_tokens=output_tokens,
             ),
             stop_reason=finish_reason,
+            dropped_malformed=dropped_malformed,
         )

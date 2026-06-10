@@ -1,9 +1,13 @@
 """ToolCallValidator — validates and auto-repairs tool calls from open models.
 
-Strictness levels:
-  NONE   — skip all validation (Claude-level, already structured)
-  MEDIUM — validate + auto-repair (Qwen, Mistral)
-  STRICT — validate + repair + aggressive coercion (weaker models)
+Strictness levels (policy — how aggressively to validate/repair):
+  NONE   — invariants only: non-empty name, name in registry, input is a
+           dict. No schema validation, no coercion.
+  MEDIUM — invariants + schema validation + auto-repair (Qwen, Mistral)
+  STRICT — MEDIUM + aggressive coercion + unknown-param rejection
+
+Invariants run at every level: strictness governs repair aggressiveness,
+never whether structural sanity is checked.
 """
 
 from __future__ import annotations
@@ -165,10 +169,21 @@ class ToolCallValidator:
 
         Returns ValidationResult with valid=True on success, or valid=False
         with error + error_type describing the first failure found.
-        """
-        if self.strictness == Strictness.NONE:
-            return ValidationResult(valid=True)
 
+        Two layers (invariants-vs-policy split):
+
+        **Invariants** — structural sanity, checked at EVERY strictness:
+        non-empty name, name exists in registry, input is a dict. A call
+        failing these is unexecutable garbage no tier should pass through.
+        (Pre-split, ``Strictness.NONE`` short-circuited above these checks,
+        which let 232 empty-name calls flow past a guard written for
+        exactly that failure — strictness must govern how aggressively we
+        repair, never whether we sanity-check.)
+
+        **Policy** — strictness-gated: pydantic schema validation (MEDIUM+),
+        unknown-parameter rejection (STRICT).
+        """
+        # ── Invariants: run unconditionally ────────────────────────────
         # 0. Reject empty/whitespace tool names immediately
         if not tool_name or not tool_name.strip():
             return ValidationResult(
@@ -203,6 +218,10 @@ class ToolCallValidator:
                 error=f"Tool input must be a JSON object, got {type(tool_input).__name__}",
                 error_type="invalid_json",
             )
+
+        # ── Policy: strictness-gated from here down ────────────────────
+        if self.strictness == Strictness.NONE:
+            return ValidationResult(valid=True)
 
         # 3. Validate against pydantic model
         try:

@@ -210,7 +210,9 @@ class OpenAICompatProvider(ModelProvider):
                 "tool_calls": list(accumulated_tool_calls.values()) if accumulated_tool_calls else None,
             }
         }
-        final_message = _parse_assistant_message(final_choice)
+        final_message, dropped_malformed = _parse_assistant_message(
+            final_choice, model=request.model
+        )
 
         yield ApiMessageCompleteEvent(
             message=final_message,
@@ -219,4 +221,5 @@ class OpenAICompatProvider(ModelProvider):
                 output_tokens=output_tokens,
             ),
             stop_reason=finish_reason,
+            dropped_malformed=dropped_malformed,
         )

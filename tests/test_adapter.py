@@ -40,9 +40,12 @@ def registry() -> ToolRegistry:
 
 class TestToolCallValidator:
 
-    def test_none_strictness_always_passes(self, registry):
+    def test_none_strictness_passes_schema_policy(self, registry):
+        # Invariants-vs-policy split: at NONE the schema POLICY is off —
+        # a known tool with missing required params still passes validate()
+        # (the loop's own pydantic check catches it later) …
         v = ToolCallValidator(strictness=Strictness.NONE)
-        result = v.validate("nonexistent", {}, registry)
+        result = v.validate("bash", {}, registry)  # command is required
         assert result.valid
 
     def test_medium_unknown_tool(self, registry):
@@ -84,6 +87,63 @@ class TestToolCallValidator:
     def test_string_strictness_enum_coercion(self, registry):
         v = ToolCallValidator(strictness="MEDIUM")
         assert v.strictness == Strictness.MEDIUM
+
+
+class TestValidatorInvariants:
+    """Structural sanity checks run at EVERY strictness (invariants-vs-policy
+    split). Born from D1: the empty-name check sat below the NONE
+    short-circuit and was dead code under the production tier."""
+
+    @pytest.mark.parametrize("level", [Strictness.NONE, Strictness.MEDIUM, Strictness.STRICT])
+    def test_empty_name_fails_at_every_strictness(self, registry, level):
+        v = ToolCallValidator(strictness=level)
+        result = v.validate("", {}, registry)
+        assert not result.valid
+        assert result.error_type == "unknown_tool"
+        # structured feedback, not a bare error string
+        assert "Available tools:" in result.error
+
+    @pytest.mark.parametrize("level", [Strictness.NONE, Strictness.MEDIUM, Strictness.STRICT])
+    def test_whitespace_name_fails_at_every_strictness(self, registry, level):
+        v = ToolCallValidator(strictness=level)
+        assert not v.validate("   ", {}, registry).valid
+
+    def test_unknown_tool_fails_at_none(self, registry):
+        v = ToolCallValidator(strictness=Strictness.NONE)
+        result = v.validate("nonexistent", {}, registry)
+        assert not result.valid
+        assert result.error_type == "unknown_tool"
+
+    def test_non_dict_input_fails_at_none(self, registry):
+        v = ToolCallValidator(strictness=Strictness.NONE)
+        result = v.validate("bash", "not a dict", registry)
+        assert not result.valid
+        assert result.error_type == "invalid_json"
+
+    def test_adapter_tier_light_fuzzy_repairs_misnamed_tool(self, registry):
+        # The repair machinery is REACHABLE at tier light now: a misnamed
+        # tool fails the registry invariant, repair() fuzzy-matches it,
+        # and the renamed call comes back with a repair log.
+        adapter = ModelAdapter(tier=ModelAdapter.TIER_LIGHT)
+        name, args, repairs = adapter.validate_and_repair(
+            "bsh", {"command": "ls"}, registry
+        )
+        assert name == "bash"
+        assert args == {"command": "ls"}
+        assert repairs and "fuzzy-matched" in repairs[0]
+
+    def test_adapter_tier_light_raises_on_empty_name(self, registry):
+        adapter = ModelAdapter(tier=ModelAdapter.TIER_LIGHT)
+        with pytest.raises(ValueError, match="could not be repaired"):
+            adapter.validate_and_repair("", {}, registry)
+
+    def test_adapter_tier_off_still_skips_everything(self, registry):
+        # Tier off is a provider-class statement (API enforces structure),
+        # not a strictness level — the early return stays.
+        adapter = ModelAdapter(tier=ModelAdapter.TIER_OFF)
+        name, args, repairs = adapter.validate_and_repair("anything", {}, registry)
+        assert name == "anything"
+        assert repairs == []
 
 
 # ---------------------------------------------------------------------------

@@ -44,6 +44,11 @@ class ApiMessageCompleteEvent:
     message: ConversationMessage
     usage: UsageSnapshot
     stop_reason: str | None = None
+    # Count of tool-call entries the provider DROPPED because they arrived
+    # structurally empty (no function name) — the malformed_empty guard at
+    # the parse boundary. The agent loop uses this to give the model
+    # structured feedback instead of silently ending the turn.
+    dropped_malformed: int = 0
 
 
 ApiStreamEvent = ApiTextDeltaEvent | ApiMessageCompleteEvent
