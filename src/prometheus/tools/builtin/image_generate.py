@@ -45,6 +45,7 @@ from urllib.parse import quote, urlparse
 import httpx
 from pydantic import BaseModel, Field
 
+from prometheus.security.path_guard import assert_path_under_roots
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -154,14 +155,37 @@ class ImageGenerateTool(BaseTool):
     )
     input_model = ImageGenerateInput
 
-    def is_read_only(self, arguments: BaseModel) -> bool:
-        return True
+    def is_read_only(self, arguments: ImageGenerateInput) -> bool:
+        # Only read-only when nothing is written to a model-chosen path.
+        # With output_path set the tool writes a file, so it must NOT be
+        # treated as read-only (which would skip permission handling and put
+        # it on the parallel read-only dispatch path). Mirrors
+        # YouTubeTranscriptTool's ``save_to is None`` pattern.
+        return arguments.output_path is None
 
     async def execute(
         self,
         arguments: ImageGenerateInput,
         context: ToolExecutionContext,
     ) -> ToolResult:
+        # Gate a model-supplied output_path BEFORE doing any work, so an
+        # out-of-bounds path is refused without burning a generation call and
+        # without ever reaching the write sink. The same guard fires again at
+        # the sink (_save_image_bytes) as defense-in-depth.
+        if arguments.output_path is not None:
+            try:
+                assert_path_under_roots(
+                    arguments.output_path, _allowed_image_roots()
+                )
+            except ValueError as exc:
+                return ToolResult(
+                    output=(
+                        f"image_generate: refusing to write outside the "
+                        f"allowed image directories — {exc}"
+                    ),
+                    is_error=True,
+                )
+
         cfg = _image_config(context)
         backend = await _resolve_backend(arguments.backend, cfg)
         logger.info(
@@ -312,9 +336,15 @@ async def _generate_via_pollinations(
         )
 
     ext = _ext_from_content_type(content_type)
-    saved_path = _save_image_bytes(
-        response.content, ext=ext, override_path=arguments.output_path,
-    )
+    try:
+        saved_path = _save_image_bytes(
+            response.content, ext=ext, override_path=arguments.output_path,
+        )
+    except ValueError as exc:
+        return ToolResult(
+            output=f"image_generate: refusing to save image — {exc}",
+            is_error=True,
+        )
     size_kb = len(response.content) / 1024.0
     return ToolResult(
         output=(
@@ -499,9 +529,15 @@ async def _generate_via_comfyui(
             output="image_generate (comfyui): /view returned empty bytes.",
             is_error=True,
         )
-    saved_path = _save_image_bytes(
-        image_bytes, ext=".png", override_path=arguments.output_path,
-    )
+    try:
+        saved_path = _save_image_bytes(
+            image_bytes, ext=".png", override_path=arguments.output_path,
+        )
+    except ValueError as exc:
+        return ToolResult(
+            output=f"image_generate: refusing to save image — {exc}",
+            is_error=True,
+        )
     size_kb = len(image_bytes) / 1024.0
     return ToolResult(
         output=(
@@ -609,11 +645,37 @@ def _ext_from_content_type(content_type: str) -> str:
     }.get(ct, ".jpg")
 
 
+def _allowed_image_roots() -> list[Path]:
+    """Directories ``image_generate`` may write to when ``output_path`` is set.
+
+    Deliberately tighter than SecurityGate's ``security.workspace_root`` — on
+    this deployment that key is ``"~"`` (the whole home dir), i.e. the exact
+    attack surface this guard exists to close (``~/.bashrc``, ``~/.ssh/...``).
+    Writing image bytes to an arbitrary path is never a legitimate need, so
+    outputs are confined to the Prometheus base dir ``~/.prometheus/`` (which
+    contains ``cache/images/``, ``files/``, ``data/`` and the default
+    ``workspace/``). The agent workspace is added explicitly in case
+    ``PROMETHEUS_WORKSPACE_DIR`` relocates it outside the base.
+    """
+    from prometheus.config.paths import get_config_dir, get_workspace_dir
+
+    roots: list[Path] = [get_config_dir()]
+    try:
+        roots.append(get_workspace_dir())
+    except Exception:  # pragma: no cover - workspace dir is best-effort
+        pass
+    return roots
+
+
 def _save_image_bytes(
     data: bytes, *, ext: str, override_path: str | None,
 ) -> str:
     if override_path:
-        path = Path(override_path).expanduser()
+        # Resolve-then-check (path_guard does both) so a ``../`` traversal
+        # that escapes the allow-list is rejected even if the literal string
+        # starts under an allowed root. Raises ValueError on violation — the
+        # backend callers convert that into a ToolResult(is_error=True).
+        path = assert_path_under_roots(override_path, _allowed_image_roots())
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         return str(path)
