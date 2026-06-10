@@ -299,6 +299,19 @@ anatomy:
 
 mcp_servers: {}
 
+# H3: lifecycle hooks. Empty by default (no hooks run). Each event maps to a
+# list of hook definitions; supported types: command, http, prompt, agent.
+# Example:
+#   hooks:
+#     pre_tool_use:
+#       - type: command
+#         command: "echo checking $ARGUMENTS"   # $ARGUMENTS = JSON payload
+#         block_on_failure: false               # true = a nonzero exit blocks the tool
+#     post_tool_use:
+#       - type: http
+#         url: "http://localhost:9090/hook"
+hooks: {}
+
 evals:
   results_dir: "~/.prometheus/eval_results"
   skip_network_tasks: true

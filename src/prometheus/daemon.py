@@ -268,17 +268,27 @@ async def run_daemon(args: argparse.Namespace) -> None:
     hook_executor = None
     try:
         from prometheus.hooks.executor import HookExecutor, HookExecutionContext
-        from prometheus.hooks.registry import HookRegistry
+        from prometheus.hooks.events import HookEvent
+        from prometheus.hooks.loader import load_hook_registry
+        # H3: build the registry from the config `hooks:` section instead of an
+        # always-empty one. Absent/empty `hooks:` yields an empty registry (no
+        # behavior change); a populated section now actually loads + fires.
+        hook_registry = load_hook_registry(config.get("hooks", {}) or {})
         hook_executor = HookExecutor(
-            registry=HookRegistry(),
+            registry=hook_registry,
             context=HookExecutionContext(
                 cwd=Path.cwd(),
                 provider=provider,
                 default_model=model_name,
             ),
         )
+        _hook_count = sum(
+            len(hook_registry.get(ev)) for ev in HookEvent
+        )
+        if _hook_count:
+            logger.info("Hooks: loaded %d hook(s) from config", _hook_count)
     except Exception:
-        pass
+        logger.warning("HookExecutor init failed — hooks disabled", exc_info=True)
 
     # Sprint 20: LSP orchestrator + diagnostics hook
     lsp_orchestrator = None
@@ -369,6 +379,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
         tool_loader=tool_loader,
         nudge=nudge,
         file_mutation_verifier=fmv,
+        tool_result_max=config.get("context", {}).get("tool_result_max", 4000),
     )
 
     # Shared session manager for all gateways
@@ -1113,6 +1124,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 telemetry=telemetry,
                 model_router=model_router,
                 divergence_detector=divergence_detector,
+                tool_result_max=config.get("context", {}).get("tool_result_max", 4000),
                 # Phase 3.5: web bridge is its own session namespace.
                 session_id="web",
             )

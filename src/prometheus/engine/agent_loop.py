@@ -580,6 +580,11 @@ class LoopContext:
     post_result_hooks: list[object] | None = None
     # Tool Calling Middle Layer sprint
     tool_loader: object | None = None     # DynamicToolLoader for deferred loading
+    # H1: per-result cap (tokens) applied to EACH tool result before injection,
+    # via ToolResultTruncator's per-tool strategies. 0 disables (back-compat for
+    # tests/benchmarks). Runs before the cross-result turn budget below, and
+    # unlike that budget it also caps error results.
+    tool_result_max: int = 0
     tool_results_turn_budget: int = 8000  # max tokens across ALL results per turn
     microcompact_after_turns: int = 3     # compact tool results older than N turns
     microcompact_keep_chars: int = 200    # chars to keep per compacted result
@@ -762,6 +767,20 @@ async def run_loop(
                     f"[STEER FROM USER, mid-turn]: {steer_text}"
                 )
 
+        # H2: tier-full models lack native tool calling — their tools live in
+        # the (formatter-augmented) system prompt and the GBNF grammar set on
+        # the provider constrains output to valid tool-call JSON (or prose).
+        # Sending tools in the payload would make llama.cpp drop the grammar
+        # (see LlamaCppProvider._build_request_payload), so we withhold them at
+        # tier full only. tier light (native + --jinja) and tier off (cloud)
+        # are unchanged — they send tools and use no grammar.
+        _payload_tools = active_tools
+        if (
+            context.adapter is not None
+            and getattr(context.adapter, "tier", None) == "full"
+        ):
+            _payload_tools = []
+
         async for event in context.provider.stream_message(
             ApiMessageRequest(
                 model=context.model,
@@ -772,7 +791,7 @@ async def run_loop(
                 messages=render_messages_for_model(messages),
                 system_prompt=per_call_system_prompt,
                 max_tokens=context.max_tokens,
-                tools=active_tools,
+                tools=_payload_tools,
             )
         ):
             if isinstance(event, ApiTextDeltaEvent):
@@ -1816,9 +1835,21 @@ async def _execute_tool_call(
                 "Printing Press suggestion hook failed", exc_info=True
             )
 
+    # H1: per-result truncation (tool_result_max) BEFORE injection. Uses the
+    # tool-aware strategies (bash tail, file head+tail, grep top-N, else hard
+    # cap). Caps every result including errors — the cross-result budget skips
+    # errors, so without this a giant error payload was unbounded. Telemetry
+    # above already captured the untruncated error_detail for diagnostics.
+    final_output = augmented_output
+    if context.tool_result_max and context.tool_result_max > 0:
+        from prometheus.context.truncation import ToolResultTruncator
+        final_output = ToolResultTruncator(context.tool_result_max).truncate(
+            tool_name, augmented_output,
+        )
+
     tool_result = ToolResultBlock(
         tool_use_id=tool_use_id,
-        content=augmented_output,
+        content=final_output,
         is_error=result.is_error,
     )
 
@@ -1914,9 +1945,11 @@ class AgentLoop:
         nudge: object | None = None,
         tool_metadata: dict[str, object] | None = None,
         file_mutation_verifier: object | None = None,
+        tool_result_max: int = 0,
     ) -> None:
         self._provider = provider
         self._model = model
+        self._tool_result_max = tool_result_max
         self._max_tokens = max_tokens
         self._max_turns = max_turns
         self._max_tool_iterations = max_tool_iterations
@@ -2019,6 +2052,7 @@ class AgentLoop:
             session_id=session_id,
             session_state=session_state,
             file_mutation_verifier=self._file_mutation_verifier,
+            tool_result_max=self._tool_result_max,
         )
 
         last_text = ""

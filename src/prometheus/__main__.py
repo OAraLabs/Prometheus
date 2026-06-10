@@ -1051,8 +1051,10 @@ def main() -> None:
     hook_executor = None
     try:
         from prometheus.hooks.executor import HookExecutor, HookExecutionContext
-        from prometheus.hooks.registry import HookRegistry
-        hook_registry = HookRegistry()
+        from prometheus.hooks.loader import load_hook_registry
+        # H3: load YAML-defined hooks from the config `hooks:` section. Empty or
+        # absent → empty registry (no behavior change).
+        hook_registry = load_hook_registry(config.get("hooks", {}) or {})
         hook_executor = HookExecutor(
             registry=hook_registry,
             context=HookExecutionContext(
@@ -1062,7 +1064,7 @@ def main() -> None:
             ),
         )
     except Exception:
-        pass
+        log.warning("HookExecutor init failed — hooks disabled", exc_info=True)
 
     # Generate session ID (Phase 3.5: threaded into LoopContext below so the
     # router's per-session override lookup has a unique namespace per CLI run).
@@ -1084,6 +1086,7 @@ def main() -> None:
         divergence_detector=divergence_detector,
         max_tool_iterations=config.get("model", {}).get("max_tool_iterations", 25),
         max_tool_iterations_cloud=config.get("model", {}).get("max_tool_iterations_cloud", 50),
+        tool_result_max=ctx_cfg.get("tool_result_max", 4000),
         tool_results_turn_budget=ctx_cfg.get("tool_results_turn_budget", 8000),
         microcompact_after_turns=ctx_cfg.get("microcompact_after_turns", 3),
         microcompact_keep_chars=ctx_cfg.get("microcompact_keep_chars", 200),
