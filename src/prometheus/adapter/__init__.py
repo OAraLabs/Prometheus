@@ -168,11 +168,17 @@ class ModelAdapter:
         result = self.validator.validate(tool_name, tool_input, tool_registry)
         if result.valid:
             self.record_tool_call(tool_name, success=True)
+            # H5: a successful call clears this tool's failure streak so the
+            # retry budget is per-streak, not per-daemon-lifetime. Keyed by the
+            # attempted name (== the RetryEngine key), so a repaired misname
+            # resets its own counter on the repair-success path below.
+            self.retry.reset(tool_name)
             return tool_name, tool_input, []
 
         repair = self.validator.repair(tool_name, tool_input, result.error, tool_registry)
         if repair.repaired:
             self.record_tool_call(tool_name, success=True)
+            self.retry.reset(tool_name)  # H5: clear the failure streak on success
             return repair.tool_name, repair.tool_input, repair.repairs_made
 
         self.record_tool_call(tool_name, success=False)
