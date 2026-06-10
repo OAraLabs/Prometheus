@@ -138,6 +138,14 @@ class TelegramAdapter(BasePlatformAdapter):
         # it's None and the subscribe path is a no-op.
         self._signal_bus: object | None = None
 
+        # M6: one lock per session so a turn can't interleave with another on
+        # the SAME session — e.g. a managed-task completion calling inject_turn
+        # while a user turn is mid-flight, which would race both coroutines
+        # appending to session.messages (scrambled order + duplicate
+        # turn_index). Different sessions never contend; PTB already serializes
+        # user×user, so this specifically guards user×re-engagement.
+        self._turn_locks: dict[str, asyncio.Lock] = {}
+
     # ------------------------------------------------------------------
     # Sprint S1 Stream 2: SignalBus subscription for user-visible events
     # ------------------------------------------------------------------
@@ -1686,6 +1694,22 @@ class TelegramAdapter(BasePlatformAdapter):
                 return None
         return None
 
+    def _turn_lock_for(self, session_id: str) -> asyncio.Lock:
+        """Return the per-session turn lock (M6), creating it on first use.
+
+        Resilient to adapters built via ``__new__`` (some tests bypass
+        ``__init__``): the lock map lazily initializes if absent.
+        """
+        locks = getattr(self, "_turn_locks", None)
+        if locks is None:
+            locks = {}
+            self._turn_locks = locks
+        lock = locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[session_id] = lock
+        return lock
+
     async def _run_agent_turn(
         self,
         session,
@@ -1702,7 +1726,28 @@ class TelegramAdapter(BasePlatformAdapter):
         (``provenance="task_supervisor"``, untrusted). Does NOT send anything —
         the caller delivers the reply (Telegram inbound adds voice/queue handling;
         :meth:`inject_turn` delivers plain text to the resolved chat).
+
+        M6: the body runs under a per-session lock so a re-engagement turn
+        (inject_turn) can't interleave with a live user turn on the same
+        session — both would otherwise append to ``session.messages``
+        concurrently, scrambling order and duplicating ``turn_index``.
         """
+        async with self._turn_lock_for(session_id):
+            return await self._run_agent_turn_locked(
+                session, content, session_id=session_id,
+                provenance=provenance, is_trusted=is_trusted,
+            )
+
+    async def _run_agent_turn_locked(
+        self,
+        session,
+        content: str,
+        *,
+        session_id: str,
+        provenance: str = "user",
+        is_trusted: bool = True,
+    ) -> str:
+        """Serialized core of :meth:`_run_agent_turn` (holds the session lock)."""
         session.add_user_message(content, provenance=provenance, is_trusted=is_trusted)
         pre_len = len(session.get_messages())
         logger.debug(
