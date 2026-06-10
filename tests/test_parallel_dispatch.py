@@ -266,19 +266,120 @@ class TestErrorIsolation:
 
     @pytest.mark.asyncio
     async def test_failed_parallel_tool_does_not_block_others(self):
-        """One failing read-only tool shouldn't prevent others from completing."""
+        """A failing read-only tool must not block others OR scramble
+        result↔call correlation (audit H4).
+
+        Pre-fix this test passed against the bug because it only checked
+        ``len`` and "some non-error result exists" — it never verified that
+        each result carries its own call's tool_use_id. The buggy path sorted
+        a ``tool_use_id="error"`` block (index -1) to the front, so the model
+        saw the failure attributed to the wrong call. These assertions pin the
+        correlation.
+        """
         good = ReadOnlyTool("good_tool")
         bad = FailingTool()
         bad.name = "failing_tool"
         ctx = _make_context([good, bad])
 
-        results = await _dispatch_tool_calls(
-            ctx, [_tc("good_tool"), _tc("failing_tool")]
-        )
+        calls = [_tc("good_tool", "id_good"), _tc("failing_tool", "id_bad")]
+        results = await _dispatch_tool_calls(ctx, calls)
         assert len(results) == 2
-        # good_tool should succeed
-        good_result = [r for r in results if "good_tool" in r.content or not r.is_error]
-        assert len(good_result) >= 1
+        # result[i] belongs to calls[i].
+        assert results[0].tool_use_id == "id_good"
+        assert not results[0].is_error
+        assert "good_tool result" in results[0].content
+        # The failing tool's own result carries ITS id and is the error.
+        assert results[1].tool_use_id == "id_bad"
+        assert results[1].is_error
+
+    @pytest.mark.asyncio
+    async def test_single_failing_tool_returns_error_block_not_raise(self):
+        """A lone raising tool returns an is_error block with its own id —
+        it does not propagate out of dispatch and kill the turn (H4)."""
+        ctx = _make_context([FailingTool()])
+        results = await _dispatch_tool_calls(ctx, [_tc("failing_tool", "solo")])
+        assert len(results) == 1
+        assert results[0].tool_use_id == "solo"
+        assert results[0].is_error
+        assert "failing_tool" in results[0].content
+
+    @pytest.mark.asyncio
+    async def test_failing_mutating_tool_isolated_and_correlated(self):
+        """A raising MUTATING tool (sequential path) yields an error block
+        with its id; surrounding results keep their correlation (H4).
+
+        Pre-fix the sequential path had no guard, so this raised out of
+        dispatch and the gateway turned the whole turn into ``Error: ...``."""
+
+        class FailingMutate(BaseTool):
+            name = "bad_writer"
+            description = "boom"
+            input_model = DummyInput
+
+            def is_read_only(self, arguments):
+                return False
+
+            async def execute(self, arguments, context):
+                raise RuntimeError("write boom")
+
+        ctx = _make_context([ReadOnlyTool("reader"), FailingMutate()])
+        results = await _dispatch_tool_calls(
+            ctx, [_tc("reader", "r1"), _tc("bad_writer", "w1")]
+        )
+        assert [r.tool_use_id for r in results] == ["r1", "w1"]
+        assert not results[0].is_error and "reader result" in results[0].content
+        assert results[1].is_error and "bad_writer" in results[1].content
+
+    @pytest.mark.asyncio
+    async def test_every_result_correlates_in_mixed_batch_with_failures(self):
+        """Read-only good/failing + mutating good/failing — all four results
+        align to their calls by id and is_error, regardless of partition (H4)."""
+
+        class FailingMutate(BaseTool):
+            name = "mut_bad"
+            description = "boom"
+            input_model = DummyInput
+
+            def is_read_only(self, arguments):
+                return False
+
+            async def execute(self, arguments, context):
+                raise RuntimeError("mut boom")
+
+        ctx = _make_context([
+            ReadOnlyTool("ro_good"),
+            FailingTool(),               # name="failing_tool", read-only
+            MutatingTool("mut_good"),
+            FailingMutate(),
+        ])
+        calls = [
+            _tc("ro_good", "a"),
+            _tc("failing_tool", "b"),
+            _tc("mut_good", "c"),
+            _tc("mut_bad", "d"),
+        ]
+        results = await _dispatch_tool_calls(ctx, calls)
+        assert [r.tool_use_id for r in results] == ["a", "b", "c", "d"]
+        assert [r.is_error for r in results] == [False, True, False, True]
+
+    @pytest.mark.asyncio
+    async def test_tool_exception_recorded_to_telemetry(self):
+        """A raising tool records a ``tool_exception`` row (H4 — failures stay
+        observable, not silently swallowed)."""
+        recorded: list[dict] = []
+
+        class _FakeTel:
+            def record(self, **kw):
+                recorded.append(kw)
+
+        ctx = _make_context([FailingTool()], telemetry=_FakeTel())
+        results = await _dispatch_tool_calls(ctx, [_tc("failing_tool", "x")])
+        assert results[0].is_error
+        assert any(
+            r.get("error_type") == "tool_exception"
+            and r.get("tool_name") == "failing_tool"
+            for r in recorded
+        )
 
     @pytest.mark.asyncio
     async def test_unknown_tool_returns_error(self):

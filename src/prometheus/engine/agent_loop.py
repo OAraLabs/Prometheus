@@ -1297,6 +1297,49 @@ def _microcompact_old_results(
         log.debug("Microcompacted %d old tool results (turn %d)", compacted, current_turn)
 
 
+async def _safe_execute(
+    context: LoopContext,
+    tc: object,
+    raw_model_output: str | None,
+) -> ToolResultBlock:
+    """Run one tool call, always returning a correctly-correlated
+    ``ToolResultBlock`` and never raising.
+
+    Failure isolation (audit H4). Without this, an exception escaping
+    ``_execute_tool_call`` (a bug in tool code, a hook, or the permission gate)
+    either killed the whole turn on the sequential path, or — inside the
+    parallel ``gather`` — lost its index and id (the old ``-1`` /
+    ``tool_use_id="error"`` block sorted to the front), so every downstream
+    ``zip(tool_calls, tool_results)`` re-paired results with the WRONG calls and
+    the model reasoned over misattributed tool output.
+    """
+    try:
+        return await _execute_tool_call(
+            context, tc.name, tc.id, tc.input,
+            raw_model_output=raw_model_output,
+        )
+    except Exception as exc:  # noqa: BLE001 — isolating tool failure is the point
+        log.error(
+            "Tool %s raised during execution: %s", tc.name, exc, exc_info=True,
+        )
+        if context.telemetry is not None:
+            try:
+                context.telemetry.record(
+                    model=context.model,
+                    tool_name=tc.name,
+                    success=False,
+                    error_type="tool_exception",
+                    error_detail=str(exc)[:2000],
+                )
+            except Exception:  # pragma: no cover - telemetry must not mask result
+                log.debug("telemetry.record failed in _safe_execute", exc_info=True)
+        return ToolResultBlock(
+            tool_use_id=tc.id,
+            content=f"Tool {tc.name} raised an exception: {exc}",
+            is_error=True,
+        )
+
+
 async def _dispatch_tool_calls(
     context: LoopContext,
     tool_calls: list,
@@ -1308,17 +1351,17 @@ async def _dispatch_tool_calls(
     Mutating tools are executed sequentially afterwards to preserve order.
     Single tool calls skip partitioning entirely.
 
+    Every call goes through ``_safe_execute``, which guarantees a
+    correctly-correlated ToolResultBlock and never raises — so a tool blowing up
+    can never scramble result↔call correlation or kill the turn (audit H4).
+
     Golden Trace Capture sprint: ``raw_model_output`` is the text the
     model produced for this turn (before adapter parsing). Forwarded to
     each ``_execute_tool_call`` so successful cloud-provider calls get
     captured as golden traces in telemetry.
     """
     if len(tool_calls) == 1:
-        tc = tool_calls[0]
-        return [await _execute_tool_call(
-            context, tc.name, tc.id, tc.input,
-            raw_model_output=raw_model_output,
-        )]
+        return [await _safe_execute(context, tool_calls[0], raw_model_output)]
 
     # Partition into read-only and mutating based on tool.is_read_only()
     read_only: list[tuple[int, object]] = []   # (original_index, tool_call)
@@ -1333,46 +1376,21 @@ async def _dispatch_tool_calls(
 
     results: list[tuple[int, ToolResultBlock]] = []
 
-    # Run all read-only tools in parallel
+    # Run all read-only tools in parallel. ``_safe_execute`` never raises, so
+    # every gathered item is an (index, ToolResultBlock) tuple — no
+    # return_exceptions backstop is needed and the index is never lost. A
+    # CancelledError during loop teardown still propagates, which is correct.
     if read_only:
         async def _run_ro(idx, tc):
-            r = await _execute_tool_call(
-                context, tc.name, tc.id, tc.input,
-                raw_model_output=raw_model_output,
-            )
-            return idx, r
+            return idx, await _safe_execute(context, tc, raw_model_output)
 
-        parallel = await asyncio.gather(
-            *[_run_ro(idx, tc) for idx, tc in read_only],
-            return_exceptions=True,
+        results.extend(
+            await asyncio.gather(*[_run_ro(idx, tc) for idx, tc in read_only])
         )
-        for item in parallel:
-            if isinstance(item, Exception):
-                log.error("Parallel tool execution failed: %s", item)
-                if context.telemetry is not None:
-                    context.telemetry.record(
-                        model=context.model,
-                        tool_name="unknown_parallel",
-                        success=False,
-                        error_type="parallel_exception",
-                        error_detail=str(item),
-                    )
-                # We lost the index — append a generic error
-                results.append((-1, ToolResultBlock(
-                    tool_use_id="error",
-                    content=f"Parallel execution error: {item}",
-                    is_error=True,
-                )))
-            else:
-                results.append(item)
 
     # Run mutating tools sequentially (order matters)
     for idx, tc in mutating:
-        result = await _execute_tool_call(
-            context, tc.name, tc.id, tc.input,
-            raw_model_output=raw_model_output,
-        )
-        results.append((idx, result))
+        results.append((idx, await _safe_execute(context, tc, raw_model_output)))
 
     # Restore original order
     results.sort(key=lambda x: x[0])
