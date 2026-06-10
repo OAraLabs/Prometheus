@@ -232,13 +232,20 @@ class MemoryStore:
     ) -> list[dict]:
         """Search memories by full-text query or by entity name / type."""
         if query:
-            # FTS5 search
+            # FTS5 search. Sanitize like the LCM stores — this site passed
+            # the raw query into MATCH, so punctuation ('.', '?') raised
+            # fts5 syntax errors (same class as the lcm_expand_query bug).
+            from prometheus.memory.lcm_fts5 import sanitize_fts5_query
+
+            safe_query = sanitize_fts5_query(query)
+            if not safe_query:
+                return []
             rows = self._conn.execute(
                 "SELECT m.* FROM memories m"
                 " JOIN memories_fts fts ON m.id = fts.id"
                 " WHERE memories_fts MATCH ? AND m.confidence >= ?"
                 " ORDER BY rank LIMIT ?",
-                (query, min_confidence, limit),
+                (safe_query, min_confidence, limit),
             ).fetchall()
         elif entity:
             rows = self._conn.execute(

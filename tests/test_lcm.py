@@ -121,21 +121,54 @@ class TestLCMTypes:
 
 class TestFTS5Sanitize:
     def test_fts5_sanitize_basic(self) -> None:
-        # FTS5 operators like *, ", (, ), -, +, ^, :, {, }, ~, @, # should be stripped
+        # Whitelist-tokenize-and-quote: every word survives as a quoted
+        # literal token; operator characters become separators.
         result = sanitize_fts5_query('hello "world" AND (test*)')
-        assert '"' not in result
-        assert "*" not in result
+        assert '"hello"' in result
+        assert '"world"' in result
+        assert '"test"' in result
         assert "(" not in result
-        assert ")" not in result
-        assert "hello" in result
-        assert "world" in result
-        assert "test" in result
+        assert "*" not in result
 
     def test_fts5_sanitize_empty(self) -> None:
         assert sanitize_fts5_query("") == ""
         # All-punctuation yields empty after stripping
         assert sanitize_fts5_query('***""()') == ""
         assert sanitize_fts5_query("   ") == ""
+        assert sanitize_fts5_query("...??!") == ""
+
+    def test_fts5_sanitize_never_syntax_errors_against_real_fts5(self) -> None:
+        """Property the old blocklist lacked: ANY sanitized non-empty query
+        executes against a real FTS5 table. The live failure was
+        'fts5: syntax error near "."' from a query containing a filename."""
+        import sqlite3
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE VIRTUAL TABLE t USING fts5(body)")
+        conn.execute(
+            "INSERT INTO t (body) VALUES "
+            "('the daily briefing job lives in daily_briefing.py')"
+        )
+        nasty = [
+            "what is wrong with daily_briefing.py?",   # the live failure shape
+            "did we fix the scheduler...maybe?",
+            "node.js vs python3.12",
+            "what's the plan, exactly?",
+            'a "quoted" phrase AND NOT (operators) OR NEAR/2 col:val ^boost',
+            "semi;colons/slashes\\backslashes`ticks'",
+        ]
+        for q in nasty:
+            safe = sanitize_fts5_query(q)
+            if not safe:
+                continue
+            # must not raise
+            conn.execute("SELECT rowid FROM t WHERE t MATCH ?", (safe,)).fetchall()
+
+        # and the filename query actually FINDS the row (tokens match)
+        safe = sanitize_fts5_query("daily_briefing.py")
+        rows = conn.execute("SELECT rowid FROM t WHERE t MATCH ?", (safe,)).fetchall()
+        assert rows, "sanitized filename query should match the indexed row"
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
