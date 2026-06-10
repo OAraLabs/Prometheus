@@ -1729,7 +1729,25 @@ class TelegramAdapter(BasePlatformAdapter):
                 "THREAD after: session=%s total_messages=%d result_messages=%d",
                 session_id, len(session.get_messages()), len(result.messages),
             )
-            return result.text or "(no response)"
+            response_text = result.text or "(no response)"
+            # Honest async-promise guard (Layer b): if this USER turn promises a
+            # later notification but registered no qualifying task_create this
+            # turn, append a delimited system-note correction and record the
+            # detection for lie-rate measurement. Skips inject_turn re-engagement
+            # turns (provenance != "user").
+            from prometheus.engine.honesty import evaluate_and_record
+            from prometheus.telemetry.tracker import get_telemetry_handle
+
+            correction = evaluate_and_record(
+                response_text,
+                result.messages[pre_len:],
+                provenance=provenance,
+                session_id=session_id,
+                telemetry=get_telemetry_handle(),
+            )
+            if correction:
+                response_text = f"{response_text}\n\n{correction}"
+            return response_text
         except Exception as exc:
             logger.error("Agent error for session %s: %s", session_id, exc)
             session.rollback_last()

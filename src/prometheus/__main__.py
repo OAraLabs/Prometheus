@@ -154,9 +154,20 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
 
     workspace = security_cfg.get("workspace_root")
     registry = ToolRegistry()
+
+    # Funnel (honest-async-promises Layer d): register bash and task_create FIRST
+    # and adjacent, so the model always sees task_create right beside bash and
+    # routes work that outlives the turn to the managed-task path instead of
+    # `nohup … &`. task_create stays on the fault-tolerant try_register (it needs
+    # the task manager) so a missing optional dep degrades gracefully rather than
+    # breaking the whole registry build.
+    from prometheus.tools.registration import try_register
+    registry.register(BashTool(workspace=workspace))
+    try_register(registry, "TaskCreateTool",
+                 "prometheus.tools.builtin.task_create", "TaskCreateTool")
+
     for tool in [
         # Core file/shell tools
-        BashTool(workspace=workspace),
         FileReadTool(),
         FileWriteTool(),
         FileEditTool(),
@@ -274,9 +285,8 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
     try_register(registry, "SessionsSpawnTool",
                  "prometheus.tools.builtin.sessions_spawn", "SessionsSpawnTool")
 
-    # Task tools — require task manager
-    try_register(registry, "TaskCreateTool",
-                 "prometheus.tools.builtin.task_create", "TaskCreateTool")
+    # Task tools — require task manager. (task_create is registered early, beside
+    # bash, as the long-running-work funnel — see top of create_tool_registry.)
     try_register(registry, "TaskGetTool",
                  "prometheus.tools.builtin.task_get", "TaskGetTool")
     try_register(registry, "TaskListTool",
