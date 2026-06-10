@@ -768,6 +768,13 @@ def create_app(
     _FILES_READ_CAP = 256 * 1024  # 256 KB text-preview cap
 
     def _files_root() -> Path:
+        # PROMETHEUS_FILES_ROOT widens/repoints the BROWSE root only (read-only,
+        # token-gated). Deliberately separate from PROMETHEUS_WORKSPACE_DIR, which
+        # doubles as an image_generate WRITE root — repointing that to browse more
+        # would widen the agent's write surface too.
+        env_root = os.environ.get("PROMETHEUS_FILES_ROOT", "").strip()
+        if env_root:
+            return Path(env_root).expanduser().resolve()
         return get_workspace_dir().resolve()
 
     def _safe_file_path(rel: str) -> Path | None:

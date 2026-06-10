@@ -26,6 +26,7 @@ def client(tmp_path, monkeypatch):
     (ws / "sub" / "nested.md").write_text("# nested", encoding="utf-8")
     (ws / "blob.bin").write_bytes(b"\x00\x01\x02BINARY")
     monkeypatch.setenv("PROMETHEUS_WORKSPACE_DIR", str(ws))
+    monkeypatch.delenv("PROMETHEUS_FILES_ROOT", raising=False)  # isolate from host config
     return TestClient(create_app({})), ws
 
 
@@ -99,3 +100,21 @@ def test_truncation(client):
     assert body["truncated"] is True
     assert body["size"] == 300 * 1024
     assert len(body["content"]) == 256 * 1024
+
+
+def test_files_root_env_overrides_workspace(tmp_path, monkeypatch):
+    """PROMETHEUS_FILES_ROOT repoints the BROWSE root without touching the
+    workspace var (which doubles as an image_generate write root)."""
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / "ws-only.txt").write_text("x", encoding="utf-8")
+    browse = tmp_path / "agent-home"
+    browse.mkdir()
+    (browse / "MEMORY.md").write_text("# memory", encoding="utf-8")
+    monkeypatch.setenv("PROMETHEUS_WORKSPACE_DIR", str(ws))
+    monkeypatch.setenv("PROMETHEUS_FILES_ROOT", str(browse))
+    c = TestClient(create_app({}))
+    names = {e["name"] for e in c.get("/api/files").json()["entries"]}
+    assert "MEMORY.md" in names and "ws-only.txt" not in names
+    # confinement still applies to the new root
+    assert c.get("/api/files", params={"path": "../"}).status_code == 403
