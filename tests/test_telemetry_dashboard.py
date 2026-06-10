@@ -270,3 +270,72 @@ class TestTimeFiltering:
         stats = dash.get_stats(hours=1)
         assert stats["total_calls"] == 1
         dash.close()
+
+
+# ---------------------------------------------------------------------------
+# Denominator honesty (D3): _loop_transition + policy-denial exclusion
+# ---------------------------------------------------------------------------
+
+
+class TestDenominatorHonesty:
+
+    def test_loop_transition_rows_excluded_everywhere(self, db_path: Path):
+        """M1 completion: dashboard stats must not count synthetic loop echoes."""
+        conn = sqlite3.connect(str(db_path))
+        _insert(conn, tool_name="bash", success=1, latency_ms=100.0)
+        _insert(conn, tool_name="bash", success=0, latency_ms=100.0,
+                error_type="tool_error")
+        # Synthetic loop echoes — one per iteration, far outnumbering real calls.
+        for _ in range(10):
+            _insert(conn, tool_name="_loop_transition", success=0,
+                    latency_ms=0.0, error_type="tool_error_retry")
+        conn.close()
+
+        dash = ToolDashboard(db_path=db_path)
+        stats = dash.get_stats(hours=24)
+        assert stats["total_calls"] == 2  # not 12
+        assert stats["overall_success_rate"] == 0.5  # not 1/12
+        assert "_loop_transition" not in stats["success_rate_by_tool"]
+        assert "_loop_transition" not in stats["avg_latency_by_tool"]
+        assert all(
+            r["tool_name"] != "_loop_transition" for r in stats["most_called"]
+        )
+        dash.close()
+
+    def test_policy_denials_not_counted_as_failures(self, db_path: Path):
+        """A SecurityGate denial is the gate working — not a failed call."""
+        conn = sqlite3.connect(str(db_path))
+        _insert(conn, tool_name="bash", success=1, latency_ms=200.0)
+        _insert(conn, tool_name="bash", success=1, latency_ms=200.0)
+        _insert(conn, tool_name="bash", success=0, latency_ms=0.0,
+                error_type="permission_denied",
+                error_detail="Command matches deny list entry")
+        _insert(conn, tool_name="bash", success=0, latency_ms=0.0,
+                error_type="hook_blocked")
+        conn.close()
+
+        dash = ToolDashboard(db_path=db_path)
+        stats = dash.get_stats(hours=24)
+        # Volume still counts the denied calls; the rate judges only the rest.
+        assert stats["total_calls"] == 4
+        assert stats["total_denials"] == 2
+        assert stats["overall_success_rate"] == 1.0
+        assert stats["success_rate_by_tool"]["bash"] == 1.0
+        # Denials never executed — latency 0 must not drag the average down.
+        assert stats["avg_latency_by_tool"]["bash"] == 200.0
+        # most_called keeps denials in the volume count.
+        assert stats["most_called"][0]["calls"] == 4
+        dash.close()
+
+    def test_all_denied_tool_has_no_rate_row(self, db_path: Path):
+        conn = sqlite3.connect(str(db_path))
+        _insert(conn, tool_name="bash", success=0, error_type="permission_denied")
+        conn.close()
+
+        dash = ToolDashboard(db_path=db_path)
+        stats = dash.get_stats(hours=24)
+        assert "bash" not in stats["success_rate_by_tool"]  # no judged calls
+        assert stats["total_calls"] == 1
+        assert stats["total_denials"] == 1
+        assert stats["overall_success_rate"] == 0.0  # zero judged calls
+        dash.close()

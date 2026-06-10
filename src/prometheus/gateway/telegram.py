@@ -738,10 +738,13 @@ class TelegramAdapter(BasePlatformAdapter):
             lines = ["Tool Call Stats (24h)\n"]
             lines.append(f"Total calls: {stats['total_calls']}")
             lines.append(f"Success rate: {stats['overall_success_rate']:.0%}")
+            if stats.get("total_denials"):
+                lines.append(f"Denied by policy: {stats['total_denials']}")
 
             if stats["most_called"]:
                 lines.append("\nMost called:")
-                for name, count in stats["most_called"][:5]:
+                for row in stats["most_called"][:5]:
+                    name, count = row["tool_name"], row["calls"]
                     rate = stats["success_rate_by_tool"].get(name, 0)
                     lines.append(f"  {name}: {count} calls ({rate:.0%} ok)")
 

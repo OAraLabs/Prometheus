@@ -111,3 +111,57 @@ class TestToolCallTelemetry:
         report = t2.report()
         assert report["total_calls"] == 1
         t2.close()
+
+
+class TestPolicyDenialDenominators:
+    """D3 denominator honesty: SecurityGate/hook denials are policy outcomes,
+    not model tool-calling failures — rates must judge only non-denied calls."""
+
+    def test_health_summary_separates_denials_from_failures(self, tel):
+        tel.record(model="m", tool_name="bash", success=True)
+        tel.record(model="m", tool_name="bash", success=True)
+        tel.record(model="m", tool_name="bash", success=False,
+                   error_type="tool_error", error_detail="exit 1")
+        tel.record(model="m", tool_name="bash", success=False,
+                   error_type="permission_denied",
+                   error_detail="Command matches deny list entry")
+        tel.record(model="m", tool_name="bash", success=False,
+                   error_type="hook_blocked")
+
+        tc = tel.health_summary(since=0.0)["tool_calls"]
+        assert tc["total"] == 5         # denials still count as calls made
+        assert tc["denials"] == 2
+        assert tc["failures"] == 1      # only the real tool_error
+        assert tc["success_rate"] == pytest.approx(2 / 3)  # judged calls only
+
+    def test_report_surfaces_denials_outside_rates(self, tel):
+        tel.record(model="m", tool_name="bash", success=True, latency_ms=100.0)
+        tel.record(model="m", tool_name="bash", success=False,
+                   error_type="permission_denied")
+
+        rep = tel.report()
+        bash = rep["tools"]["bash"]
+        assert bash["calls"] == 1               # judged calls only
+        assert bash["denials"] == 1
+        assert bash["success_rate"] == 1.0      # not 0.5
+        # the denial must not appear in the failure error-type histogram
+        assert "permission_denied" not in bash["error_types"]
+        assert rep["total_calls"] == 1
+        assert rep["total_denials"] == 1
+        assert rep["overall_success_rate"] == 1.0
+        # per-model view carries the same split
+        m_bash = rep["models"]["m"]["bash"]
+        assert m_bash["calls"] == 1
+        assert m_bash["denials"] == 1
+        assert m_bash["failures"] == 0
+
+    def test_report_all_denied_tool_keeps_zero_rate_not_failure(self, tel):
+        tel.record(model="m", tool_name="bash", success=False,
+                   error_type="permission_denied")
+        rep = tel.report()
+        bash = rep["tools"]["bash"]
+        assert bash["calls"] == 0
+        assert bash["denials"] == 1
+        assert bash["success_rate"] == 0.0
+        assert rep["total_calls"] == 0
+        assert rep["overall_success_rate"] == 0.0

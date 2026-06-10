@@ -11,6 +11,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from prometheus.telemetry.tracker import POLICY_ERROR_TYPES
+
+# SQL fragment placeholders for the policy error types (D3 denominator
+# honesty — see tracker.POLICY_ERROR_TYPES).
+_POLICY_PH = ",".join("?" * len(POLICY_ERROR_TYPES))
+_POLICY_PARAMS = tuple(POLICY_ERROR_TYPES)
+
 
 class ToolDashboard:
     """Read-only dashboard over the telemetry database.
@@ -48,8 +55,11 @@ class ToolDashboard:
         * ``lucky_guesses``         – count of records with
           ``error_type='lucky_guess'``
         * ``adapter_repairs``       – count of records where ``retries > 0``
-        * ``total_calls``           – total row count in window
-        * ``overall_success_rate``  – float 0.0 – 1.0
+        * ``total_calls``           – real tool calls in window (synthetic
+          ``_loop_transition`` loop echoes excluded)
+        * ``total_denials``         – policy refusals (SecurityGate / hooks);
+          included in ``total_calls``, excluded from success rates
+        * ``overall_success_rate``  – float 0.0 – 1.0 over non-denied calls
         """
         cutoff = time.time() - hours * 3600
 
@@ -59,7 +69,7 @@ class ToolDashboard:
         circuit_breaker_trips = self._count_circuit_breaker_trips(cutoff)
         lucky_guesses = self._count_lucky_guesses(cutoff)
         adapter_repairs = self._count_adapter_repairs(cutoff)
-        total_calls, overall_success_rate = self._totals(cutoff)
+        total_calls, total_denials, overall_success_rate = self._totals(cutoff)
 
         return {
             "success_rate_by_tool": success_rate_by_tool,
@@ -69,6 +79,7 @@ class ToolDashboard:
             "lucky_guesses": lucky_guesses,
             "adapter_repairs": adapter_repairs,
             "total_calls": total_calls,
+            "total_denials": total_denials,
             "overall_success_rate": overall_success_rate,
         }
 
@@ -87,24 +98,30 @@ class ToolDashboard:
     # ------------------------------------------------------------------
 
     def _success_rate_by_tool(self, cutoff: float) -> dict[str, float]:
+        # M1: synthetic _loop_transition rows are loop echoes, not tools.
+        # D3: policy denials are excluded from the rate denominator.
         rows = self._conn.execute(
-            """
+            f"""
             SELECT tool_name,
                    CAST(SUM(success) AS REAL) / COUNT(*) AS rate
               FROM tool_calls
              WHERE timestamp >= ?
+               AND tool_name != '_loop_transition'
+               AND (error_type IS NULL OR error_type NOT IN ({_POLICY_PH}))
              GROUP BY tool_name
             """,
-            (cutoff,),
+            (cutoff, *_POLICY_PARAMS),
         ).fetchall()
         return {r["tool_name"]: r["rate"] for r in rows}
 
     def _most_called(self, cutoff: float) -> list[dict[str, Any]]:
+        # Denied calls still count as calls (volume metric); loop echoes don't.
         rows = self._conn.execute(
             """
             SELECT tool_name, COUNT(*) AS calls
               FROM tool_calls
              WHERE timestamp >= ?
+               AND tool_name != '_loop_transition'
              GROUP BY tool_name
              ORDER BY calls DESC
              LIMIT 10
@@ -114,14 +131,18 @@ class ToolDashboard:
         return [{"tool_name": r["tool_name"], "calls": r["calls"]} for r in rows]
 
     def _avg_latency_by_tool(self, cutoff: float) -> dict[str, float]:
+        # Latency measures execution; loop echoes and never-executed policy
+        # denials (latency 0) would both drag the averages toward zero.
         rows = self._conn.execute(
-            """
+            f"""
             SELECT tool_name, AVG(latency_ms) AS avg_lat
               FROM tool_calls
              WHERE timestamp >= ?
+               AND tool_name != '_loop_transition'
+               AND (error_type IS NULL OR error_type NOT IN ({_POLICY_PH}))
              GROUP BY tool_name
             """,
-            (cutoff,),
+            (cutoff, *_POLICY_PARAMS),
         ).fetchall()
         return {r["tool_name"]: r["avg_lat"] for r in rows}
 
@@ -162,15 +183,22 @@ class ToolDashboard:
         ).fetchone()
         return row["cnt"]
 
-    def _totals(self, cutoff: float) -> tuple[int, float]:
+    def _totals(self, cutoff: float) -> tuple[int, int, float]:
+        # total counts every real tool call (denials included — the model
+        # made the call); the success rate is judged over non-denied calls.
         row = self._conn.execute(
-            """
+            f"""
             SELECT COUNT(*) AS total,
-                   COALESCE(CAST(SUM(success) AS REAL) / NULLIF(COUNT(*), 0), 0.0)
-                       AS rate
+                   COALESCE(SUM(error_type IN ({_POLICY_PH})), 0) AS denials,
+                   COALESCE(
+                       CAST(SUM(success) AS REAL)
+                       / NULLIF(COUNT(*) - COALESCE(SUM(error_type IN ({_POLICY_PH})), 0), 0),
+                       0.0
+                   ) AS rate
               FROM tool_calls
              WHERE timestamp >= ?
+               AND tool_name != '_loop_transition'
             """,
-            (cutoff,),
+            (*_POLICY_PARAMS, *_POLICY_PARAMS, cutoff),
         ).fetchone()
-        return row["total"], row["rate"]
+        return row["total"], row["denials"], row["rate"]

@@ -36,6 +36,15 @@ _CLOUD_PROVIDERS: frozenset[str] = frozenset(
 )
 
 
+# D3 denominator honesty: these error types are POLICY outcomes — the
+# SecurityGate or a hook refusing to run a well-formed call. They are not
+# model tool-calling failures, so success-rate denominators must exclude
+# them (they're still surfaced separately as ``denials`` counts).
+POLICY_ERROR_TYPES: frozenset[str] = frozenset(
+    {"permission_denied", "hook_blocked"}
+)
+
+
 _SCHEMA_SQL_TABLES = """
 CREATE TABLE IF NOT EXISTS tool_calls (
     id                TEXT PRIMARY KEY,
@@ -706,7 +715,10 @@ class ToolCallTelemetry:
 
             {
                 "since": <unix-ts>,
-                "tool_calls": {"total": N, "failures": N, "success_rate": 0-1},
+                "tool_calls": {"total": N, "failures": N, "denials": N,
+                               "success_rate": 0-1},
+                    # denials = policy refusals (SecurityGate / hooks); they
+                    # count in `total` but not in `failures` or the rate.
                 "subsystems": {
                     "<name>": {
                         "runs": N, "success": N, "partial": N, "failed": N,
@@ -722,7 +734,9 @@ class ToolCallTelemetry:
         """
         out: dict[str, Any] = {
             "since": since,
-            "tool_calls": {"total": 0, "failures": 0, "success_rate": 0.0},
+            "tool_calls": {
+                "total": 0, "failures": 0, "denials": 0, "success_rate": 0.0,
+            },
             "subsystems": {},
             "recent_silent_failures": [],
         }
@@ -730,16 +744,25 @@ class ToolCallTelemetry:
             # M1: exclude the synthetic ``_loop_transition`` rows the agent loop
             # writes per iteration — they echo every real tool failure, so
             # counting them double-counts failures in the success rate.
-            t_total, t_succ = self._conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(success), 0) "
+            # D3: policy denials count toward ``total`` (the call happened) but
+            # not toward ``failures`` or the success-rate denominator.
+            _ph = ",".join("?" * len(POLICY_ERROR_TYPES))
+            t_total, t_succ, t_denied = self._conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(success), 0), "
+                f"COALESCE(SUM(error_type IN ({_ph})), 0) "
                 "FROM tool_calls WHERE timestamp >= ? "
                 "AND tool_name != '_loop_transition'",
-                (since,),
-            ).fetchone() or (0, 0)
-            out["tool_calls"]["total"] = int(t_total or 0)
-            out["tool_calls"]["failures"] = int((t_total or 0) - (t_succ or 0))
+                (*POLICY_ERROR_TYPES, since),
+            ).fetchone() or (0, 0, 0)
+            t_total, t_succ, t_denied = (
+                int(t_total or 0), int(t_succ or 0), int(t_denied or 0),
+            )
+            judged = t_total - t_denied
+            out["tool_calls"]["total"] = t_total
+            out["tool_calls"]["failures"] = judged - t_succ
+            out["tool_calls"]["denials"] = t_denied
             out["tool_calls"]["success_rate"] = (
-                float(t_succ) / float(t_total) if t_total else 0.0
+                float(t_succ) / float(judged) if judged else 0.0
             )
         except sqlite3.DatabaseError:
             pass
@@ -899,9 +922,10 @@ class ToolCallTelemetry:
                 "models": {
                     "<model_name>": {
                         "<tool_name>": {
-                            "calls": int,
+                            "calls": int,        # excludes policy denials
                             "successes": int,
                             "failures": int,
+                            "denials": int,
                             "success_rate": float,   # 0.0 – 1.0
                             "avg_retries": float,
                             "avg_latency_ms": float,
@@ -912,7 +936,8 @@ class ToolCallTelemetry:
                 },
                 "tools": {
                     "<tool_name>": {
-                        "calls": int,
+                        "calls": int,        # excludes policy denials
+                        "denials": int,      # SecurityGate / hook refusals
                         "success_rate": float,
                         "avg_retries": float,
                         "avg_latency_ms": float,
@@ -920,7 +945,8 @@ class ToolCallTelemetry:
                     },
                     ...
                 },
-                "total_calls": int,
+                "total_calls": int,          # excludes policy denials
+                "total_denials": int,
                 "overall_success_rate": float,
             }
         """
@@ -942,6 +968,7 @@ class ToolCallTelemetry:
                 "models": {},
                 "tools": {},
                 "total_calls": 0,
+                "total_denials": 0,
                 "overall_success_rate": 0.0,
             }
 
@@ -951,29 +978,40 @@ class ToolCallTelemetry:
         total = 0
         total_success = 0
 
-        for model, tool_name, success, retries, latency_ms, error_type in rows:
-            total += 1
-            total_success += success
+        total_denials = 0
 
+        for model, tool_name, success, retries, latency_ms, error_type in rows:
             # per-model per-tool
             model_data = models.setdefault(model, {})
             mt = model_data.setdefault(
                 tool_name,
-                {"calls": 0, "successes": 0, "failures": 0,
+                {"calls": 0, "successes": 0, "failures": 0, "denials": 0,
                  "total_retries": 0, "total_latency_ms": 0.0},
             )
+            # per-tool
+            td = tools.setdefault(
+                tool_name,
+                {"calls": 0, "successes": 0, "denials": 0, "total_retries": 0,
+                 "total_latency_ms": 0.0, "error_types": {}},
+            )
+
+            # D3: policy denials are surfaced as `denials`, not failures —
+            # they never enter calls/successes or the success-rate math.
+            if error_type in POLICY_ERROR_TYPES:
+                mt["denials"] += 1
+                td["denials"] += 1
+                total_denials += 1
+                continue
+
+            total += 1
+            total_success += success
+
             mt["calls"] += 1
             mt["successes"] += success
             mt["failures"] += 1 - success
             mt["total_retries"] += retries
             mt["total_latency_ms"] += latency_ms
 
-            # per-tool
-            td = tools.setdefault(
-                tool_name,
-                {"calls": 0, "successes": 0, "total_retries": 0,
-                 "total_latency_ms": 0.0, "error_types": {}},
-            )
             td["calls"] += 1
             td["successes"] += success
             td["total_retries"] += retries
@@ -1002,6 +1040,7 @@ class ToolCallTelemetry:
             "models": models,
             "tools": tools,
             "total_calls": total,
+            "total_denials": total_denials,
             "overall_success_rate": total_success / total if total else 0.0,
         }
 
