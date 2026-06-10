@@ -781,6 +781,21 @@ async def run_loop(
         ):
             _payload_tools = []
 
+        # Visible-stream hygiene: local tiers emit tool calls as inline
+        # <tool_call> markup, and the raw token stream goes to every gateway —
+        # without this filter the grammar tags render verbatim in chat bubbles
+        # (Beacon web/desktop, Telegram). Streaming-only: the dispatch path
+        # parses the COMPLETE turn text (final_message / raw_model_output),
+        # which stays unfiltered. Tier off (cloud) streams no markup → no
+        # filter, so quoted tags in cloud prose are never eaten.
+        _markup_filter = None
+        if (
+            context.adapter is not None
+            and getattr(context.adapter, "tier", None) != "off"
+        ):
+            from prometheus.adapter.formatter import ToolCallMarkupFilter
+            _markup_filter = ToolCallMarkupFilter()
+
         async for event in context.provider.stream_message(
             ApiMessageRequest(
                 model=context.model,
@@ -795,12 +810,23 @@ async def run_loop(
             )
         ):
             if isinstance(event, ApiTextDeltaEvent):
-                yield AssistantTextDelta(text=event.text), None
+                if _markup_filter is not None:
+                    visible = _markup_filter.feed(event.text)
+                    if visible:
+                        yield AssistantTextDelta(text=visible), None
+                else:
+                    yield AssistantTextDelta(text=event.text), None
                 continue
 
             if isinstance(event, ApiMessageCompleteEvent):
                 final_message = event.message
                 usage = event.usage
+
+        if _markup_filter is not None:
+            # Release any withheld tag-lookalike text now that the stream ended.
+            _tail = _markup_filter.flush()
+            if _tail:
+                yield AssistantTextDelta(text=_tail), None
 
         if final_message is None:
             raise RuntimeError("Model stream finished without a final message")

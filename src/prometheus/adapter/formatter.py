@@ -250,3 +250,79 @@ def _parse_tool_call_json(text: str) -> ToolUseBlock | None:
         name=name,
         input=args,
     )
+
+
+# ---------------------------------------------------------------------------
+# Streaming markup filter (user-visible text hygiene)
+# ---------------------------------------------------------------------------
+
+TOOL_CALL_OPEN = "<tool_call>"
+TOOL_CALL_CLOSE = "</tool_call>"
+
+
+def _partial_tag_tail(s: str, tag: str) -> str:
+    """Longest suffix of ``s`` that is a strict prefix of ``tag`` ('' if none)."""
+    max_k = min(len(s), len(tag) - 1)
+    for k in range(max_k, 0, -1):
+        if s.endswith(tag[:k]):
+            return s[-k:]
+    return ""
+
+
+class ToolCallMarkupFilter:
+    """Strips well-formed ``<tool_call>…</tool_call>`` spans from STREAMED text.
+
+    Local tiers (light/full) make the model emit tool calls as inline markup;
+    the dispatch path parses it from the COMPLETE turn text (extract_tool_calls
+    / raw_model_output), but the token stream used to be forwarded verbatim to
+    every gateway — so chat bubbles in Beacon web/desktop and Telegram showed
+    raw grammar tags (observed live 2026-06-10). This filter guards only what
+    users SEE; the parser keeps consuming the unfiltered text.
+
+    Stateful because tags arrive split across deltas: text that could be a
+    partial tag is withheld until it resolves. ``flush()`` at stream end emits
+    anything withheld outside a tag (a lookalike that never completed) and
+    drops an unterminated tag body (it is markup either way).
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._in_tag = False
+
+    def feed(self, text: str) -> str:
+        """Filter one delta; returns the user-visible portion (may be '')."""
+        self._buf += text
+        emitted: list[str] = []
+        while True:
+            if self._in_tag:
+                idx = self._buf.find(TOOL_CALL_CLOSE)
+                if idx == -1:
+                    # Inside a tag: discard all but a possible partial close.
+                    self._buf = _partial_tag_tail(self._buf, TOOL_CALL_CLOSE)
+                    break
+                self._buf = self._buf[idx + len(TOOL_CALL_CLOSE):]
+                self._in_tag = False
+            else:
+                idx = self._buf.find(TOOL_CALL_OPEN)
+                if idx == -1:
+                    # Emit everything except a possible partial open.
+                    tail = _partial_tag_tail(self._buf, TOOL_CALL_OPEN)
+                    visible = self._buf[: len(self._buf) - len(tail)]
+                    if visible:
+                        emitted.append(visible)
+                    self._buf = tail
+                    break
+                if idx > 0:
+                    emitted.append(self._buf[:idx])
+                self._buf = self._buf[idx + len(TOOL_CALL_OPEN):]
+                self._in_tag = True
+        return "".join(emitted)
+
+    def flush(self) -> str:
+        """Stream ended: release withheld lookalike text; drop unterminated markup."""
+        if self._in_tag:
+            self._buf = ""
+            self._in_tag = False
+            return ""
+        out, self._buf = self._buf, ""
+        return out
