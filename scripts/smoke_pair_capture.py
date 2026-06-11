@@ -9,6 +9,7 @@ context. Mirrors the gym/smoke pipeline construction.
 Exit 0 = pair captured; 1 = not.
 """
 
+import argparse
 import asyncio
 import json
 import sys
@@ -26,8 +27,18 @@ from prometheus.tools.builtin.task_list import TaskListTool
 
 
 async def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--use-default-db", action="store_true",
+        help="write to the real ~/.prometheus/data/training.db so /pairs "
+             "and /api/pairs reflect the captured pair (acceptance mode)",
+    )
+    args = ap.parse_args()
     tmp = Path(tempfile.mkdtemp(prefix="pair-smoke-"))
-    pair_capture.configure({"db_path": str(tmp / "training.db")})
+    if args.use_default_db:
+        pair_capture.configure({})
+    else:
+        pair_capture.configure({"db_path": str(tmp / "training.db")})
     store = pair_capture.get_store()
 
     config = load_config()
