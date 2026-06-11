@@ -612,6 +612,10 @@ class LoopContext:
     # user-role message so the agent sees it on its next turn. See
     # prometheus/hooks/file_mutation_verifier.py.
     file_mutation_verifier: object | None = None
+    # Repair-pair flywheel: failed-call stash awaiting a matching success
+    # within this loop run (keyed by tool name; "_malformed" for provider-
+    # dropped empty envelopes). Lazily initialized; see learning/pair_capture.
+    pair_pending: dict | None = None
 
 
 def _effective_max_tool_iterations(context: LoopContext) -> int:
@@ -903,6 +907,17 @@ async def run_loop(
                         tool_iteration,
                         f"dropped={dropped_malformed}",
                     )
+                    # Repair-pair flywheel: if the model recovers with a
+                    # working call after this feedback, pair it against the
+                    # empty envelope it just emitted.
+                    _stash_pending_pair(
+                        context,
+                        "_malformed",
+                        rejected_name="",
+                        rejected_input={},
+                        error="empty tool-call envelope (dropped at provider)",
+                        source="malformed_recovery",
+                    )
                     messages.append(
                         ConversationMessage.from_injected(
                             _malformed_retry_feedback(context, dropped_malformed),
@@ -1169,6 +1184,129 @@ def _malformed_retry_feedback(context: LoopContext, dropped: int) -> str:
     if names:
         parts.append(f"Available tools: {names}.")
     return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Repair-pair flywheel capture helpers (learning/pair_capture)
+# ---------------------------------------------------------------------------
+
+_PAIR_PENDING_TTL_S = 600.0
+
+
+def _pending_pairs(context: LoopContext) -> dict:
+    if context.pair_pending is None:
+        context.pair_pending = {}
+    return context.pair_pending
+
+
+def _pair_context(context: LoopContext, tool_name: str) -> dict:
+    """Compact reproducible context: LCM reference + the tool schema the
+    model saw. Sessions without LCM persistence still get the schema."""
+    ctx: dict = {
+        "kind": "lcm_ref",
+        "session_id": context.session_id,
+        "ts": time.time(),
+        "model": context.model,
+    }
+    try:
+        tool = context.tool_registry.get(tool_name) if context.tool_registry else None
+        if tool is not None:
+            schema = tool.input_model.model_json_schema()
+            ctx["tool_schema"] = {
+                "name": tool_name,
+                "properties": list(schema.get("properties", {})),
+                "required": schema.get("required", []),
+            }
+    except Exception:
+        pass
+    return ctx
+
+
+def _stash_pending_pair(
+    context: LoopContext,
+    key: str,
+    *,
+    rejected_name: str,
+    rejected_input: object,
+    error: str,
+    source: str,
+) -> None:
+    """Remember a failed call so a near-future success can complete the pair."""
+    try:
+        _pending_pairs(context)[key] = {
+            "rejected": {"name": rejected_name, "input": rejected_input},
+            "error": error[:500],
+            "ts": time.time(),
+            "source": source,
+        }
+    except Exception:
+        log.debug("pair stash failed", exc_info=True)
+
+
+def _capture_success_pairs(
+    context: LoopContext,
+    tool_name: str,
+    original_tool_name: str,
+    tool_input: dict,
+    provider_name: str,
+) -> None:
+    """On a successful execution: complete any pending pairs + cloud goldens.
+
+    Fail-loud-but-non-blocking (pair_capture handles the loudness)."""
+    try:
+        from prometheus.learning.pair_capture import (
+            capture_pair,
+            cloud_golden_enabled,
+            get_store,
+        )
+        if get_store() is None:
+            return
+        chosen = {"name": tool_name, "input": tool_input}
+        pending = _pending_pairs(context)
+        now = time.time()
+        matched: list[dict] = []
+        for key in {tool_name, original_tool_name, "_malformed"}:
+            entry = pending.pop(key, None)
+            if entry and now - entry["ts"] <= _PAIR_PENDING_TTL_S:
+                matched.append(entry)
+        # An unknown-NAME failure (model invented a tool, repair refused,
+        # retry prompt listed the real names) recovers under a DIFFERENT,
+        # correct name — exact-key matching can't see that. Pair it only in
+        # the unambiguous case: exactly one pending left and its key is not
+        # a registered tool.
+        if not matched and len(pending) == 1:
+            key = next(iter(pending))
+            registry = context.tool_registry
+            if registry is not None and registry.get(key) is None:
+                entry = pending.pop(key)
+                if now - entry["ts"] <= _PAIR_PENDING_TTL_S:
+                    matched.append(entry)
+        for entry in matched:
+            capture_pair(
+                pair_source=entry["source"],
+                model_id=context.model,
+                tool_name=tool_name,
+                context=_pair_context(context, tool_name),
+                rejected=entry["rejected"],
+                chosen=chosen,
+                meta={"error_feedback": entry["error"]},
+                telemetry=context.telemetry,
+            )
+        if cloud_golden_enabled():
+            from prometheus.telemetry.tracker import _CLOUD_PROVIDERS
+
+            if provider_name in _CLOUD_PROVIDERS:
+                capture_pair(
+                    pair_source="cloud_golden",
+                    model_id=context.model,
+                    tool_name=tool_name,
+                    context=_pair_context(context, tool_name),
+                    rejected=None,
+                    chosen=chosen,
+                    telemetry=context.telemetry,
+                )
+    except Exception:
+        log.error("pair capture (success path) failed", exc_info=True)
 
 
 def _log_iteration(
@@ -1685,6 +1823,9 @@ async def _execute_tool_call(
     retries_used = 0
     repair_log: list[str] = []
     _original_tool_name = tool_name
+    # Repair-pair flywheel: the repair return overwrites tool_input, so the
+    # as-emitted call must be copied BEFORE validate_and_repair (D4 finding).
+    _original_tool_input = dict(tool_input) if isinstance(tool_input, dict) else tool_input
     _adapter_tier = getattr(context.adapter, "tier", None) if context.adapter else None
     if context.adapter is not None and _adapter_tier != "off":
         try:
@@ -1700,13 +1841,55 @@ async def _execute_tool_call(
                     "Adapter repaired tool name %r → %r before execution: %s",
                     _original_tool_name, tool_name, "; ".join(repair_log),
                 )
+            if repair_log:
+                # An adapter repair IS a labeled pair: as-emitted vs repaired.
+                try:
+                    from prometheus.learning.pair_capture import capture_pair, get_store
+                    if get_store() is not None:
+                        capture_pair(
+                            pair_source=(
+                                "levenshtein_repair"
+                                if tool_name != _original_tool_name
+                                else "schema_repair"
+                            ),
+                            model_id=context.model,
+                            tool_name=tool_name,
+                            context=_pair_context(context, tool_name),
+                            rejected={
+                                "name": _original_tool_name,
+                                "input": _original_tool_input,
+                            },
+                            chosen={"name": tool_name, "input": tool_input},
+                            meta={"repair_log": repair_log},
+                            telemetry=context.telemetry,
+                        )
+                except Exception:
+                    log.error("pair capture (repair path) failed", exc_info=True)
         except ValueError as exc:
             # Validation failed and repair failed — ask retry engine
             action, retry_prompt = context.adapter.handle_retry(
                 tool_name, str(exc), context.tool_registry
             )
             retries_used = 1
+            # Repair-pair flywheel: remember the failed call; if the model's
+            # retry of this tool succeeds within the TTL, that's a pair.
+            _stash_pending_pair(
+                context,
+                tool_name,
+                rejected_name=_original_tool_name,
+                rejected_input=_original_tool_input,
+                error=str(exc),
+                source="retry_success",
+            )
             if context.telemetry is not None:
+                import json as _json
+                try:
+                    _failed_call = _json.dumps(
+                        {"name": _original_tool_name, "input": _original_tool_input},
+                        default=str,
+                    )
+                except Exception:
+                    _failed_call = None
                 context.telemetry.record(
                     model=context.model,
                     tool_name=tool_name,
@@ -1715,6 +1898,9 @@ async def _execute_tool_call(
                     latency_ms=0.0,
                     error_type="validation_failed",
                     error_detail=str(exc),
+                    # forensics + future mining: the as-emitted call (D1 had
+                    # to dig the LCM because failure rows lacked this)
+                    parsed_tool_call=_failed_call,
                 )
 
             # Phase 3: ESCALATE — retries exhausted + router has escalation
@@ -1773,7 +1959,7 @@ async def _execute_tool_call(
         # unwrapping. Only runs because the original input FAILED validation;
         # only accepted if the unwrapped form PASSES. The observed live
         # pathology is the model inventing nesting against flat schemas
-        # ({"status": {"status": null}}, {"prompt": {…actual args…}}).
+        # ({"status": {"status": null}}, {"prompt": {...actual args...}}).
         _unwrapped = None
         if (
             context.adapter is not None
@@ -1787,33 +1973,50 @@ async def _execute_tool_call(
             parsed_input = tool.input_model.model_validate(tool_input)
             repair_log = list(repair_log) + _unwrap_log  # counts as repairs
             try:
-                # Pair capture is on a sibling branch; defensive import so
-                # unwrap works standalone and pairs flow once both merge.
                 from prometheus.learning.pair_capture import capture_pair, get_store
                 if get_store() is not None:
                     capture_pair(
                         pair_source="schema_repair",
                         model_id=context.model,
                         tool_name=tool_name,
-                        context={"kind": "lcm_ref", "session_id": context.session_id,
-                                 "ts": time.time(), "model": context.model},
+                        context=_pair_context(context, tool_name),
                         rejected={"name": tool_name, "input": _rejected_input},
                         chosen={"name": tool_name, "input": tool_input},
                         meta={"unwrap_log": _unwrap_log},
                         telemetry=context.telemetry,
                     )
-            except ImportError:
-                pass
             except Exception:
                 log.error("pair capture (unwrap path) failed", exc_info=True)
         else:
+            # Repair-pair flywheel: pydantic rejection + a later success on
+            # the same tool = a self-correction pair (the dominant live
+            # recovery shape — see D4: the adapter machinery was dormant; the
+            # model corrects conversationally after structured feedback).
+            _stash_pending_pair(
+                context,
+                tool_name,
+                rejected_name=tool_name,
+                rejected_input=tool_input,
+                error=str(exc),
+                source="self_correction",
+            )
             if context.telemetry is not None:
+                import json as _json
+                try:
+                    _failed_call = _json.dumps(
+                        {"name": tool_name, "input": tool_input}, default=str
+                    )
+                except Exception:
+                    _failed_call = None
                 context.telemetry.record(
                     model=context.model,
                     tool_name=tool_name,
                     success=False,
                     error_type="input_validation",
                     error_detail=str(exc),
+                    # forensics + future mining (input_validation rows had
+                    # 0/21 parsed_tool_call coverage in all history)
+                    parsed_tool_call=_failed_call,
                 )
             return ToolResultBlock(
                 tool_use_id=tool_use_id,
@@ -2012,13 +2215,13 @@ async def _execute_tool_call(
     )
 
     # Sprint 3 / Golden Trace Capture: record telemetry with raw + parsed output.
+    provider_name = _provider_name_for_telemetry(context.provider)
     if context.telemetry is not None:
         import json as _json
         try:
             parsed_tool_json = _json.dumps({"name": tool_name, "input": tool_input}, default=str)
         except Exception:
             parsed_tool_json = None
-        provider_name = _provider_name_for_telemetry(context.provider)
         context.telemetry.record(
             model=context.model,
             tool_name=tool_name,
@@ -2033,6 +2236,26 @@ async def _execute_tool_call(
             parsed_tool_call=parsed_tool_json,
             provider=provider_name,
             repairs=len(repair_log),
+        )
+
+    # Repair-pair flywheel: a successful execution completes any pending
+    # pairs for this tool (retry_success / self_correction / malformed
+    # recovery) and, when enabled, harvests cloud goldens. An execution
+    # FAILURE with mode-misuse shape stashes a pending self-correction —
+    # task_create's "'command' is required for local_bash tasks" is the
+    # canonical live example (D2).
+    if not result.is_error:
+        _capture_success_pairs(
+            context, tool_name, _original_tool_name, tool_input, provider_name
+        )
+    elif "is required" in (result.output or "")[:200]:
+        _stash_pending_pair(
+            context,
+            tool_name,
+            rejected_name=tool_name,
+            rejected_input=tool_input,
+            error=(result.output or "")[:500],
+            source="self_correction",
         )
 
     # Sprint 10: record tool call for divergence detection

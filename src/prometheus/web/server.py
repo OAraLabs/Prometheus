@@ -303,6 +303,17 @@ def create_app(
             return {"total_calls": 0, "overall_success_rate": 0, "tools": {}}
         return telemetry.report()
 
+    @app.get("/api/pairs")
+    async def get_pairs():
+        """Repair-pair flywheel stats (training_pairs in training.db)."""
+        try:
+            from prometheus.learning.pair_capture import PairStore, get_store
+
+            store = get_store() or PairStore()
+            return store.stats()
+        except Exception as exc:
+            return {"total": 0, "error": str(exc)}
+
     # ── Config (sanitized) ──────────────────────────────────────────
 
     @app.get("/api/config")

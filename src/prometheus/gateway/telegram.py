@@ -330,6 +330,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("profile", self._cmd_profile))
         self._app.add_handler(CommandHandler("beacon", self._cmd_beacon))
         self._app.add_handler(CommandHandler("tools", self._cmd_tools))
+        self._app.add_handler(CommandHandler("pairs", self._cmd_pairs))
         # Sprint 15b GRAFT: approval queue commands
         self._app.add_handler(CommandHandler("approve", self._cmd_approve))
         self._app.add_handler(CommandHandler("deny", self._cmd_deny))
@@ -765,6 +766,40 @@ class TelegramAdapter(BasePlatformAdapter):
             await self.send(update.effective_chat.id, "\n".join(lines), parse_mode=None)
         except Exception as exc:
             await self.send(update.effective_chat.id, f"Tool stats unavailable: {exc}", parse_mode=None)
+
+    async def _cmd_pairs(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /pairs command — repair-pair flywheel stats."""
+        if update.effective_chat is None:
+            return
+        try:
+            from prometheus.learning.pair_capture import PairStore, get_store
+            store = get_store() or PairStore()
+            stats = store.stats()
+
+            lines = ["Training Pairs\n"]
+            lines.append(f"Total: {stats['total']}")
+            lines.append(
+                f"Last 7d: {stats['last_7d']} (~{stats['per_day_7d']}/day)"
+            )
+            if stats["by_source"]:
+                lines.append("\nBy source:")
+                for src, n in sorted(
+                    stats["by_source"].items(), key=lambda kv: -kv[1]
+                ):
+                    lines.append(f"  {src}: {n}")
+            if stats["by_tool"]:
+                lines.append("\nBy tool:")
+                for tool, n in list(stats["by_tool"].items())[:8]:
+                    lines.append(f"  {tool}: {n}")
+            await self.send(update.effective_chat.id, "\n".join(lines), parse_mode=None)
+        except Exception as exc:
+            await self.send(
+                update.effective_chat.id,
+                f"Pair stats unavailable: {exc}",
+                parse_mode=None,
+            )
 
     async def _cmd_wiki(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
