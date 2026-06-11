@@ -350,3 +350,43 @@ class TestExport:
         lines2 = out.read_text().strip().splitlines()
         assert len(lines2) == 2
         assert any(json.loads(l)["rejected"] is None for l in lines2)
+
+
+class TestUnwrapCaptureComposition:
+    """Phase 4 × Workstream A: an accepted unwrap emits a schema_repair pair."""
+
+    def test_unwrap_emits_schema_repair_pair(self, tmp_path, capture_env):
+        class _StatusInput(BaseModel):
+            status: str | None = None
+
+        class _StatusTool(BaseTool):
+            name = "status_tool"
+            description = "sessions_list shape"
+            input_model = _StatusInput
+
+            async def execute(self, arguments, context):  # noqa: ANN001
+                return ToolResult(output=f"status={arguments.status}")
+
+        reg = ToolRegistry()
+        reg.register(_StatusTool())
+        ctx = LoopContext(
+            provider=None, model="gemma-test", system_prompt="", max_tokens=64,
+            tool_registry=reg,
+            adapter=ModelAdapter(
+                tier=ModelAdapter.TIER_LIGHT,
+                unwrap_tools=frozenset({"status_tool"}),
+            ),
+            telemetry=ToolCallTelemetry(db_path=tmp_path / "tel2.db"),
+            session_id="telegram:42",
+        )
+        block = asyncio.run(_execute_tool_call(
+            ctx, "status_tool", "t1", {"status": {"status": "failed"}}
+        ))
+        assert not block.is_error
+        assert "status=failed" in block.content
+        rows = [r for r in capture_env.rows_since()
+                if r["pair_source"] == "schema_repair"]
+        assert len(rows) == 1
+        assert json.loads(rows[0]["rejected"])["input"] == {"status": {"status": "failed"}}
+        assert json.loads(rows[0]["chosen"])["input"] == {"status": "failed"}
+        assert "unwrap_log" in json.loads(rows[0]["meta"])
