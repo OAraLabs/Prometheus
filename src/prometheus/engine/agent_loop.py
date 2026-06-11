@@ -1769,19 +1769,57 @@ async def _execute_tool_call(
     try:
         parsed_input = tool.input_model.model_validate(tool_input)
     except Exception as exc:
-        if context.telemetry is not None:
-            context.telemetry.record(
-                model=context.model,
-                tool_name=tool_name,
-                success=False,
-                error_type="input_validation",
-                error_detail=str(exc),
+        # Phase 4 (config-gated, default off): conservative dict-wrap
+        # unwrapping. Only runs because the original input FAILED validation;
+        # only accepted if the unwrapped form PASSES. The observed live
+        # pathology is the model inventing nesting against flat schemas
+        # ({"status": {"status": null}}, {"prompt": {…actual args…}}).
+        _unwrapped = None
+        if (
+            context.adapter is not None
+            and tool_name in getattr(context.adapter, "unwrap_tools", ())
+        ):
+            from prometheus.adapter.unwrap import try_unwrap_arguments
+            _unwrapped = try_unwrap_arguments(tool, tool_input)
+        if _unwrapped is not None:
+            _rejected_input = tool_input
+            tool_input, _unwrap_log = _unwrapped
+            parsed_input = tool.input_model.model_validate(tool_input)
+            repair_log = list(repair_log) + _unwrap_log  # counts as repairs
+            try:
+                # Pair capture is on a sibling branch; defensive import so
+                # unwrap works standalone and pairs flow once both merge.
+                from prometheus.learning.pair_capture import capture_pair, get_store
+                if get_store() is not None:
+                    capture_pair(
+                        pair_source="schema_repair",
+                        model_id=context.model,
+                        tool_name=tool_name,
+                        context={"kind": "lcm_ref", "session_id": context.session_id,
+                                 "ts": time.time(), "model": context.model},
+                        rejected={"name": tool_name, "input": _rejected_input},
+                        chosen={"name": tool_name, "input": tool_input},
+                        meta={"unwrap_log": _unwrap_log},
+                        telemetry=context.telemetry,
+                    )
+            except ImportError:
+                pass
+            except Exception:
+                log.error("pair capture (unwrap path) failed", exc_info=True)
+        else:
+            if context.telemetry is not None:
+                context.telemetry.record(
+                    model=context.model,
+                    tool_name=tool_name,
+                    success=False,
+                    error_type="input_validation",
+                    error_detail=str(exc),
+                )
+            return ToolResultBlock(
+                tool_use_id=tool_use_id,
+                content=f"Invalid input for {tool_name}: {exc}",
+                is_error=True,
             )
-        return ToolResultBlock(
-            tool_use_id=tool_use_id,
-            content=f"Invalid input for {tool_name}: {exc}",
-            is_error=True,
-        )
 
     # Permission check (Sprint 4 + TRUST-CONTEXT)
     if context.permission_checker is not None:

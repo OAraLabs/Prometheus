@@ -1,0 +1,18 @@
+# Series 1, experiment 3 — conservative dict-wrap unwrapping (Phase 4 reshaped).
+# ONE variable: the adapter unwraps phantom nesting for the listed tools when
+# (and only when) the original input fails pydantic AND the unwrapped form
+# passes. Targets the dict-wrap shapes that killed sessions_list/browser/
+# download_file/task_create live.
+series: s1
+experiment: exp3-unwrap
+taskset: gym/tasksets/v1.yaml
+runs_per_task: 3
+variable:
+  adapter_unwrap:
+    tools: [task_create, task_list, sessions_list, browser, download_file]
+notes: >
+  Evidence-reshaped Phase 4: all 49 builtin schemas are flat; the model
+  INVENTS nesting. Instead of lowering our schemas, absorb the phantom layer
+  adapter-side — losslessly and only when validation proves the transform
+  right. Every unwrap is telemetry (repairs) + a training pair. Code differs
+  from exp0/exp1 only by inert-when-off gates (verified by tests).

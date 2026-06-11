@@ -59,6 +59,47 @@ class TaskCreateToolInput(BaseModel):
     )
 
 
+# Phase 4 experiment gate (default OFF — model-facing error feedback ships
+# config-gated per sprint rule 7; the gym arbitrates). When ON, mode-misuse
+# errors name the ACTUAL mistake: live history (D2) shows the model supplies
+# `prompt` but omits `type`, gets "'command' is required for local_bash
+# tasks" (the silent default's complaint), and flails — JSON-stuffing the
+# prompt, dict-wrapping params — without ever learning about `type`.
+_HONEST_MODE_ERRORS = False
+
+
+def set_honest_mode_errors(enabled: bool) -> None:
+    global _HONEST_MODE_ERRORS
+    _HONEST_MODE_ERRORS = bool(enabled)
+
+
+def _mode_error(arguments: "TaskCreateToolInput", missing: str, mode: str) -> str:
+    """Build the mode-misuse error message (honest variant behind the gate)."""
+    if not _HONEST_MODE_ERRORS:
+        if missing == "watch_dir and watch_pattern":
+            return f"'watch_dir' and 'watch_pattern' are required for {mode} tasks"
+        return f"'{missing}' is required for {mode} tasks"
+    hints = [
+        f"'{missing}' is required for type='{mode}'"
+        + (" (the default)" if mode == "local_bash" else "")
+        + "."
+    ]
+    if mode == "local_bash" and arguments.prompt:
+        hints.append(
+            "You supplied 'prompt' — for an agent task pass type='local_agent'."
+        )
+    hints.append(
+        "Valid types: local_bash (needs command), local_agent (needs prompt), "
+        "file_watch (needs watch_dir + watch_pattern), poll (needs poll_predicate)."
+    )
+    hints.append(
+        'Example: {"name": "task_create", "arguments": {"type": "local_agent", '
+        '"description": "Summarize report", "prompt": "Read /data/q3.csv and '
+        'summarize revenue trends."}}'
+    )
+    return " ".join(hints)
+
+
 def _notify_target_from_session(session_id: str | None) -> str | None:
     """Derive a Telegram chat id from the creating session id.
 
@@ -113,11 +154,11 @@ class TaskCreateTool(BaseTool):
         try:
             if arguments.type == "local_bash":
                 if not arguments.command:
-                    return ToolResult(output="'command' is required for local_bash tasks", is_error=True)
+                    return ToolResult(output=_mode_error(arguments, "command", "local_bash"), is_error=True)
                 task = await manager.create_shell_task(command=arguments.command, **common)
             elif arguments.type == "local_agent":
                 if not arguments.prompt:
-                    return ToolResult(output="'prompt' is required for local_agent tasks", is_error=True)
+                    return ToolResult(output=_mode_error(arguments, "prompt", "local_agent"), is_error=True)
                 task = await manager.create_agent_task(
                     prompt=arguments.prompt,
                     model=arguments.model,
@@ -127,7 +168,7 @@ class TaskCreateTool(BaseTool):
             elif arguments.type == "file_watch":
                 if not arguments.watch_dir or not arguments.watch_pattern:
                     return ToolResult(
-                        output="'watch_dir' and 'watch_pattern' are required for file_watch tasks",
+                        output=_mode_error(arguments, "watch_dir and watch_pattern", "file_watch"),
                         is_error=True,
                     )
                 task = await manager.create_file_watch_task(
@@ -137,7 +178,7 @@ class TaskCreateTool(BaseTool):
                 )
             elif arguments.type == "poll":
                 if not arguments.poll_predicate:
-                    return ToolResult(output="'poll_predicate' is required for poll tasks", is_error=True)
+                    return ToolResult(output=_mode_error(arguments, "poll_predicate", "poll"), is_error=True)
                 task = await manager.create_poll_task(
                     poll_predicate=arguments.poll_predicate, **common
                 )

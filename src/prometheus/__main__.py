@@ -374,6 +374,8 @@ def create_adapter(model_cfg: dict[str, Any], adapter_cfg: dict[str, Any] | None
         "adaptive_strictness": acfg.get("adaptive_strictness", False),
         "strictness_threshold": acfg.get("strictness_threshold", 0.8),
         "strictness_window": acfg.get("strictness_window", 100),
+        # Phase 4: conservative dict-wrap unwrapping, per tool. Default off.
+        "unwrap_tools": acfg.get("unwrap_dict_args") or (),
     }
 
     tier = _get_adapter_tier(provider_name, model_name)
