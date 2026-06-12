@@ -62,13 +62,30 @@ class KnowledgeSynthesizer:
         budget_tokens: int = 2000,
         min_cluster_size: int = 2,
         wiki_root: Path | None = None,
+        telemetry: object | None = None,
     ) -> None:
+        from prometheus.learning.llm_envelope import LLMCallEnvelope
+
         self._store = store
         self._provider = provider
         self._model = model
         self._budget_tokens = budget_tokens
         self._min_cluster_size = min_cluster_size
         self._wiki_root = Path(wiki_root) if wiki_root else get_config_dir() / "wiki"
+        self._telemetry = telemetry
+        # Route the synthesis call through the shared envelope (like
+        # skill_creator / memory_extractor). The envelope constructs the
+        # request with the canonical ``content=[TextBlock(text=prompt)]``
+        # shape — this method previously built ``content=prompt`` (a str),
+        # raising pydantic ``list_type`` on EVERY dream cycle (the phase had
+        # never worked) — and surfaces any call failure to
+        # ``telemetry.silent_failures`` instead of only an ERROR log.
+        # on_failure="return_none" keeps the "no insight on failure" contract.
+        self._envelope = LLMCallEnvelope(
+            subsystem="knowledge_synth",
+            telemetry=telemetry,
+            on_failure="return_none",
+        )
 
     async def synthesize(self, budget_tokens: int | None = None) -> list[SynthInsight]:
         """Find entity clusters and generate insights. Budget-capped."""
@@ -145,14 +162,13 @@ class KnowledgeSynthesizer:
         return clusters
 
     async def _generate_insight(self, cluster: list[str]) -> SynthInsight | None:
-        """Generate insight for one entity cluster via LLM."""
-        from prometheus.engine.messages import ConversationMessage
-        from prometheus.providers.base import (
-            ApiMessageCompleteEvent,
-            ApiMessageRequest,
-            ApiTextDeltaEvent,
-        )
+        """Generate insight for one entity cluster via the shared LLM envelope.
 
+        The envelope builds the request with ``content=[TextBlock(text=prompt)]``
+        (canonical ContentBlock list), so the ed8f1a6 string-vs-list crash that
+        previously broke this phase on every dream cycle is structurally
+        impossible, and any failure lands in telemetry.silent_failures.
+        """
         # Gather facts about these entities
         facts_lines: list[str] = []
         for entity in cluster[:10]:  # Cap to avoid huge prompts
@@ -170,33 +186,26 @@ class KnowledgeSynthesizer:
             facts="\n".join(facts_lines[:30]),  # Cap facts
         )
 
-        request = ApiMessageRequest(
+        # on_failure="return_none": a failed/empty call returns None (recorded
+        # in telemetry by the envelope) → no insight, same as the old contract.
+        insight_text = await self._envelope.call(
+            provider=self._provider,
             model=self._model,
-            messages=[ConversationMessage(role="user", content=prompt)],
+            prompt=prompt,
             max_tokens=min(self._budget_tokens, 512),
+            operation="generate_insight",
         )
-
-        text_parts: list[str] = []
-        tokens_used = 0
-        try:
-            async for event in self._provider.stream_message(request):
-                if isinstance(event, ApiTextDeltaEvent):
-                    text_parts.append(event.text)
-                elif isinstance(event, ApiMessageCompleteEvent):
-                    if event.usage:
-                        tokens_used = getattr(event.usage, "output_tokens", 0)
-        except Exception:
-            log.exception("KnowledgeSynthesizer: LLM call failed for cluster %s", cluster)
+        if not insight_text or not insight_text.strip():
             return None
-
-        insight_text = "".join(text_parts).strip()
-        if not insight_text:
-            return None
+        insight_text = insight_text.strip()
 
         return SynthInsight(
             entities=cluster,
             insight=insight_text,
-            tokens_used=tokens_used,
+            # The envelope abstracts the token stream; estimate output tokens
+            # from text length (~chars/4) for the wiki frontmatter (it is
+            # informational only).
+            tokens_used=max(1, len(insight_text) // 4),
         )
 
     def _write_insight_page(self, insight: SynthInsight) -> None:

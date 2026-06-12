@@ -848,6 +848,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     provider=provider,
                     model=model_name,
                     budget_tokens=sentinel_config.get("dream_budget_tokens", 2000),
+                    telemetry=telemetry,
                 )
 
             # Orchestrators
