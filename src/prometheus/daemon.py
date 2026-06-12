@@ -363,6 +363,26 @@ async def run_daemon(args: argparse.Namespace) -> None:
     except Exception as exc:
         logger.warning("FileMutationVerifier not available: %s", exc)
 
+    # SPRINT-CONTEXT-COMPACTOR: assembly-time span compaction, behind
+    # compaction.enabled (default false → from_config returns None and the
+    # loop is untouched). SignalBus late-wired in the SENTINEL block.
+    compactor: object | None = None
+    try:
+        from prometheus.context.compactor import ContextCompactor
+        compactor = ContextCompactor.from_config(
+            config, provider=provider, model=model_name, telemetry=telemetry,
+        )
+        if compactor is not None:
+            logger.info(
+                "Context compactor ENABLED (limit=%d, threshold=%.0f%%)",
+                compactor._effective_limit,
+                compactor._threshold_pct * 100,
+            )
+        else:
+            logger.info("Context compactor disabled (compaction.enabled unset)")
+    except Exception as exc:
+        logger.warning("Context compactor not available: %s", exc)
+
     # Agent loop
     agent_loop = AgentLoop(
         provider=provider,
@@ -380,6 +400,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
         nudge=nudge,
         file_mutation_verifier=fmv,
         tool_result_max=config.get("context", {}).get("tool_result_max", 4000),
+        compactor=compactor,
     )
 
     # Shared session manager for all gateways
@@ -862,6 +883,11 @@ async def run_daemon(args: argparse.Namespace) -> None:
             # direct telemetry row before this point).
             if escalation_engine is not None:
                 escalation_engine.signal_bus = signal_bus
+            # SPRINT-CONTEXT-COMPACTOR: compaction events flow through the
+            # bus once it exists (the compactor falls back to a direct
+            # telemetry row before this point).
+            if compactor is not None:
+                compactor.signal_bus = signal_bus
             # MemoryTool (hermes_memory_tool) emits memory_updated on
             # MEMORY.md / USER.md writes. Module-level setter matches the
             # tools/builtin/sentinel_status.py pattern.

@@ -583,6 +583,7 @@ class LoopContext:
     post_result_hooks: list[object] | None = None
     # Tool Calling Middle Layer sprint
     tool_loader: object | None = None     # DynamicToolLoader for deferred loading
+    compactor: object | None = None       # ContextCompactor (compaction.enabled)
     # H1: per-result cap (tokens) applied to EACH tool result before injection,
     # via ToolResultTruncator's per-tool strategies. 0 disables (back-compat for
     # tests/benchmarks). Runs before the cross-result turn budget below, and
@@ -800,6 +801,25 @@ async def run_loop(
             from prometheus.adapter.formatter import ToolCallMarkupFilter
             _markup_filter = ToolCallMarkupFilter()
 
+        # SPRINT-CONTEXT-COMPACTOR: when wired (compaction.enabled), replace
+        # the oldest span with its cached summary in the RENDER VIEW only —
+        # ``messages``, the session, and lcm.db are never mutated. The
+        # compactor fails loud internally (telemetry + signal event) and
+        # falls back to the pre-existing behavior: send unmodified.
+        render_source = messages
+        if context.compactor is not None:
+            try:
+                render_source = await context.compactor.apply(
+                    messages,
+                    session_id=context.session_id or "",
+                    system_prompt=per_call_system_prompt,
+                    tools_chars=len(str(_payload_tools)) if _payload_tools else 0,
+                )
+            except Exception:
+                log.exception(
+                    "ContextCompactor.apply raised — sending uncompacted")
+                render_source = messages
+
         async for event in context.provider.stream_message(
             ApiMessageRequest(
                 model=context.model,
@@ -807,7 +827,7 @@ async def run_loop(
                 # output, watched-file contents, cron data) with the derived
                 # banner before the provider serializes them. The session/LCM
                 # copies stay clean — this projection is per-call only.
-                messages=render_messages_for_model(messages),
+                messages=render_messages_for_model(render_source),
                 system_prompt=per_call_system_prompt,
                 max_tokens=context.max_tokens,
                 tools=_payload_tools,
@@ -2046,10 +2066,12 @@ class AgentLoop:
         tool_metadata: dict[str, object] | None = None,
         file_mutation_verifier: object | None = None,
         tool_result_max: int = 0,
+        compactor: object | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
         self._tool_result_max = tool_result_max
+        self._compactor = compactor
         self._max_tokens = max_tokens
         self._max_turns = max_turns
         self._max_tool_iterations = max_tool_iterations
@@ -2153,6 +2175,7 @@ class AgentLoop:
             session_state=session_state,
             file_mutation_verifier=self._file_mutation_verifier,
             tool_result_max=self._tool_result_max,
+            compactor=self._compactor,
         )
 
         last_text = ""

@@ -20,8 +20,10 @@ from pydantic import BaseModel, Field
 # handling and the untrusted-input banner projection below.
 # "teacher_escalation" = corrective replies injected by the cloud teacher
 # (SPRINT-TEACHER-ESCALATION); untrusted by convention like all injections.
+# "compactor" = synthetic span summaries substituted at prompt-assembly time
+# (SPRINT-CONTEXT-COMPACTOR); machinery-authored, trusted, never stored.
 Provenance = Literal[
-    "user", "cron", "task_supervisor", "orchestrator", "teacher_escalation"
+    "user", "cron", "task_supervisor", "orchestrator", "teacher_escalation", "compactor"
 ]
 
 
