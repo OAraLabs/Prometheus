@@ -8,6 +8,7 @@ burning GPU time during idle cycles.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -214,7 +215,12 @@ class KnowledgeSynthesizer:
         queries_dir.mkdir(parents=True, exist_ok=True)
 
         date_str = time.strftime("%Y%m%d", time.localtime())
-        topic = "-".join(insight.entities[:3]).lower().replace(" ", "-")[:40]
+        # Entities are model-extracted free text and can contain path
+        # separators / "$vars" / dots — the slug must stay a single safe
+        # path component inside queries_dir (same whitelist idiom as
+        # skill_creator._slugify).
+        topic = re.sub(r"[^a-z0-9]+", "-", "-".join(insight.entities[:3]).lower())
+        topic = topic.strip("-")[:40].rstrip("-") or "cluster"
         filename = f"insight-{date_str}-{topic}.md"
         path = queries_dir / filename
 
