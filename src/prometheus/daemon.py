@@ -236,6 +236,12 @@ async def run_daemon(args: argparse.Namespace) -> None:
     from prometheus.telemetry.tracker import set_telemetry_handle
     set_telemetry_handle(telemetry)
 
+    # Repair-pair flywheel: every adapter repair / retry-success /
+    # self-correction becomes a training pair in training.db. Local capture
+    # defaults ON (recording-only); cloud_golden_capture defaults OFF.
+    from prometheus.learning.pair_capture import configure as configure_pair_capture
+    configure_pair_capture(config.get("training", {}))
+
     # Tool registry — same tools as CLI mode
     registry = build_tool_registry(security_cfg=security_config)
 
