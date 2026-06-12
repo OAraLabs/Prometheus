@@ -927,6 +927,85 @@ def create_app(
     async def run_benchmarks(body: dict | None = None):
         return {"status": "not_implemented", "message": "Benchmark runner not yet wired"}
 
+    # ── Coding mode (SPRINT-coding-mode v2) — Beacon/API reachability ──
+    #
+    # POST launches one sandboxed iterate-to-green run as a managed task
+    # (durable in tasks.db, SecurityGate-vetted at launch, completion
+    # notification via the existing task_completed/task_failed signal
+    # path). GET inspects it. The JSON run report is the task's output.
+
+    @app.post("/api/code")
+    async def create_coding_run(body: dict):
+        from uuid import uuid4 as _uuid4
+
+        from prometheus.coding.managed import create_coding_managed_task
+        from prometheus.tasks.manager import get_task_manager
+
+        repo = str(body.get("repo", "")).strip()
+        description = str(body.get("description", "")).strip()
+        acceptance = str(body.get("acceptance_command", "")).strip()
+        if not (repo and description and acceptance):
+            return JSONResponse(status_code=400, content={
+                "error": "repo, description and acceptance_command are required"
+            })
+        repo_path = Path(repo).expanduser()
+        if not (repo_path / ".git").exists():
+            return JSONResponse(status_code=400, content={
+                "error": f"repo is not a git repository: {repo}"
+            })
+
+        coding_task_id = str(body.get("task_id") or f"c{_uuid4().hex[:8]}")
+        try:
+            record = await create_coding_managed_task(
+                get_task_manager(),
+                repo=str(repo_path),
+                description=description,
+                acceptance_command=acceptance,
+                task_id=coding_task_id,
+                cwd=str(Path.home()),
+                max_rounds=int(body.get("max_rounds", 30)),
+                max_wall_seconds=int(body.get("max_wall_seconds", 1200)),
+            )
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": str(exc)})
+        if record.status == "failed":
+            # SecurityGate rejected the command at registration — surface it.
+            return JSONResponse(status_code=400, content={
+                "error": record.error or "task rejected at registration"
+            })
+        return {
+            "task_id": record.id,            # managed-task handle (poll this)
+            "coding_task_id": coding_task_id,  # names the branch coding/<id>
+            "status": record.status,
+            "output_file": str(record.output_file),
+        }
+
+    @app.get("/api/code/{task_id}")
+    async def get_coding_run(task_id: str):
+        from prometheus.tasks.manager import get_task_manager
+
+        record = get_task_manager().get_task(task_id)
+        if record is None:
+            return JSONResponse(status_code=404, content={"error": "no such task"})
+        output_tail = ""
+        try:
+            output_tail = record.output_file.read_text(
+                encoding="utf-8", errors="replace"
+            )[-4_000:]
+        except OSError:
+            pass
+        return {
+            "task_id": record.id,
+            "status": record.status,
+            "description": record.description,
+            "created_at": record.created_at,
+            "started_at": record.started_at,
+            "ended_at": record.ended_at,
+            "return_code": record.return_code,
+            "error": record.error,
+            "output_tail": output_tail,
+        }
+
     # ── Kanban (Projects + Stories board — Beacon Desktop) ──────────
     #
     # Daemon-backed projects/stories store (prometheus.kanban). Mirrors the
