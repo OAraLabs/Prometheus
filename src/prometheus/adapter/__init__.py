@@ -85,6 +85,7 @@ class ModelAdapter:
         strictness_window: int = 100,
         tier: str | None = None,
         router: Any = None,
+        unwrap_tools: frozenset[str] | set[str] | list[str] | None = None,
     ) -> None:
         # If tier is explicitly set, override strictness and max_retries
         if tier == self.TIER_OFF:
@@ -110,6 +111,11 @@ class ModelAdapter:
         self._strictness_window = strictness_window
         self._tool_strictness: dict[str, Strictness] = {}  # per-tool overrides
         self._tool_call_history: dict[str, list[bool]] = {}  # per-tool success history
+        # Phase 4 (reshaped): tools whose dict-wrapped arguments the loop may
+        # conservatively unwrap after a pydantic failure (adapter/unwrap.py).
+        # Config: adapter.unwrap_dict_args — per-(model,tool) because each
+        # model gets its own adapter instance. DEFAULT OFF (empty set).
+        self.unwrap_tools: frozenset[str] = frozenset(unwrap_tools or ())
 
     # ------------------------------------------------------------------
     # Formatting

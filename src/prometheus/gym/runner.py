@@ -177,6 +177,13 @@ def apply_variable(
             raise ValueError(f"tool_description: unknown tool {payload['tool']!r}")
         tool.description = payload["text"]
         return system_prompt
+    if name == "tool_error_honesty":
+        from prometheus.tools.builtin.task_create import set_honest_mode_errors
+        set_honest_mode_errors(True)
+        return system_prompt
+    if name == "adapter_unwrap":
+        # applied per-run on the adapter instance in run_task_once
+        return system_prompt
     raise ValueError(f"unimplemented variable {name!r}")
 
 
@@ -261,6 +268,8 @@ async def run_task_once(
 
     registry = build_registry(workspace, task.stub_tools)
     adapter = pipeline["adapter_factory"]()
+    if manifest.variable_name == "adapter_unwrap":
+        adapter.unwrap_tools = frozenset(manifest.variable_payload["tools"])
     system_prompt = apply_variable(manifest, system_prompt, registry)
 
     # GBNF grammar — same wiring as smoke/daemon
@@ -428,4 +437,7 @@ async def run_experiment(
 
     if workspace.exists():
         shutil.rmtree(workspace)
+    if manifest.variable_name == "tool_error_honesty":
+        from prometheus.tools.builtin.task_create import set_honest_mode_errors
+        set_honest_mode_errors(False)
     return totals

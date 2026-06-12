@@ -21,6 +21,8 @@ IMPLEMENTED_VARIABLES = frozenset({
     "example_call",      # {tool: str, example: dict} → example appended to system prompt
     "tool_description",  # {tool: str, text: str} → tool.description override
     "system_prompt",     # {text: str} → replaces the task set's system prompt
+    "adapter_unwrap",    # {tools: [str]} → adapter unwraps dict-wrapped args (Phase 4)
+    "tool_error_honesty",  # {tool: task_create} → honest mode-misuse errors (Phase 4)
 })
 RESERVED_VARIABLES = frozenset({"sampling", "schema_lowering"})
 
@@ -89,6 +91,12 @@ def load_manifest(path: str | Path) -> ExperimentManifest:
             raise ValueError(f"{p}: tool_description needs {{tool, text}}")
     if name == "system_prompt" and "text" not in payload:
         raise ValueError(f"{p}: system_prompt needs {{text}}")
+    if name == "adapter_unwrap" and not payload.get("tools"):
+        raise ValueError(f"{p}: adapter_unwrap needs {{tools: [..]}}")
+    if name == "tool_error_honesty" and payload.get("tool") != "task_create":
+        raise ValueError(
+            f"{p}: tool_error_honesty currently supports only task_create"
+        )
 
     runs = int(data.get("runs_per_task", 3))
     if runs < 1:

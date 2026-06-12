@@ -1,0 +1,18 @@
+# Series 1, experiment 2 — task_create honest mode-misuse errors.
+# ONE variable: when a task_create call fails mode requirements, the error
+# names the actual mistake (missing `type`, valid values, an example) instead
+# of complaining about the default mode's missing field. Owner-approved
+# competing experiment vs mode-splitting (D2 decision 3); the gym arbitrates.
+series: s1
+experiment: exp2-error-honesty
+taskset: gym/tasksets/v1.yaml
+runs_per_task: 3
+variable:
+  tool_error_honesty:
+    tool: task_create
+notes: >
+  Hypothesis: the live flailing (JSON-stuffed prompt, dict-wrap) is the model
+  groping in the dark after a misleading error ("'command' is required for
+  local_bash tasks" when it supplied `prompt`). Honest feedback should convert
+  the task_create_* failures into within-run recoveries. Code differs from
+  exp0/exp1 only by inert-when-off gates (verified by tests).
