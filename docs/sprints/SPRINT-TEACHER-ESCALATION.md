@@ -1,8 +1,11 @@
 # SPRINT: Teacher Escalation + Skill Flywheel
 
 **Branch:** `feat/teacher-escalation`
-**Status:** Ready for execution
-**Prerequisite:** None for Phases 0–2. Phase 3 (loop integration) touches the agent loop — the spec-vs-implementation audit of `SPRINT-TOOL-CALLING-MIDDLE-LAYER.md` must have been run this cycle before Phase 3 begins. If it has not, HALT at the Phase 3 gate and report.
+**Status:** EXECUTED 2026-06-11 (Phases 0–3 complete on the branch; PR-ready). This file is the corrected spec.
+
+> **Errata 2026-06-11** (branch `chore/spec-errata`): folds the corrections from the bakeoff/sprint session into the spec text so it matches what was actually built. Changes here: (1) the Phase-3 gate no longer references the non-existent `SPRINT-TOOL-CALLING-MIDDLE-LAYER.md` — it points at the surviving six-feature enumeration audit; (2) the Phase-1 detector signature is annotated with the dict shape the implementation actually consumes; (3) the Phase-3 `/traces` reference is corrected to `/escalations` (no `/traces` command exists in any gateway). Rationale and the full errata list live in the session summary `audits/20260611T055841Z-session-summary.md`.
+
+**Prerequisite:** None for Phases 0–2. Phase 3 (loop integration) touches the agent loop and is gated on a **same-cycle spec-vs-implementation audit of the middle-layer tool-calling subsystem**. NOTE (erratum): `SPRINT-TOOL-CALLING-MIDDLE-LAYER.md` does not exist and never existed in git history — the audit therefore runs against the surviving six-feature enumeration in `AUDIT-2026-06-8e5adf0.md §4.4.6`. The cycle audit satisfying this gate for the executed run is `audits/20260611T050051Z-middle-layer-audit.md`. If no such cycle audit exists, HALT at the Phase 3 gate and report.
 
 ## Concept
 
@@ -35,6 +38,8 @@ Survey and cite file:line for each. Do NOT write code in this phase.
 New module: `escalation/detector.py` (adjust path to repo conventions found in Phase 0).
 
 Pure function: `detect_failure(tool_results: list, final_reply: str) -> FailureVerdict` where `FailureVerdict` carries `failed: bool`, `reasons: list[str]`, `matched_patterns: list[str]`.
+
+> **Erratum (signature detail):** `tool_results` is a list of dicts in the repo's trace shape `{"tool_name": str, "arguments": dict|str, "result": str, "is_error": bool}` (the SkillCreator trace shape plus an error flag). The bare `list` in the signature cannot express the repetition signal ("same tool called with identical args ≥3×") without the per-call `arguments`, so the items carry them. `is_error` is optional; absent, an anchored error-text fallback is used so informative results (e.g. grep's "(no output)") are not miscounted as errors.
 
 Tier-1 signals (regex/deterministic only — no LLM judging in this sprint):
 - Tool errors the model did not recover from: last tool result in the turn is an error/timeout AND the reply does not acknowledge a retry plan.
@@ -88,7 +93,7 @@ GATE: confirm the middle-layer audit has been run this cycle (see Prerequisite).
 - Hook the detector at the post-turn point identified in Phase 0 item 5. Prefer extending the existing post-turn validator over adding a second post-turn pass.
 - Escalation runs after the local turn completes; the user sees the local reply replaced/augmented by the corrective reply with a brief visible note ("escalated to teacher"). No silent substitution.
 - Telegram/Beacon notification path unchanged; escalation events emit on SignalBus consistent with managed-task events.
-- New `/traces`-style visibility: extend the existing traces command (or add `/escalations`) showing count fired / skills written / budget state.
+- New `/escalations` command showing count fired / skills written / teacher failures / budget state. (Erratum: the spec originally said "extend the existing `/traces` command" — no `/traces` command exists in any gateway, so the spec's own fallback was taken: a new `/escalations` command. As built it lives in the Telegram gateway alongside the honesty validator.)
 
 ## Acceptance
 

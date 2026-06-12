@@ -1,12 +1,14 @@
 # SPRINT: Context Compactor (single-layer)
 
 **Branch:** `feat/context-compactor`
-**Status:** Ready for execution. Independent of other sprints.
+**Status:** EXECUTED 2026-06-11 (implemented behind `compaction.enabled`, default OFF; PR-ready). This file is the corrected spec.
 **Hard constraint:** This is SINGLE-LAYER compaction only. Three-layer compression is on the DO-NOT-BUILD list. If during design you find yourself proposing tiers of summaries-of-summaries, HALT and report instead.
+
+> **Errata 2026-06-11** (branch `chore/spec-errata`): the Phase-0 premise that the live prompt is "assembled from LCM" is FALSE and was corrected during execution — live assembly is the in-memory session message list; `LCMAssembler` is not in the live path; LCM is a write-mirror. Consequence folded in below: substitution happens on the per-call RENDER VIEW (the list handed to `render_messages_for_model`), and the spec's "cache keyed on LCM node IDs" became content-hash keys because in-memory messages carry no LCM row ids. The single-layer guarantee is structural (synthetic summaries are span barriers). Full rationale: session summary `audits/20260611T055841Z-session-summary.md`; design detail: `audits/20260611T050051Z-context-compactor-checkpoint1.md`.
 
 ## Concept
 
-When the assembled prompt approaches the context window, summarize the oldest conversational span via the same local model and substitute the summary into the ASSEMBLED PROMPT only. The LCM DAG remains the untouched source of truth — compaction is a prompt-assembly concern, never a storage mutation. Inspired by the context-compactor design in the Odysseus project (MIT); clean-room, design knowledge only.
+When the assembled prompt approaches the context window, summarize the oldest conversational span via the same local model and substitute the summary into the per-call RENDER VIEW only — the in-memory message list handed to the provider at assembly time. **Erratum:** the live loop assembles from the in-memory session list, NOT from LCM (LCM is a durable write-mirror, not the live read path); so "storage untouched" is structural — the live path never reads lcm.db at all, and the synthetic summary is substituted into the rendered request, never written back. The LCM DAG remains the untouched source of truth. Inspired by the context-compactor design in the Odysseus project (MIT); clean-room, design knowledge only.
 
 ## Phase 0 — Survey (read-only, mandatory halts)
 
@@ -17,10 +19,10 @@ git fetch origin && git rev-parse HEAD
 Cite SHA. HALT if dirty tree / wrong branch / behind origin.
 
 Cite file:line for:
-1. **Prompt assembly**: where the system prompt + history is assembled from LCM into the final request; what currently happens when assembled tokens exceed n_ctx (truncation? error? silent overflow?). This answer shapes everything — report it explicitly.
+1. **Prompt assembly**: where the system prompt + history is assembled into the final request; what currently happens when assembled tokens exceed n_ctx (truncation? error? silent overflow?). This answer shapes everything — report it explicitly. **Erratum (as found):** assembly is from the IN-MEMORY session message list at the model-call site (`engine/agent_loop.py`, the `render_messages_for_model(messages)` call), NOT from LCM — `LCMAssembler` has no live callers. Current overflow behavior: nothing measures total assembled tokens before the call; an oversized prompt reaches the llama.cpp server and fails provider-side, the gateway catches the exception and replies `"Error: …"` with session rollback. There is no in-repo overflow handler — this provider-side failure is exactly the documented fallback the compactor falls back TO on its own failure.
 2. **Token estimation**: any existing token-count utility; if none, note what the provider layer exposes.
 3. **n_ctx awareness**: where the configured context length lives and whether the daemon knows it per-model.
-4. **LCM read path**: confirm reads for prompt assembly are separable from the stored DAG (i.e., we can substitute at assembly time without writing to lcm.db).
+4. **LCM read path**: confirm reads for prompt assembly are separable from the stored DAG (i.e., we can substitute at assembly time without writing to lcm.db). **Erratum (as found):** stronger than assumed — live assembly performs ZERO lcm.db reads, so substitution structurally cannot touch the DAG. Consequence: the spec's idempotence cache "keyed on the span's LCM node IDs" is unimplementable at this layer (in-memory messages carry no LCM row ids — the M7 mapping gap); the implementation keys the cache on `sha256(session_id + span messages' role/provenance/content_json)` instead. Same mechanism, same layer, content-addressed rather than row-addressed.
 5. **Existing summarization**: any prior summarizer (MemoryExtractor or similar) whose call pattern/prompt style should be matched.
 6. **LLMCallEnvelope**: confirm wrapper for the summarization call.
 
