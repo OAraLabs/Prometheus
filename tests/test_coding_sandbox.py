@@ -105,6 +105,9 @@ class TestRun:
         # …while the allowlist survives (PATH is what test runners need).
         assert "PATH=" in r.output
         assert "PYTHONUNBUFFERED=1" in r.output
+        # Stale-pyc guard: same-size same-second edits must never let a
+        # test run import old bytecode (CPython pyc mtime is whole-second).
+        assert "PYTHONDONTWRITEBYTECODE=1" in r.output
 
     def test_timeout_kills_process_tree(self, box: ProcessSandbox, tmp_path: Path):
         marker = tmp_path / "child-survived.txt"

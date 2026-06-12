@@ -130,6 +130,14 @@ class ProcessSandbox(Sandbox):
         env = {k: os.environ[k] for k in _ENV_ALLOWLIST if k in os.environ}
         env["PYTHONUNBUFFERED"] = "1"
         env["TERM"] = "dumb"
+        # No bytecode caches inside the jail: CPython's pyc header stores
+        # mtime in WHOLE SECONDS, so a same-size edit landing within the
+        # same second as the previous compile silently reuses stale
+        # bytecode — an iterate-to-green loop (fast edit→test cycles) hits
+        # exactly this, and the test run then contradicts the source on
+        # disk. Recompile-per-run is trivial for task repos; the artifact
+        # diff stays clean of __pycache__ as a bonus.
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         env.update(self.extra_env)
         return env
 
