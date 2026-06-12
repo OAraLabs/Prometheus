@@ -59,11 +59,15 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, AsyncIterator, Literal
 
 if TYPE_CHECKING:
     from prometheus.engine.messages import ConversationMessage
-    from prometheus.providers.base import ModelProvider
+    from prometheus.providers.base import (
+        ApiMessageRequest,
+        ApiStreamEvent,
+        ModelProvider,
+    )
     from prometheus.telemetry.tracker import ToolCallTelemetry
 
 log = logging.getLogger(__name__)
@@ -191,6 +195,195 @@ class LLMCallEnvelope:
         if self._on_failure == "log_only":
             return LLMCallResult(text=text, error=None, duration_ms=duration_ms)
         return text
+
+    # ------------------------------------------------------------------
+    # Streaming entry point (SPRINT-loop-envelope, F1)
+    # ------------------------------------------------------------------
+
+    async def stream(
+        self,
+        *,
+        provider: "ModelProvider",
+        request: "ApiMessageRequest",
+        operation: str = "loop_round",
+        round_index: int | None = None,
+        session_id: str | None = None,
+    ) -> "AsyncIterator[ApiStreamEvent]":
+        """Pass a caller-built request through the provider, observing only.
+
+        The streaming sibling of :meth:`call`, added so the agent loop —
+        whose call shape (full message history, tool schemas, streamed
+        tool-use events) ``call()`` cannot host — runs inside the envelope
+        like every other ``_call_model`` path (bakeoff finding F1).
+
+        Contract (behavior preservation is the point):
+
+        - The ``request`` is handed to ``provider.stream_message``
+          **by reference, unmodified** — the envelope never builds or
+          rewrites payloads on this path.
+        - Every event is yielded through **unchanged, by identity**.
+        - Exceptions re-raise **always** — the loop owns recovery, so the
+          constructor's ``on_failure`` policy deliberately does not apply
+          here. Before re-raising, the failure lands in
+          ``telemetry.silent_failures`` + a failed ``subsystem_runs`` row.
+          ``GeneratorExit`` is the one exception NOT recorded as a failure:
+          it is the generator-protocol close signal (consumer stopped
+          iterating), not a model failure.
+        - A stream that ends without an ``ApiMessageCompleteEvent`` records
+          a failed row (``empty_stream``) and returns normally — the loop's
+          own "stream finished without a final message" error stays the
+          caller-visible behavior, unchanged.
+        - On completion, one ``subsystem_runs`` row records the
+          ``UsageSnapshot`` tokens, duration, round index, session id,
+          model id, and the EFFECTIVE thinking flag for the call
+          (``request.suppress_thinking`` when set, else the provider's
+          configured default; NULL when the provider has no such knob).
+        """
+        from prometheus.providers.base import ApiMessageCompleteEvent
+
+        # Effective thinking flag — record what was actually sent.
+        # ApiMessageRequest.suppress_thinking (None = provider default)
+        # resolves against the provider's configured default the same way
+        # LlamaCppProvider._effective_suppress_thinking does. Providers
+        # without the knob (stubs, cloud) yield None → NULL in the row.
+        suppress = request.suppress_thinking
+        if suppress is None:
+            suppress = getattr(provider, "_suppress_thinking", None)
+        thinking: bool | None = None if suppress is None else not suppress
+
+        started = time.time()
+        usage_in: int | None = None
+        usage_out: int | None = None
+        stop_reason: str | None = None
+        dropped_malformed = 0
+        complete_seen = False
+        empty_content = False
+
+        try:
+            async for event in provider.stream_message(request):
+                if isinstance(event, ApiMessageCompleteEvent):
+                    complete_seen = True
+                    if event.usage is not None:
+                        usage_in = event.usage.input_tokens
+                        usage_out = event.usage.output_tokens
+                    stop_reason = event.stop_reason
+                    dropped_malformed = getattr(event, "dropped_malformed", 0)
+                    msg = event.message
+                    empty_content = not (
+                        (msg.text or "").strip() or msg.tool_uses
+                    )
+                yield event
+        except GeneratorExit:
+            # Consumer closed the stream — protocol signal, not a failure.
+            raise
+        except BaseException as exc:  # noqa: BLE001 — observed, then re-raised
+            duration_ms = (time.time() - started) * 1000.0
+            # Not _record_failure: that helper also writes its own failed
+            # run row (the call() shape), which would double-count here.
+            if self._telemetry is not None:
+                try:
+                    self._telemetry.record_silent_failure(
+                        subsystem=self._subsystem,
+                        operation=operation,
+                        exc=exc,
+                        context={"round_index": round_index,
+                                 "session_id": session_id,
+                                 "model": request.model},
+                    )
+                except Exception:
+                    log.debug(
+                        "LLMCallEnvelope.stream: silent-failure write failed",
+                        exc_info=True,
+                    )
+            self._record_usage_row(
+                operation=operation,
+                outcome="failed",
+                duration_ms=duration_ms,
+                summary={"exception_type": type(exc).__name__},
+                input_tokens=usage_in,
+                output_tokens=usage_out,
+                round_index=round_index,
+                session_id=session_id,
+                model=request.model,
+                thinking=thinking,
+            )
+            raise
+
+        duration_ms = (time.time() - started) * 1000.0
+        if not complete_seen:
+            self._record_usage_row(
+                operation=operation,
+                outcome="failed",
+                duration_ms=duration_ms,
+                summary={"reason": "empty_stream"},
+                input_tokens=None,
+                output_tokens=None,
+                round_index=round_index,
+                session_id=session_id,
+                model=request.model,
+                thinking=thinking,
+            )
+            return
+
+        summary: dict[str, Any] = {}
+        if stop_reason is not None:
+            summary["stop_reason"] = stop_reason
+        if dropped_malformed:
+            summary["dropped_malformed"] = dropped_malformed
+        if empty_content:
+            # The collapse-arc shape: a complete event whose message has
+            # neither prose nor tool calls. Recorded so it is queryable.
+            summary["empty_content"] = True
+        self._record_usage_row(
+            operation=operation,
+            outcome="success",
+            duration_ms=duration_ms,
+            summary=summary or None,
+            input_tokens=usage_in,
+            output_tokens=usage_out,
+            round_index=round_index,
+            session_id=session_id,
+            model=request.model,
+            thinking=thinking,
+        )
+
+    def _record_usage_row(
+        self,
+        *,
+        operation: str,
+        outcome: str,
+        duration_ms: float,
+        summary: dict[str, Any] | None,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        round_index: int | None,
+        session_id: str | None,
+        model: str | None,
+        thinking: bool | None,
+    ) -> None:
+        """Best-effort ``subsystem_runs`` write with the F1 usage columns."""
+        if self._telemetry is None:
+            return
+        try:
+            self._telemetry.record_run(
+                subsystem=self._subsystem,
+                operation=operation,
+                outcome=outcome,
+                duration_ms=duration_ms,
+                summary=summary,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                round_index=round_index,
+                session_id=session_id,
+                model=model,
+                thinking=thinking,
+            )
+        except Exception:
+            log.debug(
+                "LLMCallEnvelope: usage-row write failed for %s.%s",
+                self._subsystem, operation,
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Explicit message-shape validator (used by tests + future callers)
