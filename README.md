@@ -1,8 +1,8 @@
 # Prometheus
 
-**A sovereign agent harness for local LLMs — the validation layer that makes open models actually reliable in a tool loop.**
+A sovereign agent harness for local LLMs — the validation layer that makes open models actually reliable in a tool loop.
 
-The model is the agent. The harness is the vehicle.
+**The model is the agent. The harness is the vehicle.**
 
 ```bash
 pip install oara-prometheus[full]
@@ -12,7 +12,7 @@ prometheus daemon         # starts agent, Beacon dashboard, gateways
 
 `prometheus init` probes for a running local inference server, asks two or three questions, writes a working `~/.prometheus/prometheus.yaml`, and points you at the Beacon dashboard. Five minutes from `pip install` to a working agent.
 
-What it gives you:
+**What it gives you:**
 
 - **Reliable tool calls on open models** — a Model Adapter Layer validates every call, auto-repairs common errors (fuzzy names, JSON inside markdown fences, type coercion), and enforces output schemas at the token level via GBNF for llama.cpp.
 - **Always-on gateways** — Telegram and Slack at parity (23 slash commands each), with mid-turn `/steer` and `/queue` for durability while the agent is mid-task.
@@ -24,29 +24,25 @@ What it gives you:
 
 Deeper docs live under [`docs/`](docs/) — architecture, model registry, adapter strictness tuning, sprint reports. The rest of this README is the high-level tour; jump to the section you care about.
 
-MIT License · Python 3.11+ · 1,179+ tests
-
 ---
 
-## What Prometheus inherits
+## Prior art and influences
 
-Not a fork. Prometheus is a new codebase that extracts specific subsystems from proven MIT-licensed projects:
+**Not a fork, and not a port.** Prometheus is an original Python codebase. Several of its subsystems were designed by studying the *architecture and behavior* of proven open-source projects, then reimplementing those ideas from scratch — no source code was copied or translated. The table credits the prior art that shaped each subsystem's design:
 
-| Subsystem | Donor | What was extracted |
-|---|---|---|
-| Agent loop | Claude Code (via OpenHarness, MIT) | Tool registry, hook pipeline, permission governance — clean-room reimplementation |
-| Always-on gateway | Hermes (MIT) | Telegram/Slack messaging, cron scheduling, credential rotation |
-| Context management | OpenClaw plugin (MIT) | DAG-based lossless compression with full-text search (11,600 lines TS → Python) |
-| Production patterns | OpenClaw (MIT) | Memory extractor, archive bridge, heartbeat |
+| Subsystem | Influence | What the design drew on |
+|-----------|-----------|-------------------------|
+| Agent loop | Claude Code patterns (via Sigrid Jin's clean-room analysis) | The tool-registry / hook-pipeline / permission-governance shape |
+| Always-on gateway | Hermes | The always-on messaging + cron + credential-rotation model |
+| Context management | Lossless-Claw / OpenClaw | The DAG-based lossless-compression-with-FTS approach |
+| Production patterns | OpenClaw | Memory-extractor / archive-bridge / heartbeat patterns |
 | Knowledge base | Karpathy's LLM Wiki (concept) | Memory extraction → wiki pages → cross-referenced knowledge |
 
-All extracted code carries a provenance header: Source, Original path, License, Modified.
+Where a subsystem's design was shaped by external prior art, the relevant source file credits that influence in a header comment. The implementation is Prometheus's own.
 
----
+## What we built from scratch
 
-## What we had to build
-
-Three subsystems had no good donor and were built from scratch:
+Three subsystems had no meaningful prior art and are wholly original:
 
 - **Model Adapter Layer** — the gap between Claude-quality tool-calling and what open models actually produce. Validates, auto-repairs, enforces output schemas, retries with specific error context.
 - **SENTINEL** — a proactive layer that watches for idle time and acts, instead of only reacting to prompts. Nudges, dreams, synthesizes.
@@ -62,47 +58,41 @@ Open models are getting good at conversation. They're still terrible at *doing t
 
 Every other agent harness — LangChain, CrewAI, AutoGen — assumes the model will get tool calls right. That works fine when you're paying OpenAI. It falls apart the moment you point it at a local model.
 
-Prometheus fixes this with a **Model Adapter Layer** that sits between your agent loop and whatever LLM you're running. Every tool call gets validated before execution, common errors get auto-repaired (fuzzy name matching, JSON extraction from markdown fences, type coercion), and when something still fails, the model gets specific error feedback with the actual schema — not a generic "try again." For llama.cpp, it goes further: GBNF grammar constraints force valid JSON at the token level, so the model literally *can't* produce malformed output.
+Prometheus fixes this with a Model Adapter Layer that sits between your agent loop and whatever LLM you're running. Every tool call gets validated before execution, common errors get auto-repaired (fuzzy name matching, JSON extraction from markdown fences, type coercion), and when something still fails, the model gets specific error feedback with the actual schema — not a generic "try again." For llama.cpp, it goes further: GBNF grammar constraints force valid JSON at the token level, so the model literally can't produce malformed output.
 
 The result: open models that reliably call tools, chain multi-step tasks, and run autonomously — without you babysitting every interaction.
-
----
 
 ## What Makes This Different
 
 Prometheus isn't a wrapper around `ollama.chat()`. It's a complete agent operating system with novel systems that don't exist in other harnesses:
 
-**The Model Adapter Layer** is the core innovation. Four cascading extraction strategies handle whatever mess the model produces. A retry engine feeds specific schema errors back to the model. GBNF grammar enforcement at the llama.cpp level makes invalid JSON structurally impossible. Telemetry tracks success rates per model per tool so you know exactly where your model struggles. Nothing else does this — other harnesses either assume clean output or crash.
+**The Model Adapter Layer is the core innovation.** Four cascading extraction strategies handle whatever mess the model produces. A retry engine feeds specific schema errors back to the model. GBNF grammar enforcement at the llama.cpp level makes invalid JSON structurally impossible. Telemetry tracks success rates per model per tool so you know exactly where your model struggles. Nothing else does this — other harnesses either assume clean output or crash.
 
-**Lossless Context Management** means your agent never forgets. Every message is persisted to SQLite. When context fills up, a two-tier compression system kicks in: Tier 1 strips tool_result content from old messages (free — the output was already acted on). Tier 2 uses LLM-powered batch summarization when pruning alone isn't enough. But the originals are always recoverable — old messages get summarized into a DAG structure, and the agent can expand any summary back to full detail on demand. Full-text search across your entire conversation history. This was ported from 11,600 lines of TypeScript (Lossless-Claw) into Python specifically for this project.
+**Lossless Context Management means your agent never forgets.** Every message is persisted to SQLite. When context fills up, a two-tier compression system kicks in: Tier 1 strips `tool_result` content from old messages (free — the output was already acted on). Tier 2 uses LLM-powered batch summarization when pruning alone isn't enough. But the originals are always recoverable — old messages get summarized into a DAG structure, and the agent can expand any summary back to full detail on demand. Full-text search across your entire conversation history. The DAG-compression approach is informed by Lossless-Claw; the Python implementation is original to Prometheus.
 
-**SENTINEL** transforms the agent from reactive to proactive. Most agents sit idle until you talk to them. Prometheus has a background intelligence layer that watches tool performance patterns, consolidates memory, lints its own knowledge base, and discovers cross-entity insights — all while you're away. Three of four phases use zero LLM calls. The fourth is budget-capped at 2,000 tokens. It nudges you via Telegram when it finds something interesting but never acts without permission.
+**SENTINEL transforms the agent from reactive to proactive.** Most agents sit idle until you talk to them. Prometheus has a background intelligence layer that watches tool performance patterns, consolidates memory, lints its own knowledge base, and discovers cross-entity insights — all while you're away. Three of four phases use zero LLM calls. The fourth is budget-capped at 2,000 tokens. It nudges you via Telegram when it finds something interesting but never acts without permission.
 
-**A compounding knowledge base** inspired by Karpathy's LLM Wiki concept. Every 30 minutes, a Memory Extractor pulls structured facts from your conversations. A WikiCompiler builds entity pages with cross-references. The wiki grows and connects itself over time. Point Obsidian at the markdown files and the graph view lights up.
+**A compounding knowledge base inspired by Karpathy's LLM Wiki concept.** Every 30 minutes, a Memory Extractor pulls structured facts from your conversations. A WikiCompiler builds entity pages with cross-references. The wiki grows and connects itself over time. Point Obsidian at the markdown files and the graph view lights up.
 
-**Infrastructure self-awareness** via the AnatomyScanner. At startup, Prometheus scans your hardware (CPU, RAM, GPU VRAM), detects the loaded model and its quantization, maps your Tailscale network peers, checks disk usage, and generates `ANATOMY.md` with Mermaid architecture diagrams of your entire setup. The agent knows exactly what machine it's running on, what model is loaded, and what resources are available — and it uses this to answer questions about its own infrastructure. No other agent harness does this.
+**Infrastructure self-awareness via the AnatomyScanner.** At startup, Prometheus scans your hardware (CPU, RAM, GPU VRAM), detects the loaded model and its quantization, maps your Tailscale network peers, checks disk usage, and generates `ANATOMY.md` with Mermaid architecture diagrams of your entire setup. The agent knows exactly what machine it's running on, what model is loaded, and what resources are available — and it uses this to answer questions about its own infrastructure. No other agent harness does this.
 
 **An evaluation framework with a local LLM judge.** Most agent evals require API calls to GPT-4. Prometheus uses constrained-decoding on your local model to judge task completion, tool usage accuracy, and hallucination — zero API cost. 21 atomic tests + 5 multi-step tests, with failure classification (model vs harness vs unclear) and trend tracking across models and runs.
 
 **LSP integration for compiler-grade code intelligence.** Instead of grepping for function names, the agent queries language servers for real symbol definitions, type errors, and references. After every file edit, a diagnostics hook automatically checks for type errors and feeds them back to the model in the same turn. This compensates for open models being weaker at code reasoning — the LSP gives them ground truth.
 
----
-
 ## Open Models First, APIs Welcome
 
 Prometheus is built for local inference. That's the whole point — sovereignty, privacy, no subscriptions. But it's not religious about it. If you want to use cloud APIs, the same harness works with:
 
-- **OpenAI** (GPT-4o, o3-mini)
-- **Anthropic** (Claude Sonnet, Haiku)
-- **Google Gemini** (Flash, Pro)
-- **xAI** (Grok)
+- OpenAI (GPT-4o, o3-mini)
+- Anthropic (Claude Sonnet, Haiku)
+- Google Gemini (Flash, Pro)
+- xAI (Grok)
 - Any OpenAI-compatible endpoint (vLLM, LiteLLM, Together, etc.)
 
 The setup wizard lets you pick. The Model Router can even mix them — route coding tasks to your local 70B model, quick answers to a fast API, and fall back to cloud when your GPU is busy. The adapter layer adjusts its strictness automatically: full validation for open models, passthrough for APIs that already handle tool calling well.
 
 The architecture doesn't care where the tokens come from. It cares that the tools get called correctly.
-
----
 
 ## Features
 
@@ -164,7 +154,7 @@ Markdown skill files in `skills/` that teach the agent patterns — from code re
 ### Migration Tool
 
 - `prometheus migrate --from hermes` or `--from openclaw`
-- Auto-detects existing installations (~/.hermes, ~/.openclaw, ~/.clawdbot)
+- Auto-detects existing installations (`~/.hermes`, `~/.openclaw`, `~/.clawdbot`)
 - Migrates config, identity, memory, skills with conflict resolution (skip/overwrite/rename)
 - Dry-run mode and timestamped migration reports
 
@@ -181,8 +171,6 @@ Markdown skill files in `skills/` that teach the agent patterns — from code re
 - Failure classification in evals (model issue vs harness issue vs unclear)
 - Trend tracking across evaluation runs
 
----
-
 ## Quick Start
 
 ### Prerequisites
@@ -194,8 +182,8 @@ Markdown skill files in `skills/` that teach the agent patterns — from code re
 ### Install
 
 ```bash
-git clone https://github.com/OAraLabs/Prometheus-.git
-cd Prometheus-
+git clone https://github.com/OAraLabs/Prometheus.git
+cd Prometheus
 pip install -e .
 python3 -m prometheus --setup
 ```
@@ -241,8 +229,6 @@ Connect via Tailscale, WireGuard, or any network. Prometheus talks HTTP — loca
 
 16GB VRAM runs Gemma 2 9B or Qwen 2.5 14B (Q4 quantized). Set `strictness: STRICT` — the adapter compensates with more validation and retries. No GPU at all? Use a cloud API provider and you still get the full harness: memory, wiki, SENTINEL, security, profiles, all of it.
 
----
-
 ## Architecture
 
 ```
@@ -278,8 +264,6 @@ Connect via Tailscale, WireGuard, or any network. Prometheus talks HTTP — loca
 └─────────────────────────────────────────────────────────┘
 ```
 
----
-
 ## Configuration
 
 ```yaml
@@ -308,8 +292,6 @@ profile:
   active: "full"   # full | coder | research | assistant | minimal
 ```
 
----
-
 ## Telegram Commands
 
 | Command | Description |
@@ -328,15 +310,14 @@ profile:
 | `/profile` | Switch agent profiles |
 | `/anatomy` | Infrastructure snapshot |
 | `/beacon` | Web dashboard status, start/stop/restart |
-| `/approve` / `/deny` / `/pending` | Manage approval queue |
-| `/claude` / `/gpt` / `/gemini` / `/xai` | Per-session cloud provider override |
+| `/approve` `/deny` `/pending` | Manage approval queue |
+| `/claude` `/gpt` `/gemini` `/xai` | Per-session cloud provider override |
 | `/local` | Clear override, return to primary local model |
 | `/route` | Show this chat's current provider + model |
 
 ### Configuring cloud slash commands
 
-`/claude`, `/gpt`, `/gemini`, and `/xai` each route to a configurable
-provider + model. Edit `config/prometheus.yaml`:
+`/claude`, `/gpt`, `/gemini`, and `/xai` each route to a configurable provider + model. Edit `config/prometheus.yaml`:
 
 ```yaml
 slash_commands:
@@ -368,11 +349,7 @@ journalctl --user -u prometheus.service | grep slash_commands
 # ...
 ```
 
-Omit a command (or the whole section) to fall back to the conservative
-defaults baked into the source — the daemon logs a one-time WARN noting
-the fallback so the source-archaeology problem isn't load-bearing.
-
----
+Omit a command (or the whole section) to fall back to the conservative defaults baked into the source — the daemon logs a one-time WARN noting the fallback so the source-archaeology problem isn't load-bearing.
 
 ## Project Structure
 
@@ -411,8 +388,6 @@ prometheus/
 └── PROMETHEUS.md        # Agent instructions (like CLAUDE.md)
 ```
 
----
-
 ## Benchmarks
 
 ```bash
@@ -432,19 +407,15 @@ No Hallucination: 84.7%
 
 All evaluation runs locally — the LLM judge uses constrained decoding on your own hardware.
 
----
-
 ## Stats
 
-- **~30,000 lines** of production Python
-- **1,179+ tests** across 53 test files
-- **43 builtin tools** + dynamic MCP tools
-- **92 builtin skills** (.md instruction files)
-- **6+ model providers** (local and cloud)
-- **21+ eval tasks** with local LLM judge
-- **8 LCM modules** ported from 11.6K TypeScript
-
----
+- ~30,000 lines of production Python
+- 1,179+ tests across 53 test files
+- 43 builtin tools + dynamic MCP tools
+- 92 builtin skills (.md instruction files)
+- 6+ model providers (local and cloud)
+- 21+ eval tasks with local LLM judge
+- 8 LCM modules (DAG compression + FTS5 search)
 
 ## Roadmap
 
@@ -468,16 +439,12 @@ All evaluation runs locally — the LLM judge uses constrained decoding on your 
 - [x] Web UI for setup and monitoring (Beacon dashboard)
 - [ ] Fine-tuning flywheel (LoRA on collected traces)
 
----
-
 ## License
 
 MIT
-
----
 
 ## Credits
 
 Built by [Will Hieber](https://github.com/OAraLabs) / OAra Labs.
 
-Architecture informed by: [OpenHarness](https://github.com/HKUDS/OpenHarness), [Hermes Agent](https://github.com/NousResearch/hermes-agent), [Lossless-Claw](https://github.com/Martian-Engineering/lossless-claw), and Andrej Karpathy's [LLM Wiki concept](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Claude Code architecture patterns derived from [Sigrid Jin's](https://github.com/instructkr) clean-room analysis.
+Prometheus is an original implementation. Its architecture was informed by studying the design of [OpenHarness](https://github.com/HKUDS/OpenHarness), the [Hermes Agent](https://github.com/NousResearch/hermes-agent), [Lossless-Claw](https://github.com/Martian-Engineering/lossless-claw), and Andrej Karpathy's [LLM Wiki concept](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f); the Claude Code agent-loop patterns were reconstructed from [Sigrid Jin's](https://github.com/instructkr) clean-room analysis rather than from any original source. No source code from these projects was copied or translated into Prometheus.
