@@ -107,7 +107,14 @@ CREATE TABLE IF NOT EXISTS subsystem_runs (
     operation       TEXT,
     duration_ms     REAL,
     outcome         TEXT NOT NULL,         -- "success" | "partial" | "failed" | "skipped"
-    summary_json    TEXT                   -- arbitrary JSON the subsystem wants to surface
+    summary_json    TEXT,                  -- arbitrary JSON the subsystem wants to surface
+    -- SPRINT-loop-envelope (F1) additions (nullable for backcompat):
+    input_tokens    INTEGER,               -- UsageSnapshot.input_tokens for LLM calls
+    output_tokens   INTEGER,               -- UsageSnapshot.output_tokens for LLM calls
+    round_index     INTEGER,               -- loop turn number (0-based) for agent_loop rows
+    session_id      TEXT,                  -- LoopContext.session_id for agent_loop rows
+    model           TEXT,                  -- model id the call was made with
+    thinking        INTEGER                -- effective flag: 1 on, 0 suppressed, NULL unknown
 );
 
 -- SignalBus Persistence sprint: every emission on the in-process SignalBus
@@ -169,6 +176,20 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
     ],
     "circuit_breaker_diagnostics": [
         ("golden_reference", "TEXT"),
+    ],
+    # SPRINT-loop-envelope (F1): per-call usage columns on the envelope's
+    # table, so the agent loop's rounds and the autonomous subsystems share
+    # one query surface. NULL on rows from callers that don't carry usage
+    # (curator, skill_creator, ... — their write path is unchanged).
+    # ``thinking`` is the EFFECTIVE thinking flag for the call: 1 = thinking
+    # on, 0 = suppressed, NULL = provider doesn't expose the knob.
+    "subsystem_runs": [
+        ("input_tokens", "INTEGER"),
+        ("output_tokens", "INTEGER"),
+        ("round_index", "INTEGER"),
+        ("session_id", "TEXT"),
+        ("model", "TEXT"),
+        ("thinking", "INTEGER"),
     ],
 }
 
@@ -425,6 +446,13 @@ class ToolCallTelemetry:
         outcome: str,
         duration_ms: float = 0.0,
         summary: dict[str, Any] | None = None,
+        *,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        round_index: int | None = None,
+        session_id: str | None = None,
+        model: str | None = None,
+        thinking: bool | None = None,
     ) -> None:
         """Record one autonomous-subsystem cycle / pass / invocation.
 
@@ -436,6 +464,13 @@ class ToolCallTelemetry:
         ``outcome`` must be one of ``"success"`` | ``"partial"`` |
         ``"failed"`` | ``"skipped"`` — anything else is coerced to
         ``"failed"`` defensively.
+
+        The keyword-only usage fields (SPRINT-loop-envelope, F1) carry
+        per-LLM-call accounting for rows written by
+        :meth:`LLMCallEnvelope.stream` — the agent loop's rounds. They
+        default to ``None`` so every pre-existing caller is unchanged;
+        ``thinking`` is stored as 1/0/NULL (NULL = the provider doesn't
+        expose a thinking knob, e.g. stubs and cloud providers).
         """
         if outcome not in {"success", "partial", "failed", "skipped"}:
             outcome = "failed"
@@ -448,8 +483,10 @@ class ToolCallTelemetry:
                 """
                 INSERT INTO subsystem_runs
                   (id, timestamp, subsystem, operation,
-                   duration_ms, outcome, summary_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                   duration_ms, outcome, summary_json,
+                   input_tokens, output_tokens, round_index,
+                   session_id, model, thinking)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     uuid4().hex,
@@ -459,6 +496,12 @@ class ToolCallTelemetry:
                     float(duration_ms),
                     outcome,
                     summary_json,
+                    input_tokens,
+                    output_tokens,
+                    round_index,
+                    session_id,
+                    model,
+                    None if thinking is None else int(thinking),
                 ),
             )
             self._conn.commit()

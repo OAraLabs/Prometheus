@@ -744,6 +744,15 @@ async def run_loop(
     circuit_breaker = _CircuitBreaker(max_identical=3, max_any=5)
     tool_iteration = 0
 
+    # SPRINT-loop-envelope (F1): the loop's model calls run inside the shared
+    # LLMCallEnvelope like every other _call_model path — silent-failure
+    # capture + a per-round usage row (tokens, round, session, model,
+    # effective thinking flag) in subsystem_runs. Observation only: the
+    # request and every stream event pass through unchanged (lazy import
+    # matches this file's convention for cross-package deps).
+    from prometheus.learning.llm_envelope import LLMCallEnvelope
+    loop_envelope = LLMCallEnvelope("agent_loop", telemetry=context.telemetry)
+
     for turn in range(context.max_turns):
         # MicroCompaction: compact old tool results (free, no LLM calls)
         if turn > 0 and context.microcompact_after_turns > 0:
@@ -824,8 +833,9 @@ async def run_loop(
                     "ContextCompactor.apply raised — sending uncompacted")
                 render_source = messages
 
-        async for event in context.provider.stream_message(
-            ApiMessageRequest(
+        async for event in loop_envelope.stream(
+            provider=context.provider,
+            request=ApiMessageRequest(
                 model=context.model,
                 # Context-assembly: fence any untrusted injected turns (task
                 # output, watched-file contents, cron data) with the derived
@@ -835,7 +845,10 @@ async def run_loop(
                 system_prompt=per_call_system_prompt,
                 max_tokens=context.max_tokens,
                 tools=_payload_tools,
-            )
+            ),
+            operation="loop_round",
+            round_index=turn,
+            session_id=context.session_id,
         ):
             if isinstance(event, ApiTextDeltaEvent):
                 if _markup_filter is not None:

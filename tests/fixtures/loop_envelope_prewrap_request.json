@@ -1,0 +1,4 @@
+{
+ "recorded_at_sha": "136733459bfabc02853235bce67d941ef8e1319f",
+ "request_canonical": "{\n \"max_tokens\": 512,\n \"messages\": [\n  {\n   \"content\": [\n    {\n     \"text\": \"fixture turn \\u2014 reply without tools\",\n     \"type\": \"text\"\n    }\n   ],\n   \"is_trusted\": true,\n   \"provenance\": \"user\",\n   \"role\": \"user\"\n  }\n ],\n \"model\": \"fixture-model\",\n \"suppress_thinking\": null,\n \"system_prompt\": \"You are the loop-envelope fixture agent.\",\n \"tools\": []\n}"
+}
