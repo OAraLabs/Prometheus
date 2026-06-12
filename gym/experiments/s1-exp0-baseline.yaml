@@ -1,0 +1,12 @@
+# Series 1, experiment 0 — BASELINE. No variable changed.
+series: s1
+experiment: exp0-baseline
+taskset: gym/tasksets/v1.yaml
+runs_per_task: 3
+variable: none
+notes: >
+  Baseline for series s1 against gym/tasksets/v1.yaml, run on main after the
+  invariants-vs-policy split (511ed2f) and the FTS5 sanitizer fix (c59fe34)
+  landed — i.e. this baseline measures the CURRENT pipeline, not the one that
+  produced the April–June telemetry. The production "before" for the collapse
+  and task_create shapes is documented in FINDINGS-TOOLCALLING-2026-06-10.md.

@@ -1,0 +1,20 @@
+# Series 1, experiment 1 — example_call injection for task_create.
+# ONE variable: the system prompt gains a single correct task_create example
+# (type discriminator made visible). Informed by D2: live failures omitted
+# `type`, defaulted to local_bash, got "'command' is required", and flailed.
+series: s1
+experiment: exp1-example-call-task-create
+taskset: gym/tasksets/v1.yaml
+runs_per_task: 3
+variable:
+  example_call:
+    tool: task_create
+    example:
+      type: local_agent
+      description: "Summarize the quarterly report"
+      prompt: "Read /data/q3.csv and produce a 5-line summary of revenue trends."
+notes: >
+  Hypothesis (D2): task_create failures are discriminator-omission plus
+  JSON-stuffing, not nested schemas (all 49 builtin schemas are flat). A
+  single concrete example showing `type: local_agent` with a plain-string
+  prompt should cut both shapes. Control categories watch for regressions.
