@@ -122,3 +122,55 @@ def test_status_read_includes_output_tail(monkeypatch, tmp_path, repo):
     assert body["status"] == "running"
     assert '"branch": "coding/x"' in body["output_tail"]
     assert c.get("/api/code/nope").status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# CLI safety net — run_coding_task always emits a report (never bare exit 1)
+# --------------------------------------------------------------------------- #
+
+
+def test_run_coding_task_emits_report_on_uncaught_exception(monkeypatch, tmp_path, capsys):
+    """A mid-run crash must still print a JSON report + return 1, never leave
+    a caller with an exit code and no report (the matrix's status=None case)."""
+    import json as _json
+    import subprocess as _sp
+
+    from prometheus import __main__ as m
+
+    class _Args:
+        config = None
+        repo = str(tmp_path / "r")
+        task_description = "x"
+        acceptance_command = "true"
+        task_id = "crashy"
+        max_rounds = 5
+        max_wall_seconds = 60
+        sandbox_parent = str(tmp_path / "sb")
+        suppress_thinking = False
+
+    # Isolate the crash-handling path: stub provider/adapter/clone so the
+    # test exercises ONLY "session.run() raises → structured failed_error
+    # report + exit 1" without a real model, git, or filesystem clone.
+    class _StubSandbox:
+        root = tmp_path / "clone"
+
+    monkeypatch.setattr(m, "create_provider", lambda cfg: (object(), "m"))
+    monkeypatch.setattr(m, "create_adapter", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "prometheus.coding.sandbox.clone_repo_for_sandbox",
+        lambda *a, **k: _StubSandbox(),
+    )
+
+    def _boom(self):
+        raise RuntimeError("simulated mid-run crash")
+
+    monkeypatch.setattr(
+        "prometheus.coding.session.CodingSession.run", _boom
+    )
+
+    rc = m.run_coding_task(_Args())
+    out = capsys.readouterr().out
+    assert rc == 1
+    payload = _json.loads(out[out.index("{"):])
+    assert payload["status"] == "failed_error"
+    assert "simulated mid-run crash" in payload["reason"]

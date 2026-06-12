@@ -759,12 +759,27 @@ def run_coding_task(args) -> int:
         max_wall_seconds=float(args.max_wall_seconds),
         suppress_thinking=True if args.suppress_thinking else False,
     )
-    report = asyncio.run(session.run())
-
-    payload = asdict(report)
-    payload["sandbox_root"] = str(sandbox.root)
-    print(_json.dumps(payload, indent=2))
-    return 0 if report.status == "success" else 1
+    # A coding run must ALWAYS emit a JSON report and a verdict exit code —
+    # an uncaught exception mid-run (a model-output edge case, a provider
+    # hiccup) otherwise leaves a caller with exit 1 and no report to read.
+    # Emit a structured failed report instead; the traceback goes to stderr
+    # for forensics.
+    try:
+        report = asyncio.run(session.run())
+        payload = asdict(report)
+        payload["sandbox_root"] = str(sandbox.root)
+        print(_json.dumps(payload, indent=2))
+        return 0 if report.status == "success" else 1
+    except Exception as exc:  # noqa: BLE001 — reported, not swallowed
+        import traceback as _tb
+        _tb.print_exc()
+        print(_json.dumps({
+            "task_id": task_id,
+            "status": "failed_error",
+            "reason": f"uncaught {type(exc).__name__}: {exc}",
+            "sandbox_root": str(sandbox.root),
+        }, indent=2))
+        return 1
 
 
 # ---------------------------------------------------------------------------
