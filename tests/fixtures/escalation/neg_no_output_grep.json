@@ -1,0 +1,8 @@
+{
+  "description": "grep '(no output)' is an informative result, not an error (FINDINGS 2026-06-10 trap) — must NOT trigger; also exercises the no-is_error-key fallback",
+  "tool_results": [
+    {"tool_name": "grep", "arguments": {"pattern": "OBSOLETE_FLAG"}, "result": "(no output)"}
+  ],
+  "final_reply": "No matches for OBSOLETE_FLAG anywhere in src/ — the constant is not referenced, so removing it is safe.",
+  "expect_failed": false
+}

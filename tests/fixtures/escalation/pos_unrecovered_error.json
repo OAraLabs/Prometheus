@@ -1,0 +1,9 @@
+{
+  "description": "Turn ends on a tool error with no retry plan in the reply",
+  "tool_results": [
+    {"tool_name": "bash", "arguments": {"command": "./deploy.sh"}, "result": "Error: connection refused (deploy target unreachable)", "is_error": true}
+  ],
+  "final_reply": "The deploy script could not reach the server.",
+  "expect_failed": true,
+  "expect_patterns_include": ["unrecovered_tool_error"]
+}

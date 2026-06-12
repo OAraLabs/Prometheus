@@ -1,0 +1,8 @@
+{
+  "description": "Honest negative search outcome ('unable to find') is a correct answer — must NOT trigger the verb-constrained denial patterns",
+  "tool_results": [
+    {"tool_name": "grep", "arguments": {"pattern": "legacy_mode"}, "result": "(no output)", "is_error": false}
+  ],
+  "final_reply": "I'm unable to find any usage of that flag in the repo, so it should be safe to remove.",
+  "expect_failed": false
+}

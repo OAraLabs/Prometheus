@@ -1,0 +1,8 @@
+{
+  "description": "Turn ends on an error but the reply commits to a concrete retry plan — must NOT trigger",
+  "tool_results": [
+    {"tool_name": "bash", "arguments": {"command": "npm run build"}, "result": "Error: missing dependency left-pad", "is_error": true}
+  ],
+  "final_reply": "The build failed on a missing dependency; let me try pinning the version and rerunning.",
+  "expect_failed": false
+}

@@ -1,0 +1,11 @@
+{
+  "description": "Same tool called with identical args 3x in one turn (looping)",
+  "tool_results": [
+    {"tool_name": "read_file", "arguments": {"path": "docs/config.md"}, "result": "## Config\nthreshold: 3", "is_error": false},
+    {"tool_name": "read_file", "arguments": {"path": "docs/config.md"}, "result": "## Config\nthreshold: 3", "is_error": false},
+    {"tool_name": "read_file", "arguments": {"path": "docs/config.md"}, "result": "## Config\nthreshold: 3", "is_error": false}
+  ],
+  "final_reply": "I read the file three times but it does not contain the section you asked about.",
+  "expect_failed": true,
+  "expect_patterns_include": ["repetition"]
+}

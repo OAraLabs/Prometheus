@@ -1,0 +1,7 @@
+{
+  "description": "Model denies having a tool it has (or hallucinates absence)",
+  "tool_results": [],
+  "final_reply": "I don't have a tool for sending emails, so I can't help with that.",
+  "expect_failed": true,
+  "expect_patterns_include": ["capability_denial:no_tool"]
+}

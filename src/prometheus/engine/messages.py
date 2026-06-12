@@ -18,7 +18,11 @@ from pydantic import BaseModel, Field
 # Closed set of turn origins. "user" = a real human; everything else is a
 # non-user turn injected by the runtime (see inject_turn). Drives both trust
 # handling and the untrusted-input banner projection below.
-Provenance = Literal["user", "cron", "task_supervisor", "orchestrator"]
+# "teacher_escalation" = corrective replies injected by the cloud teacher
+# (SPRINT-TEACHER-ESCALATION); untrusted by convention like all injections.
+Provenance = Literal[
+    "user", "cron", "task_supervisor", "orchestrator", "teacher_escalation"
+]
 
 
 class TextBlock(BaseModel):

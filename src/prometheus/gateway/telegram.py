@@ -124,6 +124,9 @@ class TelegramAdapter(BasePlatformAdapter):
         self.model_name = model_name
         self.model_provider = model_provider
         self.cost_tracker = None  # Set by daemon if using cloud provider
+        # SPRINT-TEACHER-ESCALATION: TeacherEscalation engine, set by daemon
+        # (None → feature absent; an unarmed engine reports via /escalations).
+        self.escalation_engine = None
         self._app: Application | None = None
         self._start_time: float = 0.0
         self._prometheus_config: dict[str, Any] = prometheus_config or {}
@@ -347,6 +350,10 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("grok", self._cmd_grok))
         self._app.add_handler(CommandHandler("local", self._cmd_local))
         self._app.add_handler(CommandHandler("route", self._cmd_route))
+        # SPRINT-TEACHER-ESCALATION Phase 3: escalation stats / budget state
+        self._app.add_handler(
+            CommandHandler("escalations", self._cmd_escalations)
+        )
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text)
         )
@@ -1795,11 +1802,127 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             if correction:
                 response_text = f"{response_text}\n\n{correction}"
+            # SPRINT-TEACHER-ESCALATION Phase 3: same post-turn anchor as the
+            # honesty validator. The engine fails loud in telemetry; the hook
+            # itself must never break the reply path.
+            try:
+                response_text = await self._maybe_escalate_turn(
+                    session=session,
+                    session_id=session_id,
+                    response_text=response_text,
+                    new_messages=result.messages[pre_len:],
+                    user_request=content,
+                )
+            except Exception:
+                logger.exception(
+                    "teacher escalation hook failed (local reply unaffected)")
             return response_text
         except Exception as exc:
             logger.error("Agent error for session %s: %s", session_id, exc)
             session.rollback_last()
             return f"Error: {exc}"
+
+    def _serving_provider_name(self, session_id: str) -> str:
+        """Provider name that served this session's turn: the per-session
+        override (/claude etc.) when set, else the daemon primary."""
+        router = getattr(self.agent_loop, "_model_router", None)
+        if router is not None:
+            try:
+                override = router.get_override_for_session(session_id)
+            except Exception:
+                override = None
+            if override is not None:
+                cfg = getattr(override, "provider_config", None)
+                if isinstance(cfg, dict) and cfg.get("provider"):
+                    return str(cfg["provider"])
+        return self.model_provider or ""
+
+    async def _maybe_escalate_turn(
+        self,
+        *,
+        session,
+        session_id: str,
+        response_text: str,
+        new_messages: list,
+        user_request: str,
+    ) -> str:
+        """Run teacher escalation at turn finalization (SPRINT-TEACHER-ESCALATION).
+
+        Returns the (possibly replaced or annotated) reply text. On
+        escalation, the corrective reply is persisted into the session and
+        LCM tagged ``provenance="teacher_escalation"``, ``is_trusted=False``
+        — the conservative machine-injected convention — and the user sees
+        a visible note. Never a silent substitution.
+        """
+        engine = getattr(self, "escalation_engine", None)
+        if engine is None:
+            return response_text
+
+        from prometheus.escalation.teacher import build_trace_from_messages
+
+        outcome = await engine.maybe_escalate(
+            session_id=session_id,
+            user_request=user_request,
+            tool_results=build_trace_from_messages(new_messages),
+            final_reply=response_text,
+            agent_mode=bool(self.tool_registry.list_schemas()),
+            primary_provider=self._serving_provider_name(session_id),
+        )
+        if outcome is None:
+            return response_text
+
+        if outcome.status == "escalated" and outcome.corrective_reply:
+            from prometheus.engine.messages import ConversationMessage, TextBlock
+
+            start = len(session.messages)
+            session.messages.append(ConversationMessage(
+                role="assistant",
+                content=[TextBlock(text=outcome.corrective_reply)],
+                provenance="teacher_escalation",
+                is_trusted=False,
+            ))
+            # Reuse the in-place persistence path (WS bridge pattern) so the
+            # teacher turn reaches LCM with its trust tag.
+            session.persist_loop_result(start)
+            return f"{outcome.corrective_reply}\n\n{outcome.note}"
+
+        if outcome.note:
+            # teacher_failed: local reply stands, with the visible note.
+            return f"{response_text}\n\n{outcome.note}"
+        # refused_budget: logged + traced inside the engine; reply unchanged.
+        return response_text
+
+    async def _cmd_escalations(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /escalations — teacher-escalation counters + budget state."""
+        if update.effective_chat is None:
+            return
+        chat_id = update.effective_chat.id
+        engine = getattr(self, "escalation_engine", None)
+        if engine is None:
+            await self.send(
+                chat_id,
+                "Teacher escalation: not available in this build.",
+                parse_mode=None,
+            )
+            return
+        s = engine.stats()
+        armed = f"yes — {s['teacher']}" if s["armed"] else "no (escalation.teacher_model unset)"
+        lines = [
+            "Teacher escalation",
+            f"Armed: {armed}",
+            f"Fired: {s['fired']}   Skills written: {s['skills_written']}",
+            f"Teacher failures: {s['teacher_failed']}   Budget refusals: {s['refused_budget']}",
+            f"Budget: {s['max_per_session']} per session (in-memory, resets on restart)",
+        ]
+        sessions = s.get("sessions") or {}
+        if sessions:
+            lines.append(
+                "Used: " + ", ".join(
+                    f"{k}={v}" for k, v in sorted(sessions.items()))
+            )
+        await self.send(chat_id, "\n".join(lines), parse_mode=None)
 
     async def inject_turn(
         self,

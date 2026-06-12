@@ -1,0 +1,7 @@
+{
+  "description": "Terse question-only reply with zero tool activity on a concrete ask",
+  "tool_results": [],
+  "final_reply": "Which file do you mean?",
+  "expect_failed": true,
+  "expect_patterns_include": ["clarification_stall"]
+}

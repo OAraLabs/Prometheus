@@ -1,0 +1,6 @@
+{
+  "description": "Legitimate substantive clarifying question on a genuinely ambiguous request — must NOT trigger",
+  "tool_results": [],
+  "final_reply": "I can rename it only in src/, or repo-wide including docs and tests — which scope would you like me to use?",
+  "expect_failed": false
+}

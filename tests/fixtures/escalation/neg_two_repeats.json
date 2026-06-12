@@ -1,0 +1,9 @@
+{
+  "description": "Two identical calls is verification, not looping — must NOT trigger",
+  "tool_results": [
+    {"tool_name": "grep", "arguments": {"pattern": "MAX_RETRIES", "path": "src/"}, "result": "src/config.py:12: MAX_RETRIES = 3", "is_error": false},
+    {"tool_name": "grep", "arguments": {"pattern": "MAX_RETRIES", "path": "src/"}, "result": "src/config.py:12: MAX_RETRIES = 3", "is_error": false}
+  ],
+  "final_reply": "Both probes confirm the constant is defined once in src/config.py and used nowhere else.",
+  "expect_failed": false
+}

@@ -734,6 +734,32 @@ async def run_daemon(args: argparse.Namespace) -> None:
     except Exception as exc:
         logger.warning("SkillCreator not available: %s", exc)
 
+    # Teacher escalation (SPRINT-TEACHER-ESCALATION): cloud-teacher recovery
+    # for failed local agent turns. Inert unless escalation.teacher_model is
+    # set in config; from_config always returns an engine so /escalations can
+    # report the unarmed state. SignalBus is wired later in the SENTINEL
+    # block (same late-wire pattern as SkillCreator).
+    escalation_engine = None
+    try:
+        from prometheus.escalation.teacher import TeacherEscalation
+        escalation_engine = TeacherEscalation.from_config(
+            config,
+            telemetry=telemetry,
+            skill_creator=skill_creator if "skill_creator" in dir() else None,
+        )
+        if telegram is not None:
+            telegram.escalation_engine = escalation_engine
+        if escalation_engine.is_armed:
+            logger.info(
+                "Teacher escalation armed: %s (max %d/session)",
+                escalation_engine.stats()["teacher"],
+                escalation_engine.stats()["max_per_session"],
+            )
+        else:
+            logger.info("Teacher escalation inert (escalation.teacher_model unset)")
+    except Exception as exc:
+        logger.warning("Teacher escalation not available: %s", exc)
+
     # Learning loop — SkillRefiner (refine existing skills when execution deviates beneficially)
     try:
         from prometheus.learning.skill_refiner import SkillRefiner
@@ -831,6 +857,11 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 skill_creator.signal_bus = signal_bus
             if "skill_refiner" in dir() and skill_refiner is not None:
                 skill_refiner.signal_bus = signal_bus
+            # SPRINT-TEACHER-ESCALATION: golden traces + escalation events
+            # flow through the bus once it exists (engine falls back to a
+            # direct telemetry row before this point).
+            if escalation_engine is not None:
+                escalation_engine.signal_bus = signal_bus
             # MemoryTool (hermes_memory_tool) emits memory_updated on
             # MEMORY.md / USER.md writes. Module-level setter matches the
             # tools/builtin/sentinel_status.py pattern.

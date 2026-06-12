@@ -1,0 +1,9 @@
+{
+  "description": "Whitespace-only reply after tool activity",
+  "tool_results": [
+    {"tool_name": "bash", "arguments": {"command": "ls"}, "result": "file_a.txt file_b.txt", "is_error": false}
+  ],
+  "final_reply": "  \n  ",
+  "expect_failed": true,
+  "expect_patterns_include": ["empty_reply_after_tools"]
+}

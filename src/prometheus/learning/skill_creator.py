@@ -208,6 +208,29 @@ class SkillCreator:
         if content is None or not content.strip():
             return None
 
+        return await self.persist_skill_content(content, trigger=task_description)
+
+    async def persist_skill_content(
+        self,
+        content: str,
+        *,
+        trigger: str,
+    ) -> Path | None:
+        """Validate and write skill markdown through the standard auto-skill path.
+
+        This is THE write path for machine-generated skills — used by
+        :meth:`maybe_create` and by teacher escalation
+        (``escalation/teacher.py``), so every writer gets the same
+        validation: frontmatter-``name:`` extraction with no fallback,
+        slug confinement to ``[a-z0-9-]`` inside the auto dir (a hostile
+        ``name:`` cannot traverse out), the no-overwrite policy, and the
+        ``skill_created`` signal. Returns the written path, or ``None``
+        when validation rejected the content (failure recorded in
+        ``telemetry.silent_failures``).
+
+        ``trigger`` is the originating task/request description — used for
+        telemetry context and the emitted signal, never for the filename.
+        """
         # PR #20: derive the slug from the LLM's frontmatter ``name:``, not
         # from the raw user message. The pre-PR-#20 path slugified
         # ``task_description``, which produced filenames like
@@ -217,13 +240,13 @@ class SkillCreator:
         # in the frontmatter.
         #
         # If the LLM output lacks a usable ``name:``, we DO NOT fall back to
-        # slugifying ``task_description`` — that's the bug. Skip the write
-        # and record the failure so it surfaces in /health verbose.
+        # slugifying ``trigger`` — that's the bug. Skip the write and record
+        # the failure so it surfaces in /health verbose.
         name = self._extract_name(content)
         if not name:
             self._record_name_failure(
                 content=content,
-                task_description=task_description,
+                task_description=trigger,
                 reason="LLM output missing or empty 'name:' frontmatter field",
             )
             return None
@@ -234,7 +257,7 @@ class SkillCreator:
             # path — don't write junk to disk.
             self._record_name_failure(
                 content=content,
-                task_description=task_description,
+                task_description=trigger,
                 reason=f"LLM 'name:' field {name!r} slugified to empty",
                 name_raw=name,
             )
@@ -253,7 +276,7 @@ class SkillCreator:
         # Beacon WebSocket, and any future subscribers see the event.
         await self._emit_created_signal(
             skill_path=path,
-            task_description=task_description,
+            task_description=trigger,
             content=content,
         )
         return path
