@@ -209,6 +209,26 @@ class TestNoEvidenceRejection:
 # --------------------------------------------------------------------------- #
 
 
+class TestTurnLimitExhaustion:
+
+    def test_model_that_never_stops_is_abandoned_not_crashed(self, tmp_path: Path):
+        # A model that tool-calls forever exhausts run_loop's per-episode
+        # turn allowance, which RAISES. The session must convert that to
+        # honest abandonment, not propagate the RuntimeError.
+        repo = _make_repo(tmp_path, buggy=True)
+        # Every turn views a file (a tool call) → the model never "stops",
+        # so run_loop hits max_turns and raises.
+        forever = [
+            _tool_turn(ToolUseBlock(id=f"v{i}", name="code_view",
+                                    input={"path": "src/calc.py"}))
+            for i in range(20)
+        ]
+        session, _ = _session(repo, forever, max_rounds=3)
+        report = _run(session)
+        assert report.status == "failed_abandoned"
+        assert report.rounds_used <= 3 + 1  # bounded by the cap, no crash
+
+
 class TestCaps:
 
     def test_round_cap_abandons_honestly(self, tmp_path: Path):

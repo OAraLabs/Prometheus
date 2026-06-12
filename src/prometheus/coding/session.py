@@ -216,18 +216,33 @@ class CodingSession:
             )
 
             rounds_before = self._policy.rounds_used
-            async for event, _usage in run_loop(context, messages):
-                if isinstance(event, AssistantTurnComplete):
-                    self._policy.observe_round()
-                elif isinstance(event, ToolExecutionStarted):
-                    if event.tool_name == "code_run":
-                        pending_runs[event.tool_use_id] = str(
-                            (event.tool_input or {}).get("command", "")
-                        )
-                elif isinstance(event, ToolExecutionCompleted):
-                    if event.tool_name == "code_run":
-                        command = pending_runs.pop(event.tool_use_id, "")
-                        self._policy.observe_code_run(command, event.output)
+            try:
+                async for event, _usage in run_loop(context, messages):
+                    if isinstance(event, AssistantTurnComplete):
+                        self._policy.observe_round()
+                    elif isinstance(event, ToolExecutionStarted):
+                        if event.tool_name == "code_run":
+                            pending_runs[event.tool_use_id] = str(
+                                (event.tool_input or {}).get("command", "")
+                            )
+                    elif isinstance(event, ToolExecutionCompleted):
+                        if event.tool_name == "code_run":
+                            command = pending_runs.pop(event.tool_use_id, "")
+                            self._policy.observe_code_run(command, event.output)
+            except RuntimeError as exc:
+                # run_loop raises this when an episode consumes its whole
+                # per-episode turn allowance without the model stopping — the
+                # model kept tool-calling past the budget. Treat it as a hard
+                # episode end (rounds are already counted from the yielded
+                # AssistantTurnComplete events) and fall through to the cap
+                # check, which abandons honestly or accepts if green. Any
+                # OTHER RuntimeError is a real fault and must propagate.
+                if "maximum turn limit" not in str(exc):
+                    raise
+                log.info(
+                    "coding task %s: episode %d hit its turn allowance — "
+                    "evaluating", self._task.task_id, episodes,
+                )
 
             wall = time.monotonic() - started
 
