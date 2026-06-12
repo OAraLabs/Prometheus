@@ -16,6 +16,13 @@ model:
   base_url: "http://localhost:8080" # Inference server URL
   model: ""                         # Auto-detected from server if blank
   grammar_enforcement: true             # GBNF constrained decoding for llama.cpp tool calls
+  # suppress_thinking: true             # UNSET defaults to true: send chat_template_kwargs.thinking=false
+                                        # every turn so the model's reasoning channel stays OFF (keeps
+                                        # gemma4-26b from burning its budget thinking + emitting empty
+                                        # content). Set false to ENABLE thinking on agent turns — only
+                                        # with a server-side llama.cpp --reasoning-budget in place, or
+                                        # unbounded thinking can exhaust the budget. (2026-06-11 bakeoff:
+                                        # the openhands arm ran thinking-on; this knob lets Prometheus match.)
   max_tool_iterations: 25               # Max tool calls per user message before hard stop (local/llama)
   max_tool_iterations_cloud: 50         # Separate cap for cloud (tier=off): Claude plans multi-step sequences local models wouldn't
   fallback_provider: "ollama"
