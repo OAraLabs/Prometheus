@@ -230,6 +230,12 @@ class StubProvider(ModelProvider):
             "messages": messages,
             "max_tokens": request.max_tokens,
             "stream": True,
+            # SPRINT-loop-envelope (F1): OpenAI-compat servers only emit the
+            # usage chunk when asked — without this the stream parser's
+            # ``"usage" in chunk`` branch never fires and every UsageSnapshot
+            # is structurally 0/0. Accounting-only: generation is unaffected,
+            # and servers that predate stream_options ignore unknown fields.
+            "stream_options": {"include_usage": True},
         }
 
         if request.tools:
