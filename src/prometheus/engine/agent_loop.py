@@ -561,6 +561,13 @@ class LoopContext:
     cwd: Path = field(default_factory=Path.cwd)
     max_turns: int = 200
     max_tool_iterations: int = 25
+    # SPRINT-coding-mode v2 (scope item 1): per-RUN thinking override,
+    # forwarded on every model call this context makes. None = provider
+    # default (the global suppress_thinking config, normally True for
+    # gemma); False = this run's calls think, WITHOUT flipping the global
+    # default. The F1 envelope records the effective flag per call
+    # (subsystem_runs.thinking), which is how tests assert it.
+    suppress_thinking: bool | None = None
     # M5: hard ceiling on a single tool's execution. A hung tool (browser,
     # LSP, MCP, TTS — anything without its own deadline) otherwise freezes the
     # turn AND the session. Generous default so legitimate slow tools survive;
@@ -845,6 +852,7 @@ async def run_loop(
                 system_prompt=per_call_system_prompt,
                 max_tokens=context.max_tokens,
                 tools=_payload_tools,
+                suppress_thinking=context.suppress_thinking,
             ),
             operation="loop_round",
             round_index=turn,

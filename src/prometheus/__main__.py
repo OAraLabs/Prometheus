@@ -694,6 +694,95 @@ async def run_interactive(
 
 
 # ---------------------------------------------------------------------------
+# Coding mode (SPRINT-coding-mode v2) — one sandboxed iterate-to-green run
+# ---------------------------------------------------------------------------
+
+def run_coding_task(args) -> int:
+    """`prometheus code` — clone, run the session, print the JSON report.
+
+    Deliberately minimal construction compared to chat mode: the coding
+    session pins its provider (no router/model fallback mid-run — that
+    would confound the acceptance metric), builds its own tool registry
+    around the sandbox, and writes its own system prompt. Thinking is ON
+    by default (the addendum's #1 lever), overridable via
+    --suppress-thinking for ablation runs.
+    """
+    import json as _json
+    import time as _time
+    from dataclasses import asdict
+    from uuid import uuid4 as _uuid4
+
+    from prometheus.coding.sandbox import clone_repo_for_sandbox
+    from prometheus.coding.session import CodingSession, CodingTask
+
+    config = load_config(args.config)
+    model_cfg = dict(config.get("model", {}))
+    provider, model_name = create_provider(model_cfg)
+    adapter = create_adapter(model_cfg, config.get("adapter"))
+
+    telemetry = None
+    if config.get("infrastructure", {}).get("telemetry_enabled", True):
+        try:
+            from prometheus.telemetry.tracker import ToolCallTelemetry
+            telemetry = ToolCallTelemetry()
+        except Exception:
+            pass
+
+    task_id = args.task_id or f"c{_uuid4().hex[:8]}"
+    sandbox_parent = args.sandbox_parent or str(
+        get_data_dir().parent / "coding"
+    )
+    clone_name = f"{task_id}-{int(_time.time())}"
+    try:
+        sandbox = clone_repo_for_sandbox(
+            args.repo, sandbox_parent, name=clone_name
+        )
+    except Exception as exc:
+        print(_json.dumps({
+            "task_id": task_id, "status": "failed_abandoned",
+            "reason": f"sandbox clone failed: {exc}",
+        }))
+        return 1
+
+    session = CodingSession(
+        provider=provider,
+        model=model_name,
+        sandbox=sandbox,
+        task=CodingTask(
+            task_id=task_id,
+            description=args.task_description,
+            acceptance_command=args.acceptance_command,
+        ),
+        adapter=adapter,
+        telemetry=telemetry,
+        max_rounds=args.max_rounds,
+        max_wall_seconds=float(args.max_wall_seconds),
+        suppress_thinking=True if args.suppress_thinking else False,
+    )
+    # A coding run must ALWAYS emit a JSON report and a verdict exit code —
+    # an uncaught exception mid-run (a model-output edge case, a provider
+    # hiccup) otherwise leaves a caller with exit 1 and no report to read.
+    # Emit a structured failed report instead; the traceback goes to stderr
+    # for forensics.
+    try:
+        report = asyncio.run(session.run())
+        payload = asdict(report)
+        payload["sandbox_root"] = str(sandbox.root)
+        print(_json.dumps(payload, indent=2))
+        return 0 if report.status == "success" else 1
+    except Exception as exc:  # noqa: BLE001 — reported, not swallowed
+        import traceback as _tb
+        _tb.print_exc()
+        print(_json.dumps({
+            "task_id": task_id,
+            "status": "failed_error",
+            "reason": f"uncaught {type(exc).__name__}: {exc}",
+            "sandbox_root": str(sandbox.root),
+        }, indent=2))
+        return 1
+
+
+# ---------------------------------------------------------------------------
 # One-shot mode
 # ---------------------------------------------------------------------------
 
@@ -899,6 +988,44 @@ def main() -> None:
         help="Skip confirmation prompt",
     )
 
+    # SPRINT-coding-mode v2: sandboxed iterate-to-green coding run.
+    code_parser = subparsers.add_parser(
+        "code", help="Run a coding task in a sandboxed clone (iterate-to-green)",
+    )
+    code_parser.add_argument(
+        "--repo", required=True,
+        help="Path to the target git repository (cloned, never touched)",
+    )
+    code_parser.add_argument(
+        "--task", required=True, dest="task_description",
+        help="What to do, in plain language",
+    )
+    code_parser.add_argument(
+        "--acceptance", required=True, dest="acceptance_command",
+        help="Command that must exit 0 for the task to count as done",
+    )
+    code_parser.add_argument(
+        "--task-id", default=None,
+        help="Task id (default: generated; names the branch coding/<id>)",
+    )
+    code_parser.add_argument(
+        "--max-rounds", type=int, default=30,
+        help="Model-round cap across the whole run (default: 30)",
+    )
+    code_parser.add_argument(
+        "--max-wall-seconds", type=int, default=1200,
+        help="Wall-clock cap for the run (default: 1200)",
+    )
+    code_parser.add_argument(
+        "--sandbox-parent", default=None,
+        help="Where the dedicated clone lives (default: ~/.prometheus/coding)",
+    )
+    code_parser.add_argument(
+        "--suppress-thinking", action="store_true",
+        help="Run with thinking suppressed (default: coding turns THINK — "
+             "the addendum's highest-leverage lever)",
+    )
+
     # SUNRISE: export-traces — write golden tool-call traces to JSONL for fine-tuning.
     export_parser = subparsers.add_parser(
         "export-traces", help="Export golden tool-call traces to a JSONL file",
@@ -955,6 +1082,12 @@ def main() -> None:
         from prometheus.cli.migrate import run_migration
         success = run_migration(args)
         sys.exit(0 if success else 1)
+
+    # SPRINT-coding-mode v2: one sandboxed coding run, then exit. The JSON
+    # report goes to stdout (a managed task's output file captures it);
+    # the exit code is the verdict.
+    if args.command == "code":
+        sys.exit(run_coding_task(args))
 
     # SUNRISE: export-traces — manual trigger for golden trace JSONL export.
     if args.command == "export-traces":

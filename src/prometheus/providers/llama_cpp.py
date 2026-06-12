@@ -38,6 +38,15 @@ from prometheus.providers.stub import (
 log = logging.getLogger(__name__)
 
 
+# The llama-server unit on the model box runs with
+# ``--reasoning-budget-message "[REASONING_BUDGET_EXHAUSTED]"`` — the server
+# injects this string into the reasoning stream right before it forces the
+# end-of-thinking tag when ``--reasoning-budget N`` runs out. It is the
+# deterministic in-band signal that thinking was truncated; if the unit's
+# message ever changes, change this constant with it.
+REASONING_BUDGET_MARKER = "[REASONING_BUDGET_EXHAUSTED]"
+
+
 class EmptyCompletionError(RuntimeError):
     """Raised inside the provider to mark an empty-content completion in telemetry.
 
@@ -237,6 +246,49 @@ class LlamaCppProvider(ModelProvider):
 
         return payload
 
+    def _record_reasoning_budget_exhaustion(
+        self,
+        *,
+        model: str,
+        reasoning_chars: int,
+        finish_reason: str | None,
+        content_chars: int,
+    ) -> bool:
+        """Record one ``subsystem_runs`` row when the server truncated thinking.
+
+        Fires when the configured ``--reasoning-budget-message`` marker
+        (:data:`REASONING_BUDGET_MARKER`) appears in the accumulated
+        reasoning stream. Outcome is ``"partial"`` — the call itself
+        succeeded (content was still generated after the forced
+        end-of-thinking), but the reasoning was cut. Distinct from
+        ``_finalize_content``'s empty-content path, which covers the old
+        unbounded shape (thinking ate the whole token budget and content
+        never arrived). Returns whether a row was written.
+        """
+        try:
+            from prometheus.telemetry.tracker import get_telemetry_handle
+
+            tel = get_telemetry_handle()
+            if tel is not None and hasattr(tel, "record_run"):
+                tel.record_run(
+                    subsystem="llama_cpp_provider",
+                    operation="reasoning_budget_exhausted",
+                    outcome="partial",
+                    summary={
+                        "marker": REASONING_BUDGET_MARKER,
+                        "reasoning_chars": reasoning_chars,
+                        "content_chars": content_chars,
+                        "finish_reason": finish_reason,
+                    },
+                    model=model,
+                )
+                return True
+        except Exception:
+            log.exception(
+                "llama.cpp: budget-exhaustion telemetry write failed"
+            )
+        return False
+
     def _finalize_content(
         self,
         accumulated_text: str,
@@ -423,6 +475,23 @@ class LlamaCppProvider(ModelProvider):
                                 accumulated_tool_calls[idx]["function"]["name"] += fn["name"]
                             if fn.get("arguments"):
                                 accumulated_tool_calls[idx]["function"]["arguments"] += fn["arguments"]
+
+        # Reasoning-budget truncation: the server injects the configured
+        # marker into the reasoning stream when --reasoning-budget runs out.
+        # Record it (outcome="partial") so budget pressure is queryable —
+        # coding-mode turns run thinking-on and need this observable.
+        if accumulated_reasoning and REASONING_BUDGET_MARKER in accumulated_reasoning:
+            log.warning(
+                "llama.cpp reasoning budget exhausted (reasoning_chars=%d, "
+                "content_chars=%d, finish=%s)",
+                len(accumulated_reasoning), len(accumulated_text), finish_reason,
+            )
+            self._record_reasoning_budget_exhaustion(
+                model=request.model,
+                reasoning_chars=len(accumulated_reasoning),
+                finish_reason=finish_reason,
+                content_chars=len(accumulated_text),
+            )
 
         # Empty-content handling: log + record + best-effort fallback to
         # reasoning_content so the call returns SOMETHING actionable instead
