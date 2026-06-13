@@ -13,12 +13,23 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Close code for an unauthenticated / failed-auth WebSocket. 4000–4999 is the
+# application-private range; 4401 mirrors HTTP 401 for "unauthorized". Beacon
+# and the static UI key their auth-failure UX off this exact code.
+WS_CLOSE_UNAUTHORIZED = 4401
+
+# How long a freshly-connected socket has to send its auth frame before the
+# server closes it. Short enough that an idle/probing connection can't sit
+# open; long enough for a real client's first round-trip.
+AUTH_FRAME_TIMEOUT_SECONDS = 5.0
 
 
 class WebSocketBridge:
@@ -30,13 +41,42 @@ class WebSocketBridge:
         session_mgr: Any | None = None,
         loop_context: Any | None = None,
         agent_state_ref: Any | None = None,
+        api_token: str | None = None,
     ) -> None:
         self.signal_bus = signal_bus
         self.session_mgr = session_mgr
         self.loop_context = loop_context
         self.agent_state_ref = agent_state_ref
+        # Same secret the REST middleware uses (config.web.api_token /
+        # PROMETHEUS_API_TOKEN). Empty/None => auth DISABLED, exactly like
+        # the REST side, so dev/no-token setups (and the tokenless static UI)
+        # keep working unchanged.
+        self._api_token = api_token or ""
         self._clients: set[Any] = set()
         self._server: Any = None
+
+    @property
+    def auth_required(self) -> bool:
+        """True when a non-empty token is configured (parity with REST)."""
+        return bool(self._api_token)
+
+    def _token_ok(self, raw: str) -> bool:
+        """Validate a first-frame auth message: {"type":"auth","token":...}.
+
+        Constant-time token comparison (``hmac.compare_digest``) so a timing
+        side-channel can't probe the secret. Any parse error, wrong type, or
+        missing/incorrect token is a clean False — the caller closes 4401.
+        """
+        try:
+            msg = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return False
+        if not isinstance(msg, dict) or msg.get("type") != "auth":
+            return False
+        token = msg.get("token")
+        if not isinstance(token, str):
+            return False
+        return hmac.compare_digest(token, self._api_token)
 
     async def start(self, host: str = "0.0.0.0", port: int = 8010) -> None:
         """Start the WebSocket server."""
@@ -63,11 +103,22 @@ class WebSocketBridge:
             await self._server.wait_closed()
 
     async def _handler(self, websocket: Any) -> None:
-        """Handle a single WebSocket client connection."""
+        """Handle a single WebSocket client connection.
+
+        First-frame auth: when a token is configured, the socket must send
+        ``{"type":"auth","token":...}`` within ``AUTH_FRAME_TIMEOUT_SECONDS``
+        as its FIRST frame. Until that succeeds the server sends NOTHING — not
+        even the ``connected`` welcome — so an unauthenticated client receives
+        zero frames before the 4401 close. (See the Phase-0 survey: a browser
+        client exists and cannot set an upgrade header, so auth is in-band.)
+        """
+        if self.auth_required and not await self._authenticate(websocket):
+            return  # _authenticate already closed the socket 4401
+
         self._clients.add(websocket)
         logger.info("Client connected (%d total)", len(self._clients))
 
-        # Send welcome
+        # Welcome is sent only AFTER auth — never to an unauthenticated socket.
         await self._send_one(websocket, {
             "type": "connected",
             "timestamp": time.time(),
@@ -82,6 +133,39 @@ class WebSocketBridge:
         finally:
             self._clients.discard(websocket)
             logger.info("Client disconnected (%d remain)", len(self._clients))
+
+    async def _authenticate(self, websocket: Any) -> bool:
+        """Await + validate the first-frame auth token. Closes 4401 on failure.
+
+        Returns True only when a well-formed ``{"type":"auth","token":...}``
+        frame with the correct token arrives within the timeout. The socket is
+        NOT added to ``_clients`` and NO frame is sent until this returns True,
+        so a rejected client provably receives nothing.
+        """
+        try:
+            raw = await asyncio.wait_for(
+                websocket.recv(), timeout=AUTH_FRAME_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            await self._close_unauthorized(websocket, "auth frame timeout")
+            return False
+        except Exception:
+            # Connection dropped/closed before sending anything.
+            return False
+
+        if self._token_ok(raw):
+            return True
+        await self._close_unauthorized(websocket, "invalid or missing auth token")
+        return False
+
+    async def _close_unauthorized(self, websocket: Any, reason: str) -> None:
+        # Generic client-facing reason (no token echo, ever); the specific
+        # cause stays in the server log only.
+        logger.info("WS auth rejected: %s", reason)
+        try:
+            await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="unauthorized")
+        except Exception:
+            pass
 
     async def _handle_client_message(self, websocket: Any, raw: str) -> None:
         """Process a command from the browser client."""
