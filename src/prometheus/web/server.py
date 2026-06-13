@@ -21,6 +21,48 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+# Cap on the coding diff payload (matches the files-preview 256 KB cap).
+_CODING_DIFF_CAP = 256 * 1024
+
+
+def _load_coding_report(output_file: "Path") -> dict | None:
+    """Parse a coding run's final JSON report from its managed-task output file.
+
+    The ``prometheus code`` subprocess prints exactly one JSON object (the run
+    report) to stdout at the end; while running, the file holds no such object.
+    Returns the LAST balanced top-level ``{...}`` that parses to a dict with a
+    ``status`` field, or ``None`` if no report has been written yet.
+    """
+    import json as _json
+
+    try:
+        text = output_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # Scan from the end for a line-anchored object, then the whole-text fallback.
+    candidates: list[str] = []
+    idx = text.rfind("\n{")
+    if idx >= 0:
+        candidates.append(text[idx + 1 :].strip())
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        candidates.append(stripped)
+    for cand in candidates:
+        try:
+            obj = _json.loads(cand)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("status"), str):
+            return obj
+    return None
+
+
+def _coding_sandbox_root() -> "Path":
+    """The directory API-launched coding runs clone into (~/.prometheus/coding)."""
+    from prometheus.config.paths import get_data_dir
+
+    return (get_data_dir().parent / "coding").resolve()
+
 
 def create_app(
     config: dict[str, Any],
@@ -1004,6 +1046,69 @@ def create_app(
             "return_code": record.return_code,
             "error": record.error,
             "output_tail": output_tail,
+        }
+
+    @app.post("/api/code/{task_id}/stop")
+    async def stop_coding_run(task_id: str):
+        """Cancel a running coding task — SIGTERM→SIGKILL the subprocess. Thin
+        wrapper over BackgroundTaskManager.stop_task (which already marks the
+        task ``killed``, persists, and emits completion)."""
+        from prometheus.tasks.manager import get_task_manager
+
+        mgr = get_task_manager()
+        if mgr.get_task(task_id) is None:
+            return JSONResponse(status_code=404, content={"error": "no such task"})
+        try:
+            record = await mgr.stop_task(task_id)
+        except ValueError:
+            # Already terminal / not a running task.
+            return JSONResponse(status_code=409, content={"error": "task is not running"})
+        except Exception as exc:  # noqa: BLE001 — surface, never 500-with-traceback
+            return JSONResponse(status_code=500, content={"error": str(exc)})
+        return {"task_id": record.id, "status": record.status}
+
+    @app.get("/api/code/{task_id}/diff")
+    async def get_coding_diff(task_id: str):
+        """Full unified diff of a finished coding run's artifact commit.
+
+        Reads ``sandbox_root`` from the run's report (the daemon's own trusted
+        output), validates it resolves UNDER ~/.prometheus/coding and is a git
+        repo (defense in depth), and runs ``git -C <root> diff HEAD~1..HEAD`` —
+        the same range that produced the report's ``diff_stat``. ``ready:false``
+        while the run hasn't reported yet."""
+        import subprocess as _sp
+
+        from prometheus.tasks.manager import get_task_manager
+
+        record = get_task_manager().get_task(task_id)
+        if record is None:
+            return JSONResponse(status_code=404, content={"error": "no such task"})
+        report = _load_coding_report(record.output_file)
+        if report is None:
+            return {"ready": False, "diff": "", "branch": None}
+        sandbox_root = report.get("sandbox_root")
+        if not isinstance(sandbox_root, str) or not sandbox_root:
+            return JSONResponse(status_code=422, content={"error": "report has no sandbox_root"})
+        root = Path(sandbox_root).resolve()
+        coding_root = _coding_sandbox_root()
+        if not (root == coding_root or root.is_relative_to(coding_root)) or not (root / ".git").is_dir():
+            return JSONResponse(status_code=422, content={"error": "sandbox path is not a coding repo"})
+        try:
+            proc = _sp.run(
+                ["git", "-C", str(root), "--no-pager", "diff", "HEAD~1..HEAD"],
+                capture_output=True, text=True, timeout=20,
+            )
+        except (OSError, _sp.SubprocessError) as exc:
+            return JSONResponse(status_code=500, content={"error": f"git diff failed: {exc}"})
+        diff = proc.stdout or ""
+        truncated = len(diff) > _CODING_DIFF_CAP
+        if truncated:
+            diff = diff[:_CODING_DIFF_CAP]
+        return {
+            "ready": True,
+            "branch": report.get("branch"),
+            "diff": diff,
+            "truncated": truncated,
         }
 
     # ── Kanban (Projects + Stories board — Beacon Desktop) ──────────
