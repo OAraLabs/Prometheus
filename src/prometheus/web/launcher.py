@@ -76,12 +76,19 @@ async def launch_web(
     # Wire agent state ref into the app
     app.state.agent_state_ref = agent_state_ref
 
-    # Create WebSocket bridge
+    # Create WebSocket bridge. The WS uses the SAME token as the REST
+    # middleware (config.web.api_token or PROMETHEUS_API_TOKEN); empty => auth
+    # disabled on both, in lockstep. Resolved here, never logged.
+    import os as _os
+    _api_token = config.get("web", {}).get("api_token") or _os.environ.get(
+        "PROMETHEUS_API_TOKEN", ""
+    )
     bridge = WebSocketBridge(
         signal_bus=signal_bus,
         session_mgr=session_mgr,
         loop_context=loop_context,
         agent_state_ref=agent_state_ref,
+        api_token=_api_token,
     )
 
     # Expose the bridge on the FastAPI app so REST routes (e.g.

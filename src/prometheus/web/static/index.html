@@ -518,9 +518,25 @@
     ws.onopen = () => {
       wsPill.textContent = "WS: live";
       wsPill.className = "pill ws-state up";
-      try { ws.send(JSON.stringify({ type: "subscribe", payload: { channels: ["*"] } })); } catch {}
+      // First-frame auth: the daemon requires {type:"auth",token} as the FIRST
+      // frame when a token is configured (it closes 4401 otherwise). The token
+      // lives in this browser's localStorage — entered by the user, NEVER
+      // embedded in the served HTML. When the daemon has no token (auth off),
+      // this frame is harmlessly ignored. Auth must precede subscribe.
+      try {
+        const token = localStorage.getItem("prometheus_token");
+        if (token) ws.send(JSON.stringify({ type: "auth", token }));
+        ws.send(JSON.stringify({ type: "subscribe", payload: { channels: ["*"] } }));
+      } catch {}
     };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
+      if (ev && ev.code === 4401) {
+        // Distinct, non-reconnecting auth-failure state — a retry loop would
+        // just hammer the daemon with the same bad/absent token.
+        wsPill.textContent = "WS: unauthorized — set token";
+        wsPill.className = "pill ws-state down";
+        return;
+      }
       wsPill.textContent = "WS: down — reconnecting…";
       wsPill.className = "pill ws-state down";
       clearTimeout(reconnectTimer);
