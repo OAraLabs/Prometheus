@@ -125,6 +125,10 @@ The architecture doesn't care where the tokens come from. It cares that the tool
 
 Markdown skill files in `skills/` that teach the agent patterns — from code review to subagent-driven development to git workflows. The SkillCreator auto-generates new skills from successful task traces. The SkillRefiner compares execution traces to skill prescriptions and updates skills when deviations improve outcomes.
 
+### Coding Mode
+
+Point the agent at a coding task and it runs in a sandbox, iterating until the build and tests pass — "iterate-to-green." LSP diagnostics feed type errors back into the same loop, so the model self-corrects against compiler ground truth instead of guessing. The result is a reviewable diff: nothing lands on your branches until you merge it.
+
 ### Identity System
 
 - **SOUL.md** — persistent identity loaded into every prompt. Survives `/reset`. Generated from templates at setup — no hardcoded names.
@@ -141,6 +145,7 @@ Markdown skill files in `skills/` that teach the agent patterns — from code re
 - Audit logging (SQLite + JSONL), exfiltration detection, prompt injection defense
 - Approval queue — `/approve`, `/deny`, `/pending` via Telegram
 - Credential pool rotation with dead key cooldown
+- Authenticated control plane — bearer-token auth on the REST API plus first-frame token auth on the WebSocket bridge (`PROMETHEUS_API_TOKEN`)
 
 ### Always-On
 
@@ -164,9 +169,22 @@ Markdown skill files in `skills/` that teach the agent patterns — from code re
 - Mutating tools run sequentially — no race conditions
 - Security hooks still run on every call
 
+### Durable Background Tasks
+
+- Long-running work is registered as a managed task with durable storage (`tasks.db`) that survives restarts
+- Event-driven completion detection emits a signal and notifies you (e.g. via Telegram) the moment a task finishes
+- An honesty check catches the agent promising "I'll let you know when it's done" without actually registering a task to back that promise — so async commitments are real, not hallucinated
+
+### Fine-Tuning Flywheel (in progress)
+
+- Successful tool-call traces and adapter repair-pairs are captured, stored, and mined into an exportable dataset (capture → store → miner → export)
+- Browse what's been collected with `/pairs`
+- This is the data-collection half of a LoRA fine-tuning loop for the local model; the training step itself is still on the roadmap
+
 ### Observability
 
 - Tool call telemetry (SQLite) — success rates per model per tool
+- Every model call is wrapped in an `LLMCallEnvelope` — per-round token/usage accounting and capture of silent failures that older code paths used to swallow
 - Phoenix/OpenTelemetry tracing — env-gated (`PROMETHEUS_TRACING=1`), zero-cost no-ops when off
 - Failure classification in evals (model issue vs harness issue vs unclear)
 - Trend tracking across evaluation runs
@@ -310,6 +328,10 @@ profile:
 | `/profile` | Switch agent profiles |
 | `/anatomy` | Infrastructure snapshot |
 | `/beacon` | Web dashboard status, start/stop/restart |
+| `/steer` | Inject a mid-turn course-correction while the agent is working |
+| `/queue` | Queue a message for the agent to pick up after the current task |
+| `/tasks` | List managed background tasks and their status |
+| `/pairs` | Browse captured repair-pairs / golden traces |
 | `/approve` `/deny` `/pending` | Manage approval queue |
 | `/claude` `/gpt` `/gemini` `/xai` | Per-session cloud provider override |
 | `/local` | Clear override, return to primary local model |
@@ -381,6 +403,10 @@ prometheus/
 ├── templates/           # Identity templates (no personal data)
 ├── skills/              # 92 builtin skill files (.md)
 ├── tests/               # 1,179+ tests across 53 files
+├── docs/                # Architecture, model registry, sprint reports
+├── audits/              # Timestamped audit reports (diffable across runs)
+├── gym/                 # Eval & fine-tuning gym (repair-pair capture, benchmark tasks)
+├── .githooks/           # Pre-commit hook (blocks secrets, Tailscale IPs, host refs)
 ├── config/
 │   └── prometheus.yaml.default   # Reference config (no secrets)
 ├── scripts/
@@ -437,7 +463,7 @@ All evaluation runs locally — the LLM judge uses constrained decoding on your 
 - [x] Migration tool (Hermes + OpenClaw)
 - [x] Phoenix/OpenTelemetry tracing
 - [x] Web UI for setup and monitoring (Beacon dashboard)
-- [ ] Fine-tuning flywheel (LoRA on collected traces)
+- [ ] Fine-tuning flywheel (LoRA on collected traces) — *capture/export pipeline shipped (#30); training loop pending*
 
 ## License
 
