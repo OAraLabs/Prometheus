@@ -254,9 +254,35 @@ class BackgroundTaskManager:
     # Queries / mutation (unchanged public surface)
     # ------------------------------------------------------------------
 
+    def _load_task(self, task_id: str) -> TaskRecord | None:
+        """Resolve a task by id: in-memory first, then the durable TaskStore.
+
+        Restart survival: a task that finished BEFORE this daemon lifetime is
+        durably in tasks.db (``_watch_process`` persists the terminal record)
+        but absent from ``_tasks`` (``resume_running`` only re-reads *running*
+        tasks). Falling back to ``store.get`` rehydrates completed/killed/failed
+        tasks ON DEMAND — bounded, unlike eagerly loading every historical row
+        at startup — and caches the hit so ``stop_task`` and repeat reads
+        resolve without re-querying. Returns None only when the id is unknown
+        to BOTH the live map and the durable store (a genuine 404).
+        """
+        task = self._tasks.get(task_id)
+        if task is not None:
+            return task
+        if self.store is None:
+            return None
+        try:
+            rec = self.store.get(task_id)
+        except Exception:
+            log.warning("TaskStore.get failed for %s", task_id, exc_info=True)
+            return None
+        if rec is not None:
+            self._tasks[task_id] = rec  # cache the rehydrated record
+        return rec
+
     def get_task(self, task_id: str) -> TaskRecord | None:
-        """Return one task record by ID."""
-        return self._tasks.get(task_id)
+        """Return one task record by ID (durable-store fallback; see _load_task)."""
+        return self._load_task(task_id)
 
     def list_tasks(self, *, status: TaskStatus | None = None) -> list[TaskRecord]:
         """Return all tasks, newest first, optionally filtered by status."""
@@ -387,7 +413,10 @@ class BackgroundTaskManager:
     # ------------------------------------------------------------------
 
     def _require_task(self, task_id: str) -> TaskRecord:
-        task = self._tasks.get(task_id)
+        # Durable-store fallback (see _load_task): a completed/killed task from a
+        # prior daemon lifetime resolves here too, so stop_task on it returns the
+        # terminal record rather than raising.
+        task = self._load_task(task_id)
         if task is None:
             raise ValueError(f"No task found with ID: {task_id}")
         return task
