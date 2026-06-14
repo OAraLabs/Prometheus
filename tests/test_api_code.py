@@ -22,9 +22,10 @@ from prometheus.web.server import create_app  # noqa: E402
 
 
 class _StubManager:
-    def __init__(self, tmp_path: Path, *, reject: bool = False) -> None:
+    def __init__(self, tmp_path: Path, *, reject: bool = False, stuck_stop: bool = False) -> None:
         self._tmp = tmp_path
         self._reject = reject
+        self._stuck_stop = stuck_stop
         self.created_with: dict | None = None
         self._records: dict[str, TaskRecord] = {}
 
@@ -55,12 +56,16 @@ class _StubManager:
         return self._records.get(task_id)
 
     async def stop_task(self, task_id: str) -> TaskRecord:
-        # Mirrors BackgroundTaskManager.stop_task: kills a running task, raises
-        # ValueError when there is nothing running to stop.
+        # Mirrors the REAL BackgroundTaskManager.stop_task: a terminal task is
+        # returned as-is (idempotent — a process-less terminal run reaches the
+        # `status in TERMINAL_STATUSES → return task` branch), a running one is
+        # killed. The genuine ValueError("not running") case is a non-terminal,
+        # process-less, waiter-less task — modelled by `stuck_stop`.
         rec = self._records[task_id]
-        if rec.status in ("completed", "failed", "killed"):
+        if self._stuck_stop:
             raise ValueError("not running")
-        rec.status = "killed"
+        if rec.status not in ("completed", "failed", "killed"):
+            rec.status = "killed"
         return rec
 
 
@@ -205,11 +210,24 @@ def test_stop_unknown_task_404(monkeypatch, tmp_path):
     assert c.post("/api/code/nope/stop").status_code == 404
 
 
-def test_stop_already_terminal_task_409(monkeypatch, tmp_path, repo):
+def test_stop_completed_is_idempotent_terminal(monkeypatch, tmp_path, repo):
+    # Spec: /stop on a completed run returns the terminal state, not 404/409 —
+    # the real manager returns the record (process-less terminal branch).
     mgr = _StubManager(tmp_path)
     c = _client_with(monkeypatch, mgr)
     c.post("/api/code", json={"repo": str(repo), "description": "x", "acceptance_command": "y"})
     mgr._records["a12345678"].status = "completed"  # already done
+    r = c.post("/api/code/a12345678/stop")
+    assert r.status_code == 200
+    assert r.json() == {"task_id": "a12345678", "status": "completed"}
+
+
+def test_stop_stuck_not_running_task_409(monkeypatch, tmp_path, repo):
+    # The genuine 409 path: stop_task raises ValueError (non-terminal task with
+    # no process/waiter) → the route maps it to 409.
+    mgr = _StubManager(tmp_path, stuck_stop=True)
+    c = _client_with(monkeypatch, mgr)
+    c.post("/api/code", json={"repo": str(repo), "description": "x", "acceptance_command": "y"})
     r = c.post("/api/code/a12345678/stop")
     assert r.status_code == 409
     assert "not running" in r.json()["error"]
