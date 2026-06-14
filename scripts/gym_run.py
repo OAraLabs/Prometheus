@@ -37,6 +37,18 @@ async def main() -> int:
         action="store_true",
         help="skip running; regenerate the report from stored rows",
     )
+    parser.add_argument(
+        "--harvest",
+        action="store_true",
+        help="capture repair-pairs induced by this run into the gym harvest DB "
+             "(closeout follow-up #6 — the 1,000-pair path). Off by default so "
+             "ordinary gym runs don't write training pairs.",
+    )
+    parser.add_argument(
+        "--harvest-db",
+        default=None,
+        help="override the harvest DB path (default ~/.prometheus/data/gym-training.db)",
+    )
     args = parser.parse_args()
 
     manifest = load_manifest(args.manifest)
@@ -48,6 +60,16 @@ async def main() -> int:
     print(f"    variable: {manifest.variable_name} {manifest.variable_payload or ''}")
     print(f"    runs/task: {manifest.runs_per_task}")
     print("=" * 60)
+
+    harvest_start = 0
+    harvest_db = None
+    if args.harvest:
+        from prometheus.gym.harvest import configure_harvest, pair_total
+
+        harvest_db = configure_harvest(args.harvest_db)
+        harvest_start = pair_total()
+        print(f"🌱 harvest ON — capturing induced repair-pairs → {harvest_db}")
+        print(f"    starting pairs: {harvest_start}")
 
     if not args.report_only:
         existing = store.runs(manifest.series, manifest.experiment)
@@ -61,6 +83,12 @@ async def main() -> int:
         totals = await run_experiment(manifest, taskset, config, store=store)
         print("=" * 60)
         print(f"Done: {totals['passed']}/{totals['runs']} runs passed")
+
+    if args.harvest:
+        from prometheus.gym.harvest import pair_total
+
+        gained = pair_total() - harvest_start
+        print(f"🌱 harvested {gained} new repair-pair(s) → {harvest_db}")
 
     rows = store.runs(manifest.series, manifest.experiment)
     if not rows:

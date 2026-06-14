@@ -1,0 +1,16 @@
+# Pair-harvest run — same repair-inducing variable as s1-exp3 (adapter_unwrap),
+# under a separate (series, experiment) so it never clobbers the committed s1
+# results. Run with --harvest to capture every induced unwrap as a training
+# pair into ~/.prometheus/data/gym-training.db. Closeout follow-up #6.
+series: harvest
+experiment: unwrap
+taskset: gym/tasksets/v1.yaml
+runs_per_task: 3
+variable:
+  adapter_unwrap:
+    tools: [task_create, task_list, sessions_list, browser, download_file]
+notes: >
+  Harvest run: drive the v1 task set with conservative dict-wrap unwrapping on,
+  pair-capture configured to the gym harvest DB. Each phantom-nesting the model
+  emits that the adapter losslessly unwraps becomes a schema_repair training
+  pair. Yield ≈ the repair count (exp3 fired ~10 across 66 runs).
