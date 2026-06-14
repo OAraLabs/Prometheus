@@ -64,3 +64,31 @@ form) is untouched.
 - F4 schema-tax now measurable via F1 usage rows.
 
 Proceeding to Phase 1 (no contradiction with the anticipated World 1).
+
+---
+
+## ACCEPTANCE (live) — PASSED
+
+Daemon restarted onto this branch. Launched a t11-class coding run via `POST /api/code` against the
+marshmallow fixture → managed task `aa9f2c9ee`, completed in 125 s. Captured the pre-restart diff
+(561 bytes). **Restarted the daemon** (fresh `_tasks`; `aa9f2c9ee` now finished before the current
+lifetime), then hit all three routes against it:
+
+- `GET /api/code/aa9f2c9ee` → **200**, `status=completed`.
+- `GET /api/code/aa9f2c9ee/diff` → **200**, `ready=true`, `branch=coding/restart-accept`, **561
+  bytes IDENTICAL to the pre-restart diff** — the real artifact (the model's `ensure_list`
+  implementation in `src/marshmallow/utils.py`):
+
+  ```diff
+  @@ -80,6 +80,14 @@ def ensure_text_type(val: str | bytes) -> str:
+  +def ensure_list(obj: typing.Any) -> list[typing.Any]:
+  +    if obj is None:
+  +        return []
+  +    if isinstance(obj, list):
+  +        return obj
+  +    return [obj]
+  ```
+- `POST /api/code/aa9f2c9ee/stop` → **200** `{"status":"completed"}` (idempotent terminal, not 404).
+- `GET /api/code/ghost-nonexistent/diff` → **404** (no false rehydration).
+
+The orphaned-completed-run bug is closed. Full suite 2710 passed.
