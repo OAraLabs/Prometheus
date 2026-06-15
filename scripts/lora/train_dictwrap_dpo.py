@@ -17,6 +17,15 @@ matched by suffix so nesting under a multimodal wrapper is fine).
 
   --dry-run  : load model, attach LoRA, run ONE DPO step. Validates the brand-new
                gemma4 arch + the chat-template rendering BEFORE the full train.
+
+HARDWARE FINDING (2026-06-15, single 24GB 4090): this does NOT fit one 24GB card.
+bnb does not 4-bit-quantize the FUSED MoE expert tensors, so the "4-bit" model is
+~22GB resident — no headroom to train. CPU-offloading the frozen experts is the
+right shape but hits an accelerate↔bnb↔transformers chain on this brand-new arch
+(Params4bit `_is_hf_initialized`, then meta-tensor `.item()`). Unblock: run on a
+≥40GB GPU with `--gpu-gib 40` (everything on GPU, no offload, no offload bugs), or
+pin a known-good offload stack validated on a small model first. The dataset +
+this script are otherwise ready.
 """
 from __future__ import annotations
 
@@ -127,9 +136,20 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--epochs", type=float, default=1.0)
     ap.add_argument("--beta", type=float, default=0.1)
-    ap.add_argument("--max-len", type=int, default=1024)
+    ap.add_argument("--max-len", type=int, default=512)
+    ap.add_argument("--gpu-gib", type=int, default=20, help="GiB to keep on GPU; rest (experts) → CPU")
     ap.add_argument("--dry-run", action="store_true", help="1 step — validate arch + rendering")
     args = ap.parse_args()
+
+    # accelerate's CPU-offload hook passes `_is_hf_initialized` into bnb's
+    # Params4bit.__new__, which this bnb version rejects. Strip the unexpected
+    # kwarg so 4-bit params can be offloaded to CPU (frozen experts → CPU).
+    import bitsandbytes as _bnb
+    _orig = _bnb.nn.Params4bit.__new__
+    def _patched(cls, *a, **kw):
+        kw.pop("_is_hf_initialized", None)
+        return _orig(cls, *a, **kw)
+    _bnb.nn.Params4bit.__new__ = staticmethod(_patched)
 
     tok = AutoTokenizer.from_pretrained(args.base)
     if tok.pad_token is None:
@@ -145,10 +165,16 @@ def main() -> int:
 
     bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                              bnb_4bit_compute_dtype=torch.bfloat16,
-                             bnb_4bit_use_double_quant=True)
-    print(f"[model] loading {args.base} in 4-bit …")
+                             bnb_4bit_use_double_quant=True,
+                             llm_int8_enable_fp32_cpu_offload=True)
+    print(f"[model] loading {args.base} (4-bit, GPU+CPU overflow) …")
+    # gemma-4-26B-A4B is MoE and bnb does NOT 4-bit the fused expert tensors, so
+    # the frozen base is ~22GB — too big to TRAIN on one 24GB card. Let accelerate
+    # keep as much (attention = the LoRA target, embeddings) on GPU as fits and
+    # overflow the frozen experts to CPU. Slower forward, but it fits.
     model = AutoModelForCausalLM.from_pretrained(
-        args.base, quantization_config=bnb, torch_dtype=torch.bfloat16, device_map="auto")
+        args.base, quantization_config=bnb, dtype=torch.bfloat16,
+        device_map="auto", max_memory={0: f"{args.gpu_gib}GiB", "cpu": "120GiB"})
     model.config.use_cache = False
 
     lora = LoraConfig(r=args.rank, lora_alpha=args.alpha, lora_dropout=0.05,
@@ -160,7 +186,7 @@ def main() -> int:
         per_device_train_batch_size=1, gradient_accumulation_steps=8,
         learning_rate=args.lr, num_train_epochs=args.epochs,
         max_steps=1 if args.dry_run else -1,
-        max_length=args.max_len, max_prompt_length=args.max_len // 2,
+        max_length=args.max_len, max_prompt_length=max(256, args.max_len - 140),
         logging_steps=5, save_strategy="no", bf16=True,
         gradient_checkpointing=True, report_to=[])
     trainer = DPOTrainer(model=model, args=cfg, train_dataset=ds,
