@@ -1,0 +1,26 @@
+# Series 2, experiment 1 — background-work ROUTING LINE.
+# One variable: the system prompt gains a single sentence steering background /
+# unattended work to task_create(type=local_agent), applying exp1's proven
+# "the model copies what the prompt shows it" mechanism to the 0/12-everywhere
+# agent-mode gap (task_create_agent_implicit). Compared against s2-exp0.
+series: s2
+experiment: exp1-routing-line
+taskset: gym/tasksets/v2.yaml
+runs_per_task: 3
+variable:
+  system_prompt:
+    text: |
+      You are a coding assistant with access to tools.
+      Use tools to accomplish tasks. Be concise in responses.
+      When asked to create files, use the exact path given.
+      When asked to run commands, use the bash tool.
+      For background, unattended, or multi-step research/batch work, use the
+      task_create tool with type='local_agent' and a `prompt` describing the
+      work in plain language — never start background work with a bash command
+      (no nohup, no trailing &).
+notes: >
+  Arm 1. The ONLY change vs s2-exp0 is the routing sentence appended to the
+  system prompt (the rest is the v2 baseline prompt verbatim). Dual scoring
+  shows whether it lifts EMISSION on task_create agent-mode (the model emits
+  type=local_agent itself) vs merely shifting adapter load. Harvest OFF to keep
+  exact condition-parity with the s2-exp0 baseline.
