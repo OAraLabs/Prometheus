@@ -30,12 +30,20 @@ def default_harvest_db() -> str:
 def configure_harvest(db_path: str | None = None) -> str:
     """Point the pair-capture singleton at the gym harvest DB and return the path.
 
-    cloud_golden stays OFF (gym runs the local model only). Idempotent — safe
-    to call once before an experiment.
+    cloud_golden stays OFF (gym runs the local model only). Pairs are stamped
+    ``pair_source=gym_harvest`` (series-2 provenance decision) so harvest pairs
+    are separable from organic/cloud at training time; the original repair type
+    survives in ``meta["origin_source"]``. Idempotent — safe to call once
+    before an experiment.
     """
     path = db_path or default_harvest_db()
     pair_capture.configure(
-        {"capture_enabled": True, "cloud_golden_capture": False, "db_path": path}
+        {
+            "capture_enabled": True,
+            "cloud_golden_capture": False,
+            "db_path": path,
+            "source_override": "gym_harvest",
+        }
     )
     return path
 
