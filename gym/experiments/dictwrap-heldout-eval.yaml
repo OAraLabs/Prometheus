@@ -1,0 +1,11 @@
+# Held-out EVAL harvest (the Goodhart guard). Dict-wrap on tools/params the
+# train set never drilled. Run base vs --lora; the dict-wrap repair rate must
+# DROP under the LoRA. adapter_unwrap covers the held-out tools so wraps capture.
+series: dictwrap
+experiment: heldout
+taskset: gym/tasksets/dictwrap-heldout.yaml
+runs_per_task: 1
+variable:
+  adapter_unwrap:
+    tools: [grep, task_get, cron_create, download_file, task_update]
+notes: held-out — grep.pattern, task_get.task_id, cron_create.command, download_file.url, task_update.status_note.
