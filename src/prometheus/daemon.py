@@ -224,8 +224,11 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Cost tracker for cloud providers
     cost_tracker = None
     if ProviderRegistry.is_cloud(model_config.get("provider", "")):
-        from prometheus.telemetry.cost import CostTracker
+        from prometheus.telemetry.cost import CostTracker, set_cost_tracker_handle
         cost_tracker = CostTracker()
+        # Register the process-wide handle so the telemetry usage seam feeds it
+        # (audit: was instantiated + reported but never .record()'d → always $0).
+        set_cost_tracker_handle(cost_tracker)
 
     # Telemetry — shared instance for AgentLoop and SENTINEL digest.
     # Wired BEFORE build_tool_registry so per-tool registration failures
