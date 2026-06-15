@@ -623,6 +623,16 @@ class LoopContext:
     # within this loop run (keyed by tool name; "_malformed" for provider-
     # dropped empty envelopes). Lazily initialized; see learning/pair_capture.
     pair_pending: dict | None = None
+    # Gym dual-scoring seam (series-2). Optional, None in production — the
+    # ONLY caller is the gym runner, which scores the model's RAW emission
+    # separately from the call that ACTUALLY EXECUTED (post adapter
+    # repair/unwrap). messages keep the raw ToolUseBlock; the repaired input
+    # is local to _execute_tool_call, so this callback is the one place both
+    # are correlated by tool_use_id. Signature:
+    #   observer(tool_use_id: str, raw: {"name","input"}, executed: {"name","input"})
+    # Fires once per call that reaches execution, after all input mutations.
+    # Inert by default → no live model-facing behavior change (Hard Rule 5).
+    tool_call_observer: object | None = None
 
 
 def _effective_max_tool_iterations(context: LoopContext) -> int:
@@ -2044,6 +2054,20 @@ async def _execute_tool_call(
                 content=f"Invalid input for {tool_name}: {exc}",
                 is_error=True,
             )
+
+    # Gym dual-scoring seam: hand off raw-emitted vs about-to-execute call,
+    # correlated by tool_use_id. tool_name/tool_input are now final (post
+    # repair + unwrap). None in production; exception-isolated so a buggy
+    # observer can never affect a real turn.
+    if context.tool_call_observer is not None:
+        try:
+            context.tool_call_observer(
+                tool_use_id,
+                {"name": _original_tool_name, "input": _original_tool_input},
+                {"name": tool_name, "input": tool_input},
+            )
+        except Exception:
+            log.debug("tool_call_observer raised (ignored)", exc_info=True)
 
     # Permission check (Sprint 4 + TRUST-CONTEXT)
     if context.permission_checker is not None:

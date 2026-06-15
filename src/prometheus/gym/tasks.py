@@ -20,6 +20,9 @@ ALLOWED_SCORE_KEYS = frozenset({
     "expect_tool",            # str: ≥1 non-error execution of this tool
     "expect_tool_args_string",  # list[str]: these params, if present on the
                                 # successful expect_tool call, must be strings
+    "expect_tool_args_present",  # list[str]: these params must be supplied
+                                 # (non-empty) on the successful expect_tool
+                                 # call — presence without pinning a value
     "expect_tool_args_require",  # dict: exact param values on that call
     "prompt_not_json_blob",   # bool: expect_tool call's `prompt` arg must be a
                               # plain string, not a serialized JSON object
