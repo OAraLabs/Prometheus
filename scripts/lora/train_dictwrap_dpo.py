@@ -58,34 +58,37 @@ def reconstruct_request(name: str, args: dict) -> str:
     return f"Use the {name} tool to handle the request."
 
 
-def render(tok, schema: dict, name: str, chosen_args: dict, rejected_args: dict):
-    """Return (prompt, chosen, rejected) text via the model's own chat template,
-    so the only diff between chosen and rejected is unwrapped vs wrapped args."""
+def render(tok, schema: dict, name: str, chosen_args: dict,
+           raw_chosen: str, raw_rejected: str):
+    """Return (prompt, chosen, rejected) as text. This gemma4 HF tokenizer ships
+    NO chat_template (verified on the 4090), and even if it did the served GGUF's
+    tool-call format is what matters at inference. So the completions are the RAW
+    captured call JSON — exactly what the model emitted — and the prompt presents
+    the schema + a faithful reconstructed request. The only diff between chosen
+    and rejected is unwrapped vs wrapped args, which is the gradient we want.
+    The chat template is tried first in case a future checkpoint sets one."""
     sys_msg = (
         "You are a tool-calling assistant. Call tools with arguments that match "
         "the schema exactly — scalar parameters take scalar values, never a "
         f"nested object.\nTool: {json.dumps(schema)}"
     )
     user = reconstruct_request(name, chosen_args)
-    base = [{"role": "system", "content": sys_msg}, {"role": "user", "content": user}]
-
-    def call_msg(arguments):
-        return {"role": "assistant",
-                "tool_calls": [{"type": "function",
-                                "function": {"name": name, "arguments": arguments}}]}
-
-    try:
-        prompt = tok.apply_chat_template(base, tokenize=False, add_generation_prompt=True)
-        full_c = tok.apply_chat_template(base + [call_msg(chosen_args)], tokenize=False)
-        full_r = tok.apply_chat_template(base + [call_msg(rejected_args)], tokenize=False)
-        if full_c.startswith(prompt) and full_r.startswith(prompt) and full_c != full_r:
-            return prompt, full_c[len(prompt):], full_r[len(prompt):]
-    except Exception:
-        pass
-    # fallback: plain text — schema+request prompt, raw call JSON as completion
+    if getattr(tok, "chat_template", None):
+        base = [{"role": "system", "content": sys_msg}, {"role": "user", "content": user}]
+        cm = lambda a: {"role": "assistant", "tool_calls": [
+            {"type": "function", "function": {"name": name, "arguments": a}}]}
+        try:
+            prompt = tok.apply_chat_template(base, tokenize=False, add_generation_prompt=True)
+            fc = tok.apply_chat_template(base + [cm(chosen_args)], tokenize=False)
+            fr = tok.apply_chat_template(base + [cm(json.loads(raw_rejected).get("input", {}))],
+                                         tokenize=False)
+            if fc.startswith(prompt) and fr.startswith(prompt) and fc != fr:
+                return prompt, fc[len(prompt):], fr[len(prompt):]
+        except Exception:
+            pass
+    # faithful text fallback: raw captured JSON as the completion
     prompt = f"{sys_msg}\n\nRequest: {user}\nTool call:"
-    mk = lambda args: " " + json.dumps({"name": name, "arguments": args})
-    return prompt, mk(chosen_args), mk(rejected_args)
+    return prompt, " " + raw_chosen.strip(), " " + raw_rejected.strip()
 
 
 def build_dataset(pairs_path: Path, tok) -> Dataset:
@@ -108,7 +111,7 @@ def build_dataset(pairs_path: Path, tok) -> Dataset:
         if ca == ra:  # not a real preference (no wrap diff) — drop
             skipped += 1
             continue
-        p, c, rj = render(tok, schema, name, ca, ra)
+        p, c, rj = render(tok, schema, name, ca, r["chosen"], r["rejected"])
         rows.append({"prompt": p, "chosen": c, "rejected": rj})
     print(f"[data] {len(rows)} DPO triples ({skipped} skipped)")
     return Dataset.from_list(rows)
