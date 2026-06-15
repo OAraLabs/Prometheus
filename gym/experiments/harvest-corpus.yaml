@@ -1,0 +1,16 @@
+# Harvest over the generated diversity corpus (flywheel corpus). Every task
+# targets a wrap-prone shape with a distinct scalar value → distinct pairs.
+# Run with --harvest to capture into ~/.prometheus/data/gym-training.db.
+series: harvest
+experiment: corpus
+taskset: gym/tasksets/harvest-v1.yaml
+runs_per_task: 1
+variable:
+  adapter_unwrap:
+    tools: [task_create, task_list, grep, sessions_list, browser, download_file]
+notes: >
+  Diversity corpus: 80 distinct wrap-prone tasks (task_create command/goal, grep
+  pattern×path, task_list status). schema_repair fires when the adapter unwraps
+  the model's phantom nesting; self_correction fires on failed-then-succeeded.
+  Measures whether varying the value multiplies UNIQUE pairs vs the fixed-22
+  baseline (9 pairs / 66 runs).
