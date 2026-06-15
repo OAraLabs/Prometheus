@@ -1193,6 +1193,18 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 session_id="web",
             )
 
+            # Beacon D1: construct the profile store so GET /api/profiles returns
+            # the real profiles. The server endpoints, launcher param, and desktop
+            # profile-switch UI were all ready; the daemon just never passed a
+            # store (→ [] → dead UI). A profile-load error must not take down the
+            # whole web bridge, so it degrades to None (the launcher handles None).
+            try:
+                from prometheus.config.profiles import get_profile_store
+                profile_store = get_profile_store()
+            except Exception as exc:
+                logger.warning("profile store unavailable: %s", exc)
+                profile_store = None
+
             api_port = web_config.get("api_port", 8005)
             ws_port = web_config.get("ws_port", 8010)
             web_task = asyncio.create_task(launch_web(
@@ -1204,6 +1216,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 agent_loop=agent_loop,
                 approval_queue=approval_queue if "approval_queue" in dir() else None,
                 loop_context=loop_context,
+                profile_store=profile_store,
                 api_port=api_port,
                 ws_port=ws_port,
             ))
