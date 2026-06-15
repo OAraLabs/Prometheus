@@ -1,0 +1,14 @@
+# Series 2, experiment 0 — BASELINE. No variable changed.
+series: s2
+experiment: exp0-baseline
+taskset: gym/tasksets/v2.yaml
+runs_per_task: 3
+variable: none
+notes: >
+  Fresh baseline for series s2 against gym/tasksets/v2.yaml, with DUAL SCORING
+  (emission vs execution) live. This is a NEW series — s1 numbers do not carry
+  over (different predicates: re-tagged task_create, expect_tool_args_present,
+  added download_file/browser dict-wrap shapes). All series-2 arms compare
+  against THIS baseline only. Harvest capture is OFF for the baseline (it is on
+  for the experiment arms per the sprint); the baseline measures the unmodified
+  current pipeline on the frozen v2 set.

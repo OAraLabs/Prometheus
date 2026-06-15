@@ -378,3 +378,260 @@ class TestStoreAndReport:
         _seed_runs(store, "exp0", n_tasks=1, runs=3, pass_mask=lambda i: True)
         report = render_report("s1", "exp0", store.runs("s1", "exp0"))
         assert "⚠️thin" in report
+
+
+# ---------------------------------------------------------------------------
+# Series-2 dual scoring (emission vs execution) — the adapter-credit fix
+# ---------------------------------------------------------------------------
+
+from prometheus.gym.scoring import EMISSION, EXECUTION  # noqa: E402
+
+
+def _dual_transcript(tid, raw_name, raw_input, exec_name, exec_input, *, ok=True):
+    """One tool call whose raw emission differs from what executed, via the
+    observer map the gym runner supplies to RunTranscript.from_messages."""
+    msgs = [
+        ConversationMessage(
+            role="assistant",
+            content=[ToolUseBlock(id=tid, name=raw_name, input=raw_input)],
+        ),
+        ConversationMessage(
+            role="user",
+            content=[ToolResultBlock(tool_use_id=tid, content="done", is_error=not ok)],
+        ),
+    ]
+    observed = {
+        tid: {
+            "raw": {"name": raw_name, "input": raw_input},
+            "executed": {"name": exec_name, "input": exec_input},
+        }
+    }
+    return RunTranscript.from_messages(msgs, observed)
+
+
+class TestDualScoring:
+
+    def test_dict_wrap_repair_emission_fails_execution_passes(self, tmp_path):
+        # The acceptance case (closeout §3 / exp3): the model emits
+        # {"status": {"status": "failed"}}; the adapter unwraps to
+        # {"status": "failed"} and the call executes successfully. Same row:
+        # emission ✗ (raw wrapped), execution ✓ (unwrapped ran).
+        t = _dual_transcript(
+            "t1", "task_list", {"status": {"status": "failed"}},
+            "task_list", {"status": "failed"},
+        )
+        task = {"expect_tool": "task_list",
+                "expect_tool_args_require": {"status": "failed"}}
+        assert not score(task, t, tmp_path, view=EMISSION)[0]
+        assert score(task, t, tmp_path, view=EXECUTION)[0]
+
+    def test_fuzzy_name_repair_emission_fails_execution_passes(self, tmp_path):
+        t = _dual_transcript("t1", "task_lists", {}, "task_list", {})
+        task = {"expect_tool": "task_list"}
+        assert not score(task, t, tmp_path, view=EMISSION)[0]
+        assert score(task, t, tmp_path, view=EXECUTION)[0]
+
+    def test_repaired_call_not_a_successful_emission(self, tmp_path):
+        # Even with no arg predicate, a repaired call is not a successful
+        # emission — the model's raw call needed fixing to run.
+        t = _dual_transcript("t1", "task_list", {"status": {"status": "x"}},
+                             "task_list", {"status": "x"})
+        assert not score({"expect_tool": "task_list"}, t, tmp_path, view=EMISSION)[0]
+        assert score({"expect_tool": "task_list"}, t, tmp_path, view=EXECUTION)[0]
+
+    def test_clean_call_passes_both_views(self, tmp_path):
+        # raw == executed → repaired=False → both views agree.
+        t = _dual_transcript("t1", "task_list", {"status": "failed"},
+                             "task_list", {"status": "failed"})
+        task = {"expect_tool": "task_list",
+                "expect_tool_args_require": {"status": "failed"}}
+        assert score(task, t, tmp_path, view=EMISSION)[0]
+        assert score(task, t, tmp_path, view=EXECUTION)[0]
+
+    def test_no_observer_data_views_coincide(self, tmp_path):
+        # Existing (non-gym) callers pass no observer map → execution mirrors
+        # the raw emission → identical to pre-series-2 behavior.
+        t = _transcript(*_call("bash", {"command": "echo hi"}))
+        task = {"expect_tool": "bash"}
+        assert (score(task, t, tmp_path, view=EMISSION)
+                == score(task, t, tmp_path, view=EXECUTION))
+
+
+class TestDualStore:
+
+    def test_dual_columns_roundtrip(self, tmp_path):
+        store = GymStore(tmp_path / "gym.db")
+        store.record_run(
+            series="s2", experiment="exp0", task_id="t", run_idx=0,
+            model="m", category="c", success=1, emission_pass=0,
+            execution_pass=1, manifest_sha="a", taskset_sha="b",
+        )
+        row = store.runs("s2", "exp0")[0]
+        assert row["emission_pass"] == 0
+        assert row["execution_pass"] == 1
+        assert row["success"] == 1
+
+    def test_migration_adds_columns_to_old_db(self, tmp_path):
+        # Pre-series-2 gym.db: table without the new columns + one old row.
+        p = tmp_path / "old.db"
+        conn = sqlite3.connect(str(p))
+        conn.execute(
+            "CREATE TABLE gym_runs (series TEXT, experiment TEXT, task_id TEXT, "
+            "run_idx INTEGER, timestamp REAL, model TEXT, category TEXT, "
+            "success INTEGER, fail_reasons TEXT, tools_called TEXT, latency_ms REAL, "
+            "retries INTEGER, repairs INTEGER, dropped_malformed INTEGER, "
+            "feedback_retries INTEGER, breaker_tripped INTEGER, error TEXT, "
+            "manifest_sha TEXT, taskset_sha TEXT, "
+            "PRIMARY KEY (series, experiment, task_id, run_idx))"
+        )
+        conn.execute(
+            "INSERT INTO gym_runs (series,experiment,task_id,run_idx,timestamp,"
+            "model,category,success,manifest_sha,taskset_sha) "
+            "VALUES ('s1','e','t',0,0,'m','c',1,'a','b')"
+        )
+        conn.commit()
+        conn.close()
+        store = GymStore(p)  # opens + migrates
+        cols = {r[1] for r in store._conn.execute("PRAGMA table_info(gym_runs)")}
+        assert {"emission_pass", "execution_pass"} <= cols
+        row = store.runs("s1", "e")[0]
+        assert row["success"] == 1
+        assert row["emission_pass"] is None  # old row, not back-filled
+
+
+def test_report_shows_dual_and_adapter_delta(tmp_path):
+    store = GymStore(tmp_path / "g.db")
+    # one repaired (emit0/exec1) + one clean (emit1/exec1) → adapter Δ = +50%
+    store.record_run(series="s2", experiment="exp0", task_id="t1", run_idx=0,
+                     model="m", category="cat", success=1, emission_pass=0,
+                     execution_pass=1, manifest_sha="a", taskset_sha="b")
+    store.record_run(series="s2", experiment="exp0", task_id="t2", run_idx=0,
+                     model="m", category="cat", success=1, emission_pass=1,
+                     execution_pass=1, manifest_sha="a", taskset_sha="b")
+    out = render_report("s2", "exp0", store.runs("s2", "exp0"))
+    assert "Emission pass" in out
+    assert "Execution pass" in out
+    assert "Adapter value" in out
+    assert "+50%" in out  # 1 of 2 runs saved by repair
+
+
+def test_tool_call_observer_fires_with_raw_and_executed(tmp_path):
+    """The agent_loop seam: a fuzzy-name repair must reach the observer as
+    raw(echo_tool2) → executed(echo_tool), correlated by tool_use_id. This is
+    the handoff the gym's execution view is scored from."""
+    import asyncio
+
+    from pydantic import BaseModel
+
+    from prometheus.adapter import ModelAdapter
+    from prometheus.engine.agent_loop import LoopContext, _execute_tool_call
+    from prometheus.telemetry.tracker import ToolCallTelemetry
+    from prometheus.tools.base import BaseTool, ToolRegistry, ToolResult
+
+    class _EchoIn(BaseModel):
+        text: str
+
+    class _Echo(BaseTool):
+        name = "echo_tool"
+        description = "echoes"
+        input_model = _EchoIn
+
+        async def execute(self, arguments, context):  # noqa: ANN001
+            return ToolResult(output=f"echo: {arguments.text}")
+
+    reg = ToolRegistry()
+    reg.register(_Echo())
+    observed: dict = {}
+    ctx = LoopContext(
+        provider=None, model="m", system_prompt="", max_tokens=64,
+        tool_registry=reg, adapter=ModelAdapter(tier=ModelAdapter.TIER_LIGHT),
+        telemetry=ToolCallTelemetry(db_path=tmp_path / "tel.db"),
+        tool_call_observer=lambda tid, raw, ex: observed.__setitem__(
+            tid, {"raw": raw, "executed": ex}
+        ),
+    )
+    block = asyncio.run(_execute_tool_call(ctx, "echo_tool2", "tid1", {"text": "hi"}))
+    assert not block.is_error
+    assert observed["tid1"]["raw"]["name"] == "echo_tool2"
+    assert observed["tid1"]["executed"]["name"] == "echo_tool"  # fuzzy-repaired
+
+
+def test_tool_call_observer_none_is_inert(tmp_path):
+    """Default None observer → _execute_tool_call behaves exactly as before."""
+    import asyncio
+
+    from pydantic import BaseModel
+
+    from prometheus.adapter import ModelAdapter
+    from prometheus.engine.agent_loop import LoopContext, _execute_tool_call
+    from prometheus.telemetry.tracker import ToolCallTelemetry
+    from prometheus.tools.base import BaseTool, ToolRegistry, ToolResult
+
+    class _EchoIn(BaseModel):
+        text: str
+
+    class _Echo(BaseTool):
+        name = "echo_tool"
+        description = "echoes"
+        input_model = _EchoIn
+
+        async def execute(self, arguments, context):  # noqa: ANN001
+            return ToolResult(output=f"echo: {arguments.text}")
+
+    reg = ToolRegistry()
+    reg.register(_Echo())
+    ctx = LoopContext(
+        provider=None, model="m", system_prompt="", max_tokens=64,
+        tool_registry=reg, adapter=ModelAdapter(tier=ModelAdapter.TIER_LIGHT),
+        telemetry=ToolCallTelemetry(db_path=tmp_path / "tel.db"),
+    )
+    block = asyncio.run(_execute_tool_call(ctx, "echo_tool", "tid1", {"text": "hi"}))
+    assert not block.is_error
+    assert "echo: hi" in block.content
+
+
+class TestArgsPresentPredicate:
+
+    def test_present_param_required(self, tmp_path):
+        # local_bash call with no command — the stub would accept it, but the
+        # present predicate catches the missing required param.
+        t = _transcript(*_call("task_create", {"type": "local_bash"}))
+        passed, reasons = score(
+            {"expect_tool": "task_create", "expect_tool_args_present": ["command"]},
+            t, tmp_path,
+        )
+        assert not passed
+        assert "supplied 'command'" in reasons[0]
+
+    def test_present_param_satisfied(self, tmp_path):
+        t = _transcript(*_call("task_create",
+                               {"type": "local_bash", "command": "echo hi"}))
+        passed, reasons = score(
+            {"expect_tool": "task_create", "expect_tool_args_present": ["command"]},
+            t, tmp_path,
+        )
+        assert passed, reasons
+
+    def test_present_in_taskset_allowed_keys(self):
+        from prometheus.gym.tasks import ALLOWED_SCORE_KEYS
+        assert "expect_tool_args_present" in ALLOWED_SCORE_KEYS
+
+
+class TestPreflightEndpoint:
+    """The runner refuses to start against an unreachable/wrong endpoint —
+    the gitignored config doesn't travel into worktrees, which silently pointed
+    the runner at ollama's localhost:11434 (63×404) three times. Fail loud,
+    before any task runs."""
+
+    def test_no_base_url_refused(self):
+        from prometheus.gym.runner import preflight_endpoint
+        with pytest.raises(RuntimeError, match="no model.base_url"):
+            preflight_endpoint({"model": {"provider": "ollama"}})
+
+    def test_unreachable_endpoint_refused(self):
+        from prometheus.gym.runner import preflight_endpoint
+        # 127.0.0.1:1 — nothing listens → connect error → refuse.
+        with pytest.raises(RuntimeError, match="unreachable"):
+            preflight_endpoint(
+                {"model": {"provider": "llama_cpp", "base_url": "http://127.0.0.1:1"}}
+            )

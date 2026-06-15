@@ -1,0 +1,320 @@
+# Gym task set v2 — FROZEN for series s2. Editing this file = new series.
+#
+# Series-2 changes vs v1 (same shapes, honest scoring):
+#   - DUAL SCORING is now automatic (runner scores emission AND execution);
+#     no per-task change needed — the adapter's value shows as the gap.
+#   - task_create predicates RE-TAGGED (closeout follow-up #14): the s1
+#     `expect_tool_args_require: {type: local_bash}` was a predicate artifact —
+#     local_bash is the DEFAULT, so a correct call may omit `type`. v2 instead
+#     asserts the REQUIRED PARAM is present (`command` for bash, `prompt` for
+#     agent) and pins `type` ONLY where the default does not apply (local_agent,
+#     file_watch — genuine discriminator gaps).
+#   - Added the dict-wrap shapes that still owed verdicts: download_file
+#     `destination` and browser `action` (both side-effect-stubbed — schema and
+#     validation stay real; the argshape tasks score the emitted CALL).
+#
+# Scoring is deterministic predicates only; no LLM judging. Tools execute for
+# REAL except task_create / download_file / browser (side-effect stubbed).
+
+version: 2
+workspace: /tmp/prometheus-gym-v2
+system_prompt: |
+  You are a coding assistant with access to tools.
+  Use tools to accomplish tasks. Be concise in responses.
+  When asked to create files, use the exact path given.
+  When asked to run commands, use the bash tool.
+
+tasks:
+  # ── control: currently-succeeding shapes (regression guard) ──────────
+  - id: control_bash_echo
+    category: control
+    prompt: "Run this command: echo 'gym control alpha'"
+    score:
+      expect_tool: bash
+      expect_text_contains: "gym control alpha"
+
+  - id: control_read_file
+    category: control
+    prompt: "Read the file /tmp/prometheus-gym-v2/notes.txt and tell me exactly what it says."
+    setup_files:
+      notes.txt: "the gym notes say: amber falcon"
+    score:
+      expect_tool: read_file
+      expect_text_contains: "amber falcon"
+
+  - id: control_write_file
+    category: control
+    prompt: "Create a file at /tmp/prometheus-gym-v2/out.txt containing exactly 'gym write ok'."
+    score:
+      expect_tool: write_file
+      expect_file: /tmp/prometheus-gym-v2/out.txt
+      expect_file_contains: "gym write ok"
+
+  - id: control_edit_file
+    category: control
+    prompt: "In the file /tmp/prometheus-gym-v2/edit_me.txt, replace the word 'alpha' with 'beta'. Then confirm what the file says."
+    setup_files:
+      edit_me.txt: "status: alpha\n"
+    score:
+      expect_file: /tmp/prometheus-gym-v2/edit_me.txt
+      expect_file_contains: "beta"
+
+  - id: control_grep
+    category: control
+    prompt: "Search for the text 'needle_7Q' inside the directory /tmp/prometheus-gym-v2/src and tell me which file contains it."
+    setup_files:
+      src/a.py: "# nothing here\n"
+      src/b.py: "value = 'needle_7Q'\n"
+    score:
+      expect_text_contains: "b.py"
+
+  - id: control_glob
+    category: control
+    prompt: "Find all Python files matching /tmp/prometheus-gym-v2/src/*.py and list them."
+    setup_files:
+      src/a.py: "# a\n"
+      src/b.py: "# b\n"
+    score:
+      expect_text_contains: "a.py"
+      require_graceful: true
+
+  - id: control_multi_step
+    category: control
+    prompt: |
+      Create a Python file at /tmp/prometheus-gym-v2/add.py with this content:
+      print(20 + 22)
+      Then run it with: python3 /tmp/prometheus-gym-v2/add.py
+    score:
+      expect_tool: bash
+      expect_text_contains: "42"
+
+  - id: control_no_arg_tool
+    category: control
+    prompt: "Use the cron_list tool to list the scheduled jobs."
+    score:
+      expect_tool: cron_list
+      require_graceful: true
+    notes: >
+      No-arg tool call — guards the provider boundary rule that a valid name
+      with empty arguments is NOT dropped as malformed.
+
+  # ── task_create: D2's failing tool (re-tagged, follow-up #14) ────────
+  - id: task_create_bash_explicit
+    category: task_create
+    prompt: >
+      Create a managed background task of type local_bash with description
+      'gym sleep task' that runs the shell command: sleep 1 && echo done
+    stub_tools: [task_create]
+    score:
+      expect_tool: task_create
+      expect_tool_args_present: [command, description]
+      expect_tool_args_string: [command, description]
+    notes: >
+      local_bash is the DEFAULT type — v2 asserts `command` is present (the
+      real signal) rather than pinning type=local_bash (s1 artifact). A call
+      that omits type but supplies command is semantically correct.
+
+  - id: task_create_agent_explicit
+    category: task_create
+    prompt: >
+      Create a managed background task of type local_agent. Description:
+      'Enrich surgeons batch'. The agent prompt should be: 'Process rows 10
+      to 60 of orlando_surgeons.csv adding practice phone numbers.'
+    stub_tools: [task_create]
+    score:
+      expect_tool: task_create
+      expect_tool_args_require:
+        type: local_agent
+      expect_tool_args_present: [prompt, description]
+      expect_tool_args_string: [prompt, description]
+      prompt_not_json_blob: true
+    notes: type=local_agent is genuinely required (default is local_bash).
+
+  - id: task_create_agent_implicit
+    category: task_create
+    prompt: >
+      Start a background agent that researches practice phone numbers for the
+      surgeons listed in orlando_surgeons.csv. Describe the task as 'Enrich
+      surgeons batch 1'.
+    stub_tools: [task_create]
+    score:
+      expect_tool: task_create
+      expect_tool_args_require:
+        type: local_agent
+      expect_tool_args_present: [prompt]
+      prompt_not_json_blob: true
+    notes: >
+      The 0/12-everywhere gap: nothing in the phrasing names the `type`
+      discriminator, so the model omits it → defaults to local_bash →
+      "'command' is required" → flailing. This is the task arm 1 (the
+      background-work routing line) targets. Expected to FAIL at baseline.
+
+  - id: task_create_watch
+    category: task_create
+    prompt: >
+      Create a background task of type file_watch that waits for a file
+      matching the pattern '*.done' to appear in the directory
+      /tmp/prometheus-gym-v2/watch. Description: 'wait for done marker'.
+    stub_tools: [task_create]
+    score:
+      expect_tool: task_create
+      expect_tool_args_require:
+        type: file_watch
+      expect_tool_args_present: [watch_dir, watch_pattern]
+      expect_tool_args_string: [watch_dir, watch_pattern]
+    notes: type=file_watch genuinely required (default is local_bash).
+
+  # ── argshape: dict-wrap / stuffing bait (the shapes that owe verdicts) ─
+  - id: argshape_task_list_status
+    category: argshape
+    prompt: "List only my failed background tasks."
+    score:
+      expect_tool: task_list
+      expect_tool_args_string: [status]
+      require_graceful: true
+    notes: >
+      Live failure: task_list called with status={'status': None} (dict-wrap).
+      Dual scoring now separates the wrapped emission (fail) from a successful
+      unwrap (execution pass) — the s1 confound (closeout §3).
+
+  - id: argshape_download_destination
+    category: argshape
+    prompt: >
+      Download the file at https://example.com/data.csv and save it to
+      /tmp/prometheus-gym-v2/data.csv
+    stub_tools: [download_file]
+    score:
+      expect_tool: download_file
+      expect_tool_args_present: [url, destination]
+      expect_tool_args_string: [url, destination]
+    notes: >
+      D2's dict-wrap shape: `destination` received a dict (expected string).
+      A wrapped emission fails the string check; the adapter_unwrap arm should
+      show execution pass where emission fails.
+
+  - id: argshape_browser_action
+    category: argshape
+    prompt: "Use the browser tool to navigate to https://example.com"
+    stub_tools: [browser]
+    score:
+      expect_tool: browser
+      expect_tool_args_string: [action, url]
+      require_graceful: true
+    notes: >
+      D2's dict-wrap shape: `action` received a dict (expected enum string).
+      A dict action fails enum validation (execution) AND the string check
+      (emission); a correct "navigate" string passes both.
+
+  - id: argshape_write_json_content
+    category: argshape
+    prompt: >
+      Create a file at /tmp/prometheus-gym-v2/config.json whose content is a JSON
+      object with a single key 'enabled' set to true.
+    score:
+      expect_tool: write_file
+      expect_file: /tmp/prometheus-gym-v2/config.json
+      expect_file_contains: "enabled"
+    notes: JSON-as-content — the inverse of JSON-stuffing; must stay a string param.
+
+  - id: argshape_grep_two_params
+    category: argshape
+    prompt: "Search for the pattern 'TODO' in the directory /tmp/prometheus-gym-v2/src and report each match."
+    setup_files:
+      src/x.py: "# TODO: fix this\n"
+      src/y.py: "# all good\n"
+    score:
+      expect_text_contains: "x.py"
+      require_graceful: true
+
+  # ── namespace: tool-vs-shell confusion (D3) ──────────────────────────
+  - id: namespace_task_list_not_bash
+    category: namespace
+    prompt: "Check whether any background tasks are currently running."
+    score:
+      expect_tool: task_list
+      forbid_bash_containing: "task_list"
+    notes: Live failures ran `task_list` as a shell command (exit 127).
+
+  - id: namespace_tool_search
+    category: namespace
+    prompt: "Use tool_search to find tools related to 'cron' scheduling."
+    score:
+      expect_tool: tool_search
+      expect_text_contains: "cron"
+
+  # ── resilience: error feedback without collapse (D1 trigger class) ───
+  - id: resilience_nonexistent_tool
+    category: resilience
+    prompt: >
+      Use the 'super_quantum_analyzer' tool to analyze /tmp/prometheus-gym-v2.
+      If that tool doesn't exist, just tell me it's not available.
+    score:
+      require_graceful: true
+      forbid_breaker_trip: true
+      expect_text_min_len: 10
+
+  - id: resilience_misnamed_tool
+    category: resilience
+    prompt: "Use the task_lists tool to show all background tasks."
+    score:
+      expect_tool: task_list
+      require_graceful: true
+    notes: >
+      'task_lists' → fuzzy repair (Levenshtein 1). Dual scoring: emission ✗
+      (model wrote task_lists), execution ✓ (repaired to task_list and ran) —
+      the canonical adapter-value demonstrator.
+
+  - id: resilience_missing_file
+    category: resilience
+    prompt: >
+      Read the file /tmp/prometheus-gym-v2/does_not_exist.txt. If it does not
+      exist, tell me clearly that it is missing.
+    score:
+      require_graceful: true
+      forbid_breaker_trip: true
+      expect_text_min_len: 10
+
+  - id: resilience_collapse_arc_replay
+    category: resilience
+    prompt: >
+      The job is still timing out. Figure out what state things are in and
+      give me your best diagnosis of why the job hangs.
+    setup_files:
+      long_job.py: "import time\ntime.sleep(120)\n"
+    seed:
+      - user: "My background job script /tmp/prometheus-gym-v2/long_job.py seems stuck. Can you run it and see what happens?"
+      - assistant_tool_call:
+          name: bash
+          input: {command: "python3 /tmp/prometheus-gym-v2/long_job.py"}
+      - tool_result: {content: "Command timed out after 30 seconds", is_error: true}
+      - assistant_tool_call:
+          name: bash
+          input: {command: "timeout 120 python3 /tmp/prometheus-gym-v2/long_job.py"}
+      - tool_result: {content: "Command timed out after 30 seconds", is_error: true}
+      - assistant_tool_call:
+          name: bash
+          input: {command: "python3 /tmp/prometheus-gym-v2/long_job.py || echo \"Exit code: $?\""}
+      - tool_result: {content: "Command timed out after 30 seconds", is_error: true}
+    score:
+      require_graceful: true
+      forbid_breaker_trip: true
+      forbid_malformed: true
+      expect_text_min_len: 40
+    notes: >
+      Replay of the captured 2026-06-10 telegram collapse arc (3 consecutive
+      timeouts → token soup → empty envelopes → breaker → dead turn). Success =
+      the continuation stays coherent. This is the meter arm 2 (error-feedback
+      hygiene) watches. The seeded script really sleeps 120s.
+
+  # ── lcm: FTS5 punctuation regression guard (fixed in c59fe34) ────────
+  - id: lcm_query_punctuation
+    category: lcm
+    prompt: >
+      Use the lcm_expand_query tool to search our conversation history for:
+      what is wrong with daily_briefing.py?
+    score:
+      expect_tool: lcm_expand_query
+      require_graceful: true
+    notes: >
+      The exact live failure shape ('fts5: syntax error near "."'). The gym
+      LCM store is empty — 'no relevant history' is a SUCCESS (non-error).

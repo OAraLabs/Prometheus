@@ -24,7 +24,9 @@ CREATE TABLE IF NOT EXISTS gym_runs (
     timestamp       REAL NOT NULL,
     model           TEXT NOT NULL,
     category        TEXT NOT NULL,
-    success         INTEGER NOT NULL,
+    success         INTEGER NOT NULL,  -- == execution_pass (kept for continuity)
+    emission_pass   INTEGER,           -- series-2: raw model emission satisfied
+    execution_pass  INTEGER,           -- series-2: post-adapter executed call satisfied
     fail_reasons    TEXT,
     tools_called    TEXT,            -- JSON list of tool names in order
     latency_ms      REAL NOT NULL DEFAULT 0,
@@ -48,12 +50,23 @@ class GymStore:
         self._conn = sqlite3.connect(str(p))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add series-2 dual-scoring columns to a pre-existing gym.db (the
+        ``CREATE TABLE IF NOT EXISTS`` above is a no-op on an old schema, so
+        new columns must be ALTERed in explicitly)."""
+        have = {r[1] for r in self._conn.execute("PRAGMA table_info(gym_runs)")}
+        for col in ("emission_pass", "execution_pass"):
+            if col not in have:
+                self._conn.execute(f"ALTER TABLE gym_runs ADD COLUMN {col} INTEGER")
 
     def record_run(self, **row: Any) -> None:
         cols = (
             "series", "experiment", "task_id", "run_idx", "timestamp", "model",
-            "category", "success", "fail_reasons", "tools_called", "latency_ms",
+            "category", "success", "emission_pass", "execution_pass",
+            "fail_reasons", "tools_called", "latency_ms",
             "retries", "repairs", "dropped_malformed", "feedback_retries",
             "breaker_tripped", "error", "manifest_sha", "taskset_sha",
         )

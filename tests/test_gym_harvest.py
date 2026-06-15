@@ -79,3 +79,27 @@ def test_harvest_isolated_from_live_training_db(tmp_path: Path, monkeypatch):
 def test_pair_total_zero_when_capture_off():
     pair_capture.configure({"capture_enabled": False})
     assert pair_total() == 0
+
+
+def test_harvest_stamps_gym_harvest_source(tmp_path: Path):
+    # Series-2 provenance: configure_harvest sets source_override="gym_harvest",
+    # so a captured repair pair is stored as pair_source=gym_harvest (not its
+    # repair-type), with the original kind preserved in meta.
+    import json
+
+    db = tmp_path / "gym-training.db"
+    configure_harvest(str(db))
+    _capture_one()  # captured as schema_repair upstream
+    store = pair_capture.get_store()
+    row = store.rows_since()[0]
+    assert row["pair_source"] == "gym_harvest"
+    assert json.loads(row["meta"])["origin_source"] == "schema_repair"
+
+
+def test_no_override_keeps_original_source(tmp_path: Path):
+    # Without source_override (the daemon's live path), the real repair type is
+    # preserved — the override must be opt-in.
+    pair_capture.configure({"capture_enabled": True, "db_path": str(tmp_path / "t.db")})
+    _capture_one()
+    row = pair_capture.get_store().rows_since()[0]
+    assert row["pair_source"] == "schema_repair"

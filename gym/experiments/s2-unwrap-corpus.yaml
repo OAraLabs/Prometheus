@@ -1,0 +1,17 @@
+# Series 2 — adapter_unwrap on the wrap-prone harvest corpus, DUAL SCORED.
+# This is the deferred exp3 verdict, now honest: where the adapter unwraps a
+# phantom-nested call, emission_pass=0 (raw wrapped) and execution_pass=1
+# (unwrapped ran) on the SAME row — the gap the s1 single-score confounded.
+# Distinct series (s2) so it never overwrites the merged harvest/corpus rows.
+series: s2
+experiment: unwrap-corpus
+taskset: gym/tasksets/harvest-v1.yaml
+runs_per_task: 1
+variable:
+  adapter_unwrap:
+    tools: [task_create, task_list, grep, sessions_list, browser, download_file]
+notes: >
+  adapter_unwrap arm on the 63-task wrap-prone corpus with dual scoring. Run
+  with --harvest to also stamp gym_harvest-tagged pairs. The emission→execution
+  delta here IS the adapter's measured value; the eval-set baseline (s2-exp0)
+  showed ~0 delta because grammar suppresses wrap on natural tasks.

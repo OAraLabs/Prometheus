@@ -50,6 +50,10 @@ PAIR_SOURCES = (
     "self_correction",
     "malformed_recovery",
     "cloud_golden",
+    "gym_harvest",       # series-2: stamped on pairs captured during gym
+                         # harvest runs (separable from organic for training-
+                         # day weighting). The original repair type is kept in
+                         # meta["origin_source"]. Set via configure(source_override).
 )
 
 _SCHEMA = """
@@ -180,6 +184,7 @@ class PairStore:
 
 _store: PairStore | None = None
 _cloud_golden_enabled = False
+_source_override: str | None = None
 
 
 def configure(config: dict[str, Any] | None = None) -> None:
@@ -189,19 +194,27 @@ def configure(config: dict[str, Any] | None = None) -> None:
         capture_enabled:      bool, default True  (local pair sources)
         cloud_golden_capture: bool, default False (spec: default OFF)
         db_path:              str, default ~/.prometheus/data/training.db
+        source_override:      str | None, default None — when set, every
+                              captured pair is stamped with this pair_source
+                              (the gym harvest path sets "gym_harvest"); the
+                              original repair type is preserved in
+                              meta["origin_source"]. Never set by the daemon.
     """
-    global _store, _cloud_golden_enabled
+    global _store, _cloud_golden_enabled, _source_override
     cfg = config or {}
     if not cfg.get("capture_enabled", True):
         _store = None
         _cloud_golden_enabled = False
+        _source_override = None
         log.info("pair capture disabled by config")
         return
     _store = PairStore(cfg.get("db_path", DEFAULT_TRAINING_DB))
     _cloud_golden_enabled = bool(cfg.get("cloud_golden_capture", False))
+    _source_override = cfg.get("source_override") or None
     log.info(
-        "pair capture enabled (cloud_golden=%s)",
+        "pair capture enabled (cloud_golden=%s%s)",
         "on" if _cloud_golden_enabled else "off",
+        f", source_override={_source_override}" if _source_override else "",
     )
 
 
@@ -227,9 +240,18 @@ def capture_pair(
     """Fail-loud-but-non-blocking capture. Never raises into the turn."""
     if _store is None:
         return
+    effective_source = pair_source
+    if _source_override:
+        # Series-2 harvest provenance: stamp the override as the source so
+        # harvest pairs are separable from organic. Preserve the original
+        # repair type in meta (the "Replace with gym_harvest" decision keeps
+        # the distinction recoverable rather than truly losing it).
+        meta = dict(meta or {})
+        meta.setdefault("origin_source", pair_source)
+        effective_source = _source_override
     try:
         _store.add_pair(
-            pair_source=pair_source,
+            pair_source=effective_source,
             model_id=model_id,
             tool_name=tool_name,
             context=context,

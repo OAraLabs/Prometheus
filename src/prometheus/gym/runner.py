@@ -79,6 +79,47 @@ def build_pipeline(config: dict) -> dict[str, Any]:
     }
 
 
+def preflight_endpoint(config: dict) -> None:
+    """Refuse to start a gym run against an unreachable / wrong model endpoint.
+
+    The gitignored ``config/prometheus.yaml`` does NOT travel into ``git
+    worktree``s (``_PROMETHEUS_YAML`` resolves relative to the imported module),
+    so a stub or default can silently point the runner at the wrong server —
+    three wasted N-for-0 runs to date (s1 exp2/exp3, then series-2: 63×404
+    against ollama's localhost:11434). The honest-report machinery flagged each
+    after the fact; this catches it in one second, BEFORE any task runs, and
+    names the resolved endpoint so the misconfiguration is loud, not silent.
+    Raises RuntimeError on no-base_url / unreachable / non-200."""
+    import httpx
+
+    model_cfg = config.get("model", {})
+    base_url = (model_cfg.get("base_url") or "").rstrip("/")
+    provider = model_cfg.get("provider", "?")
+    if not base_url:
+        raise RuntimeError(
+            f"gym preflight: no model.base_url in config (provider={provider!r}). "
+            "Refusing to run against a silent default endpoint — in a worktree, "
+            "copy the real config/prometheus.yaml in (it is gitignored and does "
+            "not travel into `git worktree`s)."
+        )
+    url = f"{base_url}/v1/models"
+    try:
+        resp = httpx.get(url, timeout=5.0)
+    except Exception as exc:  # noqa: BLE001 — any connect/timeout error refuses the run
+        raise RuntimeError(
+            f"gym preflight: model endpoint {url} is unreachable "
+            f"({type(exc).__name__}: {exc}); provider={provider}. Refusing to run "
+            "N-for-0 against a dead/wrong endpoint."
+        ) from exc
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"gym preflight: model endpoint {url} returned HTTP {resp.status_code} "
+            f"(provider={provider}). Refusing to run — is the config pointing at "
+            "the right server?"
+        )
+    log.info("gym preflight OK: %s (provider=%s) HTTP 200", url, provider)
+
+
 def build_registry(workspace: Path, stub_tools: list[str]) -> ToolRegistry:
     """Real builtin tools; stub_tools get side-effect-free execute()."""
     from prometheus.tools.builtin import (
@@ -123,6 +164,28 @@ def build_registry(workspace: Path, stub_tools: list[str]) -> ToolRegistry:
         registry.register(_GymTaskCreate())
     else:
         registry.register(TaskCreateTool())
+
+    # Side-effecting tools the gym must never actually run (real network /
+    # browser automation). Schema + validation stay real — argshape tasks
+    # score the emitted CALL, not the tool output. Registered only when a
+    # task asks for them via stub_tools, so the default registry is unchanged.
+    if "download_file" in stub_tools:
+        from prometheus.tools.builtin.download_file import DownloadFileTool
+
+        class _GymDownloadFile(DownloadFileTool):
+            async def execute(self, arguments, context):  # noqa: ANN001
+                return ToolResult(output=f"(gym stub) would download {arguments.url}")
+
+        registry.register(_GymDownloadFile())
+
+    if "browser" in stub_tools:
+        from prometheus.tools.builtin.browser import BrowserTool
+
+        class _GymBrowser(BrowserTool):
+            async def execute(self, arguments, context):  # noqa: ANN001
+                return ToolResult(output=f"(gym stub) browser {arguments.action}")
+
+        registry.register(_GymBrowser())
 
     try:
         from prometheus.tools.tool_search import ToolSearchTool
@@ -240,8 +303,10 @@ def build_seed_messages(seed: list[dict[str, Any]]) -> list[ConversationMessage]
 
 @dataclass
 class RunResult:
-    success: bool
-    fail_reasons: list[str]
+    success: bool               # == execution_pass (the "did it work" axis)
+    emission_pass: bool         # raw model emission satisfied the predicates
+    execution_pass: bool        # post-adapter executed call satisfied them
+    fail_reasons: list[str]     # execution-view failure reasons
     tools_called: list[str]
     latency_ms: float
     retries: int
@@ -293,6 +358,14 @@ async def run_task_once(
     messages = build_seed_messages(task.seed) if task.seed else []
     messages.append(ConversationMessage.from_user_text(task.prompt))
 
+    # Dual-scoring seam: record the raw-emitted vs actually-executed call per
+    # tool_use_id (the repaired input is local to _execute_tool_call and never
+    # written back into messages). The executed view is scored from this.
+    observed: dict[str, dict[str, Any]] = {}
+
+    def _observe(tool_use_id: str, raw: dict, executed: dict) -> None:
+        observed[tool_use_id] = {"raw": raw, "executed": executed}
+
     context = LoopContext(
         provider=provider,
         model=pipeline["model_name"],
@@ -306,6 +379,7 @@ async def run_task_once(
         max_tool_iterations=10,
         tool_timeout_seconds=45.0,
         session_id="system",
+        tool_call_observer=_observe,
     )
 
     error = ""
@@ -334,15 +408,17 @@ async def run_task_once(
     repairs = int(tel_after[2] - tel_before[2])
     dropped = int(tel_after[3] - tel_before[3])
 
-    transcript = RunTranscript.from_messages(messages)
+    transcript = RunTranscript.from_messages(messages, observed)
     transcript.dropped_malformed = dropped
     # timestamp filter not needed: gym_tel is per-experiment and single-threaded
 
     if error:
         return RunResult(
             success=False,
+            emission_pass=False,
+            execution_pass=False,
             fail_reasons=[error],
-            tools_called=[e.name for e in transcript.tool_events],
+            tools_called=[e.exec_name for e in transcript.tool_events],
             latency_ms=latency_ms,
             retries=retries,
             repairs=repairs,
@@ -352,11 +428,15 @@ async def run_task_once(
             error=error,
         )
 
-    passed, reasons = score(task.score, transcript, workspace)
+    from prometheus.gym.scoring import EMISSION, EXECUTION
+    emit_ok, _emit_reasons = score(task.score, transcript, workspace, view=EMISSION)
+    exec_ok, exec_reasons = score(task.score, transcript, workspace, view=EXECUTION)
     return RunResult(
-        success=passed,
-        fail_reasons=reasons,
-        tools_called=[e.name for e in transcript.tool_events],
+        success=exec_ok,
+        emission_pass=emit_ok,
+        execution_pass=exec_ok,
+        fail_reasons=exec_reasons,
+        tools_called=[e.exec_name for e in transcript.tool_events],
         latency_ms=latency_ms,
         retries=retries,
         repairs=repairs,
@@ -379,6 +459,7 @@ async def run_experiment(
     store: GymStore | None = None,
     progress: bool = True,
 ) -> dict[str, Any]:
+    preflight_endpoint(config)  # refuse a 0-for-N run against a wrong endpoint
     pipeline = build_pipeline(config)
     store = store or GymStore(GYM_DB)
     gym_tel = ToolCallTelemetry(
@@ -407,6 +488,8 @@ async def run_experiment(
                 model=pipeline["model_name"],
                 category=task.category,
                 success=int(result.success),
+                emission_pass=int(result.emission_pass),
+                execution_pass=int(result.execution_pass),
                 fail_reasons="; ".join(result.fail_reasons)[:1000] or None,
                 tools_called=json.dumps(result.tools_called),
                 latency_ms=result.latency_ms,
@@ -420,7 +503,13 @@ async def run_experiment(
                 taskset_sha=taskset.sha256,
             )
             if progress:
+                # E/X = emission/execution; only when they differ does the
+                # adapter show its value (E✗ X✓ = a repair saved the run).
                 icon = "✅" if result.success else "❌"
+                ex = (
+                    f"E{'✓' if result.emission_pass else '✗'}"
+                    f"X{'✓' if result.execution_pass else '✗'}"
+                )
                 extras = []
                 if result.repairs:
                     extras.append(f"repairs={result.repairs}")
@@ -429,7 +518,7 @@ async def run_experiment(
                 if result.breaker_tripped:
                     extras.append("BREAKER")
                 print(
-                    f"  {icon} {task.id} run {run_idx + 1}/{manifest.runs_per_task} "
+                    f"  {icon} {ex} {task.id} run {run_idx + 1}/{manifest.runs_per_task} "
                     f"({result.latency_ms:.0f}ms){' [' + ', '.join(extras) + ']' if extras else ''}"
                 )
                 if not result.success:
