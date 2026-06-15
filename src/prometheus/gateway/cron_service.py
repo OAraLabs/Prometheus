@@ -8,6 +8,8 @@ Modified: Import paths changed to prometheus.config.paths.
 from __future__ import annotations
 
 import json
+import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,26 +19,56 @@ from croniter import croniter
 
 from prometheus.config.paths import get_cron_registry_path
 
+log = logging.getLogger(__name__)
+
 DEFAULT_CRON_TIMEZONE = "America/New_York"
 
 
 def load_cron_jobs() -> list[dict[str, Any]]:
-    """Load stored cron jobs."""
+    """Load stored cron jobs.
+
+    On a corrupt/unreadable registry, preserve the file as ``.corrupt`` and log
+    loudly instead of silently returning ``[]`` — a silent empty would be
+    overwritten by the next ``save_cron_jobs`` and erase every operator job
+    (audit H7).
+    """
     path = get_cron_registry_path()
     if not path.exists():
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, OSError) as exc:
+        backup = path.with_suffix(path.suffix + ".corrupt")
+        try:
+            path.replace(backup)
+            log.error(
+                "cron registry %s was corrupt (%s); preserved → %s, starting empty",
+                path, exc, backup,
+            )
+        except OSError:
+            log.error("cron registry %s was corrupt (%s) and could not be preserved",
+                      path, exc)
         return []
     return data if isinstance(data, list) else []
 
 
 def save_cron_jobs(jobs: list[dict[str, Any]]) -> None:
-    """Persist cron jobs to disk."""
+    """Persist cron jobs to disk atomically.
+
+    Write to a temp file, fsync, then ``os.replace`` (atomic on POSIX) so a crash
+    or power loss mid-write can never truncate or corrupt the registry — the
+    old failure mode was a plain ``write_text`` that, interrupted, left an
+    unparseable file and silently lost every job on next start (audit H7).
+    """
     path = get_cron_registry_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(jobs, indent=2) + "\n", encoding="utf-8")
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    payload = json.dumps(jobs, indent=2) + "\n"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(payload)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
 
 
 def validate_cron_expression(expression: str) -> bool:
