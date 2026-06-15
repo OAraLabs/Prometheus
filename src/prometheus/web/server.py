@@ -146,7 +146,7 @@ def create_app(
                 "/api/cron", "/api/approvals", "/api/chat",
                 "/api/config", "/api/skills", "/api/profiles",
                 "/api/wiki/stats", "/api/sentinel", "/api/events/recent",
-                "/api/files",
+                "/api/files", "/api/documents",
             ],
         }
 
@@ -889,6 +889,147 @@ def create_app(
             "truncated": size > _FILES_READ_CAP,
             "binary": binary,
             "content": content,
+        }
+
+    # ── Documents Editor (SPRINT Documents Editor, Phase A) ─────────
+    #
+    # A confined, disk-backed writing surface under a GENERAL documents root
+    # (config documents.root, default ~/.prometheus/documents) — distinct from
+    # coding mode's per-run clone jail. Reuses the coding sandbox's path
+    # confinement (resolve: traversal / absolute-outside / symlink-escape all
+    # rejected) and the code_str_replace edit primitive; composes SecurityGate
+    # denied-paths on top. read/save/edit are model-free; suggest is one-shot.
+
+    def _documents_service():
+        from prometheus.config.paths import get_documents_dir
+        from prometheus.documents import DocumentsService
+        from prometheus.permissions.checker import SecurityGate
+
+        cfg = app.state.config if isinstance(app.state.config, dict) else {}
+        sec = cfg.get("security", {}) or {}
+        docs_cfg = cfg.get("documents", {}) or {}
+        root = (
+            Path(docs_cfg["root"]).expanduser()
+            if docs_cfg.get("root")
+            else get_documents_dir()
+        )
+        denied = sec.get("denied_paths") or []
+        # Defense in depth: denied paths feed BOTH the sandbox confinement and
+        # the SecurityGate composed over it.
+        gate = SecurityGate(denied_paths=denied, workspace_root=sec.get("workspace_root"))
+        return DocumentsService(root, denied_paths=denied, gate=gate)
+
+    def _documents_error(exc) -> JSONResponse:
+        return JSONResponse(status_code=exc.status, content={"error": exc.message})
+
+    @app.get("/api/documents")
+    async def list_documents(path: str = ""):
+        from prometheus.documents import DocumentsError
+
+        try:
+            rel, entries = _documents_service().list_dir(path)
+        except DocumentsError as exc:
+            return _documents_error(exc)
+        return {
+            "path": rel,
+            "entries": [
+                {"name": e.name, "type": e.type, "size": e.size, "mtime": e.mtime}
+                for e in entries
+            ],
+        }
+
+    @app.get("/api/documents/content")
+    async def read_document(path: str = ""):
+        from prometheus.documents import DocumentsError
+
+        if not path:
+            return JSONResponse(status_code=400, content={"error": "path is required"})
+        try:
+            return _documents_service().read(path)
+        except DocumentsError as exc:
+            return _documents_error(exc)
+
+    @app.put("/api/documents/content")
+    async def save_document(body: dict):
+        from prometheus.documents import DocumentsError
+
+        path = str(body.get("path", "")).strip()
+        if not path:
+            return JSONResponse(status_code=400, content={"error": "path is required"})
+        content = body.get("content", "")
+        if not isinstance(content, str):
+            return JSONResponse(status_code=400, content={"error": "content must be a string"})
+        try:
+            return _documents_service().save(path, content)
+        except DocumentsError as exc:
+            return _documents_error(exc)
+
+    @app.post("/api/documents/edit")
+    async def edit_document(body: dict):
+        from prometheus.documents import DocumentsError
+
+        path = str(body.get("path", "")).strip()
+        # Accept the str_replace primitive's names, or the suggest mode's
+        # {find, replace} aliases (so an approved redline applies unchanged).
+        old_str = body.get("old_str", body.get("find", ""))
+        new_str = body.get("new_str", body.get("replace", ""))
+        if not path:
+            return JSONResponse(status_code=400, content={"error": "path is required"})
+        if not isinstance(old_str, str) or not isinstance(new_str, str):
+            return JSONResponse(status_code=400, content={"error": "old_str/new_str must be strings"})
+        try:
+            result = await _documents_service().apply_edit(path, old_str, new_str)
+        except DocumentsError as exc:
+            return _documents_error(exc)
+        if not result.ok:
+            # The primitive's loud no-match / multi-match error — 422, file untouched.
+            return JSONResponse(status_code=422, content={"ok": False, "error": result.error})
+        return {"ok": True, "diff": result.diff}
+
+    @app.post("/api/documents/suggest")
+    async def suggest_document_edits(body: dict):
+        from prometheus.documents import DocumentsError
+        from prometheus.documents.ai import generate_suggestions
+
+        path = str(body.get("path", "")).strip()
+        instruction = str(body.get("instruction", "")).strip()
+        if not path or not instruction:
+            return JSONResponse(
+                status_code=400, content={"error": "path and instruction are required"}
+            )
+
+        cfg = app.state.config if isinstance(app.state.config, dict) else {}
+        model_cfg = cfg.get("model", {}) or {}
+        model_name = model_cfg.get("model") or app.state.current_model
+        try:
+            from prometheus.providers.registry import ProviderRegistry
+
+            provider = ProviderRegistry.create(model_cfg)
+        except Exception as exc:  # noqa: BLE001 — surface, never 500-with-traceback
+            return JSONResponse(
+                status_code=503, content={"error": f"model provider unavailable: {exc}"}
+            )
+
+        async def _gen(content: str, instr: str) -> list[dict]:
+            return await generate_suggestions(provider, model_name, content, instr)
+
+        try:
+            edits = await _documents_service().suggest(path, instruction, _gen)
+        except DocumentsError as exc:
+            return _documents_error(exc)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(status_code=502, content={"error": f"suggest failed: {exc}"})
+        return {
+            "edits": [
+                {
+                    "find": e.find,
+                    "replace": e.replace,
+                    "reason": e.reason,
+                    "applicable": e.applicable,
+                    "note": e.note,
+                }
+                for e in edits
+            ]
         }
 
     # ── Approvals ──────────────────────────────────────────────────
