@@ -79,6 +79,47 @@ def build_pipeline(config: dict) -> dict[str, Any]:
     }
 
 
+def preflight_endpoint(config: dict) -> None:
+    """Refuse to start a gym run against an unreachable / wrong model endpoint.
+
+    The gitignored ``config/prometheus.yaml`` does NOT travel into ``git
+    worktree``s (``_PROMETHEUS_YAML`` resolves relative to the imported module),
+    so a stub or default can silently point the runner at the wrong server —
+    three wasted N-for-0 runs to date (s1 exp2/exp3, then series-2: 63×404
+    against ollama's localhost:11434). The honest-report machinery flagged each
+    after the fact; this catches it in one second, BEFORE any task runs, and
+    names the resolved endpoint so the misconfiguration is loud, not silent.
+    Raises RuntimeError on no-base_url / unreachable / non-200."""
+    import httpx
+
+    model_cfg = config.get("model", {})
+    base_url = (model_cfg.get("base_url") or "").rstrip("/")
+    provider = model_cfg.get("provider", "?")
+    if not base_url:
+        raise RuntimeError(
+            f"gym preflight: no model.base_url in config (provider={provider!r}). "
+            "Refusing to run against a silent default endpoint — in a worktree, "
+            "copy the real config/prometheus.yaml in (it is gitignored and does "
+            "not travel into `git worktree`s)."
+        )
+    url = f"{base_url}/v1/models"
+    try:
+        resp = httpx.get(url, timeout=5.0)
+    except Exception as exc:  # noqa: BLE001 — any connect/timeout error refuses the run
+        raise RuntimeError(
+            f"gym preflight: model endpoint {url} is unreachable "
+            f"({type(exc).__name__}: {exc}); provider={provider}. Refusing to run "
+            "N-for-0 against a dead/wrong endpoint."
+        ) from exc
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"gym preflight: model endpoint {url} returned HTTP {resp.status_code} "
+            f"(provider={provider}). Refusing to run — is the config pointing at "
+            "the right server?"
+        )
+    log.info("gym preflight OK: %s (provider=%s) HTTP 200", url, provider)
+
+
 def build_registry(workspace: Path, stub_tools: list[str]) -> ToolRegistry:
     """Real builtin tools; stub_tools get side-effect-free execute()."""
     from prometheus.tools.builtin import (
@@ -418,6 +459,7 @@ async def run_experiment(
     store: GymStore | None = None,
     progress: bool = True,
 ) -> dict[str, Any]:
+    preflight_endpoint(config)  # refuse a 0-for-N run against a wrong endpoint
     pipeline = build_pipeline(config)
     store = store or GymStore(GYM_DB)
     gym_tel = ToolCallTelemetry(

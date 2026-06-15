@@ -80,7 +80,13 @@ async def main() -> int:
                 f"(task, run_idx) key."
             )
         config = load_config()
-        totals = await run_experiment(manifest, taskset, config, store=store)
+        try:
+            totals = await run_experiment(manifest, taskset, config, store=store)
+        except RuntimeError as exc:
+            # Preflight refusal (unreachable/wrong endpoint) — refuse loudly,
+            # don't run N-for-0. Exit 2 = the spec's halt convention.
+            print(f"\n❌ {exc}")
+            return 2
         print("=" * 60)
         print(f"Done: {totals['passed']}/{totals['runs']} runs passed")
 

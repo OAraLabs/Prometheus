@@ -615,3 +615,23 @@ class TestArgsPresentPredicate:
     def test_present_in_taskset_allowed_keys(self):
         from prometheus.gym.tasks import ALLOWED_SCORE_KEYS
         assert "expect_tool_args_present" in ALLOWED_SCORE_KEYS
+
+
+class TestPreflightEndpoint:
+    """The runner refuses to start against an unreachable/wrong endpoint —
+    the gitignored config doesn't travel into worktrees, which silently pointed
+    the runner at ollama's localhost:11434 (63×404) three times. Fail loud,
+    before any task runs."""
+
+    def test_no_base_url_refused(self):
+        from prometheus.gym.runner import preflight_endpoint
+        with pytest.raises(RuntimeError, match="no model.base_url"):
+            preflight_endpoint({"model": {"provider": "ollama"}})
+
+    def test_unreachable_endpoint_refused(self):
+        from prometheus.gym.runner import preflight_endpoint
+        # 127.0.0.1:1 — nothing listens → connect error → refuse.
+        with pytest.raises(RuntimeError, match="unreachable"):
+            preflight_endpoint(
+                {"model": {"provider": "llama_cpp", "base_url": "http://127.0.0.1:1"}}
+            )
