@@ -1093,6 +1093,16 @@ class ToolCallTelemetry:
             "overall_success_rate": total_success / total if total else 0.0,
         }
 
+    @property
+    def db_path(self) -> Path:
+        """Filesystem path of the telemetry SQLite db.
+
+        Lets read-only consumers (e.g. the coding live-stream tailer) open their
+        OWN connection to the same file via ``connect_telemetry_db`` instead of
+        sharing this writer's connection.
+        """
+        return self._db_path
+
     def close(self) -> None:
         """Close the database connection."""
         self._conn.close()

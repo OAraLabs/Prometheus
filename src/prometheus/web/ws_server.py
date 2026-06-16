@@ -520,6 +520,14 @@ class WebSocketBridge:
         elif signal.kind == "curator_report":
             event["type"] = "curator_report"
             event["payload"] = signal.payload
+        # Coding live-stream (feat/coding-livestream): per-round progression,
+        # the terminal verdict, and a non-fatal stream-interruption marker.
+        # Same first-class-type pattern so Beacon's Live view routes them; the
+        # payload carries session_id for client-side run scoping (these, like
+        # every signal event, broadcast to all authed clients).
+        elif signal.kind in ("coding_round", "coding_complete", "coding_stream_error"):
+            event["type"] = signal.kind
+            event["payload"] = signal.payload
 
         await self.broadcast(event)
 

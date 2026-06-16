@@ -91,6 +91,10 @@ async def create_coding_managed_task(
         description=f"coding task {task_id}: {description[:120]}",
         cwd=cwd,
         task_type="local_agent",
+        # The coding telemetry session key — so the manager's terminal
+        # task_completed/task_failed event self-identifies the run to the
+        # CodingLiveStream tailer (feat/coding-livestream), no side map.
+        session_id=f"coding:{task_id}",
         notify_target=notify_target,
         on_complete="notify",
         timeout_seconds=timeout_seconds or (max_wall_seconds + 300),

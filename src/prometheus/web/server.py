@@ -134,6 +134,18 @@ def create_app(
     app.state.current_provider = config.get("model", {}).get("provider", "unknown")
     app.state.active_profile = config.get("profiles", {}).get("default", "full")
 
+    # Coding live-stream (feat/coding-livestream): tails telemetry.db per coding
+    # run and fans coding_round/coding_complete/coding_stream_error over the WS
+    # bridge. Read-only; started by POST /api/code, stopped by the run's
+    # task_completed/task_failed event (subscribed here).
+    from prometheus.coding.livestream import CodingLiveStream, DEFAULT_DB_PATH
+    coding_stream = CodingLiveStream(
+        signal_bus,
+        db_path=getattr(telemetry, "db_path", DEFAULT_DB_PATH),
+    )
+    coding_stream.subscribe_lifecycle()
+    app.state.coding_stream = coding_stream
+
     # ── Root ────────────────────────────────────────────────────────
 
     @app.get("/")
@@ -1156,6 +1168,12 @@ def create_app(
             return JSONResponse(status_code=400, content={
                 "error": record.error or "task rejected at registration"
             })
+        # Begin live-streaming this run's rounds over the WS (read-only tail).
+        # The session_id matches both the coding telemetry key and the managed
+        # task's session_id, so the run's terminal event stops this tail.
+        stream = getattr(app.state, "coding_stream", None)
+        if stream is not None:
+            stream.start_tail(f"coding:{coding_task_id}")
         return {
             "task_id": record.id,            # managed-task handle (poll this)
             "coding_task_id": coding_task_id,  # names the branch coding/<id>
