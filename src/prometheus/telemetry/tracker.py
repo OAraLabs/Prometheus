@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from prometheus.telemetry.db import connect_telemetry_db
+
 log = logging.getLogger(__name__)
 
 
@@ -213,7 +215,11 @@ class ToolCallTelemetry:
     def __init__(self, db_path: str | Path = "~/.prometheus/telemetry.db") -> None:
         self._db_path = Path(db_path).expanduser().resolve()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        # Shared WAL + busy_timeout setup (see telemetry.db) so the daemon
+        # writer, the coding-subprocess writer, and dashboard/live-stream
+        # readers share one concurrency-safe substrate. Write/commit logic
+        # below is unchanged.
+        self._conn = connect_telemetry_db(self._db_path)
         # Three-phase init:
         # 1. Create tables IF NOT EXISTS (fresh DBs get the full schema here)
         # 2. Migrate any existing DB that predates later column additions
