@@ -147,3 +147,27 @@ def get_workspace_dir() -> Path:
 
     workspace_dir.mkdir(parents=True, exist_ok=True)
     return workspace_dir
+
+
+def get_documents_dir() -> Path:
+    """Return the confined documents-editor root (~/.prometheus/documents).
+
+    The Documents Editor (daemon docs service + Beacon panel) may only read,
+    save, and edit files resolving UNDER this root. It is a sibling of the
+    coding-mode jail (~/.prometheus/coding) — a dedicated, confined tree, NOT
+    the user's real ~/Documents (a v1 safety decision: a surprise-free root
+    inside the daemon's own data area). Repointable via PROMETHEUS_DOCUMENTS_DIR
+    or the config ``documents.root`` key.
+
+    Resolution order:
+    1. PROMETHEUS_DOCUMENTS_DIR environment variable
+    2. ~/.prometheus/documents/
+    """
+    env_dir = os.environ.get("PROMETHEUS_DOCUMENTS_DIR")
+    if env_dir:
+        documents_dir = Path(env_dir)
+    else:
+        documents_dir = get_config_dir() / "documents"
+
+    documents_dir.mkdir(parents=True, exist_ok=True)
+    return documents_dir
