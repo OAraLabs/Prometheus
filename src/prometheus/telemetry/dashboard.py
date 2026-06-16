@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from prometheus.telemetry.db import connect_telemetry_db
 from prometheus.telemetry.tracker import POLICY_ERROR_TYPES
 
 # SQL fragment placeholders for the policy error types (D3 denominator
@@ -35,7 +36,9 @@ class ToolDashboard:
 
     def __init__(self, db_path: str | Path = "~/.prometheus/telemetry.db") -> None:
         self._db_path = Path(db_path).expanduser().resolve()
-        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        # Shared WAL + busy_timeout setup (see telemetry.db) — the reader side
+        # of the same concurrency-safe substrate the writer uses.
+        self._conn = connect_telemetry_db(self._db_path)
         self._conn.row_factory = sqlite3.Row
 
     # ------------------------------------------------------------------
