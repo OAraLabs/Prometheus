@@ -162,6 +162,7 @@ def test_run_coding_task_emits_report_on_uncaught_exception(monkeypatch, tmp_pat
         max_wall_seconds = 60
         sandbox_parent = str(tmp_path / "sb")
         suppress_thinking = False
+        control_dir = None  # Loop Manager Sprint 2 — mirrors the new --control-dir CLI arg
 
     # Isolate the crash-handling path: stub provider/adapter/clone so the
     # test exercises ONLY "session.run() raises → structured failed_error
@@ -231,6 +232,72 @@ def test_stop_stuck_not_running_task_409(monkeypatch, tmp_path, repo):
     r = c.post("/api/code/a12345678/stop")
     assert r.status_code == 409
     assert "not running" in r.json()["error"]
+
+
+# --------------------------------------------------------------------------- #
+# Mid-run supervision — POST /api/code/{id}/pause|inject|resume (Sprint 2)
+# --------------------------------------------------------------------------- #
+
+
+def _supervisable(tmp_path, monkeypatch, *, status="running"):
+    """A stub manager holding one run with a coding session_id, with the control
+    dir redirected under tmp_path so the endpoints write there, not ~/.prometheus."""
+    monkeypatch.setattr(
+        "prometheus.coding.managed.coding_control_dir",
+        lambda coding_id: tmp_path / "ctl" / coding_id,
+    )
+    mgr = _StubManager(tmp_path)
+    mgr._records["a12345678"] = TaskRecord(
+        id="a12345678", type="local_agent", status=status, description="coding",
+        cwd=str(tmp_path), output_file=tmp_path / "o.log", session_id="coding:t42",
+    )
+    return mgr
+
+
+def _ctl_state(tmp_path):
+    from prometheus.coding.control import control_path, parse_control
+    p = control_path(tmp_path / "ctl" / "t42")
+    return parse_control(p.read_text()) if p.exists() else None
+
+
+def test_pause_inject_resume_round_trip(monkeypatch, tmp_path):
+    c = _client_with(monkeypatch, _supervisable(tmp_path, monkeypatch))
+
+    r = c.post("/api/code/a12345678/pause")
+    assert r.status_code == 200 and r.json()["status"] == "paused"
+    assert _ctl_state(tmp_path).paused is True
+    # idempotent + non-destructive: pausing an already-paused run
+    assert c.post("/api/code/a12345678/pause").json()["status"] == "already-paused"
+
+    r = c.post("/api/code/a12345678/inject", json={"text": "FOCUS the parser"})
+    assert r.status_code == 200 and r.json()["status"] == "injected" and r.json()["injection_id"]
+    injs = _ctl_state(tmp_path).injections
+    assert len(injs) == 1 and injs[0].text == "FOCUS the parser"
+
+    r = c.post("/api/code/a12345678/resume")
+    assert r.status_code == 200 and r.json()["status"] == "resumed"
+    assert _ctl_state(tmp_path).paused is False
+    assert len(_ctl_state(tmp_path).injections) == 1  # queued steer survives resume (consumed by id)
+    # idempotent + non-destructive: resuming a non-paused run
+    assert c.post("/api/code/a12345678/resume").json()["status"] == "not-paused"
+
+
+def test_inject_requires_nonblank_text(monkeypatch, tmp_path):
+    c = _client_with(monkeypatch, _supervisable(tmp_path, monkeypatch))
+    assert c.post("/api/code/a12345678/inject", json={"text": "   "}).status_code == 400
+    assert c.post("/api/code/a12345678/inject", json={}).status_code == 400
+
+
+def test_supervise_unknown_id_404(monkeypatch, tmp_path):
+    c = _client_with(monkeypatch, _StubManager(tmp_path))  # no records
+    for ep in ("pause", "resume", "inject"):
+        assert c.post(f"/api/code/nope/{ep}", json={"text": "x"}).status_code == 404, ep
+
+
+def test_supervise_terminal_run_409(monkeypatch, tmp_path):
+    c = _client_with(monkeypatch, _supervisable(tmp_path, monkeypatch, status="completed"))
+    for ep in ("pause", "resume", "inject"):
+        assert c.post(f"/api/code/a12345678/{ep}", json={"text": "x"}).status_code == 409, ep
 
 
 # --------------------------------------------------------------------------- #

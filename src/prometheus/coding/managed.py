@@ -14,9 +14,18 @@ from __future__ import annotations
 
 import shlex
 import sys
+from pathlib import Path
 from typing import Any
 
+from prometheus.config.paths import get_data_dir
 from prometheus.tasks.types import TaskRecord
+
+
+def coding_control_dir(task_id: str) -> Path:
+    """Per-run control dir for mid-run supervision (Loop Manager Sprint 2) — OUTSIDE the
+    sandbox clone, derivable from ``task_id`` by BOTH the daemon (the pause/inject/resume
+    endpoints, sole writer) and the run subprocess (sole reader)."""
+    return get_data_dir().parent / "coding" / "control" / task_id
 
 
 def build_coding_command(
@@ -30,6 +39,7 @@ def build_coding_command(
     sandbox_parent: str | None = None,
     config_path: str | None = None,
     suppress_thinking: bool = False,
+    control_dir: str | None = None,
 ) -> str:
     """Build the shell command for one coding run, fully quoted.
 
@@ -47,6 +57,8 @@ def build_coding_command(
     ]
     if sandbox_parent:
         parts += ["--sandbox-parent", sandbox_parent]
+    if control_dir:
+        parts += ["--control-dir", control_dir]
     if config_path:
         parts += ["--config", config_path]
     if suppress_thinking:
@@ -85,6 +97,9 @@ async def create_coding_managed_task(
         max_wall_seconds=max_wall_seconds,
         sandbox_parent=sandbox_parent,
         config_path=config_path,
+        # Every daemon-launched run is supervisable: pass a per-run control dir the
+        # pause/inject/resume endpoints write to (the run no-ops it unless used).
+        control_dir=str(coding_control_dir(task_id)),
     )
     return await manager.create_shell_task(
         command=command,

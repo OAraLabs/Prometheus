@@ -19,11 +19,13 @@ output. Never merges, never pushes.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from prometheus.coding.control import RunControl
 from prometheus.coding.policy import IterateToGreenPolicy
 from prometheus.coding.sandbox import Sandbox
 from prometheus.coding.tools import build_coding_registry
@@ -39,6 +41,9 @@ log = logging.getLogger(__name__)
 
 _GIT_IDENTITY = ("-c", "user.name=prometheus-coding",
                  "-c", "user.email=coding@prometheus.local")
+
+# Loop Manager Sprint 2 — episode-seam control re-poll cadence while a run is paused.
+_CONTROL_POLL_SECONDS = 0.5
 
 
 def coding_system_prompt(task_description: str, acceptance_command: str) -> str:
@@ -123,6 +128,7 @@ class CodingSession:
         max_wall_seconds: float = 1_200.0,
         suppress_thinking: bool | None = False,  # coding turns THINK by default
         acceptance_timeout_seconds: float = 240.0,
+        control_dir: str | None = None,  # Loop Manager Sprint 2 — mid-run control (off if None)
     ) -> None:
         self._provider = provider
         self._model = model
@@ -133,6 +139,7 @@ class CodingSession:
         self._max_tokens = max_tokens
         self._suppress_thinking = suppress_thinking
         self._acceptance_timeout = acceptance_timeout_seconds
+        self._control = RunControl(control_dir)
         self._policy = IterateToGreenPolicy(
             acceptance_command=task.acceptance_command,
             max_rounds=max_rounds,
@@ -209,6 +216,24 @@ class CodingSession:
         pending_runs: dict[str, str] = {}
 
         while True:
+            # Loop Manager Sprint 2 — mid-run supervise check at the episode seam (dormant
+            # unless --control-dir is set; run_loop is UNTOUCHED). Pause/inject/resume happen
+            # HERE, between episodes, where the conversation is well-formed.
+            if self._control.enabled and await self._apply_control(messages, started):
+                # Paused past the wall cap — honest abandonment NOW, from the pause state,
+                # without running another episode past the wall (the wall is monotonic; a
+                # pause never stops it, so a forgotten pause dies here, never orphaned).
+                wall = time.monotonic() - started
+                reason = (self._policy.over_cap(wall) or "wall-clock cap") + " — run was paused"
+                exit_code, output = await self._run_acceptance()
+                if exit_code == 0:
+                    return await self._finish(
+                        "success", f"green at cap ({reason})",
+                        episodes, wall, exit_code, output,
+                    )
+                return await self._finish(
+                    "failed_abandoned", reason, episodes, wall, exit_code, output,
+                )
             episodes += 1
             # An episode may use at most the remaining round budget.
             context.max_turns = max(
@@ -290,6 +315,64 @@ class CodingSession:
                 provenance="orchestrator",
                 is_trusted=True,
             ))
+
+    async def _apply_control(
+        self, messages: list[ConversationMessage], started: float
+    ) -> bool:
+        """Episode-seam supervise check (Loop Manager Sprint 2). Returns True iff the run must
+        ABANDON NOW — a run paused past its wall cap, detected from INSIDE the pause loop, so a
+        forgotten pause dies on the wall (monotonic; pause never stops it) and never runs on or
+        orphans. Dormant unless a control dir is set. PAUSE blocks until resume or the cap;
+        INJECT enters the NEXT episode's context trust-tagged ``provenance="supervisor"`` —
+        actionable guidance (is_trusted, so NOT untrusted-bannered) yet excluded from memory
+        fact-mining by provenance (memory/extractor.py:177-180). Any control-channel error is
+        swallowed and returns False — a broken channel never wedges, abandons, or orphans."""
+        try:
+            state = self._control.read()
+            was_paused = False
+            while state.paused:
+                if self._policy.over_cap(time.monotonic() - started):
+                    return True  # paused past the wall cap → abandon from inside the pause
+                if not was_paused:
+                    was_paused = True
+                    self._emit_control_event("pause")
+                await asyncio.sleep(_CONTROL_POLL_SECONDS)
+                state = self._control.read()
+            if was_paused:
+                self._emit_control_event("resume")
+            for injection in self._control.take_new_injections(state):
+                messages.append(ConversationMessage.from_injected(
+                    injection.text, provenance="supervisor", is_trusted=True,
+                ))
+                self._emit_control_event("inject", injection_id=injection.id)
+        except Exception:  # noqa: BLE001 — a broken control channel never wedges a run
+            log.warning(
+                "coding task %s: control seam check failed — continuing run",
+                self._task.task_id, exc_info=True,
+            )
+        return False
+
+    def _emit_control_event(self, kind: str, **detail: Any) -> None:
+        """One telemetry row per supervise action (pause/inject/resume) so a supervised run is
+        auditable and the eventual Beacon view can reflect state. Best-effort — a telemetry
+        failure never affects the run."""
+        if self._telemetry is None or not hasattr(self._telemetry, "record_run"):
+            return
+        try:
+            self._telemetry.record_run(
+                subsystem="coding_control",
+                operation=kind,
+                outcome="ok",
+                duration_ms=0.0,
+                summary={"task_id": self._task.task_id, **detail},
+                session_id=f"coding:{self._task.task_id}",
+                model=self._model,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug(
+                "coding task %s: control telemetry write failed (%s)",
+                self._task.task_id, kind, exc_info=True,
+            )
 
     async def _finish(
         self,
