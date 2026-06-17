@@ -1226,6 +1226,83 @@ def create_app(
             return JSONResponse(status_code=500, content={"error": str(exc)})
         return {"task_id": record.id, "status": record.status}
 
+    # ── Mid-run supervision (Loop Manager Sprint 2) — pause / inject / resume ──
+    # Thin writers of the run's control file (coding/control.py); the coding
+    # subprocess polls it at its episode seam. Run-id resolution mirrors /stop
+    # (managed task_id → 404 if unknown); the control file is keyed by the coding
+    # id (the task's session_id, ``coding:<id>``). No shell command is executed
+    # here, so there is nothing to SecurityGate — the bearer auth on /api/ is the
+    # access boundary, and the injected steer is TRUSTED human guidance
+    # (provenance=supervisor), not an executable. Idempotent + non-destructive on
+    # already-in-state; 409 once the run is terminal (a finished run can't steer).
+
+    def _control_path_for(record) -> "Path":
+        from prometheus.coding.control import control_path
+        from prometheus.coding.managed import coding_control_dir
+        coding_id = (record.session_id or "").removeprefix("coding:") or record.id
+        return control_path(coding_control_dir(coding_id))
+
+    @app.post("/api/code/{task_id}/pause")
+    async def pause_coding_run(task_id: str):
+        from prometheus.coding.control import read_state_for_write, with_paused, write_state
+        from prometheus.tasks.manager import get_task_manager
+        from prometheus.tasks.types import TERMINAL_STATUSES
+
+        record = get_task_manager().get_task(task_id)
+        if record is None:
+            return JSONResponse(status_code=404, content={"error": "no such task"})
+        if record.status in TERMINAL_STATUSES:
+            return JSONResponse(status_code=409, content={"error": "run is not active"})
+        path = _control_path_for(record)
+        state = read_state_for_write(path)
+        if state.paused:
+            return {"task_id": task_id, "status": "already-paused"}
+        write_state(path, with_paused(state, True))
+        return {"task_id": task_id, "status": "paused"}
+
+    @app.post("/api/code/{task_id}/resume")
+    async def resume_coding_run(task_id: str):
+        from prometheus.coding.control import read_state_for_write, with_paused, write_state
+        from prometheus.tasks.manager import get_task_manager
+        from prometheus.tasks.types import TERMINAL_STATUSES
+
+        record = get_task_manager().get_task(task_id)
+        if record is None:
+            return JSONResponse(status_code=404, content={"error": "no such task"})
+        if record.status in TERMINAL_STATUSES:
+            return JSONResponse(status_code=409, content={"error": "run is not active"})
+        path = _control_path_for(record)
+        state = read_state_for_write(path)
+        if not state.paused:
+            return {"task_id": task_id, "status": "not-paused"}
+        write_state(path, with_paused(state, False))
+        return {"task_id": task_id, "status": "resumed"}
+
+    @app.post("/api/code/{task_id}/inject")
+    async def inject_coding_run(task_id: str, body: dict):
+        """Body: ``{ "text": <the correction> }``. Queues a human steer the run applies at its
+        next episode seam, trust-tagged ``provenance="supervisor"``."""
+        from uuid import uuid4 as _uuid4
+
+        from prometheus.coding.control import Injection, read_state_for_write, with_injection, write_state
+        from prometheus.tasks.manager import get_task_manager
+        from prometheus.tasks.types import TERMINAL_STATUSES
+
+        text = str(body.get("text", "")).strip()
+        if not text:
+            return JSONResponse(status_code=400, content={"error": "text (the correction) is required"})
+        if len(text) > 8000:
+            return JSONResponse(status_code=400, content={"error": "correction too long (max 8000 chars)"})
+        record = get_task_manager().get_task(task_id)
+        if record is None:
+            return JSONResponse(status_code=404, content={"error": "no such task"})
+        if record.status in TERMINAL_STATUSES:
+            return JSONResponse(status_code=409, content={"error": "run is not active — cannot steer a finished run"})
+        path = _control_path_for(record)
+        injection = Injection(id=_uuid4().hex[:8], text=text)
+        write_state(path, with_injection(read_state_for_write(path), injection))
+        return {"task_id": task_id, "status": "injected", "injection_id": injection.id}
+
     @app.get("/api/code/{task_id}/diff")
     async def get_coding_diff(task_id: str):
         """Full unified diff of a finished coding run's artifact commit.

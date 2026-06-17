@@ -23,7 +23,8 @@ from pydantic import BaseModel, Field
 # "compactor" = synthetic span summaries substituted at prompt-assembly time
 # (SPRINT-CONTEXT-COMPACTOR); machinery-authored, trusted, never stored.
 Provenance = Literal[
-    "user", "cron", "task_supervisor", "orchestrator", "teacher_escalation", "compactor"
+    "user", "cron", "task_supervisor", "orchestrator", "teacher_escalation", "compactor",
+    "supervisor",  # Loop Manager Sprint 2 — a human's mid-run coding-loop steer (trusted)
 ]
 
 

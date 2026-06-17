@@ -758,6 +758,7 @@ def run_coding_task(args) -> int:
         max_rounds=args.max_rounds,
         max_wall_seconds=float(args.max_wall_seconds),
         suppress_thinking=True if args.suppress_thinking else False,
+        control_dir=args.control_dir,
     )
     # A coding run must ALWAYS emit a JSON report and a verdict exit code —
     # an uncaught exception mid-run (a model-output edge case, a provider
@@ -1019,6 +1020,11 @@ def main() -> None:
     code_parser.add_argument(
         "--sandbox-parent", default=None,
         help="Where the dedicated clone lives (default: ~/.prometheus/coding)",
+    )
+    code_parser.add_argument(
+        "--control-dir", default=None,
+        help="Per-run dir for the mid-run control file (pause/inject/resume). Absent → the "
+             "control channel is OFF (default, byte-identical un-supervised behavior).",
     )
     code_parser.add_argument(
         "--suppress-thinking", action="store_true",
