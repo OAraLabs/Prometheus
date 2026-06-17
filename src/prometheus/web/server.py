@@ -64,6 +64,52 @@ def _coding_sandbox_root() -> "Path":
     return (get_data_dir().parent / "coding").resolve()
 
 
+# ── Loop Manager project files (feat/loop-file-endpoint) — NARROW write expansion ──
+# The daemon may read/write ONLY these basenames, ONLY at the top level of an existing git
+# repo, validated by the SAME check POST /api/code uses (_resolve_coding_repo). This is the
+# deliberate, scoped widening that lets a REMOTE Beacon (e.g. on a Mac) edit a project's
+# TASKS.md/LOOP.md/PROGRESS.md that live on the daemon host. Every rejection is specific —
+# no generic "could not write" (that swallowed error is what made the original bug hard to
+# diagnose). This does NOT touch /api/files or its ~/.prometheus/workspace sandbox.
+_PROJECT_FILES = ("TASKS.md", "LOOP.md", "PROGRESS.md")
+
+
+def _resolve_coding_repo(repo: str) -> Path:
+    """The SINGLE coding-repo validator, shared by POST /api/code and /api/project-file (one
+    validator, reused — not a second one). Resolve the path; assert it exists and is a git
+    repo. Raises ``ValueError`` with a SPECIFIC reason."""
+    repo = (repo or "").strip()
+    if not repo:
+        raise ValueError("repo path is required")
+    repo_path = Path(repo).expanduser()
+    if not repo_path.exists():
+        raise ValueError(f"path does not exist: {repo}")
+    if not (repo_path / ".git").exists():
+        raise ValueError(f"not a git repository (no .git): {repo}")
+    return repo_path
+
+
+def _resolve_project_file(repo: str, name: str) -> Path:
+    """Resolve a Loop Manager project file to its absolute path under the repo root, enforcing
+    the NARROW scope. Raises ``ValueError`` with a SPECIFIC reason for each rejection: blank or
+    sub-path ``name``, disallowed basename, and — via :func:`_resolve_coding_repo` — missing
+    path / non-git-repo. Never widens past the three allowlisted files at the repo top level."""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("name is required")
+    if name != Path(name).name or name in ("..", "."):
+        raise ValueError(f"name must be a top-level filename, not a path: {name!r}")
+    if name not in _PROJECT_FILES:
+        raise ValueError(f"filename not permitted (only {', '.join(_PROJECT_FILES)}): {name!r}")
+    repo_path = _resolve_coding_repo(repo)
+    target = repo_path / name
+    # Defense in depth: the resolved target must sit DIRECTLY in the repo root (so a symlink at
+    # <repo>/TASKS.md can't redirect a write outside the repo).
+    if target.resolve().parent != repo_path.resolve():
+        raise ValueError(f"path does not resolve to the repo root: {name!r}")
+    return target
+
+
 def create_app(
     config: dict[str, Any],
     signal_bus: Any | None = None,
@@ -1143,11 +1189,10 @@ def create_app(
             return JSONResponse(status_code=400, content={
                 "error": "repo, description and acceptance_command are required"
             })
-        repo_path = Path(repo).expanduser()
-        if not (repo_path / ".git").exists():
-            return JSONResponse(status_code=400, content={
-                "error": f"repo is not a git repository: {repo}"
-            })
+        try:
+            repo_path = _resolve_coding_repo(repo)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
 
         coding_task_id = str(body.get("task_id") or f"c{_uuid4().hex[:8]}")
         try:
@@ -1180,6 +1225,43 @@ def create_app(
             "status": record.status,
             "output_file": str(record.output_file),
         }
+
+    # ── Loop Manager project files — read/write TASKS.md/LOOP.md/PROGRESS.md at a git repo's
+    # root (Option B: remote Beacon edits files on the daemon host). NARROW + specific errors.
+    @app.get("/api/project-file")
+    async def read_project_file(repo: str = "", name: str = ""):
+        """Read a project file. 400 (specific) on a bad request; 404 when the file is absent."""
+        try:
+            target = _resolve_project_file(repo, name)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        if not target.exists():
+            return JSONResponse(status_code=404, content={"error": f"file not found: {name}"})
+        try:
+            content = target.read_text(encoding="utf-8")
+            mtime_ms = target.stat().st_mtime * 1000.0
+        except OSError as exc:
+            return JSONResponse(status_code=500, content={"error": f"read failed: {exc}"})
+        return {"content": content, "mtimeMs": mtime_ms}
+
+    @app.put("/api/project-file")
+    async def write_project_file(body: dict):
+        """Write a project file — ONLY {TASKS.md, LOOP.md, PROGRESS.md}, ONLY at the top level of
+        an existing git repo (the SAME repo/.git validation /api/code uses). Every rejection
+        returns its specific reason; this never touches /api/files' sandbox."""
+        content = body.get("content", "")
+        if not isinstance(content, str):
+            return JSONResponse(status_code=400, content={"error": "content must be a string"})
+        try:
+            target = _resolve_project_file(str(body.get("repo", "")), str(body.get("name", "")))
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        try:
+            target.write_text(content, encoding="utf-8")
+            mtime_ms = target.stat().st_mtime * 1000.0
+        except OSError as exc:
+            return JSONResponse(status_code=500, content={"error": f"write failed: {exc}"})
+        return {"mtimeMs": mtime_ms}
 
     @app.get("/api/code/{task_id}")
     async def get_coding_run(task_id: str):
