@@ -6,20 +6,14 @@ Changes from original:
   - Calls ModelProvider instead of Claude API directly
   - Retains identical extraction prompt, entity categories, confidence scoring,
     deduplication logic, and batch size (10-20 events per call)
-  - Dual-writes to SQLite memories table + optional Obsidian vault
+  - Writes facts to the SQLite memories table only; the human-facing wiki
+    under ``~/.prometheus/wiki/`` is a pure projection rendered from that
+    store by the WikiCompiler (there is no second markdown writer here)
 
 TRUST-CONTEXT: this extractor is an autonomous, model-driven write path
-— there is no human in the loop to sanction each fact. Its file-write
-surface is therefore restricted to:
-  - ``~/.prometheus/MEMORY.md`` (the pointer index)
-  - ``~/.prometheus/wiki/`` (entity pages, written via WikiCompiler)
-  - SQLite (``MemoryStore``, no file path concern)
-
-The optional :class:`ObsidianWriter` enforces this boundary on its
-``vault_path`` at construction time — passing a vault outside
-``~/.prometheus/`` raises ``ValueError``. Callers who want to dual-write
-to a real Obsidian vault outside ``~/.prometheus/`` must opt in
-explicitly via ``ObsidianWriter(vault_path, allowed_roots=[...])``.
+— there is no human in the loop to sanction each fact. Its write surface
+is SQLite only (``MemoryStore``); the wiki is regenerated from the store,
+never written to directly from here.
 """
 
 from __future__ import annotations
@@ -27,11 +21,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from prometheus.memory.entity_validation import classify_entity, quarantine
 from prometheus.memory.store import MemoryStore
 
 if TYPE_CHECKING:
@@ -87,7 +80,6 @@ class MemoryExtractor:
         provider: ModelProvider,
         *,
         model: str = "default",
-        obsidian_writer: ObsidianWriter | None = None,
         batch_size: int = _BATCH_SIZE,
         post_extract_callback: Callable[[list[dict]], None] | None = None,
         signal_bus: object | None = None,
@@ -99,7 +91,6 @@ class MemoryExtractor:
         self._store = store  # facts store (.persist_memory + .search_memories)
         self._provider = provider
         self._model = model
-        self._obsidian = obsidian_writer
         self._batch_size = batch_size
         self._post_extract_callback = post_extract_callback
         self._signal_bus = signal_bus
@@ -274,6 +265,14 @@ class MemoryExtractor:
         persisted = 0
         persisted_facts: list[dict] = []
         for fact in facts:
+            # Structural entity gate: never persist junk (paths, code
+            # identifiers, shell syntax, over-long task strings) as entities.
+            # Rejections are quarantined for inspection, not silently dropped.
+            entity_name = fact.get("entity_name", "")
+            reason = classify_entity(entity_name)
+            if reason is not None:
+                quarantine(str(entity_name), reason, context="extractor")
+                continue
             try:
                 self._store.persist_memory(
                     entity_type=fact.get("entity_type", "concept"),
@@ -284,8 +283,11 @@ class MemoryExtractor:
                     source_event_ids=source_ids,
                     tags=fact.get("tags", []),
                 )
-                if self._obsidian:
-                    self._obsidian.write_fact(fact)
+                # Carry provenance into the dict handed to the WikiCompiler
+                # callback. The source ids are persisted to memory.db above,
+                # but _parse_facts() produced this dict without them, so the
+                # wiki rendered "source: unknown". Re-attach the real ids.
+                fact["source_event_ids"] = source_ids
                 persisted += 1
                 persisted_facts.append(fact)
             except Exception:
@@ -354,87 +356,3 @@ class MemoryExtractor:
             except json.JSONDecodeError:
                 continue
         return facts
-
-
-# ------------------------------------------------------------------
-# ObsidianWriter — optional dual-write to Obsidian vault
-# ------------------------------------------------------------------
-
-
-def _default_extractor_write_roots() -> list[Path]:
-    """Default allow-list for autonomous memory writes.
-
-    Only paths under ``~/.prometheus/`` are permitted by default. This
-    captures both ``~/.prometheus/MEMORY.md`` (pointer index) and
-    ``~/.prometheus/wiki/`` (entity pages).
-    """
-    return [Path.home() / ".prometheus"]
-
-
-class ObsidianWriter:
-    """Write extracted memory facts to an Obsidian vault for human readability.
-
-    Each entity gets its own markdown note under ``vault_path/Memory/<entity_name>.md``.
-
-    TRUST-CONTEXT: ``vault_path`` must resolve under one of
-    ``allowed_roots`` (default: ``[~/.prometheus]``). Passing a vault
-    outside the allow-list raises ``ValueError`` at construction. Callers
-    who want a vault elsewhere must pass ``allowed_roots`` explicitly so
-    the boundary widening is recorded at the call site.
-    """
-
-    def __init__(
-        self,
-        vault_path: str | Path,
-        *,
-        allowed_roots: list[str | Path] | None = None,
-    ) -> None:
-        from prometheus.security.path_guard import assert_path_under_roots
-
-        roots = allowed_roots if allowed_roots is not None else \
-            _default_extractor_write_roots()
-        # Validates and resolves; raises ValueError if vault_path escapes.
-        self._vault = assert_path_under_roots(vault_path, roots)
-        self._allowed_roots = [
-            Path(r).expanduser().resolve() for r in roots
-        ]
-        self._memory_dir = self._vault / "Memory"
-        self._memory_dir.mkdir(parents=True, exist_ok=True)
-
-    def write_fact(self, fact: dict) -> None:
-        """Append a fact to the entity's note in the vault."""
-        from prometheus.security.path_guard import assert_path_under_roots
-
-        entity_name = fact.get("entity_name", "Unknown")
-        safe_name = re.sub(r'[<>:"/\\|?*]', "_", entity_name)
-        note_path = self._memory_dir / f"{safe_name}.md"
-        # Defense-in-depth: even though safe_name strips path separators,
-        # re-validate the resolved write path lands inside the allow-list.
-        # Cheap, eliminates a whole class of escape attempts via novel
-        # entity_name shapes.
-        assert_path_under_roots(note_path, self._allowed_roots)
-
-        timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
-        confidence = fact.get("confidence", 0.0)
-        relationship = fact.get("relationship", "")
-        fact_text = fact.get("fact", "")
-        tags = fact.get("tags", [])
-
-        entry_lines = [
-            f"\n## {timestamp}",
-            f"- **Relationship**: {relationship}" if relationship else None,
-            f"- **Fact**: {fact_text}",
-            f"- **Confidence**: {confidence:.2f}",
-            f"- **Tags**: {', '.join(tags)}" if tags else None,
-        ]
-        entry = "\n".join(line for line in entry_lines if line is not None)
-
-        if not note_path.exists():
-            header = (
-                f"# {entity_name}\n\n"
-                f"**Entity Type**: {fact.get('entity_type', 'unknown')}\n"
-            )
-            note_path.write_text(header, encoding="utf-8")
-
-        with note_path.open("a", encoding="utf-8") as fh:
-            fh.write(entry + "\n")

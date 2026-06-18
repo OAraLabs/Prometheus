@@ -35,6 +35,11 @@ def _make_store(tmp: str) -> MemoryStore:
     return MemoryStore(db_path=Path(tmp) / "memory.db")
 
 
+def _seed(store: MemoryStore, entity_type: str, name: str, fact: str, conf: float) -> None:
+    """Persist a fact with a placeholder source (provenance is mandatory)."""
+    store.persist_memory(entity_type, name, fact, conf, source_event_ids=["seed"])
+
+
 def _make_fact(
     entity_name: str,
     fact: str,
@@ -74,8 +79,8 @@ def test_compiler_creates_entity_page():
         wiki_root = Path(tmp) / "wiki"
 
         # Persist memory twice so mention_count >= 2
-        store.persist_memory("person", "Dr. Pham", "nephrologist", 0.95)
-        store.persist_memory("person", "Dr. Pham", "based in Houston", 0.8)
+        _seed(store, "person", "Dr. Pham", "nephrologist", 0.95)
+        _seed(store, "person", "Dr. Pham", "based in Houston", 0.8)
 
         compiler = WikiCompiler(store=store, wiki_root=wiki_root)
         facts = [
@@ -105,32 +110,31 @@ def test_compiler_creates_entity_page():
 
 
 def test_compiler_updates_existing_page():
-    """New facts are appended and last_updated is bumped."""
+    """A newly-persisted fact appears after recompile; the page is rebuilt
+    from the DB (no blind append → no duplication)."""
     with tempfile.TemporaryDirectory() as tmp:
         store = _make_store(tmp)
         wiki_root = Path(tmp) / "wiki"
 
-        store.persist_memory("person", "Dr. Pham", "nephrologist", 0.95)
-        store.persist_memory("person", "Dr. Pham", "based in Houston", 0.8)
+        _seed(store, "person", "Dr. Pham", "nephrologist", 0.95)
+        _seed(store, "person", "Dr. Pham", "based in Houston", 0.8)
 
         compiler = WikiCompiler(store=store, wiki_root=wiki_root)
-
-        # Initial compile
         compiler.compile([_make_fact("Dr. Pham", "nephrologist"),
                           _make_fact("Dr. Pham", "based in Houston")])
 
         page = wiki_root / "people" / "Dr. Pham.md"
-        fm_before = _read_frontmatter(page)
-        initial_count = fm_before["source_count"]
+        assert _read_frontmatter(page)["source_count"] == 2
 
-        # Update with new fact
+        # Persist a third fact, then recompile — the page reflects the DB.
+        _seed(store, "person", "Dr. Pham", "speaks Mandarin", 0.7)
         compiler.compile([_make_fact("Dr. Pham", "speaks Mandarin")])
 
         text = page.read_text(encoding="utf-8")
         assert "speaks Mandarin" in text
-
-        fm_after = _read_frontmatter(page)
-        assert fm_after["source_count"] == initial_count + 1
+        assert _read_frontmatter(page)["source_count"] == 3
+        # The original fact appears exactly once — not re-appended.
+        assert text.count("based in Houston") == 1
 
         store.close()
 
@@ -147,10 +151,10 @@ def test_compiler_adds_cross_references():
         wiki_root = Path(tmp) / "wiki"
 
         # Both entities need 2+ mentions
-        store.persist_memory("person", "Dr. Pham", "nephrologist", 0.95)
-        store.persist_memory("person", "Dr. Pham", "works at Mercy Hospital", 0.9)
-        store.persist_memory("organization", "Mercy Hospital", "healthcare org", 0.9)
-        store.persist_memory("organization", "Mercy Hospital", "in Houston", 0.8)
+        _seed(store, "person", "Dr. Pham", "nephrologist", 0.95)
+        _seed(store, "person", "Dr. Pham", "works at Mercy Hospital", 0.9)
+        _seed(store, "organization", "Mercy Hospital", "healthcare org", 0.9)
+        _seed(store, "organization", "Mercy Hospital", "in Houston", 0.8)
 
         compiler = WikiCompiler(store=store, wiki_root=wiki_root)
 
@@ -181,10 +185,10 @@ def test_compiler_regenerates_index():
         wiki_root = Path(tmp) / "wiki"
 
         # Create entities across different types
-        store.persist_memory("person", "Dr. Pham", "nephrologist", 0.95)
-        store.persist_memory("person", "Dr. Pham", "candidate", 0.9)
-        store.persist_memory("concept", "Kubernetes", "container orchestration", 0.9)
-        store.persist_memory("concept", "Kubernetes", "used in production", 0.85)
+        _seed(store, "person", "Dr. Pham", "nephrologist", 0.95)
+        _seed(store, "person", "Dr. Pham", "candidate", 0.9)
+        _seed(store, "concept", "Kubernetes", "container orchestration", 0.9)
+        _seed(store, "concept", "Kubernetes", "used in production", 0.85)
 
         compiler = WikiCompiler(store=store, wiki_root=wiki_root)
         facts = [
@@ -219,7 +223,7 @@ def test_compiler_skips_single_mention():
         wiki_root = Path(tmp) / "wiki"
 
         # Only one memory — mention_count = 1
-        store.persist_memory("person", "Jane Doe", "recruiter", 0.7)
+        _seed(store, "person", "Jane Doe", "recruiter", 0.7)
 
         compiler = WikiCompiler(store=store, wiki_root=wiki_root)
         compiler.compile([_make_fact("Jane Doe", "recruiter")])
@@ -242,8 +246,8 @@ async def test_query_tool_finds_page():
         store = _make_store(tmp)
         wiki_root = Path(tmp) / "wiki"
 
-        store.persist_memory("person", "Dr. Pham", "nephrologist", 0.95)
-        store.persist_memory("person", "Dr. Pham", "based in Houston", 0.8)
+        _seed(store, "person", "Dr. Pham", "nephrologist", 0.95)
+        _seed(store, "person", "Dr. Pham", "based in Houston", 0.8)
 
         compiler = WikiCompiler(store=store, wiki_root=wiki_root)
         compiler.compile([
@@ -285,10 +289,10 @@ async def test_query_tool_writes_to_queries():
         wiki_root = Path(tmp) / "wiki"
 
         # Create two entities that will both match the query
-        store.persist_memory("person", "Dr. Pham", "nephrologist in Houston", 0.95)
-        store.persist_memory("person", "Dr. Pham", "speaks Mandarin", 0.8)
-        store.persist_memory("organization", "Houston Medical", "hospital in Houston", 0.9)
-        store.persist_memory("organization", "Houston Medical", "employs nephrologists", 0.85)
+        _seed(store, "person", "Dr. Pham", "nephrologist in Houston", 0.95)
+        _seed(store, "person", "Dr. Pham", "speaks Mandarin", 0.8)
+        _seed(store, "organization", "Houston Medical", "hospital in Houston", 0.9)
+        _seed(store, "organization", "Houston Medical", "employs nephrologists", 0.85)
 
         compiler = WikiCompiler(store=store, wiki_root=wiki_root)
         compiler.compile([
@@ -321,5 +325,87 @@ async def test_query_tool_writes_to_queries():
             assert "queries/" in index_text
         finally:
             wq_mod.get_config_dir = original
+
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# 2d — compile is idempotent (no blind append)
+# ---------------------------------------------------------------------------
+
+
+def test_compile_is_idempotent():
+    """Recompiling against an unchanged store yields a byte-identical page."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(tmp)
+        wiki_root = Path(tmp) / "wiki"
+        _seed(store, "person", "Dr. Pham", "nephrologist", 0.95)
+        _seed(store, "person", "Dr. Pham", "based in Houston", 0.8)
+        compiler = WikiCompiler(store=store, wiki_root=wiki_root)
+        facts = [_make_fact("Dr. Pham", "nephrologist"),
+                 _make_fact("Dr. Pham", "based in Houston")]
+
+        compiler.compile(facts)
+        page = wiki_root / "people" / "Dr. Pham.md"
+        first = page.read_text(encoding="utf-8")
+
+        compiler.compile(facts)
+        assert page.read_text(encoding="utf-8") == first, "compile must be idempotent"
+
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# 2e — regenerate_all: deterministic, junk-free, queries preserved, no broken links
+# ---------------------------------------------------------------------------
+
+
+def test_regenerate_all_is_deterministic_and_clean():
+    import re as _re
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(tmp)
+        wiki_root = Path(tmp) / "wiki"
+
+        # Two real entities (>=2 mentions) with a cross-reference, plus a junk
+        # (path) entity that must not get a page.
+        _seed(store, "person", "Dr. Pham", "works at Mercy Hospital", 0.95)
+        _seed(store, "person", "Dr. Pham", "nephrologist", 0.9)
+        _seed(store, "organization", "Mercy Hospital", "healthcare org", 0.9)
+        _seed(store, "organization", "Mercy Hospital", "in Houston", 0.8)
+        _seed(store, "tool", "src/marshmallow/utils.py", "a file path", 0.9)
+        _seed(store, "tool", "src/marshmallow/utils.py", "still a path", 0.9)
+
+        # A filed-back query note must survive regen verbatim.
+        (wiki_root / "queries").mkdir(parents=True)
+        qnote = wiki_root / "queries" / "insight-test.md"
+        QBODY = "# Insight: keep me\n\nsynthesized, no DB source\n"
+        qnote.write_text(QBODY, encoding="utf-8")
+
+        compiler = WikiCompiler(store=store, wiki_root=wiki_root)
+        compiler.regenerate_all()
+
+        pham = wiki_root / "people" / "Dr. Pham.md"
+        mercy = wiki_root / "clients" / "Mercy Hospital.md"
+        assert pham.exists() and mercy.exists()
+        # junk path entity got no page anywhere
+        assert not list(wiki_root.glob("*/*utils*"))
+        # cross-link resolves to a real page
+        assert "[[Mercy Hospital]]" in pham.read_text(encoding="utf-8")
+        # queries/ preserved verbatim
+        assert qnote.read_text(encoding="utf-8") == QBODY
+
+        # zero broken links across regenerated entity pages
+        pages, links = set(), []
+        for sub in ("people", "clients", "projects", "topics"):
+            for fp in (wiki_root / sub).glob("*.md"):
+                pages.add(fp.stem.replace("_", " ").lower())
+                links += [m.lower() for m in _re.findall(r"\[\[([^\]]+)\]\]",
+                                                         fp.read_text(encoding="utf-8"))]
+        assert [l for l in links if l not in pages] == [], "regen must produce no broken links"
+
+        # idempotent: a second regen reproduces the page byte-for-byte
+        before = pham.read_text(encoding="utf-8")
+        compiler.regenerate_all()
+        assert pham.read_text(encoding="utf-8") == before
 
         store.close()
