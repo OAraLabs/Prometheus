@@ -409,3 +409,31 @@ def test_regenerate_all_is_deterministic_and_clean():
         assert pham.read_text(encoding="utf-8") == before
 
         store.close()
+
+
+def test_no_filename_collisions_among_page_having_entities():
+    """Every page-having entity maps to a unique file. The entity gate rejects
+    the path/filename-shaped names that would otherwise collide in a shared
+    subdir, so the projection is collision-free (SPRINT MEMORY-2 guard)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(tmp)
+        wiki_root = Path(tmp) / "wiki"
+        _seed(store, "person", "Dr. Pham", "nephrologist", 0.95)
+        _seed(store, "person", "Dr. Pham", "in Houston", 0.9)
+        _seed(store, "organization", "Mercy Hospital", "an org", 0.9)
+        _seed(store, "organization", "Mercy Hospital", "in Houston", 0.8)
+        # would-be colliders: a path and an underscore form that sanitize toward
+        # the same file — both must be gate-rejected, so neither gets a page.
+        _seed(store, "tool", "src/foo/utils.py", "x", 0.9)
+        _seed(store, "tool", "src/foo/utils.py", "y", 0.9)
+        _seed(store, "tool", "src_foo_utils.py", "x", 0.9)
+        _seed(store, "tool", "src_foo_utils.py", "y", 0.9)
+
+        WikiCompiler(store=store, wiki_root=wiki_root).regenerate_all()
+
+        files = []
+        for sub in ("people", "clients", "projects", "topics"):
+            files += [(sub, fp.name) for fp in (wiki_root / sub).glob("*.md")]
+        assert len(files) == len(set(files)), f"filename collision among pages: {files}"
+        assert not list(wiki_root.glob("*/*utils*")), "path/filename entities must get no page"
+        store.close()
