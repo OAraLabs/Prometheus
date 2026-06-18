@@ -51,6 +51,8 @@ benchmarks/results/
 *.bak
 *.bak.*
 config/*.local.yaml
+# Secret-bearing config backups (e.g. prometheus.yaml.backup-*) — never commit.
+config/*.backup*
 
 # Local data / scratch at repo root (never commit — PII + large artifacts).
 # The pre-commit hook only blocks IPs/hostnames, so a blanket `git add -A`
