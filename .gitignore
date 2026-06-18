@@ -51,3 +51,20 @@ benchmarks/results/
 *.bak
 *.bak.*
 config/*.local.yaml
+
+# Local data / scratch at repo root (never commit — PII + large artifacts).
+# The pre-commit hook only blocks IPs/hostnames, so a blanket `git add -A`
+# could otherwise leak these. No CSV/SRT is tracked anywhere in the repo, so
+# these globs shadow nothing in the tree; a genuinely-needed data file can
+# still be force-added with `git add -f`.
+*.csv
+*.srt
+/Creatrix/
+/wiki/
+
+# Loose audit / findings / sprint reports dropped at the repo root.
+# Root-anchored so they never shadow tracked docs or source elsewhere.
+/AUDIT-*.md
+/FINDINGS-*.md
+/MEMORY-AUDIT-*.md
+/SPRINT-CLOSEOUT-*.md
