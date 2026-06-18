@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 from prometheus.config.paths import get_config_dir
 from prometheus.skills.registry import SkillRegistry
 from prometheus.skills.types import SkillDefinition
@@ -91,16 +93,11 @@ def _parse_skill_markdown(default_name: str, content: str) -> tuple[str, str]:
     if lines and lines[0].strip() == "---":
         for i, line in enumerate(lines[1:], 1):
             if line.strip() == "---":
-                for fm_line in lines[1:i]:
-                    fm = fm_line.strip()
-                    if fm.startswith("name:"):
-                        val = fm[5:].strip().strip("'\"")
-                        if val:
-                            name = val
-                    elif fm.startswith("description:"):
-                        val = fm[12:].strip().strip("'\"")
-                        if val:
-                            description = val
+                fm_name, fm_description = _parse_frontmatter("\n".join(lines[1:i]))
+                if fm_name:
+                    name = fm_name
+                if fm_description:
+                    description = fm_description
                 break
 
     if not description:
@@ -116,4 +113,51 @@ def _parse_skill_markdown(default_name: str, content: str) -> tuple[str, str]:
 
     if not description:
         description = f"Skill: {name}"
+    return name, description
+
+
+def _parse_frontmatter(block: str) -> tuple[str, str]:
+    """Return ``(name, description)`` parsed from a YAML frontmatter block.
+
+    Parses with a real YAML loader so block scalars (``description: >`` or
+    ``description: |``) and quoted or multi-line values resolve to their full
+    text instead of the bare ``>``/``|`` indicator. The previous hand-rolled
+    scan captured only the same-line remainder, turning a folded description
+    into the literal ``">"``.
+
+    Falls back to a tolerant line scan when the block is not valid YAML — many
+    hand-written descriptions contain an unquoted ``": "`` that PyYAML rejects —
+    so the loader stays as lenient as before for everything except the folded
+    case it now fixes.
+    """
+    try:
+        data = yaml.safe_load(block)
+    except yaml.YAMLError:
+        data = None
+
+    if isinstance(data, dict):
+        raw_name = data.get("name")
+        raw_description = data.get("description")
+        name = str(raw_name).strip() if isinstance(raw_name, (str, int, float)) else ""
+        description = (
+            str(raw_description).strip()
+            if isinstance(raw_description, (str, int, float))
+            else ""
+        )
+        return name, description
+
+    # Fallback: tolerant line scan for frontmatter that is not valid YAML.
+    name = ""
+    description = ""
+    block_scalar_indicators = {">", "|", ">-", "|-", ">+", "|+"}
+    for fm_line in block.splitlines():
+        fm = fm_line.strip()
+        if fm.startswith("name:"):
+            val = fm[5:].strip().strip("'\"")
+            if val:
+                name = val
+        elif fm.startswith("description:"):
+            val = fm[12:].strip().strip("'\"")
+            if val and val not in block_scalar_indicators:
+                description = val
     return name, description
