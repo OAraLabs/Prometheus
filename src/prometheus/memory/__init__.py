@@ -1,6 +1,6 @@
 """Memory package — SQLite store, file-backed pointers, extractor, and LCM."""
 
-from prometheus.memory.extractor import MemoryExtractor, ObsidianWriter
+from prometheus.memory.extractor import MemoryExtractor
 from prometheus.memory.hermes_memory_tool import (
     FileMemoryStore,
     MemoryTool,
@@ -37,7 +37,6 @@ __all__ = [
     "MemoryStore",
     "MemoryTool",
     "MessagePart",
-    "ObsidianWriter",
     "SummaryNode",
     "WikiCompiler",
     "format_memory_for_prompt",

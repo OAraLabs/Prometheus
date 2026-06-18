@@ -12,13 +12,13 @@ import logging
 import re
 import threading
 import time
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from prometheus.config.paths import get_config_dir
+from prometheus.memory.entity_validation import classify_entity, quarantine
 from prometheus.memory.store import MemoryStore
 
 log = logging.getLogger(__name__)
@@ -84,43 +84,33 @@ class WikiCompiler:
 
     def _compile_locked(self, new_facts: list[dict]) -> None:
         self._ensure_dirs()
-        index = self._load_index()
 
-        # Group facts by entity name
-        by_entity: dict[str, list[dict]] = defaultdict(list)
-        for fact in new_facts:
-            name = fact.get("entity_name", "Unknown")
-            by_entity[name].append(fact)
-
-        # Collect all known entity names for cross-reference detection
-        known_entities: set[str] = set(index.keys()) | set(by_entity.keys())
+        # The page-having set is derived from the store, so compile and
+        # regenerate make identical create/link decisions. Each touched
+        # entity's page is rebuilt in full from the DB (no blind append) —
+        # re-running with an unchanged store is a byte-identical no-op.
+        linkable = self._page_having_entities()
+        touched = {f.get("entity_name", "Unknown") for f in new_facts}
 
         pages_created = 0
         pages_updated = 0
-
-        for entity_name, facts in by_entity.items():
-            entity_type = facts[0].get("entity_type", "concept")
-            page_path = self._entity_page_path(entity_type, entity_name)
-
-            if page_path.exists():
-                self._update_page(page_path, facts)
-                pages_updated += 1
-            elif self._should_create_page(entity_name):
-                self._create_page(page_path, entity_name, entity_type, facts)
-                pages_created += 1
-            else:
+        for entity_name in sorted(touched):
+            reason = classify_entity(entity_name)
+            if reason is not None:
+                quarantine(str(entity_name), reason, context="wiki_compile")
                 continue
-
-            # Cross-references
-            related: set[str] = set()
-            for fact in facts:
-                related.update(
-                    self._detect_related_entities(
-                        fact.get("fact", ""), entity_name, known_entities
-                    )
-                )
-            if related:
-                self._add_wiki_links(page_path, related)
+            if entity_name not in linkable:
+                continue  # fewer than 2 mentions — not yet page-worthy
+            entity_type = linkable[entity_name]
+            page_path = self._entity_page_path(entity_type, entity_name)
+            existed = page_path.exists()
+            page_path.parent.mkdir(parents=True, exist_ok=True)
+            page_path.write_text(
+                self._render_page(entity_name, entity_type, linkable),
+                encoding="utf-8",
+            )
+            pages_updated += int(existed)
+            pages_created += int(not existed)
 
         self._regenerate_index()
         self._append_log(pages_updated, pages_created)
@@ -133,6 +123,40 @@ class WikiCompiler:
             len(new_facts),
         )
 
+    def regenerate_all(self) -> dict[str, int]:
+        """Deterministically rebuild ALL entity pages from the store.
+
+        Wipes the entity subdirs (people/clients/projects/topics) and rewrites
+        one page per page-having entity straight from memory.db. ``queries/``
+        is never touched — those are filed-back synthesized answers with no DB
+        source. Idempotent: an unchanged store yields byte-identical entity
+        pages + index (``log.md`` / ``.last_compile_ts`` aside — append/stamp).
+        """
+        with self._lock:
+            self._ensure_dirs()
+            for subdir in ("people", "clients", "projects", "topics"):
+                d = self._wiki / subdir
+                if d.exists():
+                    for page in d.glob("*.md"):
+                        page.unlink()
+
+            linkable = self._page_having_entities()
+            for entity_name, entity_type in sorted(linkable.items()):
+                page_path = self._entity_page_path(entity_type, entity_name)
+                page_path.parent.mkdir(parents=True, exist_ok=True)
+                page_path.write_text(
+                    self._render_page(entity_name, entity_type, linkable),
+                    encoding="utf-8",
+                )
+
+            self._regenerate_index()
+            self._log_line(
+                f"regenerate | {len(linkable)} entity pages rebuilt from memory.db"
+            )
+            self._update_watermark()
+            log.info("WikiCompiler: regenerated %d entity pages", len(linkable))
+            return {"pages": len(linkable)}
+
     # -- Directory setup ------------------------------------------------
 
     def _ensure_dirs(self) -> None:
@@ -140,23 +164,6 @@ class WikiCompiler:
             (self._wiki / subdir).mkdir(parents=True, exist_ok=True)
 
     # -- Index ----------------------------------------------------------
-
-    def _load_index(self) -> dict[str, dict[str, str]]:
-        """Parse index.md into ``{entity_name: {path, type, summary}}``."""
-        index_path = self._wiki / "index.md"
-        if not index_path.exists():
-            return {}
-
-        entries: dict[str, dict[str, str]] = {}
-        for line in index_path.read_text(encoding="utf-8").splitlines():
-            # Format: - [Entity Name](people/Entity_Name.md) — summary
-            m = re.match(
-                r"^- \[(.+?)\]\((.+?)\)\s*(?:—\s*(.*))?$", line
-            )
-            if m:
-                name, path, summary = m.group(1), m.group(2), m.group(3) or ""
-                entries[name] = {"path": path, "summary": summary.strip()}
-        return entries
 
     def _regenerate_index(self) -> None:
         """Scan all subdirs and rebuild index.md organized by category."""
@@ -242,96 +249,80 @@ class WikiCompiler:
         subdir = _TYPE_TO_SUBDIR.get(entity_type, _DEFAULT_SUBDIR)
         return self._wiki / subdir / f"{_safe_filename(entity_name)}.md"
 
-    def _should_create_page(self, entity_name: str) -> bool:
-        """True if the entity has 2+ total mentions across all memories."""
-        results = self._store.search_memories(entity=entity_name, limit=50)
-        total_mentions = sum(r.get("mention_count", 1) for r in results)
-        return total_mentions >= 2
+    def _facts_for_entity(self, entity_name: str) -> list[dict]:
+        """All stored facts whose entity_name matches *entity_name* exactly
+        (case-insensitive). ``search_memories`` does a ``LIKE %name%`` match,
+        so the exact filter happens here."""
+        results = self._store.search_memories(entity=entity_name, limit=500)
+        el = entity_name.lower()
+        return [r for r in results if (r.get("entity_name") or "").lower() == el]
 
-    def _create_page(
-        self,
-        page_path: Path,
-        entity_name: str,
-        entity_type: str,
-        facts: list[dict],
-    ) -> None:
-        today = _today()
-        source_count = len(facts)
+    def _page_having_entities(self) -> dict[str, str]:
+        """Map ``entity_name -> entity_type`` for entities that qualify for a
+        page: structurally valid AND >= 2 total mentions. Derived from the
+        store so compile and regenerate agree on which links resolve."""
+        agg: dict[str, dict] = {}
+        for r in self._store.get_all_memories(limit=1_000_000):
+            name = r.get("entity_name") or "Unknown"
+            entry = agg.setdefault(
+                name, {"mentions": 0, "type": r.get("entity_type", "concept")}
+            )
+            entry["mentions"] += r.get("mention_count", 1) or 1
+        return {
+            name: entry["type"]
+            for name, entry in agg.items()
+            if classify_entity(name) is None and entry["mentions"] >= 2
+        }
+
+    @staticmethod
+    def _fact_date(r: dict) -> str:
+        ts = r.get("last_mentioned") or r.get("timestamp") or 0.0
+        return time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else "unknown"
+
+    def _render_page(
+        self, entity_name: str, entity_type: str, linkable: dict[str, str]
+    ) -> str:
+        """Render the full entity page deterministically from the store.
+
+        Pages are a pure projection of memory.db: re-rendering an unchanged
+        store yields byte-identical output (no blind append). Cross-links point
+        only to entities that have a page, so the output has no broken links.
+        """
+        facts = self._facts_for_entity(entity_name)
+        facts.sort(key=lambda r: (r.get("timestamp") or 0.0, r.get("fact") or ""))
+
+        dates = [self._fact_date(r) for r in facts]
+        first_seen = min(dates) if dates else _today()
+        last_updated = max(dates) if dates else _today()
 
         frontmatter = yaml.dump(
             {
                 "type": entity_type,
-                "first_seen": today,
-                "last_updated": today,
-                "source_count": source_count,
+                "first_seen": first_seen,
+                "last_updated": last_updated,
+                "source_count": len(facts),
             },
             default_flow_style=False,
             sort_keys=False,
         ).strip()
 
-        lines = [
-            f"---\n{frontmatter}\n---",
-            "",
-            f"# {entity_name}",
-            "",
-            "## Key Facts",
-        ]
-        for f in facts:
-            source_ids = f.get("source_event_ids", [])
-            source_tag = source_ids[0][:8] if source_ids else "unknown"
-            lines.append(f"- {f['fact']} (source: {source_tag}, {today})")
+        lines = [f"---\n{frontmatter}\n---", "", f"# {entity_name}", "", "## Key Facts"]
+        related: set[str] = set()
+        for r in facts:
+            src = sorted(r.get("source_event_ids") or [])
+            tag = src[0][:8] if src else "unknown"
+            lines.append(f"- {r['fact']} (source: {tag}, {self._fact_date(r)})")
+            related.update(
+                self._detect_related_entities(
+                    r.get("fact", ""), entity_name, set(linkable)
+                )
+            )
 
         lines.extend(["", "## Related", ""])
+        for name in sorted(e for e in related if e in linkable):
+            lines.append(f"- [[{name}]]")
 
-        page_path.parent.mkdir(parents=True, exist_ok=True)
-        page_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    def _update_page(self, page_path: Path, facts: list[dict]) -> None:
-        text = page_path.read_text(encoding="utf-8")
-        today = _today()
-
-        # Update frontmatter
-        text = self._update_frontmatter(text, len(facts), today)
-
-        # Append facts before the Related section
-        new_fact_lines = []
-        for f in facts:
-            source_ids = f.get("source_event_ids", [])
-            source_tag = source_ids[0][:8] if source_ids else "unknown"
-            new_fact_lines.append(f"- {f['fact']} (source: {source_tag}, {today})")
-
-        insertion = "\n".join(new_fact_lines) + "\n"
-
-        # Insert before "## Related" if it exists, otherwise append
-        if "## Related" in text:
-            text = text.replace("## Related", insertion + "\n## Related", 1)
-        else:
-            text = text.rstrip() + "\n" + insertion
-
-        page_path.write_text(text, encoding="utf-8")
-
-    @staticmethod
-    def _update_frontmatter(text: str, new_fact_count: int, today: str) -> str:
-        """Update last_updated and source_count in YAML frontmatter."""
-        if not text.startswith("---"):
-            return text
-
-        parts = text.split("---", 2)
-        if len(parts) < 3:
-            return text
-
-        try:
-            fm = yaml.safe_load(parts[1])
-            if not isinstance(fm, dict):
-                return text
-        except yaml.YAMLError:
-            return text
-
-        fm["last_updated"] = today
-        fm["source_count"] = fm.get("source_count", 0) + new_fact_count
-
-        new_fm = yaml.dump(fm, default_flow_style=False, sort_keys=False).strip()
-        return f"---\n{new_fm}\n---{parts[2]}"
+        return "\n".join(lines) + "\n"
 
     # -- Cross-references -----------------------------------------------
 
@@ -341,7 +332,12 @@ class WikiCompiler:
         self_entity: str,
         known_entities: set[str],
     ) -> list[str]:
-        """Find known entity names mentioned in *fact_text* (3+ chars, case-insensitive)."""
+        """Find known entity names mentioned in *fact_text* as whole words.
+
+        Word-boundary matching (not naive substring) so short names like
+        "sed" no longer match inside "used" / "passed". Structurally-invalid
+        candidates are never linked.
+        """
         related: list[str] = []
         lower_text = fact_text.lower()
         for entity in known_entities:
@@ -349,45 +345,25 @@ class WikiCompiler:
                 continue
             if len(entity) < 3:
                 continue
-            if entity.lower() in lower_text:
+            if classify_entity(entity) is not None:
+                continue
+            if re.search(rf"\b{re.escape(entity.lower())}\b", lower_text):
                 related.append(entity)
         return related
 
-    @staticmethod
-    def _add_wiki_links(page_path: Path, related: set[str]) -> None:
-        """Add ``[[Entity]]`` links to the Related section of a page."""
-        text = page_path.read_text(encoding="utf-8")
-
-        # Find existing links to avoid duplicates
-        existing_links: set[str] = set()
-        for m in re.finditer(r"\[\[(.+?)\]\]", text):
-            existing_links.add(m.group(1))
-
-        new_links = sorted(related - existing_links)
-        if not new_links:
-            return
-
-        link_lines = "\n".join(f"- [[{name}]]" for name in new_links) + "\n"
-
-        if "## Related" in text:
-            text = text.replace("## Related\n", f"## Related\n{link_lines}", 1)
-        else:
-            text = text.rstrip() + f"\n\n## Related\n{link_lines}"
-
-        page_path.write_text(text, encoding="utf-8")
-
     # -- Log / watermark ------------------------------------------------
 
-    def _append_log(self, updated: int, created: int) -> None:
+    def _log_line(self, message: str) -> None:
         log_path = self._wiki / "log.md"
-        today = _today()
-        entry = f"## [{today}] compile | {updated} pages updated, {created} created\n\n"
+        entry = f"## [{_today()}] {message}\n\n"
         if log_path.exists():
-            text = log_path.read_text(encoding="utf-8")
-            text += entry
+            text = log_path.read_text(encoding="utf-8") + entry
         else:
             text = "# Wiki Compile Log\n\n" + entry
         log_path.write_text(text, encoding="utf-8")
+
+    def _append_log(self, updated: int, created: int) -> None:
+        self._log_line(f"compile | {updated} pages updated, {created} created")
 
     def _update_watermark(self) -> None:
         ts_path = self._wiki / ".last_compile_ts"

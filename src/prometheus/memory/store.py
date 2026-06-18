@@ -6,14 +6,33 @@ Schema mirrors OpenClaw's proven memories table structure.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+import string
 import time
+from collections import defaultdict
 from pathlib import Path
 from uuid import uuid4
 
 from prometheus.config.paths import get_config_dir
 
 _DB_NAME = "memory.db"
+
+_DEDUP_TRAILING = string.punctuation + " "
+
+
+def _normalize_for_dedup(text: str) -> str:
+    """Normalize a fact/entity string for duplicate detection.
+
+    Lowercase + collapse internal whitespace + strip trailing
+    punctuation/whitespace. Deterministic; no embeddings. Strings that
+    differ only by case, spacing, or trailing punctuation collapse to the
+    same key; genuinely different wording stays distinct.
+    """
+    if not text:
+        return ""
+    collapsed = re.sub(r"\s+", " ", text.strip().lower())
+    return collapsed.rstrip(_DEDUP_TRAILING)
 
 
 def _get_db_path() -> Path:
@@ -170,26 +189,51 @@ class MemoryStore:
     ) -> str:
         """Insert or update a memory fact. Returns the memory ID.
 
-        If a memory with the same entity_name + fact already exists,
-        its confidence and mention_count are updated instead.
+        Provenance is mandatory: ``source_event_ids`` must be a non-empty
+        list, else this raises ``ValueError``. Silent source-less writes
+        render as ``source: unknown`` in the wiki and are the bug class
+        SPRINT MEMORY-1 closes (forward-regression invariant).
+
+        Deduplication is *normalized*: a fact is a duplicate of an existing
+        one when, for the same entity (case-insensitive), the two facts
+        normalize equal (see :func:`_normalize_for_dedup`). Lexical
+        paraphrases — case / whitespace / trailing punctuation — coalesce
+        into one row (``mention_count`` incremented, ``source_event_ids``
+        unioned, confidence maxed); genuinely different facts stay separate.
         """
+        if not source_event_ids:
+            raise ValueError(
+                "persist_memory requires a non-empty source_event_ids — "
+                "provenance is mandatory (no silent 'unknown' writes)"
+            )
+
         now = time.time()
         rel = relationship or "fact"
+        norm_fact = _normalize_for_dedup(fact)
 
-        # Check for existing duplicate
-        existing = self._conn.execute(
-            "SELECT id, mention_count FROM memories"
-            " WHERE entity_name = ? AND fact = ?",
-            (entity_name, fact),
-        ).fetchone()
+        # Normalized duplicate check: scan this entity's rows (few) and
+        # match on the normalized fact. Entity match is case-insensitive.
+        candidates = self._conn.execute(
+            "SELECT id, fact, source_event_ids FROM memories"
+            " WHERE entity_name = ? COLLATE NOCASE",
+            (entity_name,),
+        ).fetchall()
+        existing = next(
+            (c for c in candidates if _normalize_for_dedup(c["fact"]) == norm_fact),
+            None,
+        )
 
         if existing:
             mid = existing["id"]
+            merged_sources = sorted(
+                set(json.loads(existing["source_event_ids"] or "[]"))
+                | set(source_event_ids)
+            )
             self._conn.execute(
                 "UPDATE memories SET confidence = MAX(confidence, ?),"
-                " mention_count = mention_count + 1, last_mentioned = ?"
-                " WHERE id = ?",
-                (confidence, now, mid),
+                " mention_count = mention_count + 1, last_mentioned = ?,"
+                " source_event_ids = ? WHERE id = ?",
+                (confidence, now, json.dumps(merged_sources), mid),
             )
             self._conn.commit()
             return mid
@@ -220,6 +264,53 @@ class MemoryStore:
         )
         self._conn.commit()
         return mid
+
+    def dedupe_existing(self) -> int:
+        """One-time backfill: collapse normalized-equal rows per entity.
+
+        For each group of rows that are normalized-equal (same normalized
+        entity_name + normalized fact), keep the earliest row and merge the
+        rest into it: ``source_event_ids`` UNIONed, ``mention_count`` SUMMED,
+        confidence MAXed. Dropping either source or count would silently
+        shred provenance — so union-and-sum is the invariant, not a count
+        target. Returns the number of rows removed. No-op on an empty store.
+        """
+        rows = self._conn.execute(
+            "SELECT id, entity_name, fact, confidence, source_event_ids,"
+            " mention_count, timestamp FROM memories"
+        ).fetchall()
+
+        groups: dict[tuple[str, str], list] = defaultdict(list)
+        for r in rows:
+            key = (
+                _normalize_for_dedup(r["entity_name"]),
+                _normalize_for_dedup(r["fact"]),
+            )
+            groups[key].append(r)
+
+        removed = 0
+        for group in groups.values():
+            if len(group) < 2:
+                continue
+            # Earliest row (smallest timestamp) is the survivor.
+            group = sorted(group, key=lambda r: r["timestamp"])
+            survivor = group[0]
+            sources = set(json.loads(survivor["source_event_ids"] or "[]"))
+            mentions = survivor["mention_count"]
+            conf = survivor["confidence"]
+            for loser in group[1:]:
+                sources |= set(json.loads(loser["source_event_ids"] or "[]"))
+                mentions += loser["mention_count"]
+                conf = max(conf, loser["confidence"])
+                self.delete_memory(loser["id"])
+                removed += 1
+            self.update_memory(
+                survivor["id"],
+                source_event_ids=sorted(sources),
+                mention_count=mentions,
+                confidence=conf,
+            )
+        return removed
 
     def search_memories(
         self,

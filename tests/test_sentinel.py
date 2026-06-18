@@ -440,8 +440,8 @@ class TestMemoryConsolidator:
         from prometheus.sentinel.memory_consolidator import MemoryConsolidator
 
         store = self._make_store(tmp_path)
-        store.persist_memory("person", "Alice", "Alice works at Acme Corp", 0.8)
-        store.persist_memory("person", "Alice", "Alice works at Acme Corporation", 0.6)
+        store.persist_memory("person", "Alice", "Alice works at Acme Corp", 0.8, source_event_ids=["s"])
+        store.persist_memory("person", "Alice", "Alice works at Acme Corporation", 0.6, source_event_ids=["s"])
 
         consolidator = MemoryConsolidator(store, similarity_threshold=0.75)
         result = consolidator.consolidate()
@@ -456,7 +456,7 @@ class TestMemoryConsolidator:
         from prometheus.sentinel.memory_consolidator import MemoryConsolidator
 
         store = self._make_store(tmp_path)
-        mid = store.persist_memory("person", "Bob", "Bob likes pizza", 0.7)
+        mid = store.persist_memory("person", "Bob", "Bob likes pizza", 0.7, source_event_ids=["s"])
 
         # Manually backdate last_mentioned
         old_time = time.time() - (100 * 86400)  # 100 days ago
@@ -474,7 +474,7 @@ class TestMemoryConsolidator:
         from prometheus.sentinel.memory_consolidator import MemoryConsolidator
 
         store = self._make_store(tmp_path)
-        mid = store.persist_memory("concept", "X", "X is something", 0.05)
+        mid = store.persist_memory("concept", "X", "X is something", 0.05, source_event_ids=["s"])
 
         consolidator = MemoryConsolidator(store, min_confidence=0.1)
         result = consolidator.consolidate()
@@ -678,7 +678,7 @@ class TestMemoryStoreExtensions:
 
     def test_update_memory(self, tmp_path: Path):
         store = self._make_store(tmp_path)
-        mid = store.persist_memory("person", "Alice", "Alice is tall", 0.5)
+        mid = store.persist_memory("person", "Alice", "Alice is tall", 0.5, source_event_ids=["s"])
         store.update_memory(mid, confidence=0.9, mention_count=5)
         mem = store.get_memory(mid)
         assert mem["confidence"] == 0.9
@@ -686,15 +686,15 @@ class TestMemoryStoreExtensions:
 
     def test_delete_memory(self, tmp_path: Path):
         store = self._make_store(tmp_path)
-        mid = store.persist_memory("person", "Bob", "Bob is short", 0.5)
+        mid = store.persist_memory("person", "Bob", "Bob is short", 0.5, source_event_ids=["s"])
         store.delete_memory(mid)
         assert store.get_memory(mid) is None
 
     def test_get_all_memories(self, tmp_path: Path):
         store = self._make_store(tmp_path)
-        store.persist_memory("person", "A", "Fact A", 0.8)
-        store.persist_memory("person", "B", "Fact B", 0.3)
-        store.persist_memory("person", "C", "Fact C", 0.05)
+        store.persist_memory("person", "A", "Fact A", 0.8, source_event_ids=["s"])
+        store.persist_memory("person", "B", "Fact B", 0.3, source_event_ids=["s"])
+        store.persist_memory("person", "C", "Fact C", 0.05, source_event_ids=["s"])
 
         all_mems = store.get_all_memories(min_confidence=0.0)
         assert len(all_mems) == 3
