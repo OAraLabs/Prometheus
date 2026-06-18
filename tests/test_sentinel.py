@@ -424,6 +424,84 @@ class TestWikiLinter:
         result = linter.lint()
         assert not result.has_issues
 
+    # --- SPRINT MEMORY-2: lint is detection-only; compile owns links ---
+
+    def test_auto_fix_is_noop_and_idempotent(self, tmp_path: Path):
+        """auto_fix mutates nothing even when fixable-category issues exist (2a)."""
+        from prometheus.sentinel.wiki_lint import WikiLinter
+
+        wiki = self._setup_wiki(tmp_path)
+        (wiki / "people" / "Alice.md").write_text(
+            "---\ntype: person\n---\n# Alice\nWorks with [[NonExistent]]; studies Quantum.\n",
+            encoding="utf-8",
+        )
+        (wiki / "topics" / "Quantum.md").write_text(
+            "---\ntype: concept\n---\n# Quantum\n", encoding="utf-8"
+        )
+        linter = WikiLinter(wiki_root=wiki)
+        before = {p: p.read_bytes() for p in sorted(wiki.rglob("*.md"))}
+        fixed = linter.auto_fix(linter.lint())
+        assert fixed == 0, "lint is detection-only — auto_fix must apply nothing"
+        assert {p: p.read_bytes() for p in sorted(wiki.rglob("*.md"))} == before
+        linter.auto_fix(linter.lint())  # second run
+        assert {p: p.read_bytes() for p in sorted(wiki.rglob("*.md"))} == before
+
+    def test_hyphenated_link_not_false_broken(self, tmp_path: Path):
+        """A link to an existing hyphenated page is not flagged broken (2a-iii)."""
+        from prometheus.sentinel.wiki_lint import WikiLinter
+
+        wiki = self._setup_wiki(tmp_path)
+        (wiki / "topics" / "Acme-Corp.md").write_text(
+            "---\ntype: place\n---\n# Acme-Corp\n", encoding="utf-8"
+        )
+        (wiki / "people" / "Alice.md").write_text(
+            "---\ntype: person\n---\n# Alice\nRuns on [[Acme-Corp]].\n", encoding="utf-8"
+        )
+        result = WikiLinter(wiki_root=wiki).lint()
+        broken = [i for i in result.issues if i.category == "broken_link"]
+        assert broken == [], f"hyphenated link should resolve, got: {[b.detail for b in broken]}"
+
+    def test_queries_broken_links_exempt(self, tmp_path: Path):
+        """queries/ links to non-page entities are never flagged broken (2a-ii)."""
+        from prometheus.sentinel.wiki_lint import WikiLinter
+
+        wiki = self._setup_wiki(tmp_path)
+        (wiki / "queries" / "insight-x.md").write_text(
+            "---\ntype: insight\n---\n# Insight: x\nRefs [[Nowhere]] and [[Also-Nowhere]].\n",
+            encoding="utf-8",
+        )
+        result = WikiLinter(wiki_root=wiki).lint()
+        broken = [i for i in result.issues if i.category == "broken_link"]
+        assert broken == [], "queries/ unresolved links must not be reported broken"
+
+    def test_no_substring_crossref_mutation(self, tmp_path: Path):
+        """A substring token ('sed' inside 'used') yields no added [[link]] (anti-oscillation)."""
+        from prometheus.sentinel.wiki_lint import WikiLinter
+
+        wiki = self._setup_wiki(tmp_path)
+        (wiki / "topics" / "sed.md").write_text("---\ntype: tool\n---\n# sed\n", encoding="utf-8")
+        (wiki / "people" / "Alice.md").write_text(
+            "---\ntype: person\n---\n# Alice\nAlice used a tool.\n", encoding="utf-8"
+        )
+        linter = WikiLinter(wiki_root=wiki)
+        before = (wiki / "people" / "Alice.md").read_text(encoding="utf-8")
+        linter.auto_fix(linter.lint())
+        after = (wiki / "people" / "Alice.md").read_text(encoding="utf-8")
+        assert after == before and "[[sed]]" not in after
+
+    def test_auto_fix_halts_on_nonconvergence(self, tmp_path: Path, monkeypatch):
+        """A fixer that fails to reduce the issue count halts + alarms, never spins (2b)."""
+        from prometheus.sentinel.wiki_lint import WikiLinter, LintResult, LintIssue
+
+        linter = WikiLinter(wiki_root=tmp_path / "wiki")
+        issue = LintIssue(severity="error", category="x", page="p", detail="d", fixable=True)
+        monkeypatch.setattr(linter, "lint", lambda: LintResult(issues=[issue]))
+        linter._FIXERS = {"x": lambda self, i: None}  # "applies" but reduces nothing
+        halts: list[str] = []
+        monkeypatch.setattr(linter, "_halt", lambda reason: halts.append(reason))
+        fixed = linter.auto_fix(max_passes=10)
+        assert halts, "non-convergent auto_fix must call _halt (fail-loud)"
+
 
 # ======================================================================
 # MemoryConsolidator

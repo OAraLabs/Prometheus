@@ -56,6 +56,13 @@ class LintResult:
 class WikiLinter:
     """Scan the Prometheus wiki for health issues."""
 
+    # Category -> fixer(self, issue). EMPTY by design (SPRINT MEMORY-2):
+    # links/crossrefs are owned solely by the WikiCompiler (fact-derived,
+    # word-boundary, page-gated), so lint is detection-only and mutates
+    # nothing. Any future fixer registered here must not touch compile-owned
+    # state and is protected by the convergence invariant in auto_fix().
+    _FIXERS: dict = {}
+
     def __init__(self, wiki_root: Path | None = None) -> None:
         self.wiki_root = Path(wiki_root) if wiki_root else get_config_dir() / "wiki"
 
@@ -79,25 +86,63 @@ class WikiLinter:
 
         return LintResult(issues=issues)
 
-    def auto_fix(self, result: LintResult) -> int:
-        """Fix safe issues. Returns count of fixes applied."""
-        fixed = 0
-        for issue in result.issues:
-            if not issue.fixable:
-                continue
-            try:
-                if issue.category == "broken_link":
-                    self._fix_broken_link(issue)
-                    fixed += 1
-                elif issue.category == "missing_crossref":
-                    self._fix_missing_crossref(issue)
-                    fixed += 1
-            except Exception:
-                log.exception("WikiLinter: failed to fix %s", issue)
+    def auto_fix(self, result: LintResult | None = None, *, max_passes: int = 5) -> int:
+        """Apply safe fixes to a fixpoint, with a fail-loud monotonic guard.
 
-        if fixed:
-            self._append_log(f"Auto-fixed {fixed} issues")
-        return fixed
+        Lint no longer mutates links/crossrefs — the WikiCompiler is their sole
+        writer — so ``_FIXERS`` is empty and this is a no-op today. The loop and
+        invariant are retained as a regression guard: across passes the total
+        issue count must strictly DECREASE while fixable issues remain. A pass
+        that increases the count, stalls (fixable issues remain but none could
+        be applied), or exhausts ``max_passes`` halts and alarms rather than
+        spinning. (SPRINT MEMORY-2 2b)
+
+        ``result`` is ignored (kept for back-compat) — the loop re-lints each
+        pass so its convergence check sees live counts.
+        """
+        total_fixed = 0
+        prev_count: int | None = None
+        for _ in range(max_passes):
+            issues = self.lint().issues
+            fixable = [i for i in issues if i.fixable]
+            if not fixable:
+                break  # converged — nothing left to fix
+            count = len(issues)
+            if prev_count is not None and count >= prev_count:
+                self._halt(
+                    f"issue count {prev_count} -> {count} with "
+                    f"{len(fixable)} fixable remaining (not strictly decreasing)"
+                )
+                return total_fixed
+            prev_count = count
+            applied = 0
+            for issue in fixable:
+                fixer = self._FIXERS.get(issue.category)
+                if fixer is None:
+                    continue
+                try:
+                    fixer(self, issue)
+                    applied += 1
+                except Exception:
+                    log.exception("WikiLinter: failed to fix %s", issue)
+            if applied == 0:
+                self._halt(f"{len(fixable)} fixable issue(s) but none applied (stalled)")
+                return total_fixed
+            total_fixed += applied
+        else:
+            if any(i.fixable for i in self.lint().issues):
+                self._halt(f"exceeded {max_passes} passes with fixable issues remaining")
+        if total_fixed:
+            self._append_log(f"Auto-fixed {total_fixed} issues")
+        return total_fixed
+
+    def _halt(self, reason: str) -> None:
+        """Fail loud on non-convergence — never silently spin a mutating loop."""
+        log.error("WikiLinter: auto_fix HALTED — %s", reason)
+        try:
+            self._append_log(f"HALT (non-convergent auto_fix): {reason}")
+        except Exception:
+            log.exception("WikiLinter: failed to write halt marker")
 
     def summary(self, issues: list[LintIssue] | None = None) -> str:
         """Human-readable summary of lint results."""
@@ -135,7 +180,12 @@ class WikiLinter:
                 content = md_file.read_text(encoding="utf-8")
                 frontmatter = self._parse_frontmatter(content)
                 links = self._extract_wiki_links(content)
-                entity_name = md_file.stem.replace("-", " ").replace("_", " ")
+                # Match the link/file format exactly: links are written
+                # ``[[<entity_name>]]`` and files are ``_safe_filename(name).md``,
+                # so the stem is the correct key. The old -/_→space normalization
+                # mis-flagged hyphenated/underscored names (e.g. Acme-Corp,
+                # build-2.0) as broken links. (SPRINT MEMORY-2 2a-iii)
+                entity_name = md_file.stem
                 pages[rel] = {
                     "path": md_file,
                     "frontmatter": frontmatter,
@@ -197,11 +247,19 @@ class WikiLinter:
         return issues
 
     def _find_broken_links(self, pages: dict[str, dict]) -> list[LintIssue]:
-        """[[links]] pointing to pages that don't exist."""
+        """[[links]] pointing to pages that don't exist.
+
+        queries/ is exempt (mirrors the orphan exemption): those are
+        synthesized insights whose links to non-page entities are inherent,
+        not breakage. Detection-only — link state is owned by the WikiCompiler
+        and is never auto-mutated here. (SPRINT MEMORY-2 2a / 2a-ii)
+        """
         known_names = {info["entity_name"].lower() for info in pages.values()}
 
         issues = []
         for rel, info in pages.items():
+            if rel.startswith("queries/"):
+                continue  # synthesized insights — unresolved links are inherent
             for link in info["links"]:
                 if link.lower() not in known_names:
                     issues.append(LintIssue(
@@ -209,7 +267,7 @@ class WikiLinter:
                         category="broken_link",
                         page=rel,
                         detail=f"Broken link to [[{link}]]",
-                        fixable=True,
+                        fixable=False,
                     ))
         return issues
 
@@ -288,7 +346,7 @@ class WikiLinter:
                         category="missing_crossref",
                         page=rel,
                         detail=f"Mentions '{name}' but no [[{name}]] link",
-                        fixable=True,
+                        fixable=False,
                     ))
         return issues
 
@@ -319,39 +377,12 @@ class WikiLinter:
     # Auto-fix helpers
     # ------------------------------------------------------------------
 
-    def _fix_broken_link(self, issue: LintIssue) -> None:
-        """Remove a broken [[link]] from a page."""
-        match = re.search(r"Broken link to \[\[(.+)\]\]", issue.detail)
-        if not match:
-            return
-        link_target = match.group(1)
-        page_path = self.wiki_root / issue.page
-        if not page_path.exists():
-            return
-        content = page_path.read_text(encoding="utf-8")
-        content = content.replace(f"[[{link_target}]]", link_target)
-        page_path.write_text(content, encoding="utf-8")
-
-    def _fix_missing_crossref(self, issue: LintIssue) -> None:
-        """Add a [[link]] for a mentioned entity."""
-        match = re.search(r"Mentions '(.+)' but no", issue.detail)
-        if not match:
-            return
-        entity = match.group(1)
-        page_path = self.wiki_root / issue.page
-        if not page_path.exists():
-            return
-        content = page_path.read_text(encoding="utf-8")
-
-        # Add to Related section if it exists
-        if "## Related" in content:
-            content = content.replace(
-                "## Related",
-                f"## Related\n- [[{entity}]]",
-            )
-        else:
-            content += f"\n\n## Related\n- [[{entity}]]\n"
-        page_path.write_text(content, encoding="utf-8")
+    # _fix_broken_link / _fix_missing_crossref REMOVED (SPRINT MEMORY-2 2a):
+    # both mutated compile-owned link state. _fix_broken_link silently
+    # corrupted queries/ (stripped synthesized-insight links) and false-
+    # stripped hyphenated entity links; _fix_missing_crossref added substring-
+    # noise crossrefs that compile then dropped (the oscillation). Link and
+    # crossref repair is the WikiCompiler's sole responsibility.
 
     def _append_log(self, message: str) -> None:
         """Append to wiki/log.md."""
