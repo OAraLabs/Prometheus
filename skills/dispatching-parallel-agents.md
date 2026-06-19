@@ -1,11 +1,11 @@
 ---
 name: dispatching-parallel-agents
-description: "Use when facing 2+ independent tasks that can be worked on without shared state or sequential dependencies - dispatches one agent per independent problem domain for concurrent execution."
-version: 1.0.0
-author: obra/superpowers
+description: "Use when facing 2+ independent tasks that can be worked on without shared state or sequential dependencies -- dispatches one Prometheus subagent per independent problem domain for concurrent execution."
+version: 1.0.1
+author: Prometheus (original: obra/superpowers)
 license: MIT
 ---
-<!-- Provenance: obra/superpowers | skills/dispatching-parallel-agents/SKILL.md | MIT -->
+<!-- Adapted from obra/superpowers | skills/dispatching-parallel-agents/SKILL.md | MIT -->
 
 # Dispatching Parallel Agents
 

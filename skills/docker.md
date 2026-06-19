@@ -38,7 +38,7 @@ Known compose/Dockerfile locations (as of skill authoring):
 | openclaw | `~/openclaw/` | `Dockerfile`, `Dockerfile.sandbox`, `Dockerfile.sandbox-browser`, `docker-compose.yml` |
 | ai-home-lab | `~/ai-home-lab/` | `docker-compose.yml` |
 | n8n | `~/projects/n8n/` | `docker-compose.yml` |
-| oara-voice | `~/projects/oara-voice/` | `docker-compose.yaml` + `docker-compose.cpu.yaml` (GPU/CPU variants) |
+| myproject | `~/projects/myproject/` | `docker-compose.yaml` + `docker-compose.cpu.yaml` (GPU/CPU variants) |
 
 When the user says "the n8n stack" or "openclaw container", resolve to these paths. If unsure which project, ask before acting.
 
@@ -126,7 +126,7 @@ docker builder prune -f         # build cache
 # Stop here unless user OK'd more
 ```
 
-### Compose file variant selection (oara-voice pattern)
+### Compose file variant selection (myproject pattern)
 ```bash
 # CPU variant
 docker compose -f docker-compose.cpu.yaml up -d

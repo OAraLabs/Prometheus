@@ -1,65 +1,72 @@
 ---
 name: webapp-testing
-description: Toolkit for interacting with and testing local web applications using Playwright. Supports verifying frontend functionality, debugging UI behavior, capturing browser screenshots, and viewing browser logs.
-license: Complete terms in LICENSE.txt
+description: Toolkit for interacting with and testing local web applications using Playwright. Supports verifying frontend functionality, debugging UI behavior, capturing browser screenshots, and viewing browser logs. Use when testing web apps, automating browser interactions, or debugging frontend issues.
 ---
-<!-- Provenance: anthropics/skills | skills/webapp-testing/SKILL.md | Proprietary (see LICENSE.txt) -->
 
 # Web Application Testing
 
-To test local web applications, write native Python Playwright scripts.
+Test local web applications by writing Python Playwright scripts and running them via `bash`.
 
-**Helper Scripts Available**:
-- `scripts/with_server.py` - Manages server lifecycle (supports multiple servers)
-
-**Always run scripts with `--help` first** to see usage. DO NOT read the source until you try running the script first and find that a customized solution is abslutely necessary. These scripts can be very large and thus pollute your context window. They exist to be called directly as black-box scripts rather than ingested into your context window.
-
-## Decision Tree: Choosing Your Approach
+## Decision Tree
 
 ```
-User task → Is it static HTML?
-    ├─ Yes → Read HTML file directly to identify selectors
-    │         ├─ Success → Write Playwright script using selectors
-    │         └─ Fails/Incomplete → Treat as dynamic (below)
-    │
-    └─ No (dynamic webapp) → Is the server already running?
-        ├─ No → Run: python scripts/with_server.py --help
-        │        Then use the helper + write simplified Playwright script
-        │
-        └─ Yes → Reconnaissance-then-action:
+User task -> Is it static HTML?
+    Yes -> Use file_read to inspect HTML and identify selectors
+           -> Write Playwright script using selectors
+    No (dynamic webapp) -> Is the server already running?
+        No -> Start the server, then write Playwright script
+        Yes -> Reconnaissance-then-action:
             1. Navigate and wait for networkidle
             2. Take screenshot or inspect DOM
             3. Identify selectors from rendered state
             4. Execute actions with discovered selectors
 ```
 
-## Example: Using with_server.py
+## Starting a Server
 
-To start a server, run `--help` first, then use the helper:
+Start the dev server in the background, then run automation:
 
-**Single server:**
 ```bash
-python scripts/with_server.py --server "npm run dev" --port 5173 -- python your_automation.py
+# Start server in background
+cd /path/to/project && npm run dev &
+SERVER_PID=$!
+sleep 3  # Wait for server to be ready
+
+# Run automation
+python /tmp/test_script.py
+
+# Clean up
+kill $SERVER_PID
 ```
 
-**Multiple servers (e.g., backend + frontend):**
+For multiple servers (backend + frontend):
 ```bash
-python scripts/with_server.py \
-  --server "cd backend && python server.py" --port 3000 \
-  --server "cd frontend && npm run dev" --port 5173 \
-  -- python your_automation.py
+cd backend && python server.py &
+BACKEND_PID=$!
+cd frontend && npm run dev &
+FRONTEND_PID=$!
+sleep 5
+
+python /tmp/test_script.py
+
+kill $BACKEND_PID $FRONTEND_PID
 ```
 
-To create an automation script, include only Playwright logic (servers are managed automatically):
+## Writing Playwright Scripts
+
+Write the script via `file_write`, then run via `bash`:
+
 ```python
 from playwright.sync_api import sync_playwright
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True) # Always launch chromium in headless mode
+    browser = p.chromium.launch(headless=True)  # Always headless
     page = browser.new_page()
-    page.goto('http://localhost:5173') # Server already running and ready
-    page.wait_for_load_state('networkidle') # CRITICAL: Wait for JS to execute
+    page.goto('http://localhost:5173')
+    page.wait_for_load_state('networkidle')  # CRITICAL: Wait for JS
+
     # ... your automation logic
+
     browser.close()
 ```
 
@@ -78,20 +85,48 @@ with sync_playwright() as p:
 
 ## Common Pitfall
 
-**Don't** inspect the DOM before waiting for `networkidle` on dynamic apps
-**Do** wait for `page.wait_for_load_state('networkidle')` before inspection
+Do NOT inspect the DOM before waiting for `networkidle` on dynamic apps. Always wait for `page.wait_for_load_state('networkidle')` before inspection.
 
 ## Best Practices
 
-- **Use bundled scripts as black boxes** - To accomplish a task, consider whether one of the scripts available in `scripts/` can help. These scripts handle common, complex workflows reliably without cluttering the context window. Use `--help` to see usage, then invoke directly.
 - Use `sync_playwright()` for synchronous scripts
 - Always close the browser when done
 - Use descriptive selectors: `text=`, `role=`, CSS selectors, or IDs
 - Add appropriate waits: `page.wait_for_selector()` or `page.wait_for_timeout()`
+- Take screenshots to `/tmp/` and use `file_read` to inspect them visually
+- Write scripts to `/tmp/` via `file_write` to keep the workspace clean
 
-## Reference Files
+## Example: Full Test Flow
 
-- **examples/** - Examples showing common patterns:
-  - `element_discovery.py` - Discovering buttons, links, and inputs on a page
-  - `static_html_automation.py` - Using file:// URLs for local HTML
-  - `console_logging.py` - Capturing console logs during automation
+```python
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page()
+
+    # Navigate
+    page.goto('http://localhost:3000')
+    page.wait_for_load_state('networkidle')
+
+    # Screenshot for inspection
+    page.screenshot(path='/tmp/initial.png', full_page=True)
+
+    # Interact
+    page.fill('input[name="email"]', 'test@example.com')
+    page.click('button[type="submit"]')
+    page.wait_for_selector('.success-message')
+
+    # Verify
+    page.screenshot(path='/tmp/after_submit.png', full_page=True)
+    assert page.locator('.success-message').is_visible()
+
+    browser.close()
+```
+
+## Dependencies
+
+```bash
+pip install playwright
+playwright install chromium
+```

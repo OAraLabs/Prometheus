@@ -21,17 +21,17 @@ metadata:
       },
   }
 ---
-<!-- Provenance: openclaw/openclaw | skills/tmux/SKILL.md | MIT -->
+<!-- Adapted for Prometheus from openclaw/openclaw | MIT -->
 
 # tmux Session Control
 
-Control tmux sessions by sending keystrokes and reading output. Essential for managing Claude Code sessions.
+Control tmux sessions by sending keystrokes and reading output. Essential for managing Prometheus agent sessions and long-running processes.
 
 ## When to Use
 
 ✅ **USE this skill when:**
 
-- Monitoring Claude/Codex sessions in tmux
+- Monitoring Prometheus agent sessions in tmux
 - Sending input to interactive terminal applications
 - Scraping output from long-running processes in tmux
 - Navigating tmux panes/windows programmatically
@@ -41,11 +41,11 @@ Control tmux sessions by sending keystrokes and reading output. Essential for ma
 
 ❌ **DON'T use this skill when:**
 
-- Running one-off shell commands → use `exec` tool directly
-- Starting new background processes → use `exec` with `background:true`
-- Non-interactive scripts → use `exec` tool
+- Running one-off shell commands → use `bash` tool directly
+- Starting new background processes → use `bash` with background mode
+- Non-interactive scripts → use `bash` tool
 - The process isn't in tmux
-- You need to create a new tmux session → use `exec` with `tmux new-session`
+- You need to create a new tmux session → use `bash` with `tmux new-session`
 
 ## Example Sessions
 
@@ -121,7 +121,7 @@ tmux rename-session -t old new
 
 ## Sending Input Safely
 
-For interactive TUIs (Claude Code, Codex, etc.), split text and Enter into separate sends to avoid paste/multiline edge cases:
+For interactive TUIs, split text and Enter into separate sends to avoid paste/multiline edge cases:
 
 ```bash
 tmux send-keys -t shared -l -- "Please apply the patch in src/foo.ts"
@@ -129,16 +129,16 @@ sleep 0.1
 tmux send-keys -t shared Enter
 ```
 
-## Claude Code Session Patterns
+## Agent Session Patterns
 
 ### Check if Session Needs Input
 
 ```bash
-# Look for prompts
-tmux capture-pane -t worker-3 -p | tail -10 | grep -E "❯|Yes.*No|proceed|permission"
+# Look for prompts or SENTINEL signals
+tmux capture-pane -t worker-3 -p | tail -10 | grep -E "❯|SENTINEL|proceed|waiting"
 ```
 
-### Approve Claude Code Prompt
+### Respond to Agent Prompt
 
 ```bash
 # Send 'y' and Enter
@@ -157,7 +157,7 @@ for s in shared worker-2 worker-3 worker-4 worker-5 worker-6 worker-7 worker-8; 
 done
 ```
 
-### Send Task to Session
+### Send Task to Agent Session
 
 ```bash
 tmux send-keys -t worker-4 "Fix the bug in auth.js" Enter
