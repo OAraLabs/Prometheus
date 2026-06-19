@@ -9,14 +9,38 @@ set -euo pipefail
 
 BLOCKED=0
 
-# Get staged files, skip markdown, docs/reference, and the hook itself
+# Get staged files, skip markdown, docs/reference, and the hook itself.
+# Also skip the skill linter's TEST fixtures (tests/test_sync_skills.py): it
+# intentionally contains example leak patterns (IPs, tokens, oara- hosts) to
+# verify the linter, so scanning it is all false positives. The linter itself
+# (scripts/sync_skills.py) is NOT exempt and stays scanned.
 STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | \
     grep -v '\.md$' | \
     grep -v '^docs/' | \
     grep -v '^reference/' | \
-    grep -v '^\.githooks/' || true)
+    grep -v '^\.githooks/' | \
+    grep -v '^tests/test_sync_skills\.py$' || true)
 
+# Skill markdown leak guard. The filter above drops .md, so the generic checks
+# never see skills/*.md — yet skills are public instruction text injected into
+# model context. Scan staged skills with the dedicated linter (paths, private
+# hosts/IPs, token shapes); one source of truth lives in scripts/sync_skills.py.
+# This runs BEFORE the empty-STAGED_FILES early-exit so a skills-only commit
+# (exactly when it's needed) is still guarded.
+if git diff --cached --name-only --diff-filter=ACM | grep -q '^skills/.*\.md$'; then
+    if ! python3 scripts/sync_skills.py --lint-staged; then
+        BLOCKED=1
+    fi
+fi
+
+# Nothing else to scan if no non-markdown files are staged.
 if [ -z "$STAGED_FILES" ]; then
+    if [ "$BLOCKED" -eq 1 ]; then
+        echo "=== COMMIT BLOCKED ==="
+        echo "A staged skill leaks a path/host/secret pattern (see above)."
+        echo ""
+        exit 1
+    fi
     exit 0
 fi
 
