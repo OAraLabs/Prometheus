@@ -305,6 +305,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("reset", self._cmd_reset))
         self._app.add_handler(CommandHandler("model", self._cmd_model))
         self._app.add_handler(CommandHandler("wiki", self._cmd_wiki))
+        self._app.add_handler(CommandHandler("note", self._cmd_note))
         self._app.add_handler(CommandHandler("sentinel", self._cmd_sentinel))
         self._app.add_handler(CommandHandler("benchmark", self._cmd_benchmark))
         self._app.add_handler(CommandHandler("context", self._cmd_context))
@@ -1065,6 +1066,23 @@ class TelegramAdapter(BasePlatformAdapter):
                     f"Unknown subcommand: {sub}\n"
                     "Use: /memory [show [user] | limits]"
                 )
+        await self.send(chat_id, text, parse_mode=None)
+
+    async def _cmd_note(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /note [@entity] <text> — file a manual, max-trust fact.
+
+        Writes ONE fact to memory.db (source=manual, confidence 1.0, manual=1);
+        compile projects it to a page. Never writes the wiki directly.
+        """
+        if update.effective_chat is None:
+            return
+        chat_id = update.effective_chat.id
+        raw = " ".join(context.args or [])
+        from prometheus.gateway import commands as _cmds
+        from prometheus.tools.builtin.wiki_compile import _memory_store
+        text = _cmds.cmd_note(_memory_store, raw)
         await self.send(chat_id, text, parse_mode=None)
 
     async def _cmd_curator(

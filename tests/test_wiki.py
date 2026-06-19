@@ -541,3 +541,26 @@ def test_compiler_enumerates_queries_into_index():
         assert "## Queries" in index_text
         assert "queries/houston-care.md" in index_text
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# WikiCompiler — manual fact bypasses the >= 2 mention gate (Phase 4a)
+# ---------------------------------------------------------------------------
+
+
+def test_manual_fact_gets_page_on_first_mention():
+    """A manual fact earns a page after ONE mention (the >= 2 gate is bypassed)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(tmp)
+        wiki_root = Path(tmp) / "wiki"
+        # ONE manual fact — below the normal >= 2 threshold.
+        store.persist_memory(
+            "note", "HoustonClinic", "opening a clinic in Q3", 1.0,
+            source_event_ids=["manual"], manual=True,
+        )
+        WikiCompiler(store=store, wiki_root=wiki_root).regenerate_all()
+
+        pages = list(wiki_root.glob("*/HoustonClinic.md"))
+        assert pages, "manual fact should get a page on first mention"
+        assert "opening a clinic in Q3" in pages[0].read_text(encoding="utf-8")
+        store.close()

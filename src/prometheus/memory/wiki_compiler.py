@@ -259,19 +259,25 @@ class WikiCompiler:
 
     def _page_having_entities(self) -> dict[str, str]:
         """Map ``entity_name -> entity_type`` for entities that qualify for a
-        page: structurally valid AND >= 2 total mentions. Derived from the
-        store so compile and regenerate agree on which links resolve."""
+        page: structurally valid AND (>= 2 total mentions OR any manual fact).
+        Manual facts (``/note``) earn a page on first mention — you asserting it
+        explicitly *is* the signal the >= 2 threshold approximates. Derived from
+        the store so compile and regenerate agree on which links resolve."""
         agg: dict[str, dict] = {}
         for r in self._store.get_all_memories(limit=1_000_000):
             name = r.get("entity_name") or "Unknown"
             entry = agg.setdefault(
-                name, {"mentions": 0, "type": r.get("entity_type", "concept")}
+                name,
+                {"mentions": 0, "type": r.get("entity_type", "concept"), "manual": False},
             )
             entry["mentions"] += r.get("mention_count", 1) or 1
+            if r.get("manual"):
+                entry["manual"] = True
         return {
             name: entry["type"]
             for name, entry in agg.items()
-            if classify_entity(name) is None and entry["mentions"] >= 2
+            if classify_entity(name) is None
+            and (entry["mentions"] >= 2 or entry["manual"])
         }
 
     @staticmethod
