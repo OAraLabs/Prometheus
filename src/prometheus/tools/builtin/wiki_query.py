@@ -104,15 +104,20 @@ class WikiQueryTool(BaseTool):
             pages_read >= _MIN_PAGES_FOR_FILEBACK
             and len(combined) >= _MIN_CONTENT_LEN_FOR_FILEBACK
         ):
-            self._file_back(wiki_root, arguments.query, combined, index_path)
+            self._file_back(wiki_root, arguments.query, combined)
 
         return ToolResult(output=combined)
 
     @staticmethod
-    def _file_back(
-        wiki_root: Path, query: str, content: str, index_path: Path
-    ) -> None:
-        """Write the query result to wiki/queries/ and update the index."""
+    def _file_back(wiki_root: Path, query: str, content: str) -> None:
+        """Write the query-result note to ``wiki/queries/``.
+
+        Does NOT touch ``index.md``. The compiler is the sole writer of the
+        index and enumerates ``queries/`` into the ``## Queries`` section on its
+        next regenerate (``WikiCompiler._regenerate_index``). A query-time index
+        append made index.md a two-writer artifact that compile then fought and
+        overwrote (the same smell #53 fixed for links).
+        """
         queries_dir = wiki_root / "queries"
         queries_dir.mkdir(parents=True, exist_ok=True)
 
@@ -125,14 +130,5 @@ class WikiQueryTool(BaseTool):
             f"# {query}\n\n{content}\n"
         )
         query_path.write_text(page_text, encoding="utf-8")
-
-        # Append to index if not already present
-        index_text = index_path.read_text(encoding="utf-8")
-        rel = f"queries/{query_path.name}"
-        if rel not in index_text:
-            if "## Queries" not in index_text:
-                index_text = index_text.rstrip() + "\n\n## Queries\n"
-            index_text += f"- [{query}]({rel}) — auto-filed query result\n"
-            index_path.write_text(index_text, encoding="utf-8")
 
         log.info("WikiQueryTool: filed query result to %s", query_path)
