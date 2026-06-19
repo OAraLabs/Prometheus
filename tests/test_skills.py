@@ -49,6 +49,78 @@ def test_parse_empty_content():
     assert description == "Skill: empty"
 
 
+def test_parse_folded_scalar_description():
+    # Regression (SPRINT MEMORY-3): a YAML folded block scalar (`>`) spanning
+    # multiple lines must resolve to the joined text, not the literal ">".
+    content = (
+        "---\n"
+        "name: folded-skill\n"
+        "description: >\n"
+        "  First line of the description\n"
+        "  continues onto a second line.\n"
+        "---\n"
+        "# Folded Skill\n"
+        "Body.\n"
+    )
+    name, description = _parse_skill_markdown("default", content)
+    assert name == "folded-skill"
+    assert description == "First line of the description continues onto a second line."
+    assert ">" not in description
+
+
+def test_parse_literal_scalar_description():
+    # A literal block scalar (`|`) preserves the newline between lines.
+    content = (
+        "---\n"
+        "name: literal-skill\n"
+        "description: |\n"
+        "  Line one.\n"
+        "  Line two.\n"
+        "---\n"
+    )
+    name, description = _parse_skill_markdown("default", content)
+    assert name == "literal-skill"
+    assert description == "Line one.\nLine two."
+
+
+def test_parse_frontmatter_non_yaml_falls_back():
+    # An unquoted ": " makes the value invalid YAML; the tolerant line-scan
+    # fallback must still recover name + description (no regression).
+    content = "---\nname: colon-skill\ndescription: Use this: for special cases\n---\n"
+    name, description = _parse_skill_markdown("default", content)
+    assert name == "colon-skill"
+    assert description == "Use this: for special cases"
+
+
+def test_parse_double_quoted_escaped_quotes():
+    # A double-quoted YAML scalar with escaped inner quotes unescapes to real
+    # quotes; the old same-line scan left the backslashes in. Surfaced by the
+    # all-skills regression gate (pptx/xlsx).
+    content = '---\nname: q\ndescription: "Say \\"hi\\" now"\n---\n'
+    name, description = _parse_skill_markdown("default", content)
+    assert name == "q"
+    assert description == 'Say "hi" now'
+
+
+def test_parse_plain_multiline_description():
+    # `description:` with an empty value plus an indented continuation is a
+    # plain multi-line scalar (no `>`): it folds to the joined text instead of
+    # the old fall-back to the first frontmatter line. Surfaced by the gate
+    # (composition-patterns).
+    content = (
+        "---\n"
+        "name: multi\n"
+        "description:\n"
+        "  First part of the description\n"
+        "  and the second part.\n"
+        "license: MIT\n"
+        "---\n"
+    )
+    name, description = _parse_skill_markdown("default", content)
+    assert name == "multi"
+    assert description == "First part of the description and the second part."
+
+
 # ---------------------------------------------------------------------------
 # SkillRegistry
 # ---------------------------------------------------------------------------
@@ -119,6 +191,27 @@ def test_load_user_skills_from_directory():
     assert len(skills) == 1
     assert skills[0].name == "custom"
     assert skills[0].source == "user"
+
+
+def test_load_user_skill_with_folded_description():
+    # End-to-end (spec side-effect): a skill whose `description:` is a folded
+    # block scalar over two lines loads with the full joined description.
+    with tempfile.TemporaryDirectory() as tmp:
+        skill_file = Path(tmp) / "folded.md"
+        skill_file.write_text(
+            "---\nname: folded\ndescription: >\n"
+            "  A folded description that\n  spans two lines.\n---\nBody.\n",
+            encoding="utf-8",
+        )
+
+        import unittest.mock as mock
+        with mock.patch(
+            "prometheus.skills.loader.get_user_skills_dir", return_value=Path(tmp)
+        ):
+            skills = load_user_skills()
+
+    assert len(skills) == 1
+    assert skills[0].description == "A folded description that spans two lines."
 
 
 def test_load_skill_registry_includes_builtins():
