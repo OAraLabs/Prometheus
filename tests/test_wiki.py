@@ -309,20 +309,23 @@ async def test_query_tool_writes_to_queries():
         try:
             tool = WikiQueryTool()
             ctx = ToolExecutionContext(cwd=Path(tmp))
+
+            # index.md as compile left it, before the query files back
+            index_before = (wiki_root / "index.md").read_text(encoding="utf-8")
             result = await tool.execute(
                 wq_mod.WikiQueryInput(query="Houston nephrologist hospital"),
                 ctx,
             )
             assert not result.is_error
 
-            # Check that a query page was filed
+            # Still files the synthesis note to queries/ (the compounding loop)
             queries_dir = wiki_root / "queries"
             query_files = list(queries_dir.glob("*.md")) if queries_dir.exists() else []
             assert len(query_files) > 0, "Query result should be filed to queries/"
 
-            # Check that index was updated
-            index_text = (wiki_root / "index.md").read_text(encoding="utf-8")
-            assert "queries/" in index_text
+            # ...but must NOT mutate index.md — compile is the sole index writer.
+            index_after = (wiki_root / "index.md").read_text(encoding="utf-8")
+            assert index_after == index_before, "wiki_query must not write index.md"
         finally:
             wq_mod.get_config_dir = original
 
@@ -436,4 +439,40 @@ def test_no_filename_collisions_among_page_having_entities():
             files += [(sub, fp.name) for fp in (wiki_root / sub).glob("*.md")]
         assert len(files) == len(set(files)), f"filename collision among pages: {files}"
         assert not list(wiki_root.glob("*/*utils*")), "path/filename entities must get no page"
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# WikiCompiler — sole writer of index.md, enumerates queries/ (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+def test_compiler_enumerates_queries_into_index():
+    """A note in wiki/queries/ is picked up into ## Queries on a compile run.
+
+    This is how filed query results reach the index now that wiki_query no
+    longer appends to it (compile is the sole index writer).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(tmp)
+        wiki_root = Path(tmp) / "wiki"
+        compiler = WikiCompiler(store=store, wiki_root=wiki_root)
+        compiler.compile([
+            _make_fact("Dr. Pham", "nephrologist"),
+            _make_fact("Dr. Pham", "based in Houston"),
+        ])
+
+        # Drop a query note straight into queries/, as wiki_query._file_back does.
+        (wiki_root / "queries").mkdir(parents=True, exist_ok=True)
+        (wiki_root / "queries" / "houston-care.md").write_text(
+            "---\ntype: query\ndate: 2026-06-18\nquery: \"houston care\"\n---\n\n"
+            "# Houston care\n\nDr. Pham provides nephrology care in Houston.\n",
+            encoding="utf-8",
+        )
+
+        # A compile run regenerates the index, which enumerates queries/.
+        compiler.regenerate_all()
+        index_text = (wiki_root / "index.md").read_text(encoding="utf-8")
+        assert "## Queries" in index_text
+        assert "queries/houston-care.md" in index_text
         store.close()
