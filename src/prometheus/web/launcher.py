@@ -89,6 +89,7 @@ async def launch_web(
         loop_context=loop_context,
         agent_state_ref=agent_state_ref,
         api_token=_api_token,
+        config=config,
     )
 
     # Expose the bridge on the FastAPI app so REST routes (e.g.
