@@ -26,6 +26,7 @@ def cmd_help() -> str:
         "/anatomy   — Hardware, GPU, VRAM, infrastructure\n"
         "/doctor    — Diagnostic health check against model registry\n"
         "/wiki      — Wiki stats and recent entries\n"
+        "/note      — Save a manual fact: /note [@entity] <text>\n"
         "/sentinel  — SENTINEL subsystem status\n"
         "/events    — Recent signal-bus events (recent | skills | memory | curator | show <id>)\n"
         "/steer     — Inject mid-turn guidance (arrives after next tool call)\n"
@@ -144,6 +145,38 @@ def cmd_wiki() -> str:
         return "\n".join(lines)
     except Exception as exc:
         return f"Wiki: error reading index — {exc}"
+
+
+def cmd_note(store, raw: str) -> str:
+    """Write a manual, max-trust note to memory.db (canonical store only).
+
+    ``/note <text>`` files under the default ``Notes`` entity; ``/note @Entity
+    <text>`` targets ``Entity``. Never writes the wiki — compile projects it,
+    and a manual fact earns a page on first mention (the >= 2 threshold is
+    bypassed). On a dedup hit it upgrades the existing row to manual rather
+    than duplicating it.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return "Usage: /note [@entity] <text>"
+    entity = "Notes"
+    if text.startswith("@"):
+        head, _, rest = text.partition(" ")
+        entity = head[1:].strip() or "Notes"
+        text = rest.strip()
+        if not text:
+            return "Usage: /note @entity <text>"
+    if store is None:
+        return "Memory store unavailable — note not saved."
+    store.persist_memory(
+        "note",
+        entity,
+        text,
+        1.0,
+        source_event_ids=["manual"],
+        manual=True,
+    )
+    return f"Noted under [[{entity}]] — manual, max trust."
 
 
 def cmd_sentinel() -> str:

@@ -333,6 +333,71 @@ async def test_query_tool_writes_to_queries():
 
 
 # ---------------------------------------------------------------------------
+# WikiQueryTool — Option A size budget (Phase 3): payload bounded by chars
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_query_payload_bounded_by_size():
+    """Top pages summing well over budget → returned payload is <= budget."""
+    import prometheus.tools.builtin.wiki_query as wq_mod
+    with tempfile.TemporaryDirectory() as tmp:
+        wiki_root = Path(tmp) / "wiki"
+        topics = wiki_root / "topics"
+        topics.mkdir(parents=True)
+        # 5 pages ~40K chars each (~200K total) >> the ~112K char budget.
+        body = "alpha kubernetes detail. " * 1600
+        lines = []
+        for i in range(5):
+            (topics / f"p{i}.md").write_text(f"# Page {i}\n{body}", encoding="utf-8")
+            lines.append(f"- [kubernetes page {i}](topics/p{i}.md)")
+        (wiki_root / "index.md").write_text(
+            "## Topics\n" + "\n".join(lines) + "\n", encoding="utf-8"
+        )
+
+        original = wq_mod.get_config_dir
+        wq_mod.get_config_dir = lambda: Path(tmp)
+        try:
+            tool = WikiQueryTool()
+            ctx = ToolExecutionContext(cwd=Path(tmp))
+            result = await tool.execute(wq_mod.WikiQueryInput(query="kubernetes"), ctx)
+            assert not result.is_error
+            # The hard requirement: actual payload size <= budget.
+            assert len(result.output) <= wq_mod._MAX_RESULT_CHARS
+            # And the model is told it's a bounded view (not all 5 fit).
+            assert "of 5 relevant page" in result.output
+        finally:
+            wq_mod.get_config_dir = original
+
+
+@pytest.mark.asyncio
+async def test_query_truncates_oversized_top_page():
+    """A single page larger than the budget → included but truncated + marked."""
+    import prometheus.tools.builtin.wiki_query as wq_mod
+    with tempfile.TemporaryDirectory() as tmp:
+        wiki_root = Path(tmp) / "wiki"
+        topics = wiki_root / "topics"
+        topics.mkdir(parents=True)
+        huge = "kubernetes orchestration detail. " * 5000  # ~165K chars > budget
+        (topics / "huge.md").write_text(f"# Huge\n{huge}", encoding="utf-8")
+        (wiki_root / "index.md").write_text(
+            "## Topics\n- [kubernetes huge page](topics/huge.md)\n", encoding="utf-8"
+        )
+
+        original = wq_mod.get_config_dir
+        wq_mod.get_config_dir = lambda: Path(tmp)
+        try:
+            tool = WikiQueryTool()
+            ctx = ToolExecutionContext(cwd=Path(tmp))
+            result = await tool.execute(wq_mod.WikiQueryInput(query="kubernetes"), ctx)
+            assert not result.is_error
+            assert len(result.output) <= wq_mod._MAX_RESULT_CHARS
+            assert "[truncated" in result.output
+        finally:
+            wq_mod.get_config_dir = original
+
+
+# ---------------------------------------------------------------------------
 # 2d — compile is idempotent (no blind append)
 # ---------------------------------------------------------------------------
 
@@ -476,3 +541,133 @@ def test_compiler_enumerates_queries_into_index():
         assert "## Queries" in index_text
         assert "queries/houston-care.md" in index_text
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# WikiCompiler — manual fact bypasses the >= 2 mention gate (Phase 4a)
+# ---------------------------------------------------------------------------
+
+
+def test_manual_fact_gets_page_on_first_mention():
+    """A manual fact earns a page after ONE mention (the >= 2 gate is bypassed)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(tmp)
+        wiki_root = Path(tmp) / "wiki"
+        # ONE manual fact — below the normal >= 2 threshold.
+        store.persist_memory(
+            "note", "HoustonClinic", "opening a clinic in Q3", 1.0,
+            source_event_ids=["manual"], manual=True,
+        )
+        WikiCompiler(store=store, wiki_root=wiki_root).regenerate_all()
+
+        pages = list(wiki_root.glob("*/HoustonClinic.md"))
+        assert pages, "manual fact should get a page on first mention"
+        assert "opening a clinic in Q3" in pages[0].read_text(encoding="utf-8")
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# Manual layer Phase 4b — render marker, retrieval priority, lint exemption
+# ---------------------------------------------------------------------------
+
+
+def test_manual_page_has_render_marker():
+    """compile emits `manual: true` frontmatter on a manual page (Phase 4b render)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(tmp)
+        wiki_root = Path(tmp) / "wiki"
+        store.persist_memory("note", "PinnedFact", "remember this", 1.0,
+                             source_event_ids=["manual"], manual=True)
+        WikiCompiler(store=store, wiki_root=wiki_root).regenerate_all()
+        page = next(iter(wiki_root.glob("*/PinnedFact.md")), None)
+        assert page is not None
+        assert _read_frontmatter(page).get("manual") is True
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_ranks_first_in_query():
+    """A manual page ranks above an equally-matching ambient page (Phase 4b retrieval)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(tmp)
+        wiki_root = Path(tmp) / "wiki"
+        _seed(store, "concept", "AmbientKube", "kubernetes orchestration", 0.8)
+        _seed(store, "concept", "AmbientKube", "kubernetes scaling", 0.8)
+        store.persist_memory("note", "ManualKube", "kubernetes best practices", 1.0,
+                             source_event_ids=["manual"], manual=True)
+        WikiCompiler(store=store, wiki_root=wiki_root).regenerate_all()
+
+        import prometheus.tools.builtin.wiki_query as wq_mod
+        original = wq_mod.get_config_dir
+        wq_mod.get_config_dir = lambda: Path(tmp)
+        try:
+            result = await WikiQueryTool().execute(
+                wq_mod.WikiQueryInput(query="kubernetes"),
+                ToolExecutionContext(cwd=Path(tmp)),
+            )
+            out = result.output
+            assert "ManualKube" in out and "AmbientKube" in out
+            assert out.index("ManualKube") < out.index("AmbientKube"), "manual must rank first"
+        finally:
+            wq_mod.get_config_dir = original
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_heavy_query_still_respects_budget():
+    """Manual items get first claim on slots, but a manual-heavy result stays <= budget."""
+    import prometheus.tools.builtin.wiki_query as wq_mod
+    with tempfile.TemporaryDirectory() as tmp:
+        wiki_root = Path(tmp) / "wiki"
+        topics = wiki_root / "topics"
+        topics.mkdir(parents=True)
+        # 5 MANUAL pages, ~47K chars each (~235K total) >> the ~112K char budget.
+        big = "kubernetes detail. " * 2500
+        lines = []
+        for i in range(5):
+            (topics / f"m{i}.md").write_text(
+                f"---\ntype: note\nmanual: true\n---\n# Manual {i}\n{big}", encoding="utf-8")
+            lines.append(f"- [kubernetes manual {i}](topics/m{i}.md)")
+        (wiki_root / "index.md").write_text(
+            "## Topics\n" + "\n".join(lines) + "\n", encoding="utf-8")
+
+        original = wq_mod.get_config_dir
+        wq_mod.get_config_dir = lambda: Path(tmp)
+        try:
+            result = await WikiQueryTool().execute(
+                wq_mod.WikiQueryInput(query="kubernetes"),
+                ToolExecutionContext(cwd=Path(tmp)),
+            )
+            # Priority for manual, NOT exemption from the cap.
+            assert len(result.output) <= wq_mod._MAX_RESULT_CHARS
+            assert "of 5 relevant page" in result.output  # bounded view; not all fit
+        finally:
+            wq_mod.get_config_dir = original
+
+
+def test_lint_exempts_manual_page_across_full_pass():
+    """A manual page survives orphan-sweep + stale-flag + duplicate-prune (Phase 4b lint)."""
+    from prometheus.sentinel.wiki_lint import WikiLinter
+    with tempfile.TemporaryDirectory() as tmp:
+        wiki = Path(tmp) / "wiki"
+        topics = wiki / "topics"
+        topics.mkdir(parents=True)
+        # Manual page: orphan (unlinked/unindexed) + stale (old) + near-dup name.
+        (topics / "PinnedNote.md").write_text(
+            "---\ntype: note\nmanual: true\nlast_updated: 2020-01-01\n---\n"
+            "# PinnedNote\n\n## Key Facts\n- remember this\n", encoding="utf-8")
+        # Ambient near-duplicate ('Pinned' ⊂ 'PinnedNote'), also orphan + stale.
+        (topics / "Pinned.md").write_text(
+            "---\ntype: topic\nlast_updated: 2020-01-01\n---\n# Pinned\n\n- something\n",
+            encoding="utf-8")
+        (wiki / "index.md").write_text("# Index\n", encoding="utf-8")
+
+        issues = WikiLinter(wiki_root=wiki).lint().issues
+        removal = ("orphan", "stale", "duplicate")
+        manual_flags = [i.category for i in issues
+                        if i.page == "topics/PinnedNote.md" and i.category in removal]
+        assert manual_flags == [], f"manual page must survive all three checks, got {manual_flags}"
+        # Sanity: the equivalent ambient page IS flagged (the checks are live).
+        ambient_flags = [i.category for i in issues
+                         if i.page == "topics/Pinned.md" and i.category in removal]
+        assert ambient_flags, "ambient page should be orphan/stale-flagged — checks are live"

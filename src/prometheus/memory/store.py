@@ -6,7 +6,9 @@ Schema mirrors OpenClaw's proven memories table structure.
 from __future__ import annotations
 
 import json
+import logging
 import re
+import shutil
 import sqlite3
 import string
 import time
@@ -15,6 +17,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from prometheus.config.paths import get_config_dir
+
+log = logging.getLogger(__name__)
 
 _DB_NAME = "memory.db"
 
@@ -95,7 +99,8 @@ class MemoryStore:
                 last_mentioned    REAL NOT NULL,
                 mention_count     INTEGER NOT NULL DEFAULT 1,
                 tags              TEXT NOT NULL DEFAULT '[]',
-                timestamp         REAL NOT NULL
+                timestamp         REAL NOT NULL,
+                manual            INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -115,6 +120,35 @@ class MemoryStore:
             );
         """)
         self._conn.commit()
+        self._migrate_manual_column()
+
+    def _migrate_manual_column(self) -> None:
+        """Add the ``manual`` flag column to a pre-manual-layer memories table.
+
+        Idempotent: a no-op when the column already exists (the common path on
+        every startup — no snapshot, no write). When it is missing (a DB created
+        before the manual layer), snapshot the DB out-of-tree first, then ALTER.
+        Fail loud — a failed snapshot or ALTER propagates rather than leaving the
+        table half-migrated.
+        """
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(memories)")}
+        if "manual" in cols:
+            return
+        self._snapshot_db()
+        self._conn.execute(
+            "ALTER TABLE memories ADD COLUMN manual INTEGER NOT NULL DEFAULT 0"
+        )
+        self._conn.commit()
+
+    def _snapshot_db(self) -> None:
+        """Copy the DB file out-of-tree, timestamped, before a migration."""
+        src = self._db_path
+        if not src.exists():
+            return  # nothing to back up (in-memory / brand-new DB)
+        ts = time.strftime("%Y%m%dT%H%M%S", time.localtime())
+        dst = src.with_name(f"{src.name}.backup-{ts}")
+        shutil.copy2(src, dst)
+        log.info("MemoryStore: snapshotted %s -> %s before manual migration", src, dst)
 
     # ------------------------------------------------------------------
     # Messages
@@ -186,8 +220,14 @@ class MemoryStore:
         source_event_ids: list[str] | None = None,
         tags: list[str] | None = None,
         memory_id: str | None = None,
+        manual: bool = False,
     ) -> str:
         """Insert or update a memory fact. Returns the memory ID.
+
+        ``manual`` flags a human-asserted fact (e.g. ``/note``). On a dedup
+        hit the flag is *unioned* (``MAX``) onto the existing row — once manual,
+        stays manual — so a ``/note`` that matches an ambient fact upgrades that
+        one row rather than creating a duplicate.
 
         Provenance is mandatory: ``source_event_ids`` must be a non-empty
         list, else this raises ``ValueError``. Silent source-less writes
@@ -232,8 +272,8 @@ class MemoryStore:
             self._conn.execute(
                 "UPDATE memories SET confidence = MAX(confidence, ?),"
                 " mention_count = mention_count + 1, last_mentioned = ?,"
-                " source_event_ids = ? WHERE id = ?",
-                (confidence, now, json.dumps(merged_sources), mid),
+                " source_event_ids = ?, manual = MAX(manual, ?) WHERE id = ?",
+                (confidence, now, json.dumps(merged_sources), int(manual), mid),
             )
             self._conn.commit()
             return mid
@@ -242,8 +282,9 @@ class MemoryStore:
         self._conn.execute(
             "INSERT INTO memories"
             " (id, entity_type, entity_name, relationship, fact, confidence,"
-            "  source_event_ids, last_mentioned, mention_count, tags, timestamp)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            "  source_event_ids, last_mentioned, mention_count, tags, timestamp,"
+            "  manual)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
             (
                 mid,
                 entity_type,
@@ -255,6 +296,7 @@ class MemoryStore:
                 now,
                 json.dumps(tags or []),
                 now,
+                int(manual),
             ),
         )
         self._conn.execute(

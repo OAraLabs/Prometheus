@@ -18,9 +18,31 @@ log = logging.getLogger(__name__)
 _MIN_PAGES_FOR_FILEBACK = 2
 _MIN_CONTENT_LEN_FOR_FILEBACK = 200
 
+# Bound the returned payload by SIZE, not just page count, so a few large pages
+# can't blow past the model's working window. Expressed in tokens (the
+# meaningful unit) with a coarse char proxy — no tokenizer dependency. Survey
+# range: 24-32K tokens. (The index.md write-path growth is carved out to Phase 4.)
+_MAX_RESULT_TOKENS = 28_000
+_CHARS_PER_TOKEN = 4  # coarse English/markdown proxy
+_MAX_RESULT_CHARS = _MAX_RESULT_TOKENS * _CHARS_PER_TOKEN
+_PAYLOAD_NOTICE_RESERVE = 200  # chars reserved for the bounded-view notice
+
 
 def _safe_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*\s]+', "_", name)[:80]
+
+
+def _page_is_manual(page_path: Path) -> bool:
+    """True if a page's frontmatter carries the manual marker (Phase 4b).
+
+    Reads only the frontmatter head, not the whole page.
+    """
+    try:
+        with open(page_path, encoding="utf-8") as fh:
+            head = fh.read(512)
+    except OSError:
+        return False
+    return bool(re.search(r"(?m)^manual:\s*true\b", head))
 
 
 class WikiQueryInput(BaseModel):
@@ -80,33 +102,73 @@ class WikiQueryTool(BaseTool):
         if not scored:
             return ToolResult(output="No relevant wiki pages found for this query.")
 
-        scored.sort(key=lambda t: t[0], reverse=True)
+        # Manual-flagged pages get FIRST claim on the bounded slots (ranked
+        # ahead of ambient pages), then by keyword overlap. This is priority
+        # WITHIN the size budget below — not an exemption from it.
+        scored.sort(
+            key=lambda t: (_page_is_manual(wiki_root / t[2]), t[0]),
+            reverse=True,
+        )
         top = scored[:5]
 
-        # Read the top pages
-        pages_read = 0
-        content_parts: list[str] = []
+        # Resolve which of the top-ranked entries actually have page files.
+        candidates: list[tuple[str, Path]] = []
         for _score, name, rel_path in top:
             page_path = wiki_root / rel_path
-            if not page_path.exists():
-                continue
-            text = page_path.read_text(encoding="utf-8")
-            content_parts.append(f"### {name}\n{text}")
-            pages_read += 1
+            if page_path.exists():
+                candidates.append((name, page_path))
 
-        if not content_parts:
+        if not candidates:
             return ToolResult(output="Found index entries but page files are missing.")
 
-        combined = "\n\n---\n\n".join(content_parts)
+        # Bound the payload by size. Include pages in rank order until the next
+        # would exceed the budget; if the highest-ranked page alone exceeds it,
+        # include it truncated with an explicit marker. A small reserve keeps
+        # the prepended notice within the total budget.
+        page_budget = _MAX_RESULT_CHARS - _PAYLOAD_NOTICE_RESERVE
+        separator = "\n\n---\n\n"
+        content_parts: list[str] = []
+        used = 0
+        truncated = False
+        for name, page_path in candidates:
+            block = f"### {name}\n{page_path.read_text(encoding='utf-8')}"
+            sep_cost = len(separator) if content_parts else 0
+            if used + sep_cost + len(block) <= page_budget:
+                content_parts.append(block)
+                used += sep_cost + len(block)
+            elif not content_parts:
+                marker = "\n\n[truncated: page exceeds the wiki_query size budget]"
+                keep = max(0, page_budget - len(marker))
+                content_parts.append(block[:keep] + marker)
+                truncated = True
+                break
+            else:
+                break
 
-        # File-back: save substantial multi-page results to queries/
+        pages_read = len(content_parts)
+        pages_available = len(candidates)
+        combined = separator.join(content_parts)
+
+        # Tell the model this is a bounded view — it never sees the dropped
+        # pages or the truncated tail otherwise.
+        notice = (
+            f"[wiki_query: {pages_read} of {pages_available} relevant page(s), "
+            f"bounded to ~{_MAX_RESULT_TOKENS // 1000}K tokens"
+            + ("; top page truncated" if truncated else "")
+            + "]"
+        )
+        output = f"{notice}\n\n{combined}"
+
+        # File-back: save substantial multi-page results to queries/. Files the
+        # bounded page content (not the notice). The index.md write here is the
+        # Phase-4 carve-out — left untouched.
         if (
             pages_read >= _MIN_PAGES_FOR_FILEBACK
             and len(combined) >= _MIN_CONTENT_LEN_FOR_FILEBACK
         ):
             self._file_back(wiki_root, arguments.query, combined)
 
-        return ToolResult(output=combined)
+        return ToolResult(output=output)
 
     @staticmethod
     def _file_back(wiki_root: Path, query: str, content: str) -> None:
