@@ -565,6 +565,14 @@ class TestDoctorDiagnose:
         doctor = Doctor.__new__(Doctor)
         doctor.config = {}
         doctor.registry = SAMPLE_REGISTRY
+        # Point the config checks at a fixture so the test doesn't depend on a
+        # gitignored config/prometheus.yaml at the real repo root — absent in any
+        # linked git worktree, which made this test fail outside the daemon checkout.
+        doctor.repo_root = tmp_path
+        (tmp_path / "config").mkdir()
+        (tmp_path / "config" / "prometheus.yaml").write_text(
+            "model:\n  provider: llama_cpp\n", encoding="utf-8"
+        )
 
         state = _sample_state()
 
