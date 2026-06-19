@@ -1182,38 +1182,12 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         if update.effective_chat is None:
             return
+        from prometheus.gateway import commands as _cmds
+
         text = " ".join(context.args or []).strip()
-        if not text:
-            await self.send(
-                update.effective_chat.id,
-                "/steer <text> — inject mid-turn guidance.\n"
-                "Arrives after the next tool call. Example:\n"
-                "/steer focus on Ubuntu, skip the Mac instructions",
-                parse_mode=None,
-            )
-            return
         session = self._resolve_session_for_command(update)
-        if session is None:
-            await self.send(
-                update.effective_chat.id,
-                "No active session yet. Send a message first, then "
-                "/steer while the agent is running.",
-                parse_mode=None,
-            )
-            return
-        if not session.enqueue_steer(text):
-            await self.send(
-                update.effective_chat.id, "Empty steer — nothing queued.",
-                parse_mode=None,
-            )
-            return
-        preview = text if len(text) <= 80 else text[:77] + "..."
         await self.send(
-            update.effective_chat.id,
-            f"📍 Steered: {preview}\n"
-            f"   Arrives after the next tool call. "
-            f"Pending: {len(session.queued_steers)}.",
-            parse_mode=None,
+            update.effective_chat.id, _cmds.cmd_steer(session, text), parse_mode=None
         )
 
     async def _cmd_queue(
@@ -1223,32 +1197,19 @@ class TelegramAdapter(BasePlatformAdapter):
         one ends."""
         if update.effective_chat is None:
             return
+        from prometheus.gateway import commands as _cmds
+
         text = " ".join(context.args or []).strip()
-        if not text:
-            await self.send(
-                update.effective_chat.id,
-                "/queue <text> — line up a follow-up turn.\n"
-                "Runs after the current task ends.",
-                parse_mode=None,
+        # /queue creates the session if missing so a queued prompt on a quiet
+        # chat fires when the user kicks off their first message — but only when
+        # there's something to queue (a bare /queue is usage, no session made).
+        session = None
+        if text:
+            session = self.session_manager.get_or_create(
+                f"telegram:{update.effective_chat.id}"
             )
-            return
-        # /queue creates the session if missing so a queued prompt on a
-        # quiet chat fires when the user kicks off their first message.
-        session_key = f"telegram:{update.effective_chat.id}"
-        session = self.session_manager.get_or_create(session_key)
-        if not session.enqueue_prompt(text):
-            await self.send(
-                update.effective_chat.id, "Empty prompt — nothing queued.",
-                parse_mode=None,
-            )
-            return
-        preview = text if len(text) <= 80 else text[:77] + "..."
-        position = len(session.queued_prompts)
         await self.send(
-            update.effective_chat.id,
-            f"📥 Queued: {preview}\n"
-            f"   Position: {position}. Fires when current turn ends.",
-            parse_mode=None,
+            update.effective_chat.id, _cmds.cmd_queue(session, text), parse_mode=None
         )
 
     async def _cmd_unqueue(
@@ -1257,20 +1218,11 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle /unqueue — drop the most recently queued prompt."""
         if update.effective_chat is None:
             return
+        from prometheus.gateway import commands as _cmds
+
         session = self._resolve_session_for_command(update)
-        if session is None or not session.queued_prompts:
-            await self.send(
-                update.effective_chat.id, "No queued prompts to drop.",
-                parse_mode=None,
-            )
-            return
-        dropped = session.queued_prompts.pop()
-        preview = dropped if len(dropped) <= 80 else dropped[:77] + "..."
-        remaining = len(session.queued_prompts)
         await self.send(
-            update.effective_chat.id,
-            f"🗑  Unqueued: {preview}\n   Remaining: {remaining}.",
-            parse_mode=None,
+            update.effective_chat.id, _cmds.cmd_unqueue(session), parse_mode=None
         )
 
     async def _cmd_clear_steers(
@@ -1279,18 +1231,11 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle /clearsteers — drop all pending steers without injection."""
         if update.effective_chat is None:
             return
+        from prometheus.gateway import commands as _cmds
+
         session = self._resolve_session_for_command(update)
-        if session is None:
-            await self.send(
-                update.effective_chat.id, "No active session.",
-                parse_mode=None,
-            )
-            return
-        n = session.clear_steers()
         await self.send(
-            update.effective_chat.id,
-            f"🧹 Cleared {n} pending steer{'s' if n != 1 else ''}.",
-            parse_mode=None,
+            update.effective_chat.id, _cmds.cmd_clearsteers(session), parse_mode=None
         )
 
     async def _cmd_events(

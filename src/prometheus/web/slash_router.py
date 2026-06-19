@@ -4,12 +4,13 @@ Web parity for Telegram's CommandHandler: in the chat surfaces a leading-slash
 message is a *command*, not a conversation turn. This module decides, for a
 given message, whether it's a command and what to do with it:
 
-  * a side-effect-free command (``/help``, ``/status``, ``/wiki``, ``/note`` …)
-    runs through the shared formatter table in ``gateway.commands`` and its text
-    is broadcast back — the message is NOT added to the session or run through
-    the agent;
-  * a command that mutates live daemon state bound to the Telegram gateway
-    (``/steer``, ``/queue``, ``/route``, ``/approve`` …) is not reachable here
+  * a side-effect-free command (``/help``, ``/status``, ``/wiki``, ``/note`` …),
+    or a session-mutating command that enqueues onto the live run (``/steer``,
+    ``/queue``, ``/unqueue``, ``/clearsteers``), runs through the shared tables
+    in ``gateway.commands`` and its text is broadcast back — the message is NOT
+    added to the session as a turn or run through the agent;
+  * a command that mutates other live daemon state still bound to the Telegram
+    gateway (``/route``, ``/approve``, ``/benchmark`` …) is not reachable here
     yet and gets an explicit "not on web" reply — never a silent drop into the
     agent;
   * a genuinely unknown ``/token`` falls through to the agent, matching Telegram
@@ -29,23 +30,26 @@ from typing import Any
 from prometheus.gateway.commands import (
     CommandContext,
     is_formatter_command,
+    is_session_command,
     run_formatter_command,
+    run_session_command,
 )
 
-# Registered in the Telegram gateway but NOT reachable as pure formatters: they
-# mutate live daemon state (model routing, steering queues, the approval queue,
-# benchmark/press/gepa/symbiote/audit runs) or are otherwise bound to the
-# TelegramGateway instance. Mirror of telegram.py's CommandHandler registrations
-# minus the shared formatter table. Kept explicit (not derived) so the web
-# surface gives a precise boundary message; the "full parity" follow-up replaces
-# these with real handlers once the bridge gains the needed daemon services.
+# Registered in the Telegram gateway but NOT reachable yet: they mutate live
+# daemon state (model routing, the approval queue, benchmark/press/gepa/symbiote/
+# audit runs) bound to the TelegramGateway instance. Mirror of telegram.py's
+# CommandHandler registrations minus the shared formatter + session tables. Kept
+# explicit (not derived) so the web surface gives a precise boundary message;
+# the remaining "full parity" follow-up replaces these with real handlers once
+# the bridge gains the needed daemon services.
 #
 # NOTE: /model is a formatter here (read-only model report, matching Slack), not
-# native — even though Telegram's /model aliases the mutating /route.
+# native — even though Telegram's /model aliases the mutating /route. The
+# steering group (/steer /queue /unqueue /clearsteers) IS wired — see the
+# session-command table in gateway.commands.
 WEB_NATIVE_ONLY: frozenset[str] = frozenset({
     "start", "clear", "reset",
     "route",
-    "steer", "queue", "unqueue", "clearsteers",
     "benchmark", "voice", "tools", "pairs",
     "approve", "deny", "pending",
     "gepa", "symbiote", "audit", "press",
@@ -102,6 +106,10 @@ async def route_slash(content: str, ctx: CommandContext) -> SlashOutcome:
         # a string; the `or ""` guards a command that legitimately returns "".
         return SlashOutcome(handled=True, reply=reply or "")
 
+    if is_session_command(name):
+        reply = await run_session_command(name, args, ctx)
+        return SlashOutcome(handled=True, reply=reply or "")
+
     if name in WEB_NATIVE_ONLY:
         return SlashOutcome(
             handled=True,
@@ -117,7 +125,10 @@ async def route_slash(content: str, ctx: CommandContext) -> SlashOutcome:
 
 
 def build_command_context(
-    loop_context: Any, config: dict | None = None
+    loop_context: Any,
+    config: dict | None = None,
+    session: Any = None,
+    ensure_session: Any = None,
 ) -> CommandContext:
     """Build a CommandContext from the web bridge's loop_context + config.
 
@@ -126,9 +137,15 @@ def build_command_context(
     tracker are absent here, so /status simply omits those lines. With no
     loop_context, the model-info commands degrade but the rest (which read
     module globals — wiki, memory, skills, health, …) still work.
+
+    ``session`` (non-creating active session, or None) and ``ensure_session``
+    (a no-arg get_or_create callable) feed the session-mutating commands; the
+    bridge resolves both from its session_mgr + the message's session_id.
     """
     if loop_context is None:
-        return CommandContext(config=config)
+        return CommandContext(
+            config=config, session=session, ensure_session=ensure_session
+        )
     provider = getattr(loop_context, "provider", "")
     provider_str = getattr(provider, "value", None) or str(provider or "")
     return CommandContext(
@@ -137,4 +154,6 @@ def build_command_context(
         system_prompt=getattr(loop_context, "system_prompt", "") or "",
         config=config,
         tool_registry=getattr(loop_context, "tool_registry", None),
+        session=session,
+        ensure_session=ensure_session,
     )
