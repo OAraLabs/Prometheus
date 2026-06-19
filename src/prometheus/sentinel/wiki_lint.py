@@ -209,6 +209,17 @@ class WikiLinter:
             return {}
 
     @staticmethod
+    def _is_manual(info: dict) -> bool:
+        """A page is manual-flagged (Phase 4b) if its frontmatter says so.
+
+        Manual (/note) pages are exempt from the removal/degradation checks —
+        orphan-sweep, stale-flag, and duplicate-prune — the same carve-out
+        shape Sprint-2 gave queries/. You asserting a fact explicitly means it
+        must never be swept, staled, or pruned out from under you.
+        """
+        return bool(info.get("frontmatter", {}).get("manual"))
+
+    @staticmethod
     def _extract_wiki_links(content: str) -> list[str]:
         """Extract [[wiki-link]] targets from content."""
         return re.findall(r"\[\[([^\]]+)\]\]", content)
@@ -234,8 +245,8 @@ class WikiLinter:
 
         issues = []
         for rel, info in pages.items():
-            if rel.startswith("queries/"):
-                continue  # Query results are allowed to be orphans
+            if rel.startswith("queries/") or self._is_manual(info):
+                continue  # queries/ and manual (/note) pages may be orphans
             name = info["entity_name"].lower()
             if name not in linked_names and name not in indexed_names:
                 issues.append(LintIssue(
@@ -278,6 +289,8 @@ class WikiLinter:
         cutoff = time.time() - (days * 86400)
         issues = []
         for rel, info in pages.items():
+            if self._is_manual(info):
+                continue  # manual (/note) pages are never stale-flagged
             fm = info["frontmatter"]
             last_updated = fm.get("last_updated")
             if last_updated is None:
@@ -316,6 +329,8 @@ class WikiLinter:
                     continue
                 # Check if one is a substring of the other
                 if norm_a in norm_b or norm_b in norm_a:
+                    if self._is_manual(pages[rel_a]) or self._is_manual(pages[rel_b]):
+                        continue  # never prune a manual (/note) page as a duplicate
                     seen.add(pair)
                     issues.append(LintIssue(
                         severity="warning",

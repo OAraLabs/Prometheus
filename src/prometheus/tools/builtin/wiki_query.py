@@ -32,6 +32,19 @@ def _safe_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*\s]+', "_", name)[:80]
 
 
+def _page_is_manual(page_path: Path) -> bool:
+    """True if a page's frontmatter carries the manual marker (Phase 4b).
+
+    Reads only the frontmatter head, not the whole page.
+    """
+    try:
+        with open(page_path, encoding="utf-8") as fh:
+            head = fh.read(512)
+    except OSError:
+        return False
+    return bool(re.search(r"(?m)^manual:\s*true\b", head))
+
+
 class WikiQueryInput(BaseModel):
     """Arguments for wiki_query."""
 
@@ -89,7 +102,13 @@ class WikiQueryTool(BaseTool):
         if not scored:
             return ToolResult(output="No relevant wiki pages found for this query.")
 
-        scored.sort(key=lambda t: t[0], reverse=True)
+        # Manual-flagged pages get FIRST claim on the bounded slots (ranked
+        # ahead of ambient pages), then by keyword overlap. This is priority
+        # WITHIN the size budget below — not an exemption from it.
+        scored.sort(
+            key=lambda t: (_page_is_manual(wiki_root / t[2]), t[0]),
+            reverse=True,
+        )
         top = scored[:5]
 
         # Resolve which of the top-ranked entries actually have page files.

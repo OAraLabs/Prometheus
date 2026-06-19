@@ -301,15 +301,19 @@ class WikiCompiler:
         first_seen = min(dates) if dates else _today()
         last_updated = max(dates) if dates else _today()
 
+        fm: dict[str, object] = {
+            "type": entity_type,
+            "first_seen": first_seen,
+            "last_updated": last_updated,
+            "source_count": len(facts),
+        }
+        # Render marker (Phase 4b): a page with any manual (/note) fact is
+        # flagged so retrieval ranks it first, lint exempts it, and Phase 5
+        # styles the graph node distinctly.
+        if any(r.get("manual") for r in facts):
+            fm["manual"] = True
         frontmatter = yaml.dump(
-            {
-                "type": entity_type,
-                "first_seen": first_seen,
-                "last_updated": last_updated,
-                "source_count": len(facts),
-            },
-            default_flow_style=False,
-            sort_keys=False,
+            fm, default_flow_style=False, sort_keys=False
         ).strip()
 
         lines = [f"---\n{frontmatter}\n---", "", f"# {entity_name}", "", "## Key Facts"]
