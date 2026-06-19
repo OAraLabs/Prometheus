@@ -1297,7 +1297,8 @@ class CommandContext:
     A gateway fills what it has; every field has a safe default so a surface
     that lacks one (e.g. the web bridge has no uptime clock or cost tracker)
     degrades gracefully instead of failing. ``tool_registry`` is needed only by
-    /status; ``config`` only by /doctor and /beacon.
+    /status; ``config`` only by /doctor and /beacon; ``session`` /
+    ``ensure_session`` only by the session-mutating commands.
     """
 
     model_name: str = ""
@@ -1307,6 +1308,12 @@ class CommandContext:
     tool_registry: Any = None
     start_time: float = 0.0
     cost_tracker: Any = None
+    # Session-mutating commands (/steer, /queue, /unqueue, /clearsteers):
+    # ``session`` is the resolved active ChatSession or None (non-creating);
+    # ``ensure_session`` is a no-arg callable that get_or_creates one (used by
+    # /queue, which fires on a quiet chat once the first turn starts).
+    session: Any = None
+    ensure_session: Any = None
 
 
 async def _fc_help(ctx: CommandContext, args: str) -> str:
@@ -1500,4 +1507,154 @@ async def run_formatter_command(
         return await handler(ctx, args)
     except Exception as exc:  # noqa: BLE001 — fail loud to the user, not the loop
         log.exception("formatter command /%s failed", name)
+        return f"⚠ /{name} failed: {exc}"
+
+
+# ===========================================================================
+# Session-mutating commands (steering + queued prompts)
+# ===========================================================================
+#
+# These DO mutate state — they enqueue steers / follow-up prompts onto a live
+# ChatSession the agent loop drains — so they're separate from the side-effect-
+# free formatter table above. The logic is gateway-agnostic: each takes the
+# resolved ChatSession (or None) plus arg text and returns the reply. The
+# gateway owns session RESOLUTION (creating vs non-creating), because that
+# differs per command and per surface.
+#
+# Telegram's _cmd_steer/_cmd_queue/_cmd_unqueue/_cmd_clear_steers call these;
+# the web slash-router dispatches them through run_session_command() with a
+# CommandContext carrying the session. One implementation, two surfaces.
+
+
+def _preview(text: str, limit: int = 80) -> str:
+    """Trim ``text`` to ``limit`` chars with an ellipsis (matches the gateways)."""
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def cmd_steer(session: Any, text: str) -> str:
+    """Inject mid-turn guidance into the running session.
+
+    Arrives at the agent as a system-prompt addendum on the next model call
+    (after the current tool batch). ``session`` is the resolved ChatSession or
+    None (no active session — non-creating, since there's nothing to steer).
+    """
+    text = (text or "").strip()
+    if not text:
+        return (
+            "/steer <text> — inject mid-turn guidance.\n"
+            "Arrives after the next tool call. Example:\n"
+            "/steer focus on Ubuntu, skip the Mac instructions"
+        )
+    if session is None:
+        return (
+            "No active session yet. Send a message first, then /steer while the "
+            "agent is running."
+        )
+    if not session.enqueue_steer(text):
+        return "Empty steer — nothing queued."
+    return (
+        f"📍 Steered: {_preview(text)}\n"
+        f"   Arrives after the next tool call. "
+        f"Pending: {len(session.queued_steers)}."
+    )
+
+
+def cmd_queue(session: Any, text: str) -> str:
+    """Queue ``text`` as a fresh turn after the current one ends.
+
+    ``session`` should be a get_or_created ChatSession (a queued prompt on a
+    quiet chat fires when the user kicks off their first message). The caller
+    creates it only when ``text`` is non-empty, so a bare ``/queue`` (usage)
+    never materialises a session.
+    """
+    text = (text or "").strip()
+    if not text:
+        return (
+            "/queue <text> — line up a follow-up turn.\n"
+            "Runs after the current task ends."
+        )
+    if session is None:
+        return "No active session."
+    if not session.enqueue_prompt(text):
+        return "Empty prompt — nothing queued."
+    return (
+        f"📥 Queued: {_preview(text)}\n"
+        f"   Position: {len(session.queued_prompts)}. Fires when current turn ends."
+    )
+
+
+def cmd_unqueue(session: Any) -> str:
+    """Drop the most recently queued prompt (LIFO)."""
+    if session is None or not session.queued_prompts:
+        return "No queued prompts to drop."
+    dropped = session.queued_prompts.pop()
+    return (
+        f"🗑  Unqueued: {_preview(dropped)}\n"
+        f"   Remaining: {len(session.queued_prompts)}."
+    )
+
+
+def cmd_clearsteers(session: Any) -> str:
+    """Drop all pending steers without surfacing them."""
+    if session is None:
+        return "No active session."
+    n = session.clear_steers()
+    return f"🧹 Cleared {n} pending steer{'s' if n != 1 else ''}."
+
+
+async def _sc_steer(ctx: CommandContext, args: str) -> str:
+    return cmd_steer(ctx.session, args)
+
+
+async def _sc_queue(ctx: CommandContext, args: str) -> str:
+    # Create the session only when there's something to queue (parity with
+    # Telegram, which doesn't materialise a session for a bare /queue usage).
+    if args.strip() and ctx.ensure_session is not None:
+        return cmd_queue(ctx.ensure_session(), args)
+    return cmd_queue(ctx.session, args)
+
+
+async def _sc_unqueue(ctx: CommandContext, args: str) -> str:
+    return cmd_unqueue(ctx.session)
+
+
+async def _sc_clearsteers(ctx: CommandContext, args: str) -> str:
+    return cmd_clearsteers(ctx.session)
+
+
+# command name -> async handler(ctx, args) -> str
+_SESSION_COMMANDS: dict[str, Any] = {
+    "steer": _sc_steer,
+    "queue": _sc_queue,
+    "unqueue": _sc_unqueue,
+    "clearsteers": _sc_clearsteers,
+}
+
+
+def is_session_command(name: str) -> bool:
+    """True if ``name`` is a session-mutating command in the shared table."""
+    return name.lower() in _SESSION_COMMANDS
+
+
+def session_command_names() -> frozenset[str]:
+    """The set of session-mutating command names the shared table can serve."""
+    return frozenset(_SESSION_COMMANDS)
+
+
+async def run_session_command(
+    name: str, args: str, ctx: CommandContext
+) -> str | None:
+    """Run a session-mutating slash command by name.
+
+    Returns the command's text result, or ``None`` if ``name`` is not a session
+    command. Like run_formatter_command, a handler that raises is caught and
+    surfaced as an error string rather than crashing the chat path.
+    """
+    handler = _SESSION_COMMANDS.get(name.lower())
+    if handler is None:
+        return None
+    try:
+        return await handler(ctx, args)
+    except Exception as exc:  # noqa: BLE001 — fail loud to the user, not the loop
+        log.exception("session command /%s failed", name)
         return f"⚠ /{name} failed: {exc}"

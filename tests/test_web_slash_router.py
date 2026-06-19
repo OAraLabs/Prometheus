@@ -24,6 +24,7 @@ import pytest  # noqa: E402
 from prometheus.gateway.commands import (  # noqa: E402
     CommandContext,
     formatter_command_names,
+    session_command_names,
 )
 from prometheus.web.slash_router import (  # noqa: E402
     WEB_NATIVE_ONLY,
@@ -84,11 +85,108 @@ async def test_status_handled_with_injected_registry():
 
 
 @pytest.mark.asyncio
-async def test_mutating_command_gets_boundary_not_silent():
-    out = await route_slash("/steer go left after the next tool call", CommandContext())
+async def test_unwired_mutating_command_gets_boundary_not_silent():
+    # /route is still gateway-native (model routing) — boundary, not a drop.
+    out = await route_slash("/route claude", CommandContext())
     assert out.handled                       # handled => NOT dropped into the agent
     assert "isn't available on the web" in out.reply
-    assert "steer" in out.reply
+    assert "route" in out.reply
+
+
+# --- session-mutating commands: steering + queued prompts ------------------
+
+class _FakeSession:
+    """Minimal stand-in for ChatSession's steering API."""
+
+    def __init__(self):
+        self.queued_steers: list[str] = []
+        self.queued_prompts: list[str] = []
+
+    def enqueue_steer(self, text):
+        t = (text or "").strip()
+        if not t:
+            return False
+        self.queued_steers.append(t)
+        return True
+
+    def enqueue_prompt(self, text):
+        t = (text or "").strip()
+        if not t:
+            return False
+        self.queued_prompts.append(t)
+        return True
+
+    def clear_steers(self):
+        n = len(self.queued_steers)
+        self.queued_steers.clear()
+        return n
+
+
+@pytest.mark.asyncio
+async def test_steer_enqueues_on_active_session():
+    sess = _FakeSession()
+    out = await route_slash("/steer focus on Ubuntu", CommandContext(session=sess))
+    assert out.handled
+    assert "Steered" in out.reply
+    assert sess.queued_steers == ["focus on Ubuntu"]
+
+
+@pytest.mark.asyncio
+async def test_steer_with_no_session_reports_no_active():
+    out = await route_slash("/steer do the thing", CommandContext(session=None))
+    assert out.handled
+    assert "No active session" in out.reply
+
+
+@pytest.mark.asyncio
+async def test_queue_uses_ensure_session_factory():
+    sess = _FakeSession()
+    created: list[bool] = []
+
+    def _ensure():
+        created.append(True)
+        return sess
+
+    ctx = CommandContext(session=None, ensure_session=_ensure)
+    out = await route_slash("/queue run the tests next", ctx)
+    assert out.handled
+    assert "Queued" in out.reply
+    assert sess.queued_prompts == ["run the tests next"]
+    assert created  # the factory created the session on demand
+
+
+@pytest.mark.asyncio
+async def test_queue_usage_does_not_create_session():
+    created: list[bool] = []
+
+    def _ensure():
+        created.append(True)
+        return _FakeSession()
+
+    out = await route_slash("/queue", CommandContext(session=None, ensure_session=_ensure))
+    assert out.handled
+    assert "/queue <text>" in out.reply
+    assert not created  # bare /queue is usage — no session materialised
+
+
+@pytest.mark.asyncio
+async def test_unqueue_drops_most_recent_prompt():
+    sess = _FakeSession()
+    sess.queued_prompts = ["first", "second"]
+    out = await route_slash("/unqueue", CommandContext(session=sess))
+    assert out.handled
+    assert "Unqueued" in out.reply
+    assert sess.queued_prompts == ["first"]  # LIFO
+
+
+@pytest.mark.asyncio
+async def test_clearsteers_clears_pending():
+    sess = _FakeSession()
+    sess.queued_steers = ["a", "b", "c"]
+    out = await route_slash("/clearsteers", CommandContext(session=sess))
+    assert out.handled
+    assert "Cleared 3" in out.reply
+    assert sess.queued_steers == []
 
 
 @pytest.mark.asyncio
@@ -154,9 +252,20 @@ def test_build_command_context_handles_none_loop_context():
     assert ctx.tool_registry is None
 
 
-def test_native_only_disjoint_from_formatters():
-    """A command is either a formatter or native-only — never both."""
-    assert not (WEB_NATIVE_ONLY & formatter_command_names())
+def test_command_tables_are_disjoint():
+    """A command lands in exactly one bucket: formatter, session, or native."""
+    fmt = formatter_command_names()
+    sess = session_command_names()
+    assert not (fmt & sess), "formatter/session overlap"
+    assert not (WEB_NATIVE_ONLY & fmt), "native/formatter overlap"
+    assert not (WEB_NATIVE_ONLY & sess), "native/session overlap"
+
+
+def test_steering_is_wired_not_bounded():
+    """The steering group is dispatched (session table), not a boundary reply."""
+    steering = {"steer", "queue", "unqueue", "clearsteers"}
+    assert steering <= session_command_names()
+    assert not (steering & WEB_NATIVE_ONLY)
 
 
 # --- bridge seam: interception happens before session + agent --------------
