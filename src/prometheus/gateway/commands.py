@@ -6,12 +6,16 @@ that the adapter sends via its own transport.
 
 from __future__ import annotations
 
+import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from prometheus.tools.base import ToolRegistry
+
+log = logging.getLogger(__name__)
 
 
 def cmd_help() -> str:
@@ -1261,3 +1265,239 @@ def cmd_beacon(config: dict) -> str:
         f"  WebSocket: <code>{ws_url}</code>\n"
         f'  <a href="{dash_url}">Open Dashboard</a>  ({host}:3000)'
     )
+
+
+# ===========================================================================
+# Shared slash-command dispatch table
+# ===========================================================================
+#
+# A single, gateway-agnostic table of side-effect-free *formatter* commands,
+# keyed by command name. A gateway builds a CommandContext (the handful of
+# values these commands need beyond their argument text) and awaits
+# run_formatter_command(); the returned string is whatever that surface sends.
+#
+# This is the "one table" the web (Beacon) slash-router dispatches through —
+# see prometheus.web.slash_router. The Telegram and Slack gateways predate it
+# and still register their own thin handlers around the same cmd_* functions;
+# they can migrate onto this table later with no behaviour change (these
+# handlers call the identical cmd_* used today).
+#
+# DELIBERATELY ABSENT: commands that mutate live daemon state bound to a gateway
+# instance — /route, /steer, /queue, /approve, /benchmark, /press, /gepa,
+# /symbiote, /audit, … . They are not reachable as pure formatters; surfacing
+# them on the web requires threading daemon services into the web bridge and is
+# tracked as a separate follow-up. The web router replies to those with an
+# explicit "not on web yet" boundary rather than running them.
+
+
+@dataclass
+class CommandContext:
+    """Gateway-agnostic inputs for a formatter command.
+
+    A gateway fills what it has; every field has a safe default so a surface
+    that lacks one (e.g. the web bridge has no uptime clock or cost tracker)
+    degrades gracefully instead of failing. ``tool_registry`` is needed only by
+    /status; ``config`` only by /doctor and /beacon.
+    """
+
+    model_name: str = ""
+    model_provider: str = ""
+    system_prompt: str = ""
+    config: dict | None = None
+    tool_registry: Any = None
+    start_time: float = 0.0
+    cost_tracker: Any = None
+
+
+async def _fc_help(ctx: CommandContext, args: str) -> str:
+    return cmd_help()
+
+
+async def _fc_status(ctx: CommandContext, args: str) -> str:
+    return cmd_status(
+        ctx.model_name,
+        ctx.model_provider,
+        ctx.start_time,
+        ctx.tool_registry,
+        ctx.cost_tracker,
+    )
+
+
+async def _fc_model(ctx: CommandContext, args: str) -> str:
+    return cmd_model(ctx.model_name, ctx.model_provider)
+
+
+async def _fc_wiki(ctx: CommandContext, args: str) -> str:
+    return cmd_wiki()
+
+
+async def _fc_sentinel(ctx: CommandContext, args: str) -> str:
+    return cmd_sentinel()
+
+
+async def _fc_context(ctx: CommandContext, args: str) -> str:
+    return cmd_context(ctx.system_prompt, ctx.model_name)
+
+
+async def _fc_note(ctx: CommandContext, args: str) -> str:
+    from prometheus.tools.builtin.wiki_compile import _memory_store
+
+    if _memory_store is None:
+        return "Memory store not initialized — is the daemon fully started?"
+    return cmd_note(_memory_store, args)
+
+
+async def _fc_skills(ctx: CommandContext, args: str) -> str:
+    parts = args.split()
+    if not parts:
+        return cmd_skills()
+    sub = parts[0].lower()
+    name = " ".join(parts[1:]).strip()
+    if sub == "list":
+        return cmd_skills_auto_list()
+    if sub == "show":
+        return cmd_skills_show(name)
+    if sub == "pin":
+        return cmd_skills_pin(name)
+    if sub == "unpin":
+        return cmd_skills_unpin(name)
+    if sub == "history":
+        return cmd_skills_history(name)
+    return (
+        f"Unknown subcommand: {sub}\n"
+        "Use: /skills [list | show <name> | pin <name> | unpin <name> | history <name>]"
+    )
+
+
+async def _fc_memory(ctx: CommandContext, args: str) -> str:
+    parts = args.split()
+    if not parts:
+        return (
+            "Memory commands:\n"
+            "  /memory show           — MEMORY.md content\n"
+            "  /memory show user      — USER.md content\n"
+            "  /memory limits         — char ceilings + usage"
+        )
+    sub = parts[0].lower()
+    tail = " ".join(parts[1:]).strip().lower()
+    if sub == "show":
+        target = "user" if tail == "user" else "memory"
+        return cmd_memory_show(target=target)
+    if sub == "limits":
+        return cmd_memory_limits()
+    return f"Unknown subcommand: {sub}\nUse: /memory [show [user] | limits]"
+
+
+async def _fc_curator(ctx: CommandContext, args: str) -> str:
+    parts = args.split()
+    if not parts:
+        return (
+            "Curator commands:\n"
+            "  /curator status        — last/next run, pinned skills\n"
+            "  /curator show          — most recent REPORT.md\n"
+            "  /curator run           — trigger an immediate pass\n"
+            "  /curator run dry       — dry-run (no file moves)"
+        )
+    sub = parts[0].lower()
+    if sub == "show":
+        return cmd_curator_show()
+    if sub == "status":
+        return cmd_curator_status()
+    if sub == "run":
+        dry = len(parts) >= 2 and parts[1].lower().startswith("dry")
+        return await cmd_curator_run(dry_run=dry)
+    return f"Unknown subcommand: {sub}\nUse: /curator [show | status | run [dry]]"
+
+
+async def _fc_events(ctx: CommandContext, args: str) -> str:
+    return cmd_events(arg=args)
+
+
+async def _fc_health(ctx: CommandContext, args: str) -> str:
+    verbose = False
+    since_hours = 24.0
+    for tok in args.split():
+        t = tok.strip().lower()
+        if t == "verbose":
+            verbose = True
+            continue
+        try:
+            since_hours = float(t)
+        except ValueError:
+            pass
+    return cmd_health(verbose=verbose, since_hours=since_hours)
+
+
+async def _fc_notifications(ctx: CommandContext, args: str) -> str:
+    return cmd_notifications(mode=args)
+
+
+async def _fc_anatomy(ctx: CommandContext, args: str) -> str:
+    return await cmd_anatomy()
+
+
+async def _fc_doctor(ctx: CommandContext, args: str) -> str:
+    return await cmd_doctor(ctx.config)
+
+
+async def _fc_profile(ctx: CommandContext, args: str) -> str:
+    # The web surface doesn't track an active profile across calls (that state
+    # lives on the Telegram gateway instance), so the "current" marker is the
+    # default. cmd_profile is descriptive — it never re-wires the running agent.
+    return cmd_profile(arg=args.strip(), current="full")
+
+
+async def _fc_beacon(ctx: CommandContext, args: str) -> str:
+    return cmd_beacon(ctx.config or {})
+
+
+# command name -> async handler(ctx, args) -> str
+_FORMATTER_COMMANDS: dict[str, Any] = {
+    "help": _fc_help,
+    "status": _fc_status,
+    "model": _fc_model,
+    "wiki": _fc_wiki,
+    "sentinel": _fc_sentinel,
+    "context": _fc_context,
+    "note": _fc_note,
+    "skills": _fc_skills,
+    "memory": _fc_memory,
+    "curator": _fc_curator,
+    "events": _fc_events,
+    "health": _fc_health,
+    "notifications": _fc_notifications,
+    "anatomy": _fc_anatomy,
+    "doctor": _fc_doctor,
+    "profile": _fc_profile,
+    "beacon": _fc_beacon,
+}
+
+
+def is_formatter_command(name: str) -> bool:
+    """True if ``name`` is a side-effect-free command in the shared table."""
+    return name.lower() in _FORMATTER_COMMANDS
+
+
+def formatter_command_names() -> frozenset[str]:
+    """The set of command names the shared table can serve."""
+    return frozenset(_FORMATTER_COMMANDS)
+
+
+async def run_formatter_command(
+    name: str, args: str, ctx: CommandContext
+) -> str | None:
+    """Run a side-effect-free slash command by name.
+
+    Returns the command's text result, or ``None`` if ``name`` is not a
+    formatter command (the caller decides whether to fall through to the agent
+    or reply with a boundary). A formatter that raises is caught and surfaced as
+    an error string — a bad command never crashes the chat path.
+    """
+    handler = _FORMATTER_COMMANDS.get(name.lower())
+    if handler is None:
+        return None
+    try:
+        return await handler(ctx, args)
+    except Exception as exc:  # noqa: BLE001 — fail loud to the user, not the loop
+        log.exception("formatter command /%s failed", name)
+        return f"⚠ /{name} failed: {exc}"

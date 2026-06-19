@@ -42,11 +42,15 @@ class WebSocketBridge:
         loop_context: Any | None = None,
         agent_state_ref: Any | None = None,
         api_token: str | None = None,
+        config: dict | None = None,
     ) -> None:
         self.signal_bus = signal_bus
         self.session_mgr = session_mgr
         self.loop_context = loop_context
         self.agent_state_ref = agent_state_ref
+        # Full daemon config (config.web.*, etc.) — used by formatter commands
+        # like /doctor and /beacon dispatched through the web slash-router.
+        self.config = config or {}
         # Same secret the REST middleware uses (config.web.api_token /
         # PROMETHEUS_API_TOKEN). Empty/None => auth DISABLED, exactly like
         # the REST side, so dev/no-token setups (and the tokenless static UI)
@@ -341,10 +345,26 @@ class WebSocketBridge:
     ) -> None:
         """Process a user message — add to session and run agent loop if context available.
 
+        A leading-slash message is a command (web parity for Telegram's
+        CommandHandler): it's handled here and broadcast back, NOT added to the
+        session or run through the agent. See prometheus.web.slash_router.
+
         If the content contains [Image: /path/to/file] references (from Beacon
         dashboard uploads), run vision analysis to describe the image before
         passing to the agent — matching the Telegram gateway's flow.
         """
+        # Slash commands first — they never become conversation turns.
+        from prometheus.web.slash_router import build_command_context, route_slash
+
+        outcome = await route_slash(
+            content, build_command_context(self.loop_context, self.config)
+        )
+        if outcome.handled:
+            await self._broadcast_command_reply(
+                session_id, content, outcome.reply or "", client_msg_id
+            )
+            return
+
         if not self.session_mgr:
             return
 
@@ -397,6 +417,52 @@ class WebSocketBridge:
         # If we have a loop context, run the agent
         if self.loop_context:
             asyncio.create_task(self._run_agent(session_id, session))
+
+    async def _broadcast_command_reply(
+        self,
+        session_id: str,
+        command_text: str,
+        reply: str,
+        client_msg_id: str | None = None,
+    ) -> None:
+        """Broadcast a slash-command exchange as transient chat messages.
+
+        Echoes the command (role user) then its result (role assistant) so every
+        connected client renders the exchange, mirroring the normal send path's
+        frames — minus LCM persistence, since commands aren't conversation turns
+        (parity with Telegram, which never adds command turns to the session).
+        The synthetic ``cmd-*`` ids and ``transient`` flag mark them as ephemeral.
+        """
+        ts = time.time()
+        marker = int(ts * 1000)
+        await self.broadcast({
+            "type": "chat_message",
+            "timestamp": ts,
+            "payload": {
+                "session_id": session_id,
+                "role": "user",
+                "content": command_text,
+                "content_json": json.dumps([{"type": "text", "text": command_text}]),
+                "message_id": f"cmd-user-{marker}",
+                "client_msg_id": client_msg_id,
+                "created_at": ts,
+                "transient": True,
+            },
+        })
+        await self.broadcast({
+            "type": "chat_message",
+            "timestamp": ts,
+            "payload": {
+                "session_id": session_id,
+                "role": "assistant",
+                "content": reply,
+                "content_json": json.dumps([{"type": "text", "text": reply}]),
+                "message_id": f"cmd-asst-{marker}",
+                "created_at": ts,
+                "transient": True,
+                "command": True,
+            },
+        })
 
     async def _run_agent(self, session_id: str, session: Any) -> None:
         """Run the agent loop and stream results over WebSocket."""
