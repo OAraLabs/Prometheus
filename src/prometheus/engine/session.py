@@ -347,6 +347,15 @@ class SessionManager:
             )
         return self._sessions[session_id]
 
+    def get(self, session_id: str) -> "ChatSession | None":
+        """Return the existing session for ``session_id``, or None.
+
+        Non-creating lookup — used by session-mutating commands (/steer,
+        /unqueue, /clearsteers) that target an in-flight run and no-op when
+        there's no active session, unlike get_or_create.
+        """
+        return self._sessions.get(session_id)
+
     def clear(self, session_id: str) -> None:
         """Clear conversation history for a session (keeps the object)."""
         if session_id in self._sessions:

@@ -353,11 +353,25 @@ class WebSocketBridge:
         dashboard uploads), run vision analysis to describe the image before
         passing to the agent — matching the Telegram gateway's flow.
         """
-        # Slash commands first — they never become conversation turns.
+        # Slash commands first — they never become conversation turns. Resolve
+        # the active session (non-creating) for /steer & friends, and pass a
+        # get_or_create factory for /queue (which fires on a quiet chat).
         from prometheus.web.slash_router import build_command_context, route_slash
 
+        active_session = self.session_mgr.get(session_id) if self.session_mgr else None
+        ensure_session = (
+            (lambda: self.session_mgr.get_or_create(session_id))
+            if self.session_mgr
+            else None
+        )
         outcome = await route_slash(
-            content, build_command_context(self.loop_context, self.config)
+            content,
+            build_command_context(
+                self.loop_context,
+                self.config,
+                session=active_session,
+                ensure_session=ensure_session,
+            ),
         )
         if outcome.handled:
             await self._broadcast_command_reply(
