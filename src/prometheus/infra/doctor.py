@@ -98,6 +98,19 @@ class Doctor:
         self.config = config or {}
         self.registry = self._load_registry()
 
+    def _repo_root(self) -> Path:
+        """Project root used to locate the bundled config files
+        (``config/prometheus.yaml``, ``config/model_registry.yaml``).
+
+        Defaults to the package's repo root, but is overridable via a
+        ``repo_root`` attribute so tests can point the config checks at a
+        fixture. Otherwise they depend on a gitignored ``config/prometheus.yaml``
+        existing at the real repo root — absent in any linked git worktree (and
+        in an installed package), which made ``test_full_diagnose_all_ok`` fail
+        outside the daemon's checkout.
+        """
+        return getattr(self, "repo_root", None) or Path(__file__).resolve().parents[3]
+
     def _load_registry(self) -> dict:
         """Load model_registry.yaml from config directory."""
         doctor_cfg = self.config.get("doctor", {})
@@ -105,7 +118,7 @@ class Doctor:
 
         # Try relative to project root first, then absolute
         candidates = [
-            Path(__file__).resolve().parents[3] / registry_file,
+            self._repo_root() / registry_file,
             Path(registry_file).expanduser(),
         ]
         for path in candidates:
@@ -197,7 +210,7 @@ class Doctor:
 
     def _check_config_valid(self) -> DiagnosticCheck:
         """Does prometheus.yaml parse without errors?"""
-        config_path = Path(__file__).resolve().parents[3] / "config" / "prometheus.yaml"
+        config_path = self._repo_root() / "config" / "prometheus.yaml"
         if not config_path.exists():
             return DiagnosticCheck(
                 name="Config", category="platform", status="error",
