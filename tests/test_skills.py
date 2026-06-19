@@ -92,6 +92,35 @@ def test_parse_frontmatter_non_yaml_falls_back():
     assert description == "Use this: for special cases"
 
 
+def test_parse_double_quoted_escaped_quotes():
+    # A double-quoted YAML scalar with escaped inner quotes unescapes to real
+    # quotes; the old same-line scan left the backslashes in. Surfaced by the
+    # all-skills regression gate (pptx/xlsx).
+    content = '---\nname: q\ndescription: "Say \\"hi\\" now"\n---\n'
+    name, description = _parse_skill_markdown("default", content)
+    assert name == "q"
+    assert description == 'Say "hi" now'
+
+
+def test_parse_plain_multiline_description():
+    # `description:` with an empty value plus an indented continuation is a
+    # plain multi-line scalar (no `>`): it folds to the joined text instead of
+    # the old fall-back to the first frontmatter line. Surfaced by the gate
+    # (composition-patterns).
+    content = (
+        "---\n"
+        "name: multi\n"
+        "description:\n"
+        "  First part of the description\n"
+        "  and the second part.\n"
+        "license: MIT\n"
+        "---\n"
+    )
+    name, description = _parse_skill_markdown("default", content)
+    assert name == "multi"
+    assert description == "First part of the description and the second part."
+
+
 # ---------------------------------------------------------------------------
 # SkillRegistry
 # ---------------------------------------------------------------------------
