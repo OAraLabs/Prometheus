@@ -333,6 +333,71 @@ async def test_query_tool_writes_to_queries():
 
 
 # ---------------------------------------------------------------------------
+# WikiQueryTool — Option A size budget (Phase 3): payload bounded by chars
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_query_payload_bounded_by_size():
+    """Top pages summing well over budget → returned payload is <= budget."""
+    import prometheus.tools.builtin.wiki_query as wq_mod
+    with tempfile.TemporaryDirectory() as tmp:
+        wiki_root = Path(tmp) / "wiki"
+        topics = wiki_root / "topics"
+        topics.mkdir(parents=True)
+        # 5 pages ~40K chars each (~200K total) >> the ~112K char budget.
+        body = "alpha kubernetes detail. " * 1600
+        lines = []
+        for i in range(5):
+            (topics / f"p{i}.md").write_text(f"# Page {i}\n{body}", encoding="utf-8")
+            lines.append(f"- [kubernetes page {i}](topics/p{i}.md)")
+        (wiki_root / "index.md").write_text(
+            "## Topics\n" + "\n".join(lines) + "\n", encoding="utf-8"
+        )
+
+        original = wq_mod.get_config_dir
+        wq_mod.get_config_dir = lambda: Path(tmp)
+        try:
+            tool = WikiQueryTool()
+            ctx = ToolExecutionContext(cwd=Path(tmp))
+            result = await tool.execute(wq_mod.WikiQueryInput(query="kubernetes"), ctx)
+            assert not result.is_error
+            # The hard requirement: actual payload size <= budget.
+            assert len(result.output) <= wq_mod._MAX_RESULT_CHARS
+            # And the model is told it's a bounded view (not all 5 fit).
+            assert "of 5 relevant page" in result.output
+        finally:
+            wq_mod.get_config_dir = original
+
+
+@pytest.mark.asyncio
+async def test_query_truncates_oversized_top_page():
+    """A single page larger than the budget → included but truncated + marked."""
+    import prometheus.tools.builtin.wiki_query as wq_mod
+    with tempfile.TemporaryDirectory() as tmp:
+        wiki_root = Path(tmp) / "wiki"
+        topics = wiki_root / "topics"
+        topics.mkdir(parents=True)
+        huge = "kubernetes orchestration detail. " * 5000  # ~165K chars > budget
+        (topics / "huge.md").write_text(f"# Huge\n{huge}", encoding="utf-8")
+        (wiki_root / "index.md").write_text(
+            "## Topics\n- [kubernetes huge page](topics/huge.md)\n", encoding="utf-8"
+        )
+
+        original = wq_mod.get_config_dir
+        wq_mod.get_config_dir = lambda: Path(tmp)
+        try:
+            tool = WikiQueryTool()
+            ctx = ToolExecutionContext(cwd=Path(tmp))
+            result = await tool.execute(wq_mod.WikiQueryInput(query="kubernetes"), ctx)
+            assert not result.is_error
+            assert len(result.output) <= wq_mod._MAX_RESULT_CHARS
+            assert "[truncated" in result.output
+        finally:
+            wq_mod.get_config_dir = original
+
+
+# ---------------------------------------------------------------------------
 # 2d — compile is idempotent (no blind append)
 # ---------------------------------------------------------------------------
 
