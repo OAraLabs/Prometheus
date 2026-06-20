@@ -75,22 +75,28 @@ class MemoryStore:
         self._db_path = Path(db_path) if db_path is not None else _get_db_path()
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        # Serializes all writers on the shared connection. RLock so a write path
-        # that composes another (dedupe_existing -> delete/update) can't deadlock.
-        self._write_lock = threading.RLock()
+        # Serializes ALL access to the shared connection — writes AND reads.
+        # Store reads are infrequent (periodic SENTINEL/compile, on-demand
+        # /status·/memory; the per-turn path is file-based wiki_query, never a
+        # store read), so locking them adds no hot-path latency and removes the
+        # read-vs-write sqlite C-API collision entirely. RLock: reentrant, so a
+        # write path that composes another (dedupe_existing -> delete/update)
+        # can't deadlock; one lock, no lock-ordering risk.
+        self._lock = threading.RLock()
         self._apply_schema()
 
     # ------------------------------------------------------------------
-    # Write choke-point — the ONLY committer; every mutation funnels here
+    # Connection choke-points — the ONLY code that touches self._conn
     # ------------------------------------------------------------------
 
     def _write(self, fn):
-        """Run ``fn(conn)`` under the write lock, commit, return its result.
+        """Run ``fn(conn)`` under the lock, commit, return its result — the sole
+        committer.
 
         On ANY error: roll back and RE-RAISE — never swallow, so a failed or
         lost write surfaces instead of a false success.
         """
-        with self._write_lock:
+        with self._lock:
             try:
                 result = fn(self._conn)
                 self._conn.commit()
@@ -101,6 +107,15 @@ class MemoryStore:
                 except Exception:
                     pass
                 raise
+
+    def _read(self, fn):
+        """Run ``fn(conn)`` under the same lock and return its result (no commit).
+
+        Serializes reads with writes on the shared connection so a read can't hit
+        the C-API misuse mid-write or see torn state.
+        """
+        with self._lock:
+            return fn(self._conn)
 
     # ------------------------------------------------------------------
     # Schema
@@ -173,7 +188,12 @@ class MemoryStore:
         Fail loud — a failed snapshot or ALTER propagates rather than leaving the
         table half-migrated.
         """
-        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(memories)")}
+        cols = {
+            row[1]
+            for row in self._read(
+                lambda conn: conn.execute("PRAGMA table_info(memories)").fetchall()
+            )
+        }
         if "manual" in cols:
             return
         self._snapshot_db()
@@ -248,7 +268,7 @@ class MemoryStore:
             params.append(int(compressed))
         query += " ORDER BY timestamp DESC LIMIT ?"
         params.append(limit)
-        rows = self._conn.execute(query, params).fetchall()
+        rows = self._read(lambda conn: conn.execute(query, params).fetchall())
         return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
@@ -373,10 +393,12 @@ class MemoryStore:
         shred provenance — so union-and-sum is the invariant, not a count
         target. Returns the number of rows removed. No-op on an empty store.
         """
-        rows = self._conn.execute(
-            "SELECT id, entity_name, fact, confidence, source_event_ids,"
-            " mention_count, timestamp FROM memories"
-        ).fetchall()
+        rows = self._read(
+            lambda conn: conn.execute(
+                "SELECT id, entity_name, fact, confidence, source_event_ids,"
+                " mention_count, timestamp FROM memories"
+            ).fetchall()
+        )
 
         groups: dict[tuple[str, str], list] = defaultdict(list)
         for r in rows:
@@ -429,33 +451,34 @@ class MemoryStore:
             safe_query = sanitize_fts5_query(query)
             if not safe_query:
                 return []
-            rows = self._conn.execute(
+            sql = (
                 "SELECT m.* FROM memories m"
                 " JOIN memories_fts fts ON m.id = fts.id"
                 " WHERE memories_fts MATCH ? AND m.confidence >= ?"
-                " ORDER BY rank LIMIT ?",
-                (safe_query, min_confidence, limit),
-            ).fetchall()
+                " ORDER BY rank LIMIT ?"
+            )
+            params = (safe_query, min_confidence, limit)
         elif entity:
-            rows = self._conn.execute(
+            sql = (
                 "SELECT * FROM memories"
                 " WHERE entity_name LIKE ? AND confidence >= ?"
-                " ORDER BY confidence DESC LIMIT ?",
-                (f"%{entity}%", min_confidence, limit),
-            ).fetchall()
+                " ORDER BY confidence DESC LIMIT ?"
+            )
+            params = (f"%{entity}%", min_confidence, limit)
         elif entity_type:
-            rows = self._conn.execute(
+            sql = (
                 "SELECT * FROM memories"
                 " WHERE entity_type = ? AND confidence >= ?"
-                " ORDER BY confidence DESC LIMIT ?",
-                (entity_type, min_confidence, limit),
-            ).fetchall()
+                " ORDER BY confidence DESC LIMIT ?"
+            )
+            params = (entity_type, min_confidence, limit)
         else:
-            rows = self._conn.execute(
+            sql = (
                 "SELECT * FROM memories WHERE confidence >= ?"
-                " ORDER BY confidence DESC LIMIT ?",
-                (min_confidence, limit),
-            ).fetchall()
+                " ORDER BY confidence DESC LIMIT ?"
+            )
+            params = (min_confidence, limit)
+        rows = self._read(lambda conn: conn.execute(sql, params).fetchall())
 
         results = []
         for row in rows:
@@ -472,11 +495,13 @@ class MemoryStore:
         limit: int = 1000,
     ) -> list[dict]:
         """Return all memories above *min_confidence*, newest first."""
-        rows = self._conn.execute(
-            "SELECT * FROM memories WHERE confidence >= ?"
-            " ORDER BY timestamp DESC LIMIT ?",
-            (min_confidence, limit),
-        ).fetchall()
+        rows = self._read(
+            lambda conn: conn.execute(
+                "SELECT * FROM memories WHERE confidence >= ?"
+                " ORDER BY timestamp DESC LIMIT ?",
+                (min_confidence, limit),
+            ).fetchall()
+        )
         results = []
         for row in rows:
             d = dict(row)
@@ -535,9 +560,11 @@ class MemoryStore:
 
     def get_memory(self, memory_id: str) -> dict | None:
         """Return a single memory by ID."""
-        row = self._conn.execute(
-            "SELECT * FROM memories WHERE id = ?", (memory_id,)
-        ).fetchone()
+        row = self._read(
+            lambda conn: conn.execute(
+                "SELECT * FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+        )
         if row is None:
             return None
         d = dict(row)
@@ -571,16 +598,15 @@ class MemoryStore:
     def get_summaries(self, *, level: int | None = None, limit: int = 10) -> list[dict]:
         """Return summaries, newest first."""
         if level is not None:
-            rows = self._conn.execute(
+            sql = (
                 "SELECT * FROM summaries WHERE level = ?"
-                " ORDER BY timestamp DESC LIMIT ?",
-                (level, limit),
-            ).fetchall()
+                " ORDER BY timestamp DESC LIMIT ?"
+            )
+            params: tuple = (level, limit)
         else:
-            rows = self._conn.execute(
-                "SELECT * FROM summaries ORDER BY timestamp DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            sql = "SELECT * FROM summaries ORDER BY timestamp DESC LIMIT ?"
+            params = (limit,)
+        rows = self._read(lambda conn: conn.execute(sql, params).fetchall())
         results = []
         for row in rows:
             d = dict(row)

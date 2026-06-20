@@ -96,6 +96,51 @@ def test_many_writers_one_connection_all_land(tmp_path):
     store.close()
 
 
+def test_concurrent_reads_during_writes_no_error_no_tear(tmp_path):
+    """Reads racing a write batch never error and never see torn state — the
+    read-vs-write C-API collision is gone now reads share the write lock."""
+    store = MemoryStore(db_path=tmp_path / "memory.db")
+    errors: list[tuple[str, str]] = []
+    stop = threading.Event()
+
+    def writer() -> None:
+        try:
+            for i in range(500):
+                store.persist_memory(
+                    "concept", f"E{i}", f"fact {i}", 0.6, source_event_ids=[f"e{i}"]
+                )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(("write", repr(exc)))
+        finally:
+            stop.set()
+
+    def reader() -> None:
+        try:
+            while not stop.is_set():
+                rows = store.get_all_memories(limit=10000)
+                # Torn-state guard: every row is a fully-formed, JSON-decoded dict.
+                for r in rows:
+                    assert isinstance(r.get("entity_name"), str)
+                    assert isinstance(r.get("source_event_ids"), list)
+                store.search_memories(entity="E", limit=50)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(("read", repr(exc)))
+
+    tw = threading.Thread(target=writer)
+    trs = [threading.Thread(target=reader) for _ in range(3)]
+    tw.start()
+    for t in trs:
+        t.start()
+    tw.join()
+    for t in trs:
+        t.join()
+
+    assert not errors, f"concurrent read/write raised: {errors}"
+    total = store.get_all_memories(limit=10000)
+    assert len([m for m in total if m["entity_name"].startswith("E")]) == 500
+    store.close()
+
+
 def test_cmd_note_fails_loud_not_false_ack():
     """A failing store write surfaces as 'NOT saved' — never a false 'Noted'."""
     class _RaisingStore:
