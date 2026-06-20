@@ -81,6 +81,7 @@ class _IterationReason:
     # Provider dropped every tool call as malformed-empty (no name); the
     # loop fed structured guidance back and is retrying, breaker-bounded.
     MALFORMED_DROPPED = "malformed_dropped"
+    EMPTY_RESPONSE = "empty_response"
 
 
 _FAILURE_CATEGORIES = (
@@ -760,6 +761,13 @@ async def run_loop(
 
     circuit_breaker = _CircuitBreaker(max_identical=3, max_any=5)
     tool_iteration = 0
+    # Empty-response guard: at most one model-call retry per run_loop on a
+    # genuinely empty assistant reply (no text, no tool calls) before surfacing.
+    # The retry's nudge rides ONLY the per-call request (per_call_system_prompt,
+    # the /steer channel) — never appended to messages, so it can't leak into
+    # session history.
+    empty_retried = False
+    pending_empty_nudge = False
 
     # SPRINT-loop-envelope (F1): the loop's model calls run inside the shared
     # LLMCallEnvelope like every other _call_model path — silent-failure
@@ -801,6 +809,17 @@ async def run_loop(
                     f"{active_system_prompt}\n\n"
                     f"[STEER FROM USER, mid-turn]: {steer_text}"
                 )
+
+        # Empty-response retry nudge — request-only, same per-call channel as
+        # steers. Set when the previous iteration returned an empty reply; rides
+        # THIS call's system prompt only, never messages/history.
+        if pending_empty_nudge:
+            per_call_system_prompt = (
+                f"{per_call_system_prompt}\n\n"
+                "[RETRY: your previous response was empty — no text and no tool "
+                "call. Respond now with a message or a tool call.]"
+            )
+            pending_empty_nudge = False
 
         # H2: tier-full models lack native tool calling — their tools live in
         # the (formatter-augmented) system prompt and the GBNF grammar set on
@@ -915,6 +934,38 @@ async def run_loop(
                     role="assistant",
                     content=extracted,
                 )
+
+        # ── Empty-response guard ──
+        # A genuinely empty assistant turn — no text, no tool calls, and NOT the
+        # malformed-tool-call case handled below (dropped_malformed). Committing
+        # it poisons the history: llama.cpp then 400s "Assistant message must
+        # contain either 'content' or 'tool_calls'" on every subsequent turn, and
+        # the session is stuck until its in-memory state is cleared. Never let it
+        # into the message list. Retry the model call ONCE with a nudge; if it's
+        # still empty, surface a valid error turn instead. (A tool-only assistant
+        # with empty text is valid — guarded by ``not final_message.tool_uses``.)
+        if (
+            not (final_message.text or "").strip()
+            and not final_message.tool_uses
+            and not dropped_malformed
+        ):
+            if not empty_retried:
+                empty_retried = True
+                pending_empty_nudge = True  # rides the retry REQUEST only (above)
+                _log_iteration(
+                    context, _IterationReason.EMPTY_RESPONSE, turn, tool_iteration
+                )
+                continue
+            _log_iteration(
+                context, _IterationReason.EMPTY_RESPONSE, turn, tool_iteration
+            )
+            error_msg = _make_assistant_msg(
+                "The model returned an empty response twice — unable to complete "
+                "this turn. Please rephrase and try again."
+            )
+            messages.append(error_msg)
+            yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+            return
 
         messages.append(final_message)
         yield AssistantTurnComplete(message=final_message, usage=usage), usage
