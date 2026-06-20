@@ -11,6 +11,7 @@ import re
 import shutil
 import sqlite3
 import string
+import threading
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -43,6 +44,15 @@ def _get_db_path() -> Path:
     return get_config_dir() / _DB_NAME
 
 
+class MemoryWriteError(RuntimeError):
+    """A memory write failed to commit a row.
+
+    Raised — never swallowed — so a failed write surfaces to the caller (and the
+    user) instead of being hidden behind a false success. Closes the false-ack
+    bug class for every write path, not just the concurrency one.
+    """
+
+
 class MemoryStore:
     """SQLite memory store with FTS5 full-text search.
 
@@ -50,21 +60,69 @@ class MemoryStore:
       messages  — conversation history (with FTS5 index)
       memories  — extracted entity facts (with FTS5 index)
       summaries — compressed conversation summaries
+
+    Thread-safety: the daemon drives one MemoryStore from several threads — the
+    memory extractor's batch, synthesis, sentinel, and the Telegram /note
+    handler. A single sqlite connection is NOT safe for concurrent writers: the
+    shared transaction state corrupts and a write is silently lost (acked but
+    never committed). So every mutation funnels through the single ``_write``
+    choke-point under one lock — single-writer discipline at the connection
+    level, and a future write path physically cannot forget the lock because
+    ``_write`` is the only committer.
     """
 
     def __init__(self, db_path: str | Path | None = None) -> None:
         self._db_path = Path(db_path) if db_path is not None else _get_db_path()
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # Serializes ALL access to the shared connection — writes AND reads.
+        # Store reads are infrequent (periodic SENTINEL/compile, on-demand
+        # /status·/memory; the per-turn path is file-based wiki_query, never a
+        # store read), so locking them adds no hot-path latency and removes the
+        # read-vs-write sqlite C-API collision entirely. RLock: reentrant, so a
+        # write path that composes another (dedupe_existing -> delete/update)
+        # can't deadlock; one lock, no lock-ordering risk.
+        self._lock = threading.RLock()
         self._apply_schema()
+
+    # ------------------------------------------------------------------
+    # Connection choke-points — the ONLY code that touches self._conn
+    # ------------------------------------------------------------------
+
+    def _write(self, fn):
+        """Run ``fn(conn)`` under the lock, commit, return its result — the sole
+        committer.
+
+        On ANY error: roll back and RE-RAISE — never swallow, so a failed or
+        lost write surfaces instead of a false success.
+        """
+        with self._lock:
+            try:
+                result = fn(self._conn)
+                self._conn.commit()
+                return result
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                raise
+
+    def _read(self, fn):
+        """Run ``fn(conn)`` under the same lock and return its result (no commit).
+
+        Serializes reads with writes on the shared connection so a read can't hit
+        the C-API misuse mid-write or see torn state.
+        """
+        with self._lock:
+            return fn(self._conn)
 
     # ------------------------------------------------------------------
     # Schema
     # ------------------------------------------------------------------
 
     def _apply_schema(self) -> None:
-        cur = self._conn.cursor()
-        cur.executescript("""
+        self._write(lambda conn: conn.executescript("""
             PRAGMA journal_mode=WAL;
 
             -- DEPRECATED 2026-05-26 — superseded by LCM (LCMConversationStore)
@@ -118,8 +176,7 @@ class MemoryStore:
                 level               INTEGER NOT NULL DEFAULT 1,
                 timestamp           REAL NOT NULL
             );
-        """)
-        self._conn.commit()
+        """))
         self._migrate_manual_column()
 
     def _migrate_manual_column(self) -> None:
@@ -131,14 +188,20 @@ class MemoryStore:
         Fail loud — a failed snapshot or ALTER propagates rather than leaving the
         table half-migrated.
         """
-        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(memories)")}
+        cols = {
+            row[1]
+            for row in self._read(
+                lambda conn: conn.execute("PRAGMA table_info(memories)").fetchall()
+            )
+        }
         if "manual" in cols:
             return
         self._snapshot_db()
-        self._conn.execute(
-            "ALTER TABLE memories ADD COLUMN manual INTEGER NOT NULL DEFAULT 0"
+        self._write(
+            lambda conn: conn.execute(
+                "ALTER TABLE memories ADD COLUMN manual INTEGER NOT NULL DEFAULT 0"
+            )
         )
-        self._conn.commit()
 
     def _snapshot_db(self) -> None:
         """Copy the DB file out-of-tree, timestamped, before a migration."""
@@ -171,16 +234,19 @@ class MemoryStore:
         """Insert a conversation message. Returns the message ID."""
         mid = message_id or uuid4().hex
         now = time.time()
-        self._conn.execute(
-            "INSERT OR REPLACE INTO messages (id, session_id, role, content, timestamp, compressed)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (mid, session_id, role, content, now, int(compressed)),
-        )
-        self._conn.execute(
-            "INSERT OR REPLACE INTO messages_fts (id, content) VALUES (?, ?)",
-            (mid, content),
-        )
-        self._conn.commit()
+
+        def _op(conn):
+            conn.execute(
+                "INSERT OR REPLACE INTO messages (id, session_id, role, content, timestamp, compressed)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (mid, session_id, role, content, now, int(compressed)),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO messages_fts (id, content) VALUES (?, ?)",
+                (mid, content),
+            )
+
+        self._write(_op)
         return mid
 
     def get_messages(
@@ -202,7 +268,7 @@ class MemoryStore:
             params.append(int(compressed))
         query += " ORDER BY timestamp DESC LIMIT ?"
         params.append(limit)
-        rows = self._conn.execute(query, params).fetchall()
+        rows = self._read(lambda conn: conn.execute(query, params).fetchall())
         return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
@@ -251,61 +317,71 @@ class MemoryStore:
         rel = relationship or "fact"
         norm_fact = _normalize_for_dedup(fact)
 
-        # Normalized duplicate check: scan this entity's rows (few) and
-        # match on the normalized fact. Entity match is case-insensitive.
-        candidates = self._conn.execute(
-            "SELECT id, fact, source_event_ids FROM memories"
-            " WHERE entity_name = ? COLLATE NOCASE",
-            (entity_name,),
-        ).fetchall()
-        existing = next(
-            (c for c in candidates if _normalize_for_dedup(c["fact"]) == norm_fact),
-            None,
-        )
+        def _op(conn):
+            # Normalized duplicate check: scan this entity's rows (few) and
+            # match on the normalized fact. Entity match is case-insensitive.
+            candidates = conn.execute(
+                "SELECT id, fact, source_event_ids FROM memories"
+                " WHERE entity_name = ? COLLATE NOCASE",
+                (entity_name,),
+            ).fetchall()
+            existing = next(
+                (c for c in candidates if _normalize_for_dedup(c["fact"]) == norm_fact),
+                None,
+            )
 
-        if existing:
-            mid = existing["id"]
-            merged_sources = sorted(
-                set(json.loads(existing["source_event_ids"] or "[]"))
-                | set(source_event_ids)
+            if existing:
+                mid = existing["id"]
+                merged_sources = sorted(
+                    set(json.loads(existing["source_event_ids"] or "[]"))
+                    | set(source_event_ids)
+                )
+                cur = conn.execute(
+                    "UPDATE memories SET confidence = MAX(confidence, ?),"
+                    " mention_count = mention_count + 1, last_mentioned = ?,"
+                    " source_event_ids = ?, manual = MAX(manual, ?) WHERE id = ?",
+                    (confidence, now, json.dumps(merged_sources), int(manual), mid),
+                )
+                if cur.rowcount != 1:
+                    raise MemoryWriteError(
+                        f"persist_memory: dedup UPDATE matched {cur.rowcount} rows "
+                        f"for id={mid} (expected 1)"
+                    )
+                return mid
+
+            mid = memory_id or uuid4().hex
+            cur = conn.execute(
+                "INSERT INTO memories"
+                " (id, entity_type, entity_name, relationship, fact, confidence,"
+                "  source_event_ids, last_mentioned, mention_count, tags, timestamp,"
+                "  manual)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                (
+                    mid,
+                    entity_type,
+                    entity_name,
+                    rel,
+                    fact,
+                    confidence,
+                    json.dumps(source_event_ids or []),
+                    now,
+                    json.dumps(tags or []),
+                    now,
+                    int(manual),
+                ),
             )
-            self._conn.execute(
-                "UPDATE memories SET confidence = MAX(confidence, ?),"
-                " mention_count = mention_count + 1, last_mentioned = ?,"
-                " source_event_ids = ?, manual = MAX(manual, ?) WHERE id = ?",
-                (confidence, now, json.dumps(merged_sources), int(manual), mid),
+            if cur.rowcount != 1:
+                raise MemoryWriteError(
+                    f"persist_memory: INSERT wrote {cur.rowcount} rows (expected 1)"
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO memories_fts (id, entity_name, fact)"
+                " VALUES (?, ?, ?)",
+                (mid, entity_name, fact),
             )
-            self._conn.commit()
             return mid
 
-        mid = memory_id or uuid4().hex
-        self._conn.execute(
-            "INSERT INTO memories"
-            " (id, entity_type, entity_name, relationship, fact, confidence,"
-            "  source_event_ids, last_mentioned, mention_count, tags, timestamp,"
-            "  manual)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
-            (
-                mid,
-                entity_type,
-                entity_name,
-                rel,
-                fact,
-                confidence,
-                json.dumps(source_event_ids or []),
-                now,
-                json.dumps(tags or []),
-                now,
-                int(manual),
-            ),
-        )
-        self._conn.execute(
-            "INSERT OR REPLACE INTO memories_fts (id, entity_name, fact)"
-            " VALUES (?, ?, ?)",
-            (mid, entity_name, fact),
-        )
-        self._conn.commit()
-        return mid
+        return self._write(_op)
 
     def dedupe_existing(self) -> int:
         """One-time backfill: collapse normalized-equal rows per entity.
@@ -317,10 +393,12 @@ class MemoryStore:
         shred provenance — so union-and-sum is the invariant, not a count
         target. Returns the number of rows removed. No-op on an empty store.
         """
-        rows = self._conn.execute(
-            "SELECT id, entity_name, fact, confidence, source_event_ids,"
-            " mention_count, timestamp FROM memories"
-        ).fetchall()
+        rows = self._read(
+            lambda conn: conn.execute(
+                "SELECT id, entity_name, fact, confidence, source_event_ids,"
+                " mention_count, timestamp FROM memories"
+            ).fetchall()
+        )
 
         groups: dict[tuple[str, str], list] = defaultdict(list)
         for r in rows:
@@ -373,33 +451,34 @@ class MemoryStore:
             safe_query = sanitize_fts5_query(query)
             if not safe_query:
                 return []
-            rows = self._conn.execute(
+            sql = (
                 "SELECT m.* FROM memories m"
                 " JOIN memories_fts fts ON m.id = fts.id"
                 " WHERE memories_fts MATCH ? AND m.confidence >= ?"
-                " ORDER BY rank LIMIT ?",
-                (safe_query, min_confidence, limit),
-            ).fetchall()
+                " ORDER BY rank LIMIT ?"
+            )
+            params = (safe_query, min_confidence, limit)
         elif entity:
-            rows = self._conn.execute(
+            sql = (
                 "SELECT * FROM memories"
                 " WHERE entity_name LIKE ? AND confidence >= ?"
-                " ORDER BY confidence DESC LIMIT ?",
-                (f"%{entity}%", min_confidence, limit),
-            ).fetchall()
+                " ORDER BY confidence DESC LIMIT ?"
+            )
+            params = (f"%{entity}%", min_confidence, limit)
         elif entity_type:
-            rows = self._conn.execute(
+            sql = (
                 "SELECT * FROM memories"
                 " WHERE entity_type = ? AND confidence >= ?"
-                " ORDER BY confidence DESC LIMIT ?",
-                (entity_type, min_confidence, limit),
-            ).fetchall()
+                " ORDER BY confidence DESC LIMIT ?"
+            )
+            params = (entity_type, min_confidence, limit)
         else:
-            rows = self._conn.execute(
+            sql = (
                 "SELECT * FROM memories WHERE confidence >= ?"
-                " ORDER BY confidence DESC LIMIT ?",
-                (min_confidence, limit),
-            ).fetchall()
+                " ORDER BY confidence DESC LIMIT ?"
+            )
+            params = (min_confidence, limit)
+        rows = self._read(lambda conn: conn.execute(sql, params).fetchall())
 
         results = []
         for row in rows:
@@ -416,11 +495,13 @@ class MemoryStore:
         limit: int = 1000,
     ) -> list[dict]:
         """Return all memories above *min_confidence*, newest first."""
-        rows = self._conn.execute(
-            "SELECT * FROM memories WHERE confidence >= ?"
-            " ORDER BY timestamp DESC LIMIT ?",
-            (min_confidence, limit),
-        ).fetchall()
+        rows = self._read(
+            lambda conn: conn.execute(
+                "SELECT * FROM memories WHERE confidence >= ?"
+                " ORDER BY timestamp DESC LIMIT ?",
+                (min_confidence, limit),
+            ).fetchall()
+        )
         results = []
         for row in rows:
             d = dict(row)
@@ -449,37 +530,41 @@ class MemoryStore:
 
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [memory_id]
-        self._conn.execute(
-            f"UPDATE memories SET {set_clause} WHERE id = ?", values  # noqa: S608
-        )
 
-        # Update FTS5 if entity_name or fact changed
-        if "entity_name" in updates or "fact" in updates:
-            row = self._conn.execute(
-                "SELECT entity_name, fact FROM memories WHERE id = ?",
-                (memory_id,),
-            ).fetchone()
-            if row:
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO memories_fts (id, entity_name, fact)"
-                    " VALUES (?, ?, ?)",
-                    (memory_id, row["entity_name"], row["fact"]),
-                )
-        self._conn.commit()
+        def _op(conn):
+            conn.execute(
+                f"UPDATE memories SET {set_clause} WHERE id = ?", values  # noqa: S608
+            )
+            # Update FTS5 if entity_name or fact changed
+            if "entity_name" in updates or "fact" in updates:
+                row = conn.execute(
+                    "SELECT entity_name, fact FROM memories WHERE id = ?",
+                    (memory_id,),
+                ).fetchone()
+                if row:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO memories_fts (id, entity_name, fact)"
+                        " VALUES (?, ?, ?)",
+                        (memory_id, row["entity_name"], row["fact"]),
+                    )
+
+        self._write(_op)
 
     def delete_memory(self, memory_id: str) -> None:
         """Delete a memory and its FTS5 entry."""
-        self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
-        self._conn.execute(
-            "DELETE FROM memories_fts WHERE id = ?", (memory_id,)
-        )
-        self._conn.commit()
+        def _op(conn):
+            conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+            conn.execute("DELETE FROM memories_fts WHERE id = ?", (memory_id,))
+
+        self._write(_op)
 
     def get_memory(self, memory_id: str) -> dict | None:
         """Return a single memory by ID."""
-        row = self._conn.execute(
-            "SELECT * FROM memories WHERE id = ?", (memory_id,)
-        ).fetchone()
+        row = self._read(
+            lambda conn: conn.execute(
+                "SELECT * FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+        )
         if row is None:
             return None
         d = dict(row)
@@ -501,27 +586,27 @@ class MemoryStore:
     ) -> str:
         """Store a conversation summary. Returns the summary ID."""
         sid = summary_id or uuid4().hex
-        self._conn.execute(
-            "INSERT INTO summaries (id, source_message_ids, summary_text, level, timestamp)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (sid, json.dumps(source_message_ids), summary_text, level, time.time()),
+        self._write(
+            lambda conn: conn.execute(
+                "INSERT INTO summaries (id, source_message_ids, summary_text, level, timestamp)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (sid, json.dumps(source_message_ids), summary_text, level, time.time()),
+            )
         )
-        self._conn.commit()
         return sid
 
     def get_summaries(self, *, level: int | None = None, limit: int = 10) -> list[dict]:
         """Return summaries, newest first."""
         if level is not None:
-            rows = self._conn.execute(
+            sql = (
                 "SELECT * FROM summaries WHERE level = ?"
-                " ORDER BY timestamp DESC LIMIT ?",
-                (level, limit),
-            ).fetchall()
+                " ORDER BY timestamp DESC LIMIT ?"
+            )
+            params: tuple = (level, limit)
         else:
-            rows = self._conn.execute(
-                "SELECT * FROM summaries ORDER BY timestamp DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            sql = "SELECT * FROM summaries ORDER BY timestamp DESC LIMIT ?"
+            params = (limit,)
+        rows = self._read(lambda conn: conn.execute(sql, params).fetchall())
         results = []
         for row in rows:
             d = dict(row)
