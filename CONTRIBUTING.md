@@ -31,6 +31,23 @@ uv run pytest tests/ --cov=prometheus
 
 All tests must pass before submitting a PR.
 
+### Web / WebSocket tests run under system `python3`, not `uv`
+
+The `uv` environment does **not** include `fastapi` or `websockets`. Tests that
+import them — the `tests/test_api_*.py` web suite, the WebSocket auth tests, and
+the endpoint half of `tests/test_boot_sha_staleness.py` — call
+`pytest.importorskip(...)`, so they are **silently skipped** under `uv run
+pytest` (reported as skipped, never run). Run them under the system interpreter —
+the same one the daemon runs on, which has those packages:
+
+```bash
+# web / WS / endpoint tests — system python3, NOT uv
+python3 -m pytest tests/test_api_cron.py tests/test_boot_sha_staleness.py -v
+```
+
+So a change under `web/` (FastAPI routes) or `gateway/` WS auth is **not** fully
+exercised by `uv run pytest` alone — run the relevant suite under `python3` too.
+
 ## Code Style
 
 - Python 3.11+ with type hints
