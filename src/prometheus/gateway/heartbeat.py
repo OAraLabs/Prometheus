@@ -13,6 +13,7 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from prometheus.context.environment import git_head_sha
 from prometheus.gateway.cron_service import load_cron_jobs, validate_cron_expression
 
 if TYPE_CHECKING:
@@ -43,6 +44,7 @@ class Heartbeat:
         idle_threshold: int = DEFAULT_IDLE_THRESHOLD,
         notify_chat_id: int | None = None,
         task_progress_interval: int = DEFAULT_TASK_PROGRESS_INTERVAL,
+        boot_sha: str | None = None,
     ) -> None:
         self.interval = interval
         self.gateway = gateway
@@ -63,6 +65,12 @@ class Heartbeat:
         self._task_progress_interval = task_progress_interval
         self._task_status_seen: dict[str, str] = {}
         self._task_progress_last: dict[str, float] = {}
+
+        # Boot-SHA staleness ("merged-but-dark"): boot_sha is the repo HEAD this
+        # process loaded; _check_staleness compares it to the live tree HEAD and
+        # nudges once per drift, de-duped on the tree_head it last nudged for.
+        self._boot_sha = boot_sha
+        self._stale_notified_for: str | None = None
 
     @property
     def signal_bus(self) -> SignalBus | None:
@@ -152,6 +160,9 @@ class Heartbeat:
                     # Proactive background-task notifications (audit fix #3)
                     await self._check_task_transitions()
 
+                    # Boot-SHA staleness nudge (merged-but-dark detector)
+                    await self._check_staleness()
+
                 except Exception as exc:
                     logger.error("Heartbeat check failed: %s", exc)
 
@@ -159,6 +170,26 @@ class Heartbeat:
         finally:
             self._running = False
             logger.info("Heartbeat stopped")
+
+    async def _check_staleness(self) -> None:
+        """Nudge once per drift when the running code (boot SHA) has fallen
+        behind the working tree — the 'merged-but-dark' signal. De-duped on
+        tree_head: a standing drift pings once, a NEW commit pings again, and a
+        restart (boot == tree) is silent. No-op when the boot SHA is unknown."""
+        if not self._boot_sha or self._boot_sha == "unknown":
+            return
+        tree_head = git_head_sha()
+        if tree_head == "unknown" or tree_head == self._boot_sha:
+            # In sync (or undeterminable) — reset so a later drift re-nudges.
+            self._stale_notified_for = None
+            return
+        if tree_head == self._stale_notified_for:
+            return  # already nudged for this exact drift
+        self._stale_notified_for = tree_head
+        await self._notify(
+            f"⚠️ Running {self._boot_sha[:8]}, tree is {tree_head[:8]} — new code "
+            f"on disk this process isn't executing. Restart to go live."
+        )
 
     async def _check_idle(self) -> None:
         """Emit idle_start / idle_end signals on the bus."""
