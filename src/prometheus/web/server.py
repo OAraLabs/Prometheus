@@ -21,6 +21,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from prometheus.context.environment import git_head_sha
+
 # Cap on the coding diff payload (matches the files-preview 256 KB cap).
 _CODING_DIFF_CAP = 256 * 1024
 
@@ -121,6 +123,7 @@ def create_app(
     agent_loop: Any | None = None,
     approval_queue: Any | None = None,
     static_dir: str | Path | None = None,
+    boot_sha: str = "unknown",
 ) -> FastAPI:
     """Create the FastAPI application with all routes."""
 
@@ -175,6 +178,7 @@ def create_app(
     app.state.agent_loop = agent_loop
     app.state.approval_queue = approval_queue
     app.state.start_time = _start_time
+    app.state.boot_sha = boot_sha
     app.state.agent_state = "idle"
     app.state.current_model = config.get("model", {}).get("model", "unknown")
     app.state.current_provider = config.get("model", {}).get("provider", "unknown")
@@ -191,6 +195,16 @@ def create_app(
     )
     coding_stream.subscribe_lifecycle()
     app.state.coding_stream = coding_stream
+
+    # ── Boot-SHA staleness (merged-but-dark detector) ───────────────
+    # running_sha = repo HEAD captured at process boot (frozen on app.state);
+    # tree_head = live repo HEAD now. They differ when new code is on disk that
+    # this process hasn't loaded. "unknown" on either side → never stale.
+    def _staleness() -> tuple[str, str, bool]:
+        running = getattr(app.state, "boot_sha", "unknown")
+        tree = git_head_sha()
+        stale = running != "unknown" and tree != "unknown" and running != tree
+        return running, tree, stale
 
     # ── Root ────────────────────────────────────────────────────────
 
@@ -217,18 +231,25 @@ def create_app(
             "status": "ok",
             "service": "prometheus",
             "uptime_seconds": time.time() - app.state.start_time,
+            # Bare staleness bool for external monitors — no SHA leaked on this
+            # unauthenticated endpoint (full SHAs are on bearer-gated /api/status).
+            "stale": _staleness()[2],
         }
 
     # ── Status ──────────────────────────────────────────────────────
 
     @app.get("/api/status")
     async def get_status():
+        running_sha, tree_head, stale = _staleness()
         return {
             "state": app.state.agent_state,
             "model": app.state.current_model,
             "provider": app.state.current_provider,
             "profile": app.state.active_profile,
             "uptime_seconds": time.time() - app.state.start_time,
+            "running_sha": running_sha,
+            "tree_head": tree_head,
+            "stale": stale,
         }
 
     # ── Sessions ────────────────────────────────────────────────────

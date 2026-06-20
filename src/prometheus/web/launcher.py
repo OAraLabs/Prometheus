@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 async def launch_web(
     config: dict[str, Any],
+    boot_sha: str = "unknown",
     signal_bus: Any | None = None,
     session_mgr: Any | None = None,
     telemetry: Any | None = None,
@@ -62,6 +63,7 @@ async def launch_web(
     # Create FastAPI app
     app = create_app(
         config=config,
+        boot_sha=boot_sha,
         signal_bus=signal_bus,
         session_mgr=session_mgr,
         telemetry=telemetry,

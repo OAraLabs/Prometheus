@@ -103,6 +103,32 @@ def detect_git_info(cwd: str) -> tuple[bool, str | None]:
     return True, branch
 
 
+def git_head_sha(repo_dir: str | Path | None = None) -> str:
+    """Return the HEAD commit SHA of the git repo containing *repo_dir*.
+
+    Defaults to the repository this package is checked out in (anchored from
+    this file: ``context/environment.py`` → ``parents[3]`` = repo root). ``git
+    rev-parse`` walks up to ``.git`` regardless, so any in-repo path works.
+    Returns ``"unknown"`` if git is unavailable or the path is not a git
+    checkout — callers treat that as "can't determine staleness" (never stale).
+    """
+    if repo_dir is None:
+        repo_dir = Path(__file__).resolve().parents[3]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_dir),
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    return result.stdout.strip() or "unknown"
+
+
 def get_environment_info(cwd: str | None = None) -> EnvironmentInfo:
     """Gather all environment information into an EnvironmentInfo snapshot."""
     if cwd is None:

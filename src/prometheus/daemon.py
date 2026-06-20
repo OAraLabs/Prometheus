@@ -24,6 +24,7 @@ from typing import Any
 import yaml
 
 from prometheus.config.paths import get_config_dir, get_logs_dir
+from prometheus.context.environment import git_head_sha
 from prometheus.engine.agent_loop import AgentLoop
 from prometheus.gateway.archive_writer import ArchiveWriter
 from prometheus.gateway.config import Platform, PlatformConfig
@@ -115,6 +116,14 @@ async def run_daemon(args: argparse.Namespace) -> None:
     model_config = config.get("model", {})
     gateway_config = config.get("gateway", {})
     security_config = config.get("security", {})
+
+    # ── Boot-SHA staleness signal ───────────────────────────────────────
+    # The repo HEAD at process start is the identity of the code THIS process
+    # loaded. /api/status, /health, and the heartbeat compare it against the
+    # live tree HEAD to surface "merged-but-dark" — new code on disk the
+    # running process isn't executing. "unknown" off a git checkout.
+    boot_sha = git_head_sha()
+    logger.info("Boot SHA: %s", boot_sha)
 
     # ── Config drift guard (opt-in) ─────────────────────────────────────
     # Users can create ~/.prometheus/config_pins.yaml to pin critical
@@ -616,6 +625,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
         gateway=telegram,
         task_manager=task_manager,
         notify_chat_id=_notify_chat,
+        boot_sha=boot_sha,
     )
     heartbeat_task = asyncio.create_task(heartbeat.run_forever())
     tasks.append(heartbeat_task)
@@ -1197,6 +1207,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
             ws_port = web_config.get("ws_port", 8010)
             web_task = asyncio.create_task(launch_web(
                 config=config,
+                boot_sha=boot_sha,
                 signal_bus=signal_bus if "signal_bus" in dir() else None,
                 session_mgr=session_manager,
                 telemetry=telemetry,
