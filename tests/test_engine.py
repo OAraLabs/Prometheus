@@ -155,7 +155,12 @@ async def test_loop_collects_text_from_final_turn():
 
 @pytest.mark.asyncio
 async def test_loop_handles_empty_text_response():
-    """Empty content should not crash — returns empty string."""
+    """Empty content must not crash AND must not poison the history.
+
+    The empty-response guard never commits an empty assistant turn (no text,
+    no tool calls) — committing it 400s the next request. It retries once; the
+    cycling mock stays empty, so the loop surfaces a valid (non-empty) turn.
+    """
     msg = ConversationMessage(role="assistant", content=[])
     provider = MockProvider([[
         ApiMessageCompleteEvent(
@@ -166,8 +171,13 @@ async def test_loop_handles_empty_text_response():
     ]])
     loop = AgentLoop(provider=provider)
     result = await loop.run_async("Be quiet.", "Say nothing.")
-    assert result.text == ""
-    assert result.turns == 1
+    # No empty assistant turn enters the history (the serialization-poison guard).
+    assert not any(
+        m.role == "assistant" and not m.text.strip() and not m.tool_uses
+        for m in result.messages
+    )
+    # A valid turn is surfaced rather than crashing or returning a poison turn.
+    assert result.text.strip()
 
 
 @pytest.mark.asyncio

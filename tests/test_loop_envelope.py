@@ -381,17 +381,25 @@ class TestFailurePaths:
         assert json.loads(rows[0][8])["reason"] == "empty_stream"
 
     def test_empty_content_complete_event_flagged(self, tmp_path: Path):
-        # The collapse-arc shape: complete event, no prose, no tool calls.
-        provider = ScriptedProvider([[
-            _complete(
+        # Collapse-arc shape: an empty complete event (no prose, no tool calls).
+        # It must still be FLAGGED (observable). The empty-response guard retries
+        # once — here the retry recovers, so the empty turn never reaches the
+        # history but its emptiness is recorded on the first round.
+        provider = ScriptedProvider([
+            [_complete(
                 ConversationMessage(role="assistant", content=[]),
                 stop_reason="stop",
-            ),
-        ]])
+            )],
+            [_complete(
+                ConversationMessage(role="assistant", content=[TextBlock(text="recovered")]),
+                stop_reason="stop",
+            )],
+        ])
         tel = ToolCallTelemetry(db_path=tmp_path / "tel.db")
         asyncio.run(_drain(_context(provider, tel), _user("q")))
 
         rows = _usage_rows(tel)
-        assert len(rows) == 1
-        assert rows[0][1] == "success"  # the call itself succeeded
-        assert json.loads(rows[0][8])["empty_content"] is True
+        assert len(rows) == 2  # the empty call + the retry
+        assert rows[0][1] == "success"  # the call itself succeeded (empty != crash)
+        assert json.loads(rows[0][8])["empty_content"] is True  # empty STILL flagged
+        assert len(provider.requests) == 2  # retried once, then recovered
