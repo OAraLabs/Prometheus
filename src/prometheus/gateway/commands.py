@@ -172,14 +172,24 @@ def cmd_note(store, raw: str) -> str:
             return "Usage: /note @entity <text>"
     if store is None:
         return "Memory store unavailable — note not saved."
-    store.persist_memory(
-        "note",
-        entity,
-        text,
-        1.0,
-        source_event_ids=["manual"],
-        manual=True,
-    )
+    # Ack ONLY on a confirmed, committed write. persist_memory raises on
+    # failure (it never swallows); surface that as an explicit "not saved"
+    # rather than a false "Noted." Closes the false-ack pattern.
+    try:
+        store.persist_memory(
+            "note",
+            entity,
+            text,
+            1.0,
+            source_event_ids=["manual"],
+            manual=True,
+        )
+    except Exception as exc:  # noqa: BLE001 — surface, never false-ack
+        log.warning("cmd_note: persist failed for [[%s]]: %s", entity, exc)
+        return (
+            f"⚠ Note NOT saved ({type(exc).__name__}) — nothing was written. "
+            "Try again."
+        )
     return f"Noted under [[{entity}]] — manual, max trust."
 
 
