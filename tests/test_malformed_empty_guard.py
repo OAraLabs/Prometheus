@@ -236,6 +236,13 @@ class TestLoopMalformedFeedback:
         assert "malformed tool call" in feedback[0].text
         assert "echo" in feedback[0].text  # available tools listed
         assert messages[-1].text == "recovered"
+        # #65: the empty malformed turn must NOT enter history — a content-less
+        # assistant message 400s the next request. Only feedback + recovery
+        # turns survive; no empty assistant turn is committed.
+        assert not any(
+            m.role == "assistant" and not m.text.strip() and not m.tool_uses
+            for m in messages
+        )
 
     def test_repeated_collapse_trips_breaker_after_three(self):
         provider = _ScriptedProvider([

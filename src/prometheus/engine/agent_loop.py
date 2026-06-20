@@ -967,8 +967,26 @@ async def run_loop(
             yield AssistantTurnComplete(message=error_msg, usage=usage), usage
             return
 
-        messages.append(final_message)
-        yield AssistantTurnComplete(message=final_message, usage=usage), usage
+        # #65 — TOTAL no-empty-assistant-turn invariant at the commit point.
+        # The empty-response guard above retries/surfaces a NON-malformed empty
+        # turn, but excludes the malformed case (`and not dropped_malformed`),
+        # so a malformed-empty reply — no text, no SURVIVING tool calls,
+        # dropped_malformed>0 — fell through here and entered history as a
+        # content-less assistant message the provider 400s on (verified live:
+        # "Assistant message must contain either 'content' or 'tool_calls'").
+        # Commit ONLY a non-empty turn; an empty one (malformed or not) never
+        # reaches the wire. The malformed branch below still fires — it gates on
+        # `not final_message.tool_uses`, committing its structured feedback and
+        # driving recovery. A turn with surviving tool calls or residual prose
+        # is NOT empty and commits normally, so the non-empty malformed case is
+        # untouched.
+        turn_is_empty = (
+            not final_message.tool_uses
+            and not (final_message.text or "").strip()
+        )
+        if not turn_is_empty:
+            messages.append(final_message)
+            yield AssistantTurnComplete(message=final_message, usage=usage), usage
 
         if not final_message.tool_uses:
             # malformed_empty guard: the provider dropped every tool call in

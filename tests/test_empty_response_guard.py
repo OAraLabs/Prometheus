@@ -125,3 +125,90 @@ def test_empty_reply_twice_surfaces_a_valid_turn():
     assistants = [m for m in messages if m.role == "assistant"]
     assert assistants, "a turn must be surfaced"
     assert assistants[-1].text.strip(), "surfaced assistant turn must carry content"
+
+
+# ---------------------------------------------------------------------------
+# #65 — extend the invariant to the MALFORMED-empty path
+#
+# #64 deliberately excludes the malformed case from the empty-response guard
+# (`and not dropped_malformed`), routing it to the structured-feedback path.
+# But the empty turn was still committed at the model-reply append point, so a
+# malformed-empty reply (no text, no SURVIVING tool calls, dropped_malformed>0)
+# entered history as a content-less assistant message and 400'd the next
+# request — the same wedge #64 fixed elsewhere. The invariant must be total.
+# ---------------------------------------------------------------------------
+
+
+class _MalformedEmptyThenRecover(ModelProvider):
+    """First call: an all-dropped malformed-empty turn (empty message,
+    ``dropped_malformed>0``). Second call: a real recovery."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream_message(self, request):  # noqa: ANN001
+        self.calls += 1
+        if self.calls == 1:
+            yield ApiMessageCompleteEvent(
+                message=_empty_msg(),
+                usage=UsageSnapshot(input_tokens=1, output_tokens=0),
+                stop_reason="stop",
+                dropped_malformed=3,
+            )
+        else:
+            yield ApiTextDeltaEvent(text="recovered")
+            yield ApiMessageCompleteEvent(
+                message=_text_msg("recovered"),
+                usage=UsageSnapshot(input_tokens=1, output_tokens=1),
+                stop_reason="stop",
+            )
+
+
+def test_malformed_empty_turn_never_enters_history():
+    p = _MalformedEmptyThenRecover()
+    messages = _drive(p)
+    assert p.calls == 2, "malformed-empty turn retried once, then recovered"
+    # The core #65 invariant — the content-less assistant turn never lands.
+    assert not _has_empty_assistant(messages), (
+        "no empty assistant turn may enter history via the malformed path"
+    )
+    # The structured feedback IS committed (load-bearing — the model reads it
+    # from history to self-correct).
+    feedback = [
+        m for m in messages
+        if m.role == "user" and m.provenance == "orchestrator"
+    ]
+    assert len(feedback) == 1
+    assert "malformed tool call" in feedback[0].text
+    # And the model recovered after reading it.
+    assert any(
+        m.role == "assistant" and m.text.strip() == "recovered" for m in messages
+    )
+
+
+def test_malformed_with_residual_prose_still_commits():
+    """The non-empty malformed case must be untouched: a turn that dropped
+    garbage calls but produced prose is a valid, non-empty assistant turn —
+    it commits and ends the turn (no synthetic feedback, no retry)."""
+
+    class _DroppedButProse(ModelProvider):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream_message(self, request):  # noqa: ANN001
+            self.calls += 1
+            yield ApiMessageCompleteEvent(
+                message=_text_msg("here is my answer"),
+                usage=UsageSnapshot(input_tokens=1, output_tokens=1),
+                stop_reason="stop",
+                dropped_malformed=2,
+            )
+
+    p = _DroppedButProse()
+    messages = _drive(p)
+    assert p.calls == 1, "prose turn ends normally — no retry"
+    assert messages[-1].role == "assistant"
+    assert messages[-1].text == "here is my answer"
+    assert not any(m.provenance == "orchestrator" for m in messages), (
+        "non-empty malformed turn must not trigger feedback"
+    )
