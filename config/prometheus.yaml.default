@@ -65,6 +65,15 @@ security:
     - "/boot"
     - "~/.ssh"
     - "config/prometheus.yaml"
+  # Regexes auto-ALLOWed even at SYSTEM trust (background tasks / cron) so a
+  # vetted long-running job can run without a human approver. Evaluated AFTER
+  # the denied/always-blocked/exfiltration gates (cannot resurrect a block) and
+  # refused if the command contains chaining metachars (; & | ` $()). Keep each
+  # pattern as narrow as possible — anchor the host, the destination, and the
+  # source. Example: download ONE Hugging Face .gguf onto the GPU box's models
+  # dir (powers the download-model-to-gpu skill). Replace the login with yours.
+  # allowed_commands:
+  #   - ^ssh\s+<user>@<gpu-host>\s+'wget\s+[^']*-O\s+~/models/[^']*\.gguf\s+https://huggingface\.co/[^']*\.gguf'\s*$
   audit:
     enabled: true
     retention_days: 30

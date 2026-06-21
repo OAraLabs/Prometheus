@@ -162,6 +162,66 @@ class TestSecurityGateEvaluate:
         assert d.action == "APPROVE"
 
 
+class TestTrustedCommandAllowlist:
+    """A command matching security.allowed_commands is auto-ALLOWed even at
+    SYSTEM trust, so a vetted job (e.g. an HF .gguf model download) can run as a
+    background task with no human approver. Adversarial variations must NOT be
+    ALLOWed, and an always-blocked command can never be allowlisted.
+
+    Uses a fake login + the model-download regex shape that ships (with the real
+    host) in prometheus.yaml.default — no real infra host in the repo."""
+
+    LOGIN = "deploy@gpu.invalid"
+    # Mirrors the vetted shape documented in prometheus.yaml.default.
+    PATTERN = (
+        r"^ssh\s+deploy@gpu\.invalid\s+'wget\s+[^']*-O\s+~/models/[^']*\.gguf\s+"
+        r"https://huggingface\.co/[^']*\.gguf'\s*$"
+    )
+    URL = "https://huggingface.co/unsloth/Foo-GGUF/resolve/main/Foo-Q4.gguf"
+
+    def _gate(self) -> SecurityGate:
+        return SecurityGate(allowed_commands=[self.PATTERN])
+
+    def _dl(self, inner: str | None = None) -> str:
+        inner = inner or f"wget -c -O ~/models/Foo-Q4.gguf {self.URL}"
+        return f"ssh {self.LOGIN} '{inner}'"
+
+    def test_real_download_allowed_at_system_trust(self):
+        assert self._gate().evaluate("bash", command=self._dl(), origin="system").action == "ALLOW"
+
+    def test_chained_destructive_is_denied_not_allowlisted(self):
+        # The appended rm is always-blocked; crucially it is NOT ALLOWed through.
+        d = self._gate().evaluate("bash", command=self._dl() + " ; rm -rf ~/models", origin="system")
+        assert d.action == "DENY"
+
+    def test_pipe_chain_is_not_allowlisted(self):
+        d = self._gate().evaluate("bash", command=self._dl() + " | tee /tmp/log", origin="system")
+        assert d.action != "ALLOW"
+
+    def test_wrong_host_not_allowlisted(self):
+        c = "ssh deploy@other.invalid 'wget -O ~/models/x.gguf " + self.URL + "'"
+        assert self._gate().evaluate("bash", command=c, origin="system").action == "APPROVE"
+
+    def test_non_huggingface_url_not_allowlisted(self):
+        c = self._dl("wget -O ~/models/x.gguf https://evil.example/x.gguf")
+        assert self._gate().evaluate("bash", command=c, origin="system").action == "APPROVE"
+
+    def test_dest_outside_models_not_allowlisted(self):
+        c = self._dl(f"wget -O /tmp/x.gguf {self.URL}")
+        assert self._gate().evaluate("bash", command=c, origin="system").action == "APPROVE"
+
+    def test_no_allowlist_means_download_needs_approval(self):
+        # With no allowed_commands configured, the same ssh+wget falls back to
+        # the network-approve path (APPROVE at system trust) — proves the
+        # built-in source list carries no infra-specific pattern.
+        assert SecurityGate().evaluate("bash", command=self._dl(), origin="system").action == "APPROVE"
+
+    def test_always_blocked_beats_config_allowlist(self):
+        # config must not be able to allowlist a destructive always-blocked command
+        gate = SecurityGate(allowed_commands=[r"rm -rf /"])
+        assert gate.evaluate("bash", command="rm -rf /", origin="system").action == "DENY"
+
+
 # ---------------------------------------------------------------------------
 # TRUST-CONTEXT: origin classification helper
 # ---------------------------------------------------------------------------

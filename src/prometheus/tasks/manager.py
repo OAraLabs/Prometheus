@@ -25,6 +25,7 @@ import asyncio
 import logging
 import os
 import shlex
+import signal
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -45,6 +46,26 @@ if TYPE_CHECKING:
     from prometheus.tasks.store import TaskStore
 
 log = logging.getLogger(__name__)
+
+
+def _signal_process_group(process: asyncio.subprocess.Process, sig: int) -> None:
+    """Send ``sig`` to the task shell's whole process group (it + its children).
+
+    Tasks are launched with ``start_new_session=True``, so the shell leads its
+    own group; signalling the group kills the actual workload (a ``wget`` etc.),
+    not just ``/bin/bash``. Best-effort and idempotent: falls back to signalling
+    the process directly, and ignores a process/group that has already exited.
+    """
+    if process.returncode is not None:
+        return
+    try:
+        os.killpg(os.getpgid(process.pid), sig)
+    except (ProcessLookupError, PermissionError):
+        try:
+            process.send_signal(sig)
+        except (ProcessLookupError, ValueError):
+            pass
+
 
 # Defaults; the daemon overrides from config["tasks"].
 DEFAULT_TIMEOUT_SECONDS = 3600
@@ -334,11 +355,11 @@ class BackgroundTaskManager:
                 return task
             raise ValueError(f"Task {task_id} is not running")
 
-        process.terminate()
+        _signal_process_group(process, signal.SIGTERM)
         try:
             await asyncio.wait_for(process.wait(), timeout=3)
         except asyncio.TimeoutError:
-            process.kill()
+            _signal_process_group(process, signal.SIGKILL)
             await process.wait()
 
         task.status = "killed"
@@ -526,6 +547,10 @@ class BackgroundTaskManager:
             raise ValueError(f"Task {task_id} has no command")
         generation = self._generations.get(task_id, 0) + 1
         self._generations[task_id] = generation
+        # start_new_session=True: the task shell leads its own process group so
+        # stop_task / a timeout can kill the WHOLE job (e.g. a `wget` spawned by
+        # the command), not just /bin/bash — otherwise children orphan and run
+        # on. Same fix as tools/builtin/bash.py.
         process = await asyncio.create_subprocess_exec(
             "/bin/bash",
             "-lc",
@@ -534,6 +559,7 @@ class BackgroundTaskManager:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
         self._processes[task_id] = process
         self._waiters[task_id] = asyncio.create_task(
@@ -558,7 +584,7 @@ class BackgroundTaskManager:
                 return_code = await process.wait()
         except asyncio.TimeoutError:
             timed_out = True
-            process.kill()
+            _signal_process_group(process, signal.SIGKILL)
             return_code = await process.wait()
         await reader
         if self._generations.get(task_id) != generation:
