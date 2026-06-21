@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -74,6 +76,11 @@ class BashTool(BaseTool):
                         is_error=True,
                     )
 
+        # start_new_session=True puts the shell in its own process group, so the
+        # ENTIRE pipeline (e.g. ``find … | grep …``) can be killed as a unit. A
+        # bare process.kill() only signals /bin/bash; its children get reparented
+        # to init and keep running — that is how a timed-out ``find`` orphaned
+        # itself and thrashed the disk for minutes after the turn moved on.
         process = await asyncio.create_subprocess_exec(
             "/bin/bash",
             "-lc",
@@ -81,6 +88,7 @@ class BashTool(BaseTool):
             cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
 
         try:
@@ -89,12 +97,20 @@ class BashTool(BaseTool):
                 timeout=arguments.timeout_seconds,
             )
         except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+            await self._kill_process_group(process)
             return ToolResult(
                 output=f"Command timed out after {arguments.timeout_seconds} seconds",
                 is_error=True,
             )
+        except asyncio.CancelledError:
+            # The agent loop wraps tool.execute() in its own (longer) timeout;
+            # when THAT fires it cancels us instead of raising TimeoutError here.
+            # Without this handler the subprocess and its children would keep
+            # running after the turn was abandoned (the original freeze: an
+            # orphaned ``find`` still scanning $HOME). Kill the whole group,
+            # then let the cancellation propagate.
+            await self._kill_process_group(process)
+            raise
 
         parts = []
         if stdout:
@@ -114,3 +130,28 @@ class BashTool(BaseTool):
             is_error=process.returncode != 0,
             metadata={"returncode": process.returncode},
         )
+
+    @staticmethod
+    async def _kill_process_group(process: asyncio.subprocess.Process) -> None:
+        """SIGKILL the shell's whole process group, then reap it.
+
+        The shell is launched with ``start_new_session=True`` so it leads its own
+        group; killing the group takes the entire pipeline (``find``, ``grep``,
+        …) with it rather than leaving orphans. Best-effort and idempotent: the
+        process or group may already be gone.
+        """
+        if process.returncode is not None:
+            return
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            # Already dead, or we couldn't address the group — fall back to
+            # signalling the shell directly so we don't leak it.
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            await process.wait()
+        except Exception:  # noqa: BLE001 — reaping must never raise
+            pass
