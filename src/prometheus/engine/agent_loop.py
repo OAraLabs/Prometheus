@@ -760,6 +760,15 @@ async def run_loop(
         )
 
     circuit_breaker = _CircuitBreaker(max_identical=3, max_any=5)
+    # Per-turn repeat guard. The circuit breaker above trips at max_identical
+    # consecutive errors, but only AFTER each one runs to its full timeout — so
+    # a doomed command (an unbounded ``find`` that always hits the 300s tool
+    # timeout) burns minutes per strike and the turn looks frozen. This map
+    # counts how many times each exact (name, input) signature has failed this
+    # turn; once it reaches _REPEAT_FAIL_LIMIT the call is refused WITHOUT
+    # executing, so further identical retries cost ~0s. A success clears it.
+    failed_call_signatures: dict[str, int] = {}
+    _REPEAT_FAIL_LIMIT = 2
     tool_iteration = 0
     # Empty-response guard: at most one model-call retry per run_loop on a
     # genuinely empty assistant reply (no text, no tool calls) before surfacing.
@@ -1089,9 +1098,57 @@ async def run_loop(
                         exc_info=True,
                     )
 
-        tool_results = await _dispatch_tool_calls(
-            context, tool_calls, raw_model_output=raw_model_output_this_turn
+        # Per-turn repeat guard: refuse any tool call whose exact (name, input)
+        # already failed _REPEAT_FAIL_LIMIT times this turn, WITHOUT executing it
+        # again. The blocked result carries a directive telling the model to
+        # change approach; the circuit breaker below still sees it as an error
+        # and trips, but we no longer pay the tool timeout on every retry.
+        _blocked: dict[int, ToolResultBlock] = {}
+        _runnable: list = []
+        for _i, _tc in enumerate(tool_calls):
+            if failed_call_signatures.get(_tool_call_signature(_tc), 0) >= _REPEAT_FAIL_LIMIT:
+                _n = failed_call_signatures[_tool_call_signature(_tc)]
+                _blocked[_i] = ToolResultBlock(
+                    tool_use_id=_tc.id,
+                    content=(
+                        f"BLOCKED: this exact {_tc.name} call already failed "
+                        f"{_n} times this turn. Do NOT run it again — change your "
+                        f"approach (different command, arguments, or tool) or tell "
+                        f"the user you cannot complete this request."
+                    ),
+                    is_error=True,
+                )
+                log.warning(
+                    "Repeat guard: blocked re-run of %s (failed %d× this turn)",
+                    _tc.name, _n,
+                )
+            else:
+                _runnable.append(_tc)
+
+        _ran = (
+            await _dispatch_tool_calls(
+                context, _runnable, raw_model_output=raw_model_output_this_turn
+            )
+            if _runnable
+            else []
         )
+
+        # Reassemble in the original tool_calls order, splicing blocked results
+        # back in where they belong.
+        _ran_iter = iter(_ran)
+        tool_results = [
+            _blocked[_i] if _i in _blocked else next(_ran_iter)
+            for _i in range(len(tool_calls))
+        ]
+
+        # Update the per-turn failure tally: a fresh failure increments its
+        # signature; any success clears it (so a flaky-then-fixed call recovers).
+        for _tc, _r in zip(tool_calls, tool_results):
+            _sig = _tool_call_signature(_tc)
+            if _r.is_error:
+                failed_call_signatures[_sig] = failed_call_signatures.get(_sig, 0) + 1
+            else:
+                failed_call_signatures.pop(_sig, None)
 
         # SPRINT-2 WS2: post-snapshot + diff after every tool result.
         if fmv is not None:
@@ -1727,6 +1784,25 @@ async def _safe_execute(
             content=f"Tool {tc.name} raised an exception: {exc}",
             is_error=True,
         )
+
+
+def _tool_call_signature(tool_call: object) -> str:
+    """Stable identity for a tool call's (name, input).
+
+    Used by the per-turn repeat guard so an EXACT re-issue of a call that
+    already failed this turn (e.g. the same unbounded ``find`` that keeps
+    hitting the tool timeout) can be short-circuited instead of paying the full
+    timeout again. Canonical JSON so key order never matters; falls back to
+    ``repr()`` for anything not JSON-serialisable.
+    """
+    import json as _json
+    name = getattr(tool_call, "name", "?")
+    raw = getattr(tool_call, "input", None)
+    try:
+        body = _json.dumps(raw, sort_keys=True, default=str)
+    except Exception:
+        body = repr(raw)
+    return f"{name}:{body}"
 
 
 async def _dispatch_tool_calls(
