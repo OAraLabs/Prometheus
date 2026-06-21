@@ -128,6 +128,29 @@ async def test_shell_task_failing_command():
             assert task.return_code == 1
 
 
+@pytest.mark.asyncio
+async def test_stop_task_kills_child_process_group():
+    """stop_task must take the WHOLE process group, not just /bin/bash — a
+    backgrounded child (e.g. a long wget) would otherwise orphan and keep
+    running. Regression for the 2026-06-21 orphan bug (same fix as bash.py)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch("prometheus.tasks.manager.get_tasks_dir", return_value=Path(tmp)):
+            mgr = BackgroundTaskManager()
+            marker = Path(tmp) / "orphan_marker"
+            task = await mgr.create_shell_task(
+                command=f"( sleep 3 && touch {marker} ) & sleep 3",
+                description="orphan probe",
+                cwd=tmp,
+            )
+            await asyncio.sleep(0.3)  # let the child spawn
+            await mgr.stop_task(task.id)
+            assert mgr.get_task(task.id).status == "killed"
+            await asyncio.sleep(3.5)  # past the child's would-be touch time
+            assert not marker.exists(), (
+                "backgrounded child survived stop_task — process group not killed"
+            )
+
+
 # ---------------------------------------------------------------------------
 # BackgroundTaskManager — list / get / update
 # ---------------------------------------------------------------------------

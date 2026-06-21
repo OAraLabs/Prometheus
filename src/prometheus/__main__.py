@@ -495,6 +495,7 @@ def create_security_gate(security_cfg: dict[str, Any]):
         workspace_root=security_cfg.get("workspace_root"),
         denied_commands=security_cfg.get("denied_commands"),
         denied_paths=security_cfg.get("denied_paths"),
+        allowed_commands=security_cfg.get("allowed_commands"),
         audit_logger=audit_logger,
         exfiltration_detector=exfil_detector,
     )

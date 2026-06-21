@@ -67,6 +67,23 @@ _APPROVE_BASH_PATTERNS: list[str] = [
     r"npm\s+install",
 ]
 
+# Trusted command patterns — auto-ALLOWed even at SYSTEM trust (background
+# tasks / cron), so vetted long-running jobs can run without a human approver.
+# Checked AFTER the always-blocked / denied / exfiltration gates, so this can
+# never resurrect a blocked pattern.
+#
+# Intentionally EMPTY in source: trusted patterns reference infrastructure
+# specifics (e.g. the GPU host for model downloads) that must not be hardcoded
+# in the repo. Configure them via ``security.allowed_commands`` in the
+# (gitignored) prometheus.yaml — see prometheus.yaml.default for the vetted
+# model-download example that powers the download-model-to-gpu skill.
+_TRUSTED_COMMAND_PATTERNS: list[str] = []
+
+# A trusted command must be a SINGLE simple invocation. These metacharacters
+# could chain a second command past the pattern match, so their presence
+# disqualifies a command from the allowlist (defense-in-depth).
+_TRUSTED_CMD_FORBIDDEN = re.compile(r"[;&|`\n]|\$\(")
+
 
 # ---------------------------------------------------------------------------
 # Origin classification
@@ -173,6 +190,7 @@ class SecurityGate:
         audit_logger: AuditLogger | None = None,
         exfiltration_detector: ExfiltrationDetector | None = None,
         approval_queue: object | None = None,
+        allowed_commands: list[str] | None = None,
     ) -> None:
         self._denied_commands: list[str] = denied_commands or []
         self._denied_paths: list[str] = [
@@ -191,6 +209,11 @@ class SecurityGate:
         # Compile blocked patterns once
         self._blocked_re = [re.compile(p) for p in _ALWAYS_BLOCKED_PATTERNS]
         self._approve_re = [re.compile(p) for p in _APPROVE_BASH_PATTERNS]
+        # Trusted allowlist = built-in patterns + any from config.allowed_commands
+        self._trusted_re = [
+            re.compile(p)
+            for p in (_TRUSTED_COMMAND_PATTERNS + list(allowed_commands or []))
+        ]
 
     # ------------------------------------------------------------------
     # Factory
@@ -227,6 +250,7 @@ class SecurityGate:
         return cls(
             denied_commands=sec.get("denied_commands") or [],
             denied_paths=sec.get("denied_paths") or [],
+            allowed_commands=sec.get("allowed_commands") or [],
             workspace_root=sec.get("workspace_root"),
             mode=sec.get("permission_mode", "default"),
             audit_logger=audit_logger,
@@ -338,6 +362,18 @@ class SecurityGate:
                 self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason)
                 return PermissionDecision.approve(reason)
 
+        # --- Trusted command allowlist (both origins) → ALLOW ---
+        # Lets a vetted command (e.g. an HF .gguf model download to the GPU box)
+        # run as a SYSTEM-trust background task without a human approver. Placed
+        # AFTER always-blocked / denied / exfiltration, so it can never bypass
+        # them; the pattern is narrow and command-chaining is rejected.
+        if tool_name == "bash" and command and self._is_trusted_command(command):
+            self._audit_log(
+                tool_name, AuditDecision.ALLOW,
+                "Auto-allowed (trusted command pattern)", command,
+            )
+            return PermissionDecision.allow(level=TrustLevel.AUTO)
+
         # --- LEVEL 1: bash with network/install commands → APPROVE
         # (system origin only — user-initiated curl/pip/wget/ssh allowed) ---
         if tool_name == "bash" and command and not is_user:
@@ -430,3 +466,11 @@ class SecurityGate:
 
     def _is_approve_pattern(self, command: str) -> bool:
         return any(r.search(command) for r in self._approve_re)
+
+    def _is_trusted_command(self, command: str) -> bool:
+        """True if ``command`` matches the trusted allowlist AND is a single
+        simple invocation (no chaining metacharacters). Trusted commands are
+        auto-ALLOWed at any origin — see _TRUSTED_COMMAND_PATTERNS."""
+        if not command or _TRUSTED_CMD_FORBIDDEN.search(command):
+            return False
+        return any(r.search(command) for r in self._trusted_re)
