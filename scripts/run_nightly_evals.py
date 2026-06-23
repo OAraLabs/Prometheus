@@ -116,7 +116,13 @@ def main() -> None:
         log.error("Cannot reach judge at %s: %s", judge_url, exc)
         sys.exit(1)
 
-    judge = PrometheusJudge(base_url=judge_url)
+    # Optional: pin the judge model explicitly. Without this, PrometheusJudge
+    # auto-detects /v1/models[0], which is non-deterministic on a multi-model
+    # endpoint (e.g. ollama) and can silently select the wrong judge.
+    judge_model = evals_cfg.get("judge_model")
+    if judge_model:
+        log.info("Judge model pinned from config: %s", judge_model)
+    judge = PrometheusJudge(base_url=judge_url, model=judge_model)
     runner = EvalRunner(
         agent_loop=agent_loop,
         judge=judge,
