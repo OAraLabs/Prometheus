@@ -214,3 +214,92 @@ def test_production_guard_restores_both_units_on_exception(monkeypatch):
     # ...and crucially RESTORED on exit despite the exception
     assert any(f"start {ab.LLAMA_UNIT}" in c for c in cmds)
     assert any(f"start {ab.PROMETHEUS_UNIT}" in c for c in cmds)
+
+
+# ── 7. ctx override: Qwen carries the overridden -c AND the deviation is recorded ──
+def test_apply_ctx_override_qwen_carries_value_and_records_deviation():
+    recipe = ["/opt/llama.cpp/build/bin/llama-server",
+              "-m", "/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+              "-c", "81920", "--jinja", "--reasoning-budget", "2048"]
+    new, dev = ab.apply_ctx_override(recipe, 32768)
+
+    # the overridden -c value rides in the recipe; the canonical value is gone
+    assert new[new.index("-c") + 1] == "32768"
+    assert "81920" not in new
+    # untouched flags survive
+    assert "--jinja" in new and "--reasoning-budget" in new
+    # the deviation is a documented "VRAM fit" record for the manifest
+    assert dev == {"flag": "-c", "canonical": 81920, "applied": 32768,
+                   "reason": "VRAM fit"}
+
+
+def test_apply_ctx_override_none_inherits_canonical():
+    recipe = ["llama-server", "-c", "81920"]
+    new, dev = ab.apply_ctx_override(recipe, None)
+    assert new == recipe
+    assert dev is None
+
+
+def test_apply_ctx_override_equal_value_is_not_a_deviation():
+    recipe = ["llama-server", "-c", "32768"]
+    new, dev = ab.apply_ctx_override(recipe, 32768)
+    assert new[new.index("-c") + 1] == "32768"
+    assert dev is None
+
+
+def test_apply_ctx_override_inline_form():
+    recipe = ["llama-server", "-c=81920", "--jinja"]
+    new, dev = ab.apply_ctx_override(recipe, 32768)
+    assert "-c=32768" in new
+    assert "-c=81920" not in new
+    assert dev["canonical"] == 81920 and dev["applied"] == 32768
+
+
+def test_manifest_records_ctx_deviation(tmp_path, monkeypatch):
+    # hermetic: no ssh / git
+    monkeypatch.setattr(ab, "remote_gguf_sha", lambda recipe: "deadbeefcafe")
+    monkeypatch.setattr(ab, "git_sha", lambda: "testsha123")
+
+    recipe = ["llama-server", "-m", "/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf", "-c", "32768"]
+    dev = {"flag": "-c", "canonical": 81920, "applied": 32768, "reason": "VRAM fit"}
+
+    manifest = ab.write_manifest(
+        "qwen", recipe, props={}, smoke_ok=True, scored_ok=True,
+        results_path=None, eval_config=tmp_path / "eval_config.yaml",
+        run_dir=tmp_path, ctx_deviation=dev,
+    )
+    # returned dict carries it...
+    assert manifest["ctx_deviation"] == dev
+    # ...and so does the persisted manifest file (the audit artifact)
+    written = json.loads((tmp_path / "qwen_manifest.json").read_text())
+    assert written["ctx_deviation"] == dev
+
+
+def test_build_report_surfaces_ctx_deviation_in_audit(tmp_path):
+    m_g = _manifest("sha_SAME", "Q4_K_M", _write_results(tmp_path, "g.json"))
+    m_q = _manifest("sha_SAME", "UD-Q4_K_XL", _write_results(tmp_path, "q.json"))
+    m_q["ctx_deviation"] = {"flag": "-c", "canonical": 81920,
+                            "applied": 32768, "reason": "VRAM fit"}
+    report = ab.build_report(tmp_path, {"gemma": m_g, "qwen": m_q})
+    text = report.read_text()
+    assert "ctx deviation" in text
+    assert "81920" in text and "32768" in text
+    assert "VRAM fit" in text
+
+
+# ── 8. (Amendment 2) judge identity + weak-discriminator caveat on the artifact ──
+def test_build_report_header_names_judge_with_weakness_caveat(tmp_path):
+    manifests = {
+        "gemma": _manifest("sha_SAME", "Q4_K_M", _write_results(tmp_path, "g.json"),
+                           judge_base="http://localhost:11434", judge_model="llama3.1:8b"),
+        "qwen": _manifest("sha_SAME", "Q4_K_M", _write_results(tmp_path, "q.json"),
+                          judge_base="http://localhost:11434", judge_model="llama3.1:8b"),
+    }
+    report = ab.build_report(tmp_path, manifests)
+    text = report.read_text()
+    # judge identity is ON THE ARTIFACT, not just in chat
+    assert "llama3.1:8b" in text
+    assert "localhost:11434" in text
+    # ...with the discriminator-strength caveat
+    assert "weaker discriminator" in text
+    assert "independent of BOTH contestants" in text

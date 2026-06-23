@@ -103,6 +103,26 @@ RESULTS_DIR = Path(os.environ.get(
     "OARA_EVAL_OUT", str(Path.home() / ".prometheus" / "evals" / "ab")
 ))
 
+
+def _env_int(name: str, default: int | None) -> int | None:
+    v = os.environ.get(name)
+    return int(v) if v else default
+
+
+# Per-leg context override. None = inherit the canonical -c from the live unit.
+# GPU-math survey (Qwen GGUF header: 40 layers, 2 KV heads, key/value_length 256)
+#   KV = 40 * 2 * (256+256) * 2 B = 80 KiB/token.
+#   ctx 81920 -> ~6.25 GiB KV; + ~21 GiB weights + overhead ~= 28 GiB -> OOM (24 GiB card).
+#   ctx 32768 -> ~2.5  GiB KV; + ~21 GiB weights + overhead ~= 24 GiB -> fits (tight).
+# So Qwen is capped at 32768 (tune via OARA_QWEN_CTX; drop further if it OOMs).
+# Gemma inherits canonical (it already runs at its unit ctx in production). Any
+# ctx that differs from canonical is recorded in the manifest + report as a
+# documented "VRAM fit" deviation.
+LEG_CTX_OVERRIDE: dict[str, int | None] = {
+    "gemma": _env_int("OARA_GEMMA_CTX", None),
+    "qwen": _env_int("OARA_QWEN_CTX", 32768),
+}
+
 HEALTH_TIMEOUT_S = 300   # cold-load of a 21 GB MoE + large-ctx KV alloc is slow
 HEALTH_POLL_S = 3
 # metric_name keys exactly as the runner serializes them (runner.py)
@@ -208,6 +228,37 @@ def derive_recipes(canonical: str) -> dict[str, list[str]]:
         else:
             qwen.append(t)
     return {"gemma": gemma, "qwen": qwen}
+
+
+def apply_ctx_override(recipe: list[str], ctx: int | None) -> tuple[list[str], dict | None]:
+    """Return (recipe_with_ctx, deviation_or_None).
+
+    ctx=None inherits the canonical -c, no deviation. Otherwise the -c / --ctx-size
+    value is replaced and a deviation dict is returned to document the change in
+    the manifest + report: {flag, canonical, applied, reason}. reason is always
+    "VRAM fit" — the only reason a leg's ctx differs from how it runs in prod.
+    """
+    if ctx is None:
+        return list(recipe), None
+    new = list(recipe)
+    for i, t in enumerate(new):
+        if t in ("-c", "--ctx-size") and i + 1 < len(new):
+            canonical = new[i + 1]
+            if str(canonical) == str(ctx):
+                return new, None
+            new[i + 1] = str(ctx)
+            return new, {"flag": t, "canonical": int(canonical),
+                         "applied": int(ctx), "reason": "VRAM fit"}
+        if t.startswith(("-c=", "--ctx-size=")):
+            flag, canonical = t.split("=", 1)
+            if str(canonical) == str(ctx):
+                return new, None
+            new[i] = f"{flag}={ctx}"
+            return new, {"flag": flag, "canonical": int(canonical),
+                         "applied": int(ctx), "reason": "VRAM fit"}
+    new += ["-c", str(ctx)]  # canonical had no -c; add one
+    return new, {"flag": "-c", "canonical": None, "applied": int(ctx),
+                 "reason": "VRAM fit"}
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -404,7 +455,7 @@ def gguf_quant(recipe: list[str]) -> str:
 
 def write_manifest(label: str, recipe: list[str], props: dict, smoke_ok: bool,
                    scored_ok: bool, results_path: Path | None, eval_config: Path,
-                   run_dir: Path) -> dict:
+                   run_dir: Path, ctx_deviation: dict | None = None) -> dict:
     p = props or {}
     dgs = p.get("default_generation_settings") or {}
     manifest = {
@@ -417,6 +468,7 @@ def write_manifest(label: str, recipe: list[str], props: dict, smoke_ok: bool,
         "served_command": " ".join(recipe),
         "gguf_sha256_12": remote_gguf_sha(recipe),
         "quant": gguf_quant(recipe),
+        "ctx_deviation": ctx_deviation,  # None, or a documented "VRAM fit" change
         "server_props": {
             "model": p.get("model_path") or p.get("model_alias") or p.get("model"),
             "modalities": p.get("modalities"),
@@ -485,8 +537,11 @@ def build_report(run_dir: Path, manifests: dict[str, dict]) -> Path:
                     f"quant, not architecture")
 
     lines = ["# Model A/B — Gemma vs Qwen", "",
-             f"_Judge: `{a['judge_model']}` @ `{a['judge_base_url']}` "
-             f"(neutral, independent of both contestants)._", ""]
+             f"> **Judge:** `{a['judge_model']}` @ `{a['judge_base_url']}` — "
+             f"independent of BOTH contestants (neither model judges itself). "
+             f"Caveat: a small judge model is a **weaker discriminator** of "
+             f"larger-model (26B/35B) outputs; treat narrow score gaps as "
+             f"inconclusive.", ""]
     if hard:
         lines += ["> ⚠️ **A/B VALIDITY WARNING** — a non-model variable changed "
                   "between legs; the comparison may be invalid:"]
@@ -504,7 +559,13 @@ def build_report(run_dir: Path, manifests: dict[str, dict]) -> Path:
     for label, man in manifests.items():
         lines += [f"**{label}** (quant `{man.get('quant', '?')}`, "
                   f"gguf `{man['gguf_sha256_12']}`):",
-                  "```", man["served_command"], "```", ""]
+                  "```", man["served_command"], "```"]
+        dev = man.get("ctx_deviation")
+        if dev:
+            lines += [f"- ⚙️ **ctx deviation** from canonical: "
+                      f"`{dev.get('canonical')}` → `{dev.get('applied')}` "
+                      f"(reason: {dev.get('reason')})"]
+        lines += [""]
     report = run_dir / "AB_REPORT.md"
     report.write_text("\n".join(lines))
     LOG(f"comparison report -> {report}")
@@ -515,7 +576,8 @@ def build_report(run_dir: Path, manifests: dict[str, dict]) -> Path:
 # per-leg + main
 # ════════════════════════════════════════════════════════════════════════
 def eval_one(label: str, recipe: list[str], guard: ProductionGuard,
-             expect_modality: str, eval_config: Path, run_dir: Path, args) -> dict | None:
+             expect_modality: str, eval_config: Path, run_dir: Path, args,
+             ctx_deviation: dict | None = None) -> dict | None:
     if args.manual_serve:
         input(f"\n>>> Bring up the **{label}** server at {LLAMA_BASE}, then Enter…\n"
               f"    recipe: {' '.join(recipe)}\n")
@@ -544,7 +606,8 @@ def eval_one(label: str, recipe: list[str], guard: ProductionGuard,
             f"Use --force to override.")
 
     return write_manifest(label, recipe, props or {}, smoke_ok, scored_ok,
-                          results_path, eval_config, run_dir)
+                          results_path, eval_config, run_dir,
+                          ctx_deviation=ctx_deviation)
 
 
 def main():
@@ -567,11 +630,19 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
 
     canonical = read_live_execstart()
-    recipes = derive_recipes(canonical)
+    base_recipes = derive_recipes(canonical)
+    recipes: dict[str, list[str]] = {}
+    deviations: dict[str, dict | None] = {}
+    for label, base in base_recipes.items():
+        recipes[label], deviations[label] = apply_ctx_override(
+            base, LEG_CTX_OVERRIDE.get(label))
     eval_config = write_eval_config(run_dir)
-    LOG("Derived recipes from the LIVE unit:")
+    LOG("Derived recipes from the LIVE unit (per-leg ctx overrides applied):")
     for k, v in recipes.items():
-        LOG(f"  {k}: {' '.join(v)}")
+        dev = deviations[k]
+        note = (f"   [ctx {dev['canonical']}->{dev['applied']}: {dev['reason']}]"
+                if dev else "")
+        LOG(f"  {k}: {' '.join(v)}{note}")
     LOG(f"eval config (judge -> {JUDGE_MODEL} @ {JUDGE_BASE_URL}): {eval_config}")
 
     jp = judge_preflight()
@@ -602,7 +673,7 @@ def main():
     with ProductionGuard(manual=args.manual_serve) as guard:  # restore-on-exit
         for label, modality in legs:
             man = eval_one(label, recipes[label], guard, modality, eval_config,
-                           run_dir, args)
+                           run_dir, args, ctx_deviation=deviations[label])
             if man:
                 manifests[label] = man
 
