@@ -1,0 +1,303 @@
+# GENERATED dictwrap_specialist.generate_dictwrap_heldout(8)
+version: 1
+workspace: /tmp/prometheus-gym-harvest
+system_prompt: You are an assistant with access to tools. Use the appropriate tool
+  to carry out the request. Be concise.
+tasks:
+- id: ho_greppat_0000
+  prompt: Search the whole workspace for the pattern 'TODO'.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_greppat_0001
+  prompt: Search the whole workspace for the pattern 'FIXME'.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_greppat_0002
+  prompt: Search the whole workspace for the pattern 'import os'.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_greppat_0003
+  prompt: Search the whole workspace for the pattern 'def main'.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_greppat_0004
+  prompt: Search the whole workspace for the pattern 'API_KEY'.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_greppat_0005
+  prompt: Search the whole workspace for the pattern 'password'.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_greppat_0006
+  prompt: Search the whole workspace for the pattern 'raise ValueError'.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_greppat_0007
+  prompt: Search the whole workspace for the pattern 'async def'.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskget_0000
+  prompt: Get the full details of background task t-9f2a.
+  score:
+    expect_tool: task_get
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskget_0001
+  prompt: Get the full details of background task task-0042.
+  score:
+    expect_tool: task_get
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskget_0002
+  prompt: Get the full details of background task bg-7c31.
+  score:
+    expect_tool: task_get
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskget_0003
+  prompt: Get the full details of background task j-aa19.
+  score:
+    expect_tool: task_get
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskget_0004
+  prompt: Get the full details of background task t-5e80.
+  score:
+    expect_tool: task_get
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskget_0005
+  prompt: Get the full details of background task run-2b6d.
+  score:
+    expect_tool: task_get
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskget_0006
+  prompt: Get the full details of background task task-118c.
+  score:
+    expect_tool: task_get
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskget_0007
+  prompt: Get the full details of background task t-d4f0.
+  score:
+    expect_tool: task_get
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_cron_0000
+  prompt: 'Create a cron job named ''nightly-backup'' on schedule ''0 3 * * *'' that
+    runs: tar -czf /backup/db.tgz /data'
+  stub_tools:
+  - cron_create
+  score:
+    expect_tool: cron_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_cron_0001
+  prompt: 'Create a cron job named ''log-rotate'' on schedule ''0 3 * * *'' that runs:
+    rotate /var/log/app.log'
+  stub_tools:
+  - cron_create
+  score:
+    expect_tool: cron_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_cron_0002
+  prompt: 'Create a cron job named ''metrics-flush'' on schedule ''0 3 * * *'' that
+    runs: curl -X POST localhost:9000/flush'
+  stub_tools:
+  - cron_create
+  score:
+    expect_tool: cron_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_cron_0003
+  prompt: 'Create a cron job named ''cache-purge'' on schedule ''0 3 * * *'' that
+    runs: redis-cli FLUSHDB'
+  stub_tools:
+  - cron_create
+  score:
+    expect_tool: cron_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_cron_0004
+  prompt: 'Create a cron job named ''health-ping'' on schedule ''0 3 * * *'' that
+    runs: curl -sf localhost:8080/health'
+  stub_tools:
+  - cron_create
+  score:
+    expect_tool: cron_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_cron_0005
+  prompt: 'Create a cron job named ''cert-renew'' on schedule ''0 3 * * *'' that runs:
+    certbot renew --quiet'
+  stub_tools:
+  - cron_create
+  score:
+    expect_tool: cron_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_cron_0006
+  prompt: 'Create a cron job named ''digest-mail'' on schedule ''0 3 * * *'' that
+    runs: python send_digest.py'
+  stub_tools:
+  - cron_create
+  score:
+    expect_tool: cron_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_cron_0007
+  prompt: 'Create a cron job named ''index-rebuild'' on schedule ''0 3 * * *'' that
+    runs: python reindex.py'
+  stub_tools:
+  - cron_create
+  score:
+    expect_tool: cron_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_dl_0000
+  prompt: Download the file at https://example.com/data/report.pdf.
+  stub_tools:
+  - download_file
+  score:
+    expect_tool: download_file
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_dl_0001
+  prompt: Download the file at https://cdn.site.net/assets/model.bin.
+  stub_tools:
+  - download_file
+  score:
+    expect_tool: download_file
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_dl_0002
+  prompt: Download the file at https://api.dev/v1/export.csv.
+  stub_tools:
+  - download_file
+  score:
+    expect_tool: download_file
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_dl_0003
+  prompt: Download the file at https://files.org/archive.tar.gz.
+  stub_tools:
+  - download_file
+  score:
+    expect_tool: download_file
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_dl_0004
+  prompt: Download the file at https://repo.io/releases/v2.tgz.
+  stub_tools:
+  - download_file
+  score:
+    expect_tool: download_file
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_dl_0005
+  prompt: Download the file at https://docs.site/spec.json.
+  stub_tools:
+  - download_file
+  score:
+    expect_tool: download_file
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_dl_0006
+  prompt: Download the file at https://mirror.net/iso/boot.img.
+  stub_tools:
+  - download_file
+  score:
+    expect_tool: download_file
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_dl_0007
+  prompt: Download the file at https://hub.dev/pkg/wheel.whl.
+  stub_tools:
+  - download_file
+  score:
+    expect_tool: download_file
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskupd_0000
+  prompt: 'Update background task t-7700: set its status note to ''blocked on review''.'
+  stub_tools:
+  - task_update
+  score:
+    expect_tool: task_update
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskupd_0001
+  prompt: 'Update background task t-7701: set its status note to ''waiting for QA''.'
+  stub_tools:
+  - task_update
+  score:
+    expect_tool: task_update
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskupd_0002
+  prompt: 'Update background task t-7702: set its status note to ''merged to staging''.'
+  stub_tools:
+  - task_update
+  score:
+    expect_tool: task_update
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskupd_0003
+  prompt: 'Update background task t-7703: set its status note to ''rolled back''.'
+  stub_tools:
+  - task_update
+  score:
+    expect_tool: task_update
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskupd_0004
+  prompt: 'Update background task t-7704: set its status note to ''pending data backfill''.'
+  stub_tools:
+  - task_update
+  score:
+    expect_tool: task_update
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskupd_0005
+  prompt: 'Update background task t-7705: set its status note to ''escalated to oncall''.'
+  stub_tools:
+  - task_update
+  score:
+    expect_tool: task_update
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskupd_0006
+  prompt: 'Update background task t-7706: set its status note to ''deferred to next
+    sprint''.'
+  stub_tools:
+  - task_update
+  score:
+    expect_tool: task_update
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: ho_taskupd_0007
+  prompt: 'Update background task t-7707: set its status note to ''done, verifying''.'
+  stub_tools:
+  - task_update
+  score:
+    expect_tool: task_update
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap

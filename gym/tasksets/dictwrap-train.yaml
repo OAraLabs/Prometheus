@@ -1,0 +1,3964 @@
+# GENERATED dictwrap_specialist.generate_dictwrap_train(250)
+version: 1
+workspace: /tmp/prometheus-gym-harvest
+system_prompt: You are an assistant with access to tools. Use the appropriate tool
+  to carry out the request. Be concise.
+tasks:
+- id: tr_cmd_0000
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    report.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0001
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    /var/log/app.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0002
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    data.csv'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0003
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    *.py'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0004
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    results/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0005
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    build.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0006
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    notes.md'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0007
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    config.yaml'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0008
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    metrics.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0009
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    out.tmp'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0010
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    backup.tar'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0011
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    index.html'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0012
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    schema.sql'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0013
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    errors.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0014
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    tmp/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0015
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    cache/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0016
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    dump.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0017
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    audit.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0018
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    staging.env'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0019
+  prompt: 'Create a background task that runs this exact shell command: sleep 1 &&
+    release.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0020
+  prompt: 'Create a background task that runs this exact shell command: echo report.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0021
+  prompt: 'Create a background task that runs this exact shell command: echo /var/log/app.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0022
+  prompt: 'Create a background task that runs this exact shell command: echo data.csv'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0023
+  prompt: 'Create a background task that runs this exact shell command: echo *.py'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0024
+  prompt: 'Create a background task that runs this exact shell command: echo results/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0025
+  prompt: 'Create a background task that runs this exact shell command: echo build.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0026
+  prompt: 'Create a background task that runs this exact shell command: echo notes.md'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0027
+  prompt: 'Create a background task that runs this exact shell command: echo config.yaml'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0028
+  prompt: 'Create a background task that runs this exact shell command: echo metrics.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0029
+  prompt: 'Create a background task that runs this exact shell command: echo out.tmp'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0030
+  prompt: 'Create a background task that runs this exact shell command: echo backup.tar'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0031
+  prompt: 'Create a background task that runs this exact shell command: echo index.html'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0032
+  prompt: 'Create a background task that runs this exact shell command: echo schema.sql'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0033
+  prompt: 'Create a background task that runs this exact shell command: echo errors.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0034
+  prompt: 'Create a background task that runs this exact shell command: echo tmp/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0035
+  prompt: 'Create a background task that runs this exact shell command: echo cache/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0036
+  prompt: 'Create a background task that runs this exact shell command: echo dump.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0037
+  prompt: 'Create a background task that runs this exact shell command: echo audit.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0038
+  prompt: 'Create a background task that runs this exact shell command: echo staging.env'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0039
+  prompt: 'Create a background task that runs this exact shell command: echo release.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0040
+  prompt: 'Create a background task that runs this exact shell command: ls -la report.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0041
+  prompt: 'Create a background task that runs this exact shell command: ls -la /var/log/app.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0042
+  prompt: 'Create a background task that runs this exact shell command: ls -la data.csv'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0043
+  prompt: 'Create a background task that runs this exact shell command: ls -la *.py'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0044
+  prompt: 'Create a background task that runs this exact shell command: ls -la results/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0045
+  prompt: 'Create a background task that runs this exact shell command: ls -la build.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0046
+  prompt: 'Create a background task that runs this exact shell command: ls -la notes.md'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0047
+  prompt: 'Create a background task that runs this exact shell command: ls -la config.yaml'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0048
+  prompt: 'Create a background task that runs this exact shell command: ls -la metrics.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0049
+  prompt: 'Create a background task that runs this exact shell command: ls -la out.tmp'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0050
+  prompt: 'Create a background task that runs this exact shell command: ls -la backup.tar'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0051
+  prompt: 'Create a background task that runs this exact shell command: ls -la index.html'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0052
+  prompt: 'Create a background task that runs this exact shell command: ls -la schema.sql'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0053
+  prompt: 'Create a background task that runs this exact shell command: ls -la errors.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0054
+  prompt: 'Create a background task that runs this exact shell command: ls -la tmp/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0055
+  prompt: 'Create a background task that runs this exact shell command: ls -la cache/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0056
+  prompt: 'Create a background task that runs this exact shell command: ls -la dump.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0057
+  prompt: 'Create a background task that runs this exact shell command: ls -la audit.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0058
+  prompt: 'Create a background task that runs this exact shell command: ls -la staging.env'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0059
+  prompt: 'Create a background task that runs this exact shell command: ls -la release.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0060
+  prompt: 'Create a background task that runs this exact shell command: cat report.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0061
+  prompt: 'Create a background task that runs this exact shell command: cat /var/log/app.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0062
+  prompt: 'Create a background task that runs this exact shell command: cat data.csv'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0063
+  prompt: 'Create a background task that runs this exact shell command: cat *.py'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0064
+  prompt: 'Create a background task that runs this exact shell command: cat results/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0065
+  prompt: 'Create a background task that runs this exact shell command: cat build.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0066
+  prompt: 'Create a background task that runs this exact shell command: cat notes.md'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0067
+  prompt: 'Create a background task that runs this exact shell command: cat config.yaml'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0068
+  prompt: 'Create a background task that runs this exact shell command: cat metrics.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0069
+  prompt: 'Create a background task that runs this exact shell command: cat out.tmp'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0070
+  prompt: 'Create a background task that runs this exact shell command: cat backup.tar'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0071
+  prompt: 'Create a background task that runs this exact shell command: cat index.html'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0072
+  prompt: 'Create a background task that runs this exact shell command: cat schema.sql'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0073
+  prompt: 'Create a background task that runs this exact shell command: cat errors.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0074
+  prompt: 'Create a background task that runs this exact shell command: cat tmp/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0075
+  prompt: 'Create a background task that runs this exact shell command: cat cache/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0076
+  prompt: 'Create a background task that runs this exact shell command: cat dump.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0077
+  prompt: 'Create a background task that runs this exact shell command: cat audit.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0078
+  prompt: 'Create a background task that runs this exact shell command: cat staging.env'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0079
+  prompt: 'Create a background task that runs this exact shell command: cat release.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0080
+  prompt: 'Create a background task that runs this exact shell command: wc -l report.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0081
+  prompt: 'Create a background task that runs this exact shell command: wc -l /var/log/app.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0082
+  prompt: 'Create a background task that runs this exact shell command: wc -l data.csv'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0083
+  prompt: 'Create a background task that runs this exact shell command: wc -l *.py'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0084
+  prompt: 'Create a background task that runs this exact shell command: wc -l results/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0085
+  prompt: 'Create a background task that runs this exact shell command: wc -l build.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0086
+  prompt: 'Create a background task that runs this exact shell command: wc -l notes.md'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0087
+  prompt: 'Create a background task that runs this exact shell command: wc -l config.yaml'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0088
+  prompt: 'Create a background task that runs this exact shell command: wc -l metrics.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0089
+  prompt: 'Create a background task that runs this exact shell command: wc -l out.tmp'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0090
+  prompt: 'Create a background task that runs this exact shell command: wc -l backup.tar'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0091
+  prompt: 'Create a background task that runs this exact shell command: wc -l index.html'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0092
+  prompt: 'Create a background task that runs this exact shell command: wc -l schema.sql'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0093
+  prompt: 'Create a background task that runs this exact shell command: wc -l errors.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0094
+  prompt: 'Create a background task that runs this exact shell command: wc -l tmp/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0095
+  prompt: 'Create a background task that runs this exact shell command: wc -l cache/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0096
+  prompt: 'Create a background task that runs this exact shell command: wc -l dump.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0097
+  prompt: 'Create a background task that runs this exact shell command: wc -l audit.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0098
+  prompt: 'Create a background task that runs this exact shell command: wc -l staging.env'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0099
+  prompt: 'Create a background task that runs this exact shell command: wc -l release.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0100
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    report.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0101
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    /var/log/app.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0102
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    data.csv'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0103
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    *.py'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0104
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    results/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0105
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    build.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0106
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    notes.md'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0107
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    config.yaml'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0108
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    metrics.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0109
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    out.tmp'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0110
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    backup.tar'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0111
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    index.html'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0112
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    schema.sql'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0113
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    errors.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0114
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    tmp/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0115
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    cache/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0116
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    dump.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0117
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    audit.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0118
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    staging.env'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0119
+  prompt: 'Create a background task that runs this exact shell command: head -n 5
+    release.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0120
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    report.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0121
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    /var/log/app.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0122
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    data.csv'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0123
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    *.py'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0124
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    results/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0125
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    build.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0126
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    notes.md'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0127
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    config.yaml'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0128
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    metrics.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0129
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    out.tmp'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0130
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    backup.tar'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0131
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    index.html'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0132
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    schema.sql'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0133
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    errors.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0134
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    tmp/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0135
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    cache/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0136
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    dump.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0137
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    audit.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0138
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    staging.env'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0139
+  prompt: 'Create a background task that runs this exact shell command: tail -n 5
+    release.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0140
+  prompt: 'Create a background task that runs this exact shell command: sort report.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0141
+  prompt: 'Create a background task that runs this exact shell command: sort /var/log/app.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0142
+  prompt: 'Create a background task that runs this exact shell command: sort data.csv'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0143
+  prompt: 'Create a background task that runs this exact shell command: sort *.py'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0144
+  prompt: 'Create a background task that runs this exact shell command: sort results/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0145
+  prompt: 'Create a background task that runs this exact shell command: sort build.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0146
+  prompt: 'Create a background task that runs this exact shell command: sort notes.md'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0147
+  prompt: 'Create a background task that runs this exact shell command: sort config.yaml'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0148
+  prompt: 'Create a background task that runs this exact shell command: sort metrics.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0149
+  prompt: 'Create a background task that runs this exact shell command: sort out.tmp'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0150
+  prompt: 'Create a background task that runs this exact shell command: sort backup.tar'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0151
+  prompt: 'Create a background task that runs this exact shell command: sort index.html'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0152
+  prompt: 'Create a background task that runs this exact shell command: sort schema.sql'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0153
+  prompt: 'Create a background task that runs this exact shell command: sort errors.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0154
+  prompt: 'Create a background task that runs this exact shell command: sort tmp/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0155
+  prompt: 'Create a background task that runs this exact shell command: sort cache/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0156
+  prompt: 'Create a background task that runs this exact shell command: sort dump.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0157
+  prompt: 'Create a background task that runs this exact shell command: sort audit.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0158
+  prompt: 'Create a background task that runs this exact shell command: sort staging.env'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0159
+  prompt: 'Create a background task that runs this exact shell command: sort release.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0160
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    report.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0161
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    /var/log/app.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0162
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    data.csv'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0163
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    *.py'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0164
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    results/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0165
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    build.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0166
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    notes.md'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0167
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    config.yaml'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0168
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    metrics.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0169
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    out.tmp'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0170
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    backup.tar'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0171
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    index.html'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0172
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    schema.sql'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0173
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    errors.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0174
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    tmp/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0175
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    cache/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0176
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    dump.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0177
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    audit.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0178
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    staging.env'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0179
+  prompt: 'Create a background task that runs this exact shell command: grep -c TODO
+    release.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0180
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    report.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0181
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    /var/log/app.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0182
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    data.csv'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0183
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    *.py'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0184
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    results/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0185
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    build.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0186
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    notes.md'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0187
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    config.yaml'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0188
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    metrics.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0189
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    out.tmp'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0190
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    backup.tar'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0191
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    index.html'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0192
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    schema.sql'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0193
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    errors.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0194
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    tmp/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0195
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    cache/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0196
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    dump.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0197
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    audit.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0198
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    staging.env'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0199
+  prompt: 'Create a background task that runs this exact shell command: find . -name
+    release.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0200
+  prompt: 'Create a background task that runs this exact shell command: du -sh report.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0201
+  prompt: 'Create a background task that runs this exact shell command: du -sh /var/log/app.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0202
+  prompt: 'Create a background task that runs this exact shell command: du -sh data.csv'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0203
+  prompt: 'Create a background task that runs this exact shell command: du -sh *.py'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0204
+  prompt: 'Create a background task that runs this exact shell command: du -sh results/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0205
+  prompt: 'Create a background task that runs this exact shell command: du -sh build.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0206
+  prompt: 'Create a background task that runs this exact shell command: du -sh notes.md'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0207
+  prompt: 'Create a background task that runs this exact shell command: du -sh config.yaml'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0208
+  prompt: 'Create a background task that runs this exact shell command: du -sh metrics.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0209
+  prompt: 'Create a background task that runs this exact shell command: du -sh out.tmp'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0210
+  prompt: 'Create a background task that runs this exact shell command: du -sh backup.tar'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0211
+  prompt: 'Create a background task that runs this exact shell command: du -sh index.html'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0212
+  prompt: 'Create a background task that runs this exact shell command: du -sh schema.sql'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0213
+  prompt: 'Create a background task that runs this exact shell command: du -sh errors.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0214
+  prompt: 'Create a background task that runs this exact shell command: du -sh tmp/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0215
+  prompt: 'Create a background task that runs this exact shell command: du -sh cache/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0216
+  prompt: 'Create a background task that runs this exact shell command: du -sh dump.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0217
+  prompt: 'Create a background task that runs this exact shell command: du -sh audit.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0218
+  prompt: 'Create a background task that runs this exact shell command: du -sh staging.env'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0219
+  prompt: 'Create a background task that runs this exact shell command: du -sh release.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0220
+  prompt: 'Create a background task that runs this exact shell command: stat report.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0221
+  prompt: 'Create a background task that runs this exact shell command: stat /var/log/app.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0222
+  prompt: 'Create a background task that runs this exact shell command: stat data.csv'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0223
+  prompt: 'Create a background task that runs this exact shell command: stat *.py'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0224
+  prompt: 'Create a background task that runs this exact shell command: stat results/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0225
+  prompt: 'Create a background task that runs this exact shell command: stat build.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0226
+  prompt: 'Create a background task that runs this exact shell command: stat notes.md'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0227
+  prompt: 'Create a background task that runs this exact shell command: stat config.yaml'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0228
+  prompt: 'Create a background task that runs this exact shell command: stat metrics.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0229
+  prompt: 'Create a background task that runs this exact shell command: stat out.tmp'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0230
+  prompt: 'Create a background task that runs this exact shell command: stat backup.tar'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0231
+  prompt: 'Create a background task that runs this exact shell command: stat index.html'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0232
+  prompt: 'Create a background task that runs this exact shell command: stat schema.sql'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0233
+  prompt: 'Create a background task that runs this exact shell command: stat errors.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0234
+  prompt: 'Create a background task that runs this exact shell command: stat tmp/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0235
+  prompt: 'Create a background task that runs this exact shell command: stat cache/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0236
+  prompt: 'Create a background task that runs this exact shell command: stat dump.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0237
+  prompt: 'Create a background task that runs this exact shell command: stat audit.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0238
+  prompt: 'Create a background task that runs this exact shell command: stat staging.env'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0239
+  prompt: 'Create a background task that runs this exact shell command: stat release.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0240
+  prompt: 'Create a background task that runs this exact shell command: md5sum report.txt'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0241
+  prompt: 'Create a background task that runs this exact shell command: md5sum /var/log/app.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0242
+  prompt: 'Create a background task that runs this exact shell command: md5sum data.csv'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0243
+  prompt: 'Create a background task that runs this exact shell command: md5sum *.py'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0244
+  prompt: 'Create a background task that runs this exact shell command: md5sum results/'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0245
+  prompt: 'Create a background task that runs this exact shell command: md5sum build.log'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0246
+  prompt: 'Create a background task that runs this exact shell command: md5sum notes.md'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0247
+  prompt: 'Create a background task that runs this exact shell command: md5sum config.yaml'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0248
+  prompt: 'Create a background task that runs this exact shell command: md5sum metrics.json'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_cmd_0249
+  prompt: 'Create a background task that runs this exact shell command: md5sum out.tmp'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0000
+  prompt: Search for the pattern 'TODO' under the directory /tmp/proj/src and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0001
+  prompt: Search for the pattern 'TODO' under the directory /var/log and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0002
+  prompt: Search for the pattern 'TODO' under the directory /etc/app and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0003
+  prompt: Search for the pattern 'TODO' under the directory /home/user/code and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0004
+  prompt: Search for the pattern 'TODO' under the directory /opt/service and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0005
+  prompt: Search for the pattern 'TODO' under the directory /srv/www and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0006
+  prompt: Search for the pattern 'TODO' under the directory /data/in and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0007
+  prompt: Search for the pattern 'TODO' under the directory /workspace/lib and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0008
+  prompt: Search for the pattern 'TODO' under the directory /usr/local/share and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0009
+  prompt: Search for the pattern 'TODO' under the directory /mnt/repo and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0010
+  prompt: Search for the pattern 'TODO' under the directory /srv/api and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0011
+  prompt: Search for the pattern 'TODO' under the directory /home/dev/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0012
+  prompt: Search for the pattern 'TODO' under the directory /var/lib/svc and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0013
+  prompt: Search for the pattern 'TODO' under the directory /opt/bin and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0014
+  prompt: Search for the pattern 'TODO' under the directory /data/out and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0015
+  prompt: Search for the pattern 'FIXME' under the directory /tmp/proj/src and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0016
+  prompt: Search for the pattern 'FIXME' under the directory /var/log and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0017
+  prompt: Search for the pattern 'FIXME' under the directory /etc/app and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0018
+  prompt: Search for the pattern 'FIXME' under the directory /home/user/code and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0019
+  prompt: Search for the pattern 'FIXME' under the directory /opt/service and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0020
+  prompt: Search for the pattern 'FIXME' under the directory /srv/www and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0021
+  prompt: Search for the pattern 'FIXME' under the directory /data/in and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0022
+  prompt: Search for the pattern 'FIXME' under the directory /workspace/lib and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0023
+  prompt: Search for the pattern 'FIXME' under the directory /usr/local/share and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0024
+  prompt: Search for the pattern 'FIXME' under the directory /mnt/repo and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0025
+  prompt: Search for the pattern 'FIXME' under the directory /srv/api and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0026
+  prompt: Search for the pattern 'FIXME' under the directory /home/dev/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0027
+  prompt: Search for the pattern 'FIXME' under the directory /var/lib/svc and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0028
+  prompt: Search for the pattern 'FIXME' under the directory /opt/bin and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0029
+  prompt: Search for the pattern 'FIXME' under the directory /data/out and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0030
+  prompt: Search for the pattern 'import os' under the directory /tmp/proj/src and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0031
+  prompt: Search for the pattern 'import os' under the directory /var/log and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0032
+  prompt: Search for the pattern 'import os' under the directory /etc/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0033
+  prompt: Search for the pattern 'import os' under the directory /home/user/code and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0034
+  prompt: Search for the pattern 'import os' under the directory /opt/service and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0035
+  prompt: Search for the pattern 'import os' under the directory /srv/www and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0036
+  prompt: Search for the pattern 'import os' under the directory /data/in and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0037
+  prompt: Search for the pattern 'import os' under the directory /workspace/lib and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0038
+  prompt: Search for the pattern 'import os' under the directory /usr/local/share
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0039
+  prompt: Search for the pattern 'import os' under the directory /mnt/repo and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0040
+  prompt: Search for the pattern 'import os' under the directory /srv/api and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0041
+  prompt: Search for the pattern 'import os' under the directory /home/dev/app and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0042
+  prompt: Search for the pattern 'import os' under the directory /var/lib/svc and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0043
+  prompt: Search for the pattern 'import os' under the directory /opt/bin and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0044
+  prompt: Search for the pattern 'import os' under the directory /data/out and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0045
+  prompt: Search for the pattern 'def main' under the directory /tmp/proj/src and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0046
+  prompt: Search for the pattern 'def main' under the directory /var/log and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0047
+  prompt: Search for the pattern 'def main' under the directory /etc/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0048
+  prompt: Search for the pattern 'def main' under the directory /home/user/code and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0049
+  prompt: Search for the pattern 'def main' under the directory /opt/service and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0050
+  prompt: Search for the pattern 'def main' under the directory /srv/www and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0051
+  prompt: Search for the pattern 'def main' under the directory /data/in and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0052
+  prompt: Search for the pattern 'def main' under the directory /workspace/lib and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0053
+  prompt: Search for the pattern 'def main' under the directory /usr/local/share and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0054
+  prompt: Search for the pattern 'def main' under the directory /mnt/repo and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0055
+  prompt: Search for the pattern 'def main' under the directory /srv/api and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0056
+  prompt: Search for the pattern 'def main' under the directory /home/dev/app and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0057
+  prompt: Search for the pattern 'def main' under the directory /var/lib/svc and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0058
+  prompt: Search for the pattern 'def main' under the directory /opt/bin and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0059
+  prompt: Search for the pattern 'def main' under the directory /data/out and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0060
+  prompt: Search for the pattern 'API_KEY' under the directory /tmp/proj/src and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0061
+  prompt: Search for the pattern 'API_KEY' under the directory /var/log and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0062
+  prompt: Search for the pattern 'API_KEY' under the directory /etc/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0063
+  prompt: Search for the pattern 'API_KEY' under the directory /home/user/code and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0064
+  prompt: Search for the pattern 'API_KEY' under the directory /opt/service and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0065
+  prompt: Search for the pattern 'API_KEY' under the directory /srv/www and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0066
+  prompt: Search for the pattern 'API_KEY' under the directory /data/in and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0067
+  prompt: Search for the pattern 'API_KEY' under the directory /workspace/lib and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0068
+  prompt: Search for the pattern 'API_KEY' under the directory /usr/local/share and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0069
+  prompt: Search for the pattern 'API_KEY' under the directory /mnt/repo and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0070
+  prompt: Search for the pattern 'API_KEY' under the directory /srv/api and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0071
+  prompt: Search for the pattern 'API_KEY' under the directory /home/dev/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0072
+  prompt: Search for the pattern 'API_KEY' under the directory /var/lib/svc and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0073
+  prompt: Search for the pattern 'API_KEY' under the directory /opt/bin and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0074
+  prompt: Search for the pattern 'API_KEY' under the directory /data/out and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0075
+  prompt: Search for the pattern 'password' under the directory /tmp/proj/src and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0076
+  prompt: Search for the pattern 'password' under the directory /var/log and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0077
+  prompt: Search for the pattern 'password' under the directory /etc/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0078
+  prompt: Search for the pattern 'password' under the directory /home/user/code and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0079
+  prompt: Search for the pattern 'password' under the directory /opt/service and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0080
+  prompt: Search for the pattern 'password' under the directory /srv/www and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0081
+  prompt: Search for the pattern 'password' under the directory /data/in and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0082
+  prompt: Search for the pattern 'password' under the directory /workspace/lib and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0083
+  prompt: Search for the pattern 'password' under the directory /usr/local/share and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0084
+  prompt: Search for the pattern 'password' under the directory /mnt/repo and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0085
+  prompt: Search for the pattern 'password' under the directory /srv/api and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0086
+  prompt: Search for the pattern 'password' under the directory /home/dev/app and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0087
+  prompt: Search for the pattern 'password' under the directory /var/lib/svc and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0088
+  prompt: Search for the pattern 'password' under the directory /opt/bin and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0089
+  prompt: Search for the pattern 'password' under the directory /data/out and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0090
+  prompt: Search for the pattern 'raise ValueError' under the directory /tmp/proj/src
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0091
+  prompt: Search for the pattern 'raise ValueError' under the directory /var/log and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0092
+  prompt: Search for the pattern 'raise ValueError' under the directory /etc/app and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0093
+  prompt: Search for the pattern 'raise ValueError' under the directory /home/user/code
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0094
+  prompt: Search for the pattern 'raise ValueError' under the directory /opt/service
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0095
+  prompt: Search for the pattern 'raise ValueError' under the directory /srv/www and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0096
+  prompt: Search for the pattern 'raise ValueError' under the directory /data/in and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0097
+  prompt: Search for the pattern 'raise ValueError' under the directory /workspace/lib
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0098
+  prompt: Search for the pattern 'raise ValueError' under the directory /usr/local/share
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0099
+  prompt: Search for the pattern 'raise ValueError' under the directory /mnt/repo
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0100
+  prompt: Search for the pattern 'raise ValueError' under the directory /srv/api and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0101
+  prompt: Search for the pattern 'raise ValueError' under the directory /home/dev/app
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0102
+  prompt: Search for the pattern 'raise ValueError' under the directory /var/lib/svc
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0103
+  prompt: Search for the pattern 'raise ValueError' under the directory /opt/bin and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0104
+  prompt: Search for the pattern 'raise ValueError' under the directory /data/out
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0105
+  prompt: Search for the pattern 'async def' under the directory /tmp/proj/src and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0106
+  prompt: Search for the pattern 'async def' under the directory /var/log and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0107
+  prompt: Search for the pattern 'async def' under the directory /etc/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0108
+  prompt: Search for the pattern 'async def' under the directory /home/user/code and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0109
+  prompt: Search for the pattern 'async def' under the directory /opt/service and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0110
+  prompt: Search for the pattern 'async def' under the directory /srv/www and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0111
+  prompt: Search for the pattern 'async def' under the directory /data/in and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0112
+  prompt: Search for the pattern 'async def' under the directory /workspace/lib and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0113
+  prompt: Search for the pattern 'async def' under the directory /usr/local/share
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0114
+  prompt: Search for the pattern 'async def' under the directory /mnt/repo and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0115
+  prompt: Search for the pattern 'async def' under the directory /srv/api and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0116
+  prompt: Search for the pattern 'async def' under the directory /home/dev/app and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0117
+  prompt: Search for the pattern 'async def' under the directory /var/lib/svc and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0118
+  prompt: Search for the pattern 'async def' under the directory /opt/bin and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0119
+  prompt: Search for the pattern 'async def' under the directory /data/out and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0120
+  prompt: Search for the pattern 'NotImplemented' under the directory /tmp/proj/src
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0121
+  prompt: Search for the pattern 'NotImplemented' under the directory /var/log and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0122
+  prompt: Search for the pattern 'NotImplemented' under the directory /etc/app and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0123
+  prompt: Search for the pattern 'NotImplemented' under the directory /home/user/code
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0124
+  prompt: Search for the pattern 'NotImplemented' under the directory /opt/service
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0125
+  prompt: Search for the pattern 'NotImplemented' under the directory /srv/www and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0126
+  prompt: Search for the pattern 'NotImplemented' under the directory /data/in and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0127
+  prompt: Search for the pattern 'NotImplemented' under the directory /workspace/lib
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0128
+  prompt: Search for the pattern 'NotImplemented' under the directory /usr/local/share
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0129
+  prompt: Search for the pattern 'NotImplemented' under the directory /mnt/repo and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0130
+  prompt: Search for the pattern 'NotImplemented' under the directory /srv/api and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0131
+  prompt: Search for the pattern 'NotImplemented' under the directory /home/dev/app
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0132
+  prompt: Search for the pattern 'NotImplemented' under the directory /var/lib/svc
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0133
+  prompt: Search for the pattern 'NotImplemented' under the directory /opt/bin and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0134
+  prompt: Search for the pattern 'NotImplemented' under the directory /data/out and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0135
+  prompt: Search for the pattern 'deprecated' under the directory /tmp/proj/src and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0136
+  prompt: Search for the pattern 'deprecated' under the directory /var/log and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0137
+  prompt: Search for the pattern 'deprecated' under the directory /etc/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0138
+  prompt: Search for the pattern 'deprecated' under the directory /home/user/code
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0139
+  prompt: Search for the pattern 'deprecated' under the directory /opt/service and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0140
+  prompt: Search for the pattern 'deprecated' under the directory /srv/www and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0141
+  prompt: Search for the pattern 'deprecated' under the directory /data/in and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0142
+  prompt: Search for the pattern 'deprecated' under the directory /workspace/lib and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0143
+  prompt: Search for the pattern 'deprecated' under the directory /usr/local/share
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0144
+  prompt: Search for the pattern 'deprecated' under the directory /mnt/repo and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0145
+  prompt: Search for the pattern 'deprecated' under the directory /srv/api and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0146
+  prompt: Search for the pattern 'deprecated' under the directory /home/dev/app and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0147
+  prompt: Search for the pattern 'deprecated' under the directory /var/lib/svc and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0148
+  prompt: Search for the pattern 'deprecated' under the directory /opt/bin and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0149
+  prompt: Search for the pattern 'deprecated' under the directory /data/out and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0150
+  prompt: Search for the pattern 'XXX' under the directory /tmp/proj/src and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0151
+  prompt: Search for the pattern 'XXX' under the directory /var/log and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0152
+  prompt: Search for the pattern 'XXX' under the directory /etc/app and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0153
+  prompt: Search for the pattern 'XXX' under the directory /home/user/code and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0154
+  prompt: Search for the pattern 'XXX' under the directory /opt/service and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0155
+  prompt: Search for the pattern 'XXX' under the directory /srv/www and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0156
+  prompt: Search for the pattern 'XXX' under the directory /data/in and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0157
+  prompt: Search for the pattern 'XXX' under the directory /workspace/lib and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0158
+  prompt: Search for the pattern 'XXX' under the directory /usr/local/share and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0159
+  prompt: Search for the pattern 'XXX' under the directory /mnt/repo and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0160
+  prompt: Search for the pattern 'XXX' under the directory /srv/api and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0161
+  prompt: Search for the pattern 'XXX' under the directory /home/dev/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0162
+  prompt: Search for the pattern 'XXX' under the directory /var/lib/svc and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0163
+  prompt: Search for the pattern 'XXX' under the directory /opt/bin and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0164
+  prompt: Search for the pattern 'XXX' under the directory /data/out and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0165
+  prompt: Search for the pattern 'HACK' under the directory /tmp/proj/src and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0166
+  prompt: Search for the pattern 'HACK' under the directory /var/log and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0167
+  prompt: Search for the pattern 'HACK' under the directory /etc/app and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0168
+  prompt: Search for the pattern 'HACK' under the directory /home/user/code and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0169
+  prompt: Search for the pattern 'HACK' under the directory /opt/service and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0170
+  prompt: Search for the pattern 'HACK' under the directory /srv/www and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0171
+  prompt: Search for the pattern 'HACK' under the directory /data/in and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0172
+  prompt: Search for the pattern 'HACK' under the directory /workspace/lib and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0173
+  prompt: Search for the pattern 'HACK' under the directory /usr/local/share and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0174
+  prompt: Search for the pattern 'HACK' under the directory /mnt/repo and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0175
+  prompt: Search for the pattern 'HACK' under the directory /srv/api and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0176
+  prompt: Search for the pattern 'HACK' under the directory /home/dev/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0177
+  prompt: Search for the pattern 'HACK' under the directory /var/lib/svc and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0178
+  prompt: Search for the pattern 'HACK' under the directory /opt/bin and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0179
+  prompt: Search for the pattern 'HACK' under the directory /data/out and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0180
+  prompt: Search for the pattern 'BUG' under the directory /tmp/proj/src and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0181
+  prompt: Search for the pattern 'BUG' under the directory /var/log and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0182
+  prompt: Search for the pattern 'BUG' under the directory /etc/app and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0183
+  prompt: Search for the pattern 'BUG' under the directory /home/user/code and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0184
+  prompt: Search for the pattern 'BUG' under the directory /opt/service and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0185
+  prompt: Search for the pattern 'BUG' under the directory /srv/www and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0186
+  prompt: Search for the pattern 'BUG' under the directory /data/in and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0187
+  prompt: Search for the pattern 'BUG' under the directory /workspace/lib and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0188
+  prompt: Search for the pattern 'BUG' under the directory /usr/local/share and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0189
+  prompt: Search for the pattern 'BUG' under the directory /mnt/repo and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0190
+  prompt: Search for the pattern 'BUG' under the directory /srv/api and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0191
+  prompt: Search for the pattern 'BUG' under the directory /home/dev/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0192
+  prompt: Search for the pattern 'BUG' under the directory /var/lib/svc and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0193
+  prompt: Search for the pattern 'BUG' under the directory /opt/bin and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0194
+  prompt: Search for the pattern 'BUG' under the directory /data/out and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0195
+  prompt: Search for the pattern 'secret' under the directory /tmp/proj/src and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0196
+  prompt: Search for the pattern 'secret' under the directory /var/log and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0197
+  prompt: Search for the pattern 'secret' under the directory /etc/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0198
+  prompt: Search for the pattern 'secret' under the directory /home/user/code and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0199
+  prompt: Search for the pattern 'secret' under the directory /opt/service and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0200
+  prompt: Search for the pattern 'secret' under the directory /srv/www and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0201
+  prompt: Search for the pattern 'secret' under the directory /data/in and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0202
+  prompt: Search for the pattern 'secret' under the directory /workspace/lib and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0203
+  prompt: Search for the pattern 'secret' under the directory /usr/local/share and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0204
+  prompt: Search for the pattern 'secret' under the directory /mnt/repo and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0205
+  prompt: Search for the pattern 'secret' under the directory /srv/api and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0206
+  prompt: Search for the pattern 'secret' under the directory /home/dev/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0207
+  prompt: Search for the pattern 'secret' under the directory /var/lib/svc and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0208
+  prompt: Search for the pattern 'secret' under the directory /opt/bin and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0209
+  prompt: Search for the pattern 'secret' under the directory /data/out and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0210
+  prompt: Search for the pattern 'localhost' under the directory /tmp/proj/src and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0211
+  prompt: Search for the pattern 'localhost' under the directory /var/log and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0212
+  prompt: Search for the pattern 'localhost' under the directory /etc/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0213
+  prompt: Search for the pattern 'localhost' under the directory /home/user/code and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0214
+  prompt: Search for the pattern 'localhost' under the directory /opt/service and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0215
+  prompt: Search for the pattern 'localhost' under the directory /srv/www and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0216
+  prompt: Search for the pattern 'localhost' under the directory /data/in and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0217
+  prompt: Search for the pattern 'localhost' under the directory /workspace/lib and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0218
+  prompt: Search for the pattern 'localhost' under the directory /usr/local/share
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0219
+  prompt: Search for the pattern 'localhost' under the directory /mnt/repo and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0220
+  prompt: Search for the pattern 'localhost' under the directory /srv/api and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0221
+  prompt: Search for the pattern 'localhost' under the directory /home/dev/app and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0222
+  prompt: Search for the pattern 'localhost' under the directory /var/lib/svc and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0223
+  prompt: Search for the pattern 'localhost' under the directory /opt/bin and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0224
+  prompt: Search for the pattern 'localhost' under the directory /data/out and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0225
+  prompt: Search for the pattern '127.0.0.1' under the directory /tmp/proj/src and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0226
+  prompt: Search for the pattern '127.0.0.1' under the directory /var/log and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0227
+  prompt: Search for the pattern '127.0.0.1' under the directory /etc/app and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0228
+  prompt: Search for the pattern '127.0.0.1' under the directory /home/user/code and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0229
+  prompt: Search for the pattern '127.0.0.1' under the directory /opt/service and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0230
+  prompt: Search for the pattern '127.0.0.1' under the directory /srv/www and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0231
+  prompt: Search for the pattern '127.0.0.1' under the directory /data/in and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0232
+  prompt: Search for the pattern '127.0.0.1' under the directory /workspace/lib and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0233
+  prompt: Search for the pattern '127.0.0.1' under the directory /usr/local/share
+    and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0234
+  prompt: Search for the pattern '127.0.0.1' under the directory /mnt/repo and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0235
+  prompt: Search for the pattern '127.0.0.1' under the directory /srv/api and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0236
+  prompt: Search for the pattern '127.0.0.1' under the directory /home/dev/app and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0237
+  prompt: Search for the pattern '127.0.0.1' under the directory /var/lib/svc and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0238
+  prompt: Search for the pattern '127.0.0.1' under the directory /opt/bin and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0239
+  prompt: Search for the pattern '127.0.0.1' under the directory /data/out and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0240
+  prompt: Search for the pattern 'panic' under the directory /tmp/proj/src and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0241
+  prompt: Search for the pattern 'panic' under the directory /var/log and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0242
+  prompt: Search for the pattern 'panic' under the directory /etc/app and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0243
+  prompt: Search for the pattern 'panic' under the directory /home/user/code and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0244
+  prompt: Search for the pattern 'panic' under the directory /opt/service and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0245
+  prompt: Search for the pattern 'panic' under the directory /srv/www and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0246
+  prompt: Search for the pattern 'panic' under the directory /data/in and report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0247
+  prompt: Search for the pattern 'panic' under the directory /workspace/lib and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0248
+  prompt: Search for the pattern 'panic' under the directory /usr/local/share and
+    report matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_grep_0249
+  prompt: Search for the pattern 'panic' under the directory /mnt/repo and report
+    matches.
+  score:
+    expect_tool: grep
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_goal_0000
+  prompt: 'Create a background agent task whose goal is: research recent transformer
+    papers'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_goal_0001
+  prompt: 'Create a background agent task whose goal is: summarize the Q3 sales pipeline'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_goal_0002
+  prompt: 'Create a background agent task whose goal is: monitor the staging error
+    logs'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_goal_0003
+  prompt: 'Create a background agent task whose goal is: audit open security advisories'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_goal_0004
+  prompt: 'Create a background agent task whose goal is: draft a brief on competitor
+    pricing'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_goal_0005
+  prompt: 'Create a background agent task whose goal is: triage the customer churn
+    cohort'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_goal_0006
+  prompt: 'Create a background agent task whose goal is: reconcile the weekly ad spend'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_goal_0007
+  prompt: 'Create a background agent task whose goal is: benchmark the API latency
+    dashboard'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_goal_0008
+  prompt: 'Create a background agent task whose goal is: collect metrics on the nightly
+    backups'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_goal_0009
+  prompt: 'Create a background agent task whose goal is: analyze the license inventory'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_goal_0010
+  prompt: 'Create a background agent task whose goal is: investigate the failed deploys'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_goal_0011
+  prompt: 'Create a background agent task whose goal is: compile the on-call handoff
+    notes'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_goal_0012
+  prompt: 'Create a background agent task whose goal is: review the dependency upgrades'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_goal_0013
+  prompt: 'Create a background agent task whose goal is: chart the support ticket
+    volume'
+  stub_tools:
+  - task_create
+  score:
+    expect_tool: task_create
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_status_0000
+  prompt: List the background tasks that currently have status 'running'.
+  score:
+    expect_tool: task_list
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_status_0001
+  prompt: List the background tasks that currently have status 'completed'.
+  score:
+    expect_tool: task_list
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_status_0002
+  prompt: List the background tasks that currently have status 'failed'.
+  score:
+    expect_tool: task_list
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_status_0003
+  prompt: List the background tasks that currently have status 'killed'.
+  score:
+    expect_tool: task_list
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
+- id: tr_status_0004
+  prompt: List the background tasks that currently have status 'pending'.
+  score:
+    expect_tool: task_list
+  category: harvest_dict_wrap_unwrap
+  notes: intended_transition=dict_wrap_unwrap
