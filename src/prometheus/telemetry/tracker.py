@@ -518,6 +518,21 @@ class ToolCallTelemetry:
                 subsystem, operation, exc_info=True,
             )
 
+        # Feed the cost tracker from this single LLM-usage seam (audit: the
+        # tracker was reported on but never fed → always $0). Only LLM-call rows
+        # carry token counts; the handle is None unless a cloud provider is
+        # active, so this is a no-op on the local box. Never let cost accounting
+        # break telemetry.
+        if input_tokens is not None and model:
+            try:
+                from prometheus.telemetry.cost import get_cost_tracker_handle
+
+                handle = get_cost_tracker_handle()
+                if handle is not None:
+                    handle.record(model, input_tokens or 0, output_tokens or 0)
+            except Exception:
+                log.debug("cost tracker feed skipped", exc_info=True)
+
     # ------------------------------------------------------------------
     # SignalBus Persistence sprint — signal_events writer + reader
     # ------------------------------------------------------------------
