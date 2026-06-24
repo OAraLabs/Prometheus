@@ -1,151 +1,86 @@
 ---
 name: taskflow
-description: "Use when work should span one or more detached tasks but still behave like one job with a single owner context. TaskFlow is the durable flow substrate under authoring layers like Lobster, ACPX, plugins, or plain code. Keep conditional logic in the cal"
----
-<!-- Provenance: openclaw/openclaw | skills/taskflow/SKILL.md | MIT -->
-
+description: "Use when work should span one or more background agent tasks but still behave like one job with a single owner context. TaskFlow manages durable multi-step workflows with state persistence, child task tracking, and resume/cancel semantics."
 ---
 
 # TaskFlow
 
-Use TaskFlow when a job needs to outlive one prompt or one detached run, but you still want one owner session, one return context, and one place to inspect or resume the work.
+Use TaskFlow when a job needs to outlive one prompt or one agent run, but you still want one owner session, one return context, and one place to inspect or resume the work.
 
-## When to use it
+## When to Use
 
 - Multi-step background work with one owner
-- Work that waits on detached ACP or subagent tasks
+- Work that waits on dispatched agent tasks
 - Jobs that may need to emit one clear update back to the owner
 - Jobs that need small persisted state between steps
-- Plugin or tool work that must survive restarts and revision conflicts cleanly
+- Work that must survive restarts cleanly
 
-## What TaskFlow owns
+## What TaskFlow Owns
 
-- flow identity
-- owner session and requester origin
-- `currentStep`, `stateJson`, and `waitJson`
-- linked child tasks and their parent flow id
-- finish, fail, cancel, waiting, and blocked state
-- revision tracking for conflict-safe mutations
+- Flow identity and owner session
+- Current step, persisted state, and wait conditions
+- Linked child tasks and their parent flow ID
+- Finish, fail, cancel, waiting, and blocked states
+- Revision tracking for conflict-safe mutations
 
-It does **not** own branching or business logic. Put that in Lobster, acpx, or the calling code.
+It does **not** own branching or business logic. Put that in the calling code or orchestration layer.
 
-## Current runtime shape
+## Managed Flow Lifecycle
 
-Canonical plugin/runtime entrypoint:
+1. **Create** the flow with an ID, goal, initial step, and state
+2. **Run tasks** linked to the flow (dispatched via agent tool)
+3. **Set waiting** when blocked on external input (human reply, API callback)
+4. **Resume** when the wait condition is met
+5. **Finish** or **fail** the flow
 
-- `api.runtime.tasks.flow`
-- `api.runtime.taskFlow` still exists as an alias, but `api.runtime.tasks.flow` is the canonical shape
+## Design Constraints
 
-Binding:
+- Use **managed** flows when your code owns the orchestration
+- One-task mirrored flows are created by runtime for simple dispatched agent work
+- Treat persisted state as the single state bag (no separate output API)
+- Every mutating step is revision-checked -- carry forward the latest revision after each mutation
+- Link child tasks to the flow rather than creating standalone tasks
 
-- `api.runtime.tasks.flow.fromToolContext(ctx)` when you already have trusted tool context with `sessionKey`
-- `api.runtime.tasks.flow.bindSession({ sessionKey, requesterOrigin })` when your binding layer already resolved the session and delivery context
+## Example Pattern
 
-Managed-flow lifecycle:
+```
+1. Create flow: "triage inbox"
+   - step: "classify"
+   - state: { businessThreads: [], personalItems: [], summary: [] }
 
-1. `createManaged(...)`
-2. `runTask(...)`
-3. `setWaiting(...)` when waiting on a person or an external system
-4. `resume(...)` when work can continue
-5. `finish(...)` or `fail(...)`
-6. `requestCancel(...)` or `cancel(...)` when the whole job should stop
+2. Dispatch classifier agent (linked to flow)
+   - Agent classifies messages into categories
 
-## Design constraints
+3. Set waiting: "await_business_reply"
+   - wait condition: reply on specific thread
+   - updated state with classified items
 
-- Use **managed** TaskFlows when your code owns the orchestration.
-- One-task **mirrored** flows are created by core runtime for detached ACP/subagent work; this skill is mainly about managed flows.
-- Treat `stateJson` as the persisted state bag. There is no separate `setFlowOutput` or `appendFlowOutput` API.
-- Every mutating method after creation is revision-checked. Carry forward the latest `flow.revision` after each successful mutation.
-- `runTask(...)` links the child task to the flow. Use it instead of manually creating detached tasks when you want parent orchestration.
+4. Resume on reply received
+   - step: "finalize"
 
-## Example shape
-
-```ts
-const taskFlow = api.runtime.tasks.flow.fromToolContext(ctx);
-
-const created = taskFlow.createManaged({
-  controllerId: "my-plugin/inbox-triage",
-  goal: "triage inbox",
-  currentStep: "classify",
-  stateJson: {
-    businessThreads: [],
-    personalItems: [],
-    eodSummary: [],
-  },
-});
-
-const classify = taskFlow.runTask({
-  flowId: created.flowId,
-  runtime: "acp",
-  childSessionKey: "agent:main:subagent:classifier",
-  runId: "inbox-classify-1",
-  task: "Classify inbox messages",
-  status: "running",
-  startedAt: Date.now(),
-  lastEventAt: Date.now(),
-});
-
-if (!classify.created) {
-  throw new Error(classify.reason);
-}
-
-const waiting = taskFlow.setWaiting({
-  flowId: created.flowId,
-  expectedRevision: created.revision,
-  currentStep: "await_business_reply",
-  stateJson: {
-    businessThreads: ["slack:thread-1"],
-    personalItems: [],
-    eodSummary: [],
-  },
-  waitJson: {
-    kind: "reply",
-    channel: "slack",
-    threadKey: "slack:thread-1",
-  },
-});
-
-if (!waiting.applied) {
-  throw new Error(waiting.code);
-}
-
-const resumed = taskFlow.resume({
-  flowId: waiting.flow.flowId,
-  expectedRevision: waiting.flow.revision,
-  status: "running",
-  currentStep: "finalize",
-  stateJson: waiting.flow.stateJson,
-});
-
-if (!resumed.applied) {
-  throw new Error(resumed.code);
-}
-
-taskFlow.finish({
-  flowId: resumed.flow.flowId,
-  expectedRevision: resumed.flow.revision,
-  stateJson: resumed.flow.stateJson,
-});
+5. Finish flow with final state
 ```
 
-## Keep conditionals above the runtime
+## Operational Patterns
 
-Use the flow runtime for state and task linkage. Keep decisions in the authoring layer:
+- Store only the minimum state needed to resume
+- Put human-readable wait reasons in a summary field
+- Use structured wait metadata for programmatic conditions
+- When the orchestrator needs a compact health view, inspect child task status
+- Use cancel when active linked child tasks should also stop
 
-- `business` → post to Slack and wait
-- `personal` → notify the owner now
-- `later` → append to an end-of-day summary bucket
+## Keep Conditionals Above the Runtime
 
-## Operational pattern
+Use the flow runtime for state and task linkage. Keep decisions in the orchestration layer:
 
-- Store only the minimum state needed to resume.
-- Put human-readable wait reasons in `blockedSummary` or structured wait metadata in `waitJson`.
-- Use `getTaskSummary(flowId)` when the orchestrator needs a compact health view of child work.
-- Use `requestCancel(...)` when a caller wants the flow to stop scheduling immediately.
-- Use `cancel(...)` when you also want active linked child tasks cancelled.
+- `business` -> notify team channel via Telegram and wait
+- `personal` -> notify the owner now
+- `later` -> append to an end-of-day summary bucket
 
-## Examples
+## Integration with Prometheus
 
-- See `skills/taskflow/examples/inbox-triage.lobster`
-- See `skills/taskflow/examples/pr-intake.lobster`
-- See `skills/taskflow-inbox-triage/SKILL.md` for a concrete routing pattern
+- Dispatch child tasks via the **agent tool**
+- Use **bash** for any shell operations needed during flow steps
+- Use **file_write** / **file_read** for persisting flow state to disk if needed
+- Monitor flow health via **SENTINEL** telemetry
+- Log flow transitions for debugging via session logs

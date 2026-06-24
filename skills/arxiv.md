@@ -1,15 +1,14 @@
 ---
 name: arxiv
-description: Search and retrieve academic papers from arXiv using their free REST API. No API key needed. Search by keyword, author, category, or ID. Combine with web_extract or the ocr-and-documents skill to read full paper content.
-version: 1.0.0
-author: Hermes Agent
+description: Search and retrieve academic papers from arXiv and Semantic Scholar using free REST APIs. No API key needed. Search by keyword, author, category, or ID. Useful for LCM research and wiki knowledge curation.
+version: 1.0.1
+author: Prometheus
 license: MIT
 metadata:
-  hermes:
-    tags: [Research, Arxiv, Papers, Academic, Science, API]
-    related_skills: [ocr-and-documents]
+  tags: [Research, Arxiv, Papers, Academic, Science, API]
+  related_skills: [ocr-and-documents]
 ---
-<!-- Provenance: NousResearch/hermes-agent | skills/research/arxiv/SKILL.md | MIT -->
+<!-- Adapted from NousResearch/hermes-agent | skills/research/arxiv/SKILL.md | MIT -->
 
 # arXiv Research
 
@@ -21,8 +20,8 @@ Search and retrieve academic papers from arXiv via their free REST API. No API k
 |--------|---------|
 | Search papers | `curl "https://export.arxiv.org/api/query?search_query=all:QUERY&max_results=5"` |
 | Get specific paper | `curl "https://export.arxiv.org/api/query?id_list=2402.03300"` |
-| Read abstract (web) | `web_extract(urls=["https://arxiv.org/abs/2402.03300"])` |
-| Read full paper (PDF) | `web_extract(urls=["https://arxiv.org/pdf/2402.03300"])` |
+| Read abstract | `curl -s "https://arxiv.org/abs/2402.03300"` |
+| Download full paper | `curl -s "https://arxiv.org/pdf/2402.03300" -o /tmp/paper.pdf` |
 
 ## Searching Papers
 
@@ -149,10 +148,10 @@ After finding a paper, read it:
 
 ```
 # Abstract page (fast, metadata + abstract)
-web_extract(urls=["https://arxiv.org/abs/2402.03300"])
+bash: curl -s "https://arxiv.org/abs/2402.03300"
 
-# Full paper (PDF → markdown via Firecrawl)
-web_extract(urls=["https://arxiv.org/pdf/2402.03300"])
+# Full paper (download PDF)
+bash: curl -s "https://arxiv.org/pdf/2402.03300" -o /tmp/paper.pdf
 ```
 
 For local PDF processing, see the `ocr-and-documents` skill.
@@ -245,8 +244,8 @@ curl -s "https://api.semanticscholar.org/graph/v1/author/search?query=Yann+LeCun
 
 1. **Discover**: `python scripts/search_arxiv.py "your topic" --sort date --max 10`
 2. **Assess impact**: `curl -s "https://api.semanticscholar.org/graph/v1/paper/arXiv:ID?fields=citationCount,influentialCitationCount"`
-3. **Read abstract**: `web_extract(urls=["https://arxiv.org/abs/ID"])`
-4. **Read full paper**: `web_extract(urls=["https://arxiv.org/pdf/ID"])`
+3. **Read abstract**: `curl -s "https://arxiv.org/abs/ID"`
+4. **Download full paper**: `curl -s "https://arxiv.org/pdf/ID" -o /tmp/paper.pdf`
 5. **Find related work**: `curl -s "https://api.semanticscholar.org/graph/v1/paper/arXiv:ID/references?fields=title,citationCount&limit=20"`
 6. **Get recommendations**: POST to Semantic Scholar recommendations endpoint
 7. **Track authors**: `curl -s "https://api.semanticscholar.org/graph/v1/author/search?query=NAME"`

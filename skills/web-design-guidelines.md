@@ -6,8 +6,7 @@ metadata:
   version: "1.0.0"
   argument-hint: <file-or-pattern>
 ---
-<!-- Provenance: vercel-labs/agent-skills | skills/web-design-guidelines/SKILL.md | MIT -->
-<!-- provenance: vercel-labs/agent-skills | skills/web-design-guidelines/SKILL.md | MIT -->
+<!-- Adapted for Prometheus from vercel-labs/agent-skills | MIT -->
 
 # Web Interface Guidelines
 
@@ -28,7 +27,7 @@ Fetch fresh guidelines before each review:
 https://raw.githubusercontent.com/vercel-labs/web-interface-guidelines/main/command.md
 ```
 
-Use WebFetch to retrieve the latest rules. The fetched content contains all the rules and output format instructions.
+Use `web_fetch` to retrieve the latest rules. The fetched content contains all the rules and output format instructions.
 
 ## Usage
 
