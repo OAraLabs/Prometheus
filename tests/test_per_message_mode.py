@@ -129,7 +129,7 @@ def _client_capturing_mode():
     captured: dict = {}
 
     class _Bridge:
-        async def dispatch_user_message(self, session_id, content, client_msg_id=None, mode="agent"):
+        async def dispatch_user_message(self, session_id, content, client_msg_id=None, mode="agent", tool_choice=None):
             captured["mode"] = mode
 
     app = create_app({})

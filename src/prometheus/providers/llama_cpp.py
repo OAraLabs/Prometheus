@@ -180,6 +180,27 @@ class LlamaCppProvider(ModelProvider):
     def set_grammar(self, grammar: str | None) -> None:
         """Update the GBNF grammar used for constrained decoding."""
         self._grammar = grammar
+        self._required_grammar_cache = None  # force-search: invalidate the derived "required" grammar
+
+    def _grammar_for(self, request: ApiMessageRequest) -> str | None:
+        """force-search: SELECT the GBNF grammar for this per-call tool_choice (immutable,
+        cached; never mutates self._grammar). auto -> boot grammar; none / suppress_tools ->
+        None (dropped — chat); required (and, at the local tier, {"tool": X} which falls back
+        to "force SOME tool" — the specific-tool constraint is carried natively by the cloud
+        path, a follow-up for the local tier) -> the boot grammar with the prose branch
+        dropped, so the model MUST emit a tool call."""
+        if not self._grammar:
+            return None
+        tc = getattr(request, "tool_choice", "auto")
+        if getattr(request, "suppress_tools", False) or tc == "none":
+            return None
+        if tc == "required" or isinstance(tc, dict):
+            if getattr(self, "_required_grammar_cache", None) is None:
+                self._required_grammar_cache = self._grammar.replace(
+                    "root ::= tool-call | prose", "root ::= tool-call"
+                )
+            return self._required_grammar_cache
+        return self._grammar  # auto (and any unrecognized value -> safe default = boot grammar)
 
     def _effective_suppress(self, request: ApiMessageRequest) -> bool:
         """Per-call override wins; otherwise fall back to provider default."""
@@ -228,9 +249,12 @@ class LlamaCppProvider(ModelProvider):
             payload["tool_choice"] = "auto"
 
         # Inject GBNF grammar only when tools aren't in the payload — with --jinja,
-        # the server handles tool calling natively and grammar conflicts with it
-        if self._grammar and "tools" not in payload and not request.suppress_tools:
-            payload["grammar"] = self._grammar
+        # the server handles tool calling natively and grammar conflicts with it. force-search:
+        # _grammar_for SELECTS per the per-call tool_choice (auto=boot, none/suppress=dropped,
+        # required/{tool}=prose-dropped) — auto/none stay byte-identical to before.
+        _selected_grammar = self._grammar_for(request)
+        if _selected_grammar and "tools" not in payload:
+            payload["grammar"] = _selected_grammar
         if "tools" in payload and payload["tools"]:
             payload.pop("grammar", None)
 

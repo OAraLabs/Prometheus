@@ -33,6 +33,11 @@ class ApiMessageRequest:
     # tool-calling grammar (the llama.cpp GBNF) so the turn is structurally tool-free at every
     # tier, not just tool-free-in-practice. Default False = today's behavior, untouched.
     suppress_tools: bool = False
+    # Per-call tool_choice (force-search): "auto" | "none" | "required" | {"tool": "<name>"}.
+    # Generalizes suppress_tools (none == suppress) into a four-state lever the provider
+    # translates per tier — local GBNF grammar SELECTION, cloud native tool_choice. Default
+    # "auto" = today's agent path. See prometheus.api.tool_choice.
+    tool_choice: Any = "auto"
 
 
 @dataclass(frozen=True)

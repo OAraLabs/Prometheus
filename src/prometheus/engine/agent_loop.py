@@ -662,21 +662,22 @@ async def run_loop(
     messages: list[ConversationMessage],
     *,
     mode: str = "agent",
+    tool_choice: object | None = None,
 ) -> AsyncIterator[tuple[StreamEvent, UsageSnapshot | None]]:
     """Run the conversation loop until the model stops requesting tools.
 
     Yields (StreamEvent, UsageSnapshot | None) tuples. The loop exits when
     the assistant returns a response with no tool_uses, or after max_turns.
     """
-    # Sprint B / Piece 2: a per-message no-tools "chat" turn. ONLY mode == "chat"
-    # disables tools — anything else (incl. None / unknown) is the always-agentic
-    # default, so the no-mode call path is byte-identical to today and an
-    # unrecognized value can never silently produce a tool-free turn. Disabling
-    # tools means BOTH: (a) leave the tool schema empty (no prompt injection, no
-    # payload tools) AND (b) set suppress_tools on the request below so providers
-    # drop any tool-calling grammar (the llama.cpp GBNF) — structurally tool-free
-    # at every tier, not merely tool-free-in-practice.
-    tools_enabled = mode != "chat"
+    # Sprint B / Piece 2 + force-search: resolve the per-call tool directive. `tool_choice`
+    # (auto|none|required|{"tool":X}) is the lever; `mode` is sugar (agent->auto, chat->none).
+    # An explicit tool_choice wins, else `mode` resolves; unknown/None -> auto, so an
+    # unrecognized value can never silently drop tools (the byte-identical default). "none"
+    # empties the schema AND sets suppress_tools (provider drops the grammar); auto/required/
+    # {tool} offer the full schema and let the provider's grammar SELECTION do the constraining.
+    from prometheus.api.tool_choice import NONE as _TC_NONE, resolve_mode_to_tool_choice
+    effective_tool_choice = tool_choice if tool_choice is not None else resolve_mode_to_tool_choice(mode)
+    tools_enabled = effective_tool_choice != _TC_NONE
 
     tool_schema: list[dict] = []
     if tools_enabled:
@@ -905,6 +906,7 @@ async def run_loop(
                 tools=_payload_tools,
                 suppress_thinking=context.suppress_thinking,
                 suppress_tools=not tools_enabled,
+                tool_choice=effective_tool_choice,
             ),
             operation="loop_round",
             round_index=turn,
