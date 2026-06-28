@@ -353,7 +353,21 @@ def create_app(
         mode = body.get("mode") or "agent"  # absent → agent default (never an error)
         if mode not in ("agent", "chat"):
             return JSONResponse(status_code=400, content={"error": f"invalid mode {mode!r} — expected 'agent' or 'chat'"})
-        await bridge.dispatch_user_message(session_id, message, client_msg_id=client_msg_id, mode=mode)
+        # force-search: validate an optional per-message tool_choice against the live tool
+        # registry (unknown tool / malformed → clean 400, same discipline as malformed mode).
+        # Absent tool_choice → None, so `mode` resolves it downstream (auto/none).
+        from prometheus.api.tool_choice import normalize_tool_choice as _normalize_tc
+        _lc = getattr(bridge, "loop_context", None)
+        _reg = getattr(_lc, "tool_registry", None)
+        _valid = {t.name for t in _reg.list_tools()} if (_reg is not None and hasattr(_reg, "list_tools")) else None
+        _tc_raw = body.get("tool_choice")
+        try:
+            tool_choice = _normalize_tc(_tc_raw, _valid) if _tc_raw is not None else None
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        await bridge.dispatch_user_message(
+            session_id, message, client_msg_id=client_msg_id, mode=mode, tool_choice=tool_choice
+        )
         return {"run_id": idempotency_key, "status": "sent"}
 
     @app.get("/api/sessions/{session_id}/messages")
