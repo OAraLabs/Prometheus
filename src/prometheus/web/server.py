@@ -122,6 +122,7 @@ def create_app(
     lcm_engine: Any | None = None,
     agent_loop: Any | None = None,
     approval_queue: Any | None = None,
+    model_router: Any | None = None,
     static_dir: str | Path | None = None,
     boot_sha: str = "unknown",
 ) -> FastAPI:
@@ -177,6 +178,7 @@ def create_app(
     app.state.lcm_engine = lcm_engine
     app.state.agent_loop = agent_loop
     app.state.approval_queue = approval_queue
+    app.state.model_router = model_router  # Sprint B / Piece 1: REST exposes its per-session overrides
     app.state.start_time = _start_time
     app.state.boot_sha = boot_sha
     app.state.agent_state = "idle"
@@ -1195,6 +1197,105 @@ def create_app(
     # (durable in tasks.db, SecurityGate-vetted at launch, completion
     # notification via the existing task_completed/task_failed signal
     # path). GET inspects it. The JSON run report is the task's output.
+
+    # ── Model REST (Sprint B / Piece 1) — expose the EXISTING per-session
+    # ModelRouter override engine over the bearer-authed /api/* surface. NO engine
+    # change: these call set_override / clear_override / get_override_for_session
+    # only. Clients choose a preset KEY from GET /api/models; the daemon maps the key
+    # → a vetted preset config (never a raw client-supplied provider config). The
+    # "local" key clears the override → back to the configured primary.
+    from prometheus.router.model_router import (
+        OVERRIDE_PRESETS as _OVERRIDE_PRESETS,
+        _RESERVED_NO_OVERRIDE_SESSION_IDS as _RESERVED_SESSIONS,
+        resolve_slash_command_target as _resolve_preset,
+    )
+
+    _LOCAL_MODEL_KEY = "local"
+    _PRESET_LABELS = {"claude": "Claude", "gpt": "GPT", "gemini": "Gemini", "xai": "xAI"}
+
+    def _model_catalog() -> list[dict]:
+        # Configured primary (key "local" → clear_override) + each vetted cloud preset.
+        # `available` is presence-only (is the api-key env var set?) — never the secret
+        # value, never the env-var name.
+        primary_model = config.get("model", {}).get("model", "unknown")
+        primary_provider = config.get("model", {}).get("provider", "local")
+        catalog = [{
+            "key": _LOCAL_MODEL_KEY, "label": "Local", "provider": primary_provider,
+            "model": primary_model, "is_default": True, "available": True,
+        }]
+        for key in _OVERRIDE_PRESETS:
+            # Resolve through the SAME path the /claude slash command uses, so REST and
+            # Telegram agree: user slash_commands.<key> config merged over the preset.
+            preset = _resolve_preset(key, config) or _OVERRIDE_PRESETS[key]
+            env = preset.get("api_key_env", "")
+            catalog.append({
+                "key": key, "label": _PRESET_LABELS.get(key, key),
+                "provider": preset.get("provider", "unknown"),
+                "model": preset.get("model", "unknown"),
+                "is_default": False,
+                "available": bool(env and os.environ.get(env)),
+            })
+        return catalog
+
+    def _effective_model(router: Any, session_id: str) -> dict:
+        catalog = _model_catalog()
+        override = router.get_override_for_session(session_id)
+        if override is not None:
+            cfg = override.provider_config or {}
+            prov, mdl = cfg.get("provider"), cfg.get("model")
+            for opt in catalog:
+                if not opt["is_default"] and opt["provider"] == prov and opt["model"] == mdl:
+                    return opt
+            # A config-customized override (e.g. a Telegram /claude with a user
+            # slash_commands block) matching no catalog preset — report it honestly.
+            return {"key": "custom", "label": mdl or "custom", "provider": prov,
+                    "model": mdl, "is_default": False, "available": True}
+        return next(o for o in catalog if o["is_default"])
+
+    @app.get("/api/models")
+    async def list_models():
+        if getattr(app.state, "model_router", None) is None:
+            return JSONResponse(status_code=503, content={"error": "model router unavailable"})
+        return {"models": _model_catalog(), "default_key": _LOCAL_MODEL_KEY}
+
+    @app.get("/api/sessions/{session_id}/model")
+    async def get_session_model(session_id: str):
+        router = getattr(app.state, "model_router", None)
+        if router is None:
+            return JSONResponse(status_code=503, content={"error": "model router unavailable"})
+        return _effective_model(router, session_id)
+
+    @app.post("/api/sessions/{session_id}/model")
+    async def set_session_model(session_id: str, body: dict):
+        router = getattr(app.state, "model_router", None)
+        if router is None:
+            return JSONResponse(status_code=503, content={"error": "model router unavailable"})
+        if session_id in _RESERVED_SESSIONS:
+            return JSONResponse(status_code=400, content={
+                "error": f"session_id {session_id!r} is reserved and cannot hold a model override"})
+        key = str(body.get("key", "")).strip()
+        if not key:
+            return JSONResponse(status_code=400, content={"error": "key is required"})
+        if key == _LOCAL_MODEL_KEY:
+            router.clear_override(session_id)
+            return _effective_model(router, session_id)
+        preset = _resolve_preset(key, config)  # user config merged over the preset (same as /claude)
+        if preset is None:
+            return JSONResponse(status_code=400, content={
+                "error": f"unknown model key {key!r}; choose a key from GET /api/models"})
+        try:
+            router.set_override(session_id, preset)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        return _effective_model(router, session_id)
+
+    @app.delete("/api/sessions/{session_id}/model")
+    async def clear_session_model(session_id: str):
+        router = getattr(app.state, "model_router", None)
+        if router is None:
+            return JSONResponse(status_code=503, content={"error": "model router unavailable"})
+        router.clear_override(session_id)  # idempotent — silent no-op if none set / reserved
+        return _effective_model(router, session_id)
 
     @app.post("/api/code")
     async def create_coding_run(body: dict):

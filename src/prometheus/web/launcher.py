@@ -72,6 +72,7 @@ async def launch_web(
         lcm_engine=lcm_engine,
         agent_loop=agent_loop,
         approval_queue=approval_queue,
+        model_router=getattr(loop_context, "model_router", None),
         static_dir=static_dir,
     )
 
