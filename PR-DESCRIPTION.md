@@ -1,36 +1,38 @@
-# Per-message Agent | Chat mode (Sprint B / Piece 2)
+# Force-search — per-call tool_choice (Sprint B follow-up to Piece 2)
 
-**Branch:** `feat/per-message-mode` off origin/main (`66fd820`)
-**Status:** PR-ready. MODERATE — real engine work on the chat generation path. **MERGE GATE: the dormant default is byte-identical to today's always-agentic path.**
+**Branch:** `feat/force-search` off origin/main (`3a506fe`)
+**Status:** PR-ready — **do NOT merge** without a go (brief authorized green, not a merge). TDD: the red spec `tests/test_force_search.py` is now **green (18/18)**, full suite **3012 passed, 0 failed**, no `--no-verify`.
 
 ## What it adds
-A per-message `mode` (`"agent"` | `"chat"`) threaded from the send paths into `run_loop`. `mode="chat"` runs a plain **no-tools** turn; absent / anything-else = today's always-agentic default. Unlocks the Beacon Agent|Chat composer toggle (a later UI sprint). Force-search remains **deferred**.
+Generalizes Piece-2's per-call `suppress_tools: bool` into a **four-state `tool_choice` lever** on `ApiMessageRequest`, mirroring the cloud API so one field drives both tiers:
 
-## Phase 0 finding → scope expanded (per your call)
-The survey's "empty the one `tool_schema` list = no-tools turn" seam was clean for **cloud** but **not local**: at tier light/full, tools also reach the model via a **GBNF grammar** generated from the full registry at boot and stored on the **shared** provider (`daemon.py:342` → `LlamaCppProvider._grammar`), and it's *actively applied to empty-tools requests* (`llama_cpp.py:212/232`). Emptying `tool_schema` didn't clear it, and clearing it per-turn = shared-state mutation (the concurrency violation). **Resolution (you chose "expand scope"):** a per-call `ApiMessageRequest.suppress_tools` flag the provider honors to drop the grammar — concurrency-safe and **structurally tool-free at all tiers**.
+| tool_choice | meaning | local (GBNF) | cloud |
+|---|---|---|---|
+| `"auto"` | today's agent path | boot grammar as-is | native auto |
+| `"none"` | no tools (chat) | grammar dropped | no tools |
+| `"required"` | must call some tool | **prose branch dropped** (`root ::= tool-call`) | native `required` |
+| `{"tool": X}` | must call tool X | force a tool (local fallback¹) | native `{"tool": X}` |
 
-## How it works
-- `run_loop` gains a keyword-only `mode: str = "agent"`. `tools_enabled = mode != "chat"` — **only `"chat"` disables tools; unknown/None → agent**, so an unrecognized value can never silently drop tools. When disabled: (a) the single `tool_schema` derivation (`agent_loop.py:669-673`) stays empty → no prompt injection, no payload tools; (b) `suppress_tools=True` on the request → llama.cpp drops the GBNF grammar. Default (agent) leaves **both** untouched → byte-identical.
-- `mode` is a per-call **parameter**, threaded WS `send_message` / REST `send_chat` → `dispatch_user_message` → `_handle_send_message` → `_run_agent` → `run_loop`. **Never** stored on the shared `loop_context` (the concurrency rule — proven by a test).
-- Send paths: **absent mode → "agent"** (never an error); **malformed explicit mode → 400** (REST) / error frame (WS).
+`mode` stays sugar: `agent→auto`, `chat→none`. **The CRUX resolved clean:** the boot grammar is a top-level alternation (`root ::= tool-call | prose`, enforcer.py:130), so `required` is the clean inverse of `suppress_tools` — drop the `prose` branch, no root rewrite.
+
+## Merge gate (the non-negotiable, held)
+`auto` / `none` are **byte-identical** to before: `run_loop` resolves an explicit `tool_choice` else `mode` (unknown→auto, so it can never silently drop tools); the `tool_schema` gate and `suppress_tools` are set exactly as in Piece 2. `tool_choice` is a **per-call `run_loop` param, never on the shared `loop_context`** (a no-crosstalk test proves it). The entire existing suite passes (3 stale test-doubles widened for the new optional kwarg — signature only, no behavior change).
 
 ## Files
-- `providers/base.py` — `ApiMessageRequest.suppress_tools: bool = False` (default = today's behavior).
-- `engine/agent_loop.py` — `run_loop` `mode` param + gated `tool_schema` derivation + `suppress_tools` on the request.
-- `providers/llama_cpp.py` — drop the GBNF grammar when `suppress_tools` (the local-tier structural fix).
-- `web/ws_server.py` — parse + validate mode (WS), thread through `dispatch_user_message`/`_handle_send_message`/`_run_agent` → `run_loop`.
-- `web/server.py` — parse + validate mode on REST `/api/chat/send`.
-- `tests/test_per_message_mode.py` *(new, 8 tests)*. Plus **3 stale test-doubles widened** to mirror the new optional param — **signature only, no assertion/behavior change**: `test_api_chat_send` (a bridge + a handler stub), `test_wire_contract` (a `fake_run_loop`, 2 occurrences).
+- `src/prometheus/api/tool_choice.py` *(new)* — the union vocabulary + `resolve_mode_to_tool_choice` + `normalize_tool_choice` (validates malformed / unknown-tool → ValueError).
+- `src/prometheus/providers/base.py` — `ApiMessageRequest.tool_choice` (default `"auto"`).
+- `src/prometheus/adapter/enforcer.py` — `generate_grammar(require_tool_use=…, only_tool=…)` variants + `grammar_admits_tool`.
+- `src/prometheus/engine/agent_loop.py` — `run_loop(tool_choice=…)` resolution + sets `request.tool_choice`.
+- `src/prometheus/web/server.py` + `ws_server.py` — parse + **validate** tool_choice against the live registry (unknown/malformed → 400 / WS error frame; absent → auto), thread through `dispatch_user_message`→`_handle_send_message`→`_run_agent`→`run_loop`.
+- `src/prometheus/providers/llama_cpp.py` — `_grammar_for(request)`: per-call grammar SELECTION (auto=boot, none/suppress=dropped, required/{tool}=prose-dropped), cached, **never mutates the boot grammar**.
+- Tests: `tests/test_force_search.py` *(the spec)*, `tests/conftest.py` *(harness: spy + cloud doubles, `make_request`/`run_turn`)*, `tests/test_force_search_provider.py` *(real-provider grammar selection)*.
 
-## Merge gate & tests (no `--no-verify`)
-- **Default byte-identical (PRIMARY):** no-mode turn → tools offered + `suppress_tools=False` (unit), and the **entire existing suite passes** (only the 3 doubles' signatures widened).
-- chat → empty tools + `suppress_tools=True`; unknown mode → agent; **concurrency**: two `run_loop`s on the SAME shared context (one agent, one chat) don't cross-talk; llama.cpp drops the grammar iff `suppress_tools`; REST absent→agent / chat→threads / malformed→400.
-- **Full suite: 2990 passed, 0 failed.**
-- **Live (daemon on branch):** malformed→400; chat-mode turn = single plain assistant reply (no tool round); agent-mode turn = multi-round tool loop; agent+chat fired concurrently both 200. The structural tool-free guarantee is **unit-proven** (grammar-drop test); live confirms end-to-end wiring + the behavioral contrast.
+## ⚠️ Live-wiring still pending (the spec's doubles stand in for these)
+The contract + plumbing + validation + the **local `required`** path are live. Two pieces of real-provider wiring remain (each defined by a conftest double):
+1. **Cloud native tool_choice + synthetic-prefill fallback** — the real anthropic/openai providers don't yet read `request.tool_choice`; a live cloud `required`/`{tool}` request won't set the native param yet. (`SpyCloudProvider` defines the contract.)
+2. **True specific-tool grammar at the local tier** — `{"tool": X}` currently falls back to "force *some* tool" locally (prose dropped); a single-alternative grammar needs the enforcer + schemas wired onto `LlamaCppProvider`. ¹
 
-## Follow-ups
-- **Beacon composer-UI sprint** — the model switcher (Piece 1) + this Agent|Chat toggle, built as one composer row.
-- **Force-search** deferred — no clean force seam (needs provider `tool_choice` / synthetic `tool_use`); separate sprint.
+Both are clean, well-scoped follow-ups; neither is gated by the spec.
 
-## Out of scope (honored)
-- No loop-body / execution-path restructuring — only the one `tool_schema` derivation is gated, plus a per-call suppress flag. No mode on shared state. No Beacon work. Default (no-mode) behavior unchanged.
+## Verify
+`python3 -m pytest -q` → **3012 passed, 0 failed** (prior 2990 + 18 spec + 4 provider; 7 pre-existing warnings, unchanged). `tests/test_force_search.py` 18/18; `test_per_message_mode.py` still 8/8.
