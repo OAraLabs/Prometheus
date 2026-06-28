@@ -192,8 +192,16 @@ class WebSocketBridge:
         elif cmd_type == "send_message":
             session_id = payload.get("session_id", "")
             content = payload.get("content", "")
+            mode = payload.get("mode") or "agent"  # absent → agent default (never an error)
+            if mode not in ("agent", "chat"):
+                await self._send_one(websocket, {
+                    "type": "error",
+                    "timestamp": time.time(),
+                    "payload": {"message": f"invalid mode {mode!r} — expected 'agent' or 'chat'"},
+                })
+                return
             if session_id and content:
-                await self._handle_send_message(session_id, content)
+                await self._handle_send_message(session_id, content, mode=mode)
 
         elif cmd_type == "chat_upload":
             # File upload from Beacon: { type: "chat_upload", payload: {
@@ -322,7 +330,7 @@ class WebSocketBridge:
         return None
 
     async def dispatch_user_message(
-        self, session_id: str, content: str, client_msg_id: str | None = None
+        self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent"
     ) -> None:
         """Public dispatch entry point — kicks off the same flow as a WS-borne
         ``send_message`` command.
@@ -338,10 +346,10 @@ class WebSocketBridge:
         alongside the canonical ``msg-{turn_index}`` id, so a client that rendered
         the message optimistically can correlate its local id to the durable one.
         """
-        await self._handle_send_message(session_id, content, client_msg_id=client_msg_id)
+        await self._handle_send_message(session_id, content, client_msg_id=client_msg_id, mode=mode)
 
     async def _handle_send_message(
-        self, session_id: str, content: str, client_msg_id: str | None = None
+        self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent"
     ) -> None:
         """Process a user message — add to session and run agent loop if context available.
 
@@ -430,7 +438,7 @@ class WebSocketBridge:
 
         # If we have a loop context, run the agent
         if self.loop_context:
-            asyncio.create_task(self._run_agent(session_id, session))
+            asyncio.create_task(self._run_agent(session_id, session, mode=mode))
 
     async def _broadcast_command_reply(
         self,
@@ -478,8 +486,10 @@ class WebSocketBridge:
             },
         })
 
-    async def _run_agent(self, session_id: str, session: Any) -> None:
-        """Run the agent loop and stream results over WebSocket."""
+    async def _run_agent(self, session_id: str, session: Any, mode: str = "agent") -> None:
+        """Run the agent loop and stream results over WebSocket. `mode` ('agent'|'chat')
+        is threaded as a per-call run_loop arg — NEVER stored on the shared loop_context —
+        so concurrent turns can't cross-talk (Sprint B / Piece 2)."""
         from prometheus.engine.agent_loop import run_loop
 
         # Update state
@@ -497,7 +507,7 @@ class WebSocketBridge:
         try:
             messages = session.get_messages()
             original_len = len(messages)
-            async for event, _usage in run_loop(self.loop_context, messages):
+            async for event, _usage in run_loop(self.loop_context, messages, mode=mode):
                 event_type = type(event).__name__
 
                 if event_type == "AssistantTextDelta":

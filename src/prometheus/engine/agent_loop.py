@@ -660,17 +660,30 @@ def _effective_max_tool_iterations(context: LoopContext) -> int:
 async def run_loop(
     context: LoopContext,
     messages: list[ConversationMessage],
+    *,
+    mode: str = "agent",
 ) -> AsyncIterator[tuple[StreamEvent, UsageSnapshot | None]]:
     """Run the conversation loop until the model stops requesting tools.
 
     Yields (StreamEvent, UsageSnapshot | None) tuples. The loop exits when
     the assistant returns a response with no tool_uses, or after max_turns.
     """
+    # Sprint B / Piece 2: a per-message no-tools "chat" turn. ONLY mode == "chat"
+    # disables tools — anything else (incl. None / unknown) is the always-agentic
+    # default, so the no-mode call path is byte-identical to today and an
+    # unrecognized value can never silently produce a tool-free turn. Disabling
+    # tools means BOTH: (a) leave the tool schema empty (no prompt injection, no
+    # payload tools) AND (b) set suppress_tools on the request below so providers
+    # drop any tool-calling grammar (the llama.cpp GBNF) — structurally tool-free
+    # at every tier, not merely tool-free-in-practice.
+    tools_enabled = mode != "chat"
+
     tool_schema: list[dict] = []
-    if context.tool_loader is not None and hasattr(context.tool_loader, "active_schemas"):
-        tool_schema = context.tool_loader.active_schemas()
-    elif context.tool_registry is not None and hasattr(context.tool_registry, "to_api_schema"):
-        tool_schema = context.tool_registry.to_api_schema()
+    if tools_enabled:
+        if context.tool_loader is not None and hasattr(context.tool_loader, "active_schemas"):
+            tool_schema = context.tool_loader.active_schemas()
+        elif context.tool_registry is not None and hasattr(context.tool_registry, "to_api_schema"):
+            tool_schema = context.tool_registry.to_api_schema()
 
     # Sprint 10 / Phase 2: route the first user message through ModelRouter.
     # The canonical router returns a RouteDecision with pre-instantiated
@@ -891,6 +904,7 @@ async def run_loop(
                 max_tokens=context.max_tokens,
                 tools=_payload_tools,
                 suppress_thinking=context.suppress_thinking,
+                suppress_tools=not tools_enabled,
             ),
             operation="loop_round",
             round_index=turn,

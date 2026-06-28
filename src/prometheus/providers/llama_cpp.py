@@ -229,7 +229,7 @@ class LlamaCppProvider(ModelProvider):
 
         # Inject GBNF grammar only when tools aren't in the payload — with --jinja,
         # the server handles tool calling natively and grammar conflicts with it
-        if self._grammar and "tools" not in payload:
+        if self._grammar and "tools" not in payload and not request.suppress_tools:
             payload["grammar"] = self._grammar
         if "tools" in payload and payload["tools"]:
             payload.pop("grammar", None)

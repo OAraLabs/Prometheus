@@ -28,6 +28,11 @@ class ApiMessageRequest:
     # currently True for LlamaCppProvider. Set to ``False`` to opt a call
     # back INTO chain-of-thought (e.g. a task that wants reasoning_content).
     suppress_thinking: bool | None = None
+    # Per-call no-tools turn (Sprint B / Piece 2 — chat mode): when True the model is offered
+    # NO tools. run_loop empties the tool schema (prompt + payload) AND providers drop any
+    # tool-calling grammar (the llama.cpp GBNF) so the turn is structurally tool-free at every
+    # tier, not just tool-free-in-practice. Default False = today's behavior, untouched.
+    suppress_tools: bool = False
 
 
 @dataclass(frozen=True)

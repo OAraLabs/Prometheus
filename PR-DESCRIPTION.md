@@ -1,36 +1,36 @@
-# Model REST — Sprint B / Piece 1 (expose-only, no engine change)
+# Per-message Agent | Chat mode (Sprint B / Piece 2)
 
-**Branch:** `feat/model-rest` off origin/main (`4cef0c5`)
-**Status:** PR-ready. **LIGHT** — exposes the EXISTING per-session `ModelRouter` override engine via bearer-authed REST. **No engine change.** Unblocks a later Beacon model-switcher UI.
+**Branch:** `feat/per-message-mode` off origin/main (`66fd820`)
+**Status:** PR-ready. MODERATE — real engine work on the chat generation path. **MERGE GATE: the dormant default is byte-identical to today's always-agentic path.**
 
-## What it does
-The model-switching engine already exists and is live-wired: `set_override(session_id, …)` is per-session, `route()` consults the override **first** (model_router.py:444-448), and `run_loop` re-routes every turn so a switch takes effect next turn. The only gap was no web-reachable API — the `/claude` slash path is Telegram-only / web-blocked. This adds REST routes over that engine. `model_router` / `run_loop` / `route()` are untouched.
+## What it adds
+A per-message `mode` (`"agent"` | `"chat"`) threaded from the send paths into `run_loop`. `mode="chat"` runs a plain **no-tools** turn; absent / anything-else = today's always-agentic default. Unlocks the Beacon Agent|Chat composer toggle (a later UI sprint). Force-search remains **deferred**.
 
-## Routes (all bearer-authed via the existing `/api/*` middleware)
-- **`GET /api/models`** — the switcher catalog: the configured primary as "Local" (key `local`) + each vetted preset (claude/gpt/gemini/xai). Each option: `key`, `label`, `provider`, `model`, `is_default`, `available` (api-key env **presence only** — never the value, never the env-var name). `default_key = "local"`.
-- **`GET /api/sessions/{id}/model`** — the session's current effective option (active override, else local).
-- **`POST /api/sessions/{id}/model`** `{key}` — `local` → `clear_override`; a preset key → `set_override` with the resolved config. Returns the new effective option.
-- **`DELETE /api/sessions/{id}/model`** — `clear_override` (idempotent → clean 200).
+## Phase 0 finding → scope expanded (per your call)
+The survey's "empty the one `tool_schema` list = no-tools turn" seam was clean for **cloud** but **not local**: at tier light/full, tools also reach the model via a **GBNF grammar** generated from the full registry at boot and stored on the **shared** provider (`daemon.py:342` → `LlamaCppProvider._grammar`), and it's *actively applied to empty-tools requests* (`llama_cpp.py:212/232`). Emptying `tool_schema` didn't clear it, and clearing it per-turn = shared-state mutation (the concurrency violation). **Resolution (you chose "expand scope"):** a per-call `ApiMessageRequest.suppress_tools` flag the provider honors to drop the grammar — concurrency-safe and **structurally tool-free at all tiers**.
 
-## Key design points
-- **Key-only, server-mapped.** Clients pick a KEY from the catalog; the daemon maps it to a vetted config. A client can **never** inject a raw provider/model/api_key payload — the switch surface is the 4 presets + local.
-- **Faithful to the slash path.** The key→config mapping goes through the SAME `resolve_slash_command_target(key, config)` the `/claude` command uses, so REST `/claude` == Telegram `/claude`. **Live acceptance proved this matters:** this host's `slash_commands` config resolves **claude → claude-sonnet-4-5** and **gemini → gemini-2.5-pro** (not the hardcoded haiku/flash) — the catalog + stored override now reflect that.
-- **No secrets.** Responses never include api-key values or env-var names — only `available` (presence).
-- **No engine change.** Routes call `set_override`/`clear_override`/`get_override_for_session` only. The router is wired to the web layer via a new `create_app(model_router=…)` param (launcher passes `loop_context.model_router`) — plumbing, not engine.
-- **Clean failure codes:** reserved ids (`None`/`"system"`) → **400** (not 500); unknown key → **400**; router unwired → **503**; no bearer → **401** (inherited middleware).
+## How it works
+- `run_loop` gains a keyword-only `mode: str = "agent"`. `tools_enabled = mode != "chat"` — **only `"chat"` disables tools; unknown/None → agent**, so an unrecognized value can never silently drop tools. When disabled: (a) the single `tool_schema` derivation (`agent_loop.py:669-673`) stays empty → no prompt injection, no payload tools; (b) `suppress_tools=True` on the request → llama.cpp drops the GBNF grammar. Default (agent) leaves **both** untouched → byte-identical.
+- `mode` is a per-call **parameter**, threaded WS `send_message` / REST `send_chat` → `dispatch_user_message` → `_handle_send_message` → `_run_agent` → `run_loop`. **Never** stored on the shared `loop_context` (the concurrency rule — proven by a test).
+- Send paths: **absent mode → "agent"** (never an error); **malformed explicit mode → 400** (REST) / error frame (WS).
 
 ## Files
-- `src/prometheus/web/server.py` — `model_router` param + `app.state.model_router`; the 4 routes + catalog / effective-model helpers.
-- `src/prometheus/web/launcher.py` — pass `model_router=loop_context.model_router` to `create_app`.
-- `tests/test_api_model_rest.py` *(new, 10 tests)*.
+- `providers/base.py` — `ApiMessageRequest.suppress_tools: bool = False` (default = today's behavior).
+- `engine/agent_loop.py` — `run_loop` `mode` param + gated `tool_schema` derivation + `suppress_tools` on the request.
+- `providers/llama_cpp.py` — drop the GBNF grammar when `suppress_tools` (the local-tier structural fix).
+- `web/ws_server.py` — parse + validate mode (WS), thread through `dispatch_user_message`/`_handle_send_message`/`_run_agent` → `run_loop`.
+- `web/server.py` — parse + validate mode on REST `/api/chat/send`.
+- `tests/test_per_message_mode.py` *(new, 8 tests)*. Plus **3 stale test-doubles widened** to mirror the new optional param — **signature only, no assertion/behavior change**: `test_api_chat_send` (a bridge + a handler stub), `test_wire_contract` (a `fake_run_loop`, 2 occurrences).
 
-## Tests & acceptance (no `--no-verify`)
-- `tests/test_api_model_rest.py` **10/10** — side-effect assertions on a REAL router: catalog (no secrets), set → stored override **+ `route()` picks it up** (override-first path returns the override target), local-key clears, DELETE idempotent, unknown→400, reserved→400, no-bearer→401, unwired→503, and resolve-through-user-`slash_commands`. Web API suite **120** + model_router/router **204** green.
-- **Live (daemon restarted on the branch):** `GET /api/models` (claude→sonnet, gemini→2.5-pro per this host's config; gpt/xai default, availability reflects key presence) → set claude → GET confirms → DELETE → local; sent a real turn into a claude-overridden session (completed); reserved→400, unknown→400, no-bearer→401. All bearer-authed.
+## Merge gate & tests (no `--no-verify`)
+- **Default byte-identical (PRIMARY):** no-mode turn → tools offered + `suppress_tools=False` (unit), and the **entire existing suite passes** (only the 3 doubles' signatures widened).
+- chat → empty tools + `suppress_tools=True`; unknown mode → agent; **concurrency**: two `run_loop`s on the SAME shared context (one agent, one chat) don't cross-talk; llama.cpp drops the grammar iff `suppress_tools`; REST absent→agent / chat→threads / malformed→400.
+- **Full suite: 2990 passed, 0 failed.**
+- **Live (daemon on branch):** malformed→400; chat-mode turn = single plain assistant reply (no tool round); agent-mode turn = multi-round tool loop; agent+chat fired concurrently both 200. The structural tool-free guarantee is **unit-proven** (grammar-drop test); live confirms end-to-end wiring + the behavioral contrast.
 
 ## Follow-ups
-- **Beacon model-switcher UI** — a later composer-UI sprint, stacks on this + Piece 2.
-- **Piece 2** (per-message options channel for the Agent|Chat toggle) — next daemon sprint, MODERATE (survey-confirmed clean `tool_schema` seam); **force-search deferred** (no clean force mechanism).
+- **Beacon composer-UI sprint** — the model switcher (Piece 1) + this Agent|Chat toggle, built as one composer row.
+- **Force-search** deferred — no clean force seam (needs provider `tool_choice` / synthetic `tool_use`); separate sprint.
 
 ## Out of scope (honored)
-- No engine change (`model_router`/`route()`/`run_loop` untouched). No per-message options. No raw client provider-configs. No Beacon work. No secrets exposed.
+- No loop-body / execution-path restructuring — only the one `tool_schema` derivation is gated, plus a per-call suppress flag. No mode on shared state. No Beacon work. Default (no-mode) behavior unchanged.
