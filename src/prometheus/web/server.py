@@ -350,7 +350,10 @@ def create_app(
 
         idempotency_key = (body.get("idempotency_key") or "").strip() or _uuid.uuid4().hex
         client_msg_id = (body.get("client_msg_id") or "").strip() or None
-        await bridge.dispatch_user_message(session_id, message, client_msg_id=client_msg_id)
+        mode = body.get("mode") or "agent"  # absent → agent default (never an error)
+        if mode not in ("agent", "chat"):
+            return JSONResponse(status_code=400, content={"error": f"invalid mode {mode!r} — expected 'agent' or 'chat'"})
+        await bridge.dispatch_user_message(session_id, message, client_msg_id=client_msg_id, mode=mode)
         return {"run_id": idempotency_key, "status": "sent"}
 
     @app.get("/api/sessions/{session_id}/messages")

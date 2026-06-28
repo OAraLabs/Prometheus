@@ -24,7 +24,7 @@ class _RecordingBridge:
         self.client_msg_ids: list[str | None] = []
 
     async def dispatch_user_message(
-        self, session_id: str, content: str, client_msg_id: str | None = None
+        self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent"
     ) -> None:
         self.calls.append((session_id, content))
         self.client_msg_ids.append(client_msg_id)
@@ -155,7 +155,7 @@ def test_ws_bridge_dispatch_method_calls_internal_handler():
     br = WebSocketBridge()
     calls: list[tuple[str, str]] = []
 
-    async def fake(session_id: str, content: str, client_msg_id: str | None = None) -> None:
+    async def fake(session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent") -> None:
         calls.append((session_id, content))
 
     br._handle_send_message = fake  # type: ignore[assignment]
