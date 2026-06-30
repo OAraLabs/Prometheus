@@ -507,7 +507,7 @@ class WebSocketBridge:
         try:
             messages = session.get_messages()
             original_len = len(messages)
-            async for event, _usage in run_loop(self.loop_context, messages, mode=mode):
+            async for event, _usage in run_loop(self.loop_context, messages, mode=mode, session_id=session_id):
                 event_type = type(event).__name__
 
                 if event_type == "AssistantTextDelta":
