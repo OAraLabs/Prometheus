@@ -118,6 +118,50 @@ def test_llama_cpp_grammar_kept_by_default_but_dropped_on_suppress_tools():
     assert "grammar" not in p_chat, "suppress_tools must drop the grammar (local-tier structural fix)"
 
 
+def test_override_lookup_uses_per_call_session_id_not_shared_context():
+    """Per-session override must be keyed on the ACTUAL turn's session_id (threaded per-call),
+    NOT the shared LoopContext.session_id. On the WS/REST path that shared id is stale, so before
+    this fix every Beacon turn silently ran the primary (local gemma) regardless of model pick."""
+    from types import SimpleNamespace
+
+    seen: dict = {}
+
+    class _SpyRouter:
+        def route(self, message, context=None):  # noqa: ANN001
+            seen["session_id"] = (context or {}).get("session_id")
+            # No-op decision (no provider/model swap) → run_loop proceeds with the stub provider.
+            return SimpleNamespace(provider=None, adapter=None, model_name=None, provider_name=None, reason=None)
+
+    prov = _CapturingProvider()
+    ctx = _ctx(prov)
+    ctx.model_router = _SpyRouter()
+    ctx.session_id = "stale:shared-loop-context"
+    asyncio.run(_drain(run_loop(ctx, [ConversationMessage.from_user_text("hi")], session_id="desktop:smoke")))
+    assert seen.get("session_id") == "desktop:smoke", (
+        f"override lookup used {seen.get('session_id')!r}, not the per-call session_id"
+    )
+
+
+def test_override_lookup_falls_back_to_context_session_id_when_not_threaded():
+    """CLI / coding / gym callers don't thread session_id → fall back to context.session_id
+    (those paths stay unchanged)."""
+    from types import SimpleNamespace
+
+    seen: dict = {}
+
+    class _SpyRouter:
+        def route(self, message, context=None):  # noqa: ANN001
+            seen["session_id"] = (context or {}).get("session_id")
+            return SimpleNamespace(provider=None, adapter=None, model_name=None, provider_name=None, reason=None)
+
+    prov = _CapturingProvider()
+    ctx = _ctx(prov)
+    ctx.model_router = _SpyRouter()
+    ctx.session_id = "cli:fallback"
+    asyncio.run(_drain(run_loop(ctx, [ConversationMessage.from_user_text("hi")])))
+    assert seen.get("session_id") == "cli:fallback"
+
+
 # ── send-path validation (REST edge) ──
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402

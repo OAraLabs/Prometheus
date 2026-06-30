@@ -662,6 +662,7 @@ async def run_loop(
     messages: list[ConversationMessage],
     *,
     mode: str = "agent",
+    session_id: str | None = None,
 ) -> AsyncIterator[tuple[StreamEvent, UsageSnapshot | None]]:
     """Run the conversation loop until the model stops requesting tools.
 
@@ -705,9 +706,15 @@ async def run_loop(
         )
         if latest_user:
             try:
+                # Per-session override is keyed on the ACTUAL turn's session_id,
+                # threaded per-call (like `mode`): callers share one LoopContext whose
+                # `.session_id` is NOT the live turn's session, so reading it here made
+                # REST/WS turns look the override up under a stale id and silently run
+                # the primary. Fall back to context.session_id for callers (CLI, coding,
+                # gym) that don't pass one.
                 decision = context.model_router.route(
                     latest_user,
-                    context={"session_id": context.session_id},
+                    context={"session_id": session_id if session_id is not None else context.session_id},
                 )
                 reason_repr = (
                     decision.reason.value
