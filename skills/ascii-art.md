@@ -1,17 +1,15 @@
 ---
 name: ascii-art
 description: Generate ASCII art using pyfiglet (571 fonts), cowsay, boxes, toilet, image-to-ascii, remote APIs (asciified, ascii.co.uk), and LLM fallback. No API keys required.
-version: 4.0.0
-author: 0xbyt4, Hermes Agent
+version: 4.0.1
+author: Prometheus (original: 0xbyt4)
 license: MIT
 dependencies: []
 metadata:
-  hermes:
-    tags: [ASCII, Art, Banners, Creative, Unicode, Text-Art, pyfiglet, figlet, cowsay, boxes]
-    related_skills: [excalidraw]
-
+  tags: [ASCII, Art, Banners, Creative, Unicode, Text-Art, pyfiglet, figlet, cowsay, boxes]
+  related_skills: [excalidraw]
 ---
-<!-- Provenance: NousResearch/hermes-agent | skills/creative/ascii-art/SKILL.md | MIT -->
+<!-- Adapted from NousResearch/hermes-agent | skills/creative/ascii-art/SKILL.md | MIT -->
 
 # ASCII Art Skill
 
@@ -156,9 +154,9 @@ boxes -l                                       # List all 70+ designs
 ### Combine with pyfiglet or asciified
 
 ```bash
-python3 -m pyfiglet "HERMES" -f slant | boxes -d stone
+python3 -m pyfiglet "PROMETHEUS" -f slant | boxes -d stone
 # Or without pyfiglet installed:
-curl -s "https://asciified.thelicato.io/api/v2/ascii?text=HERMES&font=Slant" | boxes -d stone
+curl -s "https://asciified.thelicato.io/api/v2/ascii?text=PROMETHEUS&font=Slant" | boxes -d stone
 ```
 
 ## Tool 5: TOIlet (Colored Text Art)

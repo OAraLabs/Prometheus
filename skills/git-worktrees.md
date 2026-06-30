@@ -1,11 +1,11 @@
 ---
 name: git-worktrees
-description: "Use when starting feature work that needs isolation from current workspace or before executing implementation plans - creates isolated git worktrees with smart directory selection and safety verification."
-version: 1.0.0
-author: obra/superpowers
+description: "Use when starting feature work that needs isolation from current workspace or before executing implementation plans -- creates isolated git worktrees with smart directory selection and safety verification."
+version: 1.0.1
+author: Prometheus (original: obra/superpowers)
 license: MIT
 ---
-<!-- Provenance: obra/superpowers | skills/using-git-worktrees/SKILL.md | MIT -->
+<!-- Adapted from obra/superpowers | skills/using-git-worktrees/SKILL.md | MIT -->
 
 # Using Git Worktrees
 
@@ -34,7 +34,7 @@ ls -d worktrees 2>/dev/null      # Alternative
 ### 2. Check Project Config
 
 ```bash
-grep -i "worktree.*director" CLAUDE.md 2>/dev/null
+grep -i "worktree.*director" PROMETHEUS.md CLAUDE.md 2>/dev/null
 ```
 
 **If preference specified:** Use it without asking.

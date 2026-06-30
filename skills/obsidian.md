@@ -1,13 +1,17 @@
 ---
 name: obsidian
-description: Read, search, and create notes in the Obsidian vault.
+description: Read, search, and create notes in the Obsidian vault. Useful for wiki knowledge management and SENTINEL research logs.
+version: 1.0.1
+author: Prometheus
+license: MIT
+metadata:
+  tags: [notes, obsidian, wiki, knowledge-management]
 ---
-<!-- Provenance: NousResearch/hermes-agent | skills/note-taking/obsidian/SKILL.md | MIT -->
-<!-- provenance: NousResearch/hermes-agent | skills/note-taking/obsidian/SKILL.md | MIT -->
+<!-- Adapted from NousResearch/hermes-agent | skills/note-taking/obsidian/SKILL.md | MIT -->
 
 # Obsidian Vault
 
-**Location:** Set via `OBSIDIAN_VAULT_PATH` environment variable (e.g. in `~/.hermes/.env`).
+**Location:** Set via `OBSIDIAN_VAULT_PATH` environment variable (e.g. in `~/.prometheus/.env`).
 
 If unset, defaults to `~/Documents/Obsidian Vault`.
 

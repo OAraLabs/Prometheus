@@ -96,7 +96,7 @@ opencode run --cwd /path/to/repo "<task>"
 
 ## Local Model Routing (Ollama)
 
-OpenCode's killer feature for Prometheus is clean local-model support — Prometheus already has Ollama installed (`/home/will/.local/bin/ollama`):
+OpenCode's killer feature for Prometheus is clean local-model support — Prometheus already has Ollama installed (`~/.local/bin/ollama`):
 
 ```bash
 # List local Ollama models
