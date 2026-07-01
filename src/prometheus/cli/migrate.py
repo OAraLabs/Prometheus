@@ -226,7 +226,7 @@ class _BaseMigrator:
 
     def _load_prometheus_config(self) -> dict:
         """Load existing prometheus.yaml or return empty dict."""
-        config_path = Path("config/prometheus.yaml")
+        config_path = self.dst / "config" / "prometheus.yaml"
         if config_path.exists():
             with config_path.open(encoding="utf-8") as fh:
                 return yaml.safe_load(fh) or {}
@@ -393,7 +393,7 @@ class HermesMigrator(_BaseMigrator):
         if src.exists():
             report.items.append(MigrationItem(
                 category="config", source_path=src,
-                dest_path=Path("config/prometheus.yaml"),
+                dest_path=self.dst / "config" / "prometheus.yaml",
                 description="Config remapping (Hermes config.yaml)",
                 action="remap",
             ))
@@ -436,6 +436,7 @@ class HermesMigrator(_BaseMigrator):
             _deep_set(prom_cfg, "model.provider",
                        HERMES_PROVIDER_MAP.get(provider, provider))
 
+        item.dest_path.parent.mkdir(parents=True, exist_ok=True)
         with item.dest_path.open("w", encoding="utf-8") as fh:
             yaml.dump(prom_cfg, fh, default_flow_style=False, sort_keys=False)
 
@@ -548,7 +549,7 @@ class OpenClawMigrator(_BaseMigrator):
             if src.exists():
                 report.items.append(MigrationItem(
                     category="config", source_path=src,
-                    dest_path=Path("config/prometheus.yaml"),
+                    dest_path=self.dst / "config" / "prometheus.yaml",
                     description=f"Config remapping ({name})",
                     action="remap",
                 ))
@@ -590,6 +591,7 @@ class OpenClawMigrator(_BaseMigrator):
         if tg.get("enabled"):
             _deep_set(prom_cfg, "gateway.telegram_enabled", True)
 
+        item.dest_path.parent.mkdir(parents=True, exist_ok=True)
         with item.dest_path.open("w", encoding="utf-8") as fh:
             yaml.dump(prom_cfg, fh, default_flow_style=False, sort_keys=False)
 
