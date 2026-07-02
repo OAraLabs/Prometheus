@@ -607,3 +607,12 @@ every 5 min) treats expected-but-dark as an immediate watcher alarm. When adding
 a feature behind a config flag, either default it ON in prometheus.yaml.default
 or register it in the OAra manifest with `expected: false` — a flag nobody
 tracks is a future archaeology dig.
+
+### Directory ownership — one writer per vault directory (Sprint 2, 2026-07-02)
+
+Prometheus owns `~/.prometheus/wiki` (tools/patterns/projects et al.) and NEVER
+writes `~/OAra-Brain`; the Jarvis extractor (via the OAra middleware) owns the
+OAra-Brain life-note directories and never writes the wiki. Vault notes carry
+`writer:` frontmatter; the hourly `jarvis_vault_lint` cron (detection-only)
+flags any file whose claimed writer doesn't own its tree — a Prometheus wiki
+file claiming `writer: jarvis_extractor` is a violation, and vice versa.
