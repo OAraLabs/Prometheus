@@ -200,6 +200,20 @@ class LlamaCppProvider(ModelProvider):
         self._grammar_tool_schemas = list(tool_schemas)
         self._derived_grammars = {}
 
+    def can_force_via_grammar(self, tool_choice: object) -> bool:
+        """FIRST-ROUND FORCING (post-IGNITION follow-up 2): True when this
+        provider can DETERMINISTICALLY enforce a forced directive via GBNF —
+        i.e. it has a boot grammar AND a wired grammar source to derive the
+        required / {tool:X} grammar from. The engine uses this to withhold
+        native tools for the forced round: the grammar cannot be ignored by
+        the server, unlike the OpenAI-shape function-forcing param, which the
+        live llama-server build silently drops."""
+        if not self._grammar:
+            return False
+        if not (tool_choice == "required" or isinstance(tool_choice, dict)):
+            return False
+        return self._grammar_enforcer is not None and self._grammar_tool_schemas is not None
+
     def _derived_grammar(self, cache_key: str, *, only_tool: str | None = None) -> str:
         """Generate-and-cache a constrained grammar via the enforcer.
 

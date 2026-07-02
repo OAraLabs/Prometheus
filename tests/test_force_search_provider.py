@@ -121,3 +121,16 @@ def test_unmapped_value_raises_never_degrades():
     p, _ = _provider()
     with pytest.raises(ValueError, match="unmapped tool_choice"):
         p._build_request_payload(_req(tool_choice="bogus"))
+
+
+def test_can_force_via_grammar_matrix():
+    # FIRST-ROUND FORCING: the engine's withhold-tools probe on the REAL provider.
+    p, _ = _provider()  # grammar + source wired
+    assert p.can_force_via_grammar("required")
+    assert p.can_force_via_grammar({"tool": "web_search"})
+    assert not p.can_force_via_grammar("auto")
+    assert not p.can_force_via_grammar("none")
+    p_nosrc, _ = _provider(wire_source=False)
+    assert not p_nosrc.can_force_via_grammar("required"), "no source -> cannot derive -> False"
+    p_nogrammar = LlamaCppProvider()
+    assert not p_nogrammar.can_force_via_grammar("required"), "no boot grammar -> False"
