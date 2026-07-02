@@ -91,6 +91,20 @@ def test_unknown_name_rejected():
 def test_unmarked_touches_double_ok():
     # No acceptance mark -> doubles are fine; enforcement must not leak here.
     assert FakeProvider().stream_message(None) == "canned"
+
+
+def _unregistered_substitute():
+    return "substituted"
+
+
+@pytest.mark.acceptance
+def test_sentinel_warns_on_unregistered_substitute(monkeypatch):
+    # Coverage sentinel: monkeypatching an UNREGISTERED callable in an
+    # acceptance test must emit the loud TRIPWIRE-2 warning (not a failure).
+    import json as _mod
+
+    monkeypatch.setattr(_mod, "dumps", _unregistered_substitute)
+    assert _mod.dumps() == "substituted"
 """
 
 
@@ -136,6 +150,12 @@ def test_tripwire_end_to_end(tmp_path):
 
     # Enforcement applies ONLY to acceptance-marked tests.
     assert "test_unmarked_touches_double_ok PASSED" in out
+
+    # Coverage sentinel: unregistered substitute in an acceptance test → loud
+    # WARNING (test still passes) announcing the TRIPWIRE-2 gap.
+    assert "test_sentinel_warns_on_unregistered_substitute PASSED" in out
+    assert "ACCEPTANCE TEST USED UNREGISTERED SUBSTITUTE" in out
+    assert "TRIPWIRE-2" in out
 
     # Overall: a run containing violations exits non-zero (the gate holds in CI).
     assert code != 0

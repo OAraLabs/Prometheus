@@ -14,9 +14,12 @@ and visible at the test site — never global, never implicit.
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 
 from tests.support.doubles import registry
+from tests.support.plumbing_allowlist import PLUMBING_TARGETS
 
 _VIOLATION_TEMPLATE = (
     "ACCEPTANCE TEST TERMINATED IN DOUBLE: {name} (replaces {replaces}). "
@@ -68,6 +71,49 @@ def _validated_allowance(marker: pytest.Mark) -> set[str]:
     return names
 
 
+def _sentinel_target_name(target: object, attr: str) -> str:
+    """Render a monkeypatched target as '<owner>.<attr>' for allowlist matching."""
+    owner = getattr(target, "__module__", None)
+    qual = getattr(target, "__qualname__", None) or getattr(target, "__name__", None)
+    if owner and qual and owner != qual:
+        return f"{owner}.{qual}.{attr}"
+    return f"{qual or type(target).__name__}.{attr}"
+
+
+def _warn_unregistered_substitutes(item: pytest.Item) -> None:
+    """Coverage sentinel (checkpoint-1 condition): an acceptance test that
+    monkeypatches a behavior substitute NOT in the double registry gets a loud
+    WARNING — the gap self-announces until TRIPWIRE-2 registers the long tail.
+
+    Heuristic by design: scans the function-scoped ``monkeypatch`` fixture's
+    setattr log; a replacement that is callable (or a class) and carries no
+    ``__tripwire_record__`` and is not in the plumbing allowlist is flagged.
+    unittest.mock.patch and fixture-private MonkeyPatch instances are outside
+    this net (documented limitation).
+    """
+    mp = item.funcargs.get("monkeypatch") if hasattr(item, "funcargs") else None
+    setattr_log = getattr(mp, "_setattr", None) if mp is not None else None
+    if not setattr_log:
+        return
+    for target, attr, _old in setattr_log:
+        current = getattr(target, attr, None)
+        if not callable(current):
+            continue  # value/config swap, not a behavior substitute
+        if getattr(current, "__tripwire_record__", None) is not None:
+            continue  # registered double — the tripwire proper covers it
+        if isinstance(current, type) and getattr(current, "__tripwire_record__", None) is not None:
+            continue
+        name = _sentinel_target_name(target, attr)
+        if name in PLUMBING_TARGETS:
+            continue
+        warnings.warn(
+            f"ACCEPTANCE TEST USED UNREGISTERED SUBSTITUTE: {name} — tripwire "
+            "cannot verify this path until it is registered (TRIPWIRE-2).",
+            UserWarning,
+            stacklevel=2,
+        )
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_call(item: pytest.Item):
     try:
@@ -89,4 +135,5 @@ def pytest_runtest_call(item: pytest.Item):
             ),
             pytrace=False,
         )
+    _warn_unregistered_substitutes(item)
     return result
