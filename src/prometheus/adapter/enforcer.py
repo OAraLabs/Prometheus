@@ -137,7 +137,14 @@ class StructuredOutputEnforcer:
                 f' ws "\\\"arguments\\\"" ws ":" ws {rule_name}-args ws "}}"'
             )
 
-        tool_choice = "\n  | ".join(tool_alternatives)
+        # SINGLE-LINE alternates: llama.cpp's GBNF parser silently REJECTS a
+        # grammar whose alternates continue on the next line ("\n  | ..."), and
+        # the server then runs UNCONSTRAINED with no error (live-bisected
+        # 2026-07-02: `root ::= "MOO"` forces, the multi-line tool-call rule is
+        # ignored; joining the alternates onto one line forces). Every
+        # multi-tool grammar this generator ever emitted was llama-invalid —
+        # tier-full "worked" only in unit tests that never parsed the GBNF.
+        tool_choice = " | ".join(tool_alternatives)
 
         # Tool-OR-text root: a constrained-decoding agent must still be able to
         # answer in prose, so the root permits either a valid tool-call object

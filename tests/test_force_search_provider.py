@@ -121,3 +121,27 @@ def test_unmapped_value_raises_never_degrades():
     p, _ = _provider()
     with pytest.raises(ValueError, match="unmapped tool_choice"):
         p._build_request_payload(_req(tool_choice="bogus"))
+
+
+def test_grammar_has_no_continuation_lines_llama_gbnf_compat():
+    """llama.cpp's GBNF parser silently REJECTS multi-line alternates
+    ("\\n  | ...") and then runs UNCONSTRAINED with no error (live-bisected
+    2026-07-02). Every rule must keep its alternates on one line."""
+    _, enforcer = _provider()
+    for kwargs in ({}, {"require_tool_use": True}, {"require_tool_use": True, "only_tool": "web_search"}):
+        g = enforcer.generate_grammar(SCHEMAS, **kwargs)
+        bad = [ln for ln in g.splitlines() if ln.lstrip().startswith("|")]
+        assert not bad, f"llama-invalid continuation lines in grammar: {bad[:2]}"
+
+
+def test_can_force_via_grammar_matrix():
+    # FIRST-ROUND FORCING: the engine's withhold-tools probe on the REAL provider.
+    p, _ = _provider()  # grammar + source wired
+    assert p.can_force_via_grammar("required")
+    assert p.can_force_via_grammar({"tool": "web_search"})
+    assert not p.can_force_via_grammar("auto")
+    assert not p.can_force_via_grammar("none")
+    p_nosrc, _ = _provider(wire_source=False)
+    assert not p_nosrc.can_force_via_grammar("required"), "no source -> cannot derive -> False"
+    p_nogrammar = LlamaCppProvider()
+    assert not p_nogrammar.can_force_via_grammar("required"), "no boot grammar -> False"
