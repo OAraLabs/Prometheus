@@ -21,6 +21,7 @@ from prometheus.providers.base import (
     ApiTextDeltaEvent,
     ModelProvider,
 )
+from tests.support.doubles import register_double
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,7 @@ def _tool_response(tool_name: str, tool_id: str, tool_input: dict) -> list:
     ]
 
 
+@register_double("engine.MockProvider", replaces="prometheus.providers.base.ModelProvider")
 class MockProvider(ModelProvider):
     """Provider that returns scripted responses in sequence."""
 

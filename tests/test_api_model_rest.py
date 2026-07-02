@@ -71,8 +71,16 @@ def test_set_preset_stores_override_and_route_picks_it_up(monkeypatch):
     # _route_override lazily builds a provider/adapter from the preset config; stub both
     # so the override path runs without real cloud construction (model_name comes from the
     # stored provider_config, which is what proves the switch took effect).
-    monkeypatch.setattr(_reg.ProviderRegistry, "create", lambda *a, **k: object())
-    monkeypatch.setattr(_mr, "_build_adapter_for", lambda *a, **k: object())
+    from tests.support.doubles import register_double
+
+    monkeypatch.setattr(
+        _reg.ProviderRegistry, "create",
+        register_double("model_rest.ProviderRegistry.create", replaces="prometheus.providers.registry.ProviderRegistry.create")(lambda *a, **k: object()),
+    )
+    monkeypatch.setattr(
+        _mr, "_build_adapter_for",
+        register_double("model_rest._build_adapter_for", replaces="prometheus.router.model_router._build_adapter_for")(lambda *a, **k: object()),
+    )
     decision = router.route("hello there", {"session_id": "s1"})
     assert decision.model_name == OVERRIDE_PRESETS["claude"]["model"]
     assert decision.reason == RouteReason.USER_OVERRIDE

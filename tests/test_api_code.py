@@ -170,11 +170,19 @@ def test_run_coding_task_emits_report_on_uncaught_exception(monkeypatch, tmp_pat
     class _StubSandbox:
         root = tmp_path / "clone"
 
-    monkeypatch.setattr(m, "create_provider", lambda cfg: (object(), "m"))
-    monkeypatch.setattr(m, "create_adapter", lambda *a, **k: None)
+    from tests.support.doubles import register_double
+
+    monkeypatch.setattr(
+        m, "create_provider",
+        register_double("api_code.create_provider", replaces="prometheus coding create_provider")(lambda cfg: (object(), "m")),
+    )
+    monkeypatch.setattr(
+        m, "create_adapter",
+        register_double("api_code.create_adapter", replaces="prometheus coding create_adapter")(lambda *a, **k: None),
+    )
     monkeypatch.setattr(
         "prometheus.coding.sandbox.clone_repo_for_sandbox",
-        lambda *a, **k: _StubSandbox(),
+        register_double("api_code.clone_repo_for_sandbox", replaces="prometheus.coding.sandbox.clone_repo_for_sandbox")(lambda *a, **k: _StubSandbox()),
     )
 
     def _boom(self):

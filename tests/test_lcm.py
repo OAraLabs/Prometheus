@@ -26,6 +26,7 @@ from prometheus.memory.lcm_fts5 import sanitize_fts5_query
 from prometheus.memory.lcm_conversation_store import LCMConversationStore
 from prometheus.memory.lcm_summary_store import LCMSummaryStore
 from prometheus.providers.base import ApiTextDeltaEvent
+from tests.support.doubles import register_double
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +34,7 @@ from prometheus.providers.base import ApiTextDeltaEvent
 # ---------------------------------------------------------------------------
 
 
+@register_double("lcm.MockProvider", replaces="prometheus.providers.base.ModelProvider")
 class MockProvider:
     """Minimal provider that yields a single text delta with the canned response."""
 
@@ -43,6 +45,7 @@ class MockProvider:
         yield ApiTextDeltaEvent(text=self._response)
 
 
+@register_double("lcm.MockSummarizer", replaces="prometheus.memory.lcm_summarize.LCMSummarizer")
 class MockSummarizer:
     """Mock summarizer that bypasses the real model call."""
 
@@ -64,6 +67,7 @@ class MockSummarizer:
         return False
 
 
+@register_double("lcm.RecordingProvider", replaces="prometheus.providers.base.ModelProvider")
 class RecordingProvider(MockProvider):
     """MockProvider that also records every request it receives."""
 

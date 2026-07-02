@@ -1673,6 +1673,9 @@ class TestSprint16VisionMultimodal:
         # Provider that records what it receives
         calls = []
 
+        from tests.support.doubles import register_double
+
+        @register_double("wiring.RecordingProvider", replaces="prometheus.providers.base.ModelProvider")
         class RecordingProvider:
             async def stream_message(self, request):
                 calls.append(request)
@@ -6881,6 +6884,9 @@ class TestWeaveWebToolsWiring:
             async def aiter_bytes(self, chunk_size: int = 8192):
                 yield self.content
 
+        from tests.support.doubles import register_double
+
+        @register_double("wiring._FakeAsyncClient", replaces="httpx.AsyncClient (web_fetch HTTP boundary)")
         class _FakeAsyncClient:
             def __init__(self, *a, **kw): pass
             async def __aenter__(self): return self

@@ -22,12 +22,14 @@ from prometheus.providers.base import (
     ApiTextDeltaEvent,
     ModelProvider,
 )
+from tests.support.doubles import register_double
 
 
 # ---------------------------------------------------------------------------
 # Minimal stub provider for prompt/agent hooks
 # ---------------------------------------------------------------------------
 
+@register_double("hooks.StubProvider", replaces="prometheus.providers.base.ModelProvider")
 class StubProvider(ModelProvider):
     """Returns a scripted text response."""
 

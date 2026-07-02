@@ -14,8 +14,10 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from prometheus.web.server import create_app  # noqa: E402
+from tests.support.doubles import register_double  # noqa: E402
 
 
+@register_double("api_chat_send._RecordingBridge", replaces="prometheus.web.ws_server.WebSocketBridge")
 class _RecordingBridge:
     """Captures dispatched messages without running an agent."""
 

@@ -29,6 +29,39 @@ from prometheus.memory.lcm_conversation_store import LCMConversationStore  # noq
 from prometheus.memory.lcm_types import MessagePart  # noqa: E402
 from prometheus.web.server import create_app  # noqa: E402
 from prometheus.web.ws_server import WebSocketBridge  # noqa: E402
+from tests.support.doubles import register_double  # noqa: E402
+
+
+def _pin_run_loop_signature(fake) -> None:
+    """Drift pin: fail LOUDLY if a fake_run_loop's signature no longer matches the
+    real ``run_loop``. Without this, a new run_loop kwarg becomes a TypeError inside
+    bridge._run_agent's broad try/except (swallowed) and surfaces as a misleading
+    downstream assertion — the exact #74 double-drift this file shipped red with on
+    bbfbb35 (fake lacked ``session_id`` after ws_server.py:510 started passing it).
+
+    Compares positional arity + the exact set of keyword-only parameter names, so a
+    positional rename doesn't false-alarm but any callable-interface change does.
+    """
+    import inspect
+
+    from prometheus.engine.agent_loop import run_loop as _real
+
+    real_sig, fake_sig = inspect.signature(_real), inspect.signature(fake)
+
+    def _split(sig):
+        pos = [p.name for p in sig.parameters.values()
+               if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+        kw = sorted(p.name for p in sig.parameters.values() if p.kind == p.KEYWORD_ONLY)
+        return pos, kw
+
+    real_pos, real_kw = _split(real_sig)
+    fake_pos, fake_kw = _split(fake_sig)
+    assert len(fake_pos) == len(real_pos) and fake_kw == real_kw, (
+        "fake_run_loop SIGNATURE DRIFTED from the real run_loop:\n"
+        f"  real: {real_sig}\n  fake: {fake_sig}\n"
+        "Update the double to match the real interface — do not rely on "
+        "bridge._run_agent to surface the TypeError (it swallows it)."
+    )
 
 
 def _lcm_manager(tmp_path):
@@ -59,11 +92,15 @@ def _lcm_manager(tmp_path):
 def test_tool_frames_carry_consistent_call_id(monkeypatch):
     from prometheus.engine import agent_loop as al
 
-    async def fake_run_loop(ctx, messages, *, mode="agent"):
+    async def fake_run_loop(ctx, messages, *, mode="agent", session_id=None):
         yield ToolExecutionStarted(tool_name="web_search", tool_input={"q": "x"}, tool_use_id="toolu_abc"), None
         yield ToolExecutionCompleted(tool_name="web_search", output="result", is_error=False, tool_use_id="toolu_abc"), None
 
-    monkeypatch.setattr(al, "run_loop", fake_run_loop)
+    _pin_run_loop_signature(fake_run_loop)
+    monkeypatch.setattr(
+        al, "run_loop",
+        register_double("wire_contract.fake_run_loop.tool_frames", replaces="prometheus.engine.agent_loop.run_loop")(fake_run_loop),
+    )
 
     captured: list[dict] = []
     bridge = WebSocketBridge(session_mgr=SessionManager(), loop_context=object())
@@ -163,12 +200,16 @@ def test_persist_loop_result_persists_tail_without_double_append():
 def test_run_agent_persists_assistant_turn(monkeypatch):
     from prometheus.engine import agent_loop as al
 
-    async def fake_run_loop(ctx, messages, *, mode="agent"):
+    async def fake_run_loop(ctx, messages, *, mode="agent", session_id=None):
         messages.append(ConversationMessage(role="assistant", content=[TextBlock(text="answer")]))
         if False:
             yield  # make this an async generator
 
-    monkeypatch.setattr(al, "run_loop", fake_run_loop)
+    _pin_run_loop_signature(fake_run_loop)
+    monkeypatch.setattr(
+        al, "run_loop",
+        register_double("wire_contract.fake_run_loop.persist", replaces="prometheus.engine.agent_loop.run_loop")(fake_run_loop),
+    )
 
     fake = _FakeLCM()
     session = ChatSession("s", lcm_engine=fake)
