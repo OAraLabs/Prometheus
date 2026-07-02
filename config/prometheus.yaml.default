@@ -28,6 +28,13 @@ model:
   fallback_provider: "ollama"
   fallback_url: "http://localhost:11434"
 
+# Assembly-time context compaction (the relief valve). Sprint 2 (OAra):
+# this was config-dark since birth — the compactor only exists when
+# compaction.enabled is true. Default ON; the config-dark audit alarms if
+# an expected-enabled compactor is missing from /api/status.
+compaction:
+  enabled: true
+
 context:
   effective_limit: 24000
   compression_trigger: 0.75

@@ -211,6 +211,51 @@ class ChatSession:
             if self._lcm_engine is not None:
                 self._persist_to_lcm(new, base_turn_index=original_len)
 
+    def _schedule_lcm_compaction(self) -> None:
+        """Fire-and-forget LCM ``maybe_compact`` after an ingest batch.
+
+        Runs as a background task so the summarizer LLM call never sits in the
+        turn's critical path. No-op when there is no running event loop (the
+        CLI path awaits ``maybe_compact`` itself). Failures are LOUD:
+        journal error + silent_failure telemetry — a session crossing the
+        threshold without compaction firing must never be silent again.
+        """
+        if self._lcm_engine is None:
+            return
+        import asyncio
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # sync/CLI context — __main__ owns its own maybe_compact call
+        loop.create_task(self._run_lcm_compaction())
+
+    async def _run_lcm_compaction(self) -> None:
+        try:
+            result = await self._lcm_engine.maybe_compact(self.session_id)
+            if result is not None:
+                log.info(
+                    "LCM compaction ran for %s: %s", self.session_id, result
+                )
+        except Exception as exc:
+            log.error(
+                "LCM compaction FAILED for %s: %s", self.session_id, exc,
+                exc_info=True,
+            )
+            try:
+                from prometheus.telemetry.tracker import get_telemetry_handle
+
+                tel = get_telemetry_handle()
+                if tel is not None:
+                    tel.record_silent_failure(
+                        subsystem="lcm_compaction",
+                        operation="maybe_compact",
+                        exc=exc,
+                        context={"session_id": self.session_id},
+                    )
+            except Exception:
+                log.warning("telemetry unavailable for lcm_compaction failure")
+
     def persist_loop_result(self, original_len: int) -> None:
         """Persist messages that ``run_loop`` appended IN PLACE to LCM.
 
@@ -255,6 +300,12 @@ class ChatSession:
                     provenance=msg.provenance,
                     is_trusted=msg.is_trusted,
                 )
+            # Sprint 2 (OAra): the durable-DAG relief valve. maybe_compact was
+            # CLI-only for the daemon's whole life — every gateway ingested
+            # messages forever and nothing ever summarized. This is the one
+            # choke point all paths share (telegram/slack via
+            # add_result_messages, web/Beacon/Bridge via persist_loop_result).
+            self._schedule_lcm_compaction()
         except Exception as exc:
             # Memory persistence MUST NOT be in the agent's critical
             # path. Surface to silent_failures and continue. The
