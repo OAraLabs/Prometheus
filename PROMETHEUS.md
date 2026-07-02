@@ -587,7 +587,7 @@ reporting "No new events" — fail-safe silence killed that system invisibly. Pr
 already leans loud (silent_failure telemetry, #78 journal tracebacks); keep it that way:
 any new code that catches an exception and continues silently is a bug.
 
-Prometheus's role in enforcement: the cron job `jarvis_heartbeat_watcher` (every 5 min)
+Prometheus's role in enforcement: the cron job `oara_heartbeat_watcher` (every 5 min)
 runs OAra's `services/watcher/heartbeat_watcher.py`; a stale Jarvis component makes the
 job exit non-zero, so the outage shows up as a failed cron status in Beacon's Config → Cron
 tab and as an `error` event in the Jarvis Archive. Do not "fix" that job by making it
@@ -613,6 +613,6 @@ tracks is a future archaeology dig.
 Prometheus owns `~/.prometheus/wiki` (tools/patterns/projects et al.) and NEVER
 writes `~/OAra-Brain`; the Jarvis extractor (via the OAra middleware) owns the
 OAra-Brain life-note directories and never writes the wiki. Vault notes carry
-`writer:` frontmatter; the hourly `jarvis_vault_lint` cron (detection-only)
+`writer:` frontmatter; the hourly `oara_vault_lint` cron (detection-only)
 flags any file whose claimed writer doesn't own its tree — a Prometheus wiki
-file claiming `writer: jarvis_extractor` is a violation, and vice versa.
+file claiming `writer: oara_extractor` is a violation, and vice versa.
