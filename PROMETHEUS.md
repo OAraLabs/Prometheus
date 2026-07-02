@@ -575,3 +575,20 @@ notification (asserts the gateway send + per-session routing); file-watch on
 bus); notify-only does not re-engage; turn-cap blocks excess; untrusted-tagging
 regression guard (field is truth, banner is projection); SecurityGate-denied
 command rejected with no process; timeout → `failed`; durability resume/reap.
+
+## The loud-failure law (OAra Lab-wide, 2026-07-02)
+
+**Degraded is a state that gets announced, never absorbed. No component may
+catch-and-continue silently. Every daemon writes a success heartbeat; staleness
+is surfaced, spoken, and shown.**
+
+Origin: OAra Voice's memory extractor 404'd every 30 minutes for ~3.5 months while
+reporting "No new events" — fail-safe silence killed that system invisibly. Prometheus
+already leans loud (silent_failure telemetry, #78 journal tracebacks); keep it that way:
+any new code that catches an exception and continues silently is a bug.
+
+Prometheus's role in enforcement: the cron job `jarvis_heartbeat_watcher` (every 5 min)
+runs OAra's `services/watcher/heartbeat_watcher.py`; a stale Jarvis component makes the
+job exit non-zero, so the outage shows up as a failed cron status in Beacon's Config → Cron
+tab and as an `error` event in the Jarvis Archive. Do not "fix" that job by making it
+always exit 0 — its failure IS the feature.
