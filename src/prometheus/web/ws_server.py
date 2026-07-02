@@ -578,6 +578,24 @@ class WebSocketBridge:
             })
 
         except Exception as e:
+            # FAIL LOUD (#74-adjacent follow-up): this except used to emit only a WS
+            # error frame — invisible in the journal unless a client happened to
+            # render it. That masked the wire-contract interface drift (a TypeError
+            # from a run_loop signature change surfaced as "the turn silently
+            # produced nothing") for the life of #74-on-main. Log the full traceback
+            # server-side and record a silent_failure telemetry row, THEN broadcast.
+            logger.exception(
+                "_run_agent failed (session=%s, mode=%s): %s", session_id, mode, e
+            )
+            try:
+                from prometheus.telemetry.tracker import get_telemetry_handle
+                handle = get_telemetry_handle()
+                if handle is not None and hasattr(handle, "record_silent_failure"):
+                    handle.record_silent_failure(
+                        "web_bridge", "_run_agent", e, context={"session_id": session_id, "mode": mode}
+                    )
+            except Exception:
+                logger.warning("telemetry record for _run_agent failure itself failed", exc_info=True)
             await self.broadcast({
                 "type": "error",
                 "timestamp": time.time(),
