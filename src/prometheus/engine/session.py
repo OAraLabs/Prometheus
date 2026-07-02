@@ -66,7 +66,7 @@ class ChatSession:
     __slots__ = (
         "session_id", "messages", "created_at",
         "queued_steers", "queued_prompts",
-        "_lcm_engine",
+        "_lcm_engine", "_compaction_tasks",
     )
 
     def __init__(
@@ -81,6 +81,8 @@ class ChatSession:
         # SPRINT-2 WS1 — see module docstring for semantics.
         self.queued_steers: list[str] = []
         self.queued_prompts: list[str] = []
+        # Strong refs for fire-and-forget compaction tasks (GC guard).
+        self._compaction_tasks: set = set()
         # PR fix/memory-lcm-full-rewire (2026-05-26) — LCM persistence
         # handle, set by SessionManager when the daemon has wired LCM.
         # ``None`` when the session was created before LCM was available
@@ -228,10 +230,16 @@ class ChatSession:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return  # sync/CLI context — __main__ owns its own maybe_compact call
-        loop.create_task(self._run_lcm_compaction())
+        # Hold a strong reference: a bare create_task can be garbage-collected
+        # mid-await and die SILENTLY — the exact failure mode this hook exists
+        # to eliminate.
+        task = loop.create_task(self._run_lcm_compaction())
+        self._compaction_tasks.add(task)
+        task.add_done_callback(self._compaction_tasks.discard)
 
     async def _run_lcm_compaction(self) -> None:
         try:
+            log.info("LCM maybe_compact check for %s", self.session_id)
             result = await self._lcm_engine.maybe_compact(self.session_id)
             if result is not None:
                 log.info(
