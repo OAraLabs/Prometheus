@@ -78,6 +78,9 @@ async def launch_web(
 
     # Wire agent state ref into the app
     app.state.agent_state_ref = agent_state_ref
+    # Sprint 2 (OAra): surface the compactor so /api/status can report the
+    # compaction block — the middleware config audit probes it (config-dark law).
+    app.state.compactor = getattr(loop_context, "compactor", None)
 
     # Create WebSocket bridge. The WS uses the SAME token as the REST
     # middleware (config.web.api_token or PROMETHEUS_API_TOKEN); empty => auth

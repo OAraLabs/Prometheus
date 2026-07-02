@@ -243,6 +243,12 @@ def create_app(
     @app.get("/api/status")
     async def get_status():
         running_sha, tree_head, stale = _staleness()
+        # Sprint 2 (OAra config-dark law): report compaction wiring so external
+        # audits can detect expected-but-dark. enabled == the assembly-time
+        # compactor is constructed AND threaded to this web path; the lcm_*
+        # counters expose the durable DAG compactor's activity.
+        comp = getattr(app.state, "compactor", None)
+        lcm = getattr(app.state, "lcm_engine", None)
         return {
             "state": app.state.agent_state,
             "model": app.state.current_model,
@@ -252,6 +258,12 @@ def create_app(
             "running_sha": running_sha,
             "tree_head": tree_head,
             "stale": stale,
+            "compaction": {
+                "enabled": comp is not None,
+                "lcm_wired": lcm is not None,
+                "lcm_total_compactions": getattr(lcm, "_total_compactions", None),
+                "lcm_last_compaction_at": getattr(lcm, "_last_compaction_at", None),
+            },
         }
 
     # ── Sessions ────────────────────────────────────────────────────

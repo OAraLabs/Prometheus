@@ -1205,6 +1205,12 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 tool_result_max=config.get("context", {}).get("tool_result_max", 4000),
                 # Phase 3.5: web bridge is its own session namespace.
                 session_id="web",
+                # Sprint 2 (OAra): the web path was the ONLY path without the
+                # compactor — AgentLoop.run_async() threads it for telegram/CLI,
+                # but this pre-built context never got it, so web/Beacon/Bridge
+                # turns could never trigger assembly-time compaction even with
+                # compaction.enabled=true. One line, months of config-dark.
+                compactor=compactor,
             )
 
             # Beacon D1: construct the profile store so GET /api/profiles returns

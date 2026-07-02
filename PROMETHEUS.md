@@ -592,3 +592,18 @@ runs OAra's `services/watcher/heartbeat_watcher.py`; a stale Jarvis component ma
 job exit non-zero, so the outage shows up as a failed cron status in Beacon's Config → Cron
 tab and as an `error` event in the Jarvis Archive. Do not "fix" that job by making it
 always exit 0 — its failure IS the feature.
+
+### Corollary (Sprint 2, 2026-07-02): the law extends to configuration
+
+A subsystem that is expected-enabled but dark is a failure state identical to a
+stale heartbeat. LCM compaction sat behind an unset `compaction.enabled` flag
+since birth — 1834 messages, zero summaries, and everyone debugged the
+summarizer while the flag was the outage. "Never turned on" must be a boot-time
+alarm, not an archaeology finding.
+
+Enforcement: GET /api/status now reports a `compaction` block (enabled +
+lcm counters); the OAra middleware's config audit (`subsystems:` manifest,
+every 5 min) treats expected-but-dark as an immediate watcher alarm. When adding
+a feature behind a config flag, either default it ON in prometheus.yaml.default
+or register it in the OAra manifest with `expected: false` — a flag nobody
+tracks is a future archaeology dig.
