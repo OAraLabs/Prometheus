@@ -39,6 +39,33 @@ _BASE_DELAY = 1.0
 _MAX_DELAY = 30.0
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 529}
 
+
+def _native_tool_choice(tool_choice: object) -> dict:
+    """Map the engine's per-call tool_choice to Anthropic's native param.
+
+    force-search (IGNITION): this replaces the historical hardcode — for
+    "auto" it returns the exact same ``{"type": "auto"}`` dict, so the default
+    path serializes byte-identically to before. ``required`` -> ``{"type":
+    "any"}`` (Anthropic's force-SOME-tool); ``{"tool": X}`` -> ``{"type":
+    "tool", "name": X}`` (force THAT tool).
+
+    Fail-loud guard: any other value raises. "none" never reaches here on the
+    engine path (run_loop sends no tools, so the tools/tool_choice block is
+    skipped entirely — that IS Anthropic-native "no tools"). A silent
+    degrade-to-auto or dropped key would defeat a forced turn invisibly.
+    """
+    if tool_choice == "auto" or tool_choice is None:
+        return {"type": "auto"}
+    if tool_choice == "required":
+        return {"type": "any"}
+    if isinstance(tool_choice, dict) and isinstance(tool_choice.get("tool"), str) and tool_choice["tool"]:
+        return {"type": "tool", "name": tool_choice["tool"]}
+    raise ValueError(
+        f"unmapped tool_choice {tool_choice!r} for the Anthropic provider — "
+        "expected 'auto' | 'required' | {'tool': <name>} (with tools present; "
+        "'none' is expressed by sending no tools). Refusing to degrade silently."
+    )
+
 # Enable prompt caching when system prompt exceeds this many chars
 _CACHE_THRESHOLD_CHARS = 1024
 
@@ -178,7 +205,7 @@ class AnthropicProvider(ModelProvider):
                 for t in request.tools
                 if t.get("name")
             ]
-            payload["tool_choice"] = {"type": "auto"}
+            payload["tool_choice"] = _native_tool_choice(getattr(request, "tool_choice", "auto"))
 
         headers = {
             "x-api-key": self._api_key,
