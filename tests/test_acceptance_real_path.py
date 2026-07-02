@@ -108,30 +108,64 @@ def test_acceptance_mode_channel_per_message():
 
 
 @pytest.mark.acceptance(allow_doubles=[BOUNDARY_DOUBLE])
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "FINDING (TRIPWIRE checkpoint 2): tool_choice does NOT survive REST→provider "
-        "on main — the channel doesn't exist (ApiMessageRequest has no tool_choice "
-        "field; /api/chat/send ignores the key). It is #73's unmerged payload. "
-        "strict=True arms the merge gate: when #73 threads it, this XPASSes red and "
-        "must be promoted to a plain passing acceptance test."
-    ),
-)
 def test_acceptance_tool_choice_threading():
-    """A turn carrying tool_choice=required must show tool_choice present and
-    correct ON THE OUTBOUND RECORD. Scope: threading only — enforcement
-    semantics (grammar/native param) are #73's own merge gate."""
+    """Every tool_choice value must reach the provider boundary per-call with
+    correct shape ON THE OUTBOUND RECORD. Scope: threading — enforcement
+    semantics (grammar/native param) are covered by the provider-level
+    acceptance tests (IGNITION Pieces 2/3).
+
+    History: this was TRIPWIRE's armed gate — xfail(strict=True) documenting
+    that tool_choice did not survive REST→provider on main (no
+    ApiMessageRequest field; /api/chat/send ignored the key). IGNITION threaded
+    the channel; the XPASS strict-red fired as designed and the test was
+    promoted to this plain acceptance test (evidence pair in the IGNITION PR).
+    """
     h = build_real_app()
     with h.client:
+        # required — the original gate case.
+        h.send_turn("session-T", "force a search", mode="agent", extra_body={"tool_choice": "required"})
+        assert getattr(h.primary.requests[-1], "tool_choice", None) == "required"
+
+        # {tool: X} — dict shape survives intact (name preserved, not coerced).
         h.send_turn(
-            "session-T",
-            "force a search",
-            mode="agent",
-            extra_body={"tool_choice": "required"},
+            "session-T", "use that one tool", mode="agent",
+            extra_body={"tool_choice": {"tool": "web_search"}},
         )
-        req = h.primary.requests[-1]
-        assert getattr(req, "tool_choice", None) == "required", (
-            f"tool_choice did not reach the provider boundary "
-            f"(outbound has {getattr(req, 'tool_choice', '<no field>')!r})"
+        assert getattr(h.primary.requests[-1], "tool_choice", None) == {"tool": "web_search"}
+
+        # none — resolves like chat mode: no tools offered AND suppress_tools set.
+        h.send_turn("session-T", "just talk", mode="agent", extra_body={"tool_choice": "none"})
+        none_req = h.primary.requests[-1]
+        assert getattr(none_req, "tool_choice", None) == "none"
+        assert none_req.tools == [] and none_req.suppress_tools
+
+        # auto (explicit) and absent — both reach the boundary as "auto",
+        # with the default path's tools/suppress_tools untouched.
+        h.send_turn("session-T", "explicit auto", mode="agent", extra_body={"tool_choice": "auto"})
+        assert getattr(h.primary.requests[-1], "tool_choice", None) == "auto"
+        h.send_turn("session-T", "absent tool_choice", mode="agent")
+        absent_req = h.primary.requests[-1]
+        assert getattr(absent_req, "tool_choice", None) == "auto"
+        assert not absent_req.suppress_tools
+
+
+@pytest.mark.acceptance(allow_doubles=[BOUNDARY_DOUBLE])
+def test_acceptance_tool_choice_unknown_tool_is_400():
+    """Fail-loud ingress: a forced tool that isn't registered is a clean 400
+    at REST — never silent coercion, never a dispatched turn."""
+    h = build_real_app()
+    with h.client:
+        before = len(h.primary.requests)
+        resp = h.client.post(
+            "/api/chat/send",
+            json={
+                "session_id": "session-T",
+                "message": "force a ghost",
+                "mode": "agent",
+                "tool_choice": {"tool": "no_such_tool"},
+            },
+            headers=h.auth(),
         )
+        assert resp.status_code == 400
+        assert "no_such_tool" in resp.json().get("error", "")
+        assert len(h.primary.requests) == before  # nothing reached the boundary

@@ -176,7 +176,7 @@ def _client_capturing_mode():
 
     @register_double("per_message_mode._Bridge", replaces="prometheus.web.ws_server.WebSocketBridge")
     class _Bridge:
-        async def dispatch_user_message(self, session_id, content, client_msg_id=None, mode="agent"):
+        async def dispatch_user_message(self, session_id, content, client_msg_id=None, mode="agent", tool_choice=None):
             captured["mode"] = mode
 
     app = create_app({})

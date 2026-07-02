@@ -1253,6 +1253,10 @@ def main() -> None:
             grammar = adapter.generate_grammar(registry)
             if grammar:
                 provider.set_grammar(grammar)
+                # force-search (IGNITION): hand over the grammar SOURCE so per-call
+                # required/{tool:X} grammars derive via the same enforcer path.
+                if hasattr(provider, "set_grammar_source"):
+                    provider.set_grammar_source(adapter.enforcer, registry.to_api_schema())
                 log.info("GBNF grammar enforcement enabled for tool calls")
 
         try:

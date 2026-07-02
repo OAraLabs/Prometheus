@@ -200,8 +200,24 @@ class WebSocketBridge:
                     "payload": {"message": f"invalid mode {mode!r} — expected 'agent' or 'chat'"},
                 })
                 return
+            # force-search: validate an optional per-message tool_choice against the live tool
+            # registry; unknown/malformed → error frame (same discipline as malformed mode).
+            # Absent → None, so `mode` resolves it downstream.
+            from prometheus.api.tool_choice import normalize_tool_choice as _normalize_tc
+            _reg = getattr(self.loop_context, "tool_registry", None)
+            _valid = {t.name for t in _reg.list_tools()} if (_reg is not None and hasattr(_reg, "list_tools")) else None
+            _tc_raw = payload.get("tool_choice")
+            try:
+                tool_choice = _normalize_tc(_tc_raw, _valid) if _tc_raw is not None else None
+            except ValueError as exc:
+                await self._send_one(websocket, {
+                    "type": "error",
+                    "timestamp": time.time(),
+                    "payload": {"message": str(exc)},
+                })
+                return
             if session_id and content:
-                await self._handle_send_message(session_id, content, mode=mode)
+                await self._handle_send_message(session_id, content, mode=mode, tool_choice=tool_choice)
 
         elif cmd_type == "chat_upload":
             # File upload from Beacon: { type: "chat_upload", payload: {
@@ -330,7 +346,8 @@ class WebSocketBridge:
         return None
 
     async def dispatch_user_message(
-        self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent"
+        self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
+        tool_choice: object | None = None
     ) -> None:
         """Public dispatch entry point — kicks off the same flow as a WS-borne
         ``send_message`` command.
@@ -346,10 +363,11 @@ class WebSocketBridge:
         alongside the canonical ``msg-{turn_index}`` id, so a client that rendered
         the message optimistically can correlate its local id to the durable one.
         """
-        await self._handle_send_message(session_id, content, client_msg_id=client_msg_id, mode=mode)
+        await self._handle_send_message(session_id, content, client_msg_id=client_msg_id, mode=mode, tool_choice=tool_choice)
 
     async def _handle_send_message(
-        self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent"
+        self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
+        tool_choice: object | None = None
     ) -> None:
         """Process a user message — add to session and run agent loop if context available.
 
@@ -438,7 +456,7 @@ class WebSocketBridge:
 
         # If we have a loop context, run the agent
         if self.loop_context:
-            asyncio.create_task(self._run_agent(session_id, session, mode=mode))
+            asyncio.create_task(self._run_agent(session_id, session, mode=mode, tool_choice=tool_choice))
 
     async def _broadcast_command_reply(
         self,
@@ -486,7 +504,7 @@ class WebSocketBridge:
             },
         })
 
-    async def _run_agent(self, session_id: str, session: Any, mode: str = "agent") -> None:
+    async def _run_agent(self, session_id: str, session: Any, mode: str = "agent", tool_choice: object | None = None) -> None:
         """Run the agent loop and stream results over WebSocket. `mode` ('agent'|'chat')
         is threaded as a per-call run_loop arg — NEVER stored on the shared loop_context —
         so concurrent turns can't cross-talk (Sprint B / Piece 2)."""
@@ -507,7 +525,9 @@ class WebSocketBridge:
         try:
             messages = session.get_messages()
             original_len = len(messages)
-            async for event, _usage in run_loop(self.loop_context, messages, mode=mode, session_id=session_id):
+            async for event, _usage in run_loop(
+                self.loop_context, messages, mode=mode, session_id=session_id, tool_choice=tool_choice
+            ):
                 event_type = type(event).__name__
 
                 if event_type == "AssistantTextDelta":
