@@ -242,6 +242,9 @@ class TestAnatomyScanner:
             def json(self):
                 return self._data
 
+        from tests.support.doubles import register_double
+
+        @register_double("anatomy.FakeClient", replaces="httpx.AsyncClient (anatomy llama.cpp probe)")
         class FakeClient:
             async def __aenter__(self):
                 return self

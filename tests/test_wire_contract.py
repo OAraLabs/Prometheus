@@ -29,6 +29,7 @@ from prometheus.memory.lcm_conversation_store import LCMConversationStore  # noq
 from prometheus.memory.lcm_types import MessagePart  # noqa: E402
 from prometheus.web.server import create_app  # noqa: E402
 from prometheus.web.ws_server import WebSocketBridge  # noqa: E402
+from tests.support.doubles import register_double  # noqa: E402
 
 
 def _pin_run_loop_signature(fake) -> None:
@@ -96,7 +97,10 @@ def test_tool_frames_carry_consistent_call_id(monkeypatch):
         yield ToolExecutionCompleted(tool_name="web_search", output="result", is_error=False, tool_use_id="toolu_abc"), None
 
     _pin_run_loop_signature(fake_run_loop)
-    monkeypatch.setattr(al, "run_loop", fake_run_loop)
+    monkeypatch.setattr(
+        al, "run_loop",
+        register_double("wire_contract.fake_run_loop.tool_frames", replaces="prometheus.engine.agent_loop.run_loop")(fake_run_loop),
+    )
 
     captured: list[dict] = []
     bridge = WebSocketBridge(session_mgr=SessionManager(), loop_context=object())
@@ -202,7 +206,10 @@ def test_run_agent_persists_assistant_turn(monkeypatch):
             yield  # make this an async generator
 
     _pin_run_loop_signature(fake_run_loop)
-    monkeypatch.setattr(al, "run_loop", fake_run_loop)
+    monkeypatch.setattr(
+        al, "run_loop",
+        register_double("wire_contract.fake_run_loop.persist", replaces="prometheus.engine.agent_loop.run_loop")(fake_run_loop),
+    )
 
     fake = _FakeLCM()
     session = ChatSession("s", lcm_engine=fake)

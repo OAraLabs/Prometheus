@@ -14,6 +14,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from prometheus.web.server import create_app  # noqa: E402
+from tests.support.doubles import register_double  # noqa: E402
 
 
 @pytest.fixture()
@@ -124,6 +125,7 @@ def test_dispatch_requires_bridge_then_stamps(client):
 
     sent = []
 
+    @register_double("api_kanban.FakeBridge.dispatch", replaces="prometheus.web.ws_server.WebSocketBridge")
     class FakeBridge:
         async def dispatch_user_message(self, session_id, message, client_msg_id=None):
             sent.append((session_id, message))
@@ -143,6 +145,7 @@ def test_undispatch(client):
     c, app = client
     s = _mk_story(c)
 
+    @register_double("api_kanban.FakeBridge.undispatch", replaces="prometheus.web.ws_server.WebSocketBridge")
     class FakeBridge:
         async def dispatch_user_message(self, *a, **k):
             return None

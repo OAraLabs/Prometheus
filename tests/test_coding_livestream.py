@@ -18,8 +18,10 @@ from typing import Any
 from prometheus.coding.livestream import CodingLiveStream
 from prometheus.sentinel.signals import ActivitySignal
 from prometheus.telemetry.tracker import ToolCallTelemetry
+from tests.support.doubles import register_double
 
 
+@register_double("coding_livestream.FakeBus", replaces="prometheus.sentinel.signal_bus.SignalBus")
 class FakeBus:
     """Mirrors SignalBus.emit dispatch (kind-specific + wildcard) and records
     every emitted signal so tests assert on actual events."""

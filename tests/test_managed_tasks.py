@@ -40,6 +40,10 @@ def _isolated_dirs(monkeypatch, tmp_path):
     yield
 
 
+from tests.support.doubles import register_double
+
+
+@register_double("managed_tasks.FakeBus", replaces="prometheus.sentinel.signal_bus.SignalBus")
 class FakeBus:
     """Minimal SignalBus matching the real emit/subscribe contract."""
 
@@ -59,6 +63,7 @@ class FakeBus:
         return [s for s in self.emitted if s.kind == kind]
 
 
+@register_double("managed_tasks.FakeGateway", replaces="telegram gateway send surface")
 class FakeGateway:
     def __init__(self) -> None:
         self.sent: list[tuple] = []

@@ -82,6 +82,10 @@ class _FakeStreamCM:
         return False
 
 
+from tests.support.doubles import register_double
+
+
+@register_double("reasoning_budget._FakeClient", replaces="httpx.AsyncClient (llama.cpp HTTP boundary)")
 class _FakeClient:
     lines: list[str] = []
 

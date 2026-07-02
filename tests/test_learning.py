@@ -10,6 +10,7 @@ from prometheus.learning.nudge import PeriodicNudge
 from prometheus.learning.skill_creator import SkillCreator
 from prometheus.learning.skill_refiner import SkillRefiner
 from prometheus.providers.base import ApiTextDeltaEvent
+from tests.support.doubles import register_double
 
 
 # ---------------------------------------------------------------------------
@@ -17,6 +18,7 @@ from prometheus.providers.base import ApiTextDeltaEvent
 # ---------------------------------------------------------------------------
 
 
+@register_double("learning.MockProvider", replaces="prometheus.providers.base.ModelProvider")
 class MockProvider:
     """Minimal provider that yields a single text delta with the canned response."""
 

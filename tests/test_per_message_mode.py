@@ -172,6 +172,9 @@ from prometheus.web.server import create_app  # noqa: E402
 def _client_capturing_mode():
     captured: dict = {}
 
+    from tests.support.doubles import register_double
+
+    @register_double("per_message_mode._Bridge", replaces="prometheus.web.ws_server.WebSocketBridge")
     class _Bridge:
         async def dispatch_user_message(self, session_id, content, client_msg_id=None, mode="agent"):
             captured["mode"] = mode
