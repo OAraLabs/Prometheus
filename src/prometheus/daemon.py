@@ -342,6 +342,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
             grammar = adapter.generate_grammar(registry)
             if grammar:
                 provider.set_grammar(grammar)
+                # force-search (IGNITION): hand over the grammar SOURCE so per-call
+                # required/{tool:X} grammars derive via the same enforcer path.
+                if hasattr(provider, "set_grammar_source"):
+                    provider.set_grammar_source(adapter.enforcer, registry.to_api_schema())
                 logger.info(
                     "GBNF grammar updated (%d tool schemas)",
                     len(registry.list_tools()),

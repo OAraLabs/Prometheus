@@ -95,6 +95,14 @@ class LlamaCppProvider(ModelProvider):
         self._suppress_thinking = suppress_thinking
         self.detected_model: str | None = None
         self.server_context_size: int | None = None
+        # force-search (IGNITION): the grammar SOURCE — the enforcer + tool
+        # schemas the boot grammar was generated from — so per-call
+        # required/{tool:X} grammars are derived through the SAME generate
+        # path (never a string hack on the boot grammar). Wired at the boot
+        # sites right after set_grammar(); absent => required/{tool} fail loud.
+        self._grammar_enforcer: Any | None = None
+        self._grammar_tool_schemas: list[dict[str, Any]] | None = None
+        self._derived_grammars: dict[str, str] = {}  # "required" | "tool:<name>"
 
     async def detect_context_size(self) -> int | None:
         """Query the server's actual context size via /props.
@@ -180,27 +188,66 @@ class LlamaCppProvider(ModelProvider):
     def set_grammar(self, grammar: str | None) -> None:
         """Update the GBNF grammar used for constrained decoding."""
         self._grammar = grammar
-        self._required_grammar_cache = None  # force-search: invalidate the derived "required" grammar
+        self._derived_grammars = {}  # force-search: derived grammars follow the boot grammar
+
+    def set_grammar_source(self, enforcer: Any, tool_schemas: list[dict[str, Any]]) -> None:
+        """force-search (IGNITION): hand over the grammar SOURCE (the enforcer +
+        the schemas the boot grammar came from) so per-call ``required`` /
+        ``{"tool": X}`` grammars are derived via the same
+        ``enforcer.generate_grammar`` path — never a string edit of the boot
+        grammar. Called at the boot sites right after ``set_grammar``."""
+        self._grammar_enforcer = enforcer
+        self._grammar_tool_schemas = list(tool_schemas)
+        self._derived_grammars = {}
+
+    def _derived_grammar(self, cache_key: str, *, only_tool: str | None = None) -> str:
+        """Generate-and-cache a constrained grammar via the enforcer.
+
+        Cache is keyed by tool name (bounded by the registry: unknown names were
+        already 400'd at ingress, and the enforcer ASSERTS by raising on a name
+        outside its schemas — no re-validation here)."""
+        cached = self._derived_grammars.get(cache_key)
+        if cached is not None:
+            return cached
+        if self._grammar_enforcer is None or self._grammar_tool_schemas is None:
+            raise RuntimeError(
+                "tool_choice requires the grammar source, but set_grammar_source() was "
+                "never wired for this provider — refusing to degrade a forced turn."
+            )
+        derived = self._grammar_enforcer.generate_grammar(
+            self._grammar_tool_schemas,
+            require_tool_use=True,
+            only_tool=only_tool,
+        )
+        self._derived_grammars[cache_key] = derived
+        return derived
 
     def _grammar_for(self, request: ApiMessageRequest) -> str | None:
-        """force-search: SELECT the GBNF grammar for this per-call tool_choice (immutable,
-        cached; never mutates self._grammar). auto -> boot grammar; none / suppress_tools ->
-        None (dropped — chat); required (and, at the local tier, {"tool": X} which falls back
-        to "force SOME tool" — the specific-tool constraint is carried natively by the cloud
-        path, a follow-up for the local tier) -> the boot grammar with the prose branch
-        dropped, so the model MUST emit a tool call."""
+        """force-search: SELECT the GBNF grammar for this per-call tool_choice.
+
+        auto/absent -> the UNTOUCHED boot grammar object (identity, no
+        regeneration — the dormant path); none / suppress_tools -> None
+        (dropped — same as chat); required -> enforcer-generated tool-call-only
+        root; {"tool": X} -> enforcer-generated single-alternative grammar
+        admitting ONLY X. Unrecognized values raise — a forced turn must never
+        silently degrade (same fail-loud contract as the cloud mapping)."""
         if not self._grammar:
             return None
         tc = getattr(request, "tool_choice", "auto")
         if getattr(request, "suppress_tools", False) or tc == "none":
             return None
-        if tc == "required" or isinstance(tc, dict):
-            if getattr(self, "_required_grammar_cache", None) is None:
-                self._required_grammar_cache = self._grammar.replace(
-                    "root ::= tool-call | prose", "root ::= tool-call"
-                )
-            return self._required_grammar_cache
-        return self._grammar  # auto (and any unrecognized value -> safe default = boot grammar)
+        if tc == "auto" or tc is None:
+            return self._grammar  # the boot grammar object itself — identity, not a copy
+        if tc == "required":
+            return self._derived_grammar("required")
+        if isinstance(tc, dict) and isinstance(tc.get("tool"), str) and tc["tool"]:
+            name = tc["tool"]
+            return self._derived_grammar(f"tool:{name}", only_tool=name)
+        raise ValueError(
+            f"unmapped tool_choice {tc!r} for the llama.cpp grammar path — "
+            "expected 'auto' | 'none' | 'required' | {'tool': <name>}. "
+            "Refusing to degrade silently."
+        )
 
     def _effective_suppress(self, request: ApiMessageRequest) -> bool:
         """Per-call override wins; otherwise fall back to provider default."""
@@ -246,7 +293,12 @@ class LlamaCppProvider(ModelProvider):
                 }
                 for t in request.tools
             ]
-            payload["tool_choice"] = "auto"
+            # force-search: the native tools path (tier-light + --jinja) carries the
+            # same OpenAI-shape mapping the compat provider uses — auto stays the
+            # exact former "auto" hardcode (byte-identical dormant path), required /
+            # {tool:X} force natively, anything else raises (never degrades).
+            from prometheus.providers.openai_compat import _native_tool_choice
+            payload["tool_choice"] = _native_tool_choice(getattr(request, "tool_choice", "auto"))
 
         # Inject GBNF grammar only when tools aren't in the payload — with --jinja,
         # the server handles tool calling natively and grammar conflicts with it. force-search:
