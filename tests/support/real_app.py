@@ -63,17 +63,56 @@ BOUNDARY_DOUBLE = "real_app.recording_provider"
     replaces="the model-provider HTTP boundary (LlamaCppProvider / AnthropicProvider)",
 )
 class RecordingProvider(ModelProvider):
-    """Records every outbound request verbatim; replies with canned text."""
+    """Records every outbound request verbatim; replies with canned text.
 
-    def __init__(self, label: str, reply: str | None = None) -> None:
+    ``script`` (optional, additive) makes multi-round turns testable: a list of
+    ``("text", <str>)`` / ``("tool", <name>, <args-dict>)`` entries consumed one
+    per call (falling back to the canned text when exhausted). ``force_via_grammar``
+    (optional) makes the recorder answer the engine's ``can_force_via_grammar``
+    contract like a grammar-capable local provider, so the forced-round
+    tools-withholding decision is testable at the boundary record.
+    """
+
+    def __init__(
+        self,
+        label: str,
+        reply: str | None = None,
+        script: list | None = None,
+        force_via_grammar: bool = False,
+    ) -> None:
         self.label = label
         self.reply = reply or f"[{label}] acknowledged."
         self.requests: list[ApiMessageRequest] = []
+        self._script = list(script) if script else []
+        self._force_via_grammar = force_via_grammar
+        if force_via_grammar:
+            # Only exposed when asked for — a plain recorder must NOT satisfy
+            # the engine's hasattr() probe (cloud-provider shape by default).
+            self.can_force_via_grammar = self._can_force_via_grammar  # type: ignore[method-assign]
+
+    def _can_force_via_grammar(self, tool_choice: object) -> bool:
+        return tool_choice == "required" or isinstance(tool_choice, dict)
 
     async def stream_message(self, request: ApiMessageRequest):
         self.requests.append(request)
-        msg = ConversationMessage(role="assistant", content=[TextBlock(text=self.reply)])
-        yield ApiTextDeltaEvent(text=self.reply)
+        entry = self._script.pop(0) if self._script else ("text", self.reply)
+        if entry[0] == "tool":
+            from prometheus.engine.messages import ToolUseBlock
+
+            _, name, args = entry
+            msg = ConversationMessage(
+                role="assistant",
+                content=[ToolUseBlock(id=f"toolu_{len(self.requests)}", name=name, input=args)],
+            )
+            yield ApiMessageCompleteEvent(
+                message=msg,
+                usage=UsageSnapshot(input_tokens=1, output_tokens=1),
+                stop_reason="tool_calls",
+            )
+            return
+        text = entry[1]
+        msg = ConversationMessage(role="assistant", content=[TextBlock(text=text)])
+        yield ApiTextDeltaEvent(text=text)
         yield ApiMessageCompleteEvent(
             message=msg,
             usage=UsageSnapshot(input_tokens=1, output_tokens=1),
@@ -155,10 +194,13 @@ class RealAppHarness:
         return resp.json()
 
 
-def build_real_app() -> RealAppHarness:
-    """Assemble the production wiring (mirrors daemon.py:1189 + launcher.py:60-101)."""
+def build_real_app(primary: RecordingProvider | None = None) -> RealAppHarness:
+    """Assemble the production wiring (mirrors daemon.py:1189 + launcher.py:60-101).
+
+    ``primary`` (optional) swaps in a scripted recorder (see RecordingProvider)
+    — everything else stays the same production wiring."""
     token = secrets.token_hex(16)  # runtime-generated; injected via config, never a literal
-    primary = RecordingProvider(label="primary:local")
+    primary = primary or RecordingProvider(label="primary:local")
 
     router = ModelRouter(
         RouterConfig(),

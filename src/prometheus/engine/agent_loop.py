@@ -679,6 +679,20 @@ async def run_loop(
     from prometheus.api.tool_choice import NONE as _TC_NONE, resolve_mode_to_tool_choice
     effective_tool_choice = tool_choice if tool_choice is not None else resolve_mode_to_tool_choice(mode)
     tools_enabled = effective_tool_choice != _TC_NONE
+    # FIRST-ROUND FORCING (post-IGNITION follow-up 1): a forced directive
+    # (required / {tool:X}) binds ONLY the first substantive model call of the
+    # turn, then relaxes to auto — so a forced turn makes its forced call, sees
+    # the result, and can conclude in prose instead of burning rounds to the
+    # iteration cap (the live proof's every-round-forcing finding). "none" and
+    # "auto" are turn-wide as before (byte-identical dormant path). An
+    # empty-response retry round does NOT consume the force — the force is
+    # spent by the first round that yields text or a tool call.
+    _force_directive = (
+        effective_tool_choice
+        if effective_tool_choice == "required" or isinstance(effective_tool_choice, dict)
+        else None
+    )
+    _force_spent = False
 
     tool_schema: list[dict] = []
     if tools_enabled:
@@ -865,6 +879,30 @@ async def run_loop(
         ):
             _payload_tools = []
 
+        # FIRST-ROUND FORCING: this round's directive — the force until it is
+        # spent, then auto (never touches "none"/"auto" turns).
+        round_tool_choice = effective_tool_choice
+        if _force_directive is not None and _force_spent:
+            round_tool_choice = "auto"
+
+        # LOCAL {tool:X}/required ENFORCEMENT VIA GRAMMAR (follow-up 2): the live
+        # llama-server build silently ignores OpenAI-shape function-forcing on the
+        # native tools path (IGNITION finding: forced web_search -> 11x read_file).
+        # For the FORCED round only, when the current provider can enforce the
+        # directive deterministically via GBNF (LlamaCppProvider with a wired
+        # grammar source), withhold native tools so the provider's grammar path
+        # fires — the grammar CANNOT be ignored by the server. The relaxed rounds
+        # return to the native tools path. Cloud providers (no grammar) keep the
+        # native param, which they honor (live-proven on anthropic).
+        if (
+            round_tool_choice is not None
+            and round_tool_choice != "auto"
+            and _payload_tools
+            and hasattr(context.provider, "can_force_via_grammar")
+            and context.provider.can_force_via_grammar(round_tool_choice)
+        ):
+            _payload_tools = []
+
         # Visible-stream hygiene: local tiers emit tool calls as inline
         # <tool_call> markup, and the raw token stream goes to every gateway —
         # without this filter the grammar tags render verbatim in chat bubbles
@@ -913,7 +951,7 @@ async def run_loop(
                 tools=_payload_tools,
                 suppress_thinking=context.suppress_thinking,
                 suppress_tools=not tools_enabled,
-                tool_choice=effective_tool_choice,
+                tool_choice=round_tool_choice,
             ),
             operation="loop_round",
             round_index=turn,
@@ -998,6 +1036,26 @@ async def run_loop(
             messages.append(error_msg)
             yield AssistantTurnComplete(message=error_msg, usage=usage), usage
             return
+
+        # FIRST-ROUND FORCING: this round produced substance (text or a tool
+        # call — the empty guard above already `continue`d otherwise), so the
+        # force is spent; subsequent rounds relax to auto.
+        if _force_directive is not None and not _force_spent:
+            _force_spent = True
+            # Fail-loud contract guard: a forced {tool:X} round that came back
+            # with a call to a DIFFERENT tool means the provider path did not
+            # enforce (e.g. a server that ignores function-forcing, with no
+            # grammar available to override it). Never let a call to Y
+            # masquerade as the forced X.
+            if isinstance(round_tool_choice, dict) and final_message.tool_uses:
+                _forced_name = round_tool_choice.get("tool")
+                _wrong = sorted({t.name for t in final_message.tool_uses if t.name != _forced_name})
+                if _wrong:
+                    raise RuntimeError(
+                        f"forced tool_choice {{'tool': {_forced_name!r}}} was not honored — "
+                        f"the model called {_wrong} instead. The provider path could not "
+                        "enforce the directive; refusing to proceed silently."
+                    )
 
         # #65 — TOTAL no-empty-assistant-turn invariant at the commit point.
         # The empty-response guard above retries/surfaces a NON-malformed empty
