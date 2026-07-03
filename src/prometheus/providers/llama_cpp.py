@@ -387,6 +387,7 @@ class LlamaCppProvider(ModelProvider):
         *,
         model: str,
         output_tokens: int,
+        has_tool_calls: bool = False,
     ) -> tuple[str, bool]:
         """Decide the final content and whether a silent failure was recorded.
 
@@ -406,6 +407,14 @@ class LlamaCppProvider(ModelProvider):
         """
         if accumulated_text and accumulated_text.strip():
             return accumulated_text, False
+
+        if has_tool_calls:
+            # Empty TEXT content on a native tool-call completion is the normal
+            # shape — the tool_calls were accumulated separately and ride the
+            # complete event (rider triage 2026-07-02: 516/560 "silent failures"
+            # were this). Not a failure; and no reasoning fallback here, which
+            # would inject chain-of-thought text beside the tool calls.
+            return "", False
 
         budget_exhausted = (
             finish_reason == "length"
@@ -592,6 +601,7 @@ class LlamaCppProvider(ModelProvider):
             finish_reason,
             model=request.model,
             output_tokens=output_tokens,
+            has_tool_calls=bool(accumulated_tool_calls),
         )
 
         # When a fallback was applied, emit one terminal text delta so
