@@ -14,6 +14,7 @@ section assembled by :mod:`prometheus.context.prompt_assembler`.
 
 from __future__ import annotations
 
+from prometheus.config.paths import get_documents_dir
 from prometheus.context.environment import EnvironmentInfo, get_environment_info
 
 
@@ -137,6 +138,30 @@ def _format_environment_section(env: EnvironmentInfo) -> str:
     return "\n".join(lines)
 
 
+def _format_documents_section() -> str:
+    """Format the documents-library conventions section.
+
+    The documents root is the confined tree shared with Beacon's Documents
+    editor and Loop Manager (the daemon's ``/api/documents`` surface). The
+    RESOLVED path is injected — the root is repointable via
+    ``PROMETHEUS_DOCUMENTS_DIR`` / ``documents.root`` — so the guidance stays
+    correct on any deployment.
+    """
+    docs_dir = get_documents_dir()
+    loops_dir = docs_dir / "loops"
+    return (
+        "# Documents library\n"
+        f"- The confined documents root is: {docs_dir}\n"
+        "- Files under it appear in Beacon's Documents editor, and the Loop "
+        "Manager's contract editor loads .md files from it directly "
+        '("From Documents…").\n'
+        "- When the user asks to save a drafted doc for later — a LOOP.md or "
+        "TASKS.md loop contract, a sprint plan, a spec — write it with "
+        f"file_write under {loops_dir}/ (absolute path; create the "
+        "subdirectory if needed) so it is reachable from Beacon."
+    )
+
+
 def build_system_prompt(
     custom_prompt: str | None = None,
     env: EnvironmentInfo | None = None,
@@ -158,5 +183,6 @@ def build_system_prompt(
 
     base = custom_prompt if custom_prompt is not None else _BASE_SYSTEM_PROMPT
     env_section = _format_environment_section(env)
+    docs_section = _format_documents_section()
 
-    return f"{base}\n\n{env_section}"
+    return f"{base}\n\n{env_section}\n\n{docs_section}"
