@@ -145,3 +145,19 @@ class TestRichPathEndScreen:
         out = capsys.readouterr().out
         assert "CONNECT A CLIENT" in out
         assert "minted on first daemon start" in out
+
+
+class TestBeaconDownloadPointer:
+    """A newcomer must be told WHERE to get Beacon, not just that it exists."""
+
+    def test_connect_block_has_download_url(self):
+        from prometheus.config.api_token import (
+            BEACON_DOWNLOAD_URL,
+            format_connect_client_block,
+        )
+        assert BEACON_DOWNLOAD_URL in format_connect_client_block({})
+
+    def test_pairing_banner_has_download_url(self):
+        from prometheus.config.api_token import BEACON_DOWNLOAD_URL
+        from prometheus.web.setup_server import format_pairing_banner
+        assert BEACON_DOWNLOAD_URL in format_pairing_banner("123456", 8005)

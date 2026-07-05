@@ -610,6 +610,8 @@ def format_pairing_banner(code: str, api_port: int) -> str:
     """The print-ONCE pairing banner (style: format_minted_banner)."""
     import socket
 
+    from prometheus.config.api_token import BEACON_DOWNLOAD_URL
+
     host = socket.gethostname()
     bar = "=" * 68
     return (
@@ -620,6 +622,7 @@ def format_pairing_banner(code: str, api_port: int) -> str:
         f"\n    {code}\n\n"
         f"  Pair from Beacon: address {host}:{api_port} (or this machine's\n"
         "  Tailscale / LAN address) + the code above.\n"
+        f"  Don't have Beacon yet?  {BEACON_DOWNLOAD_URL}\n"
         "  Or set up here instead:  prometheus setup\n"
         "  Expired or locked? Restart `prometheus daemon` for a new code.\n"
         f"{bar}\n"
