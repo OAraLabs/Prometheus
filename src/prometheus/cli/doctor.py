@@ -256,6 +256,158 @@ def check_dirs_writable() -> DiagnosticCheck:
     )
 
 
+def _env_or_env_file(name: str) -> str:
+    """A gateway secret the daemon would see: process env, then env file.
+
+    ``prometheus doctor`` usually runs in a shell that has NOT sourced
+    ``~/.config/prometheus/env`` — but the daemon loads it, so a token
+    that lives only there still counts as present.
+    """
+    value = os.environ.get(name, "")
+    if value:
+        return value
+    try:
+        from prometheus.config.env_file import get_env_file_path, parse_env_file
+        return parse_env_file(get_env_file_path()).get(name, "")
+    except Exception:
+        return ""
+
+
+def _library_installed(module: str) -> bool:
+    """Importability probe without importing (no side effects)."""
+    import importlib.util
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _gateway_check(
+    label: str,
+    *,
+    enabled: bool,
+    token_ok: bool,
+    token_missing_msg: str,
+    token_fix: str,
+    library_module: str,
+    library_label: str,
+    library_fix: str,
+) -> DiagnosticCheck:
+    """One gateway's doctor line — the whisper-if-voice-enabled pattern:
+    enabled-without-token = error with a fix hint; enabled-without-library
+    = error suggesting the pip extra; disabled = info."""
+    if not enabled:
+        return DiagnosticCheck(
+            name=label, category="connectivity", status="info",
+            message="not enabled",
+        )
+    if not token_ok:
+        return DiagnosticCheck(
+            name=label, category="connectivity", status="error",
+            message=token_missing_msg,
+            fix=token_fix,
+        )
+    if not _library_installed(library_module):
+        return DiagnosticCheck(
+            name=label, category="connectivity", status="error",
+            message=f"enabled with token(s) present, but {library_label} "
+                    "is not installed",
+            fix=library_fix,
+        )
+    return DiagnosticCheck(
+        name=label, category="connectivity", status="ok",
+        message=f"enabled — token present, {library_label} installed",
+    )
+
+
+def check_gateways(config: dict[str, Any]) -> list[DiagnosticCheck]:
+    """SPRINT G3: per-gateway checks for Telegram, Slack, and Discord.
+
+    Mirrors the daemon's construction blocks (daemon.py): the same
+    config keys, the same env fallbacks, so what doctor reports is what
+    the daemon would actually do.
+    """
+    gw = config.get("gateway", {}) or {}
+
+    # Telegram — flat keys; the daemon starts it when a token exists and
+    # telegram_enabled (default True) isn't switched off.
+    tg_token = gw.get("telegram_token", "") or _env_or_env_file(
+        "PROMETHEUS_TELEGRAM_TOKEN")
+    tg_flag = gw.get("telegram_enabled")
+    telegram = _gateway_check(
+        "Telegram gateway",
+        enabled=bool(tg_flag) or (tg_flag is None and bool(tg_token)),
+        token_ok=bool(tg_token),
+        token_missing_msg="enabled but no bot token (gateway.telegram_token "
+                          "or PROMETHEUS_TELEGRAM_TOKEN)",
+        token_fix="Get a token from @BotFather and add "
+                  "PROMETHEUS_TELEGRAM_TOKEN to the env file — or run "
+                  "`prometheus setup --gateway-only`.",
+        library_module="telegram",
+        library_label="python-telegram-bot",
+        library_fix="pip install python-telegram-bot (a core dependency — "
+                    "reinstall with `pip install oara-prometheus`).",
+    )
+
+    # Slack — flat keys win over the nested gateway.slack.* form; needs
+    # BOTH tokens (bot xoxb-... + app xapp-...).
+    slack_nested = gw.get("slack") if isinstance(gw.get("slack"), dict) else {}
+    slack_enabled = bool(
+        gw.get("slack_enabled", False) or (slack_nested or {}).get("enabled", False)
+    )
+    slack_bot = (
+        gw.get("slack_bot_token", "")
+        or (slack_nested or {}).get("bot_token", "")
+        or _env_or_env_file("PROMETHEUS_SLACK_BOT_TOKEN")
+    )
+    slack_app = (
+        gw.get("slack_app_token", "")
+        or (slack_nested or {}).get("app_token", "")
+        or _env_or_env_file("PROMETHEUS_SLACK_APP_TOKEN")
+    )
+    missing_slack = [
+        name for name, val in
+        (("bot token (PROMETHEUS_SLACK_BOT_TOKEN)", slack_bot),
+         ("app token (PROMETHEUS_SLACK_APP_TOKEN)", slack_app))
+        if not val
+    ]
+    slack = _gateway_check(
+        "Slack gateway",
+        enabled=slack_enabled,
+        token_ok=not missing_slack,
+        token_missing_msg="enabled but missing " + " and ".join(
+            missing_slack or ["tokens"]),
+        token_fix="Slack needs BOTH tokens — create the app at "
+                  "https://api.slack.com/apps (Socket Mode), then add "
+                  "PROMETHEUS_SLACK_BOT_TOKEN and PROMETHEUS_SLACK_APP_TOKEN "
+                  "to the env file.",
+        library_module="slack_bolt",
+        library_label="slack-bolt",
+        library_fix="pip install 'oara-prometheus[slack]'",
+    )
+
+    # Discord — nested gateway.discord.* only (the shape the daemon reads).
+    discord_nested = gw.get("discord") if isinstance(gw.get("discord"), dict) else {}
+    discord_token = (
+        (discord_nested or {}).get("token", "")
+        or _env_or_env_file("PROMETHEUS_DISCORD_TOKEN")
+    )
+    discord = _gateway_check(
+        "Discord gateway",
+        enabled=bool((discord_nested or {}).get("enabled", False)),
+        token_ok=bool(discord_token),
+        token_missing_msg="enabled but no bot token (gateway.discord.token "
+                          "or PROMETHEUS_DISCORD_TOKEN)",
+        token_fix="Create a bot at https://discord.com/developers/applications "
+                  "(enable the Message Content Intent) and add "
+                  "PROMETHEUS_DISCORD_TOKEN to the env file.",
+        library_module="discord",
+        library_label="discord.py",
+        library_fix="pip install 'oara-prometheus[discord]'",
+    )
+    return [telegram, slack, discord]
+
+
 def check_whisper(config: dict[str, Any]) -> DiagnosticCheck:
     """Whisper available when voice is enabled?"""
     whisper_cfg = config.get("whisper", {}) or {}
@@ -300,6 +452,7 @@ def run_extended_checks(
         model,
         check_web_port(config),
         check_token(config),
+        *check_gateways(config),
         check_whisper(config),
     ]
 
@@ -334,8 +487,10 @@ def run_anatomy_checks(config: dict[str, Any]) -> list[DiagnosticCheck]:
             # The extended checks above already cover these with the
             # documented search order / live probe — don't double-report
             # (the class's Config check is also repo-root-relative, which
-            # is wrong for pip installs).
-            if check.name in ("Config", "Inference", "Model", "Whisper STT"):
+            # is wrong for pip installs). "Telegram" is superseded by the
+            # per-gateway checks (SPRINT G3).
+            if check.name in ("Config", "Inference", "Model", "Whisper STT",
+                              "Telegram"):
                 continue
             # Missing SOUL.md/AGENTS.md doesn't break the loop — the fast
             # setup path deliberately skips identity. Warn, don't fail.

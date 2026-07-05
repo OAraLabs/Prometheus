@@ -76,7 +76,7 @@ class TestConfigWriting:
         wizard._provider = "llama_cpp"
         wizard._base_url = "http://localhost:8080"
         wizard._model_name = "test-model"
-        wizard._gateway = "cli"
+        wizard._gateways = set()
         wizard._write_config()
 
         assert tmp_config.exists()
@@ -89,7 +89,7 @@ class TestConfigWriting:
     def test_writes_telegram_config(self, wizard, tmp_config, tmp_prometheus_dir):
         wizard._provider = "llama_cpp"
         wizard._base_url = "http://localhost:8080"
-        wizard._gateway = "telegram"
+        wizard._gateways = {"telegram"}
         wizard._telegram_token = "123456:ABC"
         wizard._telegram_chat_ids = [42]
         wizard._write_config()
@@ -98,6 +98,65 @@ class TestConfigWriting:
         assert cfg["gateway"]["telegram_enabled"] is True
         assert cfg["gateway"]["telegram_token"] == "123456:ABC"
         assert cfg["gateway"]["allowed_chat_ids"] == [42]
+
+    def test_writes_discord_config(self, wizard, tmp_config, tmp_prometheus_dir):
+        """SPRINT G3: discord is written NESTED — the only shape the daemon
+        construction block reads (gateway.discord.{enabled,token,guild_ids,
+        channel_ids})."""
+        wizard._provider = "llama_cpp"
+        wizard._base_url = "http://localhost:8080"
+        wizard._gateways = {"discord"}
+        wizard._discord_token = "discord-token-abc"
+        wizard._discord_guild_ids = [123456789012345678]
+        wizard._write_config()
+
+        cfg = yaml.safe_load(tmp_config.read_text())
+        assert cfg["gateway"]["discord"]["enabled"] is True
+        assert cfg["gateway"]["discord"]["token"] == "discord-token-abc"
+        assert cfg["gateway"]["discord"]["guild_ids"] == [123456789012345678]
+        assert cfg["gateway"]["discord"]["channel_ids"] == []
+        # The other gateways are explicitly off.
+        assert cfg["gateway"]["telegram_enabled"] is False
+        assert cfg["gateway"]["slack_enabled"] is False
+
+    def test_writes_all_three_gateways(self, wizard, tmp_config, tmp_prometheus_dir):
+        wizard._provider = "llama_cpp"
+        wizard._base_url = "http://localhost:8080"
+        wizard._gateways = {"telegram", "slack", "discord"}
+        wizard._telegram_token = "tg-token"
+        wizard._slack_bot_token = "xoxb-x"
+        wizard._slack_app_token = "xapp-x"
+        wizard._discord_token = "dc-token"
+        wizard._write_config()
+
+        cfg = yaml.safe_load(tmp_config.read_text())
+        assert cfg["gateway"]["telegram_enabled"] is True
+        assert cfg["gateway"]["slack_enabled"] is True
+        assert cfg["gateway"]["discord"]["enabled"] is True
+
+    def test_declined_discord_is_disabled_but_preserved(
+        self, wizard, tmp_config, tmp_prometheus_dir,
+    ):
+        """Re-running and declining discord flips enabled off without
+        destroying the rest of the block."""
+        existing = {
+            "gateway": {
+                "discord": {
+                    "enabled": True,
+                    "token": "old-token",
+                    "guild_ids": [42],
+                    "channel_ids": [7],
+                },
+            },
+        }
+        wizard._provider = "llama_cpp"
+        wizard._base_url = "http://localhost:8080"
+        wizard._gateways = set()
+        wizard._merge_and_write(existing)
+
+        cfg = yaml.safe_load(tmp_config.read_text())
+        assert cfg["gateway"]["discord"]["enabled"] is False
+        assert cfg["gateway"]["discord"]["channel_ids"] == [7]
 
     def test_preserves_existing_config_values(self, tmp_config, tmp_prometheus_dir):
         """When merging, untouched fields survive."""
@@ -113,7 +172,7 @@ class TestConfigWriting:
             yaml.dump(existing, fh)
 
         wizard = SetupWizard(gateway_only=True)
-        wizard._gateway = "telegram"
+        wizard._gateways = {"telegram"}
         wizard._telegram_token = "new-token"
         wizard._telegram_chat_ids = []
         wizard._merge_and_write(existing)
@@ -140,7 +199,7 @@ class TestGitignore:
 
         wizard._provider = "llama_cpp"
         wizard._base_url = "http://localhost:8080"
-        wizard._gateway = "cli"
+        wizard._gateways = set()
         wizard._write_config()
 
         content = gitignore.read_text()
@@ -152,7 +211,7 @@ class TestGitignore:
 
         wizard._provider = "llama_cpp"
         wizard._base_url = "http://localhost:8080"
-        wizard._gateway = "cli"
+        wizard._gateways = set()
         wizard._write_config()
 
         content = gitignore.read_text()
@@ -230,6 +289,24 @@ class TestTelegramToken:
         assert result is None
 
 
+class TestDiscordToken:
+    def test_valid_token(self, wizard):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {"id": "1", "username": "prom_bot"}
+        with patch("prometheus.setup_wizard.httpx.get", return_value=mock_resp):
+            result = wizard._test_discord_token("fake-token")
+        assert result == "prom_bot"
+
+    def test_invalid_token(self, wizard):
+        with patch(
+            "prometheus.setup_wizard.httpx.get",
+            side_effect=Exception("401 Unauthorized"),
+        ):
+            result = wizard._test_discord_token("bad-token")
+        assert result is None
+
+
 # ---------------------------------------------------------------------------
 # Rerun detection
 # ---------------------------------------------------------------------------
@@ -267,9 +344,44 @@ class TestRerunDetection:
         assert wizard._provider == "ollama"
         assert wizard._base_url == "http://192.168.1.100:11434"
         assert wizard._model_name == "qwen3.5-32b"
-        assert wizard._gateway == "telegram"
+        assert wizard._gateways == {"telegram"}
         assert wizard._telegram_token == "my-token"
         assert wizard._telegram_chat_ids == [123]
+
+    def test_prefill_from_existing_discord(self, wizard):
+        cfg = {
+            "model": {"provider": "llama_cpp", "base_url": "http://localhost:8080"},
+            "gateway": {
+                "discord": {
+                    "enabled": True,
+                    "token": "dc-token",
+                    "guild_ids": [123],
+                    "channel_ids": [],
+                },
+            },
+        }
+        wizard._prefill_from(cfg)
+        assert wizard._gateways == {"discord"}
+        assert wizard._discord_token == "dc-token"
+        assert wizard._discord_guild_ids == [123]
+
+    def test_prefill_from_existing_nested_slack(self, wizard):
+        """The nested gateway.slack.* form (fast-path configs) prefils too."""
+        cfg = {
+            "gateway": {
+                "slack": {
+                    "enabled": True,
+                    "bot_token": "xoxb-n",
+                    "app_token": "xapp-n",
+                    "allowed_channels": ["C9"],
+                },
+            },
+        }
+        wizard._prefill_from(cfg)
+        assert wizard._gateways == {"slack"}
+        assert wizard._slack_bot_token == "xoxb-n"
+        assert wizard._slack_app_token == "xapp-n"
+        assert wizard._slack_channels == ["C9"]
 
 
 # ---------------------------------------------------------------------------

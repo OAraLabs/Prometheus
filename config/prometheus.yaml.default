@@ -123,6 +123,18 @@ gateway:
   rate_limits:
     messages_per_minute: 30
     media_downloads_per_minute: 10
+  # Slack gateway (optional extra: pip install 'oara-prometheus[slack]').
+  # Socket Mode — needs BOTH tokens: a bot token (xoxb-...) and an app-level
+  # token (xapp-...), created at https://api.slack.com/apps. Empty
+  # allowed_channels = respond anywhere the bot is invited. (The legacy flat
+  # keys slack_enabled / slack_bot_token / slack_app_token / slack_channels
+  # still work and win over this nested form when set.)
+  slack:
+    enabled: false
+    bot_token: ""                     # Set via PROMETHEUS_SLACK_BOT_TOKEN env var
+    app_token: ""                     # Set via PROMETHEUS_SLACK_APP_TOKEN env var
+    allowed_channels: []              # e.g. [C0123456789]
+
   # SPRINT G2: Discord gateway (optional extra: pip install 'oara-prometheus[discord]').
   # Whitelist semantics: DMs are ALWAYS allowed; guild-channel messages need
   # a channel_ids (per-channel) or guild_ids (whole-guild) hit. With both

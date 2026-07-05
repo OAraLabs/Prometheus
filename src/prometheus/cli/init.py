@@ -222,6 +222,14 @@ def _default_config(server: DetectedServer | None, model: str | None) -> dict[st
                 "app_token": "",
                 "allowed_channels": [],
             },
+            # SPRINT G3: discord is first-class in every written config —
+            # exactly the nested shape the daemon's construction block reads.
+            "discord": {
+                "enabled": False,
+                "token": "",
+                "guild_ids": [],
+                "channel_ids": [],
+            },
         },
         "web": {
             "enabled": True,
@@ -237,16 +245,22 @@ def _default_config(server: DetectedServer | None, model: str | None) -> dict[st
 _ENV_TEMPLATE = """# Prometheus environment file — secrets live here, not in prometheus.yaml.
 # Loaded by `prometheus daemon` at startup AND by the systemd unit
 # (EnvironmentFile=). Uncomment and fill in what you need.
+# Guided gateway setup: `prometheus setup --gateway-only`.
 #
-# Telegram (run `prometheus setup` again or edit prometheus.yaml to enable):
+# Telegram — get a token by messaging @BotFather (/newbot); also set
+# gateway.telegram_enabled: true in prometheus.yaml:
 #   PROMETHEUS_TELEGRAM_TOKEN=
 #   PROMETHEUS_TELEGRAM_CHAT_IDS=
 #
-# Slack:
+# Slack — create an app at https://api.slack.com/apps, enable Socket Mode,
+# install it; needs BOTH tokens (bot xoxb-... + app xapp-...) and
+# gateway.slack.enabled: true in prometheus.yaml:
 #   PROMETHEUS_SLACK_BOT_TOKEN=
 #   PROMETHEUS_SLACK_APP_TOKEN=
 #
-# Discord (enable gateway.discord in prometheus.yaml too):
+# Discord — create an app at https://discord.com/developers/applications,
+# add a Bot + enable its Message Content Intent, copy the bot token; also
+# set gateway.discord.enabled: true in prometheus.yaml:
 #   PROMETHEUS_DISCORD_TOKEN=
 #
 # Cloud providers (optional):
@@ -560,7 +574,10 @@ def run_init(
         if chosen_server is not None and chosen_server.models:
             chosen_model = chosen_server.models[0]
 
-    # Gateway choice (don't require Telegram up-front; user can enable later)
+    # Gateway choice (don't require tokens up-front; user can enable later.
+    # SPRINT G3: all three gateways are options in the SAME prompt — the
+    # fast path stays fast, `prometheus setup` has the guided per-gateway
+    # flow with token validation.)
     if noninteractive:
         gateway_choice = "cli"
     else:
@@ -570,21 +587,24 @@ def run_init(
                 "CLI only (run `prometheus` for an interactive shell)",
                 "Telegram (you'll add a bot token via env later)",
                 "Slack (you'll add bot+app tokens via env later)",
-                "Both Telegram and Slack",
+                "Discord (you'll add a bot token via env later)",
+                "All three (Telegram + Slack + Discord — tokens via env later)",
             ],
             default_index=0,
         )
-        gateway_choice = ["cli", "telegram", "slack", "both"][gw_idx]
+        gateway_choice = ["cli", "telegram", "slack", "discord", "all"][gw_idx]
 
     # Build config
     if cloud_config is not None:
         config = cloud_config
     else:
         config = _default_config(chosen_server, chosen_model)
-    if gateway_choice in ("telegram", "both"):
+    if gateway_choice in ("telegram", "all"):
         config["gateway"]["telegram_enabled"] = True
-    if gateway_choice in ("slack", "both"):
+    if gateway_choice in ("slack", "all"):
         config["gateway"]["slack"]["enabled"] = True
+    if gateway_choice in ("discord", "all"):
+        config["gateway"]["discord"]["enabled"] = True
 
     # Backup existing config if present
     backup = write_config(config, cfg_path, backup_existing=True)
@@ -617,6 +637,8 @@ def run_init(
         print(f"  1. Edit {env_path} to add gateway tokens")
         print("  2. Run: prometheus daemon   (Beacon dashboard on "
               "http://localhost:8005)")
+    print("  Guided gateway setup (Telegram / Slack / Discord, with token")
+    print("  validation):       prometheus setup --gateway-only")
     print("  Health check anytime:  prometheus doctor")
     print()
     return config

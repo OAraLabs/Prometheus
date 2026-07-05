@@ -16,7 +16,7 @@ prometheus daemon         # always-on: Beacon dashboard, gateways, cron, SENTINE
 **What it gives you:**
 
 - **Reliable tool calls on open models** — a Model Adapter Layer validates every call, auto-repairs common errors (fuzzy names, JSON inside markdown fences, type coercion), and enforces output schemas at the token level via GBNF for llama.cpp.
-- **Always-on gateways** — Telegram and Slack at parity (23 slash commands each), with mid-turn `/steer` and `/queue` for durability while the agent is mid-task.
+- **Always-on gateways** — Telegram, Slack, and Discord at parity (one shared command layer), with mid-turn `/steer` and `/queue` for durability while the agent is mid-task.
 - **Visible memory and skills** — `MEMORY.md` and `USER.md` you can read, skills the agent writes for itself that you can pin, plus a weekly Curator pass that consolidates and prunes.
 - **Lossless context** — DAG-based compression with full-text search so long sessions don't drop facts.
 - **Beacon dashboard** — live activity feed, memory viewer, skills browser at `http://localhost:8005` once the daemon is up.
@@ -152,6 +152,7 @@ Point the agent at a coding task and it runs in a sandbox, iterating until the b
 
 - Telegram gateway with photo, voice, document (20+ formats), and sticker handling
 - Slack gateway (Socket Mode) at Telegram-parity: 23 slash commands, thread-based long replies, channel-scoped permissions, skill/memory/curator notification routing
+- Discord gateway (gateway WebSocket) at the same parity: `/prometheus` app commands, DM + guild/channel whitelists, thread-based long replies, shared media pipeline (vision/STT/documents)
 - Vision support (VisionTool) and voice transcription (Whisper STT)
 - Cron scheduler, heartbeat monitoring, systemd service
 - 40+ slash commands (Telegram), 23 slash commands (Slack)
@@ -212,7 +213,7 @@ Variants:
 ```bash
 prometheus setup --fast            # quick path: probe → yaml → env, 3 questions
 prometheus setup --noninteractive  # zero questions (first detected server, CLI gateway)
-prometheus setup --gateway-only    # add/change Telegram or Slack later
+prometheus setup --gateway-only    # add/change Telegram, Slack, or Discord later
 ```
 
 (Working from a git checkout? `pip install -e .` then the same `prometheus setup`. The old `prometheus --setup` and `prometheus-init` entry points still work as forwarding aliases.)
@@ -353,6 +354,18 @@ sentinel:
 profile:
   active: "full"   # full | coder | research | assistant | minimal
 ```
+
+## Gateways
+
+Three messaging gateways, all first-class: every onboarding surface (`prometheus setup`, the fast path, the remote setup API, and Beacon's wizard) can enable any subset, and `prometheus doctor` reports each one's state (enabled / token present / library installed).
+
+| Gateway | What you need | Env vars | Extra |
+|---------|---------------|----------|-------|
+| **Telegram** | A bot token from [@BotFather](https://t.me/BotFather) (`/newbot`) | `PROMETHEUS_TELEGRAM_TOKEN` | built-in |
+| **Slack** | A Slack app ([api.slack.com/apps](https://api.slack.com/apps)) with Socket Mode enabled — **both** tokens: bot (`xoxb-…`) + app-level (`xapp-…`) | `PROMETHEUS_SLACK_BOT_TOKEN`, `PROMETHEUS_SLACK_APP_TOKEN` | `pip install 'oara-prometheus[slack]'` |
+| **Discord** | A bot from the [developer portal](https://discord.com/developers/applications) with the **Message Content Intent** enabled, invited with the `bot` + `applications.commands` scopes | `PROMETHEUS_DISCORD_TOKEN` | `pip install 'oara-prometheus[discord]'` |
+
+Tokens live in the env file (`~/.config/prometheus/env`), never in the yaml. Enablement lives in the yaml: `gateway.telegram_enabled`, `gateway.slack.enabled`, `gateway.discord.enabled` (plus optional whitelists — `gateway.allowed_chat_ids`, `gateway.slack.allowed_channels`, `gateway.discord.guild_ids`/`channel_ids`; Discord with an empty whitelist is DMs-only). The easiest way to configure any of them is `prometheus setup --gateway-only`.
 
 ## Telegram Commands
 

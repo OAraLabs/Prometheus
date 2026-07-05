@@ -20,6 +20,7 @@ import yaml
 from prometheus.cli.doctor import (
     check_config,
     check_dirs_writable,
+    check_gateways,
     check_inference,
     check_token,
     check_web_port,
@@ -181,6 +182,103 @@ class TestCheckTokenAndDirs:
 
     def test_dirs_writable(self, isolated_dirs):
         assert check_dirs_writable().status == "ok"
+
+
+class TestCheckGateways:
+    """SPRINT G3: per-gateway doctor lines (Telegram / Slack / Discord)."""
+
+    def _by_name(self, config):
+        return {c.name: c for c in check_gateways(config)}
+
+    def test_all_disabled_render_info_lines(self, isolated_dirs, monkeypatch):
+        for var in ("PROMETHEUS_TELEGRAM_TOKEN", "PROMETHEUS_SLACK_BOT_TOKEN",
+                    "PROMETHEUS_SLACK_APP_TOKEN", "PROMETHEUS_DISCORD_TOKEN"):
+            monkeypatch.delenv(var, raising=False)
+        checks = self._by_name({"gateway": {}})
+        assert set(checks) == {
+            "Telegram gateway", "Slack gateway", "Discord gateway"}
+        for c in checks.values():
+            assert c.status == "info"
+            assert c.message == "not enabled"
+
+    def test_telegram_enabled_without_token_is_error(
+        self, isolated_dirs, monkeypatch,
+    ):
+        monkeypatch.delenv("PROMETHEUS_TELEGRAM_TOKEN", raising=False)
+        c = self._by_name({"gateway": {"telegram_enabled": True}})[
+            "Telegram gateway"]
+        assert c.status == "error"
+        assert "no bot token" in c.message
+        assert "BotFather" in (c.fix or "")
+
+    def test_telegram_token_from_env_file_counts(
+        self, isolated_dirs, monkeypatch,
+    ):
+        monkeypatch.delenv("PROMETHEUS_TELEGRAM_TOKEN", raising=False)
+        (isolated_dirs / "envfile").write_text(
+            "PROMETHEUS_TELEGRAM_TOKEN=123:abc\n", encoding="utf-8")
+        c = self._by_name({"gateway": {"telegram_enabled": True}})[
+            "Telegram gateway"]
+        # python-telegram-bot is a core dependency of the test env → ok.
+        assert c.status == "ok"
+        assert "token present" in c.message
+
+    def test_slack_checks_both_tokens(self, isolated_dirs, monkeypatch):
+        monkeypatch.delenv("PROMETHEUS_SLACK_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("PROMETHEUS_SLACK_APP_TOKEN", raising=False)
+        # Only the bot token → error naming the missing app token.
+        c = self._by_name({"gateway": {"slack": {
+            "enabled": True, "bot_token": "xoxb-x"}}})["Slack gateway"]
+        assert c.status == "error"
+        assert "app token" in c.message
+        assert "bot token" not in c.message
+        # Neither → both named.
+        c = self._by_name({"gateway": {"slack_enabled": True}})["Slack gateway"]
+        assert c.status == "error"
+        assert "bot token" in c.message and "app token" in c.message
+
+    def test_slack_flat_keys_win_and_ok_with_library(
+        self, isolated_dirs, monkeypatch,
+    ):
+        pytest.importorskip("slack_bolt")
+        c = self._by_name({"gateway": {
+            "slack_enabled": True,
+            "slack_bot_token": "xoxb-x", "slack_app_token": "xapp-x",
+        }})["Slack gateway"]
+        assert c.status == "ok"
+        assert "slack-bolt installed" in c.message
+
+    def test_discord_enabled_without_token_is_error(
+        self, isolated_dirs, monkeypatch,
+    ):
+        monkeypatch.delenv("PROMETHEUS_DISCORD_TOKEN", raising=False)
+        c = self._by_name({"gateway": {"discord": {"enabled": True}}})[
+            "Discord gateway"]
+        assert c.status == "error"
+        assert "no bot token" in c.message
+        assert "PROMETHEUS_DISCORD_TOKEN" in (c.fix or "")
+
+    def test_discord_enabled_with_token_and_library(
+        self, isolated_dirs, monkeypatch,
+    ):
+        pytest.importorskip("discord")
+        monkeypatch.setenv("PROMETHEUS_DISCORD_TOKEN", "tok")
+        c = self._by_name({"gateway": {"discord": {"enabled": True}}})[
+            "Discord gateway"]
+        assert c.status == "ok"
+        assert "discord.py installed" in c.message
+
+    def test_enabled_without_library_suggests_extra(
+        self, isolated_dirs, monkeypatch,
+    ):
+        monkeypatch.setenv("PROMETHEUS_DISCORD_TOKEN", "tok")
+        monkeypatch.setattr(
+            "prometheus.cli.doctor._library_installed", lambda mod: False)
+        c = self._by_name({"gateway": {"discord": {"enabled": True}}})[
+            "Discord gateway"]
+        assert c.status == "error"
+        assert "not installed" in c.message
+        assert "oara-prometheus[discord]" in (c.fix or "")
 
 
 class TestCheckWhisper:

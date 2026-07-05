@@ -464,31 +464,44 @@ async def run_daemon(args: argparse.Namespace) -> None:
     telegram: TelegramAdapter | None = None
     telegram_token = gateway_config.get("telegram_token", "") or os.environ.get("PROMETHEUS_TELEGRAM_TOKEN", "")
     if telegram_token and gateway_config.get("telegram_enabled", True):
-        tg_config = PlatformConfig(
-            platform=Platform.TELEGRAM,
-            token=telegram_token,
-            allowed_chat_ids=gateway_config.get("allowed_chat_ids", []),
-            proxy_url=gateway_config.get("proxy_url"),
-        )
-        from prometheus.context.prompt_assembler import build_runtime_system_prompt
-        system_prompt = build_runtime_system_prompt(
-            cwd=str(Path.cwd()), config=config,
-        )
-        telegram = TelegramAdapter(
-            config=tg_config,
-            agent_loop=agent_loop,
-            tool_registry=registry,
-            system_prompt=system_prompt,
-            model_name=model_name,
-            model_provider=model_config.get("provider", "llama_cpp"),
-            session_manager=session_manager,
-            prometheus_config=config,
-        )
-        gateway_registry.register_adapter(telegram)
-        await telegram.start()
-        archive.archive_event("telegram_started")
-        logger.info("Telegram adapter started")
+        # SPRINT G3: failure-guarded like the Slack/Discord blocks below —
+        # a bad token (or Telegram being unreachable) must not kill the
+        # daemon; the other gateways and the web surface still come up.
+        try:
+            tg_config = PlatformConfig(
+                platform=Platform.TELEGRAM,
+                token=telegram_token,
+                allowed_chat_ids=gateway_config.get("allowed_chat_ids", []),
+                proxy_url=gateway_config.get("proxy_url"),
+            )
+            from prometheus.context.prompt_assembler import build_runtime_system_prompt
+            system_prompt = build_runtime_system_prompt(
+                cwd=str(Path.cwd()), config=config,
+            )
+            telegram = TelegramAdapter(
+                config=tg_config,
+                agent_loop=agent_loop,
+                tool_registry=registry,
+                system_prompt=system_prompt,
+                model_name=model_name,
+                model_provider=model_config.get("provider", "llama_cpp"),
+                session_manager=session_manager,
+                prometheus_config=config,
+            )
+            gateway_registry.register_adapter(telegram)
+            await telegram.start()
+            archive.archive_event("telegram_started")
+            logger.info("Telegram adapter started")
+        except Exception as exc:
+            # Redact: python-telegram-bot's InvalidToken message embeds the
+            # token itself — never let a token value reach the log.
+            logger.error(
+                "Failed to start Telegram adapter: %s",
+                str(exc).replace(telegram_token, "***"),
+            )
+            telegram = None
 
+    if telegram is not None:
         # Sprint 15b GRAFT: wire approval queue if enabled.
         # NOTE: the queue's *prompt delivery* transport is still the Telegram
         # adapter (constructor arg — adapter-into-subsystem, the reverse
@@ -621,7 +634,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 "Install with: pip install 'prometheus[slack]'"
             )
         except Exception as exc:
-            logger.error("Failed to start Slack adapter: %s", exc)
+            msg = str(exc).replace(slack_bot_token, "***").replace(slack_app_token, "***")
+            logger.error("Failed to start Slack adapter: %s", msg)
 
     # Discord adapter (SPRINT G2) — mirrors the Slack optional-construction
     # block: nested gateway.discord.* config, token via config or env var.
@@ -675,7 +689,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 "Install with: pip install 'oara-prometheus[discord]'"
             )
         except Exception as exc:
-            logger.error("Failed to start Discord adapter: %s", exc)
+            logger.error(
+                "Failed to start Discord adapter: %s",
+                str(exc).replace(discord_token, "***"),
+            )
 
     # Heartbeat — also watches background tasks and pushes proactive
     # finish/fail + progress notifications to the user (audit fix #3).
@@ -1445,6 +1462,11 @@ def main() -> None:
         ],
         force=True,
     )
+    # SPRINT G3: httpx logs every request URL at INFO — and the Telegram
+    # Bot API puts the bot TOKEN in the URL path (…/bot<token>/getMe), so
+    # httpx-at-INFO leaks the token into the daemon log on every Telegram
+    # API call. WARNING keeps real failures visible without the URLs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     asyncio.run(run_daemon(args))
 

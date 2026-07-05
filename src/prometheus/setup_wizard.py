@@ -119,7 +119,9 @@ class SetupWizard:
         self._base_url: str = "http://localhost:8080"
         self._model_name: str = ""
         self._api_key_env: str = ""
-        self._gateway: str = "cli"
+        # SPRINT G3: which gateways the user enabled (any subset of
+        # {"telegram", "slack", "discord"}; empty = CLI only).
+        self._gateways: set[str] = set()
         self._telegram_token: str = ""
         self._telegram_chat_ids: list[int] = []
         self._telegram_bot_name: str = ""
@@ -127,6 +129,9 @@ class SetupWizard:
         self._slack_app_token: str = ""
         self._slack_channels: list[str] = []
         self._slack_workspace: str = ""
+        self._discord_token: str = ""
+        self._discord_guild_ids: list[int] = []
+        self._discord_bot_name: str = ""
 
     @property
     def _config_path(self) -> Path:
@@ -467,48 +472,69 @@ Run this wizard again after you're ready:
     # ------------------------------------------------------------------
 
     def _step_gateway(self) -> None:
-        choice = _ask_choice(
-            "How do you want to talk to Prometheus?",
-            [
-                "Telegram",
-                "Slack",
-                "Both (Telegram + Slack)",
-                "CLI only (no messaging gateway)",
-            ],
-            default=4,
-        )
+        # SPRINT G3: per-gateway enable loop — each of Telegram, Slack and
+        # Discord is a first-class y/N question. All-default (N,N,N) = CLI
+        # only, exactly like the old menu's default.
+        print("\nHow do you want to talk to Prometheus?")
+        print("\n  Enable any of the messaging gateways below — or none, for"
+              "\n  CLI only. You can add or change gateways any time with:"
+              "\n    prometheus setup --gateway-only")
 
-        if choice == 4:
-            self._gateway = "cli"
+        # Telegram — a prefilled (rerun) gateway defaults to staying enabled.
+        if self._ask_enable("Telegram", "telegram" in self._gateways):
+            self._setup_telegram()
+        else:
+            self._telegram_token = ""
+            self._telegram_chat_ids = []
+
+        # Slack
+        if self._ask_enable("Slack", "slack" in self._gateways):
+            self._setup_slack()
+        else:
+            self._slack_bot_token = ""
+            self._slack_app_token = ""
+            self._slack_channels = []
+
+        # Discord
+        if self._ask_enable("Discord", "discord" in self._gateways):
+            self._setup_discord()
+        else:
+            self._discord_token = ""
+            self._discord_guild_ids = []
+
+        # Only gateways that actually got working credentials count.
+        self._gateways = set()
+        if self._telegram_token:
+            self._gateways.add("telegram")
+        if self._slack_bot_token and self._slack_app_token:
+            self._gateways.add("slack")
+        if self._discord_token:
+            self._gateways.add("discord")
+        if not self._gateways:
             print(
                 "\n  Got it — CLI mode. Add a gateway later with:"
                 "\n    prometheus setup --gateway-only"
             )
-            return
 
-        if choice in (1, 3):
-            self._setup_telegram()
-
-        if choice in (2, 3):
-            self._setup_slack()
-
-        # Determine gateway value
-        has_tg = bool(self._telegram_token)
-        has_slack = bool(self._slack_bot_token and self._slack_app_token)
-        if has_tg and has_slack:
-            self._gateway = "both"
-        elif has_tg:
-            self._gateway = "telegram"
-        elif has_slack:
-            self._gateway = "slack"
-        else:
-            self._gateway = "cli"
-            print("\n  No gateway configured. Running in CLI mode.")
+    @staticmethod
+    def _ask_enable(name: str, currently_enabled: bool) -> bool:
+        """One `Enable <gateway>? [y/N]` question (default Y on a rerun
+        where that gateway is already configured)."""
+        default = "Y" if currently_enabled else "N"
+        hint = "[Y/n]" if currently_enabled else "[y/N]"
+        answer = _input(f"\nEnable {name}? {hint}", default)
+        return answer.lower() == "y"
 
     def _setup_telegram(self) -> None:
         """Collect and validate Telegram bot token."""
-        token = _input("\nEnter your Telegram bot token (from @BotFather)")
+        prompt = "\nEnter your Telegram bot token (from @BotFather)"
+        if self._telegram_token:
+            prompt += " — Enter keeps the current one"
+        token = _input(prompt)
         if not token:
+            if self._telegram_token:
+                print("  Keeping the current Telegram token.")
+                return
             print("  No token provided. Skipping Telegram.")
             return
 
@@ -552,8 +578,14 @@ Run this wizard again after you're ready:
             "\n  4. Install App to your workspace"
             "\n  5. Copy both tokens:"
         )
-        bot_token = _input("\nBot Token (xoxb-...)")
+        prompt = "\nBot Token (xoxb-...)"
+        if self._slack_bot_token and self._slack_app_token:
+            prompt += " — Enter keeps the current tokens"
+        bot_token = _input(prompt)
         if not bot_token:
+            if self._slack_bot_token and self._slack_app_token:
+                print("  Keeping the current Slack tokens.")
+                return
             print("  No bot token provided. Skipping Slack.")
             return
 
@@ -589,6 +621,74 @@ Run this wizard again after you're ready:
             self._slack_channels = [
                 c.strip() for c in channels_str.split(",") if c.strip()
             ]
+
+    def _setup_discord(self) -> None:
+        """Collect and validate Discord bot token (SPRINT G3)."""
+        print(
+            "\n  Discord setup needs a bot token from the developer portal:"
+            "\n"
+            "\n  1. Create an app at https://discord.com/developers/applications"
+            "\n     and add a Bot to it (Bot tab), then copy its token."
+            "\n  2. Enable the Message Content Intent (Bot > Privileged Gateway Intents)."
+            "\n  3. Invite it with the bot + applications.commands scopes"
+            "\n     (OAuth2 > URL Generator)."
+        )
+        prompt = "\nBot token"
+        if self._discord_token:
+            prompt += " — Enter keeps the current one"
+        token = _input(prompt)
+        if not token:
+            if self._discord_token:
+                print("  Keeping the current Discord token.")
+                return
+            print("  No token provided. Skipping Discord.")
+            return
+
+        print("  Testing token...")
+        bot_name = self._test_discord_token(token)
+        if bot_name:
+            print(f"  + Bot connected: {bot_name}")
+            self._discord_token = token
+            self._discord_bot_name = bot_name
+        else:
+            print("  x Invalid token or could not reach the Discord API.")
+            keep = _input("Save this token anyway? [y/N]", "N")
+            if keep.lower() == "y":
+                self._discord_token = token
+            else:
+                print("  Skipping Discord.")
+                return
+
+        # Optional: whitelist guilds (servers). DMs are always allowed;
+        # with no whitelist the bot is DMs-only (deliberately strict).
+        print(
+            "\n  Optional: whitelist Discord servers (guild IDs)?"
+            "\n  Enter guild IDs separated by commas — messages in those"
+            "\n  servers' channels are allowed, and slash commands register"
+            "\n  instantly there. Leave blank for DMs-only."
+        )
+        guilds_str = _input("Guild IDs", "")
+        if guilds_str:
+            try:
+                self._discord_guild_ids = [
+                    int(g.strip()) for g in guilds_str.split(",") if g.strip()
+                ]
+            except ValueError:
+                print("  Invalid guild ID list, skipping the whitelist (DMs-only).")
+
+    def _test_discord_token(self, token: str) -> str | None:
+        """Test a Discord bot token via /users/@me. Returns bot name or None."""
+        try:
+            resp = httpx.get(
+                "https://discord.com/api/v10/users/@me",
+                headers={"Authorization": f"Bot {token}"},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            return resp.json().get("username", "")
+        except Exception:
+            pass
+        return None
 
     def _test_slack_token(self, bot_token: str) -> str | None:
         """Test a Slack bot token via auth.test. Returns workspace name or None."""
@@ -698,22 +798,42 @@ Run this wizard again after you're ready:
 
         gateway = cfg.setdefault("gateway", {})
 
-        # Telegram
-        if self._gateway in ("telegram", "both"):
+        # SPRINT G3: the per-gateway loop is the WHOLE answer — a gateway
+        # the user declined is explicitly disabled (its stale tokens, if
+        # any, are left in place but inert).
+
+        # Telegram (flat keys — the form the daemon reads first)
+        if "telegram" in self._gateways:
             gateway["telegram_enabled"] = True
             gateway["telegram_token"] = self._telegram_token
             gateway["allowed_chat_ids"] = self._telegram_chat_ids
-        elif self._gateway == "cli":
+        else:
             gateway["telegram_enabled"] = False
 
-        # Slack
-        if self._gateway in ("slack", "both"):
+        # Slack (flat keys — they win over the nested gateway.slack.* form
+        # in the daemon's construction block)
+        if "slack" in self._gateways:
             gateway["slack_enabled"] = True
             gateway["slack_bot_token"] = self._slack_bot_token
             gateway["slack_app_token"] = self._slack_app_token
             gateway["slack_channels"] = self._slack_channels
-        elif self._gateway == "cli":
+        else:
             gateway["slack_enabled"] = False
+
+        # Discord (nested gateway.discord.* — the ONLY form the daemon
+        # reads; mirrors the fast path's _default_config nesting)
+        discord = gateway.get("discord")
+        if not isinstance(discord, dict):
+            discord = {}
+        if "discord" in self._gateways:
+            discord["enabled"] = True
+            discord["token"] = self._discord_token
+            discord["guild_ids"] = self._discord_guild_ids
+            discord.setdefault("channel_ids", [])
+            gateway["discord"] = discord
+        elif discord:
+            discord["enabled"] = False
+            gateway["discord"] = discord
 
     def _save_config(self, cfg: dict[str, Any]) -> None:
         """Write config dict to YAML file and update .gitignore."""
@@ -743,6 +863,12 @@ Run this wizard again after you're ready:
             masked = f"{token[:4]}...{token[-4:]}" if len(token) > 8 else "****"
             print(f"  + Gateway: Slack (bot token: {masked})")
             gateways_active.append("slack")
+        discord_cfg = gw.get("discord") if isinstance(gw.get("discord"), dict) else {}
+        if (discord_cfg or {}).get("enabled"):
+            token = (discord_cfg or {}).get("token", "")
+            masked = f"{token[:4]}...{token[-4:]}" if len(token) > 8 else "****"
+            print(f"  + Gateway: Discord (token: {masked})")
+            gateways_active.append("discord")
         if not gateways_active:
             print("  + Gateway: CLI only")
         print("  + Config saved")
@@ -962,16 +1088,21 @@ Run this wizard again after you're ready:
 
         # Gateway summary
         gw_parts: list[str] = []
-        if self._gateway in ("telegram", "both"):
+        if "telegram" in self._gateways:
             if self._telegram_bot_name:
                 gw_parts.append(f"Telegram (@{self._telegram_bot_name})")
             else:
                 gw_parts.append("Telegram")
-        if self._gateway in ("slack", "both"):
+        if "slack" in self._gateways:
             if self._slack_workspace:
                 gw_parts.append(f"Slack ({self._slack_workspace})")
             else:
                 gw_parts.append("Slack")
+        if "discord" in self._gateways:
+            if self._discord_bot_name:
+                gw_parts.append(f"Discord ({self._discord_bot_name})")
+            else:
+                gw_parts.append("Discord")
         if not gw_parts:
             gw_parts.append("CLI only")
         print(f"  Gateway:  {' + '.join(gw_parts)}")
@@ -987,12 +1118,16 @@ Run this wizard again after you're ready:
         print("                first start mints a web API token — printed once;")
         print("                `prometheus token show` re-prints it")
         print("  Health check: prometheus doctor")
-        if self._gateway in ("telegram", "both") and self._telegram_bot_name:
+        if "telegram" in self._gateways and self._telegram_bot_name:
             print()
             print(f"Send /start to @{self._telegram_bot_name} to begin.")
-        if self._gateway in ("slack", "both"):
+        if "slack" in self._gateways:
             print()
             print("Mention @prometheus in a Slack channel to chat.")
+        if "discord" in self._gateways:
+            print()
+            print("DM your Discord bot (or type /prometheus in a whitelisted "
+                  "server) to begin.")
         print()
         print("=" * 55)
 
@@ -1081,20 +1216,22 @@ Run this wizard again after you're ready:
         self._api_key_env = model.get("api_key_env", "")
 
         gw = cfg.get("gateway", {})
-        has_tg = gw.get("telegram_enabled", False)
-        has_slack = gw.get("slack_enabled", False)
+        discord_cfg = gw.get("discord") if isinstance(gw.get("discord"), dict) else {}
 
-        if has_tg and has_slack:
-            self._gateway = "both"
-        elif has_tg:
-            self._gateway = "telegram"
-        elif has_slack:
-            self._gateway = "slack"
-        else:
-            self._gateway = "cli"
+        slack_nested = gw.get("slack") if isinstance(gw.get("slack"), dict) else {}
+
+        self._gateways = set()
+        if gw.get("telegram_enabled", False):
+            self._gateways.add("telegram")
+        if gw.get("slack_enabled", False) or (slack_nested or {}).get("enabled"):
+            self._gateways.add("slack")
+        if (discord_cfg or {}).get("enabled"):
+            self._gateways.add("discord")
 
         self._telegram_token = gw.get("telegram_token", "")
         self._telegram_chat_ids = gw.get("allowed_chat_ids", [])
-        self._slack_bot_token = gw.get("slack_bot_token", "")
-        self._slack_app_token = gw.get("slack_app_token", "")
-        self._slack_channels = gw.get("slack_channels", [])
+        self._slack_bot_token = gw.get("slack_bot_token", "") or (slack_nested or {}).get("bot_token", "")
+        self._slack_app_token = gw.get("slack_app_token", "") or (slack_nested or {}).get("app_token", "")
+        self._slack_channels = gw.get("slack_channels") or (slack_nested or {}).get("allowed_channels", []) or []
+        self._discord_token = (discord_cfg or {}).get("token", "")
+        self._discord_guild_ids = (discord_cfg or {}).get("guild_ids", []) or []
