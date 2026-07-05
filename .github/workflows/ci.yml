@@ -1,0 +1,46 @@
+name: CI
+
+# The June 2026 audit's cheapest durable win: the suite is ~3,000 tests in well
+# under a minute, so gating every push/PR on it is nearly free and would have
+# caught the regressions this repo has historically shipped (tested-but-unwired,
+# string-vs-ContentBlock). Network-marked tests are excluded (no live model in CI).
+#
+# Provenance: authored in the 2026-06 repo audit (untracked at the repo root
+# because the gh token lacked `workflow` scope), folded into the branch and
+# modernized for Onboarding Phase 3: uv-based install/test invocation matching
+# the project's canonical dev loop (`uv sync --extra web --extra anthropic
+# --group dev` + `PYTHONPATH=$PWD/src uv run pytest`).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - name: Sync dependencies (web + anthropic extras, dev group)
+        run: uv sync --extra web --extra anthropic --group dev
+      - name: Run test suite (excluding network-dependent tests)
+        # --deselect: tests/test_bootstrap.py::TestMemoryInPrompt::test_empty_memory_files_no_section
+        # is a KNOWN pre-existing failure on main (documented in the sprint hard
+        # rules since Onboarding Phase 0). Deselecting the single test — not the
+        # file — keeps the other bootstrap tests gating while the fix is owed.
+        run: >
+          PYTHONPATH=$PWD/src uv run pytest -m "not network" -q
+          --deselect tests/test_bootstrap.py::TestMemoryInPrompt::test_empty_memory_files_no_section

@@ -1,0 +1,55 @@
+name: Release
+
+# Onboarding Phase 3 (distribution): tag `vX.Y.Z` (or run manually) → build the
+# sdist + wheel and attach them to a DRAFT GitHub Release. Nothing is published
+# automatically: the release stays a draft until a human publishes it, and the
+# PyPI step is skipped entirely unless the PYPI_API_TOKEN secret exists
+# (Settings → Secrets and variables → Actions). Add that secret only when the
+# `oara-prometheus` name is ready to go live on PyPI.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    env:
+      # Job-level so the step-level `if:` can see it (secrets context is not
+      # available in job-level conditionals).
+      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel
+        run: uv build
+      - name: Smoke the wheel (install into a scratch venv, `prometheus --help`)
+        run: |
+          uv venv /tmp/relcheck
+          uv pip install --python /tmp/relcheck/bin/python dist/*.whl
+          /tmp/relcheck/bin/prometheus --help
+      - name: Upload build artifacts (always, incl. workflow_dispatch runs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/*
+      - name: Attach to a draft GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --title "Prometheus $GITHUB_REF_NAME" \
+            --notes "Draft release for $GITHUB_REF_NAME — publish manually after review." \
+            || true  # already exists (e.g. re-run) → just upload
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+      - name: Publish to PyPI (ONLY when the PYPI_API_TOKEN secret is set)
+        if: startsWith(github.ref, 'refs/tags/v') && env.PYPI_API_TOKEN != ''
+        run: uv publish --token "$PYPI_API_TOKEN"
