@@ -996,6 +996,18 @@ Run this wizard again after you're ready:
         print()
         print("=" * 55)
 
+        # Onboarding Phase 1, item 1: the "Connect a client (Beacon)"
+        # block — address + token in one place, printed at the very end
+        # of BOTH wizard paths (rich here; fast in cli/init.run_init).
+        from prometheus.config.api_token import format_connect_client_block
+        config: dict[str, Any] = {}
+        try:
+            with self._config_path.open(encoding="utf-8") as fh:
+                config = yaml.safe_load(fh) or {}
+        except Exception:
+            pass
+        print(format_connect_client_block(config), end="")
+
     # ------------------------------------------------------------------
     # Re-run handling
     # ------------------------------------------------------------------

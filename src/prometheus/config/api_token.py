@@ -120,3 +120,47 @@ def format_minted_banner(token: str) -> str:
         "  Rotate it:      prometheus token rotate\n"
         f"{bar}\n"
     )
+
+
+def format_connect_client_block(
+    config: dict[str, Any] | None = None,
+    api_port: int | None = None,
+) -> str:
+    """The wizard's "Connect a client (Beacon)" end screen (Phase 1, item 1).
+
+    Everything a client needs, in one boxed block: the address (this
+    machine's hostname + the web API port — never a hardcoded host) and
+    the API token. The token value is printed only when one already
+    exists (config/env/env file); otherwise we point at the first-start
+    mint + ``prometheus token show``. The token is never *written*
+    anywhere here — printing only.
+    """
+    import socket
+
+    host = socket.gethostname()
+    if api_port is None:
+        try:
+            api_port = int(((config or {}).get("web") or {}).get("api_port") or 8005)
+        except (TypeError, ValueError):
+            api_port = 8005
+    token, _source = resolve_api_token(config)
+    if token:
+        token_lines = (
+            f"    Token:    {token}\n"
+            f"              (stored in {get_env_file_path()})\n"
+        )
+    else:
+        token_lines = (
+            "    Token:    minted on first daemon start — re-print with\n"
+            "              `prometheus token show`\n"
+        )
+    bar = "=" * 68
+    return (
+        f"\n{bar}\n"
+        "  CONNECT A CLIENT (Beacon)\n"
+        "\n"
+        f"    Address:  {host}:{api_port}\n"
+        f"              (or this machine's Tailscale / LAN address, port {api_port})\n"
+        f"{token_lines}"
+        f"{bar}\n"
+    )
