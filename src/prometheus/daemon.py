@@ -1331,8 +1331,25 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Logging
     log_level = logging.DEBUG if args.debug else logging.INFO
+
+    # ── Setup mode (Onboarding Phase 1) ─────────────────────────────────
+    # No config anywhere → don't half-start on defaults (the old dead
+    # end): boot the minimal pairing-only web server instead, so a client
+    # (Beacon) can exchange a one-time code for the real API token while
+    # the user finishes `prometheus setup`. Checked BEFORE the file
+    # logger below — setup mode must not create ~/.prometheus/logs (or
+    # any other ~/.prometheus state).
+    from prometheus.web.setup_server import find_config_file, run_setup_mode
+    if find_config_file(args.config) is None:
+        logging.basicConfig(
+            level=log_level,
+            format="%(asctime)s %(name)s %(levelname)s %(message)s",
+            handlers=[logging.StreamHandler(sys.stdout)],
+        )
+        sys.exit(run_setup_mode())
+
+    # Logging
     log_dir = get_logs_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
 

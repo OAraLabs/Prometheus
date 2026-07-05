@@ -566,6 +566,12 @@ def run_init(
     else:
         print(f"Env file already present at {env_path} — left untouched")
 
+    # Onboarding Phase 1, item 1: "Connect a client (Beacon)" end block —
+    # printed on the fast/noninteractive path too, so BOTH wizard paths
+    # end with the address + token a client needs.
+    from prometheus.config.api_token import format_connect_client_block
+    print(format_connect_client_block(config), end="")
+
     # Friendly next-steps
     print()
     print("Setup complete. Next steps:")
