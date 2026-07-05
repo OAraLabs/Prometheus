@@ -31,6 +31,21 @@ class TestBuildSystemPrompt:
         assert "SYSTEM_PROMPT_DYNAMIC_BOUNDARY" in SYSTEM_PROMPT_DYNAMIC_BOUNDARY
         assert SYSTEM_PROMPT_DYNAMIC_BOUNDARY == "--- SYSTEM_PROMPT_DYNAMIC_BOUNDARY ---"
 
+    def test_documents_library_convention(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The prompt names the RESOLVED documents root (repointable via env)
+        # and the loops/ save-for-later convention the Beacon Loop Manager
+        # picks up ("From Documents…").
+        docs_root = tmp_path / "docs"
+        monkeypatch.setenv("PROMETHEUS_DOCUMENTS_DIR", str(docs_root))
+
+        prompt = build_system_prompt(cwd=os.getcwd())
+
+        assert "# Documents library" in prompt
+        assert str(docs_root) in prompt
+        assert str(docs_root / "loops") in prompt
+
 
 # ---------------------------------------------------------------------------
 # build_runtime_system_prompt
@@ -56,6 +71,18 @@ class TestBuildRuntimeSystemPrompt:
 
         # The dynamic section should include reasoning settings
         assert "Reasoning Settings" in dynamic_part or "Effort" in dynamic_part
+
+    def test_documents_convention_is_static(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The documents-library convention is stable per session, so it must
+        # live BEFORE the dynamic boundary (KV-cache friendly).
+        monkeypatch.setenv("PROMETHEUS_DOCUMENTS_DIR", str(tmp_path / "docs"))
+
+        prompt = build_runtime_system_prompt(cwd=str(tmp_path))
+        static_part = prompt.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)[0]
+
+        assert "# Documents library" in static_part
 
 
 # ---------------------------------------------------------------------------
