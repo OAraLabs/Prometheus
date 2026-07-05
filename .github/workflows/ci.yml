@@ -37,10 +37,9 @@ jobs:
       - name: Sync dependencies (web + anthropic extras, dev group)
         run: uv sync --extra web --extra anthropic --group dev
       - name: Run test suite (excluding network-dependent tests)
-        # --deselect: tests/test_bootstrap.py::TestMemoryInPrompt::test_empty_memory_files_no_section
-        # is a KNOWN pre-existing failure on main (documented in the sprint hard
-        # rules since Onboarding Phase 0). Deselecting the single test — not the
-        # file — keeps the other bootstrap tests gating while the fix is owed.
+        # The once-"known failure" (test_empty_memory_files_no_section) was
+        # never a broken test — it read the developer's REAL ~/.prometheus
+        # state. conftest's _isolated_state_dirs fixture now sandboxes every
+        # test, so the full suite gates with no deselects.
         run: >
           PYTHONPATH=$PWD/src uv run pytest -m "not network" -q
-          --deselect tests/test_bootstrap.py::TestMemoryInPrompt::test_empty_memory_files_no_section

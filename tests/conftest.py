@@ -44,6 +44,22 @@ def _tripwire_reset():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _isolated_state_dirs(tmp_path, monkeypatch):
+    """Point ALL live-state roots at per-test tmp dirs.
+
+    Found live 2026-07-05: a test_wiring MessageEvent(chat_id=99) flowed
+    through TelegramAdapter.on_message → _save_chat_id → the REAL
+    ``~/.prometheus/last_telegram_chat_id`` — so every suite run broke the
+    daemon's startup greeting (400 "Chat not found" on chat 99). Tests
+    must never touch ``~/.prometheus`` or ``~/.config/prometheus``; this
+    kills the whole leak class. Tests that need a specific dir still win —
+    their own monkeypatch.setenv overrides this default.
+    """
+    monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path / "prom-config"))
+    monkeypatch.setenv("PROMETHEUS_ENV_FILE", str(tmp_path / "prom-env"))
+
+
 def _validated_allowance(marker: pytest.Mark) -> set[str]:
     allow = marker.kwargs.get("allow_doubles", [])
     if isinstance(allow, str) or not isinstance(allow, (list, tuple, set)):
