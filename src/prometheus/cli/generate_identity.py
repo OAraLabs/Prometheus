@@ -95,8 +95,16 @@ def render_soul_md(
     brain_machine_name: str | None = None,
     owner_description: str = "",
     vision_available: bool | None = None,
+    agent_name: str = "Prometheus",
+    persona: str = "",
 ) -> str:
-    """Render SOUL.md from template with user's values."""
+    """Render SOUL.md from template with user's values.
+
+    ``agent_name`` fills the template's ``{{AGENT_NAME}}`` slots (default
+    keeps the historical "Prometheus" rendering byte-identical);
+    ``persona`` (Onboarding Phase 2, Beacon identity step) appends a
+    short "## Persona" section when non-empty.
+    """
     template = (TEMPLATES_DIR / "SOUL.md.template").read_text()
 
     if hardware_layout == "split":
@@ -134,11 +142,14 @@ def render_soul_md(
 
     owner_desc = f" \u2014 {owner_description}" if owner_description else ""
 
-    result = template.replace("{{OWNER_NAME}}", owner_name)
+    result = template.replace("{{AGENT_NAME}}", agent_name or "Prometheus")
+    result = result.replace("{{OWNER_NAME}}", owner_name)
     result = result.replace("{{HARDWARE_SECTION}}", "\n".join(hw_lines))
     result = result.replace("{{VISION_LINE}}", vision_line)
     result = result.replace("{{VOICE_LINE}}", voice_line)
     result = result.replace("{{OWNER_DESCRIPTION}}", owner_desc)
+    if persona.strip():
+        result = result.rstrip("\n") + f"\n\n## Persona\n\n{persona.strip()}\n"
     return result
 
 
@@ -156,6 +167,8 @@ def generate_identity_files(
     owner_description: str = "",
     overwrite: bool = False,
     dest: Path | None = None,
+    agent_name: str = "Prometheus",
+    persona: str = "",
 ) -> dict[str, str]:
     """Generate all identity files in ~/.prometheus/ (or dest).
 
@@ -173,6 +186,7 @@ def generate_identity_files(
         soul_path.write_text(render_soul_md(
             owner_name, hardware, hardware_layout,
             gpu_machine_name, brain_machine_name, owner_description,
+            agent_name=agent_name, persona=persona,
         ))
         results["SOUL.md"] = "created"
 
