@@ -406,6 +406,144 @@ class TestConfigure:
 
 
 # ---------------------------------------------------------------------------
+# SPRINT G3 — gateway fields on POST /api/setup/configure
+# ---------------------------------------------------------------------------
+
+
+class TestConfigureGateways:
+    def _configure(self, client, headers, url, **extra):
+        body = {"provider": "llama_cpp", "base_url": url,
+                "model": "gemma4-26b", **extra}
+        return client.post("/api/setup/configure", json=body, headers=headers)
+
+    def test_all_three_gateways_written(self, env_file, config_dir):
+        client, _ = make_client()
+        headers = pair(client)
+        with _serve(_FakeLlamaCppHandler) as url:
+            resp = self._configure(
+                client, headers, url,
+                telegram_token="123456:SECRET-TG",
+                slack_bot_token="xoxb-SECRET-BOT",
+                slack_app_token="xapp-SECRET-APP",
+                slack_channels=["C0123", "C0456"],
+                discord_token="SECRET-DISCORD",
+                discord_guild_ids=[123456789012345678],
+            )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["gateways_enabled"] == ["telegram", "slack", "discord"]
+        assert body["telegram_token_saved"] is True
+
+        # Env file carries all four token vars…
+        env = parse_env_file(env_file)
+        assert env["PROMETHEUS_TELEGRAM_TOKEN"] == "123456:SECRET-TG"
+        assert env["PROMETHEUS_SLACK_BOT_TOKEN"] == "xoxb-SECRET-BOT"
+        assert env["PROMETHEUS_SLACK_APP_TOKEN"] == "xapp-SECRET-APP"
+        assert env["PROMETHEUS_DISCORD_TOKEN"] == "SECRET-DISCORD"
+
+        # …the yaml has the enabled blocks + whitelists (never tokens)…
+        cfg_text = (config_dir / "prometheus.yaml").read_text(encoding="utf-8")
+        cfg = yaml.safe_load(cfg_text)
+        assert cfg["gateway"]["telegram_enabled"] is True
+        assert cfg["gateway"]["slack"]["enabled"] is True
+        assert cfg["gateway"]["slack"]["allowed_channels"] == ["C0123", "C0456"]
+        assert cfg["gateway"]["discord"]["enabled"] is True
+        assert cfg["gateway"]["discord"]["guild_ids"] == [123456789012345678]
+        for secret in ("SECRET-TG", "SECRET-BOT", "SECRET-APP", "SECRET-DISCORD"):
+            assert secret not in cfg_text
+
+        # …and the response never echoes a token.
+        for secret in ("SECRET-TG", "SECRET-BOT", "SECRET-APP", "SECRET-DISCORD"):
+            assert secret not in resp.text
+
+    @pytest.mark.parametrize("half", [
+        {"slack_bot_token": "xoxb-only"},
+        {"slack_app_token": "xapp-only"},
+    ])
+    def test_slack_half_token_is_400_nothing_written(
+        self, env_file, config_dir, half,
+    ):
+        client, _ = make_client()
+        headers = pair(client)
+        with _serve(_FakeLlamaCppHandler) as url:
+            resp = self._configure(client, headers, url, **half)
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["error"] == "slack_token_pair_incomplete"
+        assert "BOTH" in body["detail"]
+        assert not (config_dir / "prometheus.yaml").exists()
+        assert "PROMETHEUS_SLACK" not in (
+            env_file.read_text(encoding="utf-8") if env_file.exists() else "")
+
+    def test_discord_guild_ids_accept_strings_and_ints(
+        self, env_file, config_dir,
+    ):
+        client, _ = make_client()
+        headers = pair(client)
+        with _serve(_FakeLlamaCppHandler) as url:
+            resp = self._configure(
+                client, headers, url,
+                discord_token="tok", discord_guild_ids=["111", 222],
+            )
+        assert resp.status_code == 200
+        cfg = yaml.safe_load(
+            (config_dir / "prometheus.yaml").read_text(encoding="utf-8"))
+        assert cfg["gateway"]["discord"]["guild_ids"] == [111, 222]
+
+    def test_bad_discord_guild_ids_is_400(self, env_file, config_dir):
+        client, _ = make_client()
+        headers = pair(client)
+        with _serve(_FakeLlamaCppHandler) as url:
+            resp = self._configure(
+                client, headers, url,
+                discord_token="tok", discord_guild_ids=["not-a-guild"],
+            )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "bad_discord_guild_ids"
+
+    def test_no_gateways_means_empty_list_and_disabled_blocks(
+        self, env_file, config_dir,
+    ):
+        client, _ = make_client()
+        headers = pair(client)
+        with _serve(_FakeLlamaCppHandler) as url:
+            resp = self._configure(client, headers, url)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["gateways_enabled"] == []
+        assert body["telegram_token_saved"] is False
+        cfg = yaml.safe_load(
+            (config_dir / "prometheus.yaml").read_text(encoding="utf-8"))
+        assert cfg["gateway"]["telegram_enabled"] is False
+        assert cfg["gateway"]["slack"]["enabled"] is False
+        assert cfg["gateway"]["discord"]["enabled"] is False
+
+    def test_idempotent_re_post_drops_removed_gateways(
+        self, env_file, config_dir,
+    ):
+        """A re-POST is the WHOLE answer: gateways omitted the second time
+        are disabled in the freshly written yaml (env-file tokens remain,
+        but they are inert without the enabled flag)."""
+        client, _ = make_client()
+        headers = pair(client)
+        with _serve(_FakeLlamaCppHandler) as url:
+            assert self._configure(
+                client, headers, url,
+                discord_token="tok-1", discord_guild_ids=[1],
+            ).status_code == 200
+            resp = self._configure(client, headers, url,
+                                   telegram_token="123:tg")
+        assert resp.status_code == 200
+        assert resp.json()["gateways_enabled"] == ["telegram"]
+        cfg = yaml.safe_load(
+            (config_dir / "prometheus.yaml").read_text(encoding="utf-8"))
+        assert cfg["gateway"]["telegram_enabled"] is True
+        assert cfg["gateway"]["discord"]["enabled"] is False
+        # No backup litter from the overwrite (idempotency contract).
+        assert list(config_dir.glob("prometheus.yaml.backup-*")) == []
+
+
+# ---------------------------------------------------------------------------
 # status.configured + POST /api/setup/complete
 # ---------------------------------------------------------------------------
 

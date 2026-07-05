@@ -343,7 +343,7 @@ class TestSetupWizardSlack:
         monkeypatch.setattr("prometheus.setup_wizard._REPO_CONFIG", config_file)
 
         w = SetupWizard()
-        w._gateway = "slack"
+        w._gateways = {"slack"}
         w._slack_bot_token = "xoxb-test"
         w._slack_app_token = "xapp-test"
         w._slack_channels = ["C123"]
@@ -363,7 +363,7 @@ class TestSetupWizardSlack:
         monkeypatch.setattr("prometheus.setup_wizard._REPO_CONFIG", config_file)
 
         w = SetupWizard()
-        w._gateway = "both"
+        w._gateways = {"telegram", "slack"}
         w._telegram_token = "tg-token"
         w._telegram_chat_ids = []
         w._slack_bot_token = "xoxb-test"
@@ -392,7 +392,7 @@ class TestSetupWizardSlack:
             },
         }
         w._prefill_from(cfg)
-        assert w._gateway == "both"
+        assert w._gateways == {"telegram", "slack"}
         assert w._telegram_token == "tg-token"
         assert w._slack_bot_token == "xoxb-test"
         assert w._slack_app_token == "xapp-test"
@@ -820,3 +820,127 @@ class TestSlackSubcommandDispatch:
 
         assert captured["name"] == "build-pancakes"
         respond.assert_awaited_once_with(text="pinned:build-pancakes")
+
+
+# ---------------------------------------------------------------------------
+# SPRINT G3 — start() must be non-blocking and fail loud on bad tokens
+# ---------------------------------------------------------------------------
+
+
+class TestSlackStartNonBlocking:
+    """Regression pins for the G3 start() fix.
+
+    The old start() awaited slack-bolt's ``start_async()`` — documented as
+    "starts infinite sleep" — so an enabled Slack gateway hung the daemon's
+    startup sequence forever (even with VALID tokens). And a bad token made
+    ``connect_async`` retry silently forever. The fixed start() validates
+    both tokens loudly, then connects in a background task.
+    """
+
+    def _fake_slack_bolt(self, monkeypatch, *, auth_ok=True, wss_ok=True):
+        import asyncio
+        import sys
+        import types
+
+        calls: dict = {"connect_started": asyncio.Event()}
+
+        class FakeWebClient:
+            async def auth_test(self):
+                calls["auth_test"] = True
+                if not auth_ok:
+                    raise RuntimeError("invalid_auth (bot token)")
+                return {"ok": True, "team": "T"}
+
+        class FakeApp:
+            def __init__(self, token=None):
+                self.client = FakeWebClient()
+
+            def event(self, *_a, **_k):
+                return lambda f: f
+
+            def command(self, *_a, **_k):
+                return lambda f: f
+
+        class FakeSMClient:
+            wss_uri = None
+
+            async def issue_new_wss_url(self):
+                calls["issue_wss"] = True
+                if not wss_ok:
+                    raise RuntimeError("invalid_auth (app token)")
+                return "wss://fake"
+
+        class FakeHandler:
+            def __init__(self, app, app_token):
+                self.client = FakeSMClient()
+
+            async def connect_async(self):
+                calls["connect_started"].set()
+
+            async def close_async(self):
+                pass
+
+        mod_app = types.ModuleType("slack_bolt.async_app")
+        mod_app.AsyncApp = FakeApp
+        mod_handler = types.ModuleType(
+            "slack_bolt.adapter.socket_mode.async_handler")
+        mod_handler.AsyncSocketModeHandler = FakeHandler
+        for name, mod in (
+            ("slack_bolt", types.ModuleType("slack_bolt")),
+            ("slack_bolt.adapter", types.ModuleType("slack_bolt.adapter")),
+            ("slack_bolt.adapter.socket_mode",
+             types.ModuleType("slack_bolt.adapter.socket_mode")),
+            ("slack_bolt.async_app", mod_app),
+            ("slack_bolt.adapter.socket_mode.async_handler", mod_handler),
+        ):
+            monkeypatch.setitem(sys.modules, name, mod)
+        return calls
+
+    def _adapter(self, slack_config):
+        from prometheus.gateway.slack import SlackAdapter
+
+        return SlackAdapter(
+            config=slack_config,
+            agent_loop=MagicMock(),
+            tool_registry=MagicMock(),
+            system_prompt="",
+            model_name="test-model",
+            model_provider="llama_cpp",
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_returns_and_connects_in_background(
+        self, monkeypatch, slack_config,
+    ):
+        import asyncio
+
+        calls = self._fake_slack_bolt(monkeypatch)
+        adapter = self._adapter(slack_config)
+        # The whole point: start() RETURNS (the old code slept forever).
+        await asyncio.wait_for(adapter.start(), timeout=5)
+        assert calls.get("auth_test") is True
+        assert calls.get("issue_wss") is True
+        assert adapter._running is True
+        assert adapter._connect_task is not None
+        await asyncio.wait_for(calls["connect_started"].wait(), timeout=5)
+        adapter._connect_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_bad_bot_token_raises_loudly(self, monkeypatch, slack_config):
+        import asyncio
+
+        self._fake_slack_bolt(monkeypatch, auth_ok=False)
+        adapter = self._adapter(slack_config)
+        with pytest.raises(Exception, match="invalid_auth"):
+            await asyncio.wait_for(adapter.start(), timeout=5)
+        assert adapter._running is False
+
+    @pytest.mark.asyncio
+    async def test_bad_app_token_raises_loudly(self, monkeypatch, slack_config):
+        import asyncio
+
+        self._fake_slack_bolt(monkeypatch, wss_ok=False)
+        adapter = self._adapter(slack_config)
+        with pytest.raises(Exception, match="invalid_auth"):
+            await asyncio.wait_for(adapter.start(), timeout=5)
+        assert adapter._running is False

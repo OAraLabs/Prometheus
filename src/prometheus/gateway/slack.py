@@ -11,6 +11,7 @@ Key patterns adapted from NousResearch/hermes-agent Slack adapter:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -173,6 +174,7 @@ class SlackAdapter(BasePlatformAdapter):
         self.model_provider = model_provider
         self._app: Any = None
         self._handler: Any = None
+        self._connect_task: Any = None
         self._start_time: float = 0.0
         self._prometheus_config: dict[str, Any] = prometheus_config or {}
 
@@ -447,9 +449,27 @@ class SlackAdapter(BasePlatformAdapter):
         self._app.command("/prometheus-local")(self._slash_local)
         self._app.command("/prometheus-route")(self._slash_route)
 
-        # Start Socket Mode connection
+        # Start Socket Mode connection.
+        #
+        # SPRINT G3 fix — this used to be `await self._handler.start_async()`,
+        # which per slack-bolt "starts infinite sleep to prevent the
+        # termination of this process": the daemon's startup sequence hung
+        # HERE forever, even with valid tokens (nothing after the Slack
+        # block — Discord, heartbeat, web server — ever ran). And plain
+        # connect_async() retries forever on invalid_auth without raising,
+        # which would hang startup on a bad token instead. So: validate both
+        # tokens LOUDLY first (SlackApiError propagates to the daemon's
+        # try/except → logged, non-fatal), then hand the connect to a
+        # background task — the same non-blocking start the Discord adapter
+        # uses.
         self._handler = AsyncSocketModeHandler(self._app, self.config.app_token)
-        await self._handler.start_async()
+        await self._app.client.auth_test()  # bot token (xoxb-...) — raises on bad auth
+        # App-level token (xapp-...): apps.connections.open raises on bad
+        # auth; cache the issued WSS URL so connect_async doesn't re-fetch.
+        self._handler.client.wss_uri = await self._handler.client.issue_new_wss_url()
+        self._connect_task = asyncio.create_task(
+            self._handler.connect_async(), name="slack_socket_mode",
+        )
         self._running = True
         self._start_time = time.monotonic()
 
@@ -459,6 +479,8 @@ class SlackAdapter(BasePlatformAdapter):
         """Graceful shutdown of the Slack bot."""
         if self._handler and self._running:
             self._running = False
+            if self._connect_task is not None and not self._connect_task.done():
+                self._connect_task.cancel()
             await self._handler.close_async()
             logger.info("Slack adapter stopped")
 

@@ -207,6 +207,23 @@ class TestWriteEnvTemplate:
         assert "PROMETHEUS_TELEGRAM_TOKEN" in body
         assert "ANTHROPIC_API_KEY" in body
 
+    def test_template_covers_all_three_gateways_with_hints(self, tmp_path):
+        """SPRINT G3: every gateway's env vars + a how-to-get-the-token hint."""
+        path = tmp_path / "env"
+        write_env_template(path)
+        body = path.read_text()
+        # All four gateway token vars.
+        assert "PROMETHEUS_TELEGRAM_TOKEN" in body
+        assert "PROMETHEUS_SLACK_BOT_TOKEN" in body
+        assert "PROMETHEUS_SLACK_APP_TOKEN" in body
+        assert "PROMETHEUS_DISCORD_TOKEN" in body
+        # One-line how-to-get-token pointers.
+        assert "@BotFather" in body
+        assert "api.slack.com/apps" in body
+        assert "discord.com/developers/applications" in body
+        # And the pointer to the guided path.
+        assert "prometheus setup --gateway-only" in body
+
     def test_preserves_existing(self, tmp_path):
         path = tmp_path / "env"
         path.write_text("CUSTOM=1\n")
@@ -254,6 +271,17 @@ class TestRunInit:
         assert loaded["model"]["base_url"] == url
         # Returned config matches what was written
         assert loaded == config
+        # SPRINT G3: all three gateway blocks exist (disabled) in the
+        # exact shapes the daemon reads.
+        assert loaded["gateway"]["telegram_enabled"] is False
+        assert loaded["gateway"]["slack"] == {
+            "enabled": False, "bot_token": "", "app_token": "",
+            "allowed_channels": [],
+        }
+        assert loaded["gateway"]["discord"] == {
+            "enabled": False, "token": "", "guild_ids": [],
+            "channel_ids": [],
+        }
 
     def test_existing_config_is_backed_up(self, tmp_path):
         cfg_path = tmp_path / "prometheus.yaml"

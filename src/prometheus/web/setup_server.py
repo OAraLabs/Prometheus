@@ -273,6 +273,19 @@ def _backend_payload(server: Any) -> dict[str, Any]:
     }
 
 
+def _string_list(value: Any) -> list[str]:
+    """Coerce an optional list-ish field to a clean list of strings.
+
+    Accepts a JSON array or a comma-separated string; anything else
+    (or empty) → [].
+    """
+    if isinstance(value, str):
+        return [v.strip() for v in value.split(",") if v.strip()]
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return []
+
+
 def _apply_configure(
     body: dict[str, Any],
     *,
@@ -286,9 +299,11 @@ def _apply_configure(
     config with the SAME writer the CLI wizard's fast path uses
     (``prometheus.cli.init._default_config`` + ``write_config`` — shared
     code, not a fork), generates identity via the SetupWizard's
-    generator when ``agent_name`` is given, and persists an optional
-    Telegram token to the env file. Idempotent: a re-POST overwrites the
-    previous answers cleanly. Returns the written summary — never tokens.
+    generator when ``agent_name`` is given, and persists optional
+    gateway tokens (Telegram / Slack / Discord — SPRINT G3) to the env
+    file while enabling the matching ``gateway.*`` blocks in the yaml.
+    Idempotent: a re-POST overwrites the previous answers cleanly.
+    Returns the written summary — never tokens (names only).
     """
     from prometheus.cli.init import _default_config, probe_backend, write_config
     from prometheus.config.paths import get_config_dir
@@ -299,6 +314,10 @@ def _apply_configure(
     agent_name = str(body.get("agent_name") or "").strip()
     persona = str(body.get("persona") or "").strip()
     telegram_token = str(body.get("telegram_token") or "").strip()
+    slack_bot_token = str(body.get("slack_bot_token") or "").strip()
+    slack_app_token = str(body.get("slack_app_token") or "").strip()
+    slack_channels = _string_list(body.get("slack_channels"))
+    discord_token = str(body.get("discord_token") or "").strip()
 
     missing = [k for k, v in
                (("provider", provider), ("base_url", base_url), ("model", model))
@@ -313,6 +332,34 @@ def _apply_configure(
             "error": "bad_base_url",
             "detail": "base_url must start with http:// or https://",
         })
+
+    # Slack is a token PAIR — half a pair can only produce a gateway that
+    # is enabled but can never start. Refuse it loudly (dead-end rule).
+    if bool(slack_bot_token) != bool(slack_app_token):
+        got, need = (
+            ("slack_bot_token", "slack_app_token (xapp-...)")
+            if slack_bot_token else
+            ("slack_app_token", "slack_bot_token (xoxb-...)")
+        )
+        return JSONResponse(status_code=400, content={
+            "error": "slack_token_pair_incomplete",
+            "detail": f"Slack needs BOTH tokens — got {got} but no {need}. "
+                      "Send both, or neither.",
+        })
+
+    # Discord guild IDs: accept a JSON array (or comma string) of integer
+    # IDs; anything non-numeric is a 400, not a silently-broken whitelist.
+    discord_guild_ids: list[int] = []
+    raw_guilds = _string_list(body.get("discord_guild_ids"))
+    for g in raw_guilds:
+        try:
+            discord_guild_ids.append(int(g))
+        except ValueError:
+            return JSONResponse(status_code=400, content={
+                "error": "bad_discord_guild_ids",
+                "detail": f"discord_guild_ids must be integer guild IDs "
+                          f"(got {g!r})",
+            })
 
     # Dead-end rule (Phase 0): never write a config pointing at a backend
     # that is not there. Re-probe the exact provider+URL the client chose.
@@ -334,13 +381,32 @@ def _apply_configure(
     if agent_name:
         config["system"]["name"] = agent_name
 
-    telegram_token_saved = False
-    if telegram_token:
+    # Gateway tokens → env file; enabled flags + whitelists → the yaml.
+    # SPRINT G3: all three gateways, exactly the config shapes the
+    # daemon's construction blocks read (gateway.telegram_enabled +
+    # PROMETHEUS_TELEGRAM_TOKEN; gateway.slack.{enabled,allowed_channels}
+    # + PROMETHEUS_SLACK_BOT_TOKEN/APP_TOKEN; gateway.discord.{enabled,
+    # guild_ids} + PROMETHEUS_DISCORD_TOKEN).
+    gateways_enabled: list[str] = []
+    if telegram_token or (slack_bot_token and slack_app_token) or discord_token:
         from prometheus.config.env_file import set_env_value
 
-        set_env_value("PROMETHEUS_TELEGRAM_TOKEN", telegram_token)
-        config["gateway"]["telegram_enabled"] = True
-        telegram_token_saved = True
+        if telegram_token:
+            set_env_value("PROMETHEUS_TELEGRAM_TOKEN", telegram_token)
+            config["gateway"]["telegram_enabled"] = True
+            gateways_enabled.append("telegram")
+        if slack_bot_token and slack_app_token:
+            set_env_value("PROMETHEUS_SLACK_BOT_TOKEN", slack_bot_token)
+            set_env_value("PROMETHEUS_SLACK_APP_TOKEN", slack_app_token)
+            config["gateway"]["slack"]["enabled"] = True
+            config["gateway"]["slack"]["allowed_channels"] = slack_channels
+            gateways_enabled.append("slack")
+        if discord_token:
+            set_env_value("PROMETHEUS_DISCORD_TOKEN", discord_token)
+            config["gateway"]["discord"]["enabled"] = True
+            config["gateway"]["discord"]["guild_ids"] = discord_guild_ids
+            gateways_enabled.append("discord")
+    telegram_token_saved = "telegram" in gateways_enabled
 
     cfg_path = get_config_dir() / "prometheus.yaml"
     # backup_existing=False: setup mode only runs when no config existed
@@ -367,10 +433,11 @@ def _apply_configure(
     state.configured = True
     logger.info(
         "Setup configure applied: provider=%s base_url=%s model=%s "
-        "agent_name=%s identity=%s telegram_token=%s (config at %s)",
+        "agent_name=%s identity=%s gateways=%s (tokens saved to the env "
+        "file, never logged) (config at %s)",
         provider, base_url, model, agent_name or "-",
         "generated" if identity else "skipped",
-        "saved-to-env-file" if telegram_token_saved else "none",
+        ",".join(gateways_enabled) or "none",
         cfg_path,
     )
     return JSONResponse(status_code=200, content={
@@ -382,6 +449,8 @@ def _apply_configure(
         "agent_name": agent_name or None,
         "identity": identity,
         "telegram_token_saved": telegram_token_saved,
+        # SPRINT G3: names only — the summary NEVER echoes token values.
+        "gateways_enabled": gateways_enabled,
         "web": {
             "enabled": True,
             "api_port": api_port,
@@ -530,7 +599,9 @@ def create_setup_app(
                 "error": "bad_request",
                 "detail": 'expected a JSON body: {"provider", "base_url", '
                           '"model", "agent_name"?, "persona"?, '
-                          '"telegram_token"?}',
+                          '"telegram_token"?, "slack_bot_token"?, '
+                          '"slack_app_token"?, "slack_channels"?, '
+                          '"discord_token"?, "discord_guild_ids"?}',
             })
         # Blocking work (backend re-probe, file writes) off the event loop.
         return await asyncio.to_thread(
