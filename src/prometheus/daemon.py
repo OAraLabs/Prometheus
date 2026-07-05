@@ -1340,7 +1340,11 @@ def main() -> None:
     # the user finishes `prometheus setup`. Checked BEFORE the file
     # logger below — setup mode must not create ~/.prometheus/logs (or
     # any other ~/.prometheus state).
-    from prometheus.web.setup_server import find_config_file, run_setup_mode
+    from prometheus.web.setup_server import (
+        SETUP_COMPLETE,
+        find_config_file,
+        run_setup_mode,
+    )
     if args.config and not Path(args.config).expanduser().is_file():
         # An EXPLICIT --config that doesn't exist is a broken invocation —
         # fail loudly rather than silently falling back to the user config
@@ -1353,9 +1357,28 @@ def main() -> None:
             format="%(asctime)s %(name)s %(levelname)s %(message)s",
             handlers=[logging.StreamHandler(sys.stdout)],
         )
-        sys.exit(run_setup_mode())
+        result = run_setup_mode()
+        # Phase 2: POST /api/setup/complete exits the serve loop with a
+        # restart sentinel. RE-CHECK for config — present now → fall
+        # through into the normal daemon boot IN THIS SAME PROCESS (no
+        # systemd needed; under systemd a plain exit + Restart= also
+        # works, but the fallthrough must work standalone).
+        if result != SETUP_COMPLETE:
+            sys.exit(result)
+        if find_config_file(args.config) is None:
+            print(
+                "Setup reported complete but no config was found — "
+                "run `prometheus setup` and restart the daemon.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        logger.info(
+            "Setup complete — starting the real daemon in this process."
+        )
 
-    # Logging
+    # Logging (force=True: after a setup-mode fallthrough the root logger
+    # already has the stdout-only handler installed above and basicConfig
+    # would otherwise be a silent no-op — the file handler must attach).
     log_dir = get_logs_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1366,6 +1389,7 @@ def main() -> None:
             logging.StreamHandler(sys.stdout),
             logging.FileHandler(log_dir / "daemon.log"),
         ],
+        force=True,
     )
 
     asyncio.run(run_daemon(args))

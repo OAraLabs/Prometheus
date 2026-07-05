@@ -150,6 +150,39 @@ def detect_local_servers(
     return found
 
 
+def remote_server_candidates(url: str) -> list[dict[str, str]]:
+    """Probe specs for ONE user-supplied base URL (both known API shapes).
+
+    Shared by the interactive remote prompt below and the setup-mode
+    ``GET /api/setup/detect?base_url=`` endpoint (Onboarding Phase 2) —
+    one definition of "what counts as an inference server at this URL".
+    """
+    url = url.rstrip("/")
+    return [
+        {"name": "remote (OpenAI-compatible)", "url": url,
+         "models_path": "/v1/models", "provider": "llama_cpp"},
+        {"name": "remote (Ollama)", "url": url,
+         "models_path": "/api/tags", "provider": "ollama"},
+    ]
+
+
+def probe_backend(
+    provider: str, base_url: str, timeout: float = 3.0,
+) -> DetectedServer | None:
+    """Re-probe ONE chosen backend; ``None`` when unreachable/not-inference.
+
+    The validation step behind ``POST /api/setup/configure`` — the same
+    JSON-shape hardening as :func:`detect_local_servers` (an HTML page on
+    the port does not count), aimed at exactly one provider+URL.
+    """
+    models_path = "/api/tags" if provider == "ollama" else "/v1/models"
+    found = detect_local_servers(timeout=timeout, candidates=[{
+        "name": provider, "url": base_url.rstrip("/"),
+        "models_path": models_path, "provider": provider,
+    }])
+    return found[0] if found else None
+
+
 # ---------------------------------------------------------------------------
 # Config writing
 # ---------------------------------------------------------------------------
@@ -358,13 +391,9 @@ def _prompt_remote_server(timeout: float) -> DetectedServer | None:
         ).rstrip("/")
         if not url:
             return None
-        specs = [
-            {"name": "remote (OpenAI-compatible)", "url": url,
-             "models_path": "/v1/models", "provider": "llama_cpp"},
-            {"name": "remote (Ollama)", "url": url,
-             "models_path": "/api/tags", "provider": "ollama"},
-        ]
-        found = detect_local_servers(timeout=max(timeout, 3.0), candidates=specs)
+        found = detect_local_servers(
+            timeout=max(timeout, 3.0), candidates=remote_server_candidates(url),
+        )
         if found:
             s = found[0]
             print(f"  + Reachable: {s.name} @ {s.url}"
