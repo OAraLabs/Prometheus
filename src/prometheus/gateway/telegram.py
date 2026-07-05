@@ -1473,45 +1473,20 @@ class TelegramAdapter(BasePlatformAdapter):
         await self.on_message(event)
 
     def _truncate_for_context(self, text: str) -> str:
-        """Truncate extracted document text to fit the context window budget."""
-        from prometheus.context.token_estimation import estimate_tokens
+        """Truncate extracted document text to fit the context window budget.
 
-        doc_tokens = estimate_tokens(text)
+        SPRINT G2: logic extracted to prometheus.gateway.media_services so
+        Discord shares it; behaviour pinned in test_gateway_media_pins.py.
+        """
+        from prometheus.gateway.media_services import truncate_for_context
 
-        # Get server-detected context size if available, else use config
-        ctx_limit = self._prometheus_config.get("context", {}).get(
-            "effective_limit", 24000
+        return truncate_for_context(
+            text,
+            prometheus_config=self._prometheus_config,
+            system_prompt=self.system_prompt,
+            tool_registry=self.tool_registry,
+            provider=getattr(self.agent_loop, "_provider", None),
         )
-        provider = getattr(self.agent_loop, "_provider", None)
-        server_ctx = getattr(provider, "server_context_size", None)
-        if server_ctx:
-            ctx_limit = min(ctx_limit, server_ctx)
-
-        # Calculate actual overhead from system prompt + tool schemas
-        prompt_tokens = estimate_tokens(self.system_prompt)
-        import json
-        schema_chars = len(json.dumps(self.tool_registry.list_schemas()))
-        tool_tokens = schema_chars // 4  # rough char-to-token ratio
-
-        reserved_output = self._prometheus_config.get("context", {}).get(
-            "reserved_output", 2000
-        )
-        # overhead = system prompt + tools + output reserve + conversation buffer
-        overhead = prompt_tokens + tool_tokens + reserved_output + 500
-        max_doc_tokens = max(2000, ctx_limit - overhead)
-
-        if doc_tokens > max_doc_tokens:
-            char_limit = max_doc_tokens * 4
-            text = text[:char_limit] + (
-                f"\n\n[... truncated to fit context window "
-                f"({max_doc_tokens} of {doc_tokens} tokens)]"
-            )
-            logger.info(
-                "Truncated document from %d to ~%d tokens "
-                "(context: %d, overhead: %d)",
-                doc_tokens, max_doc_tokens, ctx_limit, overhead,
-            )
-        return text
 
     @staticmethod
     def _chat_id_from_session_id(session_id: str) -> int | None:
@@ -2266,38 +2241,24 @@ class TelegramAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     async def _describe_image(self, image_path: str) -> str | None:
-        """Run image through VisionTool for a text description. Returns None on failure."""
-        try:
-            from prometheus.tools.builtin.vision import VisionTool, VisionInput
-            from prometheus.tools.base import ToolExecutionContext
+        """Run image through VisionTool for a text description. Returns None on failure.
 
-            tool = VisionTool()
-            result = await tool.execute(
-                VisionInput(image_path=image_path, question="Describe this image in detail."),
-                ToolExecutionContext(cwd=Path.cwd(), metadata={"provider": self._get_provider()}),
-            )
-            if not result.is_error and result.output:
-                return result.output
-        except Exception as exc:
-            logger.debug("Vision analysis unavailable: %s", exc)
-        return None
+        SPRINT G2: delegates to the shared media_services module (same
+        service Discord uses); behaviour pinned in test_gateway_media_pins.py.
+        """
+        from prometheus.gateway.media_services import describe_image
+
+        return await describe_image(image_path, provider=self._get_provider())
 
     async def _transcribe_audio(self, audio_path: str) -> str | None:
-        """Run audio through WhisperSTT for transcription. Returns None on failure."""
-        try:
-            from prometheus.tools.builtin.whisper_stt import WhisperSTTTool, WhisperSTTInput
-            from prometheus.tools.base import ToolExecutionContext
+        """Run audio through WhisperSTT for transcription. Returns None on failure.
 
-            tool = WhisperSTTTool()
-            result = await tool.execute(
-                WhisperSTTInput(audio_path=audio_path),
-                ToolExecutionContext(cwd=Path.cwd()),
-            )
-            if not result.is_error and result.output:
-                return result.output
-        except Exception as exc:
-            logger.debug("Whisper STT unavailable: %s", exc)
-        return None
+        SPRINT G2: delegates to the shared media_services module (same
+        service Discord uses); behaviour pinned in test_gateway_media_pins.py.
+        """
+        from prometheus.gateway.media_services import transcribe_audio
+
+        return await transcribe_audio(audio_path)
 
     def _get_provider(self):
         """Return the model provider from the agent loop (for vision analysis)."""
