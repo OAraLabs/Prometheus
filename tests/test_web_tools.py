@@ -195,10 +195,17 @@ class TestYouTubeToolBehavior:
     @pytest.mark.asyncio
     async def test_invalid_url_returns_error(self):
         tool = YouTubeTranscriptTool()
-        result = await tool.execute(
-            YouTubeTranscriptInput(url="https://example.com/not-youtube"),
-            _ctx(),
-        )
+        # The tool checks for the yt-dlp binary BEFORE validating the URL, so
+        # patch it present — this test is about URL validation and must not
+        # depend on yt-dlp being installed (it isn't on CI runners).
+        with patch(
+            "prometheus.tools.builtin.youtube_transcript.shutil.which",
+            return_value="/usr/bin/yt-dlp",
+        ):
+            result = await tool.execute(
+                YouTubeTranscriptInput(url="https://example.com/not-youtube"),
+                _ctx(),
+            )
         assert result.is_error
         assert "not a recognizable YouTube" in result.output
 
