@@ -138,9 +138,11 @@ class TestDaemonUsesGenericWiring:
     subsystem (delivery transport), which is the reverse direction."""
 
     def test_no_by_name_subsystem_injection(self):
+        # SPRINT G2 extends the scan to discord_adapter: the Discord gateway
+        # must inherit all subsystems through register_adapter alone.
         source = Path(daemon_mod.__file__).read_text(encoding="utf-8")
         forbidden = re.findall(
-            r"^\s*(?:telegram|slack_adapter)\.(?:_\w+|cost_tracker"
+            r"^\s*(?:telegram|slack_adapter|discord_adapter)\.(?:_\w+|cost_tracker"
             r"|escalation_engine|signal_bus)\s*=",
             source,
             flags=re.MULTILINE,
@@ -161,7 +163,8 @@ class TestDaemonUsesGenericWiring:
                 f"daemon.py no longer attaches {slot!r} through the "
                 "GatewaySubsystemRegistry"
             )
-        assert source.count("gateway_registry.register_adapter(") >= 2
+        # telegram + slack + discord (G2) all register through the registry.
+        assert source.count("gateway_registry.register_adapter(") >= 3
 
 
 # ---------------------------------------------------------------------------

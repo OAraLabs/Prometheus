@@ -28,6 +28,7 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "PROMETHEUS_TELEGRAM_TOKEN": ("gateway", "telegram_token"),
     "PROMETHEUS_SLACK_BOT_TOKEN": ("gateway", "slack_bot_token"),
     "PROMETHEUS_SLACK_APP_TOKEN": ("gateway", "slack_app_token"),
+    "PROMETHEUS_DISCORD_TOKEN": ("gateway", "discord", "token"),
 
     # Provider API keys
     "ANTHROPIC_API_KEY": ("providers", "anthropic", "api_key"),
