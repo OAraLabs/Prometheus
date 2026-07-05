@@ -5,12 +5,13 @@ A sovereign agent harness for local LLMs — the validation layer that makes ope
 **The model is the agent. The harness is the vehicle.**
 
 ```bash
-pip install oara-prometheus[full]
-prometheus init           # auto-detects llama.cpp / Ollama / LM Studio / vLLM
-prometheus daemon         # starts agent, Beacon dashboard, gateways
+pip install 'oara-prometheus[full]'
+prometheus setup          # auto-detects llama.cpp / Ollama / LM Studio / vLLM
+prometheus                # chat in the CLI
+prometheus daemon         # always-on: Beacon dashboard, gateways, cron, SENTINEL
 ```
 
-`prometheus init` probes for a running local inference server, asks two or three questions, writes a working `~/.prometheus/prometheus.yaml`, and points you at the Beacon dashboard. Five minutes from `pip install` to a working agent.
+`prometheus setup` probes for a running local inference server, generates your agent's identity, writes a working config with the web dashboard enabled, and smoke-tests the loop. In a hurry? `prometheus setup --fast` (or `--noninteractive`) is the three-question version. On first daemon start a web API token is minted and printed once — `prometheus token show` re-prints it. If anything misbehaves: `prometheus doctor`.
 
 **What it gives you:**
 
@@ -197,32 +198,71 @@ Point the agent at a coding task and it runs in a sandbox, iterating until the b
 - llama.cpp or Ollama running with any model loaded (or a cloud API key)
 - A Telegram bot token (from @BotFather) — optional, CLI works without it
 
-### Install
+### Install — the one canonical path
 
 ```bash
-git clone https://github.com/OAraLabs/Prometheus.git
-cd Prometheus
-pip install -e .
-python3 -m prometheus --setup
+pip install 'oara-prometheus[full]'
+prometheus setup
 ```
 
-The setup wizard generates your personalized identity, detects your hardware, connects to your LLM, and runs a smoke test.
+The setup wizard generates your personalized identity, detects your inference server (llama.cpp:8080, Ollama:11434, LM Studio:1234, vLLM:8000), writes the config with the Beacon web dashboard **enabled**, and runs a smoke test. No server running? The wizard offers a remote URL, a cloud provider (key saved to the env file), or copy-paste install instructions — it never writes a config it knows is broken.
+
+Variants:
+
+```bash
+prometheus setup --fast            # quick path: probe → yaml → env, 3 questions
+prometheus setup --noninteractive  # zero questions (first detected server, CLI gateway)
+prometheus setup --gateway-only    # add/change Telegram or Slack later
+```
+
+(Working from a git checkout? `pip install -e .` then the same `prometheus setup`. The old `prometheus --setup` and `prometheus-init` entry points still work as forwarding aliases.)
 
 ### Run
 
 ```bash
 # Interactive CLI
-python3 -m prometheus
+prometheus
 
 # One-shot query
-python3 -m prometheus --once "List all Python files in this directory"
+prometheus --once "List all Python files in this directory"
 
-# Daemon mode (Telegram + Slack + cron + heartbeat + SENTINEL)
-python3 -m prometheus daemon
-
-# As a systemd service (Linux)
-systemctl --user enable --now prometheus
+# Daemon mode (Beacon dashboard + Telegram + Slack + cron + heartbeat + SENTINEL)
+prometheus daemon
 ```
+
+On the first daemon start with the web API enabled, Prometheus mints a secure `PROMETHEUS_API_TOKEN`, saves it to `~/.config/prometheus/env`, and prints it **once**. Beacon (or curl) authenticates with `Authorization: Bearer <token>`:
+
+```bash
+prometheus token show     # re-print the token
+prometheus token rotate   # invalidate + mint a new one
+curl -H "Authorization: Bearer $(prometheus token show | head -1)" http://localhost:8005/api/status
+```
+
+### Run as a systemd service (Linux)
+
+```bash
+prometheus install-service          # writes ~/.config/systemd/user/prometheus.service,
+                                    # daemon-reload, enable (refuses to clobber an
+                                    # existing unit without --force)
+systemctl --user start prometheus
+journalctl --user -u prometheus -f
+```
+
+### When something is off
+
+```bash
+prometheus doctor
+```
+
+Checks config, inference server, model, web port, API token, data-dir permissions, and (if voice is enabled) whisper — with a fix hint per failure. Exit code is nonzero when anything is broken, so it also works in scripts.
+
+### Where the config lives (search order)
+
+1. an explicit `--config` path
+2. `config/prometheus.yaml` — repo-local (checkout installs; gitignored)
+3. `$PROMETHEUS_CONFIG_DIR/prometheus.yaml` — default `~/.prometheus/prometheus.yaml` (pip installs; written by `prometheus setup --fast`)
+
+Secrets never go in the yaml — they live in the env file `~/.config/prometheus/env`, which both `prometheus daemon` and the systemd unit load (`PROMETHEUS_API_TOKEN`, `PROMETHEUS_TELEGRAM_TOKEN`, `ANTHROPIC_API_KEY`, …).
 
 ### Multi-Machine Setup
 

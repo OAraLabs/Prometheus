@@ -47,6 +47,20 @@ logger = logging.getLogger(__name__)
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 
+# One-shot user-facing warnings (a voice turn runs every round — repeat
+# the actionable message once, not per turn).
+_WARNED: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """Print *message* the first time *key* is seen; log afterwards."""
+    if key in _WARNED:
+        logger.debug(message)
+        return
+    _WARNED.add(key)
+    print(f"\n{message}")
+    logger.warning(message)
+
 
 # ---------------------------------------------------------------------------
 # Configuration helpers
@@ -232,6 +246,11 @@ async def transcribe_wav(wav_path: str | Path) -> str | None:
         ToolExecutionContext(cwd=Path.cwd()),
     )
     if result.is_error or not result.output:
+        # Onboarding papercut fix: a missing Whisper engine used to
+        # degrade to a silent None (looked like an empty recording).
+        # Surface the actionable error the tool produced.
+        if result.is_error and result.output:
+            print(f"\n[voice] {result.output}")
         return None
     text = result.output.strip()
     return text or None
@@ -247,11 +266,20 @@ async def synthesize_wav(
     """Synthesize *text* to a WAV via piper. Returns path or ``None``."""
     piper_bin = shutil.which("piper")
     if piper_bin is None:
-        logger.debug("piper binary not on PATH — voice output disabled")
+        _warn_once(
+            "piper-missing",
+            "[voice] piper binary not on PATH — voice OUTPUT disabled. "
+            "piper-tts ships with Prometheus; check your PATH or reinstall "
+            "with: pip install piper-tts",
+        )
         return None
     model_path = voice_config.get("model_path")
     if not model_path:
-        logger.debug("No piper model_path configured in gateway.voice")
+        _warn_once(
+            "piper-model-unset",
+            "[voice] gateway.voice.model_path is not set in prometheus.yaml — "
+            "voice OUTPUT disabled. Point it at a piper .onnx voice model.",
+        )
         return None
     model = Path(model_path).expanduser()
     if not model.is_file():

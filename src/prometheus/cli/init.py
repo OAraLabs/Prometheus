@@ -1,16 +1,24 @@
-"""``prometheus init`` — interactive setup for new installs.
+"""The FAST setup path — probe, three questions, working config.
 
-The Hermes ``pip install hermes-agent && hermes init`` story is the
-reference. We mirror it here: detect the user's local inference
-servers (llama.cpp, Ollama, LM Studio, vLLM), ask three questions, and
-write a working ``prometheus.yaml`` + env template that gets the user
-to ``prometheus daemon`` in under five minutes.
+Detect the user's local inference servers (llama.cpp, Ollama, LM
+Studio, vLLM), ask three questions, and write a working
+``prometheus.yaml`` + env file that gets the user to
+``prometheus daemon`` in under five minutes.
 
-This is *additive* — it doesn't replace the existing :mod:`setup_wizard`
-which has a much richer surface (Telegram, Slack, profiles, identity).
-``init`` is the fast path for first-time users.
+Onboarding Phase 0: this is no longer a competing wizard. The ONE
+canonical entry point is ``prometheus setup`` (see
+:mod:`prometheus.cli.setup`); this module implements its ``--fast`` /
+``--noninteractive`` path. The ``prometheus-init`` console script is
+kept as a thin forwarding alias.
 
-Source: Novel code for Prometheus Polish & Platform sprint, WS4.
+Dead-end rule: **no path in here may write a config that is known
+broken.** When nothing is detected we offer a remote URL, a cloud
+provider (key written to the env file), or copy-paste install
+instructions and a clean exit — never a default config pointing at a
+server that isn't there.
+
+Source: Novel code for Prometheus Polish & Platform sprint, WS4;
+reworked in the onboarding overhaul (Phase 0).
 """
 
 from __future__ import annotations
@@ -86,9 +94,13 @@ def detect_local_servers(
     installed — :command:`prometheus init` should never error on a
     minimal install.
 
-    The model-list parse is best-effort: Ollama uses ``{"models": [...]}``
-    while OpenAI-compat servers use ``{"data": [{"id": ...}, ...]}``.
-    Both shapes are handled; unknown shapes leave ``models`` empty.
+    The model-list parse doubles as the liveness check: a candidate only
+    counts as detected when its models endpoint returns JSON in a known
+    shape — Ollama's ``{"models": [...]}`` or the OpenAI-compat
+    ``{"data": [...]}``. Anything else (an HTML dashboard squatting on
+    :8080, a proxy error page) is skipped: writing a config pointing at
+    a non-inference service is exactly the known-broken dead end the
+    onboarding overhaul forbids.
     """
     import urllib.error
     import urllib.request
@@ -107,7 +119,7 @@ def detect_local_servers(
         elapsed_ms = (time.monotonic() - t0) * 1000.0
 
         # Parse model list from whichever JSON shape this server returns.
-        models: list[str] = []
+        models: list[str] | None = None
         try:
             data = json.loads(body)
             if isinstance(data, dict):
@@ -123,6 +135,10 @@ def detect_local_servers(
                     ]
         except (json.JSONDecodeError, TypeError):
             pass
+
+        if models is None:
+            # Responded, but not like an inference server — skip it.
+            continue
 
         found.append(DetectedServer(
             name=spec["name"],
@@ -185,10 +201,11 @@ def _default_config(server: DetectedServer | None, model: str | None) -> dict[st
     }
 
 
-_ENV_TEMPLATE = """# Prometheus environment overrides
-# Set any of these and they override the matching yaml field.
+_ENV_TEMPLATE = """# Prometheus environment file — secrets live here, not in prometheus.yaml.
+# Loaded by `prometheus daemon` at startup AND by the systemd unit
+# (EnvironmentFile=). Uncomment and fill in what you need.
 #
-# Telegram (run prometheus init again or edit prometheus.yaml to enable):
+# Telegram (run `prometheus setup` again or edit prometheus.yaml to enable):
 #   PROMETHEUS_TELEGRAM_TOKEN=
 #   PROMETHEUS_TELEGRAM_CHAT_IDS=
 #
@@ -201,9 +218,30 @@ _ENV_TEMPLATE = """# Prometheus environment overrides
 #   OPENAI_API_KEY=
 #   GOOGLE_API_KEY=
 #
-# Beacon dashboard API token (recommended if exposing beyond localhost):
+# Beacon dashboard API token. Leave UNSET and the daemon mints a secure
+# one on first start (printed once; `prometheus token show` re-prints it).
+# An explicit empty value (PROMETHEUS_API_TOKEN=) means deliberately open.
 #   PROMETHEUS_API_TOKEN=
 """
+
+# Cloud fast-path choices: provider → (api_key_env, default model, context limit)
+_CLOUD_FAST_PROVIDERS: dict[str, tuple[str, str, int]] = {
+    "anthropic": ("ANTHROPIC_API_KEY", "claude-sonnet-4-6", 100000),
+    "openai": ("OPENAI_API_KEY", "gpt-4o", 64000),
+}
+
+
+def _cloud_default_config(provider: str, api_key_env: str, model: str) -> dict[str, Any]:
+    """A valid cloud-provider config (no base_url — the provider knows)."""
+    config = _default_config(None, model)
+    config["model"] = {
+        "provider": provider,
+        "model": model,
+        "api_key_env": api_key_env,
+        "max_tool_iterations": 25,
+    }
+    config["context"]["effective_limit"] = _CLOUD_FAST_PROVIDERS[provider][2]
+    return config
 
 
 def write_config(
@@ -274,8 +312,6 @@ def _print_detection_summary(servers: list[DetectedServer]) -> None:
     if not servers:
         print("Local inference: no servers detected on standard ports.")
         print("  Checked llama.cpp:8080, Ollama:11434, LM Studio:1234, vLLM:8000.")
-        print("  You can still continue and add a cloud provider, or start a")
-        print("  local server and rerun `prometheus init`.")
         return
     print(f"Local inference: {len(servers)} server(s) detected:")
     for s in servers:
@@ -284,6 +320,130 @@ def _print_detection_summary(servers: list[DetectedServer]) -> None:
             if s.models else " (model list unavailable)"
         )
         print(f"  • {s.name:<10} @ {s.url:<28} {s.response_ms:.0f}ms{model_info}")
+
+
+# ---------------------------------------------------------------------------
+# Dead-end handling — no server detected
+# ---------------------------------------------------------------------------
+
+
+OLLAMA_INSTALL_INSTRUCTIONS = """\
+To run a local model, install one of:
+
+  Ollama (easiest):
+    curl -fsSL https://ollama.com/install.sh | sh
+    ollama pull qwen3:8b        # or any model that fits your hardware
+
+  llama.cpp (fastest):
+    git clone https://github.com/ggerganov/llama.cpp.git
+    cd llama.cpp && cmake -B build && cmake --build build -j
+    ./build/bin/llama-server -m models/your-model.gguf -c 32768 --port 8080
+
+Then run `prometheus setup` again — it will detect the server."""
+
+
+def _print_install_instructions() -> None:
+    print()
+    print(OLLAMA_INSTALL_INSTRUCTIONS)
+    print()
+    print("No config was written — nothing usable was detected, and Prometheus")
+    print("refuses to write a config that is known to be broken.")
+
+
+def _prompt_remote_server(timeout: float) -> DetectedServer | None:
+    """Ask for a remote base URL and probe it. None if nothing reachable."""
+    while True:
+        url = _prompt(
+            "Base URL of your inference server (e.g. http://gpu-box:8080)"
+        ).rstrip("/")
+        if not url:
+            return None
+        specs = [
+            {"name": "remote (OpenAI-compatible)", "url": url,
+             "models_path": "/v1/models", "provider": "llama_cpp"},
+            {"name": "remote (Ollama)", "url": url,
+             "models_path": "/api/tags", "provider": "ollama"},
+        ]
+        found = detect_local_servers(timeout=max(timeout, 3.0), candidates=specs)
+        if found:
+            s = found[0]
+            print(f"  + Reachable: {s.name} @ {s.url}"
+                  + (f" ({len(s.models)} models)" if s.models else ""))
+            return s
+        print(f"  x {url} did not respond on /v1/models or /api/tags.")
+        retry = _prompt("Try a different URL? [y/N]", "N")
+        if retry.lower() != "y":
+            return None
+
+
+def _prompt_cloud_provider(env_path: Path) -> dict[str, Any] | None:
+    """Cloud fast path: pick anthropic/openai, get a key INTO the env file.
+
+    Returns a complete, valid config dict — or None when no usable key
+    could be established (in which case nothing is written).
+    """
+    import os
+
+    providers = list(_CLOUD_FAST_PROVIDERS)
+    idx = _prompt_choice(
+        "Which cloud provider?",
+        [f"{p} (key: ${_CLOUD_FAST_PROVIDERS[p][0]})" for p in providers],
+        default_index=0,
+    )
+    provider = providers[idx]
+    key_env, default_model, _limit = _CLOUD_FAST_PROVIDERS[provider]
+
+    key = _prompt(
+        f"Paste your {provider} API key (Enter to use ${key_env} from your environment)"
+    )
+    if key and len(key) > 10:
+        write_env_template(env_path)  # make sure the commented template exists
+        from prometheus.config.env_file import set_env_value
+        set_env_value(key_env, key, env_path)
+        os.environ.setdefault(key_env, key)
+        print(f"  + Key saved to {env_path} (as {key_env})")
+    elif not os.environ.get(key_env):
+        print(f"  x No key pasted and ${key_env} is not set.")
+        print(f"    Get one, add `{key_env}=...` to {env_path}, and re-run "
+              "`prometheus setup --fast`.")
+        return None
+    else:
+        print(f"  + Using ${key_env} from your environment "
+              f"(remember to add it to {env_path} for the daemon).")
+
+    model = _prompt("Model", default_model)
+    return _cloud_default_config(provider, key_env, model)
+
+
+def _handle_no_server(
+    env_path: Path, timeout: float,
+) -> tuple[DetectedServer | None, dict[str, Any] | None]:
+    """Interactive dead-end menu. Returns (remote_server, cloud_config).
+
+    ``(None, None)`` means: exit cleanly, write nothing.
+    """
+    while True:
+        choice = _prompt_choice(
+            "No local inference server was found. What now?",
+            [
+                "Point Prometheus at a remote server URL",
+                "Use a cloud provider (Anthropic / OpenAI)",
+                "Show install instructions for a local server and exit",
+            ],
+            default_index=2,
+        )
+        if choice == 0:
+            server = _prompt_remote_server(timeout)
+            if server is not None:
+                return server, None
+            continue  # nothing reachable — back to the menu
+        if choice == 1:
+            cloud = _prompt_cloud_provider(env_path)
+            if cloud is not None:
+                return None, cloud
+            continue
+        _print_install_instructions()
+        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -296,30 +456,44 @@ def run_init(
     noninteractive: bool = False,
     target_dir: Path | None = None,
     timeout: float = 1.0,
-) -> dict[str, Any]:
-    """Run the init flow. Returns the config that was written."""
+    candidates: list[dict[str, str]] | None = None,
+) -> dict[str, Any] | None:
+    """Run the fast setup flow. Returns the config that was written.
+
+    Returns ``None`` when the flow exited cleanly WITHOUT writing a
+    config (nothing detected and the user took — or noninteractive mode
+    implies — the install-instructions path). ``candidates`` overrides
+    the probe list for tests.
+    """
+    from prometheus.config.env_file import get_env_file_path
+
     cfg_dir = target_dir or get_config_dir()
     cfg_path = cfg_dir / "prometheus.yaml"
-    env_path = cfg_dir / "env"
+    # The env file the daemon actually loads lives at
+    # ~/.config/prometheus/env (see prometheus.config.env_file). An
+    # explicit --target-dir confines EVERYTHING under it (tests rely on
+    # this — no writes outside the target dir).
+    env_path = (cfg_dir / "env") if target_dir else get_env_file_path()
 
-    print("┌─ Prometheus init ─────────────────────────────────────────────┐")
+    print("┌─ Prometheus setup (fast) ─────────────────────────────────────┐")
     print(f"  Config will be written to {cfg_path}")
     print("└───────────────────────────────────────────────────────────────┘")
 
     print("\nProbing for local inference servers …")
-    servers = detect_local_servers(timeout=timeout)
+    servers = detect_local_servers(timeout=timeout, candidates=candidates)
     _print_detection_summary(servers)
 
     # Pick a model provider
     chosen_server: DetectedServer | None = None
     chosen_model: str | None = None
+    cloud_config: dict[str, Any] | None = None
     if servers:
         if noninteractive:
             chosen_server = servers[0]
             chosen_model = chosen_server.models[0] if chosen_server.models else None
         else:
             labels = [f"{s.name} @ {s.url}" for s in servers]
-            labels.append("None of these — I'll use a cloud provider")
+            labels.append("None of these — remote URL or cloud provider")
             pick = _prompt_choice(
                 "Which inference server should Prometheus use?",
                 labels,
@@ -336,6 +510,23 @@ def run_init(
                             "Which model?", chosen_server.models, default_index=0,
                         )
                         chosen_model = chosen_server.models[midx]
+            else:
+                chosen_server, cloud_config = _handle_no_server(env_path, timeout)
+                if chosen_server is None and cloud_config is None:
+                    return None
+                if chosen_server is not None and chosen_server.models:
+                    chosen_model = chosen_server.models[0]
+    else:
+        # Dead-end rule: never write a config pointing at a server that
+        # isn't there.
+        if noninteractive:
+            _print_install_instructions()
+            return None
+        chosen_server, cloud_config = _handle_no_server(env_path, timeout)
+        if chosen_server is None and cloud_config is None:
+            return None
+        if chosen_server is not None and chosen_server.models:
+            chosen_model = chosen_server.models[0]
 
     # Gateway choice (don't require Telegram up-front; user can enable later)
     if noninteractive:
@@ -354,7 +545,10 @@ def run_init(
         gateway_choice = ["cli", "telegram", "slack", "both"][gw_idx]
 
     # Build config
-    config = _default_config(chosen_server, chosen_model)
+    if cloud_config is not None:
+        config = cloud_config
+    else:
+        config = _default_config(chosen_server, chosen_model)
     if gateway_choice in ("telegram", "both"):
         config["gateway"]["telegram_enabled"] = True
     if gateway_choice in ("slack", "both"):
@@ -376,18 +570,16 @@ def run_init(
     print()
     print("Setup complete. Next steps:")
     if gateway_choice == "cli":
-        print("  1. Run: prometheus")
-        print(
-            "  2. Beacon dashboard available at http://localhost:8005 "
-            "once daemon is up"
-        )
+        print("  1. Chat now:       prometheus")
+        print("  2. Always-on:      prometheus daemon   (Beacon dashboard on "
+              "http://localhost:8005;")
+        print("     first start mints a web API token — printed once, "
+              "`prometheus token show` re-prints)")
     else:
         print(f"  1. Edit {env_path} to add gateway tokens")
-        print("  2. Run: prometheus daemon")
-        print(
-            "  3. Beacon dashboard available at http://localhost:8005 "
-            "once daemon is up"
-        )
+        print("  2. Run: prometheus daemon   (Beacon dashboard on "
+              "http://localhost:8005)")
+    print("  Health check anytime:  prometheus doctor")
     print()
     return config
 
@@ -398,12 +590,16 @@ def run_init(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``prometheus-init`` console-script entry point."""
+    """``prometheus-init`` console-script entry point.
+
+    Thin forwarding alias: ``prometheus setup --fast`` is the canonical
+    command now. This keeps existing muscle memory and scripts working.
+    """
     parser = argparse.ArgumentParser(
         prog="prometheus-init",
         description=(
-            "Interactive first-run setup for Prometheus. Detects local "
-            "inference servers and writes a working prometheus.yaml."
+            "[alias for `prometheus setup --fast`] Detects local inference "
+            "servers and writes a working prometheus.yaml."
         ),
     )
     parser.add_argument(
@@ -425,16 +621,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    print("note: `prometheus-init` is now `prometheus setup --fast` — "
+          "forwarding.\n")
+    forward = ["--fast", "--timeout", str(args.timeout)]
+    if args.noninteractive:
+        forward.append("--noninteractive")
+    if args.target_dir is not None:
+        forward.extend(["--target-dir", str(args.target_dir)])
+
+    from prometheus.cli.setup import main as setup_main
     try:
-        run_init(
-            noninteractive=args.noninteractive,
-            target_dir=args.target_dir,
-            timeout=args.timeout,
-        )
+        return setup_main(forward)
     except KeyboardInterrupt:
         print("\nInit aborted.")
         return 130
-    return 0
 
 
 if __name__ == "__main__":

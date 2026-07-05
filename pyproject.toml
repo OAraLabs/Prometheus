@@ -31,6 +31,10 @@ dependencies = [
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
 browser = ["playwright>=1.40"]
+# Onboarding Phase 0 papercut: whisper STT was used for voice input but
+# never declared anywhere. The faster-whisper python API is the pip-
+# installable engine; the whisper/faster-whisper-xxl CLIs also work.
+voice = ["faster-whisper>=1.0"]
 mcp = ["mcp>=1.0"]
 slack = ["slack-bolt>=1.18.0", "slack-sdk>=3.27.0"]
 # Polish sprint WS2: Beacon dashboard backend + WS bridge. Optional so the

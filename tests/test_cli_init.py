@@ -128,6 +128,34 @@ class TestDetectLocalServers:
         assert "qwen3.5-32b" in result[0].models
         assert result[0].response_ms > 0
 
+    def test_html_dashboard_is_not_a_server(self):
+        """A web UI squatting on a standard port must NOT count as detected.
+
+        (Real incident shape: open-webui on :8080 answers 200 with HTML on
+        /v1/models — writing a config pointing at it is a broken config.)
+        """
+        class _HtmlHandler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                body = b"<!doctype html><html><body>dashboard</body></html>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args, **kwargs):
+                pass
+
+        with _serve(_HtmlHandler) as url:
+            candidates = [{
+                "name": "impostor",
+                "url": url,
+                "models_path": "/v1/models",
+                "provider": "llama_cpp",
+            }]
+            result = detect_local_servers(timeout=2.0, candidates=candidates)
+        assert result == []
+
     def test_detects_ollama_server(self):
         with _serve(_FakeOllamaHandler) as url:
             candidates = [{
@@ -188,17 +216,29 @@ class TestWriteEnvTemplate:
 
 
 # ---------------------------------------------------------------------------
-# run_init — end-to-end with no servers
+# run_init — end-to-end (a detected server is now REQUIRED for a write:
+# the no-server dead ends are covered in tests/test_setup_deadends.py)
 # ---------------------------------------------------------------------------
+
+
+def _candidates_for(url: str) -> list[dict[str, str]]:
+    return [{
+        "name": "fake-llamacpp",
+        "url": url,
+        "models_path": "/v1/models",
+        "provider": "llama_cpp",
+    }]
 
 
 class TestRunInit:
     def test_noninteractive_writes_config(self, tmp_path):
-        config = run_init(
-            noninteractive=True,
-            target_dir=tmp_path,
-            timeout=0.05,  # short timeout — pretend no servers respond
-        )
+        with _serve(_FakeLlamaCppHandler) as url:
+            config = run_init(
+                noninteractive=True,
+                target_dir=tmp_path,
+                timeout=2.0,
+                candidates=_candidates_for(url),
+            )
         cfg_path = tmp_path / "prometheus.yaml"
         env_path = tmp_path / "env"
         assert cfg_path.exists()
@@ -211,6 +251,7 @@ class TestRunInit:
         assert "gateway" in loaded
         assert "web" in loaded
         assert loaded["web"]["enabled"] is True
+        assert loaded["model"]["base_url"] == url
         # Returned config matches what was written
         assert loaded == config
 
@@ -218,9 +259,27 @@ class TestRunInit:
         cfg_path = tmp_path / "prometheus.yaml"
         cfg_path.write_text("previous: real\n")
 
-        run_init(noninteractive=True, target_dir=tmp_path, timeout=0.05)
+        with _serve(_FakeLlamaCppHandler) as url:
+            run_init(
+                noninteractive=True, target_dir=tmp_path, timeout=2.0,
+                candidates=_candidates_for(url),
+            )
 
         # Original is preserved as a backup
         backups = list(tmp_path.glob("prometheus.yaml.backup-*"))
         assert len(backups) == 1
         assert "previous: real" in backups[0].read_text()
+
+    def test_noninteractive_no_server_writes_nothing(self, tmp_path):
+        """Dead-end rule: nothing detected → clean exit, NO config."""
+        result = run_init(
+            noninteractive=True,
+            target_dir=tmp_path,
+            timeout=0.05,
+            candidates=[{
+                "name": "ghost", "url": "http://127.0.0.1:9",
+                "models_path": "/v1/models", "provider": "test",
+            }],
+        )
+        assert result is None
+        assert not (tmp_path / "prometheus.yaml").exists()

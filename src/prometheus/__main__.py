@@ -49,7 +49,17 @@ _PROMETHEUS_YAML = Path(__file__).resolve().parents[2] / "config" / "prometheus.
 def load_config(config_path: str | None = None) -> dict[str, Any]:
     """Load prometheus.yaml with env var overrides applied.
 
-    Precedence: env vars > secret files > YAML > defaults.
+    Config file search order (also documented in the README and in
+    config/prometheus.yaml.default):
+
+    1. an explicit ``--config`` path
+    2. the repo-local ``config/prometheus.yaml`` (checkout installs)
+    3. ``$PROMETHEUS_CONFIG_DIR/prometheus.yaml`` — default
+       ``~/.prometheus/prometheus.yaml`` (pip installs; written by
+       ``prometheus setup``)
+
+    Value precedence within the loaded file:
+    env vars > secret files > YAML > defaults.
     """
     from prometheus.config.env_override import apply_env_overrides
 
@@ -920,11 +930,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--setup", action="store_true",
-        help="Run first-time setup wizard",
+        help="[alias for `prometheus setup`] Run first-time setup wizard",
     )
     parser.add_argument(
         "--setup-gateway-only", action="store_true",
-        help="Add or change gateway only (skip model provider setup)",
+        help="[alias for `prometheus setup --gateway-only`] Add or change gateway only",
     )
     parser.add_argument(
         "--reset-telemetry", action="store_true",
@@ -940,6 +950,17 @@ def main() -> None:
     )
 
     subparsers = parser.add_subparsers(dest="command")
+
+    # Onboarding Phase 0: the canonical setup/diagnostics surface.
+    from prometheus.cli.doctor import add_doctor_subparser
+    from prometheus.cli.service import add_install_service_subparser
+    from prometheus.cli.setup import add_setup_subparser
+    from prometheus.cli.token import add_token_subparser
+    add_setup_subparser(subparsers)
+    add_token_subparser(subparsers)
+    add_doctor_subparser(subparsers)
+    add_install_service_subparser(subparsers)
+
     daemon_parser = subparsers.add_parser("daemon", help="Start always-on daemon")
     daemon_parser.add_argument(
         "--telegram-only", action="store_true",
@@ -1060,12 +1081,32 @@ def main() -> None:
         handlers=[logging.StreamHandler(sys.stderr)],
     )
 
-    # Setup wizard — runs before anything else
-    if args.setup or args.setup_gateway_only:
-        from prometheus.setup_wizard import SetupWizard
-        wizard = SetupWizard(gateway_only=args.setup_gateway_only)
-        success = wizard.run()
-        sys.exit(0 if success else 1)
+    # `prometheus setup` — the ONE canonical wizard (Onboarding Phase 0).
+    # `--setup` / `--setup-gateway-only` are thin forwarding aliases.
+    if args.command == "setup" or args.setup or args.setup_gateway_only:
+        from prometheus.cli.setup import run_setup
+        if args.command != "setup":
+            print("note: `prometheus --setup` is now `prometheus setup` — "
+                  "forwarding.\n")
+            args.gateway_only = args.setup_gateway_only
+            args.fast = False
+            args.noninteractive = False
+        sys.exit(run_setup(args))
+
+    # `prometheus token show|rotate` — web API token management.
+    if args.command == "token":
+        from prometheus.cli.token import run_token_command
+        sys.exit(run_token_command(args, load_config(args.config)))
+
+    # `prometheus doctor` — install diagnostics (exit nonzero on errors).
+    if args.command == "doctor":
+        from prometheus.cli.doctor import run_doctor_command
+        sys.exit(run_doctor_command(args))
+
+    # `prometheus install-service` — systemd user unit installer.
+    if args.command == "install-service":
+        from prometheus.cli.service import run_install_service_command
+        sys.exit(run_install_service_command(args))
 
     # Identity subcommand — manage SOUL.md / AGENTS.md
     if args.command == "identity":
@@ -1074,7 +1115,7 @@ def main() -> None:
             if soul.exists():
                 print(soul.read_text())
             else:
-                print("No SOUL.md found. Run: python -m prometheus --setup")
+                print("No SOUL.md found. Run: prometheus setup")
                 sys.exit(1)
         elif args.regenerate:
             from prometheus.setup_wizard import SetupWizard
@@ -1140,7 +1181,7 @@ def main() -> None:
     config = load_config(args.config)
     if not config and not _PROMETHEUS_YAML.exists() and not (get_config_dir() / "prometheus.yaml").exists():
         print("No configuration found. Run the setup wizard:\n")
-        print("  python3 -m prometheus --setup\n")
+        print("  prometheus setup\n")
         print("Or create config/prometheus.yaml manually.")
         sys.exit(1)
     model_cfg = config.get("model", {})

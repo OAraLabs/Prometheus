@@ -1,6 +1,17 @@
 # Prometheus configuration — reference defaults
-# Copy to config/prometheus.yaml and customize.
+# Copy to config/prometheus.yaml and customize (or run `prometheus setup`).
 # config/prometheus.yaml is gitignored — your secrets stay local.
+#
+# CONFIG SEARCH ORDER (first hit wins):
+#   1. an explicit --config path
+#   2. config/prometheus.yaml          — repo-local (checkout installs)
+#   3. $PROMETHEUS_CONFIG_DIR/prometheus.yaml
+#      (default ~/.prometheus/prometheus.yaml — pip installs; this is
+#       what `prometheus setup --fast` writes)
+#
+# SECRETS never belong in this file — put them in the env file the daemon
+# and the systemd unit both load: ~/.config/prometheus/env
+# (PROMETHEUS_API_TOKEN, PROMETHEUS_TELEGRAM_TOKEN, ANTHROPIC_API_KEY, …).
 
 system:
   name: "Prometheus"
@@ -287,8 +298,13 @@ sentinel:
   idle_threshold_minutes: 15
   dream_interval_minutes: 30
 
+# Beacon dashboard + REST/WS control plane. ON by default (Onboarding
+# Phase 0): the daemon mints a PROMETHEUS_API_TOKEN into the env file on
+# first start if none is set, so on-by-default is not open-by-default.
+# Set an explicit empty PROMETHEUS_API_TOKEN= in the env file to run
+# deliberately open (localhost-only recommended).
 web:
-  enabled: false
+  enabled: true
   api_port: 8005
   ws_port: 8010
 

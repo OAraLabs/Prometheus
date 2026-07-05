@@ -1,0 +1,30 @@
+# Prometheus daemon — systemd user unit.
+#
+# Installed by `prometheus install-service`, which resolves the absolute
+# path of the installed `prometheus` binary into ExecStart. This copy is
+# the shipped default (PATH-resolved fallback).
+#
+#   prometheus install-service          # write + daemon-reload + enable
+#   systemctl --user start prometheus   # start it now
+#   journalctl --user -u prometheus -f  # follow the logs
+
+[Unit]
+Description=Prometheus AI Agent Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env prometheus daemon
+ExecStop=/bin/kill -SIGTERM $MAINPID
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Secrets (PROMETHEUS_API_TOKEN, gateway tokens, provider keys) live in
+# the env file, written by `prometheus setup` / `prometheus token rotate`.
+# The leading "-" makes it optional so a fresh install still boots.
+EnvironmentFile=-%h/.config/prometheus/env
+
+[Install]
+WantedBy=default.target
