@@ -27,6 +27,11 @@ from prometheus.config.env_file import (
 
 TOKEN_ENV_VAR = "PROMETHEUS_API_TOKEN"
 
+# Where a new user downloads the Beacon desktop client (prebuilt releases —
+# Onboarding Phase 3). A public repo URL, not an infra host, so it is safe to
+# print anywhere.
+BEACON_DOWNLOAD_URL = "https://github.com/OAraLabs/beacon-desktop/releases"
+
 
 def mint_api_token() -> str:
     """Generate a new secure API token."""
@@ -158,6 +163,10 @@ def format_connect_client_block(
     return (
         f"\n{bar}\n"
         "  CONNECT A CLIENT (Beacon)\n"
+        "\n"
+        "    Beacon is the desktop cockpit for this daemon (chat, coding\n"
+        "    runs, documents, dashboards). Get it:\n"
+        f"      {BEACON_DOWNLOAD_URL}\n"
         "\n"
         f"    Address:  {host}:{api_port}\n"
         f"              (or this machine's Tailscale / LAN address, port {api_port})\n"
