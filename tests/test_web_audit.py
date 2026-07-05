@@ -240,5 +240,7 @@ class TestTelegramAuditWired:
         """TelegramAdapter._cmd_audit exists (wired in start())."""
         from prometheus.gateway.telegram import TelegramAdapter
         assert hasattr(TelegramAdapter, "_cmd_audit")
-        assert hasattr(TelegramAdapter, "_audit_show_last")
-        assert hasattr(TelegramAdapter, "_audit_kick_off")
+        # SPRINT G1: show-last + kick-off moved to the shared commands layer.
+        from prometheus.gateway import commands as gateway_commands
+        assert callable(gateway_commands._audit_show_last)
+        assert callable(gateway_commands._audit_kick_off)

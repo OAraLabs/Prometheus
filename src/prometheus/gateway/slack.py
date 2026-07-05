@@ -38,6 +38,11 @@ MAX_MESSAGE_LENGTH = 3900
 # Override via gateway.slack.long_reply_threshold in prometheus.yaml.
 DEFAULT_LONG_REPLY_THRESHOLD = 800
 
+# SPRINT G1: Slack workspace slash commands are global, so ours are
+# namespaced. Shared command text that references sibling commands is built
+# with this prefix so Slack users see commands they can actually type.
+SLACK_COMMAND_PREFIX = "/prometheus-"
+
 
 def chunk_message(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> list[str]:
     """Split a long message into chunks respecting Slack's limit.
@@ -421,6 +426,26 @@ class SlackAdapter(BasePlatformAdapter):
         self._app.command("/prometheus-doctor")(self._slash_doctor)
         self._app.command("/prometheus-beacon")(self._slash_beacon)
         self._app.command("/prometheus-tools")(self._slash_tools)
+        # SPRINT G1 — gateway parity: fill the Telegram-only families.
+        self._app.command("/prometheus-note")(self._slash_note)
+        self._app.command("/prometheus-pairs")(self._slash_pairs)
+        self._app.command("/prometheus-approve")(self._slash_approve)
+        self._app.command("/prometheus-deny")(self._slash_deny)
+        self._app.command("/prometheus-pending")(self._slash_pending)
+        self._app.command("/prometheus-escalations")(self._slash_escalations)
+        self._app.command("/prometheus-gepa")(self._slash_gepa)
+        self._app.command("/prometheus-symbiote")(self._slash_symbiote)
+        self._app.command("/prometheus-audit")(self._slash_audit)
+        self._app.command("/prometheus-press")(self._slash_press)
+        self._app.command("/prometheus-voice")(self._slash_voice)
+        # Provider overrides (per-channel, sticky until /prometheus-local)
+        self._app.command("/prometheus-claude")(self._slash_claude)
+        self._app.command("/prometheus-gpt")(self._slash_gpt)
+        self._app.command("/prometheus-gemini")(self._slash_gemini)
+        self._app.command("/prometheus-xai")(self._slash_xai)
+        self._app.command("/prometheus-grok")(self._slash_grok)
+        self._app.command("/prometheus-local")(self._slash_local)
+        self._app.command("/prometheus-route")(self._slash_route)
 
         # Start Socket Mode connection
         self._handler = AsyncSocketModeHandler(self._app, self.config.app_token)
@@ -665,6 +690,7 @@ class SlackAdapter(BasePlatformAdapter):
         text = cmd_status(
             self.model_name, self.model_provider,
             self._start_time, self.tool_registry,
+            getattr(self, "cost_tracker", None),
         )
         await respond(text=text)
 
@@ -689,6 +715,26 @@ class SlackAdapter(BasePlatformAdapter):
             "  /prometheus-anatomy        — host, GPU, VRAM, Tailscale",
             "  /prometheus-doctor         — diagnostic health check",
             "  /prometheus-tools          — tool-call stats (24h)",
+            "  /prometheus-pairs          — training-pair flywheel stats",
+            "  /prometheus-note           — save a manual fact: [@entity] <text>",
+            "",
+            "Provider overrides (this channel only, sticky until -local):",
+            "  /prometheus-claude         — Anthropic Claude",
+            "  /prometheus-gpt            — OpenAI GPT",
+            "  /prometheus-gemini         — Google Gemini",
+            "  /prometheus-xai            — xAI Grok  (alias: -grok)",
+            "  /prometheus-local          — back to primary",
+            "  /prometheus-route          — current routing (primary vs override)",
+            "",
+            "Approvals & autonomy:",
+            "  /prometheus-approve <id>   — approve a pending tool request",
+            "  /prometheus-deny <id>      — deny a pending tool request",
+            "  /prometheus-pending        — list pending approval requests",
+            "  /prometheus-gepa           — skill evolution: status | run | history",
+            "  /prometheus-symbiote       — GitHub graft pipeline (status | history | …)",
+            "  /prometheus-audit          — web capability audit: run | <category>",
+            "  /prometheus-press          — CLI library: list | search | install | …",
+            "  /prometheus-escalations    — teacher-escalation counters",
             "",
             "Memory & skills (Sprint S1):",
             "  /prometheus-memory show [user]  — MEMORY.md / USER.md content",
@@ -1093,33 +1139,254 @@ class SlackAdapter(BasePlatformAdapter):
     async def _slash_tools(self, ack: Any, respond: Any) -> None:
         """Tool-call telemetry dashboard (24h)."""
         await ack()
-        try:
-            from prometheus.telemetry.dashboard import ToolDashboard
-            dashboard = ToolDashboard()
-            stats = dashboard.get_stats(hours=24)
+        from prometheus.gateway.commands import cmd_tools
 
-            lines = ["Tool Call Stats (24h)\n"]
-            lines.append(f"Total calls: {stats['total_calls']}")
-            lines.append(f"Success rate: {stats['overall_success_rate']:.0%}")
-            if stats.get("total_denials"):
-                lines.append(f"Denied by policy: {stats['total_denials']}")
+        await respond(text=cmd_tools())
 
-            if stats["most_called"]:
-                lines.append("\nMost called:")
-                for row in stats["most_called"][:5]:
-                    name, count = row["tool_name"], row["calls"]
-                    rate = stats["success_rate_by_tool"].get(name, 0)
-                    lines.append(f"  {name}: {count} calls ({rate:.0%} ok)")
+    # ------------------------------------------------------------------
+    # SPRINT G1 — gateway parity: Telegram-only families filled in.
+    # Every handler below is a thin wrapper over the shared commands layer;
+    # subsystems (approval queue, GEPA, symbiote engines, printing press,
+    # escalation engine) arrive via the daemon's GatewaySubsystemRegistry.
+    # ------------------------------------------------------------------
 
-            if stats["circuit_breaker_trips"]:
-                lines.append(
-                    f"\nCircuit breaker trips: {stats['circuit_breaker_trips']}"
-                )
-            if stats["adapter_repairs"]:
-                lines.append(f"Adapter repairs: {stats['adapter_repairs']}")
-            if stats["lucky_guesses"]:
-                lines.append(f"Lucky guesses (deferred): {stats['lucky_guesses']}")
+    def _channel_sender(self, command: Any, respond: Any):
+        """Return ``async send(text)`` for multi-message shared flows.
 
-            await respond(text="\n".join(lines))
-        except Exception as exc:
-            await respond(text=f"Tool stats unavailable: {exc}")
+        Prefers a durable ``chat_postMessage`` to the invoking channel (a
+        slash command's ``respond`` URL expires after ~30 minutes and allows
+        only 5 messages — too tight for symbiote/audit/install flows that
+        report back later); falls back to ``respond`` when the channel post
+        fails (e.g. bot not in channel).
+        """
+        channel = self._cmd_channel(command)
+
+        async def _send(text: str) -> None:
+            if channel and self._app:
+                try:
+                    await self._app.client.chat_postMessage(
+                        channel=channel, text=text,
+                    )
+                    return
+                except Exception:
+                    logger.debug(
+                        "Slack: channel send failed; falling back to respond",
+                        exc_info=True,
+                    )
+            await respond(text=text)
+
+        return _send
+
+    async def _slash_note(self, ack: Any, command: Any, respond: Any) -> None:
+        """Save a manual, max-trust fact: [@entity] <text>."""
+        await ack()
+        from prometheus.gateway.commands import cmd_note
+        from prometheus.tools.builtin.wiki_compile import _memory_store
+
+        await respond(text=cmd_note(_memory_store, self._cmd_text(command)))
+
+    async def _slash_pairs(self, ack: Any, respond: Any) -> None:
+        """Repair-pair flywheel stats."""
+        await ack()
+        from prometheus.gateway.commands import cmd_pairs
+
+        await respond(text=cmd_pairs())
+
+    async def _slash_approve(self, ack: Any, command: Any, respond: Any) -> None:
+        """Approve a pending tool request."""
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        text_arg = self._cmd_text(command)
+        request_id = text_arg.split()[0] if text_arg else ""
+        text = await _cmds.cmd_approve(
+            getattr(self, "_approval_queue", None), request_id,
+            prefix=SLACK_COMMAND_PREFIX,
+        )
+        await respond(text=text)
+
+    async def _slash_deny(self, ack: Any, command: Any, respond: Any) -> None:
+        """Deny a pending tool request."""
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        text_arg = self._cmd_text(command)
+        request_id = text_arg.split()[0] if text_arg else ""
+        text = await _cmds.cmd_deny(
+            getattr(self, "_approval_queue", None), request_id,
+            prefix=SLACK_COMMAND_PREFIX,
+        )
+        await respond(text=text)
+
+    async def _slash_pending(self, ack: Any, respond: Any) -> None:
+        """List pending approval requests."""
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        await respond(text=_cmds.cmd_pending(getattr(self, "_approval_queue", None)))
+
+    async def _slash_escalations(self, ack: Any, respond: Any) -> None:
+        """Teacher-escalation counters + budget state."""
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        await respond(
+            text=_cmds.cmd_escalations(getattr(self, "escalation_engine", None))
+        )
+
+    async def _slash_gepa(self, ack: Any, command: Any, respond: Any) -> None:
+        """GEPA skill evolution: status | run | history.
+
+        The approval prompt for ``run`` is delivered by the ApprovalQueue's
+        transport (currently Telegram); progress/result messages land back
+        in this Slack channel via the injected sender.
+        """
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        text_arg = self._cmd_text(command)
+        sub = text_arg.split()[0] if text_arg else "status"
+        text = await _cmds.cmd_gepa(
+            getattr(self, "_gepa_engine", None),
+            getattr(self, "_approval_queue", None),
+            sub,
+            chat_id=None,
+            send=self._channel_sender(command, respond),
+            prefix=SLACK_COMMAND_PREFIX,
+        )
+        if text:
+            await respond(text=text)
+
+    async def _slash_symbiote(self, ack: Any, command: Any, respond: Any) -> None:
+        """GitHub research → graft pipeline (shared dispatcher)."""
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        await _cmds.cmd_symbiote(
+            self._channel_sender(command, respond),
+            self._cmd_text(command),
+            approval_queue=getattr(self, "_approval_queue", None),
+            morph_engine=getattr(self, "_morph_engine", None),
+            backup_vault=getattr(self, "_backup_vault", None),
+            chat_id=None,
+            prefix=SLACK_COMMAND_PREFIX,
+        )
+
+    async def _slash_audit(self, ack: Any, command: Any, respond: Any) -> None:
+        """Web capability audit: show last | run | <category>."""
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        await _cmds.cmd_audit(
+            self._channel_sender(command, respond),
+            self._cmd_text(command),
+            prefix=SLACK_COMMAND_PREFIX,
+        )
+
+    async def _slash_press(self, ack: Any, command: Any, respond: Any) -> None:
+        """Printing Press CLI library: list | search | install | installed | update."""
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        await _cmds.cmd_press(
+            self._channel_sender(command, respond),
+            getattr(self, "_printing_press", None),
+            self._cmd_text(command),
+            approval_queue=getattr(self, "_approval_queue", None),
+            chat_id=None,
+            prefix=SLACK_COMMAND_PREFIX,
+        )
+
+    async def _slash_voice(self, ack: Any, respond: Any) -> None:
+        """Platform-honest boundary: the voice-reply pipeline is Telegram-only."""
+        await ack()
+        await respond(text=(
+            "Voice replies are not supported on Slack yet — the TTS pipeline "
+            "(piper → opus/ogg voice notes) is wired to Telegram's voice-"
+            "message API only. /voice modes remain a Telegram setting; on "
+            "Slack all replies are text."
+        ))
+
+    # ---- provider overrides ------------------------------------------
+
+    async def _apply_override(
+        self, command: Any, respond: Any, preset_name: str,
+    ) -> None:
+        """Shared logic for /prometheus-claude, -gpt, -gemini, -xai, -grok."""
+        from prometheus.gateway import commands as _cmds
+
+        channel = self._cmd_channel(command)
+        if not channel:
+            await respond(text="Channel id missing from slash payload.")
+            return
+        session_key = f"slack:{channel}"
+        text, applied = _cmds.cmd_provider_override(
+            self.agent_loop,
+            self._prometheus_config,
+            session_key,
+            preset_name,
+            prefix=SLACK_COMMAND_PREFIX,
+        )
+        # Platform-honest: Telegram dispatches an inline trailing message
+        # ("/claude what is 2+2?") through the new provider; Slack slash
+        # payloads have no thread/reaction context wired for that yet.
+        if applied and self._cmd_text(command):
+            text += (
+                "\n\nNote: inline message dispatch isn't supported on Slack "
+                "yet — send your question as a normal message."
+            )
+        await respond(text=text)
+
+    async def _slash_claude(self, ack: Any, command: Any, respond: Any) -> None:
+        await ack()
+        await self._apply_override(command, respond, preset_name="claude")
+
+    async def _slash_gpt(self, ack: Any, command: Any, respond: Any) -> None:
+        await ack()
+        await self._apply_override(command, respond, preset_name="gpt")
+
+    async def _slash_gemini(self, ack: Any, command: Any, respond: Any) -> None:
+        await ack()
+        await self._apply_override(command, respond, preset_name="gemini")
+
+    async def _slash_xai(self, ack: Any, command: Any, respond: Any) -> None:
+        await ack()
+        await self._apply_override(command, respond, preset_name="xai")
+
+    async def _slash_grok(self, ack: Any, command: Any, respond: Any) -> None:
+        """Alias for /prometheus-xai."""
+        await ack()
+        await self._apply_override(command, respond, preset_name="xai")
+
+    async def _slash_local(self, ack: Any, command: Any, respond: Any) -> None:
+        """Clear the per-channel provider override, back to primary."""
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        channel = self._cmd_channel(command)
+        if not channel:
+            await respond(text="Channel id missing from slash payload.")
+            return
+        text = _cmds.cmd_local_override(
+            self.agent_loop, f"slack:{channel}",
+            self.model_name, self.model_provider,
+        )
+        if self._cmd_text(command):
+            text += (
+                "\n\nNote: inline message dispatch isn't supported on Slack "
+                "yet — send your question as a normal message."
+            )
+        await respond(text=text)
+
+    async def _slash_route(self, ack: Any, command: Any, respond: Any) -> None:
+        """Show current routing (primary vs override) for this channel."""
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        channel = self._cmd_channel(command)
+        text = _cmds.cmd_route(
+            self.agent_loop, f"slack:{channel}",
+            self.model_name, self.model_provider,
+            prefix=SLACK_COMMAND_PREFIX,
+        )
+        await respond(text=text)
