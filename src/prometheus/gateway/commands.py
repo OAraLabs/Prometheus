@@ -1668,3 +1668,1473 @@ async def run_session_command(
     except Exception as exc:  # noqa: BLE001 — fail loud to the user, not the loop
         log.exception("session command /%s failed", name)
         return f"⚠ /{name} failed: {exc}"
+
+
+# ===========================================================================
+# SPRINT G1 — gateway parity: logic extracted from telegram.py handlers
+# ===========================================================================
+#
+# Everything below was Telegram-embedded command logic, moved here verbatim
+# (mechanical extraction — reply text preserved byte-for-byte, pinned by
+# tests/test_gateway_command_pins.py). Each function is platform-independent:
+# no adapter ``self``, no platform APIs. Subsystem objects (router via
+# agent_loop, approval queue, GEPA engine, symbiote coordinator, printing
+# press, escalation engine) are injected by the calling gateway.
+#
+# Conventions:
+#   * ``prefix`` — the surface's slash-command prefix. Telegram passes the
+#     default ``"/"``; Slack passes ``"/prometheus-"`` (its commands are
+#     workspace-global and namespaced). Reply text mentioning other commands
+#     is built with the prefix so each surface shows commands the user can
+#     actually type.
+#   * ``send`` — for multi-message flows (gepa run, symbiote, audit, press
+#     install) the gateway injects ``async send(text) -> None`` bound to the
+#     invoking chat/channel. Single-reply commands just return a string.
+
+
+# Display labels for /claude, /gpt, etc. (moved from telegram.py — Sprint 22
+# GRAFT-ROUTER-WIRE Phase 4).
+PROVIDER_PRESET_DISPLAY_NAMES: dict[str, str] = {
+    "claude": "Claude (anthropic)",
+    "gpt": "GPT (openai)",
+    "gemini": "Gemini (google)",
+    "xai": "Grok (xai)",
+}
+
+
+# ---------------------------------------------------------------------------
+# Provider overrides — /claude /gpt /gemini /xai /grok /local /route
+# ---------------------------------------------------------------------------
+
+
+def cmd_provider_override(
+    agent_loop: Any,
+    prometheus_config: dict | None,
+    session_key: str,
+    preset_name: str,
+    *,
+    prefix: str = "/",
+) -> tuple[str, bool]:
+    """Set a per-session provider override (shared /claude, /gpt, … core).
+
+    Validates router availability, ``overrides_enabled``, and the preset's
+    API-key env var; records the override on the router keyed by
+    ``session_key`` (``telegram:<chat_id>`` / ``slack:<channel_id>``).
+
+    Returns ``(reply_text, applied)`` — ``applied`` is True only when the
+    override was actually recorded, so the gateway can decide whether to
+    dispatch an inline message through the new provider.
+    """
+    import os as _os
+
+    router = getattr(agent_loop, "_model_router", None)
+    if router is None:
+        return (
+            "Routing is not enabled. Provider overrides require a "
+            "configured router in prometheus.yaml.",
+            False,
+        )
+
+    if not getattr(router.config, "overrides_enabled", True):
+        log.warning(
+            "Override command %s%s invoked for session %s but "
+            "router.overrides.enabled is False — ignoring.",
+            prefix, preset_name, session_key,
+        )
+        return (
+            "Direct-mode provider overrides are disabled.\n"
+            "Set router.overrides.enabled: true in config/prometheus.yaml "
+            "and restart the daemon to enable.",
+            False,
+        )
+
+    from prometheus.router.model_router import resolve_slash_command_target
+    preset = resolve_slash_command_target(preset_name, prometheus_config or {})
+    if preset is None:
+        return (f"Unknown override preset '{preset_name}'.", False)
+
+    # Early feedback if the API key env var is missing — beats failing on
+    # the user's next message with an opaque ValueError from the provider
+    # registry.
+    api_key_env = preset.get("api_key_env", "")
+    if api_key_env and not _os.environ.get(api_key_env):
+        display = PROVIDER_PRESET_DISPLAY_NAMES.get(preset_name, preset_name)
+        return (
+            f"{display} requires {api_key_env} to be set in the "
+            f"environment.\n"
+            f"Add it to ~/.config/prometheus/env and restart the daemon "
+            f"(systemctl --user restart prometheus), then try {prefix}{preset_name} "
+            f"again.",
+            False,
+        )
+
+    # Record the override. set_override raises ValueError if called with a
+    # reserved session_id, but gateway session keys are never reserved.
+    router.set_override(session_key, dict(preset))
+    display = PROVIDER_PRESET_DISPLAY_NAMES.get(preset_name, preset_name)
+    log.info(
+        "Provider override for session %s → %s/%s",
+        session_key, preset.get("provider"), preset.get("model"),
+    )
+    return (
+        f"Switched to {display}.\n"
+        f"Model: {preset.get('model', '?')}\n"
+        f"Use {prefix}local to return to primary, {prefix}route to check.",
+        True,
+    )
+
+
+def cmd_local_override(
+    agent_loop: Any,
+    session_key: str,
+    model_name: str,
+    model_provider: str,
+) -> str:
+    """Clear a per-session provider override (shared /local core).
+
+    Silent no-op when no override was set (distinct reply text).
+    """
+    router = getattr(agent_loop, "_model_router", None)
+    had_override = False
+    if router is not None:
+        had_override = router.get_override_for_session(session_key) is not None
+        router.clear_override(session_key)
+        if had_override:
+            log.info(
+                "Cleared provider override for session %s (back to primary)",
+                session_key,
+            )
+
+    primary = f"{model_provider or '?'}/{model_name or '?'}"
+    if had_override:
+        return f"Back to primary ({primary})."
+    return f"Already on primary ({primary}). No override was set."
+
+
+def cmd_route(
+    agent_loop: Any,
+    session_key: str,
+    model_name: str,
+    model_provider: str,
+    *,
+    prefix: str = "/",
+) -> str:
+    """Show the current effective provider for this session (shared /route core).
+
+    Reports one of three states:
+      - override active: "{provider}/{model}  (override)"
+      - no router:       "{primary_provider}/{primary_model}  (no router)"
+      - primary:         "{primary_provider}/{primary_model}  (primary)"
+
+    Followed by a list of available override commands.
+    """
+    router = getattr(agent_loop, "_model_router", None)
+    lines = ["Route"]
+
+    if router is None:
+        lines.append(
+            f"Active: {model_provider or '?'}/"
+            f"{model_name or '?'}  (no router)"
+        )
+    else:
+        override = router.get_override_for_session(session_key)
+        if override is not None:
+            cfg = override.provider_config
+            lines.append(
+                f"Active: {cfg.get('provider', '?')}/"
+                f"{cfg.get('model', '?')}  (override)"
+            )
+            lines.append(f"Clear with: {prefix}local")
+        else:
+            lines.append(
+                f"Active: {model_provider or '?'}/"
+                f"{model_name or '?'}  (primary)"
+            )
+
+    lines.append("")
+    lines.append("Override commands:")
+    lines.append(f"  {prefix}claude  — Anthropic Claude")
+    lines.append(f"  {prefix}gpt     — OpenAI GPT")
+    lines.append(f"  {prefix}gemini  — Google Gemini")
+    lines.append(f"  {prefix}xai     — xAI Grok")
+    lines.append(f"  {prefix}grok    — alias for {prefix}xai")
+    lines.append(f"  {prefix}local   — back to primary")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Approval queue — /approve /deny /pending
+# ---------------------------------------------------------------------------
+
+
+async def cmd_approve(queue: Any, request_id: str, *, prefix: str = "/") -> str:
+    """Approve a pending tool request (shared /approve core)."""
+    if not request_id:
+        return f"Usage: {prefix}approve {{request_id}}"
+    if queue is None:
+        return "Approval queue not active."
+    ok = await queue.approve(request_id)
+    if ok:
+        return f"Approved: {request_id}"
+    return f"No pending request: {request_id}"
+
+
+async def cmd_deny(queue: Any, request_id: str, *, prefix: str = "/") -> str:
+    """Deny a pending tool request (shared /deny core)."""
+    if not request_id:
+        return f"Usage: {prefix}deny {{request_id}}"
+    if queue is None:
+        return "Approval queue not active."
+    ok = await queue.deny(request_id)
+    if ok:
+        return f"Denied: {request_id}"
+    return f"No pending request: {request_id}"
+
+
+def cmd_pending(queue: Any) -> str:
+    """List pending approval requests (shared /pending core)."""
+    if queue is None:
+        return "Approval queue not active."
+    pending = queue.list_pending()
+    if not pending:
+        return "No pending requests."
+    lines = ["Pending approval requests:"]
+    for action in pending:
+        lines.append(
+            f"  {action.request_id}: {action.tool_name} — {action.description}"
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Teacher escalation — /escalations
+# ---------------------------------------------------------------------------
+
+
+def cmd_escalations(engine: Any) -> str:
+    """Teacher-escalation counters + budget state (shared /escalations core)."""
+    if engine is None:
+        return "Teacher escalation: not available in this build."
+    s = engine.stats()
+    armed = (
+        f"yes — {s['teacher']}" if s["armed"]
+        else "no (escalation.teacher_model unset)"
+    )
+    lines = [
+        "Teacher escalation",
+        f"Armed: {armed}",
+        f"Fired: {s['fired']}   Skills written: {s['skills_written']}",
+        f"Teacher failures: {s['teacher_failed']}   Budget refusals: {s['refused_budget']}",
+        f"Budget: {s['max_per_session']} per session (in-memory, resets on restart)",
+    ]
+    sessions = s.get("sessions") or {}
+    if sessions:
+        lines.append(
+            "Used: " + ", ".join(
+                f"{k}={v}" for k, v in sorted(sessions.items()))
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# GEPA skill evolution — /gepa
+# ---------------------------------------------------------------------------
+
+
+async def gepa_run_with_approval(
+    send: Any,
+    queue: Any,
+    engine: Any,
+    chat_id: Any = None,
+) -> None:
+    """Background flow: request approval, then run a GEPA cycle if granted.
+
+    ``send`` is an async callable delivering one message to the invoking
+    chat. ``chat_id`` is forwarded to the approval queue for prompt delivery
+    (the queue's transport decides where the /approve prompt lands).
+    """
+    from prometheus.permissions.approval_queue import ApprovalResult
+    try:
+        result = await queue.request_approval(
+            tool_name="gepa",
+            description="Run GEPA skill evolution cycle now",
+            chat_id=chat_id,
+        )
+    except Exception as exc:
+        await send(f"GEPA: approval failed: {exc}")
+        return
+
+    if result == ApprovalResult.DENIED:
+        await send("GEPA run denied.")
+        return
+    if result == ApprovalResult.TIMEOUT:
+        await send("GEPA run approval timed out.")
+        return
+
+    try:
+        report = await engine.run_now()
+    except Exception as exc:
+        await send(f"GEPA cycle failed: {exc}")
+        return
+
+    if report is None:
+        await send("GEPA: a cycle is already running (or returned no report).")
+        return
+    await send("GEPA cycle complete:\n" + report.to_telegram_summary())
+
+
+async def cmd_gepa(
+    engine: Any,
+    queue: Any,
+    sub: str,
+    *,
+    chat_id: Any = None,
+    send: Any = None,
+    prefix: str = "/",
+) -> str | None:
+    """Shared /gepa {status|run|history} core.
+
+    Returns the immediate reply text. The ``run`` path additionally spawns
+    ``gepa_run_with_approval`` in the background (requires ``send``).
+    """
+    import asyncio as _aio
+
+    sub = (sub or "status").strip().lower() or "status"
+
+    if sub == "status":
+        if engine is None:
+            return "GEPA: engine not active (set learning.gepa_enabled in config)."
+        report = engine.last_report
+        if report is None:
+            return (
+                "GEPA: no cycle has run yet. "
+                f"Use {prefix}gepa run to trigger one manually."
+            )
+        return report.to_telegram_summary()
+
+    if sub == "run":
+        if engine is None:
+            return "GEPA: engine not active (set learning.gepa_enabled in config)."
+        if queue is None:
+            return "GEPA: approval queue not active — cannot run on demand."
+        _aio.create_task(
+            gepa_run_with_approval(send, queue, engine, chat_id),
+            name="gepa_run_with_approval",
+        )
+        return f"GEPA run pending approval. Watch for the {prefix}approve prompt."
+
+    if sub == "history":
+        from prometheus.config.paths import get_config_dir
+        archive_dir = get_config_dir() / "skills" / "auto" / "archive"
+        if not archive_dir.exists():
+            return "GEPA history: no promotions yet."
+        archives = sorted(
+            archive_dir.glob("*.md"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not archives:
+            return "GEPA history: archive directory is empty."
+        lines = ["GEPA promotion history:"]
+        for path in archives[:15]:
+            ts = path.stat().st_mtime
+            stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+            lines.append(f"  • {path.stem} ({stamp})")
+        return "\n".join(lines)
+
+    return f"Usage: {prefix}gepa [status | run | history]"
+
+
+# ---------------------------------------------------------------------------
+# SYMBIOTE — /symbiote (GitHub research → graft pipeline)
+# ---------------------------------------------------------------------------
+
+
+async def _symbiote_scout(send: Any, coordinator: Any, problem: str, prefix: str) -> None:
+    """Run the Scout phase and reply with a candidate summary."""
+    await send(f"SYMBIOTE: scouting GitHub for {problem!r}...")
+    try:
+        session = await coordinator.start_scout(problem)
+    except RuntimeError as exc:
+        await send(f"SYMBIOTE: {exc}")
+        return
+    except Exception as exc:
+        log.exception("SYMBIOTE scout failed")
+        await send(f"SYMBIOTE scout failed: {exc}")
+        return
+    if session.error:
+        await send(f"SYMBIOTE scout: {session.error}")
+        return
+    report = session.scout_report or {}
+    candidates = report.get("candidates") or []
+    if not candidates:
+        note = report.get("notes") or "no viable candidates"
+        await send(
+            f"SYMBIOTE: no candidates ({note}). Session {session.session_id[:8]}."
+        )
+        return
+    lines = [
+        f"SYMBIOTE session {session.session_id[:8]} — "
+        f"{len(candidates)} candidate(s):",
+    ]
+    for c in candidates[:5]:
+        lic = (c.get("license_check") or {}).get("spdx_id") or "?"
+        lines.append(
+            f"  • {c['full_name']} ({lic}, ★{c.get('stars', 0)}) "
+            f"[{c.get('recommendation', '?')}] "
+            f"score={float(c.get('relevance_score', 0)):.2f}"
+        )
+    lines.append("")
+    lines.append(f"To proceed: {prefix}symbiote approve <full_name>")
+    await send("\n".join(lines))
+
+
+async def _symbiote_approve(
+    send: Any, coordinator: Any, rest: str, *,
+    approval_queue: Any, morph_engine: Any, chat_id: Any, prefix: str,
+) -> None:
+    """Queue an approval; on approval run harvest."""
+    import asyncio as _aio
+
+    if not rest:
+        await send(f"Usage: {prefix}symbiote approve <owner/repo>")
+        return
+    active = coordinator.get_status()
+    if active is None:
+        await send(
+            f"SYMBIOTE: no active session. Run {prefix}symbiote <problem> first."
+        )
+        return
+    candidate_full_name = rest.split()[0]
+    if approval_queue is None:
+        await send("SYMBIOTE: approval queue not active — cannot start harvest.")
+        return
+    _aio.create_task(
+        symbiote_run_with_approval(
+            send, approval_queue, coordinator,
+            phase="harvest",
+            session_id=active.session_id,
+            candidate=candidate_full_name,
+            morph_engine=morph_engine,
+            chat_id=chat_id,
+        ),
+        name="symbiote_harvest_approval",
+    )
+    await send(
+        f"SYMBIOTE: harvest of {candidate_full_name} pending approval. "
+        f"Watch for the {prefix}approve prompt."
+    )
+
+
+async def _symbiote_graft(
+    send: Any, coordinator: Any, *,
+    approval_queue: Any, morph_engine: Any, chat_id: Any, prefix: str,
+) -> None:
+    """Queue an approval; on approval run graft."""
+    import asyncio as _aio
+
+    active = coordinator.get_status()
+    if active is None:
+        await send("SYMBIOTE: no active session.")
+        return
+    from prometheus.symbiote.coordinator import SymbiotePhase
+    if active.phase != SymbiotePhase.AWAITING_HARVEST_APPROVAL:
+        await send(f"SYMBIOTE: cannot graft from phase {active.phase.value}.")
+        return
+    if approval_queue is None:
+        await send("SYMBIOTE: approval queue not active — cannot graft.")
+        return
+    _aio.create_task(
+        symbiote_run_with_approval(
+            send, approval_queue, coordinator,
+            phase="graft",
+            session_id=active.session_id,
+            morph_engine=morph_engine,
+            chat_id=chat_id,
+        ),
+        name="symbiote_graft_approval",
+    )
+    await send(
+        f"SYMBIOTE: graft pending approval. Watch for the {prefix}approve prompt."
+    )
+
+
+async def _symbiote_status(send: Any, coordinator: Any, rest: str) -> None:
+    session_id = rest.split()[0] if rest else None
+    session = coordinator.get_status(session_id)
+    if session is None:
+        await send("SYMBIOTE: no active session.")
+        return
+    await send(session.to_telegram_summary())
+
+
+async def _symbiote_history(send: Any, coordinator: Any, rest: str) -> None:
+    try:
+        limit = int(rest.split()[0]) if rest else 10
+    except ValueError:
+        limit = 10
+    history = coordinator.get_history(limit)
+    if not history:
+        await send("SYMBIOTE: no past sessions.")
+        return
+    lines = [f"SYMBIOTE history ({len(history)} session(s)):"]
+    for s in history:
+        lines.append(
+            f"  • {s.session_id[:8]} {s.phase.value} — "
+            f"{(s.problem_statement or '')[:60]}"
+        )
+    await send("\n".join(lines))
+
+
+async def _symbiote_abort(send: Any, coordinator: Any) -> None:
+    active = coordinator.get_status()
+    if active is None:
+        await send("SYMBIOTE: no active session.")
+        return
+    try:
+        session = await coordinator.abort(active.session_id)
+    except Exception as exc:
+        await send(f"SYMBIOTE abort failed: {exc}")
+        return
+    await send(f"SYMBIOTE: session {session.session_id[:8]} aborted.")
+
+
+async def _symbiote_morph(
+    send: Any, coordinator: Any, *, morph_engine: Any, prefix: str,
+) -> None:
+    """Stage a candidate via MorphEngine and produce a MorphReport."""
+    if morph_engine is None:
+        await send(
+            "SYMBIOTE: MorphEngine not active. "
+            "Set symbiote.morph.enabled in config."
+        )
+        return
+    active = coordinator.get_status()
+    if active is None:
+        await send("SYMBIOTE: no active session.")
+        return
+    from prometheus.symbiote.coordinator import SymbiotePhase
+    if active.phase != SymbiotePhase.AWAITING_GRAFT_APPROVAL:
+        await send(
+            f"SYMBIOTE: cannot morph from phase {active.phase.value}. "
+            f"Run {prefix}symbiote graft first."
+        )
+        return
+    await send(
+        "SYMBIOTE: staging candidate (full test run)... this may take a minute."
+    )
+    try:
+        session = await coordinator.start_morph(active.session_id, morph_engine)
+    except Exception as exc:
+        log.exception("SYMBIOTE morph failed")
+        await send(f"SYMBIOTE morph failed: {exc}")
+        return
+    if session.morph_report:
+        report = coordinator._rebuild_morph_report(session.morph_report)
+        await send(report.to_telegram_summary())
+    elif session.error:
+        await send(f"SYMBIOTE morph: {session.error}")
+
+
+async def _symbiote_swap(
+    send: Any, coordinator: Any, *,
+    approval_queue: Any, morph_engine: Any, chat_id: Any, prefix: str,
+) -> None:
+    """Request approval; on approval run MorphEngine.execute_swap()."""
+    import asyncio as _aio
+
+    if morph_engine is None:
+        await send("SYMBIOTE: MorphEngine not active.")
+        return
+    active = coordinator.get_status()
+    if active is None:
+        await send("SYMBIOTE: no active session.")
+        return
+    from prometheus.symbiote.coordinator import SymbiotePhase
+    if active.phase != SymbiotePhase.AWAITING_SWAP_APPROVAL:
+        await send(
+            f"SYMBIOTE: cannot swap from phase {active.phase.value}. "
+            f"Run {prefix}symbiote morph first."
+        )
+        return
+    if approval_queue is None:
+        await send("SYMBIOTE: approval queue not active — cannot swap.")
+        return
+    backup_id = active.backup_id or "?"
+    warning = (
+        "⚠️ This will:\n"
+        "  1. Stop the daemon (~2-5s downtime)\n"
+        "  2. Replace live code with the candidate\n"
+        "  3. Restart the daemon\n"
+        "  4. Auto-rollback if health check fails within 60s\n\n"
+        f"Backup {backup_id} retained for manual rollback.\n\n"
+        f"Watch for {prefix}approve prompt."
+    )
+    await send(warning)
+    _aio.create_task(
+        symbiote_run_with_approval(
+            send, approval_queue, coordinator,
+            phase="swap",
+            session_id=active.session_id,
+            morph_engine=morph_engine,
+            chat_id=chat_id,
+        ),
+        name="symbiote_swap_approval",
+    )
+
+
+async def _symbiote_manual_backup(
+    send: Any, rest: str, *, backup_vault: Any, chat_id: Any,
+) -> None:
+    """Create a manual backup snapshot. Trust Level 2 (no approval)."""
+    if backup_vault is None:
+        await send(
+            "SYMBIOTE: BackupVault not active. Set symbiote.backup.enabled."
+        )
+        return
+    description = rest.strip().strip('"').strip("'") or "manual backup via /symbiote"
+    await send(
+        "SYMBIOTE: creating backup (running test suite for status capture)..."
+    )
+    try:
+        snap = await backup_vault.create_snapshot(
+            description=description,
+            source="manual",
+            metadata={"chat_id": chat_id},
+            capture_test_status=True,
+        )
+    except Exception as exc:
+        log.exception("SYMBIOTE backup failed")
+        await send(f"SYMBIOTE backup failed: {exc}")
+        return
+    await send(
+        f"📦 Backup created: {snap.backup_id}\n"
+        f"  files: {snap.file_count}, size: {snap.size_bytes/1024:.1f}KB\n"
+        f"  tests: {snap.test_status}\n"
+        f"  description: {snap.description}"
+    )
+
+
+async def _symbiote_backups(
+    send: Any, rest: str, *, backup_vault: Any, prefix: str,
+) -> None:
+    """List available backups."""
+    if backup_vault is None:
+        await send("SYMBIOTE: BackupVault not active.")
+        return
+    try:
+        limit = int(rest.split()[0]) if rest else 15
+    except ValueError:
+        limit = 15
+    snaps = backup_vault.list_snapshots(limit=limit)
+    if not snaps:
+        await send("SYMBIOTE: no backups yet.")
+        return
+    lines = [f"📦 Backup Vault ({len(snaps)} snapshot(s)):"]
+    for s in snaps:
+        lines.append(
+            f"  {s.backup_id} — {s.source} — "
+            f"{s.size_bytes/1024:.1f}KB — tests: {s.test_status}"
+        )
+    lines.append("")
+    lines.append(f"Use: {prefix}symbiote restore <backup_id>")
+    await send("\n".join(lines))
+
+
+async def _symbiote_restore(
+    send: Any, rest: str, *,
+    backup_vault: Any, approval_queue: Any, chat_id: Any, prefix: str,
+) -> None:
+    """Restore from a backup. Trust Level 1 — requires approval."""
+    import asyncio as _aio
+
+    if backup_vault is None:
+        await send("SYMBIOTE: BackupVault not active.")
+        return
+    args = rest.split()
+    dry_run = False
+    backup_id: str | None = None
+    for arg in args:
+        if arg.lower() == "dry":
+            dry_run = True
+        else:
+            backup_id = arg
+    if backup_id is None:
+        latest = backup_vault.get_latest()
+        if latest is None:
+            await send("SYMBIOTE: no backups available to restore.")
+            return
+        backup_id = latest.backup_id
+
+    snap = backup_vault.get_snapshot(backup_id)
+    if snap is None:
+        await send(f"SYMBIOTE: unknown backup_id {backup_id!r}.")
+        return
+
+    if dry_run:
+        await send(f"SYMBIOTE: dry-run restore of {backup_id}...")
+        try:
+            result = await backup_vault.restore_snapshot(backup_id, dry_run=True)
+        except Exception as exc:
+            await send(f"SYMBIOTE: dry-run failed: {exc}")
+            return
+        lines = [
+            f"📦 Dry-run restore of {backup_id}:",
+            f"  added: {len(result.files_added)} file(s)",
+            f"  changed: {len(result.files_changed)} file(s)",
+        ]
+        if result.files_changed[:5]:
+            lines.append("  example changed paths:")
+            for p in result.files_changed[:5]:
+                lines.append(f"    {p}")
+        await send("\n".join(lines))
+        return
+
+    # Real restore — Trust Level 1.
+    if approval_queue is None:
+        await send("SYMBIOTE: approval queue not active — cannot restore.")
+        return
+    await send(
+        f"⚠️ {prefix}symbiote restore {backup_id} will replace live source files. "
+        "A pre-restore backup will be created automatically. "
+        f"Watch for {prefix}approve prompt."
+    )
+    _aio.create_task(
+        symbiote_restore_with_approval(
+            send, approval_queue, backup_vault, backup_id, chat_id=chat_id,
+        ),
+        name="symbiote_restore_approval",
+    )
+
+
+async def symbiote_restore_with_approval(
+    send: Any,
+    queue: Any,
+    vault: Any,
+    backup_id: str,
+    *,
+    chat_id: Any = None,
+) -> None:
+    """Background flow: request approval, then restore the snapshot."""
+    from prometheus.permissions.approval_queue import ApprovalResult
+    try:
+        result = await queue.request_approval(
+            tool_name="symbiote_restore",
+            description=f"SYMBIOTE: restore from {backup_id}",
+            chat_id=chat_id,
+        )
+    except Exception as exc:
+        await send(f"SYMBIOTE: approval failed: {exc}")
+        return
+    if result == ApprovalResult.DENIED:
+        await send("SYMBIOTE: restore denied.")
+        return
+    if result == ApprovalResult.TIMEOUT:
+        await send("SYMBIOTE: restore approval timed out.")
+        return
+    try:
+        restore = await vault.restore_snapshot(
+            backup_id, capture_test_status=False,
+        )
+    except Exception as exc:
+        await send(f"SYMBIOTE: restore failed: {exc}")
+        return
+    if restore.error:
+        await send(f"SYMBIOTE: restore error: {restore.error}")
+        return
+    await send(
+        f"📦 Restore complete: {backup_id}\n"
+        f"  files restored: {restore.files_restored}\n"
+        f"  pre-restore backup: {restore.pre_restore_backup_id}"
+    )
+
+
+async def symbiote_run_with_approval(
+    send: Any,
+    queue: Any,
+    coordinator: Any,
+    *,
+    phase: str,
+    session_id: str,
+    candidate: str | None = None,
+    morph_engine: Any = None,
+    chat_id: Any = None,
+) -> None:
+    """Background flow: queue.request_approval → run phase on APPROVED."""
+    from prometheus.permissions.approval_queue import ApprovalResult
+    descriptions = {
+        "harvest": (
+            f"SYMBIOTE: clone and analyze {candidate!r} "
+            f"(session {session_id[:8]})"
+        ),
+        "graft": (
+            f"SYMBIOTE: write adapted files + run tests "
+            f"(session {session_id[:8]})"
+        ),
+        "swap": (
+            f"SYMBIOTE: HOT SWAP — replace live src/prometheus with "
+            f"candidate (session {session_id[:8]})"
+        ),
+    }
+    try:
+        result = await queue.request_approval(
+            tool_name=f"symbiote_{phase}",
+            description=descriptions.get(phase, f"SYMBIOTE {phase}"),
+            chat_id=chat_id,
+        )
+    except Exception as exc:
+        await send(f"SYMBIOTE: approval failed: {exc}")
+        return
+    if result == ApprovalResult.DENIED:
+        await send(f"SYMBIOTE {phase} denied.")
+        return
+    if result == ApprovalResult.TIMEOUT:
+        await send(f"SYMBIOTE {phase} approval timed out.")
+        return
+
+    try:
+        if phase == "harvest":
+            session = await coordinator.approve_scout(session_id, candidate)
+        elif phase == "graft":
+            session = await coordinator.approve_harvest(session_id)
+        elif phase == "swap":
+            if morph_engine is None:
+                await send("SYMBIOTE swap: MorphEngine not active.")
+                return
+            session = await coordinator.approve_swap(session_id, morph_engine)
+        else:
+            await send(f"Unknown phase: {phase}")
+            return
+    except Exception as exc:
+        log.exception("SYMBIOTE %s execution failed", phase)
+        await send(f"SYMBIOTE {phase} failed: {exc}")
+        return
+
+    if session.error:
+        await send(f"SYMBIOTE {phase}: {session.error}")
+        return
+
+    await send(session.to_telegram_summary())
+
+
+async def cmd_symbiote(
+    send: Any,
+    body: str,
+    *,
+    approval_queue: Any = None,
+    morph_engine: Any = None,
+    backup_vault: Any = None,
+    chat_id: Any = None,
+    prefix: str = "/",
+) -> None:
+    """Shared /symbiote dispatcher.
+
+    Forms:
+      /symbiote <problem statement>      — start a scout
+      /symbiote approve <full_name>      — request harvest approval
+      /symbiote graft                    — request graft approval
+      /symbiote status [session_id]      — show session state
+      /symbiote abort                    — abort active session
+      /symbiote history [N]              — last N sessions
+      /symbiote morph | swap | backup | backups | restore  (Session B)
+    """
+    from prometheus.symbiote import get_coordinator
+    coordinator = get_coordinator()
+    if coordinator is None:
+        await send("SYMBIOTE is not active. Set symbiote.enabled in config.")
+        return
+
+    body = (body or "").strip()
+
+    # Detect subcommand by first token; otherwise treat whole body as problem.
+    first_token = body.split(maxsplit=1)[0] if body else ""
+    first_lower = first_token.lower()
+    rest = body[len(first_token):].strip()
+
+    known_subcommands = {
+        # Session A
+        "approve", "graft", "status", "abort", "history",
+        # Session B
+        "morph", "swap", "backup", "backups", "restore",
+    }
+
+    if not body:
+        await _symbiote_status(send, coordinator, "")
+        return
+
+    if first_lower not in known_subcommands:
+        # Treat whole body as the problem statement → start scout.
+        await _symbiote_scout(send, coordinator, body, prefix)
+        return
+
+    if first_lower == "status":
+        await _symbiote_status(send, coordinator, rest)
+        return
+    if first_lower == "history":
+        await _symbiote_history(send, coordinator, rest)
+        return
+    if first_lower == "abort":
+        await _symbiote_abort(send, coordinator)
+        return
+    if first_lower == "approve":
+        await _symbiote_approve(
+            send, coordinator, rest,
+            approval_queue=approval_queue, morph_engine=morph_engine,
+            chat_id=chat_id, prefix=prefix,
+        )
+        return
+    if first_lower == "graft":
+        await _symbiote_graft(
+            send, coordinator,
+            approval_queue=approval_queue, morph_engine=morph_engine,
+            chat_id=chat_id, prefix=prefix,
+        )
+        return
+    # ---- Session B subcommands ------------------------------------
+    if first_lower == "morph":
+        await _symbiote_morph(
+            send, coordinator, morph_engine=morph_engine, prefix=prefix,
+        )
+        return
+    if first_lower == "swap":
+        await _symbiote_swap(
+            send, coordinator,
+            approval_queue=approval_queue, morph_engine=morph_engine,
+            chat_id=chat_id, prefix=prefix,
+        )
+        return
+    if first_lower == "backup":
+        await _symbiote_manual_backup(
+            send, rest, backup_vault=backup_vault, chat_id=chat_id,
+        )
+        return
+    if first_lower == "backups":
+        await _symbiote_backups(
+            send, rest, backup_vault=backup_vault, prefix=prefix,
+        )
+        return
+    if first_lower == "restore":
+        await _symbiote_restore(
+            send, rest,
+            backup_vault=backup_vault, approval_queue=approval_queue,
+            chat_id=chat_id, prefix=prefix,
+        )
+        return
+
+
+# ---------------------------------------------------------------------------
+# Web capability audit — /audit
+# ---------------------------------------------------------------------------
+
+
+async def _audit_show_last(send: Any, prefix: str) -> None:
+    """Show summary of the most recent audit JSON, if any."""
+    from prometheus.config.paths import get_config_dir
+
+    audits_dir = get_config_dir() / "audits"
+    if not audits_dir.is_dir():
+        await send(f"No audits yet. Run `{prefix}audit run` to start one.")
+        return
+    json_files = sorted(audits_dir.glob("web_audit_*.json"))
+    if not json_files:
+        await send(f"No audits yet. Run `{prefix}audit run` to start one.")
+        return
+    latest = json_files[-1]
+    try:
+        import json as _json
+        payload = _json.loads(latest.read_text())
+    except Exception as exc:
+        await send(f"Could not read latest audit: {exc}")
+        return
+
+    lines = [
+        "🔬 Last Web Capability Audit",
+        f"Date: {payload.get('timestamp', '?')}",
+        f"Model: {payload.get('model', '?')}",
+        (
+            f"Result: {payload.get('passed', 0)}/"
+            f"{payload.get('total_tests', 0)} passed "
+            f"({payload.get('pass_rate', 0) * 100:.0f}%)"
+        ),
+        f"Duration: {payload.get('duration_seconds', 0):.0f}s",
+        "",
+        "By category:",
+    ]
+    for cat, stats in sorted((payload.get("categories") or {}).items()):
+        n = stats["passed"] + stats["failed"]
+        lines.append(f"  {cat}: {stats['passed']}/{n}")
+    fb = payload.get("failure_breakdown") or {}
+    if fb:
+        lines.append("")
+        lines.append("Failure breakdown:")
+        for fc, n in sorted(fb.items(), key=lambda kv: -kv[1]):
+            lines.append(f"  {fc}: {n}")
+    lines.append("")
+    lines.append(f"Full report: {latest}")
+    await send("\n".join(lines))
+
+
+async def _audit_kick_off(send: Any, category: str | None) -> None:
+    """Spawn the audit as a background subprocess and notify on completion."""
+    import asyncio as _aio
+    from pathlib import Path as _Path
+
+    repo_root = _Path(__file__).resolve().parents[3]
+    script = repo_root / "scripts" / "web_capability_audit.py"
+    if not script.is_file():
+        await send(f"Audit script not found at {script}")
+        return
+
+    cmd: list[str] = ["python3", str(script)]
+    if category:
+        cmd += ["--category", category]
+    label = f"category={category}" if category else "full audit"
+
+    await send(
+        f"🔬 Audit starting ({label}). "
+        "I'll send a summary when it completes."
+    )
+
+    async def _runner() -> None:
+        try:
+            proc = await _aio.create_subprocess_exec(
+                *cmd,
+                stdout=_aio.subprocess.PIPE,
+                stderr=_aio.subprocess.STDOUT,
+                cwd=str(repo_root),
+            )
+            stdout, _ = await proc.communicate()
+            rc = proc.returncode
+            # Read the latest report (the script writes one even on partial runs)
+            from prometheus.config.paths import get_config_dir
+            audits_dir = get_config_dir() / "audits"
+            latest_md = sorted(audits_dir.glob("web_audit_*.md"))[-1] \
+                if audits_dir.is_dir() and any(
+                    audits_dir.glob("web_audit_*.md")
+                ) else None
+            if latest_md is not None:
+                msg = (
+                    f"🔬 Audit complete (exit {rc}). "
+                    f"Report: {latest_md}"
+                )
+            else:
+                tail = (stdout or b"").decode("utf-8", errors="replace")[-1500:]
+                msg = f"🔬 Audit finished (exit {rc}). Output tail:\n{tail}"
+            await send(msg)
+        except Exception as exc:
+            await send(f"Audit failed to launch: {exc}")
+
+    _aio.create_task(_runner())
+
+
+async def cmd_audit(send: Any, body: str, *, prefix: str = "/") -> None:
+    """Shared /audit dispatcher.
+
+    Forms:
+      /audit                  — show summary of the most recent audit
+      /audit run              — start a full web capability audit
+      /audit <category>       — start an audit for a single category
+                                (search|fetch|youtube|download|research|graceful|railway)
+    """
+    body = (body or "").strip().lower()
+
+    if not body:
+        await _audit_show_last(send, prefix)
+        return
+
+    valid_categories = {
+        "search", "fetch", "youtube", "download",
+        "research", "graceful", "railway",
+    }
+
+    if body == "run":
+        await _audit_kick_off(send, category=None)
+        return
+
+    if body in valid_categories:
+        await _audit_kick_off(send, category=body)
+        return
+
+    await send(
+        "Usage:\n"
+        f"  {prefix}audit                — show last audit summary\n"
+        f"  {prefix}audit run            — full audit (~30–60 min)\n"
+        f"  {prefix}audit <category>     — single category\n"
+        "Categories: search, fetch, youtube, download, research, graceful, railway"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Printing Press — /press (CLI library discovery + install)
+# ---------------------------------------------------------------------------
+
+
+async def _press_usage(send: Any, prefix: str) -> None:
+    await send(
+        "Printing Press — local CLI library\n\n"
+        f"  {prefix}press list [category]  — list available CLIs\n"
+        f"  {prefix}press search <query>   — fuzzy search\n"
+        f"  {prefix}press install <name>   — install (queues approval)\n"
+        f"  {prefix}press installed        — show what's installed\n"
+        f"  {prefix}press update           — git pull the library clone\n"
+    )
+
+
+async def _press_list(
+    send: Any, press: Any, *, category: str | None, prefix: str,
+) -> None:
+    records = press.list_available()
+    if category:
+        cat = category.lower()
+        records = [r for r in records if cat in r.category.lower()]
+    if not records:
+        await send(
+            f"No CLIs in the library{' for category ' + category if category else ''}."
+        )
+        return
+    # Group by category for readability
+    from collections import defaultdict
+    by_cat: dict[str, list] = defaultdict(list)
+    for r in records:
+        by_cat[r.category or "uncategorized"].append(r)
+    lines = [f"Printing Press CLIs ({len(records)} available):"]
+    for cat in sorted(by_cat):
+        lines.append(f"\n[{cat}]")
+        for r in sorted(by_cat[cat], key=lambda x: x.name):
+            marker = "✓" if r.installed else "·"
+            lines.append(f"  {marker} {r.name} — {r.description[:80]}")
+    # Telegram caps messages around 4096 chars; trim if needed
+    msg = "\n".join(lines)
+    if len(msg) > 3800:
+        msg = msg[:3800] + f"\n... (truncated; use {prefix}press search to narrow)"
+    await send(msg)
+
+
+async def _press_search(send: Any, press: Any, *, query: str, prefix: str) -> None:
+    if not query:
+        await send(f"Usage: {prefix}press search <query>")
+        return
+    records = press.search(query, limit=10)
+    if not records:
+        await send(f"No CLI matched '{query}'.")
+        return
+    lines = [f"Matches for '{query}':"]
+    for r in records:
+        marker = "✓" if r.installed else "·"
+        lines.append(
+            f"{marker} {r.name} ({r.category}) — {r.description[:140]}"
+        )
+    await send("\n".join(lines))
+
+
+async def _press_installed(send: Any, press: Any, *, prefix: str) -> None:
+    records = [r for r in press.list_available() if r.installed]
+    if not records:
+        await send(
+            f"No Printing Press CLIs installed yet. Try {prefix}press list."
+        )
+        return
+    lines = [f"Installed Printing Press CLIs ({len(records)}):"]
+    for r in sorted(records, key=lambda x: x.name):
+        lines.append(f"  ✓ {r.name} ({r.bin_name})")
+    await send("\n".join(lines))
+
+
+async def _press_update(send: Any, press: Any) -> None:
+    ok, msg = await press.update_library()
+    prefix_mark = "✓" if ok else "✗"
+    await send(f"{prefix_mark} library update: {msg}")
+
+
+async def _press_install(
+    send: Any, press: Any, *, cli_name: str,
+    approval_queue: Any, chat_id: Any, prefix: str,
+) -> None:
+    """Approval-queue install. Mirrors the /gepa run / /symbiote pattern."""
+    import asyncio as _aio
+
+    if approval_queue is None:
+        await send("Approval queue is not active — cannot install.")
+        return
+
+    # Resolve up-front so we can show the user what they're approving
+    records = press.search(cli_name, limit=1)
+    if not records:
+        await send(
+            f"No CLI matching '{cli_name}' in the library. "
+            f"Try {prefix}press search first."
+        )
+        return
+    rec = records[0]
+    if rec.installed:
+        await send(f"{rec.name} ({rec.bin_name}) is already installed.")
+        return
+
+    async def _runner() -> None:
+        from prometheus.permissions.approval_queue import ApprovalResult
+
+        description = (
+            f"go install {rec.install_module}@latest  "
+            f"+ copy SKILL.md → ~/.prometheus/skills/{rec.skill_name}.md"
+        )
+        try:
+            result = await approval_queue.request_approval(
+                "printing_press_install", description, chat_id=chat_id,
+            )
+        except Exception as exc:
+            await send(f"Approval queue error: {exc}")
+            return
+        if result == ApprovalResult.DENIED:
+            await send(f"Install denied: {rec.name}.")
+            return
+        if result == ApprovalResult.TIMEOUT:
+            await send(f"Install request timed out: {rec.name}.")
+            return
+        await send(f"Installing {rec.name}…")
+        try:
+            outcome = await press.install(rec.name)
+        except Exception as exc:
+            await send(f"Install failed: {exc}")
+            return
+        if outcome.success:
+            lines = [
+                f"✓ Installed {outcome.cli_name} ({outcome.bin_name})",
+                f"  Skill: {'copied' if outcome.skill_installed else 'NOT copied'}",
+            ]
+            if not outcome.on_path:
+                lines.append(
+                    "  ⚠ Binary in ~/go/bin but not on $PATH — "
+                    "add `export PATH=$HOME/go/bin:$PATH` to your shell."
+                )
+            await send("\n".join(lines))
+        else:
+            await send(f"✗ Install failed: {outcome.error}")
+
+    _aio.create_task(_runner(), name=f"press_install_{rec.name}")
+    await send(
+        f"Install request queued for {rec.name}. Watch for {prefix}approve."
+    )
+
+
+async def cmd_press(
+    send: Any,
+    press: Any,
+    body: str,
+    *,
+    approval_queue: Any = None,
+    chat_id: Any = None,
+    prefix: str = "/",
+) -> None:
+    """Shared /press dispatcher.
+
+    Forms:
+      /press                   — show usage
+      /press list [category]   — list available CLIs (optionally filtered)
+      /press search <query>    — fuzzy search by name / description
+      /press install <name>    — request approval, then go install + skill copy
+      /press installed         — list CLIs whose binary is on PATH or in ~/go/bin
+      /press update            — git pull the library clone
+    """
+    if press is None or not press.is_available():
+        await send(
+            "Printing Press is not active. The library clone is missing "
+            "(searched ~/printing-press-library/ and /tmp/printing-press-library/) "
+            "or the feature is disabled in config."
+        )
+        return
+
+    body = (body or "").strip()
+    first_token = body.split(maxsplit=1)[0].lower() if body else ""
+    rest = body[len(first_token):].strip() if first_token else ""
+
+    if first_token == "" or first_token == "help":
+        await _press_usage(send, prefix)
+        return
+    if first_token == "list":
+        await _press_list(send, press, category=rest or None, prefix=prefix)
+        return
+    if first_token == "search":
+        await _press_search(send, press, query=rest, prefix=prefix)
+        return
+    if first_token == "installed":
+        await _press_installed(send, press, prefix=prefix)
+        return
+    if first_token == "update":
+        await _press_update(send, press)
+        return
+    if first_token == "install":
+        if not rest:
+            await send(f"Usage: {prefix}press install <cli-name>")
+            return
+        await _press_install(
+            send, press, cli_name=rest,
+            approval_queue=approval_queue, chat_id=chat_id, prefix=prefix,
+        )
+        return
+    await _press_usage(send, prefix)
+
+
+# ---------------------------------------------------------------------------
+# Voice reply mode — /voice (persistence is platform-independent; the TTS
+# reply pipeline itself currently lives in the Telegram adapter)
+# ---------------------------------------------------------------------------
+
+_VOICE_MODES_FILE = "voice_modes.json"
+_VALID_VOICE_MODES = ("auto", "on", "off")
+
+
+def _voice_modes_path() -> str:
+    """Path to the per-chat voice mode override JSON file."""
+    from prometheus.config.paths import get_config_dir
+    return str(get_config_dir() / _VOICE_MODES_FILE)
+
+
+def load_voice_modes() -> dict[str, str]:
+    """Read per-chat voice mode overrides. Returns {chat_key: mode}."""
+    import json
+    try:
+        with open(_voice_modes_path()) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+    return {}
+
+
+def save_voice_modes(modes: dict[str, str]) -> None:
+    """Persist per-chat voice mode overrides."""
+    import json
+    try:
+        with open(_voice_modes_path(), "w") as f:
+            json.dump(modes, f, indent=2)
+    except OSError as exc:
+        log.warning("Failed to persist voice modes: %s", exc)
+
+
+def get_voice_mode(chat_key: str, default_mode: str = "auto") -> str:
+    """Return the effective voice mode for a chat ('auto' | 'on' | 'off')."""
+    overrides = load_voice_modes()
+    mode = overrides.get(str(chat_key))
+    if mode in _VALID_VOICE_MODES:
+        return mode
+    return default_mode if default_mode in _VALID_VOICE_MODES else "auto"
+
+
+def set_voice_mode(chat_key: str, mode: str) -> None:
+    """Persist a per-chat voice mode override."""
+    if mode not in _VALID_VOICE_MODES:
+        return
+    modes = load_voice_modes()
+    modes[str(chat_key)] = mode
+    save_voice_modes(modes)
+
+
+def cmd_voice(
+    chat_key: str,
+    arg: str,
+    voice_config: dict | None = None,
+    *,
+    prefix: str = "/",
+) -> str:
+    """Shared /voice core — show or set the per-chat voice reply mode.
+
+    Modes:
+      auto  (default) — mirror input modality (voice in → voice out)
+      on              — always reply with voice (TTS for every response)
+      off             — always reply with text (disable voice replies)
+
+    Persists across daemon restarts in ~/.prometheus/voice_modes.json.
+    """
+    cfg = voice_config or {}
+    arg = (arg or "").strip().lower()
+
+    if not arg:
+        default = str(cfg.get("default_mode", "auto"))
+        current = get_voice_mode(chat_key, default)
+        engine = cfg.get("engine", "piper")
+        model = cfg.get("model_path", "(unset)")
+        return (
+            f"Voice mode: {current}\n"
+            f"  auto — mirror input modality (default)\n"
+            f"  on   — always voice reply\n"
+            f"  off  — always text reply\n"
+            f"\nEngine: {engine}\nModel:  {model}\n"
+            f"Set with: {prefix}voice [auto|on|off]"
+        )
+
+    if arg not in _VALID_VOICE_MODES:
+        return f"Unknown voice mode: {arg}\nUse: {prefix}voice [auto|on|off]"
+
+    set_voice_mode(chat_key, arg)
+    descriptions = {
+        "auto": "mirror input modality (voice in → voice out)",
+        "on": "always reply with voice",
+        "off": "always reply with text",
+    }
+    return f"Voice mode set to: {arg}\n  ({descriptions[arg]})"
+
+
+# ---------------------------------------------------------------------------
+# Telemetry formatters — /tools /pairs
+# ---------------------------------------------------------------------------
+
+
+def cmd_tools() -> str:
+    """Tool-call telemetry dashboard, last 24h (shared /tools core)."""
+    try:
+        from prometheus.telemetry.dashboard import ToolDashboard
+        dashboard = ToolDashboard()
+        stats = dashboard.get_stats(hours=24)
+
+        lines = ["Tool Call Stats (24h)\n"]
+        lines.append(f"Total calls: {stats['total_calls']}")
+        lines.append(f"Success rate: {stats['overall_success_rate']:.0%}")
+        if stats.get("total_denials"):
+            lines.append(f"Denied by policy: {stats['total_denials']}")
+
+        if stats["most_called"]:
+            lines.append("\nMost called:")
+            for row in stats["most_called"][:5]:
+                name, count = row["tool_name"], row["calls"]
+                rate = stats["success_rate_by_tool"].get(name, 0)
+                lines.append(f"  {name}: {count} calls ({rate:.0%} ok)")
+
+        if stats["circuit_breaker_trips"]:
+            lines.append(f"\nCircuit breaker trips: {stats['circuit_breaker_trips']}")
+        if stats["adapter_repairs"]:
+            lines.append(f"Adapter repairs: {stats['adapter_repairs']}")
+        if stats["lucky_guesses"]:
+            lines.append(f"Lucky guesses (deferred): {stats['lucky_guesses']}")
+
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Tool stats unavailable: {exc}"
+
+
+def cmd_pairs() -> str:
+    """Repair-pair flywheel stats (shared /pairs core)."""
+    try:
+        from prometheus.learning.pair_capture import PairStore, get_store
+        store = get_store() or PairStore()
+        stats = store.stats()
+
+        lines = ["Training Pairs\n"]
+        lines.append(f"Total: {stats['total']}")
+        lines.append(
+            f"Last 7d: {stats['last_7d']} (~{stats['per_day_7d']}/day)"
+        )
+        if stats["by_source"]:
+            lines.append("\nBy source:")
+            for src, n in sorted(
+                stats["by_source"].items(), key=lambda kv: -kv[1]
+            ):
+                lines.append(f"  {src}: {n}")
+        if stats["by_tool"]:
+            lines.append("\nBy tool:")
+            for tool, n in list(stats["by_tool"].items())[:8]:
+                lines.append(f"  {tool}: {n}")
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Pair stats unavailable: {exc}"

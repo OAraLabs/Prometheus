@@ -50,12 +50,11 @@ _MARKDOWN_V2_ESCAPE = re.compile(r"([_\*\[\]\(\)~`>#+\-=|{}.!\\])")
 MAX_MESSAGE_LENGTH = 4096
 
 # Sprint 22 GRAFT-ROUTER-WIRE Phase 4: display labels for /claude, /gpt, etc.
-_PRESET_DISPLAY_NAMES: dict[str, str] = {
-    "claude": "Claude (anthropic)",
-    "gpt": "GPT (openai)",
-    "gemini": "Gemini (google)",
-    "xai": "Grok (xai)",
-}
+# SPRINT G1: canonical table moved to the shared commands layer; kept as an
+# alias for backward compatibility.
+from prometheus.gateway.commands import (  # noqa: E402
+    PROVIDER_PRESET_DISPLAY_NAMES as _PRESET_DISPLAY_NAMES,
+)
 
 
 def escape_markdown_v2(text: str) -> str:
@@ -123,10 +122,10 @@ class TelegramAdapter(BasePlatformAdapter):
         self.system_prompt = system_prompt
         self.model_name = model_name
         self.model_provider = model_provider
-        self.cost_tracker = None  # Set by daemon if using cloud provider
-        # SPRINT-TEACHER-ESCALATION: TeacherEscalation engine, set by daemon
-        # (None → feature absent; an unarmed engine reports via /escalations).
-        self.escalation_engine = None
+        # cost_tracker / escalation_engine / _approval_queue / _gepa_engine /
+        # _printing_press / _backup_vault / _morph_engine: gateway-generic
+        # subsystem slots, defaulted to None in BasePlatformAdapter.__init__
+        # and attached by daemon.py via GatewaySubsystemRegistry (SPRINT G1).
         self._app: Application | None = None
         self._start_time: float = 0.0
         self._prometheus_config: dict[str, Any] = prometheus_config or {}
@@ -739,34 +738,8 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle /tools command — tool call telemetry dashboard."""
         if update.effective_chat is None:
             return
-        try:
-            from prometheus.telemetry.dashboard import ToolDashboard
-            dashboard = ToolDashboard()
-            stats = dashboard.get_stats(hours=24)
-
-            lines = ["Tool Call Stats (24h)\n"]
-            lines.append(f"Total calls: {stats['total_calls']}")
-            lines.append(f"Success rate: {stats['overall_success_rate']:.0%}")
-            if stats.get("total_denials"):
-                lines.append(f"Denied by policy: {stats['total_denials']}")
-
-            if stats["most_called"]:
-                lines.append("\nMost called:")
-                for row in stats["most_called"][:5]:
-                    name, count = row["tool_name"], row["calls"]
-                    rate = stats["success_rate_by_tool"].get(name, 0)
-                    lines.append(f"  {name}: {count} calls ({rate:.0%} ok)")
-
-            if stats["circuit_breaker_trips"]:
-                lines.append(f"\nCircuit breaker trips: {stats['circuit_breaker_trips']}")
-            if stats["adapter_repairs"]:
-                lines.append(f"Adapter repairs: {stats['adapter_repairs']}")
-            if stats["lucky_guesses"]:
-                lines.append(f"Lucky guesses (deferred): {stats['lucky_guesses']}")
-
-            await self.send(update.effective_chat.id, "\n".join(lines), parse_mode=None)
-        except Exception as exc:
-            await self.send(update.effective_chat.id, f"Tool stats unavailable: {exc}", parse_mode=None)
+        from prometheus.gateway import commands as _cmds
+        await self.send(update.effective_chat.id, _cmds.cmd_tools(), parse_mode=None)
 
     async def _cmd_pairs(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -774,33 +747,8 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle /pairs command — repair-pair flywheel stats."""
         if update.effective_chat is None:
             return
-        try:
-            from prometheus.learning.pair_capture import PairStore, get_store
-            store = get_store() or PairStore()
-            stats = store.stats()
-
-            lines = ["Training Pairs\n"]
-            lines.append(f"Total: {stats['total']}")
-            lines.append(
-                f"Last 7d: {stats['last_7d']} (~{stats['per_day_7d']}/day)"
-            )
-            if stats["by_source"]:
-                lines.append("\nBy source:")
-                for src, n in sorted(
-                    stats["by_source"].items(), key=lambda kv: -kv[1]
-                ):
-                    lines.append(f"  {src}: {n}")
-            if stats["by_tool"]:
-                lines.append("\nBy tool:")
-                for tool, n in list(stats["by_tool"].items())[:8]:
-                    lines.append(f"  {tool}: {n}")
-            await self.send(update.effective_chat.id, "\n".join(lines), parse_mode=None)
-        except Exception as exc:
-            await self.send(
-                update.effective_chat.id,
-                f"Pair stats unavailable: {exc}",
-                parse_mode=None,
-            )
+        from prometheus.gateway import commands as _cmds
+        await self.send(update.effective_chat.id, _cmds.cmd_pairs(), parse_mode=None)
 
     async def _cmd_wiki(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1171,6 +1119,16 @@ class TelegramAdapter(BasePlatformAdapter):
         session_key = f"telegram:{update.effective_chat.id}"
         return self.session_manager._sessions.get(session_key)
 
+    def _plain_sender(self, chat_id: int):
+        """Return ``async send(text)`` bound to *chat_id* (plain text).
+
+        SPRINT G1: multi-message shared command flows (gepa/symbiote/audit/
+        press) take an injected send callable instead of an adapter handle.
+        """
+        async def _send(text: str) -> None:
+            await self.send(chat_id, text, parse_mode=None)
+        return _send
+
     async def _cmd_steer(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1288,42 +1246,9 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id = update.effective_chat.id
         arg = (" ".join(context.args or []).strip()).lower()
 
-        if not arg:
-            current = self._get_voice_mode(chat_id)
-            cfg = self._voice_config()
-            engine = cfg.get("engine", "piper")
-            model = cfg.get("model_path", "(unset)")
-            await self.send(
-                chat_id,
-                f"Voice mode: {current}\n"
-                f"  auto — mirror input modality (default)\n"
-                f"  on   — always voice reply\n"
-                f"  off  — always text reply\n"
-                f"\nEngine: {engine}\nModel:  {model}\n"
-                f"Set with: /voice [auto|on|off]",
-                parse_mode=None,
-            )
-            return
-
-        if arg not in ("auto", "on", "off"):
-            await self.send(
-                chat_id,
-                f"Unknown voice mode: {arg}\nUse: /voice [auto|on|off]",
-                parse_mode=None,
-            )
-            return
-
-        self._set_voice_mode(chat_id, arg)
-        descriptions = {
-            "auto": "mirror input modality (voice in → voice out)",
-            "on": "always reply with voice",
-            "off": "always reply with text",
-        }
-        await self.send(
-            chat_id,
-            f"Voice mode set to: {arg}\n  ({descriptions[arg]})",
-            parse_mode=None,
-        )
+        from prometheus.gateway import commands as _cmds
+        text = _cmds.cmd_voice(str(chat_id), arg, self._voice_config())
+        await self.send(chat_id, text, parse_mode=None)
 
     async def _cmd_context(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1394,10 +1319,10 @@ class TelegramAdapter(BasePlatformAdapter):
     ) -> None:
         """Shared logic for /claude, /gpt, /gemini, /xai, /grok.
 
-        Validates router availability, overrides_enabled, and API key env var;
-        records the override on the router; if the command had an inline
-        message (e.g., ``/claude what is 2+2?``), dispatches it immediately
-        via the normal agent path so the user gets an answer in one shot.
+        Thin wrapper over commands.cmd_provider_override (SPRINT G1); if the
+        command had an inline message (e.g., ``/claude what is 2+2?``) and the
+        override applied, dispatches it immediately via the normal agent path
+        so the user gets an answer in one shot.
         """
         if update.effective_chat is None:
             return
@@ -1405,73 +1330,16 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id = update.effective_chat.id
         session_key = f"{Platform.TELEGRAM.value}:{chat_id}"
 
-        router = getattr(self.agent_loop, "_model_router", None)
-        if router is None:
-            await self.send(
-                chat_id,
-                "Routing is not enabled. Provider overrides require a "
-                "configured router in prometheus.yaml.",
-                parse_mode=None,
-            )
-            return
-
-        if not getattr(router.config, "overrides_enabled", True):
-            logger.warning(
-                "Phase 4 override command /%s invoked in chat %d but "
-                "router.overrides.enabled is False — ignoring.",
-                preset_name, chat_id,
-            )
-            await self.send(
-                chat_id,
-                "Direct-mode provider overrides are disabled.\n"
-                "Set router.overrides.enabled: true in config/prometheus.yaml "
-                "and restart the daemon to enable.",
-                parse_mode=None,
-            )
-            return
-
-        from prometheus.router.model_router import resolve_slash_command_target
-        preset = resolve_slash_command_target(preset_name, self._prometheus_config)
-        if preset is None:
-            await self.send(
-                chat_id,
-                f"Unknown override preset '{preset_name}'.",
-                parse_mode=None,
-            )
-            return
-
-        # Early feedback if the API key env var is missing — beats failing on
-        # the user's next message with an opaque ValueError from the provider
-        # registry.
-        api_key_env = preset.get("api_key_env", "")
-        if api_key_env and not os.environ.get(api_key_env):
-            display = _PRESET_DISPLAY_NAMES.get(preset_name, preset_name)
-            await self.send(
-                chat_id,
-                f"{display} requires {api_key_env} to be set in the "
-                f"environment.\n"
-                f"Add it to ~/.config/prometheus/env and restart the daemon "
-                f"(systemctl --user restart prometheus), then try /{preset_name} "
-                f"again.",
-                parse_mode=None,
-            )
-            return
-
-        # Record the override. set_override raises ValueError if called with a
-        # reserved session_id, but "telegram:<chat_id>" is never reserved.
-        router.set_override(session_key, dict(preset))
-        display = _PRESET_DISPLAY_NAMES.get(preset_name, preset_name)
-        logger.info(
-            "Phase 4: set override for session %s → %s/%s",
-            session_key, preset.get("provider"), preset.get("model"),
+        from prometheus.gateway import commands as _cmds
+        text, applied = _cmds.cmd_provider_override(
+            self.agent_loop,
+            self._prometheus_config,
+            session_key,
+            preset_name,
         )
-        await self.send(
-            chat_id,
-            f"Switched to {display}.\n"
-            f"Model: {preset.get('model', '?')}\n"
-            f"Use /local to return to primary, /route to check.",
-            parse_mode=None,
-        )
+        await self.send(chat_id, text, parse_mode=None)
+        if not applied:
+            return
 
         # Inline message dispatch: /claude <message> answers <message> through
         # the override provider in one round-trip. No auth check here; the
@@ -1537,30 +1405,11 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id = update.effective_chat.id
         session_key = f"{Platform.TELEGRAM.value}:{chat_id}"
 
-        router = getattr(self.agent_loop, "_model_router", None)
-        had_override = False
-        if router is not None:
-            had_override = router.get_override_for_session(session_key) is not None
-            router.clear_override(session_key)
-            if had_override:
-                logger.info(
-                    "Phase 4: cleared override for session %s (back to primary)",
-                    session_key,
-                )
-
-        primary = f"{self.model_provider or '?'}/{self.model_name or '?'}"
-        if had_override:
-            await self.send(
-                chat_id,
-                f"Back to primary ({primary}).",
-                parse_mode=None,
-            )
-        else:
-            await self.send(
-                chat_id,
-                f"Already on primary ({primary}). No override was set.",
-                parse_mode=None,
-            )
+        from prometheus.gateway import commands as _cmds
+        text = _cmds.cmd_local_override(
+            self.agent_loop, session_key, self.model_name, self.model_provider,
+        )
+        await self.send(chat_id, text, parse_mode=None)
 
         # Inline message dispatch
         args = getattr(context, "args", None)
@@ -1597,39 +1446,11 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id = update.effective_chat.id
         session_key = f"{Platform.TELEGRAM.value}:{chat_id}"
 
-        router = getattr(self.agent_loop, "_model_router", None)
-        lines = ["Route"]
-
-        if router is None:
-            lines.append(
-                f"Active: {self.model_provider or '?'}/"
-                f"{self.model_name or '?'}  (no router)"
-            )
-        else:
-            override = router.get_override_for_session(session_key)
-            if override is not None:
-                cfg = override.provider_config
-                lines.append(
-                    f"Active: {cfg.get('provider', '?')}/"
-                    f"{cfg.get('model', '?')}  (override)"
-                )
-                lines.append("Clear with: /local")
-            else:
-                lines.append(
-                    f"Active: {self.model_provider or '?'}/"
-                    f"{self.model_name or '?'}  (primary)"
-                )
-
-        lines.append("")
-        lines.append("Override commands:")
-        lines.append("  /claude  — Anthropic Claude")
-        lines.append("  /gpt     — OpenAI GPT")
-        lines.append("  /gemini  — Google Gemini")
-        lines.append("  /xai     — xAI Grok")
-        lines.append("  /grok    — alias for /xai")
-        lines.append("  /local   — back to primary")
-
-        await self.send(chat_id, "\n".join(lines), parse_mode=None)
+        from prometheus.gateway import commands as _cmds
+        text = _cmds.cmd_route(
+            self.agent_loop, session_key, self.model_name, self.model_provider,
+        )
+        await self.send(chat_id, text, parse_mode=None)
 
     async def _handle_text(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1896,31 +1717,11 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle /escalations — teacher-escalation counters + budget state."""
         if update.effective_chat is None:
             return
-        chat_id = update.effective_chat.id
+        from prometheus.gateway import commands as _cmds
+
         engine = getattr(self, "escalation_engine", None)
-        if engine is None:
-            await self.send(
-                chat_id,
-                "Teacher escalation: not available in this build.",
-                parse_mode=None,
-            )
-            return
-        s = engine.stats()
-        armed = f"yes — {s['teacher']}" if s["armed"] else "no (escalation.teacher_model unset)"
-        lines = [
-            "Teacher escalation",
-            f"Armed: {armed}",
-            f"Fired: {s['fired']}   Skills written: {s['skills_written']}",
-            f"Teacher failures: {s['teacher_failed']}   Budget refusals: {s['refused_budget']}",
-            f"Budget: {s['max_per_session']} per session (in-memory, resets on restart)",
-        ]
-        sessions = s.get("sessions") or {}
-        if sessions:
-            lines.append(
-                "Used: " + ", ".join(
-                    f"{k}={v}" for k, v in sorted(sessions.items()))
-            )
-        await self.send(chat_id, "\n".join(lines), parse_mode=None)
+        text = _cmds.cmd_escalations(engine)
+        await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def inject_turn(
         self,
@@ -2138,22 +1939,13 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle /approve {request_id} command."""
         if not update.message or not update.effective_chat:
             return
+        from prometheus.gateway import commands as _cmds
+
         args = (update.message.text or "").split()
-        if len(args) < 2:
-            await self.send(update.effective_chat.id, "Usage: /approve {request_id}", parse_mode=None)
-            return
-
-        request_id = args[1]
+        request_id = args[1] if len(args) >= 2 else ""
         queue = getattr(self, "_approval_queue", None)
-        if queue is None:
-            await self.send(update.effective_chat.id, "Approval queue not active.", parse_mode=None)
-            return
-
-        ok = await queue.approve(request_id)
-        if ok:
-            await self.send(update.effective_chat.id, f"Approved: {request_id}", parse_mode=None)
-        else:
-            await self.send(update.effective_chat.id, f"No pending request: {request_id}", parse_mode=None)
+        text = await _cmds.cmd_approve(queue, request_id)
+        await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_deny(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2161,22 +1953,13 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle /deny {request_id} command."""
         if not update.message or not update.effective_chat:
             return
+        from prometheus.gateway import commands as _cmds
+
         args = (update.message.text or "").split()
-        if len(args) < 2:
-            await self.send(update.effective_chat.id, "Usage: /deny {request_id}", parse_mode=None)
-            return
-
-        request_id = args[1]
+        request_id = args[1] if len(args) >= 2 else ""
         queue = getattr(self, "_approval_queue", None)
-        if queue is None:
-            await self.send(update.effective_chat.id, "Approval queue not active.", parse_mode=None)
-            return
-
-        ok = await queue.deny(request_id)
-        if ok:
-            await self.send(update.effective_chat.id, f"Denied: {request_id}", parse_mode=None)
-        else:
-            await self.send(update.effective_chat.id, f"No pending request: {request_id}", parse_mode=None)
+        text = await _cmds.cmd_deny(queue, request_id)
+        await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_pending(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2184,21 +1967,11 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle /pending command — list pending approval requests."""
         if not update.message or not update.effective_chat:
             return
+        from prometheus.gateway import commands as _cmds
 
         queue = getattr(self, "_approval_queue", None)
-        if queue is None:
-            await self.send(update.effective_chat.id, "Approval queue not active.", parse_mode=None)
-            return
-
-        pending = queue.list_pending()
-        if not pending:
-            await self.send(update.effective_chat.id, "No pending requests.", parse_mode=None)
-            return
-
-        lines = ["Pending approval requests:"]
-        for action in pending:
-            lines.append(f"  {action.request_id}: {action.tool_name} — {action.description}")
-        await self.send(update.effective_chat.id, "\n".join(lines), parse_mode=None)
+        text = _cmds.cmd_pending(queue)
+        await self.send(update.effective_chat.id, text, parse_mode=None)
 
     # ------------------------------------------------------------------
     # SUNRISE Session B: GEPA skill evolution
@@ -2210,146 +1983,21 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle /gepa {status|run|history} command."""
         if not update.message or not update.effective_chat:
             return
+        from prometheus.gateway import commands as _cmds
+
         chat_id = update.effective_chat.id
         args = (update.message.text or "").split()
         sub = args[1].strip().lower() if len(args) > 1 else "status"
 
-        engine = getattr(self, "_gepa_engine", None)
-
-        if sub == "status":
-            if engine is None:
-                await self.send(
-                    chat_id,
-                    "GEPA: engine not active (set learning.gepa_enabled in config).",
-                    parse_mode=None,
-                )
-                return
-            report = engine.last_report
-            if report is None:
-                await self.send(
-                    chat_id,
-                    "GEPA: no cycle has run yet. "
-                    "Use /gepa run to trigger one manually.",
-                    parse_mode=None,
-                )
-                return
-            await self.send(chat_id, report.to_telegram_summary(), parse_mode=None)
-            return
-
-        if sub == "run":
-            if engine is None:
-                await self.send(
-                    chat_id,
-                    "GEPA: engine not active (set learning.gepa_enabled in config).",
-                    parse_mode=None,
-                )
-                return
-            queue = getattr(self, "_approval_queue", None)
-            if queue is None:
-                await self.send(
-                    chat_id,
-                    "GEPA: approval queue not active — cannot run on demand.",
-                    parse_mode=None,
-                )
-                return
-            asyncio.create_task(
-                self._gepa_run_with_approval(chat_id, queue, engine),
-                name="gepa_run_with_approval",
-            )
-            await self.send(
-                chat_id,
-                "GEPA run pending approval. Watch for the /approve prompt.",
-                parse_mode=None,
-            )
-            return
-
-        if sub == "history":
-            from prometheus.config.paths import get_config_dir
-            archive_dir = get_config_dir() / "skills" / "auto" / "archive"
-            if not archive_dir.exists():
-                await self.send(
-                    chat_id,
-                    "GEPA history: no promotions yet.",
-                    parse_mode=None,
-                )
-                return
-            archives = sorted(
-                archive_dir.glob("*.md"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            if not archives:
-                await self.send(
-                    chat_id,
-                    "GEPA history: archive directory is empty.",
-                    parse_mode=None,
-                )
-                return
-            lines = ["GEPA promotion history:"]
-            for path in archives[:15]:
-                ts = path.stat().st_mtime
-                stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
-                lines.append(f"  • {path.stem} ({stamp})")
-            await self.send(chat_id, "\n".join(lines), parse_mode=None)
-            return
-
-        await self.send(
-            chat_id,
-            "Usage: /gepa [status | run | history]",
-            parse_mode=None,
+        text = await _cmds.cmd_gepa(
+            getattr(self, "_gepa_engine", None),
+            getattr(self, "_approval_queue", None),
+            sub,
+            chat_id=chat_id,
+            send=self._plain_sender(chat_id),
         )
-
-    async def _gepa_run_with_approval(
-        self,
-        chat_id: int,
-        queue,
-        engine,
-    ) -> None:
-        """Background task: request approval, then run a GEPA cycle if granted."""
-        from prometheus.permissions.approval_queue import ApprovalResult
-        try:
-            result = await queue.request_approval(
-                tool_name="gepa",
-                description="Run GEPA skill evolution cycle now",
-                chat_id=chat_id,
-            )
-        except Exception as exc:
-            await self.send(
-                chat_id,
-                f"GEPA: approval failed: {exc}",
-                parse_mode=None,
-            )
-            return
-
-        if result == ApprovalResult.DENIED:
-            await self.send(chat_id, "GEPA run denied.", parse_mode=None)
-            return
-        if result == ApprovalResult.TIMEOUT:
-            await self.send(chat_id, "GEPA run approval timed out.", parse_mode=None)
-            return
-
-        try:
-            report = await engine.run_now()
-        except Exception as exc:
-            await self.send(
-                chat_id,
-                f"GEPA cycle failed: {exc}",
-                parse_mode=None,
-            )
-            return
-
-        if report is None:
-            await self.send(
-                chat_id,
-                "GEPA: a cycle is already running (or returned no report).",
-                parse_mode=None,
-            )
-            return
-        await self.send(
-            chat_id,
-            "GEPA cycle complete:\n" + report.to_telegram_summary(),
-            parse_mode=None,
-        )
+        if text:
+            await self.send(chat_id, text, parse_mode=None)
 
     # ------------------------------------------------------------------
     # GRAFT-SYMBIOTE Session A: /symbiote command
@@ -2367,651 +2015,29 @@ class TelegramAdapter(BasePlatformAdapter):
           /symbiote status [session_id]      — show session state
           /symbiote abort                    — abort active session
           /symbiote history [N]              — last N sessions
+
+        SPRINT G1: full dispatch + sub-handlers live in the shared
+        commands layer (commands.cmd_symbiote); this wrapper only parses
+        the Telegram Update and injects the wired subsystems.
         """
         if not update.message or not update.effective_chat:
             return
         chat_id = update.effective_chat.id
-        from prometheus.symbiote import get_coordinator
-        coordinator = get_coordinator()
-        if coordinator is None:
-            await self.send(
-                chat_id,
-                "SYMBIOTE is not active. Set symbiote.enabled in config.",
-                parse_mode=None,
-            )
-            return
 
         text = (update.message.text or "").strip()
         # Strip the command itself (handles "/symbiote@bot ...")
         parts = text.split(maxsplit=1)
         body = parts[1].strip() if len(parts) > 1 else ""
 
-        # Detect subcommand by first token; otherwise treat whole body as problem.
-        first_token = body.split(maxsplit=1)[0] if body else ""
-        first_lower = first_token.lower()
-        rest = body[len(first_token):].strip()
-
-        known_subcommands = {
-            # Session A
-            "approve", "graft", "status", "abort", "history",
-            # Session B
-            "morph", "swap", "backup", "backups", "restore",
-        }
-
-        if not body:
-            await self._symbiote_status(chat_id, coordinator, "")
-            return
-
-        if first_lower not in known_subcommands:
-            # Treat whole body as the problem statement → start scout.
-            await self._symbiote_scout(chat_id, coordinator, body)
-            return
-
-        if first_lower == "status":
-            await self._symbiote_status(chat_id, coordinator, rest)
-            return
-        if first_lower == "history":
-            await self._symbiote_history(chat_id, coordinator, rest)
-            return
-        if first_lower == "abort":
-            await self._symbiote_abort(chat_id, coordinator)
-            return
-        if first_lower == "approve":
-            await self._symbiote_approve(chat_id, coordinator, rest)
-            return
-        if first_lower == "graft":
-            await self._symbiote_graft(chat_id, coordinator)
-            return
-        # ---- Session B subcommands ------------------------------------
-        if first_lower == "morph":
-            await self._symbiote_morph(chat_id, coordinator)
-            return
-        if first_lower == "swap":
-            await self._symbiote_swap(chat_id, coordinator)
-            return
-        if first_lower == "backup":
-            await self._symbiote_manual_backup(chat_id, rest)
-            return
-        if first_lower == "backups":
-            await self._symbiote_backups(chat_id, rest)
-            return
-        if first_lower == "restore":
-            await self._symbiote_restore(chat_id, rest)
-            return
-
-    # ------------------------------------------------------------------
-    # /symbiote subcommand handlers
-    # ------------------------------------------------------------------
-
-    async def _symbiote_scout(self, chat_id: int, coordinator, problem: str) -> None:
-        """Run the Scout phase and reply with a candidate summary."""
-        await self.send(
-            chat_id,
-            f"SYMBIOTE: scouting GitHub for {problem!r}...",
-            parse_mode=None,
+        from prometheus.gateway import commands as _cmds
+        await _cmds.cmd_symbiote(
+            self._plain_sender(chat_id),
+            body,
+            approval_queue=getattr(self, "_approval_queue", None),
+            morph_engine=getattr(self, "_morph_engine", None),
+            backup_vault=getattr(self, "_backup_vault", None),
+            chat_id=chat_id,
         )
-        try:
-            session = await coordinator.start_scout(problem)
-        except RuntimeError as exc:
-            await self.send(chat_id, f"SYMBIOTE: {exc}", parse_mode=None)
-            return
-        except Exception as exc:
-            logger.exception("SYMBIOTE scout failed")
-            await self.send(chat_id, f"SYMBIOTE scout failed: {exc}", parse_mode=None)
-            return
-        if session.error:
-            await self.send(
-                chat_id,
-                f"SYMBIOTE scout: {session.error}",
-                parse_mode=None,
-            )
-            return
-        report = session.scout_report or {}
-        candidates = report.get("candidates") or []
-        if not candidates:
-            note = report.get("notes") or "no viable candidates"
-            await self.send(
-                chat_id,
-                f"SYMBIOTE: no candidates ({note}). Session {session.session_id[:8]}.",
-                parse_mode=None,
-            )
-            return
-        lines = [
-            f"SYMBIOTE session {session.session_id[:8]} — "
-            f"{len(candidates)} candidate(s):",
-        ]
-        for c in candidates[:5]:
-            lic = (c.get("license_check") or {}).get("spdx_id") or "?"
-            lines.append(
-                f"  • {c['full_name']} ({lic}, ★{c.get('stars', 0)}) "
-                f"[{c.get('recommendation', '?')}] "
-                f"score={float(c.get('relevance_score', 0)):.2f}"
-            )
-        lines.append("")
-        lines.append("To proceed: /symbiote approve <full_name>")
-        await self.send(chat_id, "\n".join(lines), parse_mode=None)
-
-    async def _symbiote_approve(self, chat_id: int, coordinator, rest: str) -> None:
-        """Queue an approval; on /approve run harvest."""
-        if not rest:
-            await self.send(
-                chat_id,
-                "Usage: /symbiote approve <owner/repo>",
-                parse_mode=None,
-            )
-            return
-        active = coordinator.get_status()
-        if active is None:
-            await self.send(
-                chat_id,
-                "SYMBIOTE: no active session. Run /symbiote <problem> first.",
-                parse_mode=None,
-            )
-            return
-        candidate_full_name = rest.split()[0]
-        queue = getattr(self, "_approval_queue", None)
-        if queue is None:
-            await self.send(
-                chat_id,
-                "SYMBIOTE: approval queue not active — cannot start harvest.",
-                parse_mode=None,
-            )
-            return
-        asyncio.create_task(
-            self._symbiote_run_with_approval(
-                chat_id, queue, coordinator,
-                phase="harvest",
-                session_id=active.session_id,
-                candidate=candidate_full_name,
-            ),
-            name="symbiote_harvest_approval",
-        )
-        await self.send(
-            chat_id,
-            f"SYMBIOTE: harvest of {candidate_full_name} pending approval. "
-            "Watch for the /approve prompt.",
-            parse_mode=None,
-        )
-
-    async def _symbiote_graft(self, chat_id: int, coordinator) -> None:
-        """Queue an approval; on /approve run graft."""
-        active = coordinator.get_status()
-        if active is None:
-            await self.send(
-                chat_id,
-                "SYMBIOTE: no active session.",
-                parse_mode=None,
-            )
-            return
-        from prometheus.symbiote.coordinator import SymbiotePhase
-        if active.phase != SymbiotePhase.AWAITING_HARVEST_APPROVAL:
-            await self.send(
-                chat_id,
-                f"SYMBIOTE: cannot graft from phase {active.phase.value}.",
-                parse_mode=None,
-            )
-            return
-        queue = getattr(self, "_approval_queue", None)
-        if queue is None:
-            await self.send(
-                chat_id,
-                "SYMBIOTE: approval queue not active — cannot graft.",
-                parse_mode=None,
-            )
-            return
-        asyncio.create_task(
-            self._symbiote_run_with_approval(
-                chat_id, queue, coordinator,
-                phase="graft",
-                session_id=active.session_id,
-            ),
-            name="symbiote_graft_approval",
-        )
-        await self.send(
-            chat_id,
-            "SYMBIOTE: graft pending approval. Watch for the /approve prompt.",
-            parse_mode=None,
-        )
-
-    async def _symbiote_status(self, chat_id: int, coordinator, rest: str) -> None:
-        session_id = rest.split()[0] if rest else None
-        session = coordinator.get_status(session_id)
-        if session is None:
-            await self.send(
-                chat_id,
-                "SYMBIOTE: no active session.",
-                parse_mode=None,
-            )
-            return
-        await self.send(chat_id, session.to_telegram_summary(), parse_mode=None)
-
-    async def _symbiote_history(self, chat_id: int, coordinator, rest: str) -> None:
-        try:
-            limit = int(rest.split()[0]) if rest else 10
-        except ValueError:
-            limit = 10
-        history = coordinator.get_history(limit)
-        if not history:
-            await self.send(chat_id, "SYMBIOTE: no past sessions.", parse_mode=None)
-            return
-        lines = [f"SYMBIOTE history ({len(history)} session(s)):"]
-        for s in history:
-            lines.append(
-                f"  • {s.session_id[:8]} {s.phase.value} — "
-                f"{(s.problem_statement or '')[:60]}"
-            )
-        await self.send(chat_id, "\n".join(lines), parse_mode=None)
-
-    async def _symbiote_abort(self, chat_id: int, coordinator) -> None:
-        active = coordinator.get_status()
-        if active is None:
-            await self.send(chat_id, "SYMBIOTE: no active session.", parse_mode=None)
-            return
-        try:
-            session = await coordinator.abort(active.session_id)
-        except Exception as exc:
-            await self.send(chat_id, f"SYMBIOTE abort failed: {exc}", parse_mode=None)
-            return
-        await self.send(
-            chat_id,
-            f"SYMBIOTE: session {session.session_id[:8]} aborted.",
-            parse_mode=None,
-        )
-
-    # ---- SYMBIOTE Session B subcommands -------------------------------
-
-    async def _symbiote_morph(self, chat_id: int, coordinator) -> None:
-        """Stage a candidate via MorphEngine and produce a MorphReport."""
-        morph_engine = getattr(self, "_morph_engine", None)
-        if morph_engine is None:
-            await self.send(
-                chat_id,
-                "SYMBIOTE: MorphEngine not active. "
-                "Set symbiote.morph.enabled in config.",
-                parse_mode=None,
-            )
-            return
-        active = coordinator.get_status()
-        if active is None:
-            await self.send(chat_id, "SYMBIOTE: no active session.", parse_mode=None)
-            return
-        from prometheus.symbiote.coordinator import SymbiotePhase
-        if active.phase != SymbiotePhase.AWAITING_GRAFT_APPROVAL:
-            await self.send(
-                chat_id,
-                f"SYMBIOTE: cannot morph from phase {active.phase.value}. "
-                "Run /symbiote graft first.",
-                parse_mode=None,
-            )
-            return
-        await self.send(
-            chat_id,
-            "SYMBIOTE: staging candidate (full test run)... this may take a minute.",
-            parse_mode=None,
-        )
-        try:
-            session = await coordinator.start_morph(
-                active.session_id, morph_engine,
-            )
-        except Exception as exc:
-            logger.exception("SYMBIOTE morph failed")
-            await self.send(chat_id, f"SYMBIOTE morph failed: {exc}", parse_mode=None)
-            return
-        if session.morph_report:
-            from prometheus.symbiote.morph import MorphReport
-            report = coordinator._rebuild_morph_report(session.morph_report)
-            await self.send(chat_id, report.to_telegram_summary(), parse_mode=None)
-        elif session.error:
-            await self.send(chat_id, f"SYMBIOTE morph: {session.error}", parse_mode=None)
-
-    async def _symbiote_swap(self, chat_id: int, coordinator) -> None:
-        """Request approval; on /approve run MorphEngine.execute_swap()."""
-        morph_engine = getattr(self, "_morph_engine", None)
-        if morph_engine is None:
-            await self.send(
-                chat_id,
-                "SYMBIOTE: MorphEngine not active.",
-                parse_mode=None,
-            )
-            return
-        active = coordinator.get_status()
-        if active is None:
-            await self.send(chat_id, "SYMBIOTE: no active session.", parse_mode=None)
-            return
-        from prometheus.symbiote.coordinator import SymbiotePhase
-        if active.phase != SymbiotePhase.AWAITING_SWAP_APPROVAL:
-            await self.send(
-                chat_id,
-                f"SYMBIOTE: cannot swap from phase {active.phase.value}. "
-                "Run /symbiote morph first.",
-                parse_mode=None,
-            )
-            return
-        queue = getattr(self, "_approval_queue", None)
-        if queue is None:
-            await self.send(
-                chat_id,
-                "SYMBIOTE: approval queue not active — cannot swap.",
-                parse_mode=None,
-            )
-            return
-        backup_id = active.backup_id or "?"
-        warning = (
-            "⚠️ This will:\n"
-            "  1. Stop the daemon (~2-5s downtime)\n"
-            "  2. Replace live code with the candidate\n"
-            "  3. Restart the daemon\n"
-            "  4. Auto-rollback if health check fails within 60s\n\n"
-            f"Backup {backup_id} retained for manual rollback.\n\n"
-            "Watch for /approve prompt."
-        )
-        await self.send(chat_id, warning, parse_mode=None)
-        asyncio.create_task(
-            self._symbiote_run_with_approval(
-                chat_id, queue, coordinator,
-                phase="swap",
-                session_id=active.session_id,
-            ),
-            name="symbiote_swap_approval",
-        )
-
-    async def _symbiote_manual_backup(self, chat_id: int, rest: str) -> None:
-        """Create a manual backup snapshot. Trust Level 2 (no approval)."""
-        vault = getattr(self, "_backup_vault", None)
-        if vault is None:
-            await self.send(
-                chat_id,
-                "SYMBIOTE: BackupVault not active. Set symbiote.backup.enabled.",
-                parse_mode=None,
-            )
-            return
-        description = rest.strip().strip('"').strip("'") or "manual backup via /symbiote"
-        await self.send(
-            chat_id,
-            "SYMBIOTE: creating backup (running test suite for status capture)...",
-            parse_mode=None,
-        )
-        try:
-            snap = await vault.create_snapshot(
-                description=description,
-                source="manual",
-                metadata={"chat_id": chat_id},
-                capture_test_status=True,
-            )
-        except Exception as exc:
-            logger.exception("SYMBIOTE backup failed")
-            await self.send(chat_id, f"SYMBIOTE backup failed: {exc}", parse_mode=None)
-            return
-        await self.send(
-            chat_id,
-            (
-                f"📦 Backup created: {snap.backup_id}\n"
-                f"  files: {snap.file_count}, size: {snap.size_bytes/1024:.1f}KB\n"
-                f"  tests: {snap.test_status}\n"
-                f"  description: {snap.description}"
-            ),
-            parse_mode=None,
-        )
-
-    async def _symbiote_backups(self, chat_id: int, rest: str) -> None:
-        """List available backups."""
-        vault = getattr(self, "_backup_vault", None)
-        if vault is None:
-            await self.send(
-                chat_id,
-                "SYMBIOTE: BackupVault not active.",
-                parse_mode=None,
-            )
-            return
-        try:
-            limit = int(rest.split()[0]) if rest else 15
-        except ValueError:
-            limit = 15
-        snaps = vault.list_snapshots(limit=limit)
-        if not snaps:
-            await self.send(chat_id, "SYMBIOTE: no backups yet.", parse_mode=None)
-            return
-        lines = [f"📦 Backup Vault ({len(snaps)} snapshot(s)):"]
-        for s in snaps:
-            lines.append(
-                f"  {s.backup_id} — {s.source} — "
-                f"{s.size_bytes/1024:.1f}KB — tests: {s.test_status}"
-            )
-        lines.append("")
-        lines.append("Use: /symbiote restore <backup_id>")
-        await self.send(chat_id, "\n".join(lines), parse_mode=None)
-
-    async def _symbiote_restore(self, chat_id: int, rest: str) -> None:
-        """Restore from a backup. Trust Level 1 — requires approval."""
-        vault = getattr(self, "_backup_vault", None)
-        if vault is None:
-            await self.send(
-                chat_id,
-                "SYMBIOTE: BackupVault not active.",
-                parse_mode=None,
-            )
-            return
-        args = rest.split()
-        dry_run = False
-        backup_id: str | None = None
-        for arg in args:
-            if arg.lower() == "dry":
-                dry_run = True
-            else:
-                backup_id = arg
-        if backup_id is None:
-            latest = vault.get_latest()
-            if latest is None:
-                await self.send(
-                    chat_id,
-                    "SYMBIOTE: no backups available to restore.",
-                    parse_mode=None,
-                )
-                return
-            backup_id = latest.backup_id
-
-        snap = vault.get_snapshot(backup_id)
-        if snap is None:
-            await self.send(
-                chat_id,
-                f"SYMBIOTE: unknown backup_id {backup_id!r}.",
-                parse_mode=None,
-            )
-            return
-
-        if dry_run:
-            await self.send(
-                chat_id,
-                f"SYMBIOTE: dry-run restore of {backup_id}...",
-                parse_mode=None,
-            )
-            try:
-                result = await vault.restore_snapshot(backup_id, dry_run=True)
-            except Exception as exc:
-                await self.send(
-                    chat_id,
-                    f"SYMBIOTE: dry-run failed: {exc}",
-                    parse_mode=None,
-                )
-                return
-            lines = [
-                f"📦 Dry-run restore of {backup_id}:",
-                f"  added: {len(result.files_added)} file(s)",
-                f"  changed: {len(result.files_changed)} file(s)",
-            ]
-            if result.files_changed[:5]:
-                lines.append("  example changed paths:")
-                for p in result.files_changed[:5]:
-                    lines.append(f"    {p}")
-            await self.send(chat_id, "\n".join(lines), parse_mode=None)
-            return
-
-        # Real restore — Trust Level 1.
-        queue = getattr(self, "_approval_queue", None)
-        if queue is None:
-            await self.send(
-                chat_id,
-                "SYMBIOTE: approval queue not active — cannot restore.",
-                parse_mode=None,
-            )
-            return
-        await self.send(
-            chat_id,
-            f"⚠️ /symbiote restore {backup_id} will replace live source files. "
-            "A pre-restore backup will be created automatically. "
-            "Watch for /approve prompt.",
-            parse_mode=None,
-        )
-        asyncio.create_task(
-            self._symbiote_restore_with_approval(chat_id, queue, vault, backup_id),
-            name="symbiote_restore_approval",
-        )
-
-    async def _symbiote_restore_with_approval(
-        self,
-        chat_id: int,
-        queue,
-        vault,
-        backup_id: str,
-    ) -> None:
-        from prometheus.permissions.approval_queue import ApprovalResult
-        try:
-            result = await queue.request_approval(
-                tool_name="symbiote_restore",
-                description=f"SYMBIOTE: restore from {backup_id}",
-                chat_id=chat_id,
-            )
-        except Exception as exc:
-            await self.send(
-                chat_id,
-                f"SYMBIOTE: approval failed: {exc}",
-                parse_mode=None,
-            )
-            return
-        if result == ApprovalResult.DENIED:
-            await self.send(chat_id, "SYMBIOTE: restore denied.", parse_mode=None)
-            return
-        if result == ApprovalResult.TIMEOUT:
-            await self.send(
-                chat_id,
-                "SYMBIOTE: restore approval timed out.",
-                parse_mode=None,
-            )
-            return
-        try:
-            restore = await vault.restore_snapshot(
-                backup_id, capture_test_status=False,
-            )
-        except Exception as exc:
-            await self.send(
-                chat_id,
-                f"SYMBIOTE: restore failed: {exc}",
-                parse_mode=None,
-            )
-            return
-        if restore.error:
-            await self.send(
-                chat_id,
-                f"SYMBIOTE: restore error: {restore.error}",
-                parse_mode=None,
-            )
-            return
-        await self.send(
-            chat_id,
-            (
-                f"📦 Restore complete: {backup_id}\n"
-                f"  files restored: {restore.files_restored}\n"
-                f"  pre-restore backup: {restore.pre_restore_backup_id}"
-            ),
-            parse_mode=None,
-        )
-
-    async def _symbiote_run_with_approval(
-        self,
-        chat_id: int,
-        queue,
-        coordinator,
-        *,
-        phase: str,
-        session_id: str,
-        candidate: str | None = None,
-    ) -> None:
-        """Background task: queue.request_approval → run phase on APPROVED."""
-        from prometheus.permissions.approval_queue import ApprovalResult
-        descriptions = {
-            "harvest": (
-                f"SYMBIOTE: clone and analyze {candidate!r} "
-                f"(session {session_id[:8]})"
-            ),
-            "graft": (
-                f"SYMBIOTE: write adapted files + run tests "
-                f"(session {session_id[:8]})"
-            ),
-            "swap": (
-                f"SYMBIOTE: HOT SWAP — replace live src/prometheus with "
-                f"candidate (session {session_id[:8]})"
-            ),
-        }
-        try:
-            result = await queue.request_approval(
-                tool_name=f"symbiote_{phase}",
-                description=descriptions.get(phase, f"SYMBIOTE {phase}"),
-                chat_id=chat_id,
-            )
-        except Exception as exc:
-            await self.send(
-                chat_id,
-                f"SYMBIOTE: approval failed: {exc}",
-                parse_mode=None,
-            )
-            return
-        if result == ApprovalResult.DENIED:
-            await self.send(chat_id, f"SYMBIOTE {phase} denied.", parse_mode=None)
-            return
-        if result == ApprovalResult.TIMEOUT:
-            await self.send(
-                chat_id,
-                f"SYMBIOTE {phase} approval timed out.",
-                parse_mode=None,
-            )
-            return
-
-        try:
-            if phase == "harvest":
-                session = await coordinator.approve_scout(session_id, candidate)
-            elif phase == "graft":
-                session = await coordinator.approve_harvest(session_id)
-            elif phase == "swap":
-                morph_engine = getattr(self, "_morph_engine", None)
-                if morph_engine is None:
-                    await self.send(
-                        chat_id,
-                        "SYMBIOTE swap: MorphEngine not active.",
-                        parse_mode=None,
-                    )
-                    return
-                session = await coordinator.approve_swap(session_id, morph_engine)
-            else:
-                await self.send(chat_id, f"Unknown phase: {phase}", parse_mode=None)
-                return
-        except Exception as exc:
-            logger.exception("SYMBIOTE %s execution failed", phase)
-            await self.send(
-                chat_id,
-                f"SYMBIOTE {phase} failed: {exc}",
-                parse_mode=None,
-            )
-            return
-
-        if session.error:
-            await self.send(
-                chat_id,
-                f"SYMBIOTE {phase}: {session.error}",
-                parse_mode=None,
-            )
-            return
-
-        await self.send(chat_id, session.to_telegram_summary(), parse_mode=None)
 
     # ------------------------------------------------------------------
     # Sprint 15 GRAFT: media handlers (additive — Hermes parity)
@@ -3320,48 +2346,35 @@ class TelegramAdapter(BasePlatformAdapter):
                 return voice
         return {}
 
+    # SPRINT G1: voice-mode persistence moved to the shared commands layer
+    # (platform-independent, keyed by str chat key). These thin delegates
+    # remain because _voice_should_reply and existing tests use them.
+
     def _voice_modes_path(self) -> str:
         """Path to the per-chat voice mode override JSON file."""
-        from prometheus.config.paths import get_config_dir
-        return str(get_config_dir() / "voice_modes.json")
+        from prometheus.gateway import commands as _cmds
+        return _cmds._voice_modes_path()
 
     def _load_voice_modes(self) -> dict[str, str]:
         """Read per-chat voice mode overrides. Returns {chat_id_str: mode}."""
-        import json
-        try:
-            with open(self._voice_modes_path()) as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return {str(k): str(v) for k, v in data.items()}
-        except (FileNotFoundError, ValueError, OSError):
-            pass
-        return {}
+        from prometheus.gateway import commands as _cmds
+        return _cmds.load_voice_modes()
 
     def _save_voice_modes(self, modes: dict[str, str]) -> None:
         """Persist per-chat voice mode overrides."""
-        import json
-        try:
-            with open(self._voice_modes_path(), "w") as f:
-                json.dump(modes, f, indent=2)
-        except OSError as exc:
-            logger.warning("Failed to persist voice modes: %s", exc)
+        from prometheus.gateway import commands as _cmds
+        _cmds.save_voice_modes(modes)
 
     def _get_voice_mode(self, chat_id: int) -> str:
         """Return the effective voice mode for a chat ('auto' | 'on' | 'off')."""
-        overrides = self._load_voice_modes()
-        mode = overrides.get(str(chat_id))
-        if mode in ("auto", "on", "off"):
-            return mode
-        default = self._voice_config().get("default_mode", "auto")
-        return default if default in ("auto", "on", "off") else "auto"
+        from prometheus.gateway import commands as _cmds
+        default = str(self._voice_config().get("default_mode", "auto"))
+        return _cmds.get_voice_mode(str(chat_id), default)
 
     def _set_voice_mode(self, chat_id: int, mode: str) -> None:
         """Persist a per-chat voice mode override."""
-        if mode not in ("auto", "on", "off"):
-            return
-        modes = self._load_voice_modes()
-        modes[str(chat_id)] = mode
-        self._save_voice_modes(modes)
+        from prometheus.gateway import commands as _cmds
+        _cmds.set_voice_mode(str(chat_id), mode)
 
     def _voice_should_reply(self, event: MessageEvent) -> bool:
         """Decide whether the reply to *event* should be a voice message."""
@@ -3577,6 +2590,9 @@ class TelegramAdapter(BasePlatformAdapter):
           /audit run              — start a full web capability audit
           /audit <category>       — start an audit for a single category
                                     (search|fetch|youtube|download|research|graceful|railway)
+
+        SPRINT G1: dispatch + show-last + kick-off live in the shared
+        commands layer (commands.cmd_audit).
         """
         if not update.message or not update.effective_chat:
             return
@@ -3586,158 +2602,8 @@ class TelegramAdapter(BasePlatformAdapter):
         parts = text.split(maxsplit=1)
         body = parts[1].strip().lower() if len(parts) > 1 else ""
 
-        if not body:
-            await self._audit_show_last(chat_id)
-            return
-
-        valid_categories = {
-            "search", "fetch", "youtube", "download",
-            "research", "graceful", "railway",
-        }
-
-        if body == "run":
-            await self._audit_kick_off(chat_id, category=None)
-            return
-
-        if body in valid_categories:
-            await self._audit_kick_off(chat_id, category=body)
-            return
-
-        await self.send(
-            chat_id,
-            (
-                "Usage:\n"
-                "  /audit                — show last audit summary\n"
-                "  /audit run            — full audit (~30–60 min)\n"
-                "  /audit <category>     — single category\n"
-                "Categories: search, fetch, youtube, download, research, graceful, railway"
-            ),
-            parse_mode=None,
-        )
-
-    async def _audit_show_last(self, chat_id: int) -> None:
-        """Show summary of the most recent audit JSON, if any."""
-        from prometheus.config.paths import get_config_dir
-
-        audits_dir = get_config_dir() / "audits"
-        if not audits_dir.is_dir():
-            await self.send(
-                chat_id,
-                "No audits yet. Run `/audit run` to start one.",
-                parse_mode=None,
-            )
-            return
-        json_files = sorted(audits_dir.glob("web_audit_*.json"))
-        if not json_files:
-            await self.send(
-                chat_id,
-                "No audits yet. Run `/audit run` to start one.",
-                parse_mode=None,
-            )
-            return
-        latest = json_files[-1]
-        try:
-            import json as _json
-            payload = _json.loads(latest.read_text())
-        except Exception as exc:
-            await self.send(
-                chat_id,
-                f"Could not read latest audit: {exc}",
-                parse_mode=None,
-            )
-            return
-
-        lines = [
-            "🔬 Last Web Capability Audit",
-            f"Date: {payload.get('timestamp', '?')}",
-            f"Model: {payload.get('model', '?')}",
-            (
-                f"Result: {payload.get('passed', 0)}/"
-                f"{payload.get('total_tests', 0)} passed "
-                f"({payload.get('pass_rate', 0) * 100:.0f}%)"
-            ),
-            f"Duration: {payload.get('duration_seconds', 0):.0f}s",
-            "",
-            "By category:",
-        ]
-        for cat, stats in sorted((payload.get("categories") or {}).items()):
-            n = stats["passed"] + stats["failed"]
-            lines.append(f"  {cat}: {stats['passed']}/{n}")
-        fb = payload.get("failure_breakdown") or {}
-        if fb:
-            lines.append("")
-            lines.append("Failure breakdown:")
-            for fc, n in sorted(fb.items(), key=lambda kv: -kv[1]):
-                lines.append(f"  {fc}: {n}")
-        lines.append("")
-        lines.append(f"Full report: {latest}")
-        await self.send(chat_id, "\n".join(lines), parse_mode=None)
-
-    async def _audit_kick_off(
-        self, chat_id: int, category: str | None
-    ) -> None:
-        """Spawn the audit as a background subprocess and notify on completion."""
-        import asyncio as _aio
-        from pathlib import Path as _Path
-
-        repo_root = _Path(__file__).resolve().parents[3]
-        script = repo_root / "scripts" / "web_capability_audit.py"
-        if not script.is_file():
-            await self.send(
-                chat_id,
-                f"Audit script not found at {script}",
-                parse_mode=None,
-            )
-            return
-
-        cmd: list[str] = ["python3", str(script)]
-        if category:
-            cmd += ["--category", category]
-        label = f"category={category}" if category else "full audit"
-
-        await self.send(
-            chat_id,
-            (
-                f"🔬 Audit starting ({label}). "
-                "I'll send a summary when it completes."
-            ),
-            parse_mode=None,
-        )
-
-        async def _runner() -> None:
-            try:
-                proc = await _aio.create_subprocess_exec(
-                    *cmd,
-                    stdout=_aio.subprocess.PIPE,
-                    stderr=_aio.subprocess.STDOUT,
-                    cwd=str(repo_root),
-                )
-                stdout, _ = await proc.communicate()
-                rc = proc.returncode
-                # Read the latest report (the script writes one even on partial runs)
-                from prometheus.config.paths import get_config_dir
-                audits_dir = get_config_dir() / "audits"
-                latest_md = sorted(audits_dir.glob("web_audit_*.md"))[-1] \
-                    if audits_dir.is_dir() and any(
-                        audits_dir.glob("web_audit_*.md")
-                    ) else None
-                if latest_md is not None:
-                    msg = (
-                        f"🔬 Audit complete (exit {rc}). "
-                        f"Report: {latest_md}"
-                    )
-                else:
-                    tail = (stdout or b"").decode("utf-8", errors="replace")[-1500:]
-                    msg = f"🔬 Audit finished (exit {rc}). Output tail:\n{tail}"
-                await self.send(chat_id, msg, parse_mode=None)
-            except Exception as exc:
-                await self.send(
-                    chat_id,
-                    f"Audit failed to launch: {exc}",
-                    parse_mode=None,
-                )
-
-        _aio.create_task(_runner())
+        from prometheus.gateway import commands as _cmds
+        await _cmds.cmd_audit(self._plain_sender(chat_id), body)
 
     # ------------------------------------------------------------------
     # WEAVE-PRESS: /press command — Printing Press CLI library
@@ -3755,250 +2621,23 @@ class TelegramAdapter(BasePlatformAdapter):
           /press install <name>    — request approval, then go install + skill copy
           /press installed         — list CLIs whose binary is on PATH or in ~/go/bin
           /press update            — git pull the library clone
+
+        SPRINT G1: dispatch + sub-handlers live in the shared commands
+        layer (commands.cmd_press).
         """
         if not update.message or not update.effective_chat:
             return
         chat_id = update.effective_chat.id
 
-        press = getattr(self, "_printing_press", None)
-        if press is None or not press.is_available():
-            await self.send(
-                chat_id,
-                "Printing Press is not active. The library clone is missing "
-                "(searched ~/printing-press-library/ and /tmp/printing-press-library/) "
-                "or the feature is disabled in config.",
-                parse_mode=None,
-            )
-            return
-
         text = (update.message.text or "").strip()
         parts = text.split(maxsplit=1)
         body = parts[1].strip() if len(parts) > 1 else ""
-        first_token = body.split(maxsplit=1)[0].lower() if body else ""
-        rest = body[len(first_token):].strip() if first_token else ""
 
-        if first_token == "" or first_token == "help":
-            await self._press_usage(chat_id)
-            return
-        if first_token == "list":
-            await self._press_list(chat_id, press, category=rest or None)
-            return
-        if first_token == "search":
-            await self._press_search(chat_id, press, query=rest)
-            return
-        if first_token == "installed":
-            await self._press_installed(chat_id, press)
-            return
-        if first_token == "update":
-            await self._press_update(chat_id, press)
-            return
-        if first_token == "install":
-            if not rest:
-                await self.send(
-                    chat_id,
-                    "Usage: /press install <cli-name>",
-                    parse_mode=None,
-                )
-                return
-            await self._press_install(chat_id, press, cli_name=rest)
-            return
-        await self._press_usage(chat_id)
-
-    async def _press_usage(self, chat_id: int) -> None:
-        await self.send(
-            chat_id,
-            (
-                "Printing Press — local CLI library\n\n"
-                "  /press list [category]  — list available CLIs\n"
-                "  /press search <query>   — fuzzy search\n"
-                "  /press install <name>   — install (queues approval)\n"
-                "  /press installed        — show what's installed\n"
-                "  /press update           — git pull the library clone\n"
-            ),
-            parse_mode=None,
-        )
-
-    async def _press_list(
-        self, chat_id: int, press: object, *, category: str | None = None,
-    ) -> None:
-        records = press.list_available()
-        if category:
-            cat = category.lower()
-            records = [r for r in records if cat in r.category.lower()]
-        if not records:
-            await self.send(
-                chat_id,
-                f"No CLIs in the library{' for category ' + category if category else ''}.",
-                parse_mode=None,
-            )
-            return
-        # Group by category for readability
-        from collections import defaultdict
-        by_cat: dict[str, list] = defaultdict(list)
-        for r in records:
-            by_cat[r.category or "uncategorized"].append(r)
-        lines = [f"Printing Press CLIs ({len(records)} available):"]
-        for cat in sorted(by_cat):
-            lines.append(f"\n[{cat}]")
-            for r in sorted(by_cat[cat], key=lambda x: x.name):
-                marker = "✓" if r.installed else "·"
-                lines.append(f"  {marker} {r.name} — {r.description[:80]}")
-        # Telegram caps messages around 4096 chars; trim if needed
-        msg = "\n".join(lines)
-        if len(msg) > 3800:
-            msg = msg[:3800] + "\n... (truncated; use /press search to narrow)"
-        await self.send(chat_id, msg, parse_mode=None)
-
-    async def _press_search(
-        self, chat_id: int, press: object, *, query: str,
-    ) -> None:
-        if not query:
-            await self.send(
-                chat_id, "Usage: /press search <query>", parse_mode=None,
-            )
-            return
-        records = press.search(query, limit=10)
-        if not records:
-            await self.send(
-                chat_id,
-                f"No CLI matched '{query}'.",
-                parse_mode=None,
-            )
-            return
-        lines = [f"Matches for '{query}':"]
-        for r in records:
-            marker = "✓" if r.installed else "·"
-            lines.append(
-                f"{marker} {r.name} ({r.category}) — {r.description[:140]}"
-            )
-        await self.send(chat_id, "\n".join(lines), parse_mode=None)
-
-    async def _press_installed(
-        self, chat_id: int, press: object,
-    ) -> None:
-        records = [r for r in press.list_available() if r.installed]
-        if not records:
-            await self.send(
-                chat_id,
-                "No Printing Press CLIs installed yet. Try /press list.",
-                parse_mode=None,
-            )
-            return
-        lines = [f"Installed Printing Press CLIs ({len(records)}):"]
-        for r in sorted(records, key=lambda x: x.name):
-            lines.append(f"  ✓ {r.name} ({r.bin_name})")
-        await self.send(chat_id, "\n".join(lines), parse_mode=None)
-
-    async def _press_update(
-        self, chat_id: int, press: object,
-    ) -> None:
-        ok, msg = await press.update_library()
-        prefix = "✓" if ok else "✗"
-        await self.send(
-            chat_id,
-            f"{prefix} library update: {msg}",
-            parse_mode=None,
-        )
-
-    async def _press_install(
-        self, chat_id: int, press: object, *, cli_name: str,
-    ) -> None:
-        """Approval-queue install. Mirrors the /gepa run / /symbiote pattern."""
-        queue = getattr(self, "_approval_queue", None)
-        if queue is None:
-            await self.send(
-                chat_id,
-                "Approval queue is not active — cannot install.",
-                parse_mode=None,
-            )
-            return
-
-        # Resolve up-front so we can show the user what they're approving
-        records = press.search(cli_name, limit=1)
-        if not records:
-            await self.send(
-                chat_id,
-                f"No CLI matching '{cli_name}' in the library. "
-                "Try /press search first.",
-                parse_mode=None,
-            )
-            return
-        rec = records[0]
-        if rec.installed:
-            await self.send(
-                chat_id,
-                f"{rec.name} ({rec.bin_name}) is already installed.",
-                parse_mode=None,
-            )
-            return
-
-        async def _runner() -> None:
-            from prometheus.permissions.approval_queue import ApprovalResult
-
-            description = (
-                f"go install {rec.install_module}@latest  "
-                f"+ copy SKILL.md → ~/.prometheus/skills/{rec.skill_name}.md"
-            )
-            try:
-                result = await queue.request_approval(
-                    "printing_press_install", description, chat_id=chat_id,
-                )
-            except Exception as exc:
-                await self.send(
-                    chat_id,
-                    f"Approval queue error: {exc}",
-                    parse_mode=None,
-                )
-                return
-            if result == ApprovalResult.DENIED:
-                await self.send(
-                    chat_id,
-                    f"Install denied: {rec.name}.",
-                    parse_mode=None,
-                )
-                return
-            if result == ApprovalResult.TIMEOUT:
-                await self.send(
-                    chat_id,
-                    f"Install request timed out: {rec.name}.",
-                    parse_mode=None,
-                )
-                return
-            await self.send(
-                chat_id,
-                f"Installing {rec.name}…",
-                parse_mode=None,
-            )
-            try:
-                outcome = await press.install(rec.name)
-            except Exception as exc:
-                await self.send(
-                    chat_id,
-                    f"Install failed: {exc}",
-                    parse_mode=None,
-                )
-                return
-            if outcome.success:
-                lines = [
-                    f"✓ Installed {outcome.cli_name} ({outcome.bin_name})",
-                    f"  Skill: {'copied' if outcome.skill_installed else 'NOT copied'}",
-                ]
-                if not outcome.on_path:
-                    lines.append(
-                        "  ⚠ Binary in ~/go/bin but not on $PATH — "
-                        "add `export PATH=$HOME/go/bin:$PATH` to your shell."
-                    )
-                await self.send(chat_id, "\n".join(lines), parse_mode=None)
-            else:
-                await self.send(
-                    chat_id,
-                    f"✗ Install failed: {outcome.error}",
-                    parse_mode=None,
-                )
-
-        asyncio.create_task(_runner(), name=f"press_install_{rec.name}")
-        await self.send(
-            chat_id,
-            f"Install request queued for {rec.name}. Watch for /approve.",
-            parse_mode=None,
+        from prometheus.gateway import commands as _cmds
+        await _cmds.cmd_press(
+            self._plain_sender(chat_id),
+            getattr(self, "_printing_press", None),
+            body,
+            approval_queue=getattr(self, "_approval_queue", None),
+            chat_id=chat_id,
         )

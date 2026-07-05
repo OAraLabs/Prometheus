@@ -6664,11 +6664,16 @@ class TestSymbioteWiring:
             set_coordinator(None)
 
     def test_telegram_has_cmd_symbiote(self):
-        """TelegramAdapter._cmd_symbiote exists (wired in start())."""
+        """TelegramAdapter._cmd_symbiote exists (wired in start()).
+
+        SPRINT G1: the dispatch + approval runner moved to the shared
+        gateway commands layer so Slack (and future gateways) reuse them.
+        """
         from prometheus.gateway.telegram import TelegramAdapter
+        from prometheus.gateway import commands as gateway_commands
 
         assert hasattr(TelegramAdapter, "_cmd_symbiote")
-        assert hasattr(TelegramAdapter, "_symbiote_run_with_approval")
+        assert callable(gateway_commands.symbiote_run_with_approval)
 
     def test_symbiote_tool_returns_disabled_when_no_coordinator(self, tmp_path):
         """If get_coordinator() returns None, scout/harvest/graft tools fail safely."""
@@ -6748,18 +6753,23 @@ class TestSymbioteSessionBWiring:
         )
         assert engine._vault is vault
 
-    def test_telegram_has_session_b_handlers(self):
-        """All five new /symbiote subcommand handlers must exist."""
-        from prometheus.gateway.telegram import TelegramAdapter
-        for method in (
+    def test_shared_layer_has_session_b_handlers(self):
+        """All five Session B /symbiote subcommand handlers must exist.
+
+        SPRINT G1: they live in the shared gateway commands layer now
+        (gateway-agnostic — Telegram and Slack both dispatch through
+        commands.cmd_symbiote).
+        """
+        from prometheus.gateway import commands as gateway_commands
+        for fn in (
             "_symbiote_morph",
             "_symbiote_swap",
             "_symbiote_manual_backup",
             "_symbiote_backups",
             "_symbiote_restore",
-            "_symbiote_restore_with_approval",
+            "symbiote_restore_with_approval",
         ):
-            assert hasattr(TelegramAdapter, method), f"missing handler: {method}"
+            assert callable(getattr(gateway_commands, fn, None)), f"missing handler: {fn}"
 
     def test_symbiote_phase_includes_morph_states(self):
         """The state machine must include the new MORPH/SWAP/HEALTH_CHECK/ROLLED_BACK
@@ -6961,13 +6971,15 @@ class TestWeavePressWiring:
     """Verify the Printing Press hooks are wired into telegram + agent_loop."""
 
     def test_telegram_has_cmd_press(self):
+        # SPRINT G1: sub-handlers moved to the shared gateway commands layer.
         from prometheus.gateway.telegram import TelegramAdapter
+        from prometheus.gateway import commands as gateway_commands
         assert hasattr(TelegramAdapter, "_cmd_press")
-        assert hasattr(TelegramAdapter, "_press_install")
-        assert hasattr(TelegramAdapter, "_press_search")
-        assert hasattr(TelegramAdapter, "_press_list")
-        assert hasattr(TelegramAdapter, "_press_installed")
-        assert hasattr(TelegramAdapter, "_press_update")
+        assert callable(gateway_commands._press_install)
+        assert callable(gateway_commands._press_search)
+        assert callable(gateway_commands._press_list)
+        assert callable(gateway_commands._press_installed)
+        assert callable(gateway_commands._press_update)
 
     def test_printing_press_registry_importable(self):
         from prometheus.tools.printing_press import (

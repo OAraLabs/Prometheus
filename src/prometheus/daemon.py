@@ -30,6 +30,7 @@ from prometheus.gateway.archive_writer import ArchiveWriter
 from prometheus.gateway.config import Platform, PlatformConfig
 from prometheus.gateway.cron_scheduler import run_scheduler_loop
 from prometheus.gateway.heartbeat import Heartbeat
+from prometheus.gateway.platform_base import GatewaySubsystemRegistry
 from prometheus.gateway.telegram import TelegramAdapter
 from prometheus.providers.llama_cpp import LlamaCppProvider
 from prometheus.providers.registry import ProviderRegistry
@@ -450,6 +451,15 @@ async def run_daemon(args: argparse.Namespace) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _signal_handler)
 
+    # SPRINT G1 — gateway-generic subsystem wiring. Every constructed gateway
+    # adapter is registered here, and every gateway-facing subsystem is
+    # attached through the registry (never to one adapter by name). Adapters
+    # registered later replay all earlier attachments, so construction order
+    # doesn't matter. Adding a gateway (Discord — G2) = construct + register.
+    gateway_registry = GatewaySubsystemRegistry()
+    if cost_tracker is not None:
+        gateway_registry.attach("cost_tracker", cost_tracker)
+
     # Telegram adapter
     telegram: TelegramAdapter | None = None
     telegram_token = gateway_config.get("telegram_token", "") or os.environ.get("PROMETHEUS_TELEGRAM_TOKEN", "")
@@ -474,13 +484,16 @@ async def run_daemon(args: argparse.Namespace) -> None:
             session_manager=session_manager,
             prometheus_config=config,
         )
-        if cost_tracker is not None:
-            telegram.cost_tracker = cost_tracker
+        gateway_registry.register_adapter(telegram)
         await telegram.start()
         archive.archive_event("telegram_started")
         logger.info("Telegram adapter started")
 
-        # Sprint 15b GRAFT: wire approval queue if enabled
+        # Sprint 15b GRAFT: wire approval queue if enabled.
+        # NOTE: the queue's *prompt delivery* transport is still the Telegram
+        # adapter (constructor arg — adapter-into-subsystem, the reverse
+        # direction); the queue itself is attached to every gateway so
+        # /approve, /deny, /pending work from any surface.
         approval_cfg = security_config.get("approval_queue", {})
         if approval_cfg.get("enabled", False):
             from prometheus.permissions.approval_queue import ApprovalQueue
@@ -491,8 +504,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 default_chat_id=default_chat,
             )
             security_gate._approval_queue = approval_queue
-            telegram._approval_queue = approval_queue
-            logger.info("Approval queue wired to Telegram adapter")
+            gateway_registry.attach("_approval_queue", approval_queue)
+            logger.info("Approval queue wired to gateway adapters")
 
     # WEAVE-PRESS: Printing Press CLI registry
     press_cfg = config.get("printing_press", {}) or {}
@@ -543,8 +556,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
             if agent_loop._tool_metadata is None:
                 agent_loop._tool_metadata = {}
             agent_loop._tool_metadata["printing_press"] = press_registry
-            # And to the Telegram adapter for /press commands.
-            telegram._printing_press = press_registry
+            # And to every gateway adapter for /press commands.
+            gateway_registry.attach("_printing_press", press_registry)
         except Exception:
             logger.exception("Printing Press: failed to initialise")
 
@@ -596,6 +609,9 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 session_manager=session_manager,
                 prometheus_config=config,
             )
+            # SPRINT G1: registering replays every subsystem attached so far
+            # (cost tracker, approval queue, printing press, …) onto Slack.
+            gateway_registry.register_adapter(slack_adapter)
             await slack_adapter.start()
             archive.archive_event("slack_started")
             logger.info("Slack adapter started (Socket Mode)")
@@ -799,8 +815,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
             telemetry=telemetry,
             skill_creator=skill_creator if "skill_creator" in dir() else None,
         )
-        if telegram is not None:
-            telegram.escalation_engine = escalation_engine
+        gateway_registry.attach("escalation_engine", escalation_engine)
         if escalation_engine.is_armed:
             logger.info(
                 "Teacher escalation armed: %s (max %d/session)",
@@ -930,16 +945,12 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 set_memory_signal_bus(signal_bus)
             except Exception:
                 logger.debug("memory signal bus wiring skipped", exc_info=True)
-            # Sprint S1 Stream 2: Telegram gateway subscribes to
+            # Sprint S1 Stream 2 + SPRINT G1: every gateway subscribes to
             # skill_created / skill_refined / memory_updated / curator_report
-            # for user-facing notifications (default quiet mode).
-            if "telegram" in dir() and telegram is not None:
-                try:
-                    telegram.signal_bus = signal_bus
-                except Exception:
-                    logger.debug(
-                        "telegram signal bus wiring skipped", exc_info=True
-                    )
+            # for user-facing notifications (default quiet mode). setattr
+            # invokes each adapter's signal_bus property setter, which does
+            # the actual subscribe.
+            gateway_registry.attach("signal_bus", signal_bus)
             # Managed tasks: wire the bus so task_completed/task_failed drive
             # re-engagement. The completion handler injects task results back
             # into the creating session via the shared inject_turn primitive
@@ -962,17 +973,6 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 logger.info("TaskCompletionHandler subscribed (managed-task reengage)")
             except Exception:
                 logger.warning("TaskCompletionHandler wiring failed", exc_info=True)
-
-            # Sprint Polish: Slack gateway gets the same wiring so signal
-            # notifications fan out to whichever gateways the user enables,
-            # not just the originating one.
-            if "slack_adapter" in dir() and slack_adapter is not None:
-                try:
-                    slack_adapter.signal_bus = signal_bus
-                except Exception:
-                    logger.debug(
-                        "slack signal bus wiring skipped", exc_info=True
-                    )
 
             # Start (signal-reactive, no separate tasks needed)
             await observer.start()
@@ -1119,8 +1119,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     include_config=bool(backup_cfg.get("include_config", True)),
                     exempt_from_retention=set(backup_cfg.get("exempt_from_retention") or []) or None,
                 )
-                if telegram is not None:
-                    telegram._backup_vault = sym_backup_vault
+                gateway_registry.attach("_backup_vault", sym_backup_vault)
                 logger.info("BackupVault wired (vault_root=%s)", sym_backup_vault._vault_root)
 
             if morph_cfg.get("enabled", False) and sym_backup_vault is not None:
@@ -1148,8 +1147,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     daemon_manager_override=manager_override,
                     daemon_health_url=morph_cfg.get("daemon_health_url"),
                 )
-                if telegram is not None:
-                    telegram._morph_engine = sym_morph_engine
+                gateway_registry.attach("_morph_engine", sym_morph_engine)
                 logger.info(
                     "MorphEngine wired (manager_override=%s)", manager_override or "auto",
                 )
@@ -1180,9 +1178,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 config=learning_cfg,
             )
             await gepa_engine.start()
-            # Expose to Telegram adapter so /gepa commands can find it.
-            if telegram is not None:
-                telegram._gepa_engine = gepa_engine
+            # Expose to every gateway adapter so /gepa commands can find it.
+            gateway_registry.attach("_gepa_engine", gepa_engine)
             logger.info("GEPAEngine started")
     except Exception as exc:
         logger.warning("GEPAEngine not available: %s", exc)
