@@ -217,6 +217,10 @@ prometheus setup --gateway-only    # add/change Telegram or Slack later
 
 (Working from a git checkout? `pip install -e .` then the same `prometheus setup`. The old `prometheus --setup` and `prometheus-init` entry points still work as forwarding aliases.)
 
+### Releases
+
+Tagged versions (`vX.Y.Z`) are built in CI — sdist + wheel attached to a **draft** GitHub Release for review before publishing (`.github/workflows/release.yml`; also runnable manually via *workflow_dispatch*). PyPI publishing from that workflow is gated on a `PYPI_API_TOKEN` repo secret and is skipped until one exists. Prebuilt **Beacon** desktop clients (macOS dmg, Linux AppImage/deb) ship from the [beacon-desktop releases](https://github.com/OAraLabs/beacon-desktop/releases).
+
 ### Run
 
 ```bash
