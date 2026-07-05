@@ -1,4 +1,4 @@
-"""SPRINT G1 — the gateway parity chart, as CI.
+"""SPRINT G1 (+G2) — the gateway parity chart, as CI.
 
 Single source of truth for the slash-command surface across gateways. Every
 command family must have:
@@ -8,6 +8,7 @@ command family must have:
       shared function would be pure ceremony),
   (b) a registered Telegram handler,
   (c) a registered Slack handler,
+  (d) a registered Discord handler (SPRINT G2),
 
 with an explicit, commented allowlist for deliberate platform gaps.
 
@@ -15,13 +16,19 @@ Drift-proofing runs BOTH directions:
   * a manifest entry whose command isn't registered on a platform FAILS, and
   * a command registered on any platform but missing from the manifest FAILS.
 
-So adding a command to one gateway and forgetting the other (or forgetting
+So adding a command to one gateway and forgetting the others (or forgetting
 the chart) breaks CI.
 
-Extending for a new gateway (Discord — Sprint G2) is one line per layer:
-add the platform to ``PLATFORMS`` (name, source file, registration regex)
-and a ``"discord": "<command>"`` (or ``None`` + gap reason) key to each
-manifest entry.
+Extending for a new gateway is one line per layer: add the platform to
+``PLATFORMS`` (name, source file, registration regex) and a
+``"<platform>": "<command>"`` (or ``None`` + gap reason) key to each
+manifest entry — exactly what G2 did for Discord.
+
+Discord note: the manifest stores the family LEAF name; the user-facing
+command is ``/prometheus <section> <leaf>`` (Discord caps a command at 25
+options, so the 43 families sit one section-group deep — see discord.py's
+module docstring). Every family is registered on Discord: ZERO discord
+allowlist entries.
 
 No adapters are instantiated and nothing touches tokens, env files, or the
 network — registration is asserted by scanning the adapter sources, and
@@ -63,8 +70,12 @@ PLATFORMS: tuple[PlatformSpec, ...] = (
         registration_re=r'self\._app\.command\("/([\w-]+)"\)\(self\.(\w+)\)',
         adapter_import="prometheus.gateway.slack:SlackAdapter",
     ),
-    # G2: add a PlatformSpec for discord here, then a "discord" key to each
-    # manifest entry below.
+    PlatformSpec(
+        name="discord",
+        source=GATEWAY_DIR / "discord.py",
+        registration_re=r'self\._register\(\s*\w+,\s*"([\w-]+)",\s*self\.(\w+)',
+        adapter_import="prometheus.gateway.discord:DiscordAdapter",
+    ),
 )
 
 
@@ -83,8 +94,10 @@ class Family:
     shared_gap: str = ""
 
 
-def _tg_slack(telegram: str | None, slack: str | None) -> dict[str, str | None]:
-    return {"telegram": telegram, "slack": slack}
+def _cmds(
+    telegram: str | None, slack: str | None, discord: str | None,
+) -> dict[str, str | None]:
+    return {"telegram": telegram, "slack": slack, "discord": discord}
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +107,7 @@ def _tg_slack(telegram: str | None, slack: str | None) -> dict[str, str | None]:
 MANIFEST: tuple[Family, ...] = (
     # -- core -------------------------------------------------------------
     Family(
-        "start", (), _tg_slack("start", None),
+        "start", (), _cmds("start", None, "start"),
         gap_reason=(
             "Telegram-native onboarding ping (/start is a Telegram platform "
             "convention); Slack onboarding happens via app-home/@mention."
@@ -102,117 +115,124 @@ MANIFEST: tuple[Family, ...] = (
         shared_gap="one fixed greeting string; a shared fn would be ceremony",
     ),
     Family(
-        "clear", (), _tg_slack("clear", None),
+        "clear", (), _cmds("clear", None, "clear"),
         gap_reason="alias of /reset kept for Telegram muscle memory; Slack has -reset",
         shared_gap="one-line session_manager.clear alias of reset",
     ),
     Family(
-        "reset", (), _tg_slack("reset", "prometheus-reset"),
+        "reset", (), _cmds("reset", "prometheus-reset", "reset"),
         shared_gap="one-line session_manager.clear + fixed reply string",
     ),
-    Family("help", ("cmd_help",), _tg_slack("help", "prometheus-help")),
-    Family("status", ("cmd_status",), _tg_slack("status", "prometheus-status")),
-    Family("model", ("cmd_model",), _tg_slack("model", "prometheus-model")),
-    Family("wiki", ("cmd_wiki",), _tg_slack("wiki", "prometheus-wiki")),
-    Family("note", ("cmd_note",), _tg_slack("note", "prometheus-note")),
-    Family("sentinel", ("cmd_sentinel",), _tg_slack("sentinel", "prometheus-sentinel")),
+    Family("help", ("cmd_help",), _cmds("help", "prometheus-help", "help")),
+    Family("status", ("cmd_status",), _cmds("status", "prometheus-status", "status")),
+    Family("model", ("cmd_model",), _cmds("model", "prometheus-model", "model")),
+    Family("wiki", ("cmd_wiki",), _cmds("wiki", "prometheus-wiki", "wiki")),
+    Family("note", ("cmd_note",), _cmds("note", "prometheus-note", "note")),
+    Family("sentinel", ("cmd_sentinel",), _cmds("sentinel", "prometheus-sentinel", "sentinel")),
     Family(
-        "benchmark", (), _tg_slack("benchmark", "prometheus-benchmark"),
+        "benchmark", (), _cmds("benchmark", "prometheus-benchmark", "benchmark"),
         shared_gap=(
             "the handler IS the benchmark (one agent_loop.run_async smoke "
             "call); no formatter logic to share"
         ),
     ),
-    Family("context", ("cmd_context",), _tg_slack("context", "prometheus-context")),
+    Family("context", ("cmd_context",), _cmds("context", "prometheus-context", "context")),
     Family(
         "skills",
         ("cmd_skills", "cmd_skills_auto_list", "cmd_skills_show",
          "cmd_skills_pin", "cmd_skills_unpin", "cmd_skills_history"),
-        _tg_slack("skills", "prometheus-skills"),
+        _cmds("skills", "prometheus-skills", "skills"),
     ),
     Family(
         "memory", ("cmd_memory_show", "cmd_memory_limits"),
-        _tg_slack("memory", "prometheus-memory"),
+        _cmds("memory", "prometheus-memory", "memory"),
     ),
     Family(
         "curator", ("cmd_curator_show", "cmd_curator_status", "cmd_curator_run"),
-        _tg_slack("curator", "prometheus-curator"),
+        _cmds("curator", "prometheus-curator", "curator"),
     ),
     Family(
         "notifications", ("cmd_notifications",),
-        _tg_slack("notifications", "prometheus-notifications"),
+        _cmds("notifications", "prometheus-notifications", "notifications"),
     ),
-    Family("health", ("cmd_health",), _tg_slack("health", "prometheus-health")),
-    Family("events", ("cmd_events",), _tg_slack("events", "prometheus-events")),
+    Family("health", ("cmd_health",), _cmds("health", "prometheus-health", "health")),
+    Family("events", ("cmd_events",), _cmds("events", "prometheus-events", "events")),
     # -- steering / durability --------------------------------------------
-    Family("steer", ("cmd_steer",), _tg_slack("steer", "prometheus-steer")),
-    Family("queue", ("cmd_queue",), _tg_slack("queue", "prometheus-queue")),
-    Family("unqueue", ("cmd_unqueue",), _tg_slack("unqueue", "prometheus-unqueue")),
+    Family("steer", ("cmd_steer",), _cmds("steer", "prometheus-steer", "steer")),
+    Family("queue", ("cmd_queue",), _cmds("queue", "prometheus-queue", "queue")),
+    Family("unqueue", ("cmd_unqueue",), _cmds("unqueue", "prometheus-unqueue", "unqueue")),
     Family(
         "clearsteers", ("cmd_clearsteers",),
-        _tg_slack("clearsteers", "prometheus-clearsteers"),
+        _cmds("clearsteers", "prometheus-clearsteers", "clearsteers"),
     ),
     # -- infra / observability ---------------------------------------------
-    Family("anatomy", ("cmd_anatomy",), _tg_slack("anatomy", "prometheus-anatomy")),
-    Family("doctor", ("cmd_doctor",), _tg_slack("doctor", "prometheus-doctor")),
-    Family("profile", ("cmd_profile",), _tg_slack("profile", "prometheus-profile")),
-    Family("beacon", ("cmd_beacon",), _tg_slack("beacon", "prometheus-beacon")),
-    Family("tools", ("cmd_tools",), _tg_slack("tools", "prometheus-tools")),
-    Family("pairs", ("cmd_pairs",), _tg_slack("pairs", "prometheus-pairs")),
+    Family("anatomy", ("cmd_anatomy",), _cmds("anatomy", "prometheus-anatomy", "anatomy")),
+    Family("doctor", ("cmd_doctor",), _cmds("doctor", "prometheus-doctor", "doctor")),
+    Family("profile", ("cmd_profile",), _cmds("profile", "prometheus-profile", "profile")),
+    Family("beacon", ("cmd_beacon",), _cmds("beacon", "prometheus-beacon", "beacon")),
+    Family("tools", ("cmd_tools",), _cmds("tools", "prometheus-tools", "tools")),
+    Family("pairs", ("cmd_pairs",), _cmds("pairs", "prometheus-pairs", "pairs")),
     # -- approvals ----------------------------------------------------------
-    Family("approve", ("cmd_approve",), _tg_slack("approve", "prometheus-approve")),
-    Family("deny", ("cmd_deny",), _tg_slack("deny", "prometheus-deny")),
-    Family("pending", ("cmd_pending",), _tg_slack("pending", "prometheus-pending")),
+    Family("approve", ("cmd_approve",), _cmds("approve", "prometheus-approve", "approve")),
+    Family("deny", ("cmd_deny",), _cmds("deny", "prometheus-deny", "deny")),
+    Family("pending", ("cmd_pending",), _cmds("pending", "prometheus-pending", "pending")),
     # -- autonomy subsystems -------------------------------------------------
-    Family("gepa", ("cmd_gepa",), _tg_slack("gepa", "prometheus-gepa")),
-    Family("symbiote", ("cmd_symbiote",), _tg_slack("symbiote", "prometheus-symbiote")),
-    Family("audit", ("cmd_audit",), _tg_slack("audit", "prometheus-audit")),
-    Family("press", ("cmd_press",), _tg_slack("press", "prometheus-press")),
+    Family("gepa", ("cmd_gepa",), _cmds("gepa", "prometheus-gepa", "gepa")),
+    Family("symbiote", ("cmd_symbiote",), _cmds("symbiote", "prometheus-symbiote", "symbiote")),
+    Family("audit", ("cmd_audit",), _cmds("audit", "prometheus-audit", "audit")),
+    Family("press", ("cmd_press",), _cmds("press", "prometheus-press", "press")),
     Family(
         "escalations", ("cmd_escalations",),
-        _tg_slack("escalations", "prometheus-escalations"),
+        _cmds("escalations", "prometheus-escalations", "escalations"),
     ),
     # -- voice ---------------------------------------------------------------
     # The Slack handler is registered but platform-honest: it explains that
     # the TTS voice-note reply pipeline is Telegram-only. The registration
     # itself is asserted; the functional gap is documented in
     # NON_COMMAND_GAPS below.
-    Family("voice", ("cmd_voice",), _tg_slack("voice", "prometheus-voice")),
+    Family("voice", ("cmd_voice",), _cmds("voice", "prometheus-voice", "voice")),
     # -- provider overrides ---------------------------------------------------
     Family(
         "claude", ("cmd_provider_override",),
-        _tg_slack("claude", "prometheus-claude"),
+        _cmds("claude", "prometheus-claude", "claude"),
     ),
-    Family("gpt", ("cmd_provider_override",), _tg_slack("gpt", "prometheus-gpt")),
+    Family("gpt", ("cmd_provider_override",), _cmds("gpt", "prometheus-gpt", "gpt")),
     Family(
         "gemini", ("cmd_provider_override",),
-        _tg_slack("gemini", "prometheus-gemini"),
+        _cmds("gemini", "prometheus-gemini", "gemini"),
     ),
-    Family("xai", ("cmd_provider_override",), _tg_slack("xai", "prometheus-xai")),
-    Family("grok", ("cmd_provider_override",), _tg_slack("grok", "prometheus-grok")),
-    Family("local", ("cmd_local_override",), _tg_slack("local", "prometheus-local")),
-    Family("route", ("cmd_route",), _tg_slack("route", "prometheus-route")),
+    Family("xai", ("cmd_provider_override",), _cmds("xai", "prometheus-xai", "xai")),
+    Family("grok", ("cmd_provider_override",), _cmds("grok", "prometheus-grok", "grok")),
+    Family("local", ("cmd_local_override",), _cmds("local", "prometheus-local", "local")),
+    Family("route", ("cmd_route",), _cmds("route", "prometheus-route", "route")),
 )
 
 
 # Deliberate NON-slash-command platform gaps — documented here so the
 # allowlist is versioned next to the chart. These are capabilities, not
-# commands, so they aren't mechanically asserted; G2 owns the media row.
+# commands, so they aren't mechanically asserted.
 NON_COMMAND_GAPS: tuple[tuple[str, str], ...] = (
     ("slack: media ingestion (photo/voice/document/sticker)",
-     "rides with Sprint G2's shared media pipeline"),
-    ("slack: TTS voice-note replies",
+     "the shared media pipeline now exists (G2: gateway/media_services.py, "
+     "used by telegram + discord); Slack file_shared wiring is still open"),
+    ("slack + discord: TTS voice-note replies",
      "piper→opus/ogg pipeline is bound to Telegram's voice-message API; "
-     "/prometheus-voice replies with an explicit not-supported boundary"),
-    ("slack: inline message dispatch on override commands "
+     "the voice command on both surfaces replies with an explicit "
+     "not-supported boundary (Discord voice-message INPUT works — Whisper)"),
+    ("slack + discord: inline message dispatch on override commands "
      "(e.g. '/claude what is 2+2?')",
-     "Slack slash payload has no thread context wired; handler appends an "
-     "explicit note instead of silently dropping the text"),
+     "Slack slash payloads / Discord interactions have no message-dispatch "
+     "context wired; handlers append an explicit note instead of silently "
+     "dropping the text"),
     ("telegram: emoji reaction ack (eyes → white_check_mark)",
-     "Slack-native affordance; Telegram uses typing indicator instead"),
+     "Slack/Discord-native affordance; Telegram uses typing indicator instead"),
+    ("discord: sticker vision analysis",
+     "Telegram stickers ride a dedicated sticker_cache; Discord stickers "
+     "arrive as message.stickers (not attachments) and are not wired — "
+     "image ATTACHMENTS get full vision analysis"),
     ("approval prompt delivery",
      "ApprovalQueue's outbound prompt transport is the Telegram adapter; "
-     "/approve /deny /pending work from every gateway"),
+     "approve/deny/pending work from every gateway"),
 )
 
 
@@ -245,9 +265,9 @@ class TestManifestInternalConsistency:
 
     def test_every_family_covers_every_platform(self):
         """Each family must take an explicit stance on each platform —
-        a command name or a deliberate (reasoned) gap. G2 adds 'discord'
-        to PLATFORMS and this test starts failing until every family says
-        what Discord does."""
+        a command name or a deliberate (reasoned) gap. When a new platform
+        is added to PLATFORMS this test fails until every family says what
+        that platform does (this is how G2 forced the discord column)."""
         platform_names = {p.name for p in PLATFORMS}
         for fam in MANIFEST:
             assert set(fam.commands) == platform_names, (

@@ -1,304 +1,253 @@
-# feat(gateway): SPRINT G1 — gateway parity foundation
+# feat(gateway): SPRINT G2 — Discord gateway
 
-**Branch:** `feat/gateway-parity-g1` off main (`cbfed06`)
+**Branch:** `feat/gateway-discord-g2` off main (`7867b36`)
 **Status:** PR-ready — not merged, main untouched, live daemon untouched.
-Prometheus repo only. Discord (G2) and onboarding (G3) untouched.
+Prometheus repo only. Onboarding surfaces (G3) untouched — no wizard prompt
+flows, no setup API; only the commented env-template line the wizard writes.
 
-Slack goes from a 23-command subset to full slash-command parity with
-Telegram (41 commands), the daemon's subsystem wiring becomes
-gateway-generic (a new gateway inherits everything for free — the G2
-Discord hook), and a parity-manifest CI test makes the chart impossible to
-silently regress.
-
----
-
-## Workstream 1 — Telegram-embedded command logic → shared layer
-
-Every Telegram-only command family was mechanically extracted from
-`telegram.py` handler bodies into `src/prometheus/gateway/commands.py` as
-plain, adapter-free `cmd_*` functions (existing style: no `self`, no
-platform APIs, injected subsystem objects). Telegram handlers are now thin
-wrappers, exactly like Slack's pre-existing ones.
-
-Extracted families (new shared functions):
-
-| family | shared function(s) | notes |
-|---|---|---|
-| provider overrides `/claude /gpt /gemini /xai /grok` | `cmd_provider_override` | returns `(text, applied)` so the gateway decides on inline dispatch |
-| `/local` | `cmd_local_override` | |
-| `/route` | `cmd_route` | `prefix=` kwarg renders per-surface command names |
-| `/approve /deny /pending` | `cmd_approve` `cmd_deny` `cmd_pending` | |
-| `/escalations` | `cmd_escalations` | |
-| `/gepa` | `cmd_gepa` + `gepa_run_with_approval` | multi-message flows take an injected `async send(text)` |
-| `/symbiote` (all 11 subcommands) | `cmd_symbiote` + `symbiote_run_with_approval`, `symbiote_restore_with_approval`, `_symbiote_*` sub-handlers | ~570 lines moved verbatim |
-| `/audit` | `cmd_audit` + `_audit_show_last` / `_audit_kick_off` | |
-| `/press` | `cmd_press` + `_press_*` sub-handlers | |
-| `/voice` | `cmd_voice` + `get_voice_mode` / `set_voice_mode` / `load_voice_modes` / `save_voice_modes` | per-chat persistence is platform-independent; Telegram's `_get_voice_mode` etc. now delegate |
-| `/tools` `/pairs` | `cmd_tools` `cmd_pairs` | pure formatters; kills the /tools duplication that already existed between telegram.py and slack.py |
-
-`PROVIDER_PRESET_DISPLAY_NAMES` moved to commands.py
-(`telegram._PRESET_DISPLAY_NAMES` kept as an alias).
-
-**`prefix` convention:** shared text that names sibling commands is built
-with a `prefix` kwarg — Telegram passes the default `"/"` (byte-identical
-output), Slack passes `"/prometheus-"` so its replies name commands the
-user can actually type.
-
-`telegram.py`: 4004 → 2663 lines. Telegram-visible reply text preserved
-byte-for-byte — see the pins below.
-
-### Acceptance 2 — before/after reply-text pins (byte-identical)
-
-`tests/test_gateway_command_pins.py` hard-codes the exact reply strings of
-**27** representative handler invocations across the refactored families
-(`/route`, `/local`, `/claude` (3 failure modes), `/approve`, `/deny`,
-`/pending`, `/escalations` (incl. full armed-stats block), `/gepa`,
-`/symbiote`, `/audit`, `/press` (incl. full usage block), `/voice` (3
-modes), `/tools`, `/pairs`).
-
-Run against the PRE-refactor tree (main `cbfed06…`, only the pin file
-added):
-
-```
-$ PYTHONPATH=$PWD/src uv run pytest tests/test_gateway_command_pins.py -q
-...........................                                              [100%]
-27 passed in 0.23s
-(HEAD = cbfed06850cb2ce621e2957338987225be3aafbb)
-```
-
-Same file, unchanged, against the POST-refactor tree:
-
-```
-$ PYTHONPATH=$PWD/src uv run pytest tests/test_gateway_command_pins.py -q
-...........................                                              [100%]
-27 passed in 0.23s
-```
-
-## Workstream 2 — gateway-generic subsystem wiring in daemon.py
-
-New `GatewaySubsystemRegistry` (`src/prometheus/gateway/platform_base.py`):
-
-* `register_adapter(adapter)` — adds a gateway and **replays every
-  subsystem attached so far** onto it (fixes the ordering problem: the
-  approval queue and printing press are constructed before the Slack
-  adapter exists).
-* `attach(name, value)` — records a subsystem and `setattr`s it on every
-  registered adapter, current and future. Property setters (e.g. the
-  `signal_bus` subscribe-on-set contract) are invoked naturally; a failing
-  setter is logged loudly and never blocks other adapters or startup.
-
-`BasePlatformAdapter.__init__` now defaults all seven subsystem slots to
-`None` (`cost_tracker`, `escalation_engine`, `_approval_queue`,
-`_gepa_engine`, `_printing_press`, `_backup_vault`, `_morph_engine`), so
-any adapter subclass has well-defined "not wired" state.
-
-daemon.py changes are surgical: one registry constructed before the
-Telegram block, `register_adapter()` after each adapter's construction,
-and each former `telegram.<slot> = X` line became
-`gateway_registry.attach("<slot>", X)` in place. No startup restructuring.
-
-**Adding a gateway (Discord, G2) = construct the adapter +
-`gateway_registry.register_adapter(discord)` — it inherits ALL subsystems.**
-
-### Acceptance 4 — grep-level proof
-
-```
-$ grep -nE '^\s*(telegram|slack_adapter)\.(_\w+|cost_tracker|escalation_engine|signal_bus)\s*=' src/prometheus/daemon.py
-(no output)
-
-$ grep -n "gateway_registry" src/prometheus/daemon.py
-459:    gateway_registry = GatewaySubsystemRegistry()
-461:        gateway_registry.attach("cost_tracker", cost_tracker)
-487:        gateway_registry.register_adapter(telegram)
-507:            gateway_registry.attach("_approval_queue", approval_queue)
-560:            gateway_registry.attach("_printing_press", press_registry)
-614:            gateway_registry.register_adapter(slack_adapter)
-818:        gateway_registry.attach("escalation_engine", escalation_engine)
-953:            gateway_registry.attach("signal_bus", signal_bus)
-1122:                gateway_registry.attach("_backup_vault", sym_backup_vault)
-1150:                gateway_registry.attach("_morph_engine", sym_morph_engine)
-1182:            gateway_registry.attach("_gepa_engine", gepa_engine)
-```
-
-This proof is codified as CI in
-`tests/test_gateway_g1.py::TestDaemonUsesGenericWiring` (source-scan: no
-by-name injection + every slot attached through the registry).
-
-Remaining `telegram` references in daemon.py are the **reverse direction**
-(the adapter handed to a subsystem as its delivery transport), deliberately
-out of G1 scope: `ApprovalQueue(telegram_adapter=…)` (approval-prompt
-delivery), `ActivityObserver(gateway=…)`, and
-`TaskCompletionHandler(inject_turn=telegram.inject_turn)`.
-
-## Workstream 3 — Slack's missing commands
-
-**Slack slash handlers: 23 → 41** (`grep -c 'self._app.command('`;
-before-count taken from `git show main:src/prometheus/gateway/slack.py`).
-
-18 new `/prometheus-*` handlers, all thin wrappers over the shared layer,
-registered in `start()` and listed in `/prometheus-help`: `note`, `pairs`,
-`approve`, `deny`, `pending`, `escalations`, `gepa`, `symbiote`, `audit`,
-`press`, `voice`, `claude`, `gpt`, `gemini`, `xai`, `grok`, `local`,
-`route`.
-
-Also: `_slash_tools` now delegates to the shared `cmd_tools` (its body was
-a copy of Telegram's), and `_slash_status` passes the (newly attached)
-`cost_tracker` so cloud-spend reporting reaches Slack too.
-
-Multi-message flows (gepa run, symbiote, audit, press install) use a
-`_channel_sender` that posts via `chat_postMessage` (durable) and falls
-back to the slash `respond` URL — a `respond` URL alone dies after ~30
-minutes / 5 messages, too tight for approval-gated background flows.
-
-### Platform-honest exceptions table
-
-| capability | Slack behavior | why |
-|---|---|---|
-| `/voice` TTS voice-note replies | `/prometheus-voice` is registered and replies: *"Voice replies are not supported on Slack yet — the TTS pipeline (piper → opus/ogg voice notes) is wired to Telegram's voice-message API only…"* | the synth/upload pipeline lives in the Telegram adapter; porting it is not a G1 goal |
-| inline message dispatch (`/claude what is 2+2?`) | override applies; reply appends *"inline message dispatch isn't supported on Slack yet — send your question as a normal message"* | Telegram re-enters `_dispatch_to_agent` with a synthetic event; Slack slash payloads have no message/thread context wired for that |
-| approval **prompt delivery** | `/prometheus-approve/deny/pending` fully work; the outbound "Permission requested… /approve <id>" prompt still lands on the queue's configured transport (Telegram) | `ApprovalQueue`'s transport is a constructor arg; multi-gateway prompt delivery is flagged for G2 |
-| approval queue when Telegram is disabled | queue is only constructed inside the Telegram block, so a Slack-only deployment reports "Approval queue not active." | pre-existing structure; honest reply rather than half-working |
-| `/start`, `/clear` | not on Slack (manifest gap entries with reasons) | Telegram-native onboarding ping / alias of `-reset` |
-| media ingestion (photo/voice/document/sticker) | out of G1 scope | rides with G2's shared media work |
-| turn-level teacher-escalation hook | `/prometheus-escalations` reports the engine; the per-turn escalation anchor itself still runs only in Telegram's `_run_agent_turn` | turn-pipeline unification is beyond command parity (G2+ candidate) |
-
-## The drift-proof parity test (acceptance 1)
-
-`tests/test_gateway_parity.py` — a single `MANIFEST` of 43 command
-families, each declaring its shared `commands.py` function(s) and its
-registered command name per platform (or `None` + mandatory `gap_reason`).
-Asserted mechanically, both directions:
-
-* every manifest command is registered in that adapter's source AND its
-  handler method exists on the adapter class;
-* **every registered command on every platform appears in the manifest** —
-  adding a command to one gateway and forgetting another (or forgetting
-  the chart) fails CI;
-* platform gaps and shared-function gaps must carry documented reasons;
-* `TestParityReport` prints the full chart + the deliberate-gap allowlist
-  into CI logs.
-
-G2 extensibility: add one `PlatformSpec` for discord to `PLATFORMS` and a
-`"discord": …` key per family —
-`test_every_family_covers_every_platform` fails until every family takes an
-explicit stance on Discord.
-
-```
-$ PYTHONPATH=$PWD/src uv run pytest tests/test_gateway_parity.py -q
-........                                                                 [100%]
-8 passed in 0.20s
-```
-
-### Parity chart after G1 (printed by the test)
-
-```
-family        telegram                  slack                     shared
-------------------------------------------------------------------------
-start         start                     — (gap)                   — (one fixed greeting string)
-clear         clear                     — (gap)                   — (alias of /reset)
-reset         reset                     prometheus-reset          — (one-line session clear)
-help          help                      prometheus-help           cmd_help
-status        status                    prometheus-status         cmd_status
-model         model                     prometheus-model          cmd_model
-wiki          wiki                      prometheus-wiki           cmd_wiki
-note          note                      prometheus-note           cmd_note
-sentinel      sentinel                  prometheus-sentinel       cmd_sentinel
-benchmark     benchmark                 prometheus-benchmark      — (handler IS the benchmark)
-context       context                   prometheus-context        cmd_context
-skills        skills                    prometheus-skills         cmd_skills + 5 subcommand fns
-memory        memory                    prometheus-memory         cmd_memory_show, cmd_memory_limits
-curator       curator                   prometheus-curator        cmd_curator_show/status/run
-notifications notifications             prometheus-notifications  cmd_notifications
-health        health                    prometheus-health         cmd_health
-events        events                    prometheus-events         cmd_events
-steer         steer                     prometheus-steer          cmd_steer
-queue         queue                     prometheus-queue          cmd_queue
-unqueue       unqueue                   prometheus-unqueue        cmd_unqueue
-clearsteers   clearsteers               prometheus-clearsteers    cmd_clearsteers
-anatomy       anatomy                   prometheus-anatomy        cmd_anatomy
-doctor        doctor                    prometheus-doctor         cmd_doctor
-profile       profile                   prometheus-profile        cmd_profile
-beacon        beacon                    prometheus-beacon         cmd_beacon
-tools         tools                     prometheus-tools          cmd_tools
-pairs         pairs                     prometheus-pairs          cmd_pairs
-approve       approve                   prometheus-approve        cmd_approve
-deny          deny                      prometheus-deny           cmd_deny
-pending       pending                   prometheus-pending        cmd_pending
-gepa          gepa                      prometheus-gepa           cmd_gepa
-symbiote      symbiote                  prometheus-symbiote       cmd_symbiote
-audit         audit                     prometheus-audit          cmd_audit
-press         press                     prometheus-press          cmd_press
-escalations   escalations               prometheus-escalations    cmd_escalations
-voice         voice                     prometheus-voice          cmd_voice
-claude        claude                    prometheus-claude         cmd_provider_override
-gpt           gpt                       prometheus-gpt            cmd_provider_override
-gemini        gemini                    prometheus-gemini         cmd_provider_override
-xai           xai                       prometheus-xai            cmd_provider_override
-grok          grok                      prometheus-grok           cmd_provider_override
-local         local                     prometheus-local          cmd_local_override
-route         route                     prometheus-route          cmd_route
-
-Deliberate non-command gaps (allowlist):
-  * slack: media ingestion (photo/voice/document/sticker)
-      rides with Sprint G2's shared media pipeline
-  * slack: TTS voice-note replies
-      piper→opus/ogg pipeline is bound to Telegram's voice-message API;
-      /prometheus-voice replies with an explicit not-supported boundary
-  * slack: inline message dispatch on override commands
-      handler appends an explicit note instead of silently dropping text
-  * telegram: emoji reaction ack (eyes → white_check_mark)
-      Slack-native affordance; Telegram uses typing indicator instead
-  * approval prompt delivery
-      ApprovalQueue's outbound prompt transport is the Telegram adapter;
-      /approve /deny /pending work from every gateway
-```
-
-## Acceptance 3 — full suite
-
-```
-$ PYTHONPATH=$PWD/src uv run pytest -q \
-    --deselect "tests/test_bootstrap.py::TestMemoryInPrompt::test_empty_memory_files_no_section"
-3193 passed, 4 skipped, 1 deselected, 4 warnings in 102.93s
-```
-
-(The deselected test is the known pre-existing failure; CI deselects the
-same one. Warnings are pre-existing event-loop teardown noise.)
-
-New tests: 27 pins + 8 parity + 30 registry/Slack-handler tests = 65.
-Updated: 4 wiring assertions in `tests/test_wiring.py` /
-`tests/test_web_audit.py` that pinned the old private-method locations now
-point at the shared layer (same guarantees, new home).
-
-## Safety
-
-No adapters were started, no tokens read, no ports bound, no daemon
-restarted, no second daemon run. All tests use fakes, `MagicMock`
-transports, and tmp-dir `PROMETHEUS_CONFIG_DIR`. Registration is asserted
-by source scan + `hasattr`, never by instantiating a live bot.
-
-## Deviations / notes for review
-
-* `cmd_provider_override` returns `(text, applied)` — the one shared
-  function that isn't a plain `-> str`, because the gateway must know
-  whether to dispatch an inline message. Documented in its docstring.
-* `cmd_note`'s usage strings still say `/note …` on Slack (no `prefix`
-  kwarg added — it's a pre-G1 shared function also used by the web slash
-  router; threading `prefix` through it is a trivial follow-up).
-* Slack `/prometheus-status` output gains the cost-tracker block when a
-  cloud provider is active (parity improvement, not drift — Slack had
-  simply never received the tracker).
-* Two daemon/commands log lines changed wording ("Approval queue wired to
-  gateway adapters"; override log lines no longer say "Phase 4"); no
-  user-visible reply text changed.
-* Slack handler count is 23 → 41 (the sprint brief's "18 → ~38" counted a
-  slightly different baseline; both deltas are the same 18 missing
-  commands).
-* Telegram's `/status`, `/wiki`, `/sentinel`, `/context`, `/benchmark`
-  bodies remain embedded duplicates of their shared functions (pre-G1
-  state). Left untouched per the "bias toward leaving Telegram code paths
-  alone" rule — the parity manifest covers them because the shared
-  functions exist and both gateways register the commands.
+Third gateway surface: a `DiscordAdapter` on discord.py (new optional
+extra), wired through the G1 `GatewaySubsystemRegistry` with **zero
+per-subsystem daemon wiring**, all 43 command families registered as
+Discord app commands (ZERO discord entries in the command allowlist), and
+attachments routed through the **same** media services Telegram uses —
+extracted to a shared module with Telegram behaviour pinned byte-identical.
 
 ---
 
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
+## What shipped
+
+| Piece | Where |
+| --- | --- |
+| DiscordAdapter — gateway WS, DMs + whitelisted guild channels, 2000-char chunking, long replies → threads, 👀→✅ reactions, skill/memory/curator signal notifications, last-channel persistence | `src/prometheus/gateway/discord.py` |
+| All 43 families as app commands under ONE `/prometheus` command (4 section groups) | `discord.py::_register_app_commands` |
+| Shared media services (vision / Whisper STT / doc context-budget) extracted from Telegram | `src/prometheus/gateway/media_services.py` |
+| Telegram delegates to the shared services — byte-identical, pinned | `telegram.py` + `tests/test_gateway_media_pins.py` |
+| Optional extra `discord = ["discord.py>=2.3.0"]`, `full` extra updated | `pyproject.toml` (+ `uv.lock`) |
+| Daemon: optional-construction block, ONE `register_adapter(discord_adapter)` call, start/stop lifecycle alongside telegram/slack | `src/prometheus/daemon.py` |
+| Config defaults `gateway.discord.{enabled,token,guild_ids,channel_ids,skill_event_notifications,long_reply_threshold}` | `config/prometheus.yaml.default` |
+| `PROMETHEUS_DISCORD_TOKEN` — env template line (wizard-written template ONLY) + `ENV_OVERRIDES` mapping | `src/prometheus/cli/init.py`, `src/prometheus/config/env_override.py` |
+| `Platform.DISCORD` + `discord_inbound_allowed` whitelist semantics | `src/prometheus/gateway/config.py` |
+| Parity manifest: discord column, 43/43 registered | `tests/test_gateway_parity.py` |
+| Adapter test suite — fakes only, no token, no network | `tests/test_discord.py` (61 tests) |
+| Source-scan test extended: forbids `discord_adapter.<subsystem> =`, requires ≥3 `register_adapter` calls | `tests/test_gateway_g1.py` |
+
+---
+
+## 1. Parity manifest — the chart (green in CI; printed by `pytest -s tests/test_gateway_parity.py::TestParityReport`)
+
+```
+family        telegram       slack                     discord       shared
+-----------------------------------------------------------------------------
+start         start          — (gap: TG convention)    start         — (shared_gap: one fixed greeting)
+clear         clear          — (gap: alias of reset)   clear         — (shared_gap: one-line clear alias)
+reset         reset          prometheus-reset          reset         — (shared_gap: one-line clear + string)
+help          help           prometheus-help           help          cmd_help
+status        status         prometheus-status         status        cmd_status
+model         model          prometheus-model          model         cmd_model
+wiki          wiki           prometheus-wiki           wiki          cmd_wiki
+note          note           prometheus-note           note          cmd_note
+sentinel      sentinel       prometheus-sentinel       sentinel      cmd_sentinel
+benchmark     benchmark      prometheus-benchmark      benchmark     — (shared_gap: handler IS the benchmark)
+context       context        prometheus-context        context       cmd_context
+skills        skills         prometheus-skills         skills        cmd_skills + 5 subcommand fns
+memory        memory         prometheus-memory         memory        cmd_memory_show, cmd_memory_limits
+curator       curator        prometheus-curator        curator       cmd_curator_show/_status/_run
+notifications notifications  prometheus-notifications  notifications cmd_notifications
+health        health         prometheus-health         health        cmd_health
+events        events         prometheus-events         events        cmd_events
+steer         steer          prometheus-steer          steer         cmd_steer
+queue         queue          prometheus-queue          queue         cmd_queue
+unqueue       unqueue        prometheus-unqueue        unqueue       cmd_unqueue
+clearsteers   clearsteers    prometheus-clearsteers    clearsteers   cmd_clearsteers
+anatomy       anatomy        prometheus-anatomy        anatomy       cmd_anatomy
+doctor        doctor         prometheus-doctor         doctor        cmd_doctor
+profile       profile        prometheus-profile        profile       cmd_profile
+beacon        beacon         prometheus-beacon         beacon        cmd_beacon
+tools         tools          prometheus-tools          tools         cmd_tools
+pairs         pairs          prometheus-pairs          pairs         cmd_pairs
+approve       approve        prometheus-approve        approve       cmd_approve
+deny          deny           prometheus-deny           deny          cmd_deny
+pending       pending        prometheus-pending        pending       cmd_pending
+gepa          gepa           prometheus-gepa           gepa          cmd_gepa
+symbiote      symbiote       prometheus-symbiote       symbiote      cmd_symbiote
+audit         audit          prometheus-audit          audit         cmd_audit
+press         press          prometheus-press          press         cmd_press
+escalations   escalations    prometheus-escalations    escalations   cmd_escalations
+voice         voice          prometheus-voice          voice         cmd_voice
+claude        claude         prometheus-claude         claude        cmd_provider_override
+gpt           gpt            prometheus-gpt            gpt           cmd_provider_override
+gemini        gemini         prometheus-gemini         gemini        cmd_provider_override
+xai           xai            prometheus-xai            xai           cmd_provider_override
+grok          grok           prometheus-grok           grok          cmd_provider_override
+local         local          prometheus-local          local         cmd_local_override
+route         route          prometheus-route          route         cmd_route
+```
+
+**Discord command allowlist: EMPTY — 43/43 families registered**, including
+`start`/`clear` which are deliberately gapped on Slack. The discord column
+stores the family leaf name; the user-facing command is
+`/prometheus <section> <leaf>` (flagged deviation below). The manifest's
+registration regex scans `discord.py`'s `self._register(<group>, "<name>",
+self.<handler>, …)` lines and `hasattr`-checks each handler, both directions
+(unregistered manifest entry FAILS; unlisted registration FAILS).
+
+Non-command capability allowlist (`NON_COMMAND_GAPS`, updated by G2):
+
+| Gap | Reason |
+| --- | --- |
+| slack: media ingestion | the shared media pipeline now EXISTS (`gateway/media_services.py`, used by telegram + discord); Slack `file_shared` wiring is still open |
+| slack + discord: TTS voice-note replies | piper→opus/ogg is bound to Telegram's voice-message API; `voice` on both surfaces replies with an explicit boundary. Discord voice-message **INPUT works** (Whisper) |
+| slack + discord: inline dispatch on override commands | no message-dispatch context on slash payloads / interactions; handlers append an honest note instead of silently dropping text |
+| telegram: emoji reaction ack | Slack/Discord-native affordance; Telegram uses the typing indicator |
+| discord: sticker vision analysis | Discord stickers arrive as `message.stickers`, not attachments; image ATTACHMENTS get full vision analysis |
+| approval prompt delivery | ApprovalQueue's outbound transport is still the Telegram adapter; approve/deny/pending work from every gateway |
+
+## 2. Test counts
+
+- Baseline, MEASURED on main `7867b36` in a clean worktree with the
+  standard extras (`web anthropic slack` + dev): **3194 passed, 4 skipped,
+  0 failed** in this environment. (The sprint brief's "3243" figure does
+  not reproduce on this box with these extras — flagged rather than
+  copied; the 4 skips are pre-existing optional-dep skips, e.g. `mcp`
+  not installed.)
+- This branch, same command + `--extra discord`: **3265 passed, 4 skipped,
+  0 failed, 0 deselected** (`PYTHONPATH=$PWD/src uv run pytest`).
+- Delta: exactly **+71** — 61 `tests/test_discord.py` +
+  10 `tests/test_gateway_media_pins.py`; identical skips, nothing
+  deselected, no xfails added.
+- `uv sync --extra web --extra anthropic --extra slack --extra discord
+  --group dev` resolves cleanly (discord.py 2.7.1, no conflicts);
+  `uv sync --extra discord` alone also resolves (dry-run verified).
+  `uv.lock` diff = the new extra's dependency set only.
+- The 43-command tree was additionally built against the REAL discord.py
+  2.7.1 (no network): one `/prometheus` root, sections core=24, session=4,
+  ops=8, provider=7, every leaf carrying an optional `args` string option —
+  under Discord's 25-options-per-command cap at every level.
+
+## 3. Grep-proof: no discord-specific subsystem assignments in daemon.py
+
+```
+$ grep -nE '^\s*(telegram|slack_adapter|discord_adapter)\.(_\w+|cost_tracker|escalation_engine|signal_bus)\s*=' src/prometheus/daemon.py
+(no output — exit 1)
+$ grep -c "gateway_registry.register_adapter(" src/prometheus/daemon.py
+3
+```
+
+The daemon's entire Discord wiring is: construct `DiscordAdapter` →
+`gateway_registry.register_adapter(discord_adapter)` → `await start()`.
+All 8 subsystems (cost tracker, approval queue, printing press, escalation
+engine, signal bus, backup vault, morph engine, GEPA) arrive via the G1
+registry replay — proven in
+`test_discord.py::TestRegistryInheritance` (attach-before-register replay +
+signal_bus setter subscription). The CI source-scan test
+(`test_gateway_g1.py::TestDaemonUsesGenericWiring`) now also forbids
+`discord_adapter.<subsystem> =` lines and requires ≥3 `register_adapter`
+calls, so the constraint is enforced forward.
+
+## 4. First live run — honest statement
+
+**A live Discord connection was NOT tested.** No Discord bot token exists
+on this box and none was created for this sprint (hard rule: no real
+tokens, no daemon restart). Everything above is fakes + real-library tree
+construction.
+
+What the first live run needs from Will:
+
+1. **Create the Discord application + bot**
+   (https://discord.com/developers/applications → New Application → Bot →
+   Reset Token → copy token).
+2. **Enable the MESSAGE CONTENT intent** (Bot tab → Privileged Gateway
+   Intents → *Message Content Intent* ON). The adapter requests
+   `intents.message_content = True`; if the portal toggle is off the
+   gateway rejects the connection outright (`PrivilegedIntentsRequired`) —
+   loud, not silent.
+3. **Invite URL with BOTH scopes** — `bot` **and** `applications.commands`
+   (OAuth2 → URL Generator). Without `applications.commands`, `/prometheus`
+   never appears. Suggested bot permissions: View Channels, Send Messages,
+   Send Messages in Threads, Create Public Threads, Add Reactions,
+   Attach Files, Read Message History.
+4. **Config + install on the daemon host**:
+   `PROMETHEUS_DISCORD_TOKEN=` in `~/.config/prometheus/env` (template line
+   added), and in `prometheus.yaml`:
+   ```yaml
+   gateway:
+     discord:
+       enabled: true
+       guild_ids: [<server id>]   # instant slash commands; [] = global (~1h)
+   ```
+   plus `uv sync --extra discord` (or `pip install 'oara-prometheus[discord]'`),
+   then a daemon restart — Will's call, not done here.
+
+What could surprise us:
+
+- **Global command propagation**: with `guild_ids: []`, Discord can take up
+  to ~1 hour to surface `/prometheus`. Guild-scoped sync is instant — set
+  `guild_ids`.
+- **DM slash commands under guild-scoped sync**: when `guild_ids` is set we
+  deliberately skip the global sync (per spec), so the command picker only
+  offers `/prometheus` inside those guilds. DM *chat* and DM media still
+  work — plain messages need no registration.
+- **Rate limits**: discord.py absorbs per-route 429s internally (sleep +
+  retry), but a very long agent reply chunked into many 2000-char messages
+  will visibly trickle (~5 msgs/5s per channel). Long-reply→thread reduces
+  channel spam, not the rate limit.
+- **Interaction deadlines**: app commands must be acked within 3s — slow
+  handlers (benchmark, anatomy, doctor, curator run, gepa, symbiote, audit,
+  press) `defer()` first, and multi-message flows post directly to the
+  channel because followup webhooks expire after 15 minutes. Anything
+  unexpectedly slow without a defer shows "The application did not respond".
+- **Message-content intent at scale**: past 100 guilds the intent needs
+  Discord's manual approval — irrelevant for a personal bot, noted for
+  completeness.
+
+## 5. Telegram media refactor — byte-identical pins (G1 pattern)
+
+`_describe_image` / `_transcribe_audio` / `_truncate_for_context` moved
+from `telegram.py` into shared `prometheus.gateway.media_services` so
+Discord routes attachments through the SAME services (no duplication).
+Commit-sequenced so the proof is in history:
+
+- `cf39888` — 10 pins authored and run **green against the pre-refactor
+  tree**: exact vision question string ("Describe this image in detail."),
+  provider-metadata pass-through, error/empty→None fallbacks, exact
+  truncation formula + suffix text, server-context cap, and an end-to-end
+  `_handle_photo` pin asserting the exact `[Image: …]\ncaption` event text.
+- refactor commit — telegram delegates; the same 10 pins pass unchanged
+  (`10 passed` before AND after the extraction).
+
+## Flagged deviations
+
+1. **`/prometheus <section> <family>`, not `/prometheus <family>`.**
+   Discord hard-caps a slash command at 25 options (and a group at 25
+   subcommands); 43 families cannot sit flat under one group, so they sit
+   one section deeper: `core` (24) / `session` (4) / `ops` (8) /
+   `provider` (7) — still ONE top-level `/prometheus` in the picker.
+   Sections were chosen so every cross-command reference the shared layer
+   renders stays inside one section (approvals live with gepa/symbiote/
+   press in `ops` because their flows render "watch for the …approve
+   prompt"), so a single `prefix` string per section produces correct,
+   typeable help text — verified in tests
+   (`Usage: /prometheus ops approve {request_id}`,
+   `/prometheus provider local`, …).
+2. **Whitelist semantics.** The spec said "empty = DMs only, mirroring
+   Telegram's allowed_chat_ids semantics — check and MATCH the existing
+   semantics, cite them." Checked: Telegram's actual semantics
+   (`PlatformConfig.chat_allowed`) are *empty list = allow every chat*.
+   Carrying that to guilds would make the bot answer every message in any
+   server anyone invites it to, so Discord deviates deliberately: DMs
+   always allowed (matches Telegram's open-DM posture when unrestricted),
+   guild channels require an explicit `channel_ids`/`guild_ids` hit, both
+   empty = DMs only — exactly the spec's stated behaviour, documented with
+   the Telegram citation at `PlatformConfig.discord_inbound_allowed`.
+3. **`ENV_OVERRIDES` rider**: `PROMETHEUS_DISCORD_TOKEN` also got a mapping
+   in `env_override.py` (nested path `gateway.discord.token`) so the env
+   var behaves like the Telegram/Slack token vars everywhere (config
+   loading), not only in the daemon's construction block. One line.
+
+## Hard-rule compliance
+
+- No real tokens; no live Discord (or any) connection attempted.
+- Live daemon untouched: no restart, no second daemon, nothing bound to
+  :8005/:8010 — all tests are fakes; the discord gateway task only exists
+  inside `start()`, which no test calls with a real client.
+- Telegram behaviour byte-identical (pinned); slack.py untouched.

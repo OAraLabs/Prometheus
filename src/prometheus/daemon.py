@@ -623,6 +623,60 @@ async def run_daemon(args: argparse.Namespace) -> None:
         except Exception as exc:
             logger.error("Failed to start Slack adapter: %s", exc)
 
+    # Discord adapter (SPRINT G2) — mirrors the Slack optional-construction
+    # block: nested gateway.discord.* config, token via config or env var.
+    # No per-subsystem wiring here: register_adapter replays every subsystem
+    # attached so far and future attach() calls reach it automatically.
+    discord_adapter = None
+    discord_nested = gateway_config.get("discord") if isinstance(gateway_config.get("discord"), dict) else {}
+    discord_token = (
+        (discord_nested or {}).get("token", "")
+        or os.environ.get("PROMETHEUS_DISCORD_TOKEN", "")
+    )
+    discord_enabled = bool((discord_nested or {}).get("enabled", False))
+    if discord_token and discord_enabled:
+        try:
+            from prometheus.gateway.discord import DiscordAdapter
+            discord_config = PlatformConfig(
+                platform=Platform.DISCORD,
+                token=discord_token,
+                allowed_guild_ids=[
+                    int(g) for g in (discord_nested or {}).get("guild_ids", []) or []
+                ],
+                allowed_channel_ids=[
+                    int(c) for c in (discord_nested or {}).get("channel_ids", []) or []
+                ],
+            )
+            if "system_prompt" not in dir():
+                from prometheus.context.prompt_assembler import build_runtime_system_prompt
+                system_prompt = build_runtime_system_prompt(
+                    cwd=str(Path.cwd()), config=config,
+                )
+            discord_adapter = DiscordAdapter(
+                config=discord_config,
+                agent_loop=agent_loop,
+                tool_registry=registry,
+                system_prompt=system_prompt,
+                model_name=model_name,
+                model_provider=model_config.get("provider", "llama_cpp"),
+                session_manager=session_manager,
+                prometheus_config=config,
+            )
+            # SPRINT G1 contract: registering replays every subsystem attached
+            # so far (cost tracker, approval queue, printing press, …) onto
+            # Discord.
+            gateway_registry.register_adapter(discord_adapter)
+            await discord_adapter.start()
+            archive.archive_event("discord_started")
+            logger.info("Discord adapter started")
+        except ImportError:
+            logger.warning(
+                "Discord is enabled but discord.py is not installed. "
+                "Install with: pip install 'oara-prometheus[discord]'"
+            )
+        except Exception as exc:
+            logger.error("Failed to start Discord adapter: %s", exc)
+
     # Heartbeat — also watches background tasks and pushes proactive
     # finish/fail + progress notifications to the user (audit fix #3).
     from prometheus.tasks.manager import get_task_manager
@@ -1302,6 +1356,9 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     if slack_adapter:
         await slack_adapter.stop()
+
+    if discord_adapter:
+        await discord_adapter.stop()
 
     heartbeat.stop()
 

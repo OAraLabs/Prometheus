@@ -123,6 +123,18 @@ gateway:
   rate_limits:
     messages_per_minute: 30
     media_downloads_per_minute: 10
+  # SPRINT G2: Discord gateway (optional extra: pip install 'oara-prometheus[discord]').
+  # Whitelist semantics: DMs are ALWAYS allowed; guild-channel messages need
+  # a channel_ids (per-channel) or guild_ids (whole-guild) hit. With both
+  # empty the bot is DMs-only. App commands register guild-scoped (instant)
+  # when guild_ids is set, else globally (up to ~1h to propagate Discord-side).
+  discord:
+    enabled: false
+    token: ""                          # Set via PROMETHEUS_DISCORD_TOKEN env var
+    guild_ids: []                      # e.g. [123456789012345678]
+    channel_ids: []                    # e.g. [987654321098765432]
+    skill_event_notifications: quiet   # off | quiet | verbose
+    long_reply_threshold: 800          # chars; longer replies open a thread
 
 whisper:
   enabled: false

@@ -246,6 +246,9 @@ _ENV_TEMPLATE = """# Prometheus environment file — secrets live here, not in p
 #   PROMETHEUS_SLACK_BOT_TOKEN=
 #   PROMETHEUS_SLACK_APP_TOKEN=
 #
+# Discord (enable gateway.discord in prometheus.yaml too):
+#   PROMETHEUS_DISCORD_TOKEN=
+#
 # Cloud providers (optional):
 #   ANTHROPIC_API_KEY=
 #   OPENAI_API_KEY=
