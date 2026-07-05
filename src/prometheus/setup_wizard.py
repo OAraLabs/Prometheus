@@ -1,10 +1,18 @@
-"""First-run setup wizard for Prometheus.
+"""First-run setup wizard for Prometheus (the RICH path).
 
-Walks the user through provider selection, gateway configuration,
-directory creation, config writing, and a smoke test.
+Walks the user through identity generation, provider selection, gateway
+configuration, directory creation, config writing, and a smoke test.
 
 Usage:
-    python3 -m prometheus --setup
+    prometheus setup            # canonical entry point (Onboarding Phase 0)
+    prometheus setup --fast     # quick probe→yaml path (prometheus.cli.init)
+
+``prometheus --setup`` remains a thin forwarding alias.
+
+Dead-end rule (Phase 0, item 5): no path in this wizard may write a
+config that is known to be broken. When no server answers, the user is
+offered a remote URL, a cloud provider (key persisted to the env file),
+or install instructions and a clean exit.
 """
 
 from __future__ import annotations
@@ -20,8 +28,21 @@ import yaml
 from prometheus.config.paths import get_config_dir
 from prometheus.providers.registry import CLOUD_DEFAULTS, ProviderRegistry
 
-# Config file lives in the repo's config/ directory
+# Config file lives in the repo's config/ directory (checkout installs).
 _REPO_CONFIG = Path(__file__).resolve().parents[2] / "config" / "prometheus.yaml"
+
+
+def _config_target() -> Path:
+    """Where the wizard writes prometheus.yaml.
+
+    Checkout installs keep the historical repo-local ``config/`` target;
+    pip installs (no ``config/`` directory next to the package) write to
+    the user config dir — the second entry in the documented search
+    order, so the daemon finds it without flags.
+    """
+    if _REPO_CONFIG.parent.is_dir():
+        return _REPO_CONFIG
+    return get_config_dir() / "prometheus.yaml"
 
 # Cloud provider model choices: (model_id, label, pricing)
 CLOUD_PROVIDER_MODELS: dict[str, list[tuple[str, str, str]]] = {
@@ -106,6 +127,11 @@ class SetupWizard:
         self._slack_app_token: str = ""
         self._slack_channels: list[str] = []
         self._slack_workspace: str = ""
+
+    @property
+    def _config_path(self) -> Path:
+        """Resolved lazily so tests can monkeypatch ``_REPO_CONFIG``."""
+        return _config_target()
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -232,8 +258,10 @@ class SetupWizard:
         )
 
         if choice == 7:
-            self._print_no_model_help()
-            sys.exit(0)
+            # Dead-end fix (Phase 0, item 5): don't just print help and
+            # bail — offer the same recovery menu as a failed connection.
+            self._no_server_menu()
+            return
 
         # Cloud providers
         cloud_map = {3: "openai", 4: "anthropic", 5: "gemini", 6: "xai"}
@@ -268,9 +296,65 @@ class SetupWizard:
 
             retry = _input("\nTry a different URL? [y/N]", "N")
             if retry.lower() != "y":
-                print("\nSaving config with this URL — you can fix it later.")
-                self._base_url = url
+                # Dead-end fix (Phase 0, item 5): never save a config
+                # pointing at a server that just failed the probe.
+                self._no_server_menu()
                 return
+
+    def _no_server_menu(self) -> None:
+        """Recovery menu when no working inference server is available.
+
+        Offers (a) a remote URL, (b) a cloud provider with the key
+        persisted to the env file, or (c) install instructions + a clean
+        exit. Guarantees the wizard never proceeds with a base_url that
+        is known to be dead.
+        """
+        while True:
+            choice = _ask_choice(
+                "No working inference server. What now?",
+                [
+                    "Point Prometheus at a remote server URL",
+                    "Use a cloud provider (OpenAI / Anthropic / Gemini / xAI)",
+                    "Show install instructions for a local server and exit",
+                ],
+                default=3,
+            )
+            if choice == 1:
+                url = _input("\nRemote server URL (e.g. http://gpu-box:8080)").rstrip("/")
+                if not url:
+                    continue
+                print(f"\n  Testing connection to {url}...")
+                model = self._test_provider(url)
+                if model is None and self._provider != "ollama":
+                    # A remote box might be Ollama even if the user picked
+                    # llama.cpp earlier — probe the Ollama endpoint too.
+                    prev = self._provider
+                    self._provider = "ollama"
+                    model = self._test_provider(url)
+                    if model is None:
+                        self._provider = prev
+                if model is not None:
+                    print("  + Connected")
+                    if model:
+                        print(f"  Detected model: {model}")
+                        self._model_name = model
+                    self._base_url = url
+                    return
+                print(f"  x {url} did not respond.")
+                continue
+            if choice == 2:
+                cloud = _ask_choice(
+                    "Which cloud provider?",
+                    ["OpenAI", "Anthropic", "Google Gemini", "xAI"],
+                    default=2,
+                )
+                provider = {1: "openai", 2: "anthropic", 3: "gemini", 4: "xai"}[cloud]
+                self._step_cloud_provider(provider)
+                return
+            self._print_no_model_help()
+            print("Nothing was configured — no config written for a server "
+                  "that isn't there.")
+            sys.exit(0)
 
     def _step_cloud_provider(self, provider: str) -> None:
         """Collect cloud provider config: API key, model, smoke test."""
@@ -291,13 +375,16 @@ class SetupWizard:
                 print(f"  Set it with: export {default_env}=your-key-here")
                 print(f"  Config will reference ${default_env}.\n")
         elif len(key_input) > 20:
-            # They pasted a raw key — store as env var reference
+            # They pasted a raw key — persist it to the env file (the one
+            # `prometheus daemon` and the systemd unit load), never the yaml.
+            from prometheus.config.env_file import get_env_file_path, set_env_value
+
             self._api_key_env = default_env
             api_key = key_input
-            print(f"\n  For security, add this to your shell profile:")
-            print(f"  export {default_env}={key_input}")
+            env_path = set_env_value(default_env, key_input, get_env_file_path())
+            print(f"\n  + Key saved to {env_path} (as {default_env}).")
             print(f"  Config will reference ${default_env}, not store the key.\n")
-            os.environ[default_env] = key_input  # temp set for smoke test
+            os.environ[default_env] = key_input  # set for the smoke test
         else:
             # Custom env var name
             self._api_key_env = key_input
@@ -371,7 +458,7 @@ No problem. Here are your options:
     export XAI_API_KEY=...             # xAI Grok
 
 Run this wizard again after you're ready:
-  python3 -m prometheus --setup
+  prometheus setup
 """
         )
 
@@ -395,7 +482,7 @@ Run this wizard again after you're ready:
             self._gateway = "cli"
             print(
                 "\n  Got it — CLI mode. Add a gateway later with:"
-                "\n    python3 -m prometheus --setup --gateway-only"
+                "\n    prometheus setup --gateway-only"
             )
             return
 
@@ -556,7 +643,7 @@ Run this wizard again after you're ready:
 
     def _write_config(self) -> None:
         """Write a fresh config, preserving defaults from the template."""
-        print(f"\nWriting config to {_REPO_CONFIG}...")
+        print(f"\nWriting config to {self._config_path}...")
 
         # Load template defaults
         base = self._load_existing_config() or {}
@@ -568,12 +655,21 @@ Run this wizard again after you're ready:
 
     def _merge_and_write(self, existing: dict[str, Any]) -> None:
         """Merge wizard fields into existing config."""
-        print(f"\nUpdating config at {_REPO_CONFIG}...")
+        print(f"\nUpdating config at {self._config_path}...")
         self._apply_wizard_fields(existing)
         self._save_config(existing)
 
     def _apply_wizard_fields(self, cfg: dict[str, Any]) -> None:
         """Apply wizard answers to the config dict."""
+        # Onboarding Phase 0, item 2: the web bridge (Beacon dashboard +
+        # REST/WS API) is ON in every config the wizard writes. The daemon
+        # mints an API token on first start, so on-by-default is not
+        # open-by-default. Existing explicit settings are preserved.
+        web = cfg.setdefault("web", {})
+        web.setdefault("enabled", True)
+        web.setdefault("api_port", 8005)
+        web.setdefault("ws_port", 8010)
+
         if not self._gateway_only:
             model = cfg.setdefault("model", {})
             model["provider"] = self._provider
@@ -621,8 +717,8 @@ Run this wizard again after you're ready:
 
     def _save_config(self, cfg: dict[str, Any]) -> None:
         """Write config dict to YAML file and update .gitignore."""
-        _REPO_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-        with _REPO_CONFIG.open("w", encoding="utf-8") as fh:
+        self._config_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._config_path.open("w", encoding="utf-8") as fh:
             yaml.dump(cfg, fh, default_flow_style=False, sort_keys=False)
 
         # Print summary of what was written
@@ -656,7 +752,9 @@ Run this wizard again after you're ready:
 
     def _ensure_gitignore(self) -> None:
         """Add config/prometheus.yaml to .gitignore if not already there."""
-        gitignore = _REPO_CONFIG.parents[1] / ".gitignore"
+        if self._config_path != _REPO_CONFIG:
+            return  # user-dir config isn't inside a repo
+        gitignore = self._config_path.parents[1] / ".gitignore"
         entry = "config/prometheus.yaml"
         if gitignore.exists():
             content = gitignore.read_text(encoding="utf-8")
@@ -757,7 +855,7 @@ Run this wizard again after you're ready:
             print(f"  x Smoke test failed: {exc}")
             print()
             print("  Config was saved. Fix the issue and test manually:")
-            print('    python3 -m prometheus --once "What is 2+2?"')
+            print('    prometheus --once "What is 2+2?"')
             return False
 
     # ------------------------------------------------------------------
@@ -878,14 +976,17 @@ Run this wizard again after you're ready:
             gw_parts.append("CLI only")
         print(f"  Gateway:  {' + '.join(gw_parts)}")
 
-        print(f"  Config:   {_REPO_CONFIG}")
+        print(f"  Config:   {self._config_path}")
         print(f"  Data:     {get_config_dir()}")
         print()
         print("Start Prometheus:")
         print()
-        print("  Interactive:  python3 -m prometheus")
-        print('  One-shot:     python3 -m prometheus --once "your question"')
-        print(f"  Daemon:       python3 scripts/daemon.py --config {_REPO_CONFIG}")
+        print("  Interactive:  prometheus")
+        print('  One-shot:     prometheus --once "your question"')
+        print("  Daemon:       prometheus daemon   (Beacon dashboard on http://localhost:8005)")
+        print("                first start mints a web API token — printed once;")
+        print("                `prometheus token show` re-prints it")
+        print("  Health check: prometheus doctor")
         if self._gateway in ("telegram", "both") and self._telegram_bot_name:
             print()
             print(f"Send /start to @{self._telegram_bot_name} to begin.")
@@ -935,7 +1036,7 @@ Run this wizard again after you're ready:
     def _ask_rerun(self) -> int:
         """Ask what to do when config already exists. Returns 1-4."""
         return _ask_choice(
-            f"Existing configuration found at {_REPO_CONFIG}",
+            f"Existing configuration found at {self._config_path}",
             [
                 "Start fresh (overwrite everything)",
                 "Update model provider only",
@@ -951,9 +1052,9 @@ Run this wizard again after you're ready:
 
     def _load_existing_config(self) -> dict[str, Any] | None:
         """Load existing config if it exists."""
-        if _REPO_CONFIG.exists():
+        if self._config_path.exists():
             try:
-                with _REPO_CONFIG.open(encoding="utf-8") as fh:
+                with self._config_path.open(encoding="utf-8") as fh:
                     return yaml.safe_load(fh) or {}
             except Exception:
                 return None

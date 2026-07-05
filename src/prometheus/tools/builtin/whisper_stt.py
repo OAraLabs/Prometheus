@@ -101,16 +101,31 @@ class WhisperSTTTool(BaseTool):
 
     async def _transcribe(self, wav_path: Path, language: str, model: str) -> ToolResult:
         """Run Whisper on a WAV file."""
-        # Try faster-whisper first, then whisper CLI
+        # Try faster-whisper first, then whisper CLI, then the
+        # faster-whisper python API (the [voice] extra).
         engine = _detect_whisper_engine()
         if engine is None:
+            # Onboarding Phase 0 papercut: whisper was never declared as a
+            # dependency and this failure used to surface as a generic
+            # transcription error. Be loud and actionable.
+            logger.error(
+                "Voice input requested but no Whisper engine is installed. "
+                "Fix: pip install 'oara-prometheus[voice]' (faster-whisper), "
+                "or install the 'whisper' / 'faster-whisper-xxl' CLI."
+            )
             return ToolResult(
-                output="No Whisper engine found. Install 'whisper' or 'faster-whisper-xxl'.",
+                output=(
+                    "No Whisper engine found — voice input is unavailable. "
+                    "Install one: pip install 'oara-prometheus[voice]' "
+                    "(faster-whisper), or the 'whisper' / 'faster-whisper-xxl' CLI."
+                ),
                 is_error=True,
             )
 
         if engine == "faster-whisper":
             return await self._run_faster_whisper(wav_path, language, model)
+        if engine == "faster-whisper-python":
+            return await self._run_faster_whisper_python(wav_path, language, model)
         return await self._run_whisper_cli(wav_path, language, model)
 
     async def _run_whisper_cli(self, wav_path: Path, language: str, model: str) -> ToolResult:
@@ -182,14 +197,47 @@ class WhisperSTTTool(BaseTool):
         text = stdout.decode(errors="replace").strip()
         return ToolResult(output=text or "(empty transcription)")
 
+    async def _run_faster_whisper_python(
+        self, wav_path: Path, language: str, model: str,
+    ) -> ToolResult:
+        """Transcribe via the faster-whisper python API ([voice] extra)."""
+        def _work() -> str:
+            from faster_whisper import WhisperModel
+
+            wm = WhisperModel(model, device="auto", compute_type="auto")
+            segments, _info = wm.transcribe(str(wav_path), language=language)
+            return " ".join(seg.text.strip() for seg in segments).strip()
+
+        try:
+            text = await asyncio.wait_for(asyncio.to_thread(_work), timeout=120)
+        except asyncio.TimeoutError:
+            return ToolResult(
+                output="faster-whisper transcription timed out (120s)",
+                is_error=True,
+            )
+        except Exception as exc:
+            return ToolResult(
+                output=f"faster-whisper (python) failed: {exc}", is_error=True,
+            )
+        return ToolResult(output=text or "(empty transcription)")
+
     def is_read_only(self, arguments: BaseModel) -> bool:
         return True
 
 
 def _detect_whisper_engine() -> str | None:
-    """Detect which Whisper engine is available."""
+    """Detect which Whisper engine is available.
+
+    Preference order: the faster-whisper CLI variants, the whisper CLI,
+    then the faster-whisper python package (installed via
+    ``pip install 'oara-prometheus[voice]'``).
+    """
     if shutil.which("faster-whisper-xxl") or shutil.which("faster-whisper"):
         return "faster-whisper"
     if shutil.which("whisper"):
         return "whisper"
-    return None
+    try:
+        import faster_whisper  # noqa: F401 — the [voice] extra
+        return "faster-whisper-python"
+    except ImportError:
+        return None

@@ -117,6 +117,17 @@ async def run_daemon(args: argparse.Namespace) -> None:
     gateway_config = config.get("gateway", {})
     security_config = config.get("security", {})
 
+    # ── Env file (Onboarding Phase 0) ───────────────────────────────────
+    # Under systemd the unit's EnvironmentFile= already populated these;
+    # run bare, `prometheus daemon` loads the same file so tokens/keys
+    # behave identically either way (setdefault — real env always wins).
+    from prometheus.config.env_file import get_env_file_path, load_env_file
+    _env_loaded = load_env_file()
+    if _env_loaded:
+        logger.info(
+            "Loaded %d variable(s) from %s", _env_loaded, get_env_file_path()
+        )
+
     # ── Boot-SHA staleness signal ───────────────────────────────────────
     # The repo HEAD at process start is the identity of the code THIS process
     # loaded. /api/status, /health, and the heartbeat compare it against the
@@ -1179,6 +1190,28 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Web bridge (Beacon dashboard backend)
     web_config = config.get("web", {})
     if web_config.get("enabled", False):
+        # ── API token bootstrap (Onboarding Phase 0, item 2) ────────────
+        # Web-on must not mean open-by-accident: with no token configured
+        # anywhere, mint one, persist it to the env file, and print it
+        # ONCE. An explicit empty PROMETHEUS_API_TOKEN= stays OPEN
+        # (deliberate). Either way the auth state is logged every start.
+        from prometheus.config.api_token import (
+            describe_web_auth,
+            ensure_api_token,
+            format_minted_banner,
+        )
+        try:
+            _token, _minted = ensure_api_token(config)
+            if _minted:
+                print(format_minted_banner(_token), flush=True)
+                logger.warning(
+                    "web auth: NEW API token generated and saved to %s "
+                    "(printed once above — `prometheus token show` re-prints it)",
+                    get_env_file_path(),
+                )
+        except Exception:
+            logger.error("API token bootstrap failed", exc_info=True)
+        logger.info(describe_web_auth(config))
         try:
             from prometheus.web.launcher import launch_web
             from prometheus.engine.agent_loop import LoopContext
