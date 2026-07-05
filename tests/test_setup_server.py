@@ -269,3 +269,32 @@ class TestFindConfigFile:
         assert found is not None
         # daemon.load_config uses the same cwd-relative path — compare resolved.
         assert found.resolve() == repo_cfg.resolve()
+
+
+class TestExplicitConfigMissing:
+    """A typo'd --config must be a loud error — NOT silent fallback to the
+    user config (pre-Phase-1 behavior) and NOT surprise setup mode."""
+
+    def test_daemon_exits_1_with_clear_error(self, tmp_path):
+        import os
+        import subprocess
+        import sys
+
+        # A perfectly valid user config exists — the point is that an
+        # explicit-but-missing --config must not fall back to it.
+        confdir = tmp_path / "confdir"
+        confdir.mkdir()
+        (confdir / "prometheus.yaml").write_text("web: {}\n")
+        env = dict(os.environ)
+        env["PROMETHEUS_CONFIG_DIR"] = str(confdir)
+        env["PROMETHEUS_ENV_FILE"] = str(tmp_path / "env")
+        proc = subprocess.run(
+            [sys.executable, "-m", "prometheus.daemon", "--config",
+             str(tmp_path / "nope.yaml")],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(tmp_path), env=env,
+        )
+        assert proc.returncode == 1
+        assert "Config file not found" in proc.stderr
+        # Setup mode must NOT have engaged.
+        assert "PAIRING" not in proc.stdout.upper()

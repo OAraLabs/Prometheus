@@ -1341,6 +1341,12 @@ def main() -> None:
     # logger below — setup mode must not create ~/.prometheus/logs (or
     # any other ~/.prometheus state).
     from prometheus.web.setup_server import find_config_file, run_setup_mode
+    if args.config and not Path(args.config).expanduser().is_file():
+        # An EXPLICIT --config that doesn't exist is a broken invocation —
+        # fail loudly rather than silently falling back to the user config
+        # (old behavior) or surprising the operator with setup mode.
+        print(f"Config file not found: {args.config}", file=sys.stderr)
+        sys.exit(1)
     if find_config_file(args.config) is None:
         logging.basicConfig(
             level=log_level,
