@@ -20,6 +20,10 @@ Backend trade-offs:
   air-gapped. Faster on a warm GPU, no quota, supports future img2img/
   inpaint/ControlNet extensions. Needs the model files on disk and
   competes with other workloads for VRAM.
+- **dashscope** — Alibaba WAN 2.5 (PAID, async task API, needs
+  DASHSCOPE_API_KEY). NEVER auto-selected: only an explicit
+  ``backend=dashscope`` argument or a deliberate
+  ``default_backend: dashscope`` config reaches it (CLOUD EXPANSION 2026-07).
 
 When ``backend=auto``, the tool probes ComfyUI's ``/system_stats`` and
 falls back to Pollinations if the local server is unreachable. The
@@ -55,7 +59,7 @@ logger = logging.getLogger(__name__)
 # Backend names
 # ---------------------------------------------------------------------------
 
-BackendName = Literal["auto", "pollinations", "comfyui"]
+BackendName = Literal["auto", "pollinations", "comfyui", "dashscope"]
 
 # Pollinations-side known model names (the endpoint accepts anything;
 # unknown values fall through to flux server-side).
@@ -66,6 +70,17 @@ _POLLINATIONS_TIMEOUT = 120.0
 _COMFYUI_PROBE_TIMEOUT = 2.0
 _COMFYUI_TOTAL_TIMEOUT = 180.0
 _COMFYUI_POLL_INTERVAL = 0.5
+
+# DashScope (WAN 2.5) — async-only task API. CLOUD EXPANSION (2026-07).
+# Legacy-but-working international default; newer workspace-scoped domains
+# exist, so the base URL is config-overridable
+# (image_generation.dashscope.base_url).
+_DASHSCOPE_DEFAULT_BASE = "https://dashscope-intl.aliyuncs.com/api/v1"
+_DASHSCOPE_DEFAULT_MODEL = "wan2.5-t2i-preview"
+_DASHSCOPE_DEFAULT_KEY_ENV = "DASHSCOPE_API_KEY"
+_DASHSCOPE_POLL_INTERVAL = 3.0
+_DASHSCOPE_POLL_BUDGET = 300.0
+_DASHSCOPE_HTTP_TIMEOUT = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +105,9 @@ class ImageGenerateInput(BaseModel):
             "Which backend to use. 'auto' (default) tries local ComfyUI "
             "first and falls back to Pollinations if it's offline. "
             "'pollinations' forces the free hosted endpoint. 'comfyui' "
-            "forces the local GPU backend (errors if unreachable)."
+            "forces the local GPU backend (errors if unreachable). "
+            "'dashscope' forces the PAID Alibaba WAN 2.5 API — never "
+            "selected automatically; requires DASHSCOPE_API_KEY."
         ),
     )
     model: str = Field(
@@ -147,13 +164,21 @@ class ImageGenerateTool(BaseTool):
 
     name = "image_generate"
     description = (
-        "Generate an image from a text prompt. Two backends: 'pollinations' "
+        "Generate an image from a text prompt. Backends: 'pollinations' "
         "(free hosted, no key), 'comfyui' (local GPU, FLUX-backed, "
-        "sovereign). Default 'auto' picks comfyui when reachable else "
-        "pollinations. Returns the path to the saved image. Defaults: "
-        "1024x1024, flux model. Set seed for reproducible output."
+        "sovereign), 'dashscope' (PAID Alibaba WAN 2.5 — only when "
+        "explicitly requested). Default 'auto' picks comfyui when reachable "
+        "else pollinations; auto NEVER picks the paid backend. Returns the "
+        "path to the saved image. Defaults: 1024x1024, flux model. Set seed "
+        "for reproducible output."
     )
     input_model = ImageGenerateInput
+    # CLOUD EXPANSION (2026-07): the dashscope path can legitimately run
+    # poll-budget (300s) + submit + download — past the agent loop's 300s
+    # default tool timeout. Raise the per-tool bar so a slow WAN render
+    # returns the tool's own honest timeout message instead of being killed
+    # mid-poll. (Free backends finish well under their 120–180s budgets.)
+    execution_timeout_seconds: float = _DASHSCOPE_POLL_BUDGET + 180.0
 
     def is_read_only(self, arguments: ImageGenerateInput) -> bool:
         # Only read-only when nothing is written to a model-chosen path.
@@ -196,6 +221,8 @@ class ImageGenerateTool(BaseTool):
 
         if backend == "comfyui":
             return await _generate_via_comfyui(arguments, cfg)
+        if backend == "dashscope":
+            return await _generate_via_dashscope(arguments, cfg)
         return await _generate_via_pollinations(arguments)
 
 
@@ -238,25 +265,37 @@ def _image_config(context: ToolExecutionContext) -> dict[str, Any]:
 
 async def _resolve_backend(
     requested: BackendName, cfg: dict[str, Any],
-) -> Literal["pollinations", "comfyui"]:
+) -> Literal["pollinations", "comfyui", "dashscope"]:
     """Map ``requested`` to a concrete backend, probing on ``auto``.
 
-    Explicit ``pollinations`` or ``comfyui`` are honored verbatim —
-    the agent gets the failure it asked for. ``auto`` and a missing
-    ``backend`` fall back through the config default; if that's also
-    ``auto``, probe ComfyUI and pick.
+    Explicit ``pollinations`` / ``comfyui`` / ``dashscope`` are honored
+    verbatim — the agent gets the failure it asked for. ``auto`` and a
+    missing ``backend`` fall back through the config default; if that's
+    also ``auto``, probe ComfyUI and pick.
+
+    HARD RULE (CLOUD EXPANSION): the ``auto`` probe NEVER lands on
+    ``dashscope`` — the paid API runs only on an explicit
+    ``backend=dashscope`` argument or a deliberate
+    ``default_backend: dashscope`` in config. A present DASHSCOPE_API_KEY
+    alone must not change what ``auto`` picks.
     """
     if requested == "pollinations":
         return "pollinations"
     if requested == "comfyui":
         return "comfyui"
+    if requested == "dashscope":
+        return "dashscope"
     # auto
     default = (cfg.get("default_backend") or "auto").lower()
     if default == "pollinations":
         return "pollinations"
     if default == "comfyui":
         return "comfyui"
-    # Probe — auto means "use comfyui if it's up"
+    if default == "dashscope":
+        # Explicit config opt-in — the user deliberately made the paid API
+        # the default. This is the ONLY non-argument path to dashscope.
+        return "dashscope"
+    # Probe — auto means "use comfyui if it's up". Never dashscope.
     if await _comfyui_reachable(cfg):
         return "comfyui"
     return "pollinations"
@@ -628,6 +667,212 @@ async def _fetch_comfyui_image(
     r = await client.get(f"{base}/view", params=params)
     r.raise_for_status()
     return r.content
+
+
+# ---------------------------------------------------------------------------
+# DashScope (WAN 2.5) backend — CLOUD EXPANSION (2026-07)
+# ---------------------------------------------------------------------------
+#
+# Async-ONLY task API:
+#   1. POST {base}/services/aigc/image-generation/generation
+#      with header ``X-DashScope-Async: enable`` → {"output": {"task_id": …}}
+#   2. Poll GET {base}/tasks/{task_id} until task_status SUCCEEDED / FAILED.
+#   3. Result URLs expire in 24h → download the bytes IMMEDIATELY and save
+#      through the existing cache path (same as every other backend).
+#
+# Fakes-tested, dormant-until-keyed: no DASHSCOPE_API_KEY existed on this box
+# when the backend shipped; the request/response shapes come from the
+# 2026-07-05 research pass and the test fixtures pin them.
+
+
+def _dashscope_api_key(ds_cfg: dict[str, Any]) -> str:
+    """Resolve the DashScope key: direct config value (env-override injected)
+    first, then the configured env var name. Empty string = not configured."""
+    import os
+
+    direct = ds_cfg.get("api_key") or ""
+    if direct:
+        return str(direct)
+    env_name = ds_cfg.get("api_key_env") or _DASHSCOPE_DEFAULT_KEY_ENV
+    return os.environ.get(env_name, "")
+
+
+async def _generate_via_dashscope(
+    arguments: ImageGenerateInput,
+    cfg: dict[str, Any],
+) -> ToolResult:
+    """Drive the WAN 2.5 text-to-image task API end-to-end."""
+    ds = cfg.get("dashscope", {}) or {}
+    base = (ds.get("base_url") or _DASHSCOPE_DEFAULT_BASE).rstrip("/")
+    model = arguments.model
+    if model in _POLLINATIONS_MODELS:
+        # Caller passed a Pollinations alias — substitute the WAN default.
+        model = ds.get("model") or _DASHSCOPE_DEFAULT_MODEL
+
+    api_key = _dashscope_api_key(ds)
+    if not api_key:
+        env_name = ds.get("api_key_env") or _DASHSCOPE_DEFAULT_KEY_ENV
+        return ToolResult(
+            output=(
+                f"image_generate (dashscope): no API key configured. The WAN "
+                f"2.5 backend is a PAID Alibaba Cloud service — get a key "
+                f"from the DashScope / Model Studio console "
+                f"(https://dashscope.console.aliyun.com), add "
+                f"{env_name}=<key> to ~/.config/prometheus/env, and restart "
+                f"the daemon. Free alternatives: backend=pollinations or "
+                f"backend=comfyui."
+            ),
+            is_error=True,
+        )
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "X-DashScope-Async": "enable",   # WAN 2.5 t2i is async-ONLY
+    }
+    payload: dict[str, Any] = {
+        "model": model,
+        "input": {"prompt": arguments.prompt},
+        "parameters": {
+            "size": f"{arguments.width}*{arguments.height}",
+            "n": 1,
+        },
+    }
+    if arguments.seed is not None:
+        payload["parameters"]["seed"] = arguments.seed
+
+    try:
+        async with httpx.AsyncClient(timeout=_DASHSCOPE_HTTP_TIMEOUT) as client:
+            r = await client.post(
+                f"{base}/services/aigc/image-generation/generation",
+                json=payload,
+                headers=headers,
+            )
+            r.raise_for_status()
+            task_id = (r.json().get("output") or {}).get("task_id")
+            if not task_id:
+                return ToolResult(
+                    output=(
+                        f"image_generate (dashscope): submit returned no "
+                        f"task_id. Body: {r.text[:400]}"
+                    ),
+                    is_error=True,
+                )
+
+            outcome = await _poll_dashscope_task(
+                client, base, task_id, {"Authorization": f"Bearer {api_key}"},
+            )
+            if outcome is None:
+                return ToolResult(
+                    output=(
+                        f"image_generate (dashscope): task {task_id} did not "
+                        f"finish within {_DASHSCOPE_POLL_BUDGET:.0f}s. It may "
+                        f"still complete server-side; retry, or check the "
+                        f"DashScope console."
+                    ),
+                    is_error=True,
+                )
+            status, output = outcome
+            if status != "SUCCEEDED":
+                message = output.get("message") or output.get("code") or "(no detail)"
+                return ToolResult(
+                    output=(
+                        f"image_generate (dashscope): task {task_id} ended "
+                        f"{status} — {message}"
+                    ),
+                    is_error=True,
+                )
+
+            image_url = _extract_dashscope_image_url(output)
+            if not image_url:
+                return ToolResult(
+                    output=(
+                        f"image_generate (dashscope): task {task_id} "
+                        f"SUCCEEDED but no image URL in results."
+                    ),
+                    is_error=True,
+                )
+
+            # Result URLs expire in 24h — download NOW, cache like every
+            # other backend.
+            img = await client.get(image_url)
+            img.raise_for_status()
+            image_bytes = img.content
+            content_type = img.headers.get("content-type", "image/png")
+    except httpx.HTTPStatusError as exc:
+        return ToolResult(
+            output=(
+                f"image_generate (dashscope): HTTP {exc.response.status_code} — "
+                f"{exc.response.text[:400] if exc.response.text else '(empty)'}"
+            ),
+            is_error=True,
+        )
+    except httpx.HTTPError as exc:
+        return ToolResult(
+            output=f"image_generate (dashscope): network error — {exc}",
+            is_error=True,
+        )
+
+    if not image_bytes:
+        return ToolResult(
+            output="image_generate (dashscope): downloaded empty image bytes.",
+            is_error=True,
+        )
+    try:
+        saved_path = _save_image_bytes(
+            image_bytes,
+            ext=_ext_from_content_type(content_type),
+            override_path=arguments.output_path,
+        )
+    except ValueError as exc:
+        return ToolResult(
+            output=f"image_generate: refusing to save image — {exc}",
+            is_error=True,
+        )
+    size_kb = len(image_bytes) / 1024.0
+    return ToolResult(
+        output=(
+            f"Saved image to {saved_path}\n"
+            f"  backend: dashscope (WAN 2.5, paid)\n"
+            f"  size: {arguments.width}x{arguments.height}\n"
+            f"  bytes: {size_kb:.1f} KB\n"
+            f"  model: {model}"
+        ),
+    )
+
+
+async def _poll_dashscope_task(
+    client: httpx.AsyncClient,
+    base: str,
+    task_id: str,
+    headers: dict[str, str],
+) -> tuple[str, dict[str, Any]] | None:
+    """Poll ``GET {base}/tasks/{task_id}`` until a terminal status.
+
+    Returns ``(task_status, output_dict)`` on SUCCEEDED/FAILED/CANCELED,
+    or ``None`` on poll-budget exhaustion.
+    """
+    deadline = asyncio.get_event_loop().time() + _DASHSCOPE_POLL_BUDGET
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            r = await client.get(f"{base}/tasks/{task_id}", headers=headers)
+            r.raise_for_status()
+            output = r.json().get("output") or {}
+            status = str(output.get("task_status") or "").upper()
+            if status in ("SUCCEEDED", "FAILED", "CANCELED"):
+                return status, output
+        except httpx.HTTPError as exc:
+            logger.debug("dashscope task poll error: %s", exc)
+        await asyncio.sleep(_DASHSCOPE_POLL_INTERVAL)
+    return None
+
+
+def _extract_dashscope_image_url(output: dict[str, Any]) -> str:
+    """Pull the first result URL from a SUCCEEDED task's output block."""
+    for result in output.get("results") or []:
+        if isinstance(result, dict) and result.get("url"):
+            return str(result["url"])
+    return ""
 
 
 # ---------------------------------------------------------------------------

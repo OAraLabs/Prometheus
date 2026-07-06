@@ -54,6 +54,8 @@ WEB_NATIVE_ONLY: frozenset[str] = frozenset({
     "approve", "deny", "pending",
     "gepa", "symbiote", "audit", "press",
     "claude", "gpt", "gemini", "xai", "grok", "local",
+    # CLOUD EXPANSION (2026-07): mirror of the new Telegram override commands
+    "deepseek", "kimi", "glm", "mimo",
     "escalations",
 })
 

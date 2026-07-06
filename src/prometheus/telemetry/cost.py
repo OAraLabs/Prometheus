@@ -55,6 +55,14 @@ PRICING: dict[str, tuple[float, float]] = {
     # xAI (not re-verified in PR #19 — docs.x.ai no longer lists grok-3)
     "grok-3": (3.00, 15.00),
     "grok-3-mini": (0.30, 0.50),
+    # -- CLOUD EXPANSION (2026-07) — values from the 2026-07-05 web research
+    # pass; verify each against the provider's pricing console at first live
+    # use (no keys existed on this box when they were entered).
+    "deepseek-v4-flash": (0.14, 0.28),
+    "deepseek-v4-pro": (0.435, 0.87),      # 2026-07 research, verify at first live use
+    "kimi-k2.6": (0.95, 4.00),             # 2026-07 research, verify at first live use
+    "glm-5.2": (1.40, 4.40),               # 2026-07 research, verify at first live use
+    "mimo-v2.5-pro": (0.435, 0.87),        # 2026-07 research, verify at first live use
 }
 
 

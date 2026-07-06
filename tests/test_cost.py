@@ -30,6 +30,13 @@ SLASH_COMMAND_DEFAULT_MODELS: tuple[str, ...] = (
     "gpt-4o",              # /gpt default
     "gemini-2.5-pro",      # /gemini default
     "grok-3",              # /xai default
+    # CLOUD EXPANSION (2026-07) — pricing entered from the 2026-07-05
+    # research pass, verify at first live use
+    "deepseek-v4-flash",   # /deepseek default
+    "deepseek-v4-pro",     # DeepSeek reasoning flagship (documented pin target)
+    "kimi-k2.6",           # /kimi default
+    "glm-5.2",             # /glm default
+    "mimo-v2.5-pro",       # /mimo default
 )
 
 

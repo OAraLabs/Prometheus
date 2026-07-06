@@ -309,8 +309,17 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
                  "prometheus.tools.builtin.task_output", "TaskOutputTool")
 
     # Image generation — free Pollinations.ai endpoint, no API key
+    # (backend=dashscope adds paid WAN 2.5, opt-in, DASHSCOPE_API_KEY)
     try_register(registry, "ImageGenerateTool",
                  "prometheus.tools.builtin.image_generate", "ImageGenerateTool")
+
+    # Video generation — Kling 3.0 (CLOUD EXPANSION 2026-07). PAID +
+    # dormant-until-keyed: registration is unconditional (same pattern as
+    # image_generate — this is the single registry both the CLI and the
+    # daemon build via create_tool_registry); without KLING_ACCESS_KEY +
+    # KLING_SECRET_KEY the tool returns an actionable error, never bills.
+    try_register(registry, "KlingVideoTool",
+                 "prometheus.tools.builtin.video_generate", "KlingVideoTool")
 
     return registry
 

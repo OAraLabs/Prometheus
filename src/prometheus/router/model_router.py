@@ -293,11 +293,38 @@ OVERRIDE_PRESETS: dict[str, dict[str, str]] = {
         "api_key_env": "XAI_API_KEY",
         "model": "grok-3",
     },
+    # -- CLOUD EXPANSION (2026-07) --
+    "deepseek": {
+        "provider": "deepseek",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        # V4 flash: cheap + fast chat default. The reasoning flagship is
+        # deepseek-v4-pro — pin it via slash_commands.deepseek in
+        # prometheus.yaml. The pre-V4 aliases (deepseek-chat /
+        # deepseek-reasoner) are deprecated 2026-07-24; do NOT use them.
+        "model": "deepseek-v4-flash",
+    },
+    "kimi": {
+        "provider": "kimi",
+        "api_key_env": "MOONSHOT_API_KEY",
+        "model": "kimi-k2.6",
+    },
+    "glm": {
+        "provider": "glm",
+        "api_key_env": "ZAI_API_KEY",
+        "model": "glm-5.2",
+    },
+    "mimo": {
+        "provider": "mimo",
+        "api_key_env": "MIMO_API_KEY",
+        "model": "mimo-v2.5-pro",
+    },
 }
 
 # Known slash commands that route through OVERRIDE_PRESETS. Used by
 # log_slash_command_wiring() at startup and by tests.
-SLASH_COMMAND_NAMES: tuple[str, ...] = ("claude", "gpt", "gemini", "xai")
+SLASH_COMMAND_NAMES: tuple[str, ...] = (
+    "claude", "gpt", "gemini", "xai", "deepseek", "kimi", "glm", "mimo",
+)
 
 # Track which slash commands we've already warned about falling back to
 # the hardcoded preset. Set semantics: warn once per process per command,
@@ -792,7 +819,12 @@ def _build_adapter_for(provider_name: str) -> Any:
             formatter=AnthropicFormatter(),
             tier=ModelAdapter.TIER_OFF,
         )
-    if provider_name in ("openai", "gemini", "xai"):
+    if provider_name in (
+        "openai", "gemini", "xai",
+        # CLOUD EXPANSION (2026-07): same OpenAI-compat wire path, same
+        # API-enforced structure → tier off.
+        "deepseek", "kimi", "glm", "mimo",
+    ):
         return ModelAdapter(
             formatter=PassthroughFormatter(),
             tier=ModelAdapter.TIER_OFF,

@@ -267,6 +267,15 @@ _ENV_TEMPLATE = """# Prometheus environment file — secrets live here, not in p
 #   ANTHROPIC_API_KEY=
 #   OPENAI_API_KEY=
 #   GOOGLE_API_KEY=
+#   DEEPSEEK_API_KEY=      # platform.deepseek.com — /deepseek override
+#   MOONSHOT_API_KEY=      # platform.moonshot.ai — /kimi override
+#   ZAI_API_KEY=           # z.ai API console — /glm override
+#   MIMO_API_KEY=          # api.xiaomimimo.com console — /mimo override
+#
+# Media generation (optional, paid — never auto-selected):
+#   DASHSCOPE_API_KEY=     # Alibaba DashScope — image_generate backend=dashscope (WAN 2.5)
+#   KLING_ACCESS_KEY=      # klingai.com API console — video_generate (Kling 3.0)
+#   KLING_SECRET_KEY=
 #
 # Beacon dashboard API token. Leave UNSET and the daemon mints a secure
 # one on first start (printed once; `prometheus token show` re-prints it).
@@ -275,9 +284,15 @@ _ENV_TEMPLATE = """# Prometheus environment file — secrets live here, not in p
 """
 
 # Cloud fast-path choices: provider → (api_key_env, default model, context limit)
+# Appended entries keep the historical anthropic/openai numbering stable.
 _CLOUD_FAST_PROVIDERS: dict[str, tuple[str, str, int]] = {
     "anthropic": ("ANTHROPIC_API_KEY", "claude-sonnet-4-6", 100000),
     "openai": ("OPENAI_API_KEY", "gpt-4o", 64000),
+    # CLOUD EXPANSION (2026-07)
+    "deepseek": ("DEEPSEEK_API_KEY", "deepseek-v4-flash", 64000),
+    "kimi": ("MOONSHOT_API_KEY", "kimi-k2.6", 64000),
+    "glm": ("ZAI_API_KEY", "glm-5.2", 64000),
+    "mimo": ("MIMO_API_KEY", "mimo-v2.5-pro", 64000),
 }
 
 
@@ -473,7 +488,8 @@ def _handle_no_server(
             "No local inference server was found. What now?",
             [
                 "Point Prometheus at a remote server URL",
-                "Use a cloud provider (Anthropic / OpenAI)",
+                "Use a cloud provider (Anthropic / OpenAI / DeepSeek / "
+                "Kimi / GLM / MiMo)",
                 "Show install instructions for a local server and exit",
             ],
             default_index=2,

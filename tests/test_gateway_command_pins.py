@@ -69,6 +69,9 @@ def _sent_text(adapter: TelegramAdapter) -> str:
 
 
 class TestRouteLocalPins:
+    # NOTE (CLOUD EXPANSION 2026-07): the /route override list deliberately
+    # gained /deepseek /kimi /glm /mimo lines; the pins below were updated to
+    # the new expected surface at the same time as the change.
     @pytest.mark.asyncio
     async def test_route_no_router_pin(self):
         adapter = _make_adapter()
@@ -83,6 +86,10 @@ class TestRouteLocalPins:
             "  /gemini  — Google Gemini\n"
             "  /xai     — xAI Grok\n"
             "  /grok    — alias for /xai\n"
+            "  /deepseek — DeepSeek\n"
+            "  /kimi    — Kimi (Moonshot)\n"
+            "  /glm     — GLM (Z.ai)\n"
+            "  /mimo    — MiMo (Xiaomi)\n"
             "  /local   — back to primary"
         )
 
@@ -107,6 +114,10 @@ class TestRouteLocalPins:
             "  /gemini  — Google Gemini\n"
             "  /xai     — xAI Grok\n"
             "  /grok    — alias for /xai\n"
+            "  /deepseek — DeepSeek\n"
+            "  /kimi    — Kimi (Moonshot)\n"
+            "  /glm     — GLM (Z.ai)\n"
+            "  /mimo    — MiMo (Xiaomi)\n"
             "  /local   — back to primary"
         )
 

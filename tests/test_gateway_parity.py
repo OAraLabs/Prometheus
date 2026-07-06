@@ -203,6 +203,15 @@ MANIFEST: tuple[Family, ...] = (
     ),
     Family("xai", ("cmd_provider_override",), _cmds("xai", "prometheus-xai", "xai")),
     Family("grok", ("cmd_provider_override",), _cmds("grok", "prometheus-grok", "grok")),
+    # CLOUD EXPANSION (2026-07): DeepSeek / Kimi (Moonshot) / GLM (Z.ai) /
+    # MiMo (Xiaomi) — same shared handler, all three platforms, no gaps.
+    Family(
+        "deepseek", ("cmd_provider_override",),
+        _cmds("deepseek", "prometheus-deepseek", "deepseek"),
+    ),
+    Family("kimi", ("cmd_provider_override",), _cmds("kimi", "prometheus-kimi", "kimi")),
+    Family("glm", ("cmd_provider_override",), _cmds("glm", "prometheus-glm", "glm")),
+    Family("mimo", ("cmd_provider_override",), _cmds("mimo", "prometheus-mimo", "mimo")),
     Family("local", ("cmd_local_override",), _cmds("local", "prometheus-local", "local")),
     Family("route", ("cmd_route",), _cmds("route", "prometheus-route", "route")),
 )

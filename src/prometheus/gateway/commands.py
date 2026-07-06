@@ -1699,6 +1699,11 @@ PROVIDER_PRESET_DISPLAY_NAMES: dict[str, str] = {
     "gpt": "GPT (openai)",
     "gemini": "Gemini (google)",
     "xai": "Grok (xai)",
+    # CLOUD EXPANSION (2026-07)
+    "deepseek": "DeepSeek (deepseek)",
+    "kimi": "Kimi (moonshot)",
+    "glm": "GLM (z.ai)",
+    "mimo": "MiMo (xiaomi)",
 }
 
 
@@ -1858,6 +1863,10 @@ def cmd_route(
     lines.append(f"  {prefix}gemini  — Google Gemini")
     lines.append(f"  {prefix}xai     — xAI Grok")
     lines.append(f"  {prefix}grok    — alias for {prefix}xai")
+    lines.append(f"  {prefix}deepseek — DeepSeek")
+    lines.append(f"  {prefix}kimi    — Kimi (Moonshot)")
+    lines.append(f"  {prefix}glm     — GLM (Z.ai)")
+    lines.append(f"  {prefix}mimo    — MiMo (Xiaomi)")
     lines.append(f"  {prefix}local   — back to primary")
 
     return "\n".join(lines)
