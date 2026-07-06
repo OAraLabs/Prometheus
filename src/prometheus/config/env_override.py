@@ -33,6 +33,16 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     # Provider API keys
     "ANTHROPIC_API_KEY": ("providers", "anthropic", "api_key"),
     "OPENAI_API_KEY": ("providers", "openai", "api_key"),
+    # CLOUD EXPANSION (2026-07): four more LLM providers + media backends
+    "DEEPSEEK_API_KEY": ("providers", "deepseek", "api_key"),
+    "MOONSHOT_API_KEY": ("providers", "kimi", "api_key"),
+    "ZAI_API_KEY": ("providers", "glm", "api_key"),
+    "MIMO_API_KEY": ("providers", "mimo", "api_key"),
+    # WAN 2.5 image backend (Alibaba DashScope) — paid, opt-in only
+    "DASHSCOPE_API_KEY": ("image_generation", "dashscope", "api_key"),
+    # Kling 3.0 video tool — AccessKey + SecretKey pair (JWT minted per call)
+    "KLING_ACCESS_KEY": ("video_generation", "kling", "access_key"),
+    "KLING_SECRET_KEY": ("video_generation", "kling", "secret_key"),
 
     # Provider URLs (for switching machines)
     "PROMETHEUS_LLAMA_CPP_URL": ("providers", "llama_cpp", "base_url"),

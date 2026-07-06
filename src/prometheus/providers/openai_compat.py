@@ -1,7 +1,8 @@
 """OpenAICompatProvider — works with any OpenAI-compatible API.
 
-Covers: OpenAI, Google Gemini, xAI Grok, and any server exposing
-/v1/chat/completions with Bearer token auth.
+Covers: OpenAI, Google Gemini, xAI Grok, DeepSeek, Kimi (Moonshot),
+GLM (Z.ai), MiMo (Xiaomi), and any server exposing /v1/chat/completions
+(or a version-suffixed equivalent) with Bearer token auth.
 
 For local servers without auth (llama.cpp, Ollama), use the existing
 LlamaCppProvider or OllamaProvider instead.
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
@@ -35,6 +37,29 @@ from prometheus.providers.stub import (
 )
 
 log = logging.getLogger(__name__)
+
+# A base URL whose final path segment is a version tag (/v1, /v4, /v1beta …)
+# already names the API root — appending another /v1 would 404. Matches the
+# trailing segment only, so Gemini's /v1beta/openai base (final segment
+# "openai") keeps the historical behavior.
+_VERSIONED_BASE_RE = re.compile(r"/v\d+[a-z0-9]*$")
+
+
+def _chat_completions_url(base_url: str) -> str:
+    """Join a provider base URL with the chat-completions path.
+
+    Rules (CLOUD EXPANSION — GLM's ``https://api.z.ai/api/paas/v4`` base):
+
+    * base ends with a version segment (``/v1``, ``/v4``, ``/v1beta``) →
+      append ``/chat/completions`` — the base already IS the API root.
+    * anything else → append ``/v1/chat/completions`` (historical behavior,
+      unchanged for bare hosts like ``https://api.deepseek.com`` and for
+      Gemini's ``/v1beta/openai`` base).
+    """
+    base = base_url.rstrip("/")
+    if _VERSIONED_BASE_RE.search(base):
+        return f"{base}/chat/completions"
+    return f"{base}/v1/chat/completions"
 
 
 def _native_tool_choice(tool_choice: object) -> object:
@@ -168,11 +193,9 @@ class OpenAICompatProvider(ModelProvider):
             ]
             payload["tool_choice"] = _native_tool_choice(getattr(request, "tool_choice", "auto"))
 
-        # Build URL — handle base URLs that already end with /v1
-        if self._base_url.endswith("/v1"):
-            url = f"{self._base_url}/chat/completions"
-        else:
-            url = f"{self._base_url}/v1/chat/completions"
+        # Build URL — version-suffixed bases (/v1, /v4, /v1beta) already name
+        # the API root; everything else gets the /v1 prefix.
+        url = _chat_completions_url(self._base_url)
 
         headers = {
             "Content-Type": "application/json",

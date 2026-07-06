@@ -349,6 +349,11 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("gemini", self._cmd_gemini))
         self._app.add_handler(CommandHandler("xai", self._cmd_xai))
         self._app.add_handler(CommandHandler("grok", self._cmd_grok))
+        # CLOUD EXPANSION (2026-07): four more provider override commands
+        self._app.add_handler(CommandHandler("deepseek", self._cmd_deepseek))
+        self._app.add_handler(CommandHandler("kimi", self._cmd_kimi))
+        self._app.add_handler(CommandHandler("glm", self._cmd_glm))
+        self._app.add_handler(CommandHandler("mimo", self._cmd_mimo))
         self._app.add_handler(CommandHandler("local", self._cmd_local))
         self._app.add_handler(CommandHandler("route", self._cmd_route))
         # SPRINT-TEACHER-ESCALATION Phase 3: escalation stats / budget state
@@ -407,6 +412,10 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("gemini", "Route this chat through Google Gemini"),
                 BotCommand("xai", "Route this chat through xAI Grok"),
                 BotCommand("grok", "Alias for /xai"),
+                BotCommand("deepseek", "Route this chat through DeepSeek"),
+                BotCommand("kimi", "Route this chat through Kimi (Moonshot)"),
+                BotCommand("glm", "Route this chat through GLM (Z.ai)"),
+                BotCommand("mimo", "Route this chat through MiMo (Xiaomi)"),
                 BotCommand("local", "Clear override, back to primary"),
                 BotCommand("route", "Show current routing (primary vs override)"),
             ])
@@ -609,6 +618,10 @@ class TelegramAdapter(BasePlatformAdapter):
             "/gpt       — OpenAI GPT\n"
             "/gemini    — Google Gemini\n"
             "/xai       — xAI Grok  (alias: /grok)\n"
+            "/deepseek  — DeepSeek\n"
+            "/kimi      — Kimi (Moonshot)\n"
+            "/glm       — GLM (Z.ai)\n"
+            "/mimo      — MiMo (Xiaomi)\n"
             "/local     — Back to primary\n"
             "\n"
             "Send any message to chat with the agent."
@@ -1390,6 +1403,30 @@ class TelegramAdapter(BasePlatformAdapter):
     ) -> None:
         """Handle /grok — alias for /xai."""
         await self._apply_override(update, context, preset_name="xai")
+
+    async def _cmd_deepseek(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /deepseek — set per-session override to DeepSeek."""
+        await self._apply_override(update, context, preset_name="deepseek")
+
+    async def _cmd_kimi(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /kimi — set per-session override to Kimi (Moonshot)."""
+        await self._apply_override(update, context, preset_name="kimi")
+
+    async def _cmd_glm(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /glm — set per-session override to GLM (Z.ai)."""
+        await self._apply_override(update, context, preset_name="glm")
+
+    async def _cmd_mimo(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /mimo — set per-session override to MiMo (Xiaomi)."""
+        await self._apply_override(update, context, preset_name="mimo")
 
     async def _cmd_local(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

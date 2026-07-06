@@ -151,6 +151,11 @@ class TestProviderRegistry:
         assert ProviderRegistry.is_cloud("anthropic") is True
         assert ProviderRegistry.is_cloud("gemini") is True
         assert ProviderRegistry.is_cloud("xai") is True
+        # CLOUD EXPANSION (2026-07)
+        assert ProviderRegistry.is_cloud("deepseek") is True
+        assert ProviderRegistry.is_cloud("kimi") is True
+        assert ProviderRegistry.is_cloud("glm") is True
+        assert ProviderRegistry.is_cloud("mimo") is True
         assert ProviderRegistry.is_cloud("llama_cpp") is False
         assert ProviderRegistry.is_cloud("ollama") is False
 
@@ -160,7 +165,8 @@ class TestProviderRegistry:
         assert "openai" in providers
         assert "anthropic" in providers
         assert "llama_cpp" in providers
-        assert len(providers) == 7
+        # CLOUD EXPANSION (2026-07): +deepseek/kimi/glm/mimo → 11
+        assert len(providers) == 11
 
 
 # -----------------------------------------------------------------------

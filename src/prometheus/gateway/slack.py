@@ -446,6 +446,11 @@ class SlackAdapter(BasePlatformAdapter):
         self._app.command("/prometheus-gemini")(self._slash_gemini)
         self._app.command("/prometheus-xai")(self._slash_xai)
         self._app.command("/prometheus-grok")(self._slash_grok)
+        # CLOUD EXPANSION (2026-07): four more provider override commands
+        self._app.command("/prometheus-deepseek")(self._slash_deepseek)
+        self._app.command("/prometheus-kimi")(self._slash_kimi)
+        self._app.command("/prometheus-glm")(self._slash_glm)
+        self._app.command("/prometheus-mimo")(self._slash_mimo)
         self._app.command("/prometheus-local")(self._slash_local)
         self._app.command("/prometheus-route")(self._slash_route)
 
@@ -745,6 +750,10 @@ class SlackAdapter(BasePlatformAdapter):
             "  /prometheus-gpt            — OpenAI GPT",
             "  /prometheus-gemini         — Google Gemini",
             "  /prometheus-xai            — xAI Grok  (alias: -grok)",
+            "  /prometheus-deepseek       — DeepSeek",
+            "  /prometheus-kimi           — Kimi (Moonshot)",
+            "  /prometheus-glm            — GLM (Z.ai)",
+            "  /prometheus-mimo           — MiMo (Xiaomi)",
             "  /prometheus-local          — back to primary",
             "  /prometheus-route          — current routing (primary vs override)",
             "",
@@ -1379,6 +1388,22 @@ class SlackAdapter(BasePlatformAdapter):
         """Alias for /prometheus-xai."""
         await ack()
         await self._apply_override(command, respond, preset_name="xai")
+
+    async def _slash_deepseek(self, ack: Any, command: Any, respond: Any) -> None:
+        await ack()
+        await self._apply_override(command, respond, preset_name="deepseek")
+
+    async def _slash_kimi(self, ack: Any, command: Any, respond: Any) -> None:
+        await ack()
+        await self._apply_override(command, respond, preset_name="kimi")
+
+    async def _slash_glm(self, ack: Any, command: Any, respond: Any) -> None:
+        await ack()
+        await self._apply_override(command, respond, preset_name="glm")
+
+    async def _slash_mimo(self, ack: Any, command: Any, respond: Any) -> None:
+        await ack()
+        await self._apply_override(command, respond, preset_name="mimo")
 
     async def _slash_local(self, ack: Any, command: Any, respond: Any) -> None:
         """Clear the per-channel provider override, back to primary."""

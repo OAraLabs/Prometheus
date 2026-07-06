@@ -35,10 +35,45 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
         "model": "claude-haiku-4-5-20251001",
         "default_env": "ANTHROPIC_API_KEY",
     },
+    # -- CLOUD EXPANSION (2026-07) — endpoints/models verified 2026-07-05 --
+    "deepseek": {
+        # DeepSeek serves /v1/chat/completions with or without the /v1
+        # prefix; the bare host is their documented base.
+        "base_url": "https://api.deepseek.com",
+        # V4 names ship here deliberately: the legacy `deepseek-chat` /
+        # `deepseek-reasoner` aliases are deprecated 2026-07-24. The
+        # reasoning flagship is `deepseek-v4-pro` (pin it via
+        # slash_commands.deepseek.model or model.model in prometheus.yaml).
+        "model": "deepseek-v4-flash",
+        "default_env": "DEEPSEEK_API_KEY",
+    },
+    "kimi": {
+        # Moonshot AI international endpoint. A separate CN endpoint
+        # (https://api.moonshot.cn/v1) exists with SEPARATE keys — point
+        # base_url there in config if your key is CN-issued.
+        "base_url": "https://api.moonshot.ai/v1",
+        "model": "kimi-k2.6",
+        "default_env": "MOONSHOT_API_KEY",
+    },
+    "glm": {
+        # Z.ai (Zhipu) — note the nonstandard /api/paas/v4 path prefix; the
+        # OpenAI-compat provider appends /chat/completions to version-suffixed
+        # bases (see openai_compat._chat_completions_url). CN mainland
+        # endpoint (https://open.bigmodel.cn/api/paas/v4) has the same shape.
+        "base_url": "https://api.z.ai/api/paas/v4",
+        "model": "glm-5.2",
+        "default_env": "ZAI_API_KEY",
+    },
+    "mimo": {
+        # Xiaomi MiMo first-party hosted platform.
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "model": "mimo-v2.5-pro",
+        "default_env": "MIMO_API_KEY",
+    },
 }
 
 # Providers that use the OpenAI-compatible wire format
-_OPENAI_COMPAT_PROVIDERS = {"openai", "gemini", "xai"}
+_OPENAI_COMPAT_PROVIDERS = {"openai", "gemini", "xai", "deepseek", "kimi", "glm", "mimo"}
 
 
 def _resolve_api_key(config: dict[str, Any], provider_name: str) -> str:
@@ -151,7 +186,8 @@ class ProviderRegistry:
 
         raise ValueError(
             f"Unknown provider: {provider_name!r}. "
-            f"Valid providers: llama_cpp, ollama, stub, openai, anthropic, gemini, xai"
+            f"Valid providers: llama_cpp, ollama, stub, openai, anthropic, "
+            f"gemini, xai, deepseek, kimi, glm, mimo"
         )
 
     @staticmethod
@@ -162,4 +198,7 @@ class ProviderRegistry:
     @staticmethod
     def list_providers() -> list[str]:
         """Return all supported provider names."""
-        return ["llama_cpp", "ollama", "stub", "openai", "anthropic", "gemini", "xai"]
+        return [
+            "llama_cpp", "ollama", "stub", "openai", "anthropic", "gemini",
+            "xai", "deepseek", "kimi", "glm", "mimo",
+        ]

@@ -146,6 +146,7 @@ class Doctor:
         # ── Connectivity ──
         checks.append(await self._check_inference(state))
         checks.append(self._check_telegram_token())
+        checks.append(self._check_cloud_keys())
         checks.append(self._check_tailscale(state))
 
         # ── Model ──
@@ -335,6 +336,37 @@ class Doctor:
         return DiagnosticCheck(
             name="Telegram", category="connectivity", status="ok",
             message=f"bot token set ({masked})",
+        )
+
+    def _check_cloud_keys(self) -> DiagnosticCheck:
+        """CLOUD EXPANSION (2026-07): one info line listing which optional
+        cloud-service keys are present in the environment.
+
+        Set/not-set ONLY — values are never echoed (not even masked). These
+        services are dormant-until-keyed by design, so absence is "info",
+        never a warning.
+        """
+        import os
+
+        llm_keys = (
+            ("DeepSeek", "DEEPSEEK_API_KEY"),
+            ("Kimi", "MOONSHOT_API_KEY"),
+            ("GLM", "ZAI_API_KEY"),
+            ("MiMo", "MIMO_API_KEY"),
+            ("DashScope/WAN", "DASHSCOPE_API_KEY"),
+        )
+        parts = [
+            f"{label} {'set' if os.environ.get(env) else 'not set'}"
+            for label, env in llm_keys
+        ]
+        kling_ok = bool(
+            os.environ.get("KLING_ACCESS_KEY")
+            and os.environ.get("KLING_SECRET_KEY")
+        )
+        parts.append(f"Kling AK+SK {'set' if kling_ok else 'not set'}")
+        return DiagnosticCheck(
+            name="Cloud keys", category="connectivity", status="info",
+            message=" · ".join(parts),
         )
 
     def _check_tailscale(self, state: AnatomyState) -> DiagnosticCheck | None:

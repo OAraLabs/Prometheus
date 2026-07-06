@@ -63,6 +63,23 @@ CLOUD_PROVIDER_MODELS: dict[str, list[tuple[str, str, str]]] = {
         ("grok-3", "Flagship", "$3/$15 per 1M tokens"),
         ("grok-3-mini", "Fast + cheap", "$0.30/$0.50 per 1M tokens"),
     ],
+    # -- CLOUD EXPANSION (2026-07) — pricing from the 2026-07-05 research
+    # pass; verify at first live use.
+    "deepseek": [
+        # V4 names only — the deepseek-chat/deepseek-reasoner aliases are
+        # deprecated 2026-07-24.
+        ("deepseek-v4-flash", "Fast + cheap", "$0.14/$0.28 per 1M tokens"),
+        ("deepseek-v4-pro", "Reasoning flagship", "$0.435/$0.87 per 1M tokens"),
+    ],
+    "kimi": [
+        ("kimi-k2.6", "Flagship", "$0.95/$4 per 1M tokens"),
+    ],
+    "glm": [
+        ("glm-5.2", "Flagship", "$1.40/$4.40 per 1M tokens"),
+    ],
+    "mimo": [
+        ("mimo-v2.5-pro", "Flagship", "$0.435/$0.87 per 1M tokens"),
+    ],
 }
 
 CLOUD_DEFAULT_ENV_VARS: dict[str, str] = {
@@ -70,6 +87,11 @@ CLOUD_DEFAULT_ENV_VARS: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GEMINI_API_KEY",
     "xai": "XAI_API_KEY",
+    # CLOUD EXPANSION (2026-07)
+    "deepseek": "DEEPSEEK_API_KEY",
+    "kimi": "MOONSHOT_API_KEY",
+    "glm": "ZAI_API_KEY",
+    "mimo": "MIMO_API_KEY",
 }
 
 # Effective context limits per provider for sane defaults
@@ -80,6 +102,13 @@ PROVIDER_EFFECTIVE_LIMITS: dict[str, int] = {
     "gemini": 64000,
     "xai": 64000,
     "anthropic": 100000,
+    # CLOUD EXPANSION (2026-07): all four advertise huge windows (deepseek/
+    # glm/mimo ~1M, kimi 256K) — the conservative 64000 default keeps
+    # request cost sane; raise context.effective_limit deliberately.
+    "deepseek": 64000,
+    "kimi": 64000,
+    "glm": 64000,
+    "mimo": 64000,
 }
 
 
@@ -257,19 +286,26 @@ class SetupWizard:
                 "Cloud — Anthropic (Claude Sonnet, Haiku)",
                 "Cloud — Google Gemini (Flash, Pro)",
                 "Cloud — xAI (Grok)",
+                "Cloud — DeepSeek (V4 Flash, V4 Pro)",
+                "Cloud — Kimi / Moonshot (K2.6)",
+                "Cloud — GLM / Z.ai (GLM-5.2)",
+                "Cloud — MiMo / Xiaomi (V2.5 Pro)",
                 "I don't have one running yet",
             ],
             default=1,
         )
 
-        if choice == 7:
+        if choice == 11:
             # Dead-end fix (Phase 0, item 5): don't just print help and
             # bail — offer the same recovery menu as a failed connection.
             self._no_server_menu()
             return
 
         # Cloud providers
-        cloud_map = {3: "openai", 4: "anthropic", 5: "gemini", 6: "xai"}
+        cloud_map = {
+            3: "openai", 4: "anthropic", 5: "gemini", 6: "xai",
+            7: "deepseek", 8: "kimi", 9: "glm", 10: "mimo",
+        }
         if choice in cloud_map:
             self._step_cloud_provider(cloud_map[choice])
             return
@@ -319,7 +355,8 @@ class SetupWizard:
                 "No working inference server. What now?",
                 [
                     "Point Prometheus at a remote server URL",
-                    "Use a cloud provider (OpenAI / Anthropic / Gemini / xAI)",
+                    "Use a cloud provider (OpenAI / Anthropic / Gemini / xAI / "
+                    "DeepSeek / Kimi / GLM / MiMo)",
                     "Show install instructions for a local server and exit",
                 ],
                 default=3,
@@ -350,10 +387,17 @@ class SetupWizard:
             if choice == 2:
                 cloud = _ask_choice(
                     "Which cloud provider?",
-                    ["OpenAI", "Anthropic", "Google Gemini", "xAI"],
+                    [
+                        "OpenAI", "Anthropic", "Google Gemini", "xAI",
+                        "DeepSeek", "Kimi (Moonshot)", "GLM (Z.ai)",
+                        "MiMo (Xiaomi)",
+                    ],
                     default=2,
                 )
-                provider = {1: "openai", 2: "anthropic", 3: "gemini", 4: "xai"}[cloud]
+                provider = {
+                    1: "openai", 2: "anthropic", 3: "gemini", 4: "xai",
+                    5: "deepseek", 6: "kimi", 7: "glm", 8: "mimo",
+                }[cloud]
                 self._step_cloud_provider(provider)
                 return
             self._print_no_model_help()

@@ -941,6 +941,11 @@ class DiscordAdapter(BasePlatformAdapter):
         self._register(provider, "gemini", self._app_gemini, "Route this channel via Google Gemini")
         self._register(provider, "xai", self._app_xai, "Route this channel via xAI Grok")
         self._register(provider, "grok", self._app_grok, "Alias for xai")
+        # CLOUD EXPANSION (2026-07): four more provider override commands
+        self._register(provider, "deepseek", self._app_deepseek, "Route this channel via DeepSeek")
+        self._register(provider, "kimi", self._app_kimi, "Route this channel via Kimi (Moonshot)")
+        self._register(provider, "glm", self._app_glm, "Route this channel via GLM (Z.ai)")
+        self._register(provider, "mimo", self._app_mimo, "Route this channel via MiMo (Xiaomi)")
         self._register(provider, "local", self._app_local, "Clear the override, back to primary")
         self._register(provider, "route", self._app_route, "Show current routing for this channel")
 
@@ -1032,7 +1037,8 @@ class DiscordAdapter(BasePlatformAdapter):
             "  press [list|search|install|installed|update] · escalations",
             "",
             "Provider (`/prometheus provider …`, this channel only):",
-            "  claude · gpt · gemini · xai · grok · local · route",
+            "  claude · gpt · gemini · xai · grok",
+            "  deepseek · kimi · glm · mimo · local · route",
             "",
             "Send a message (or DM the bot) to chat with the agent. "
             "Attachments are understood: images (vision), voice (Whisper), "
@@ -1501,6 +1507,18 @@ class DiscordAdapter(BasePlatformAdapter):
     async def _app_grok(self, interaction: Any, args: str) -> None:
         """Alias for /prometheus provider xai."""
         await self._apply_override(interaction, args, preset_name="xai")
+
+    async def _app_deepseek(self, interaction: Any, args: str) -> None:
+        await self._apply_override(interaction, args, preset_name="deepseek")
+
+    async def _app_kimi(self, interaction: Any, args: str) -> None:
+        await self._apply_override(interaction, args, preset_name="kimi")
+
+    async def _app_glm(self, interaction: Any, args: str) -> None:
+        await self._apply_override(interaction, args, preset_name="glm")
+
+    async def _app_mimo(self, interaction: Any, args: str) -> None:
+        await self._apply_override(interaction, args, preset_name="mimo")
 
     async def _app_local(self, interaction: Any, args: str) -> None:
         """Clear the per-channel provider override, back to primary."""

@@ -102,7 +102,7 @@ The architecture doesn't care where the tokens come from. It cares that the tool
 - Runs any model llama.cpp or Ollama can serve — Qwen, Gemma, Llama, Mistral, Phi, DeepSeek, Command-R
 - Optimized formatters for Qwen and Gemma, default formatter works with everything else
 - Auto-detects whatever model is loaded — swap the GGUF, restart, done
-- 6+ providers: llama.cpp, Ollama, OpenAI-compatible (covers OpenAI/Gemini/xAI), Anthropic, stub
+- 10+ providers: llama.cpp, Ollama, OpenAI-compatible (covers OpenAI/Gemini/xAI/DeepSeek/Kimi/GLM/MiMo), Anthropic, stub
 - Configurable adapter strictness: STRICT (small models), MEDIUM (Qwen/Gemma), NONE (cloud APIs)
 
 ### Model Router + Fallback Chains
@@ -324,6 +324,7 @@ Connect via Tailscale, WireGuard, or any network. Prometheus talks HTTP — loca
 ┌────────────────────────┴────────────────────────────────┐
 │                 MODEL PROVIDER LAYER                      │
 │  llama.cpp │ Ollama │ OpenAI │ Anthropic │ Gemini │ xAI  │
+│  DeepSeek │ Kimi (Moonshot) │ GLM (Z.ai) │ MiMo (Xiaomi) │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -331,7 +332,8 @@ Connect via Tailscale, WireGuard, or any network. Prometheus talks HTTP — loca
 
 ```yaml
 model:
-  provider: "llama_cpp"              # or ollama, openai, anthropic, gemini, xai
+  provider: "llama_cpp"              # or ollama, openai, anthropic, gemini, xai,
+                                     #    deepseek, kimi, glm, mimo
   base_url: "http://localhost:8080"
   # model auto-detected from llama.cpp on startup
 
@@ -390,13 +392,13 @@ Tokens live in the env file (`~/.config/prometheus/env`), never in the yaml. Ena
 | `/tasks` | List managed background tasks and their status |
 | `/pairs` | Browse captured repair-pairs / golden traces |
 | `/approve` `/deny` `/pending` | Manage approval queue |
-| `/claude` `/gpt` `/gemini` `/xai` | Per-session cloud provider override |
+| `/claude` `/gpt` `/gemini` `/xai` `/deepseek` `/kimi` `/glm` `/mimo` | Per-session cloud provider override |
 | `/local` | Clear override, return to primary local model |
 | `/route` | Show this chat's current provider + model |
 
 ### Configuring cloud slash commands
 
-`/claude`, `/gpt`, `/gemini`, and `/xai` each route to a configurable provider + model. Edit `config/prometheus.yaml`:
+`/claude`, `/gpt`, `/gemini`, `/xai`, `/deepseek`, `/kimi`, `/glm`, and `/mimo` each route to a configurable provider + model. Edit `config/prometheus.yaml`:
 
 ```yaml
 slash_commands:
@@ -416,6 +418,22 @@ slash_commands:
     provider: xai
     api_key_env: XAI_API_KEY
     model: grok-3
+  deepseek:
+    provider: deepseek
+    api_key_env: DEEPSEEK_API_KEY
+    model: deepseek-v4-flash    # reasoning flagship: deepseek-v4-pro
+  kimi:
+    provider: kimi
+    api_key_env: MOONSHOT_API_KEY
+    model: kimi-k2.6
+  glm:
+    provider: glm
+    api_key_env: ZAI_API_KEY
+    model: glm-5.2
+  mimo:
+    provider: mimo
+    api_key_env: MIMO_API_KEY
+    model: mimo-v2.5-pro
 ```
 
 Restart the daemon and grep the journal to verify the wiring:
@@ -429,6 +447,22 @@ journalctl --user -u prometheus.service | grep slash_commands
 ```
 
 Omit a command (or the whole section) to fall back to the conservative defaults baked into the source — the daemon logs a one-time WARN noting the fallback so the source-archaeology problem isn't load-bearing.
+
+## Image & Video Generation
+
+**Images** — the `image_generate` tool has three backends:
+
+| Backend | Cost | Needs |
+|---------|------|-------|
+| `pollinations` | free | nothing — hosted endpoint |
+| `comfyui` | free (local GPU) | a local ComfyUI server with a FLUX checkpoint |
+| `dashscope` | **paid** | `DASHSCOPE_API_KEY` (Alibaba WAN 2.5, async task API) |
+
+The default `auto` probes local ComfyUI and falls back to Pollinations. **`auto` never selects the paid backend** — DashScope runs only on an explicit `backend=dashscope` argument or a deliberate `image_generation.default_backend: dashscope` in `prometheus.yaml`.
+
+**Video** — the `video_generate` tool drives the Kling 3.0 API (text-to-video, or image-to-video via `image_path`; 5s/10s durations). Paid and dormant-until-keyed: it needs `KLING_ACCESS_KEY` + `KLING_SECRET_KEY` from the [Kling console](https://app.klingai.com), and self-signs a short-lived HS256 JWT per request (stdlib only — no extra dependencies). Renders take minutes; the tool polls (budget: `video_generation.kling.poll_budget_seconds`) and saves the finished `.mp4` to `~/.prometheus/cache/videos/`.
+
+All six cloud-expansion key vars (`DEEPSEEK_API_KEY`, `MOONSHOT_API_KEY`, `ZAI_API_KEY`, `MIMO_API_KEY`, `DASHSCOPE_API_KEY`, `KLING_ACCESS_KEY`/`KLING_SECRET_KEY`) live in `~/.config/prometheus/env`; `prometheus doctor` shows a set/not-set line for each without echoing values.
 
 ## Project Structure
 

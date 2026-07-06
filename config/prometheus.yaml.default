@@ -23,7 +23,8 @@ bootstrap:
   load_agents: true     # ~/.prometheus/AGENTS.md
 
 model:
-  provider: "llama_cpp"             # llama_cpp, ollama, openai, anthropic, gemini, xai
+  provider: "llama_cpp"             # llama_cpp, ollama, openai, anthropic, gemini, xai,
+                                    # deepseek, kimi, glm, mimo
   base_url: "http://localhost:8080" # Inference server URL
   model: ""                         # Auto-detected from server if blank
   grammar_enforcement: true             # GBNF constrained decoding for llama.cpp tool calls
@@ -216,6 +217,26 @@ slash_commands:
     provider: xai
     api_key_env: XAI_API_KEY
     model: grok-3
+  # CLOUD EXPANSION (2026-07) — /deepseek /kimi /glm /mimo. Same rules as
+  # above: the command only works once the key env var is in
+  # ~/.config/prometheus/env and the daemon has been restarted.
+  deepseek:
+    provider: deepseek
+    api_key_env: DEEPSEEK_API_KEY
+    model: deepseek-v4-flash   # reasoning flagship: deepseek-v4-pro
+                               # (deepseek-chat/-reasoner aliases deprecated 2026-07-24)
+  kimi:
+    provider: kimi
+    api_key_env: MOONSHOT_API_KEY
+    model: kimi-k2.6
+  glm:
+    provider: glm
+    api_key_env: ZAI_API_KEY
+    model: glm-5.2
+  mimo:
+    provider: mimo
+    api_key_env: MIMO_API_KEY
+    model: mimo-v2.5-pro
 
 # Phase 3 — opt-in cloud escalation for failed tool calls.
 #
@@ -331,6 +352,41 @@ web:
   enabled: true
   api_port: 8005
   ws_port: 8010
+
+# Image generation — the image_generate tool's backend selection + per-backend
+# settings. CLOUD EXPANSION (2026-07) adds the PAID DashScope backend (WAN 2.5).
+#
+# HARD RULE: `auto` NEVER silently selects the paid API. auto = probe local
+# ComfyUI, fall back to free Pollinations. DashScope runs ONLY when the agent
+# passes backend=dashscope explicitly, or when you deliberately set
+# default_backend: dashscope below.
+image_generation:
+  default_backend: auto              # auto | pollinations | comfyui | dashscope
+  comfyui:
+    base_url: "http://127.0.0.1:8188"
+    default_model: "flux1-schnell-fp8.safetensors"
+    default_steps: 4
+  # WAN 2.5 text-to-image via Alibaba DashScope (async task API; PAID).
+  # Key: DASHSCOPE_API_KEY in ~/.config/prometheus/env
+  # (console: https://dashscope.console.aliyun.com / modelstudio intl).
+  dashscope:
+    api_key_env: DASHSCOPE_API_KEY
+    model: "wan2.5-t2i-preview"
+    # Legacy-but-working international default. Newer workspace-scoped
+    # DashScope domains exist — override here if your account uses one.
+    base_url: "https://dashscope-intl.aliyuncs.com/api/v1"
+
+# Video generation — the video_generate tool (Kling 3.0). PAID; dormant until
+# both keys are set. Auth is an AccessKey+SecretKey pair; the tool self-signs
+# a short-lived JWT (HS256) per request — keys never leave this machine.
+# Console: https://app.klingai.com (API access).
+video_generation:
+  kling:
+    access_key_env: KLING_ACCESS_KEY
+    secret_key_env: KLING_SECRET_KEY
+    base_url: "https://api-singapore.klingai.com"
+    model_name: "kling-v3"
+    poll_budget_seconds: 600           # videos take MINUTES; poll every ~10s
 
 # Core web research tools — web_fetch, web_search, youtube_transcript, download_file
 web_tools:

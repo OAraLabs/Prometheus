@@ -70,6 +70,10 @@ def document_cache_dir() -> Path:
     return _cache_dir("documents")
 
 
+def video_cache_dir() -> Path:
+    return _cache_dir("videos")
+
+
 # ---------------------------------------------------------------------------
 # Cache functions (following Hermes module-level pattern)
 # ---------------------------------------------------------------------------
@@ -80,6 +84,20 @@ def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str:
     path = image_cache_dir() / name
     path.write_bytes(data)
     logger.debug("Cached image: %s (%d bytes)", path, len(data))
+    return str(path)
+
+
+def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
+    """Write video bytes to cache, return absolute path.
+
+    CLOUD EXPANSION (2026-07): sink for the video_generate tool — mirrors
+    cache_image_from_bytes so generated videos land next to generated
+    images under ~/.prometheus/cache/ and shared cleanup covers both.
+    """
+    name = f"vid_{uuid4().hex[:12]}{ext}"
+    path = video_cache_dir() / name
+    path.write_bytes(data)
+    logger.debug("Cached video: %s (%d bytes)", path, len(data))
     return str(path)
 
 
