@@ -819,7 +819,12 @@ def _build_adapter_for(provider_name: str) -> Any:
             formatter=AnthropicFormatter(),
             tier=ModelAdapter.TIER_OFF,
         )
-    if provider_name in ("openai", "gemini", "xai"):
+    if provider_name in (
+        "openai", "gemini", "xai",
+        # CLOUD EXPANSION (2026-07): same OpenAI-compat wire path, same
+        # API-enforced structure → tier off.
+        "deepseek", "kimi", "glm", "mimo",
+    ):
         return ModelAdapter(
             formatter=PassthroughFormatter(),
             tier=ModelAdapter.TIER_OFF,

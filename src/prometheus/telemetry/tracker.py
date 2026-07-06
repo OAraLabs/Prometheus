@@ -34,7 +34,11 @@ log = logging.getLogger(__name__)
 # avoid a telemetry → providers dependency. Drift is unlikely — this set
 # only changes when a new cloud backend is added to the project.
 _CLOUD_PROVIDERS: frozenset[str] = frozenset(
-    {"openai", "anthropic", "gemini", "xai", "groq"}
+    {
+        "openai", "anthropic", "gemini", "xai", "groq",
+        # CLOUD EXPANSION (2026-07)
+        "deepseek", "kimi", "glm", "mimo",
+    }
 )
 
 

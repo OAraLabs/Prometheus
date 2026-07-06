@@ -1240,7 +1240,11 @@ def create_app(
     )
 
     _LOCAL_MODEL_KEY = "local"
-    _PRESET_LABELS = {"claude": "Claude", "gpt": "GPT", "gemini": "Gemini", "xai": "xAI"}
+    _PRESET_LABELS = {
+        "claude": "Claude", "gpt": "GPT", "gemini": "Gemini", "xai": "xAI",
+        # CLOUD EXPANSION (2026-07)
+        "deepseek": "DeepSeek", "kimi": "Kimi", "glm": "GLM", "mimo": "MiMo",
+    }
 
     def _model_catalog() -> list[dict]:
         # Configured primary (key "local" → clear_override) + each vetted cloud preset.

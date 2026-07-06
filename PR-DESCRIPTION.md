@@ -42,6 +42,15 @@ All four ride the existing OpenAI-compat wire path — no new provider classes.
 - Missing keys → actionable error pointing at the Kling console; zero HTTP without keys (pinned).
 - Registered in `create_tool_registry` (`__main__.py`) beside `image_generate` — the single registry BOTH entry points build (the daemon reuses `create_tool_registry` via `daemon.py:75-82`; no second registration site exists). Permission treatment mirrors image_generate: no model-chosen output path exists, so the tool is cache-confined (`is_read_only` → True, matching image_generate's `output_path is None` case).
 
+### 1b. Drive-by catches (enumeration sweep after the main wiring)
+
+A grep sweep for every hardcoded provider enumeration caught four sites the study's file list didn't name — all fixed + test-pinned:
+
+- **`router/model_router.py::_build_adapter_for`** (the real one): the override path's adapter factory listed `("openai", "gemini", "xai")` — the new providers would have fallen through to the LOCAL full pipeline (QwenFormatter + text extraction) instead of tier=off. Now all four build `PassthroughFormatter` @ `TIER_OFF`.
+- **`telemetry/tracker.py::_CLOUD_PROVIDERS`**: golden-trace capture's deliberate duplicate of `is_cloud()` — four names added.
+- **`web/slash_router.py::WEB_NATIVE_ONLY`**: the web chat surface's boundary list mirrors Telegram registrations — `/deepseek` etc. now get the explicit boundary reply instead of silently running the agent.
+- **`web/server.py::_PRESET_LABELS`**: GET `/api/models` catalog labels (the catalog itself iterates `OVERRIDE_PRESETS`, so the new presets appear automatically; labels now read DeepSeek/Kimi/GLM/MiMo instead of raw keys).
+
 ### 4. Doctor
 
 - New connectivity info line (`infra/doctor.py::_check_cloud_keys`): `Cloud keys: DeepSeek set/not set · Kimi … · GLM … · MiMo … · DashScope/WAN … · Kling AK+SK …` — set/not-set only, values never echoed (test-pinned: not even a prefix). Absence is `info`, never a warning — dormant-until-keyed is a non-event.
@@ -70,8 +79,9 @@ Zero platform gaps for the new families; both drift directions (manifest→regis
 
 ### 2. Test counts
 
-- **Full suite: 3400 passed, 4 skipped, 0 failed** (`PYTHONPATH=$PWD/src uv run pytest`), zero deselects; skips are pre-existing optional-dep skips.
-- Sprint adds **94 new tests**: `tests/test_cloud_expansion.py` (68), `tests/test_image_dashscope.py` (9), `tests/test_video_generate.py` (17); plus honest updates to existing pins: `test_cloud_providers.py` (list_providers 7→11, is_cloud), `test_cost.py` (+5 pricing-coverage models), `test_gateway_command_pins.py` (the `/route` list deliberately grew — pins updated with a note), `test_gateway_parity.py` (4 families).
+- **Full suite: 3413 passed, 4 skipped, 0 failed** (`PYTHONPATH=$PWD/src uv run pytest`), zero deselects; skips are pre-existing optional-dep skips. Pre-branch baseline: 3306 passed / 4 skipped.
+- Sprint adds **107 new tests**: `tests/test_cloud_expansion.py` (81 — incl. adapter-tier, golden-trace-set, and web-surface pins for the drive-by catches), `tests/test_image_dashscope.py` (9), `tests/test_video_generate.py` (17); plus honest updates to existing pins: `test_cloud_providers.py` (list_providers 7→11, is_cloud), `test_cost.py` (+5 pricing-coverage models), `test_gateway_command_pins.py` (the `/route` list deliberately grew — pins updated with a note), `test_gateway_parity.py` (4 families).
+- CI (GitHub Actions) green on the PR: `test (3.11)` pass, `test (3.12)` pass.
 
 ### 3. Fake-transport transcripts (mocked endpoints; fake keys; auth redacted)
 

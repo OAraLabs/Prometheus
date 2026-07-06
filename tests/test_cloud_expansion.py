@@ -467,6 +467,58 @@ class TestConfigSurfaces:
 
 
 # -----------------------------------------------------------------------
+# Adapter tier + secondary cloud-provider surfaces
+# -----------------------------------------------------------------------
+
+
+class TestAdapterTierAndSecondarySurfaces:
+    @pytest.mark.parametrize("name", NEW_PROVIDERS)
+    def test_build_adapter_for_is_tier_off(self, name: str) -> None:
+        """The override path builds adapters per provider name. The new
+        providers are API-enforced-structure clouds — they must get
+        tier=off (validator NONE, no retries), NOT the local full
+        pipeline. This was a real drive-by catch: without the fix they
+        fell through to the QwenFormatter local branch."""
+        from prometheus.adapter import ModelAdapter
+        from prometheus.adapter.formatter import PassthroughFormatter
+        from prometheus.router.model_router import _build_adapter_for
+
+        adapter = _build_adapter_for(name)
+        assert adapter.tier == ModelAdapter.TIER_OFF
+        assert isinstance(adapter.formatter, PassthroughFormatter)
+
+    @pytest.mark.parametrize("name", NEW_PROVIDERS)
+    def test_telemetry_cloud_set_includes_new_providers(self, name: str) -> None:
+        """Golden-trace capture keys off tracker._CLOUD_PROVIDERS (a
+        deliberate duplicate of ProviderRegistry.is_cloud)."""
+        from prometheus.telemetry.tracker import _CLOUD_PROVIDERS
+
+        assert name in _CLOUD_PROVIDERS
+
+    @pytest.mark.parametrize("name", NEW_PROVIDERS)
+    def test_web_slash_router_declares_boundary(self, name: str) -> None:
+        """The web chat surface mirrors Telegram's command registrations in
+        WEB_NATIVE_ONLY so /deepseek etc. get an explicit boundary reply
+        instead of silently running the agent."""
+        from prometheus.web.slash_router import WEB_NATIVE_ONLY
+
+        assert name in WEB_NATIVE_ONLY
+
+    def test_model_rest_catalog_labels(self) -> None:
+        """GET /api/models labels (web/server.py _PRESET_LABELS) cover the
+        new presets — pinned at the source level (the labels dict is
+        function-local to create_app)."""
+        src = (
+            _REPO_ROOT / "src" / "prometheus" / "web" / "server.py"
+        ).read_text()
+        for key, label in (
+            ("deepseek", "DeepSeek"), ("kimi", "Kimi"),
+            ("glm", "GLM"), ("mimo", "MiMo"),
+        ):
+            assert f'"{key}": "{label}"' in src
+
+
+# -----------------------------------------------------------------------
 # Doctor — cloud-keys info line
 # -----------------------------------------------------------------------
 
