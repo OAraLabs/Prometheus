@@ -505,17 +505,21 @@ class TestAdapterTierAndSecondarySurfaces:
         assert name in WEB_NATIVE_ONLY
 
     def test_model_rest_catalog_labels(self) -> None:
-        """GET /api/models labels (web/server.py _PRESET_LABELS) cover the
-        new presets — pinned at the source level (the labels dict is
-        function-local to create_app)."""
-        src = (
-            _REPO_ROOT / "src" / "prometheus" / "web" / "server.py"
-        ).read_text()
+        """GET /api/models labels cover the new presets. The labels dict was
+        function-local to create_app (hence a source grep here); the MODELS
+        KEYS UI sprint single-sourced it as key_catalog.PRESET_LABELS, so this
+        asserts the importable dict directly — server.py imports the same one."""
+        from prometheus.providers.key_catalog import PRESET_LABELS
+
         for key, label in (
             ("deepseek", "DeepSeek"), ("kimi", "Kimi"),
             ("glm", "GLM"), ("mimo", "MiMo"),
         ):
-            assert f'"{key}": "{label}"' in src
+            assert PRESET_LABELS[key] == label
+        src = (
+            _REPO_ROOT / "src" / "prometheus" / "web" / "server.py"
+        ).read_text()
+        assert "from prometheus.providers.key_catalog import PRESET_LABELS" in src
 
 
 # -----------------------------------------------------------------------

@@ -1240,11 +1240,9 @@ def create_app(
     )
 
     _LOCAL_MODEL_KEY = "local"
-    _PRESET_LABELS = {
-        "claude": "Claude", "gpt": "GPT", "gemini": "Gemini", "xai": "xAI",
-        # CLOUD EXPANSION (2026-07)
-        "deepseek": "DeepSeek", "kimi": "Kimi", "glm": "GLM", "mimo": "MiMo",
-    }
+    # Labels are single-sourced with the provider-keys catalog (MODELS KEYS UI
+    # sprint) so /api/models and /api/providers/keys never disagree on names.
+    from prometheus.providers.key_catalog import PRESET_LABELS as _PRESET_LABELS
 
     def _model_catalog() -> list[dict]:
         # Configured primary (key "local" → clear_override) + each vetted cloud preset.
@@ -1329,6 +1327,108 @@ def create_app(
             return JSONResponse(status_code=503, content={"error": "model router unavailable"})
         router.clear_override(session_id)  # idempotent — silent no-op if none set / reserved
         return _effective_model(router, session_id)
+
+    # ── Provider API keys (MODELS KEYS UI sprint) — booleans out, secrets in ──
+    #
+    # GET returns the service catalog with set/not-set BOOLEANS only — never a
+    # value, prefix, or length. PUT persists each key to the daemon env file
+    # (config/env_file.set_env_value — 0600, dedup) AND exports it into
+    # os.environ, so the key is live IMMEDIATELY in this same process:
+    #   - ProviderRegistry.create reads config["api_key_env"] from os.environ
+    #     at provider-CREATE time (providers/registry.py),
+    #   - cmd_provider_override checks os.environ at command time
+    #     (gateway/commands.py), and
+    #   - _model_catalog above checks os.environ at request time,
+    # so GET /api/models flips `available` without a daemon restart.
+    #
+    # Clearing: an empty-string value is an explicit clear — we keep a
+    # deliberate blank `VAR=` assignment in the env file (the same convention
+    # config/api_token.py reads as "deliberately blank", and load_env_file's
+    # setdefault keeps harmless on next boot) and pop the var from os.environ.
+    #
+    # NEVER log values. Log lines carry the service id + env-var NAME only.
+    from prometheus.providers.key_catalog import provider_key_services
+
+    _KEY_VALUE_MAX_CHARS = 4096  # sanity cap; real provider keys are far shorter
+
+    def _provider_keys_payload() -> dict:
+        return {
+            "services": [
+                {
+                    "id": svc.id,
+                    "label": svc.label,
+                    "kind": svc.kind,
+                    "env_vars": [
+                        {"name": name, "set": bool(os.environ.get(name))}
+                        for name in svc.env_vars
+                    ],
+                    "docs_url": svc.docs_url,
+                    "default_model": svc.default_model,
+                }
+                for svc in provider_key_services(config)
+            ]
+        }
+
+    @app.get("/api/providers/keys")
+    async def get_provider_keys():
+        return _provider_keys_payload()
+
+    @app.put("/api/providers/keys/{service_id}")
+    async def put_provider_keys(service_id: str, body: dict):
+        import logging as _logging
+
+        from prometheus.config.env_file import set_env_value
+
+        svc = next(
+            (s for s in provider_key_services(config) if s.id == service_id),
+            None,
+        )
+        if svc is None:
+            return JSONResponse(status_code=404, content={
+                "error": f"unknown service {service_id!r}; "
+                         "choose an id from GET /api/providers/keys"})
+        values = body.get("values")
+        if not isinstance(values, dict) or not values:
+            return JSONResponse(status_code=400, content={
+                "error": 'body must be {"values": {ENV_VAR: "key", ...}}'})
+
+        # Validate EVERYTHING before writing anything — a bad var name means
+        # no partial persist. Names must belong to this service (that is the
+        # whole allowlist: nothing outside the catalog is ever written).
+        cleaned: dict[str, str] = {}
+        for name, value in values.items():
+            if name not in svc.env_vars:
+                return JSONResponse(status_code=400, content={
+                    "error": f"env var {name!r} does not belong to service "
+                             f"{service_id!r} (expected: {', '.join(svc.env_vars)})"})
+            if not isinstance(value, str):
+                return JSONResponse(status_code=400, content={
+                    "error": f"value for {name} must be a string"})
+            value = value.strip()  # pasted keys arrive with stray whitespace
+            if len(value) > _KEY_VALUE_MAX_CHARS:
+                return JSONResponse(status_code=400, content={
+                    "error": f"value for {name} is implausibly long"})
+            if any(ord(ch) < 0x20 for ch in value):
+                # The env file is line-based — a control character (esp. \n)
+                # in a value could inject a second VAR= assignment.
+                return JSONResponse(status_code=400, content={
+                    "error": f"value for {name} contains control characters"})
+            cleaned[name] = value
+
+        for name, value in cleaned.items():
+            if value:
+                set_env_value(name, value)
+                os.environ[name] = value
+            else:
+                set_env_value(name, "")  # deliberate blank line, api_token-style
+                os.environ.pop(name, None)
+            _logging.getLogger(__name__).info(
+                "provider key %s: %s %s",
+                service_id, "set" if value else "cleared", name,
+            )
+
+        # Same booleans as GET so the client refreshes its view from us.
+        return _provider_keys_payload()
 
     @app.post("/api/code")
     async def create_coding_run(body: dict):
