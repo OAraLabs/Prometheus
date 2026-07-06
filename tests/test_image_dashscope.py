@@ -311,3 +311,14 @@ class TestDashscopeErrors:
             )
         assert result.is_error is True
         assert "did not finish" in result.output
+
+
+class TestExecutionTimeoutOverride:
+    def test_tool_timeout_exceeds_dashscope_poll_budget(self) -> None:
+        """The agent loop kills tools at 300s by default — exactly the
+        dashscope poll budget, leaving no room for submit + download. The
+        per-tool override must clear the budget with margin so a slow WAN
+        render surfaces the tool's own honest timeout message."""
+        tool = ImageGenerateTool()
+        assert tool.execution_timeout_seconds is not None
+        assert tool.execution_timeout_seconds > ig._DASHSCOPE_POLL_BUDGET

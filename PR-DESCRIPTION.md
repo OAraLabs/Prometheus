@@ -50,6 +50,7 @@ A grep sweep for every hardcoded provider enumeration caught four sites the stud
 - **`telemetry/tracker.py::_CLOUD_PROVIDERS`**: golden-trace capture's deliberate duplicate of `is_cloud()` — four names added.
 - **`web/slash_router.py::WEB_NATIVE_ONLY`**: the web chat surface's boundary list mirrors Telegram registrations — `/deepseek` etc. now get the explicit boundary reply instead of silently running the agent.
 - **`web/server.py::_PRESET_LABELS`**: GET `/api/models` catalog labels (the catalog itself iterates `OVERRIDE_PRESETS`, so the new presets appear automatically; labels now read DeepSeek/Kimi/GLM/MiMo instead of raw keys).
+- **Tool execution timeout vs poll budgets**: the agent loop kills tools at `LoopContext.tool_timeout_seconds` (300s default) — Kling's poll budget alone is 600s and DashScope's is 300s + submit/download. Both tools now set the M5 `execution_timeout_seconds` class override (`video_generate` 900s, `image_generate` 480s) so a slow render surfaces the tool's own honest timeout message instead of being killed mid-poll. Test-pinned (override must exceed the poll budget).
 
 ### 4. Doctor
 
@@ -79,8 +80,8 @@ Zero platform gaps for the new families; both drift directions (manifest→regis
 
 ### 2. Test counts
 
-- **Full suite: 3413 passed, 4 skipped, 0 failed** (`PYTHONPATH=$PWD/src uv run pytest`), zero deselects; skips are pre-existing optional-dep skips. Pre-branch baseline: 3306 passed / 4 skipped.
-- Sprint adds **107 new tests**: `tests/test_cloud_expansion.py` (81 — incl. adapter-tier, golden-trace-set, and web-surface pins for the drive-by catches), `tests/test_image_dashscope.py` (9), `tests/test_video_generate.py` (17); plus honest updates to existing pins: `test_cloud_providers.py` (list_providers 7→11, is_cloud), `test_cost.py` (+5 pricing-coverage models), `test_gateway_command_pins.py` (the `/route` list deliberately grew — pins updated with a note), `test_gateway_parity.py` (4 families).
+- **Full suite: 3415 passed, 4 skipped, 0 failed** (`PYTHONPATH=$PWD/src uv run pytest`), zero deselects; skips are pre-existing optional-dep skips. Pre-branch baseline: 3306 passed / 4 skipped.
+- Sprint adds **109 new tests**: `tests/test_cloud_expansion.py` (81 — incl. adapter-tier, golden-trace-set, and web-surface pins for the drive-by catches), `tests/test_image_dashscope.py` (10), `tests/test_video_generate.py` (18); plus honest updates to existing pins: `test_cloud_providers.py` (list_providers 7→11, is_cloud), `test_cost.py` (+5 pricing-coverage models), `test_gateway_command_pins.py` (the `/route` list deliberately grew — pins updated with a note), `test_gateway_parity.py` (4 families).
 - CI (GitHub Actions) green on the PR: `test (3.11)` pass, `test (3.12)` pass.
 
 ### 3. Fake-transport transcripts (mocked endpoints; fake keys; auth redacted)

@@ -173,6 +173,12 @@ class ImageGenerateTool(BaseTool):
         "for reproducible output."
     )
     input_model = ImageGenerateInput
+    # CLOUD EXPANSION (2026-07): the dashscope path can legitimately run
+    # poll-budget (300s) + submit + download — past the agent loop's 300s
+    # default tool timeout. Raise the per-tool bar so a slow WAN render
+    # returns the tool's own honest timeout message instead of being killed
+    # mid-poll. (Free backends finish well under their 120–180s budgets.)
+    execution_timeout_seconds: float = _DASHSCOPE_POLL_BUDGET + 180.0
 
     def is_read_only(self, arguments: ImageGenerateInput) -> bool:
         # Only read-only when nothing is written to a model-chosen path.

@@ -499,3 +499,11 @@ class TestRegistrationAndSchema:
     def test_duration_restricted_to_5_or_10(self) -> None:
         with pytest.raises(Exception):
             VideoGenerateInput(prompt="p", duration=7)
+
+    def test_execution_timeout_exceeds_poll_budget(self) -> None:
+        """The agent loop kills tools at 300s by default; Kling's poll
+        budget alone is 600s. The per-tool override must clear the default
+        poll budget with margin, or every real render dies mid-poll."""
+        tool = KlingVideoTool()
+        assert tool.execution_timeout_seconds is not None
+        assert tool.execution_timeout_seconds > vg._KLING_POLL_BUDGET
