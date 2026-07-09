@@ -186,16 +186,28 @@ def logout() -> bool:
         return False
 
 
-def device_code_login(*, open_browser: bool = True, print_fn=print) -> dict[str, Any]:
-    """Run the interactive device-code login and persist tokens.
+def token_status() -> dict[str, Any]:
+    """Return login status WITHOUT any network I/O or refresh.
 
-    Prints a verification URL + user code, then polls until the user approves
-    (or the code expires). Blocking — intended for a CLI/login trigger, not the
-    request path. Returns the persisted store dict on success; raises otherwise.
+    ``{"logged_in": bool, "expires_at": float | None}`` — safe for a status
+    endpoint. ``expires_at`` is epoch seconds (or ``None`` when unknown/absent).
+    """
+    store = _read_store()
+    if store is None:
+        return {"logged_in": False, "expires_at": None}
+    return {"logged_in": True, "expires_at": float(store.get("expires_at") or 0.0) or None}
+
+
+def begin_device_login() -> dict[str, Any]:
+    """Request a device code (fast, non-blocking).
+
+    Does OIDC discovery + the device-code request and returns the bits a caller
+    needs to (a) show the user where to approve and (b) later poll to
+    completion via :func:`complete_device_login`. Does NOT wait for approval —
+    so a REST endpoint can return the code immediately.
     """
     with httpx.Client(timeout=httpx.Timeout(30.0), headers={"Accept": "application/json"}) as client:
         token_endpoint = _discover_token_endpoint(client)
-
         dc = client.post(
             DEVICE_CODE_URL,
             headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
@@ -204,32 +216,36 @@ def device_code_login(*, open_browser: bool = True, print_fn=print) -> dict[str,
         if dc.status_code != 200:
             raise RuntimeError(f"xAI device-code request failed (HTTP {dc.status_code}): {dc.text}")
         d = dc.json()
-        verification = str(d.get("verification_uri_complete") or d["verification_uri"])
-        user_code = str(d["user_code"])
-        expires_in = int(d["expires_in"])
-        interval = max(1, int(d["interval"]))
+        return {
+            "verification_uri": str(d.get("verification_uri_complete") or d["verification_uri"]),
+            "user_code": str(d["user_code"]),
+            "expires_in": int(d["expires_in"]),
+            "interval": max(1, int(d["interval"])),
+            "device_code": str(d["device_code"]),
+            "token_endpoint": token_endpoint,
+        }
 
-        print_fn(f"Open this URL and sign in with SuperGrok:\n  {verification}")
-        print_fn(f"If prompted, enter code: {user_code}")
-        print_fn(f"(code expires in {expires_in}s)")
-        if open_browser:
-            try:
-                webbrowser.open(verification)
-            except Exception:
-                pass
 
-        deadline = time.monotonic() + expires_in
-        cur = interval
+def complete_device_login(begin: dict[str, Any]) -> dict[str, Any]:
+    """Poll the token endpoint until the user approves, then persist tokens.
+
+    Blocking (up to the code's ``expires_in``) — call from a thread/background
+    task, never the event loop. Takes the dict returned by
+    :func:`begin_device_login`. Returns the persisted store; raises on
+    denial/timeout.
+    """
+    token_endpoint = begin["token_endpoint"]
+    with httpx.Client(timeout=httpx.Timeout(30.0), headers={"Accept": "application/json"}) as client:
+        deadline = time.monotonic() + int(begin["expires_in"])
+        cur = max(1, int(begin["interval"]))
         while time.monotonic() < deadline:
             resp = client.post(
                 token_endpoint,
                 headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
-                data={"grant_type": DEVICE_GRANT, "client_id": CLIENT_ID, "device_code": d["device_code"]},
+                data={"grant_type": DEVICE_GRANT, "client_id": CLIENT_ID, "device_code": begin["device_code"]},
             )
             if resp.status_code == 200:
-                store = _persist_tokens(resp.json(), token_endpoint)
-                print_fn("Logged in — tokens stored at " + str(_store_path()))
-                return store
+                return _persist_tokens(resp.json(), token_endpoint)
             try:
                 err = str(resp.json().get("error") or "")
             except Exception:
@@ -242,3 +258,19 @@ def device_code_login(*, open_browser: bool = True, print_fn=print) -> dict[str,
             else:
                 raise RuntimeError(f"xAI device authorization failed: {resp.json()}")
         raise TimeoutError("timed out waiting for device approval")
+
+
+def device_code_login(*, open_browser: bool = True, print_fn=print) -> dict[str, Any]:
+    """Interactive CLI login: begin, show the code, then block until approved."""
+    begin = begin_device_login()
+    print_fn(f"Open this URL and sign in with SuperGrok:\n  {begin['verification_uri']}")
+    print_fn(f"If prompted, enter code: {begin['user_code']}")
+    print_fn(f"(code expires in {begin['expires_in']}s)")
+    if open_browser:
+        try:
+            webbrowser.open(begin["verification_uri"])
+        except Exception:
+            pass
+    store = complete_device_login(begin)
+    print_fn("Logged in — tokens stored at " + str(_store_path()))
+    return store
