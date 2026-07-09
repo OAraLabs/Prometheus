@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 from uuid import uuid4
 
 import httpx
@@ -108,16 +108,30 @@ class OpenAICompatProvider(ModelProvider):
     def __init__(
         self,
         base_url: str,
-        api_key: str,
+        api_key: "str | Callable[[], str | None]",
         model: str = "",
         default_max_tokens: int = 4096,
         timeout: float = 120.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        # api_key may be a static string OR a zero-arg callable resolved per
+        # request. The callable form powers rotating credentials (xAI SuperGrok
+        # OAuth) where the bearer refreshes mid-session and must not be frozen
+        # at construction — providers here are long-lived and cached.
         self._api_key = api_key
         self._model = model
         self._default_max_tokens = default_max_tokens
         self._timeout = timeout
+
+    def _resolve_bearer(self) -> str:
+        """Return the current bearer, resolving a callable credential if given."""
+        key = self._api_key() if callable(self._api_key) else self._api_key
+        if not key:
+            raise ValueError(
+                "no bearer available for this request — the credential source "
+                "returned empty (expired OAuth token with no fallback key?)"
+            )
+        return key
 
     async def stream_message(
         self, request: ApiMessageRequest
@@ -199,7 +213,7 @@ class OpenAICompatProvider(ModelProvider):
 
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self._api_key}",
+            "Authorization": f"Bearer {self._resolve_bearer()}",
         }
 
         log.debug(

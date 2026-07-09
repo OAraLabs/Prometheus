@@ -115,6 +115,39 @@ def _resolve_api_key(config: dict[str, Any], provider_name: str) -> str:
     raise ValueError(f"No API key source found for provider {provider_name}")
 
 
+def _resolve_xai_credential(config: dict[str, Any]) -> "str | object":
+    """Resolve the xAI bearer, preferring a SuperGrok OAuth token over a key.
+
+    Precedence:
+      1. A direct ``config["api_key"]`` (explicit/test override) — static str.
+      2. SuperGrok OAuth, if the user has logged in — a *callable* resolved per
+         request (the token refreshes mid-session, so it must not be frozen at
+         construction). The callable falls back to ``XAI_API_KEY`` if an OAuth
+         refresh ever fails, so an outage degrades to the key instead of a hard
+         failure.
+      3. Otherwise the normal env-var key path (raises if unset).
+    """
+    from prometheus.providers import xai_oauth
+
+    direct = config.get("api_key", "")
+    if direct:
+        return direct
+
+    if xai_oauth.is_logged_in():
+        env_name = config.get("api_key_env", "") or CLOUD_DEFAULTS["xai"]["default_env"]
+
+        def _bearer() -> str | None:
+            token = xai_oauth.get_access_token()
+            if token:
+                return token
+            log.warning("xAI OAuth token unavailable — falling back to %s", env_name)
+            return os.environ.get(env_name, "") or None
+
+        return _bearer
+
+    return _resolve_api_key(config, "xai")
+
+
 class ProviderRegistry:
     """Create providers from prometheus.yaml config."""
 
@@ -135,7 +168,11 @@ class ProviderRegistry:
         if provider_name in _OPENAI_COMPAT_PROVIDERS:
             from prometheus.providers.openai_compat import OpenAICompatProvider
 
-            api_key = _resolve_api_key(config, provider_name)
+            api_key = (
+                _resolve_xai_credential(config)
+                if provider_name == "xai"
+                else _resolve_api_key(config, provider_name)
+            )
             return OpenAICompatProvider(
                 base_url=config.get("base_url", defaults.get("base_url", "")),
                 api_key=api_key,
