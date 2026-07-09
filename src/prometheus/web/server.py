@@ -1430,6 +1430,67 @@ def create_app(
         # Same booleans as GET so the client refreshes its view from us.
         return _provider_keys_payload()
 
+    # --- xAI SuperGrok OAuth (device-code) — remote login surface ----------
+    # Lets Beacon sign the daemon in with a SuperGrok subscription instead of a
+    # metered XAI_API_KEY. The provider resolver (registry._resolve_xai_credential)
+    # prefers a stored OAuth token over the key, so a successful login here takes
+    # effect on the next xai request with no restart. Device-code = no loopback,
+    # so it works from a remote Beacon against the mini.
+    #
+    # `login` returns the verification URL + user code IMMEDIATELY and polls in a
+    # background task; the client polls GET to watch `pending` flip to logged_in.
+    _xai_login: dict = {"pending": False, "verification_uri": None,
+                        "user_code": None, "error": None}
+
+    @app.get("/api/providers/xai/oauth")
+    async def xai_oauth_status():
+        from prometheus.providers import xai_oauth
+        status = xai_oauth.token_status()
+        return {**status, "pending": _xai_login["pending"],
+                "verification_uri": _xai_login["verification_uri"],
+                "user_code": _xai_login["user_code"],
+                "last_error": _xai_login["error"]}
+
+    @app.post("/api/providers/xai/oauth/login")
+    async def xai_oauth_login():
+        import asyncio
+
+        from prometheus.providers import xai_oauth
+
+        if _xai_login["pending"]:
+            # Idempotent: a login is already in flight — hand back its code.
+            return {"pending": True,
+                    "verification_uri": _xai_login["verification_uri"],
+                    "user_code": _xai_login["user_code"]}
+        try:
+            begin = await asyncio.to_thread(xai_oauth.begin_device_login)
+        except Exception as exc:
+            return JSONResponse(status_code=502, content={
+                "error": f"could not start xAI device login: {exc}"})
+
+        _xai_login.update(pending=True, error=None,
+                          verification_uri=begin["verification_uri"],
+                          user_code=begin["user_code"])
+
+        async def _finish():
+            try:
+                await asyncio.to_thread(xai_oauth.complete_device_login, begin)
+            except Exception as exc:  # denial / timeout — surfaced via status
+                _xai_login["error"] = str(exc)
+            finally:
+                _xai_login["pending"] = False
+                _xai_login["verification_uri"] = None
+                _xai_login["user_code"] = None
+
+        asyncio.create_task(_finish())
+        return {"pending": True, "verification_uri": begin["verification_uri"],
+                "user_code": begin["user_code"], "expires_in": begin["expires_in"]}
+
+    @app.delete("/api/providers/xai/oauth")
+    async def xai_oauth_logout():
+        from prometheus.providers import xai_oauth
+        return {"logged_out": xai_oauth.logout()}
+
     @app.post("/api/code")
     async def create_coding_run(body: dict):
         from uuid import uuid4 as _uuid4

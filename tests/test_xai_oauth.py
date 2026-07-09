@@ -130,6 +130,108 @@ class TestRegistryPrecedence:
             assert cred() == "sk-key"  # OAuth refresh failed -> env key
 
 
+class TestStatusAndDeviceFlow:
+    def test_token_status_logged_out(self, store_dir):
+        from prometheus.providers import xai_oauth
+        assert xai_oauth.token_status() == {"logged_in": False, "expires_at": None}
+
+    def test_token_status_logged_in_no_network(self, store_dir):
+        from prometheus.providers import xai_oauth
+        exp = time.time() + 3600
+        _write_store(store_dir, expires_at=exp)
+        with patch("prometheus.providers.xai_oauth.httpx.Client") as client:
+            st = xai_oauth.token_status()
+            client.assert_not_called()  # status never hits the network
+        assert st["logged_in"] is True
+        assert st["expires_at"] == exp
+
+    def test_begin_returns_code_without_waiting(self, store_dir):
+        from prometheus.providers import xai_oauth
+        get_resp = MagicMock(status_code=200)
+        get_resp.json.return_value = {"token_endpoint": "https://auth.x.ai/oauth2/token"}
+        get_resp.raise_for_status.return_value = None
+        post_resp = MagicMock(status_code=200)
+        post_resp.json.return_value = {
+            "device_code": "dev-123", "user_code": "ABCD-EFGH",
+            "verification_uri": "https://accounts.x.ai/device",
+            "verification_uri_complete": "https://accounts.x.ai/device?user_code=ABCD-EFGH",
+            "expires_in": 1800, "interval": 5,
+        }
+        client = MagicMock()
+        client.get.return_value = get_resp
+        client.post.return_value = post_resp
+        with patch("prometheus.providers.xai_oauth.httpx.Client") as ctor:
+            ctor.return_value.__enter__.return_value = client
+            begin = xai_oauth.begin_device_login()
+        assert begin["user_code"] == "ABCD-EFGH"
+        assert begin["verification_uri"].endswith("user_code=ABCD-EFGH")
+        assert begin["device_code"] == "dev-123"
+        assert begin["token_endpoint"] == "https://auth.x.ai/oauth2/token"
+
+    def test_complete_persists_on_approval(self, store_dir):
+        from prometheus.providers import xai_oauth
+        begin = {
+            "device_code": "dev-123", "expires_in": 1800, "interval": 1,
+            "token_endpoint": "https://auth.x.ai/oauth2/token",
+        }
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {
+            "access_token": "tok-live", "refresh_token": "refresh-9", "expires_in": 21600,
+        }
+        client = MagicMock()
+        client.post.return_value = resp
+        with patch("prometheus.providers.xai_oauth.httpx.Client") as ctor:
+            ctor.return_value.__enter__.return_value = client
+            store = xai_oauth.complete_device_login(begin)
+        assert store["access_token"] == "tok-live"
+        assert xai_oauth.token_status()["logged_in"] is True
+
+
+class TestOAuthEndpoints:
+    def _client(self):
+        import pytest as _pytest
+        _pytest.importorskip("fastapi")
+        from fastapi.testclient import TestClient
+        from prometheus.web.server import create_app
+        return TestClient(create_app({"model": {"model": "qwen3.5-32b", "provider": "local"}}))
+
+    def test_status_logged_out(self):
+        with patch("prometheus.providers.xai_oauth.token_status",
+                   return_value={"logged_in": False, "expires_at": None}):
+            r = self._client().get("/api/providers/xai/oauth")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["logged_in"] is False
+        assert body["pending"] is False
+
+    def test_login_returns_code_immediately(self):
+        fake_begin = {
+            "verification_uri": "https://accounts.x.ai/device?user_code=WXYZ-1234",
+            "user_code": "WXYZ-1234", "expires_in": 1800, "interval": 5,
+            "device_code": "d", "token_endpoint": "https://auth.x.ai/oauth2/token",
+        }
+        with patch("prometheus.providers.xai_oauth.begin_device_login", return_value=fake_begin), \
+             patch("prometheus.providers.xai_oauth.complete_device_login", return_value={}):
+            r = self._client().post("/api/providers/xai/oauth/login")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["pending"] is True
+        assert body["user_code"] == "WXYZ-1234"
+
+    def test_login_begin_failure_is_502(self):
+        with patch("prometheus.providers.xai_oauth.begin_device_login",
+                   side_effect=RuntimeError("xAI down")):
+            r = self._client().post("/api/providers/xai/oauth/login")
+        assert r.status_code == 502
+        assert "xAI down" in r.json()["error"]
+
+    def test_logout(self):
+        with patch("prometheus.providers.xai_oauth.logout", return_value=True):
+            r = self._client().request("DELETE", "/api/providers/xai/oauth")
+        assert r.status_code == 200
+        assert r.json()["logged_out"] is True
+
+
 class TestCallableBearerInProvider:
     def test_provider_resolves_callable_per_request(self):
         from prometheus.providers.openai_compat import OpenAICompatProvider
