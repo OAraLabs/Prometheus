@@ -7,6 +7,7 @@ burning GPU time during idle cycles.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import time
@@ -36,6 +37,20 @@ Facts:
 Respond with a brief insight (2-4 sentences) about what connects these entities
 or what patterns emerge from the data. Focus on actionable or surprising connections.
 """
+
+# Facts fed to the prompt AND fingerprinted per cluster. One cap for both:
+# the skip check must see exactly the fact set the insight was synthesized
+# from, or the two drift and unchanged clusters re-synthesize anyway.
+_MAX_CLUSTER_FACTS = 30
+
+# ``facts_hash`` line in an insight page's frontmatter — the fingerprint of
+# the facts the page was last synthesized from.
+_FACTS_HASH_RE = re.compile(r"^facts_hash: ([0-9a-f]{64})$", re.MULTILINE)
+
+
+def _norm_text(text: str) -> str:
+    """Lowercase + collapse whitespace, for fingerprint stability."""
+    return re.sub(r"\s+", " ", text.strip().lower())
 
 
 @dataclass
@@ -99,17 +114,37 @@ class KnowledgeSynthesizer:
 
         insights: list[SynthInsight] = []
         tokens_spent = 0
+        skipped_unchanged = 0
 
         for cluster in clusters:
             if tokens_spent >= budget:
                 break
 
-            insight = await self._generate_insight(cluster)
+            facts = self._gather_cluster_facts(cluster)
+            if len(facts) < 3:
+                continue
+
+            # Dedup gate: if this cluster's insight page already reflects
+            # exactly these facts, re-synthesizing would mint a near-identical
+            # page (the live vault accumulated the same slug 20×) and burn
+            # budget. Skip BEFORE the LLM call.
+            fingerprint = self._facts_fingerprint(cluster, facts)
+            if self._read_page_fingerprint(self._insight_page_path(cluster)) == fingerprint:
+                skipped_unchanged += 1
+                continue
+
+            insight = await self._generate_insight(cluster, facts)
             if insight:
                 tokens_spent += insight.tokens_used
                 insights.append(insight)
-                self._write_insight_page(insight)
+                self._write_insight_page(insight, fingerprint=fingerprint)
 
+        if skipped_unchanged:
+            log.debug(
+                "KnowledgeSynthesizer: skipped %d cluster(s) whose facts are "
+                "unchanged since their insight page was written",
+                skipped_unchanged,
+            )
         if insights:
             log.info(
                 "KnowledgeSynthesizer: generated %d insight(s), %d tokens used",
@@ -162,7 +197,58 @@ class KnowledgeSynthesizer:
         clusters.sort(key=len, reverse=True)
         return clusters
 
-    async def _generate_insight(self, cluster: list[str]) -> SynthInsight | None:
+    def _gather_cluster_facts(
+        self, cluster: list[str]
+    ) -> list[tuple[str, str, float]]:
+        """Collect ``(entity, fact, confidence)`` rows for a cluster, capped."""
+        facts: list[tuple[str, str, float]] = []
+        for entity in cluster[:10]:  # Cap to avoid huge prompts
+            mems = self._store.search_memories(entity=entity, limit=10)
+            for mem in mems:
+                facts.append((entity, mem["fact"], mem["confidence"]))
+        return facts[:_MAX_CLUSTER_FACTS]
+
+    def _facts_fingerprint(
+        self, cluster: list[str], facts: list[tuple[str, str, float]]
+    ) -> str:
+        """Stable digest of a cluster's underlying facts.
+
+        Confidence is excluded on purpose: a dedup merge bumps confidence and
+        mention_count without changing what is known, and must not trigger a
+        re-synthesis.
+        """
+        lines = sorted(
+            _norm_text(entity) + "\t" + _norm_text(fact)
+            for entity, fact, _confidence in facts
+        )
+        payload = "\n".join([",".join(_norm_text(e) for e in cluster), *lines])
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _insight_page_path(self, entities: list[str]) -> Path:
+        """Stable page path for a cluster: wiki/queries/insight-{topic}.md.
+
+        Entities are model-extracted free text and can contain path
+        separators / "$vars" / dots — the slug must stay a single safe
+        path component inside queries_dir (same whitelist idiom as
+        skill_creator._slugify).
+        """
+        topic = re.sub(r"[^a-z0-9]+", "-", "-".join(entities[:3]).lower())
+        topic = topic.strip("-")[:40].rstrip("-") or "cluster"
+        return self._wiki_root / "queries" / f"insight-{topic}.md"
+
+    @staticmethod
+    def _read_page_fingerprint(path: Path) -> str | None:
+        """``facts_hash`` recorded in an existing insight page, or ``None``."""
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        m = _FACTS_HASH_RE.search(text)
+        return m.group(1) if m else None
+
+    async def _generate_insight(
+        self, cluster: list[str], facts: list[tuple[str, str, float]]
+    ) -> SynthInsight | None:
         """Generate insight for one entity cluster via the shared LLM envelope.
 
         The envelope builds the request with ``content=[TextBlock(text=prompt)]``
@@ -170,21 +256,14 @@ class KnowledgeSynthesizer:
         previously broke this phase on every dream cycle is structurally
         impossible, and any failure lands in telemetry.silent_failures.
         """
-        # Gather facts about these entities
-        facts_lines: list[str] = []
-        for entity in cluster[:10]:  # Cap to avoid huge prompts
-            mems = self._store.search_memories(entity=entity, limit=10)
-            for mem in mems:
-                facts_lines.append(
-                    f"  [{entity}] {mem['fact']} (confidence: {mem['confidence']:.2f})"
-                )
-
-        if len(facts_lines) < 3:
-            return None
+        facts_lines = [
+            f"  [{entity}] {fact} (confidence: {confidence:.2f})"
+            for entity, fact, confidence in facts
+        ]
 
         prompt = _SYNTHESIS_PROMPT.format(
             entities=", ".join(cluster[:10]),
-            facts="\n".join(facts_lines[:30]),  # Cap facts
+            facts="\n".join(facts_lines),
         )
 
         # on_failure="return_none": a failed/empty call returns None (recorded
@@ -209,24 +288,29 @@ class KnowledgeSynthesizer:
             tokens_used=max(1, len(insight_text) // 4),
         )
 
-    def _write_insight_page(self, insight: SynthInsight) -> None:
-        """Write insight to wiki/queries/insight-{date}-{topic}.md."""
-        queries_dir = self._wiki_root / "queries"
-        queries_dir.mkdir(parents=True, exist_ok=True)
+    def _write_insight_page(
+        self, insight: SynthInsight, *, fingerprint: str | None = None
+    ) -> None:
+        """Write/update wiki/queries/insight-{topic}.md — one stable page per
+        cluster, updated in place when the underlying facts change.
 
-        date_str = time.strftime("%Y%m%d", time.localtime())
-        # Entities are model-extracted free text and can contain path
-        # separators / "$vars" / dots — the slug must stay a single safe
-        # path component inside queries_dir (same whitelist idiom as
-        # skill_creator._slugify).
-        topic = re.sub(r"[^a-z0-9]+", "-", "-".join(insight.entities[:3]).lower())
-        topic = topic.strip("-")[:40].rstrip("-") or "cluster"
-        filename = f"insight-{date_str}-{topic}.md"
-        path = queries_dir / filename
+        Pre-dedup, the name carried a date stamp, so every idle cycle minted a
+        near-identical new page for an unchanged cluster — and queries/ is the
+        only non-regenerable vault content, so the noise accumulated durably.
+        Legacy dated pages are left in place (the vault is never edited from
+        here beyond this cluster's own page).
+        """
+        path = self._insight_page_path(insight.entities)
+        path.parent.mkdir(parents=True, exist_ok=True)
 
         content = (
             f"---\ntype: insight\ngenerated: {time.strftime('%Y-%m-%d %H:%M')}\n"
-            f"entities: {insight.entities}\ntokens_used: {insight.tokens_used}\n---\n\n"
+            f"entities: {insight.entities}\ntokens_used: {insight.tokens_used}\n"
+        )
+        if fingerprint:
+            content += f"facts_hash: {fingerprint}\n"
+        content += (
+            f"---\n\n"
             f"# Insight: {', '.join(insight.entities[:5])}\n\n"
             f"{insight.insight}\n\n"
             f"## Related Entities\n"
