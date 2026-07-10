@@ -1763,15 +1763,24 @@ def cmd_provider_override(
     # registry.
     api_key_env = preset.get("api_key_env", "")
     if api_key_env and not _os.environ.get(api_key_env):
-        display = PROVIDER_PRESET_DISPLAY_NAMES.get(preset_name, preset_name)
-        return (
-            f"{display} requires {api_key_env} to be set in the "
-            f"environment.\n"
-            f"Add it to ~/.config/prometheus/env and restart the daemon "
-            f"(systemctl --user restart prometheus), then try {prefix}{preset_name} "
-            f"again.",
-            False,
-        )
+        # The xai provider can also be authed via SuperGrok OAuth (registry
+        # prefers it over the key — see _resolve_xai_credential). Mirror that:
+        # a logged-in store passes the gate. is_logged_in() is a store-presence
+        # probe — no network, no refresh.
+        oauth_ok = False
+        if preset.get("provider") == "xai":
+            from prometheus.providers import xai_oauth
+            oauth_ok = xai_oauth.is_logged_in()
+        if not oauth_ok:
+            display = PROVIDER_PRESET_DISPLAY_NAMES.get(preset_name, preset_name)
+            return (
+                f"{display} requires {api_key_env} to be set in the "
+                f"environment.\n"
+                f"Add it to ~/.config/prometheus/env and restart the daemon "
+                f"(systemctl --user restart prometheus), then try {prefix}{preset_name} "
+                f"again.",
+                False,
+            )
 
     # Record the override. set_override raises ValueError if called with a
     # reserved session_id, but gateway session keys are never reserved.

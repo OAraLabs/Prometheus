@@ -281,6 +281,61 @@ class TestModelCatalogAvailability:
         probe.assert_not_called()  # short-circuit: key present → no OAuth probe
 
 
+class TestGatewaySlashGate:
+    """cmd_provider_override's early key gate must honor SuperGrok OAuth for
+    /xai (Telegram/Slack/Discord share this core) — a logged-in store passes
+    with no XAI_API_KEY set."""
+
+    def _agent_loop_with_router(self):
+        agent_loop = MagicMock()
+        router = MagicMock()
+        router.config.overrides_enabled = True
+        agent_loop._model_router = router
+        return agent_loop
+
+    def test_xai_passes_gate_via_oauth_without_api_key(self):
+        import os
+        from prometheus.gateway.commands import cmd_provider_override
+        agent_loop = self._agent_loop_with_router()
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("prometheus.providers.xai_oauth.is_logged_in", return_value=True):
+            text, applied = cmd_provider_override(agent_loop, {}, "telegram:1", "xai")
+        assert applied is True
+        assert "Switched to" in text
+        agent_loop._model_router.set_override.assert_called_once()
+
+    def test_xai_blocked_when_no_key_and_logged_out(self):
+        import os
+        from prometheus.gateway.commands import cmd_provider_override
+        agent_loop = self._agent_loop_with_router()
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("prometheus.providers.xai_oauth.is_logged_in", return_value=False):
+            text, applied = cmd_provider_override(agent_loop, {}, "telegram:1", "xai")
+        assert applied is False
+        assert "XAI_API_KEY" in text
+        agent_loop._model_router.set_override.assert_not_called()
+
+    def test_non_xai_provider_does_not_probe_oauth(self):
+        import os
+        from prometheus.gateway.commands import cmd_provider_override
+        agent_loop = self._agent_loop_with_router()
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("prometheus.providers.xai_oauth.is_logged_in") as probe:
+            text, applied = cmd_provider_override(agent_loop, {}, "telegram:1", "deepseek")
+        assert applied is False  # key missing, and OAuth doesn't apply
+        probe.assert_not_called()
+
+    def test_xai_with_api_key_does_not_probe_oauth(self):
+        import os
+        from prometheus.gateway.commands import cmd_provider_override
+        agent_loop = self._agent_loop_with_router()
+        with patch.dict(os.environ, {"XAI_API_KEY": "sk-x"}, clear=True), \
+             patch("prometheus.providers.xai_oauth.is_logged_in") as probe:
+            text, applied = cmd_provider_override(agent_loop, {}, "telegram:1", "xai")
+        assert applied is True
+        probe.assert_not_called()  # env key present → gate passes without OAuth
+
+
 class TestCallableBearerInProvider:
     def test_provider_resolves_callable_per_request(self):
         from prometheus.providers.openai_compat import OpenAICompatProvider
