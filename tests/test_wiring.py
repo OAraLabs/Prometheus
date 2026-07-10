@@ -5186,6 +5186,12 @@ class TestGraftRouterWirePhase4:
         assert "- Model: gemma4-26b" not in sp, (
             f"Stale primary-model identity still in prompt:\n{sp}"
         )
+        # Anatomy identity-confusion fix: on a non-primary route the rewritten
+        # line must out-rank the Infrastructure section, or the cloud model
+        # adopts the local GPU node's "Loaded:" GGUF as its own identity.
+        assert "ACTIVE model serving this conversation" in sp, (
+            f"Override identity line lacks the Infrastructure out-rank clause:\n{sp}"
+        )
 
 
 # ---------------------------------------------------------------------------
