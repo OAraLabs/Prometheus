@@ -764,6 +764,18 @@ async def run_loop(
                     provider_name = decision.provider_name or "unknown"
                     model_name = decision.model_name or "unknown"
                     new_line = f"- Model: {model_name} (provider: {provider_name})"
+                    # On non-primary routes, a trailing clause out-ranks the
+                    # Infrastructure/ANATOMY section: without it, an overridden
+                    # cloud model reads the local GPU node's "Loaded:" entry
+                    # and answers "what model is this?" with the local GGUF
+                    # filename. Primary routes skip it — there the serving
+                    # model IS the local backend and the clause would be false.
+                    if reason_repr != "primary":
+                        new_line += (
+                            " — the ACTIVE model serving this conversation;"
+                            " any model in the Infrastructure section is a"
+                            " separate local backend, not you"
+                        )
                     context.system_prompt = _re.sub(
                         r"^- Model: .*$",
                         new_line,

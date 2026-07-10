@@ -103,9 +103,11 @@ class AnatomyWriter:
         hw += "."
         parts.append(hw)
 
-        # Model line
+        # Model line — "Local backend model", not "Model": this summary is read
+        # by whichever model is serving the session, which under a /xai or
+        # /claude override is NOT the local one (identity-confusion fix).
         if state.model_name:
-            model_line = f"Model: {_short_model(state.model_name)}"
+            model_line = f"Local backend model: {_short_model(state.model_name)}"
             if state.model_quantization:
                 model_line += f" ({state.model_quantization})"
             model_line += f" via {state.inference_engine.replace('_', '.')}."
@@ -169,9 +171,18 @@ class AnatomyWriter:
                 total = state.gpu_vram_total_mb
                 lines.append(f"- **VRAM:** {used}MB / {total}MB used ({free}MB free)")
 
-        # Model
+        # Model — labelled "local backend" deliberately. This section lands in
+        # every system prompt; a cloud model serving an overridden session
+        # (/xai, /claude, …) read the old "### Model / Loaded:" heading as ITS
+        # OWN identity and answered "what model is this?" with the local GGUF.
         lines.append("")
-        lines.append("### Model")
+        lines.append("### Local backend model (GPU node inventory)")
+        lines.append(
+            "- **Note:** auto-detected model loaded on the local GPU node — "
+            "NOT necessarily the model serving this conversation (see the "
+            "Environment section's `- Model:` line; per-session overrides "
+            "may route chats to a cloud provider)."
+        )
         if state.model_name:
             lines.append(f"- **Loaded:** {state.model_name}")
             if state.model_file and state.model_file != state.model_name:

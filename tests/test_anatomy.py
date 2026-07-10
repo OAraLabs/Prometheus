@@ -408,6 +408,24 @@ class TestAnatomyWriter:
         # Should be compact
         assert len(summary) < 1500  # well under 300 tokens
 
+    def test_render_summary_labels_model_as_local_backend(self) -> None:
+        # Identity-confusion fix: the summary is read by whichever model
+        # serves the session (a /xai override routes to a cloud model), so
+        # the local GGUF must not be presented as bare "Model:".
+        writer = AnatomyWriter()
+        summary = writer.render_summary(_sample_state())
+        assert "Local backend model:" in summary
+        assert "\nModel:" not in summary
+
+    def test_write_labels_model_section_as_local_backend(self, tmp_path: Path) -> None:
+        # Same fix for the ANATOMY.md file (its Active Configuration section
+        # is injected verbatim into every system prompt).
+        writer = AnatomyWriter(anatomy_path=tmp_path / "ANATOMY.md")
+        content = writer.write(_sample_state())
+        assert "### Local backend model (GPU node inventory)" in content
+        assert "### Model\n" not in content
+        assert "NOT necessarily the model serving this conversation" in content
+
     def test_write_with_project_summaries(self, tmp_path: Path) -> None:
         writer = AnatomyWriter(anatomy_path=tmp_path / "ANATOMY.md")
         state = _sample_state()
@@ -558,6 +576,11 @@ class TestAnatomySummaryInPrompt:
             assert "gemma-4-26B" in summary
             # Should NOT include Architecture section
             assert "mermaid" not in summary
+            # Identity-confusion clarifier is injected at load time so it also
+            # covers ANATOMY.md files written by pre-fix scanners (this
+            # fixture deliberately uses the OLD "### Model" heading).
+            assert "LOCAL backend" in summary
+            assert "not necessarily the model serving this" in summary
 
             prompt = build_runtime_system_prompt(cwd=str(tmp_path))
             static, _ = prompt.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)

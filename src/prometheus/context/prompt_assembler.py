@@ -97,7 +97,18 @@ def _load_anatomy_summary() -> str | None:
     if not active:
         return None
 
-    return f"## Infrastructure\n{active}"
+    # The clarifier is injected HERE (not only baked by anatomy_writer) so it
+    # also covers ANATOMY.md files on disk written by older scanners: any
+    # "Model/Loaded" entries below describe the LOCAL GPU node, and a cloud
+    # model serving an overridden session must not adopt them as its identity.
+    return (
+        "## Infrastructure\n"
+        "_Auto-detected local hardware/software inventory. Any model named "
+        "below is the LOCAL backend, not necessarily the model serving this "
+        "conversation — your identity is the Environment section's "
+        "`- Model:` line._\n"
+        f"{active}"
+    )
 
 
 def build_runtime_system_prompt(
