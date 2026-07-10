@@ -1730,8 +1730,6 @@ def cmd_provider_override(
     override was actually recorded, so the gateway can decide whether to
     dispatch an inline message through the new provider.
     """
-    import os as _os
-
     router = getattr(agent_loop, "_model_router", None)
     if router is None:
         return (
@@ -1758,32 +1756,44 @@ def cmd_provider_override(
     if preset is None:
         return (f"Unknown override preset '{preset_name}'.", False)
 
-    # Early feedback if the API key env var is missing — beats failing on
-    # the user's next message with an opaque ValueError from the provider
-    # registry.
+    # Early feedback if no credential is present — beats failing on the
+    # user's next message with an opaque ValueError from the provider
+    # registry. A subscription source (e.g. SuperGrok OAuth for xai) counts
+    # as a credential and ALWAYS wins over the API key, mirroring the
+    # registry's runtime precedence (_resolve_xai_credential).
+    from prometheus.providers.credentials import credential_status
+
     api_key_env = preset.get("api_key_env", "")
-    if api_key_env and not _os.environ.get(api_key_env):
+    cred = credential_status(preset.get("provider", ""), api_key_env)
+    if api_key_env and cred["mode"] is None:
         display = PROVIDER_PRESET_DISPLAY_NAMES.get(preset_name, preset_name)
-        return (
+        text = (
             f"{display} requires {api_key_env} to be set in the "
             f"environment.\n"
             f"Add it to ~/.config/prometheus/env and restart the daemon "
             f"(systemctl --user restart prometheus), then try {prefix}{preset_name} "
-            f"again.",
-            False,
+            f"again."
         )
+        if cred["subscription_label"]:
+            text += (
+                f"\nOr use your {cred['subscription_label']} instead — "
+                f"{cred['subscription_hint']}."
+            )
+        return (text, False)
 
     # Record the override. set_override raises ValueError if called with a
     # reserved session_id, but gateway session keys are never reserved.
     router.set_override(session_key, dict(preset))
     display = PROVIDER_PRESET_DISPLAY_NAMES.get(preset_name, preset_name)
     log.info(
-        "Provider override for session %s → %s/%s",
-        session_key, preset.get("provider"), preset.get("model"),
+        "Provider override for session %s → %s/%s (auth=%s)",
+        session_key, preset.get("provider"), preset.get("model"), cred["mode"],
     )
+    auth_line = f"Auth: {cred['detail']}\n" if cred["detail"] else ""
     return (
         f"Switched to {display}.\n"
         f"Model: {preset.get('model', '?')}\n"
+        f"{auth_line}"
         f"Use {prefix}local to return to primary, {prefix}route to check.",
         True,
     )
@@ -1849,6 +1859,15 @@ def cmd_route(
                 f"Active: {cfg.get('provider', '?')}/"
                 f"{cfg.get('model', '?')}  (override)"
             )
+            # Say HOW the override provider is authed (subscription vs API
+            # key) when determinable; silent otherwise so mocked/env-less
+            # configs don't print noise.
+            from prometheus.providers.credentials import credential_status
+            cred = credential_status(
+                cfg.get("provider", ""), cfg.get("api_key_env", "")
+            )
+            if cred["detail"]:
+                lines.append(f"Auth: {cred['detail']}")
             lines.append(f"Clear with: {prefix}local")
         else:
             lines.append(

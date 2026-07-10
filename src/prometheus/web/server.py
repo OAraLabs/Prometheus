@@ -1246,32 +1246,34 @@ def create_app(
 
     def _model_catalog() -> list[dict]:
         # Configured primary (key "local" → clear_override) + each vetted cloud preset.
-        # `available` is presence-only (is the api-key env var set?) — never the secret
-        # value, never the env-var name.
+        # `available`/`auth` are presence-only (credential_status: subscription
+        # store or api-key env var, subscription preferred — no network, mirrors
+        # registry precedence) — never the secret value, never the env-var name.
+        # `auth` is "subscription" | "api_key" | None: which credential the
+        # provider would actually use, so UIs can say how it's connected.
+        from prometheus.providers.credentials import credential_status
+
         primary_model = config.get("model", {}).get("model", "unknown")
         primary_provider = config.get("model", {}).get("provider", "local")
         catalog = [{
             "key": _LOCAL_MODEL_KEY, "label": "Local", "provider": primary_provider,
             "model": primary_model, "is_default": True, "available": True,
+            "auth": None,
         }]
         for key in _OVERRIDE_PRESETS:
             # Resolve through the SAME path the /claude slash command uses, so REST and
             # Telegram agree: user slash_commands.<key> config merged over the preset.
             preset = _resolve_preset(key, config) or _OVERRIDE_PRESETS[key]
-            env = preset.get("api_key_env", "")
-            available = bool(env and os.environ.get(env))
-            # xAI SuperGrok can be authed via OAuth (the subscription) instead of
-            # XAI_API_KEY — PRs #99/#100. is_logged_in() is a store-presence probe:
-            # no network, no token refresh, so it's safe on a catalog GET.
-            if key == "xai" and not available:
-                from prometheus.providers import xai_oauth
-                available = xai_oauth.is_logged_in()
+            cred = credential_status(
+                preset.get("provider", ""), preset.get("api_key_env", "")
+            )
             catalog.append({
                 "key": key, "label": _PRESET_LABELS.get(key, key),
                 "provider": preset.get("provider", "unknown"),
                 "model": preset.get("model", "unknown"),
                 "is_default": False,
-                "available": available,
+                "available": cred["mode"] is not None,
+                "auth": cred["mode"],
             })
         return catalog
 
@@ -1286,8 +1288,10 @@ def create_app(
                     return opt
             # A config-customized override (e.g. a Telegram /claude with a user
             # slash_commands block) matching no catalog preset — report it honestly.
+            from prometheus.providers.credentials import credential_status
             return {"key": "custom", "label": mdl or "custom", "provider": prov,
-                    "model": mdl, "is_default": False, "available": True}
+                    "model": mdl, "is_default": False, "available": True,
+                    "auth": credential_status(prov or "", cfg.get("api_key_env", ""))["mode"]}
         return next(o for o in catalog if o["is_default"])
 
     @app.get("/api/models")

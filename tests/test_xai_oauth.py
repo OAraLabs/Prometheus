@@ -232,9 +232,53 @@ class TestOAuthEndpoints:
         assert r.json()["logged_out"] is True
 
 
+class TestCredentialStatus:
+    """providers.credentials.credential_status — subscription vs API key,
+    subscription ALWAYS preferred (mirrors registry runtime precedence)."""
+
+    def test_subscription_wins_over_api_key(self, monkeypatch):
+        import os
+        from prometheus.providers.credentials import credential_status
+        monkeypatch.setenv("XAI_API_KEY", "sk-x")
+        with patch("prometheus.providers.xai_oauth.is_logged_in", return_value=True):
+            cred = credential_status("xai", "XAI_API_KEY")
+        assert cred["mode"] == "subscription"
+        assert cred["detail"] == "SuperGrok subscription"
+        assert cred["has_subscription"] is True
+        assert cred["has_api_key"] is True
+
+    def test_api_key_when_not_logged_in(self, monkeypatch):
+        from prometheus.providers.credentials import credential_status
+        monkeypatch.setenv("XAI_API_KEY", "sk-x")
+        with patch("prometheus.providers.xai_oauth.is_logged_in", return_value=False):
+            cred = credential_status("xai", "XAI_API_KEY")
+        assert cred["mode"] == "api_key"
+        assert cred["detail"] == "API key (XAI_API_KEY)"
+
+    def test_none_when_no_credential(self, monkeypatch):
+        from prometheus.providers.credentials import credential_status
+        monkeypatch.delenv("XAI_API_KEY", raising=False)
+        with patch("prometheus.providers.xai_oauth.is_logged_in", return_value=False):
+            cred = credential_status("xai", "XAI_API_KEY")
+        assert cred["mode"] is None
+        assert cred["detail"] is None
+        # Hint still populated so error messages can point at the subscription.
+        assert cred["subscription_label"] == "SuperGrok subscription"
+
+    def test_provider_without_subscription_source_never_probes(self, monkeypatch):
+        from prometheus.providers.credentials import credential_status
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-d")
+        with patch("prometheus.providers.xai_oauth.is_logged_in") as probe:
+            cred = credential_status("deepseek", "DEEPSEEK_API_KEY")
+        probe.assert_not_called()
+        assert cred["mode"] == "api_key"
+        assert cred["subscription_label"] is None
+
+
 class TestModelCatalogAvailability:
     """GET /api/models must report xai available when OAuth is logged in,
-    even with no XAI_API_KEY set (PRs #99/#100)."""
+    even with no XAI_API_KEY set (PRs #99/#100), and say which credential
+    each preset would use via the `auth` field."""
 
     def _client(self):
         import pytest as _pytest
@@ -263,6 +307,7 @@ class TestModelCatalogAvailability:
             with patch("prometheus.providers.xai_oauth.is_logged_in", return_value=True):
                 entry = self._xai_entry(self._client())
         assert entry["available"] is True
+        assert entry["auth"] == "subscription"
 
     def test_xai_unavailable_when_no_key_and_logged_out(self):
         import os
@@ -271,14 +316,118 @@ class TestModelCatalogAvailability:
             with patch("prometheus.providers.xai_oauth.is_logged_in", return_value=False):
                 entry = self._xai_entry(self._client())
         assert entry["available"] is False
+        assert entry["auth"] is None
 
-    def test_xai_available_via_api_key_does_not_probe_oauth(self):
+    def test_xai_api_key_only_reports_api_key_auth(self):
         import os
         with patch.dict(os.environ, {"XAI_API_KEY": "sk-xai-test"}, clear=False):
-            with patch("prometheus.providers.xai_oauth.is_logged_in") as probe:
+            with patch("prometheus.providers.xai_oauth.is_logged_in", return_value=False):
                 entry = self._xai_entry(self._client())
         assert entry["available"] is True
-        probe.assert_not_called()  # short-circuit: key present → no OAuth probe
+        assert entry["auth"] == "api_key"
+
+    def test_xai_subscription_wins_over_api_key(self):
+        import os
+        with patch.dict(os.environ, {"XAI_API_KEY": "sk-xai-test"}, clear=False):
+            with patch("prometheus.providers.xai_oauth.is_logged_in", return_value=True):
+                entry = self._xai_entry(self._client())
+        assert entry["available"] is True
+        assert entry["auth"] == "subscription"  # subscription preferred over key
+
+
+class TestGatewaySlashGate:
+    """cmd_provider_override's early key gate must honor SuperGrok OAuth for
+    /xai (Telegram/Slack/Discord share this core) — a logged-in store passes
+    with no XAI_API_KEY set."""
+
+    def _agent_loop_with_router(self):
+        agent_loop = MagicMock()
+        router = MagicMock()
+        router.config.overrides_enabled = True
+        agent_loop._model_router = router
+        return agent_loop
+
+    def test_xai_passes_gate_via_oauth_and_reports_subscription(self):
+        import os
+        from prometheus.gateway.commands import cmd_provider_override
+        agent_loop = self._agent_loop_with_router()
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("prometheus.providers.xai_oauth.is_logged_in", return_value=True):
+            text, applied = cmd_provider_override(agent_loop, {}, "telegram:1", "xai")
+        assert applied is True
+        assert "Switched to" in text
+        assert "Auth: SuperGrok subscription" in text
+        agent_loop._model_router.set_override.assert_called_once()
+
+    def test_xai_blocked_when_no_key_and_logged_out(self):
+        import os
+        from prometheus.gateway.commands import cmd_provider_override
+        agent_loop = self._agent_loop_with_router()
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("prometheus.providers.xai_oauth.is_logged_in", return_value=False):
+            text, applied = cmd_provider_override(agent_loop, {}, "telegram:1", "xai")
+        assert applied is False
+        assert "XAI_API_KEY" in text
+        # The error must offer the subscription path too.
+        assert "SuperGrok subscription" in text
+        agent_loop._model_router.set_override.assert_not_called()
+
+    def test_non_xai_provider_does_not_probe_oauth(self):
+        import os
+        from prometheus.gateway.commands import cmd_provider_override
+        agent_loop = self._agent_loop_with_router()
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("prometheus.providers.xai_oauth.is_logged_in") as probe:
+            text, applied = cmd_provider_override(agent_loop, {}, "telegram:1", "deepseek")
+        assert applied is False  # key missing, and no subscription source
+        assert "SuperGrok" not in text  # xai's subscription isn't offered for deepseek
+        probe.assert_not_called()
+
+    def test_xai_api_key_only_reports_api_key(self):
+        import os
+        from prometheus.gateway.commands import cmd_provider_override
+        agent_loop = self._agent_loop_with_router()
+        with patch.dict(os.environ, {"XAI_API_KEY": "sk-x"}, clear=True), \
+             patch("prometheus.providers.xai_oauth.is_logged_in", return_value=False):
+            text, applied = cmd_provider_override(agent_loop, {}, "telegram:1", "xai")
+        assert applied is True
+        assert "Auth: API key (XAI_API_KEY)" in text
+
+    def test_xai_subscription_wins_over_api_key_in_reply(self):
+        import os
+        from prometheus.gateway.commands import cmd_provider_override
+        agent_loop = self._agent_loop_with_router()
+        with patch.dict(os.environ, {"XAI_API_KEY": "sk-x"}, clear=True), \
+             patch("prometheus.providers.xai_oauth.is_logged_in", return_value=True):
+            text, applied = cmd_provider_override(agent_loop, {}, "telegram:1", "xai")
+        assert applied is True
+        assert "Auth: SuperGrok subscription" in text  # sub preferred over key
+
+    def test_other_provider_reports_api_key_auth(self):
+        import os
+        from prometheus.gateway.commands import cmd_provider_override
+        agent_loop = self._agent_loop_with_router()
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-d"}, clear=True):
+            text, applied = cmd_provider_override(
+                agent_loop, {}, "telegram:1", "deepseek")
+        assert applied is True
+        assert "Auth: API key (DEEPSEEK_API_KEY)" in text
+
+    def test_route_reports_auth_for_active_override(self):
+        import os
+        from prometheus.gateway.commands import cmd_route
+        agent_loop = MagicMock()
+        router = MagicMock()
+        override = MagicMock()
+        override.provider_config = {
+            "provider": "xai", "model": "grok-3", "api_key_env": "XAI_API_KEY",
+        }
+        router.get_override_for_session.return_value = override
+        agent_loop._model_router = router
+        with patch.dict(os.environ, {}, clear=True), \
+             patch("prometheus.providers.xai_oauth.is_logged_in", return_value=True):
+            text = cmd_route(agent_loop, "telegram:1", "m", "local")
+        assert "Auth: SuperGrok subscription" in text
 
 
 class TestCallableBearerInProvider:
