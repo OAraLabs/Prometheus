@@ -227,8 +227,11 @@ def test_inject_correction_reaches_next_episode_trust_tagged(tmp_path):
 
 
 async def test_inject_supervisor_steer_is_not_mined_into_memory(tmp_path):
-    """(b) provenance='supervisor' is excluded by the REAL MemoryExtractor — the steer does not
-    poison the fact store (mirrors test_extractor_provenance with the supervisor tag)."""
+    """(b) NOTHING in a coding: session is mined by the REAL MemoryExtractor — the steer does
+    not poison the fact store. Since the 2026-07 extraction-hygiene change, coding: sessions
+    are machine sessions and are excluded wholesale (user turns included), a second layer on
+    top of the provenance='supervisor' exclusion (still covered on a chat session in
+    test_extractor_hygiene)."""
     from prometheus.memory.extractor import MemoryExtractor
     from prometheus.memory.lcm_conversation_store import LCMConversationStore
     from prometheus.memory.lcm_types import MessagePart
@@ -261,10 +264,11 @@ async def test_inject_supervisor_steer_is_not_mined_into_memory(tmp_path):
     extractor._call_model = fake_call_model
     count, facts = await extractor.run_once()
 
-    assert "PIZZA_USERFACT" in captured["prompt"]        # the genuine user fact was mined
-    assert "SUPERVISOR_STEER" not in captured["prompt"]  # the steer NEVER reached the extractor
+    assert count == 0 and facts == []
+    assert captured == {}                                # no batch was even built for coding:*
     blob = " ".join(str(m) for m in store.get_all_memories())
     assert "SUPERVISOR_STEER" not in blob                # the steer does not poison the fact store
+    assert "PIZZA_USERFACT" not in blob                  # nor does coding-session user chatter
 
 
 # --------------------------------------------------------------------------- #

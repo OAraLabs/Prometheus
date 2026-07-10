@@ -62,6 +62,16 @@ def test_rejects_structural_junk(name, reason):
     assert classify_entity(name, allowlist=EMPTY) == reason
 
 
+def test_eval_fixture_library_names_pass_the_structural_gate():
+    """"marshmallow" (the bakeoff eval-fixture library that ended up filed as
+    a client organization) IS a structurally plausible entity name — this gate
+    must NOT reject it, and a content denylist is deliberately out of scope.
+    Keeping eval chatter out of the store is the extractor's machine-session
+    exclusion (prometheus.memory.extractor._is_machine_session), not this
+    gate's job."""
+    assert classify_entity("marshmallow", allowlist=EMPTY) is None
+
+
 def test_allowlist_rescues_structural_junk():
     """A name on the allow-list bypasses the structural gate; off it, it's rejected."""
     # Filename-shaped tool name (the canonical false positive).
