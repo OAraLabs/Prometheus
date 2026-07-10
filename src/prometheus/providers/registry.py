@@ -28,7 +28,9 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "xai": {
         "base_url": "https://api.x.ai/v1",
-        "model": "grok-3",
+        # Explicit grok-4.5 — aliases (grok-3/grok-4/-latest) serve grok-4.3
+        # on the OAuth surface (probed 2026-07-10); see OVERRIDE_PRESETS.
+        "model": "grok-4.5",
         "default_env": "XAI_API_KEY",
     },
     "anthropic": {

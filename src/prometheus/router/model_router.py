@@ -291,7 +291,10 @@ OVERRIDE_PRESETS: dict[str, dict[str, str]] = {
     "xai": {
         "provider": "xai",
         "api_key_env": "XAI_API_KEY",
-        "model": "grok-3",
+        # grok-4.5 must be requested EXPLICITLY: probed 2026-07-10 on the
+        # SuperGrok OAuth surface, "grok-3"/"grok-4"/"grok-4-latest" are all
+        # silently served as grok-4.3; only "grok-4.5" gets the newest model.
+        "model": "grok-4.5",
     },
     # -- CLOUD EXPANSION (2026-07) --
     "deepseek": {
@@ -389,7 +392,7 @@ def log_slash_command_wiring(
         INFO  slash_commands.claude  → anthropic / claude-sonnet-4-5
         INFO  slash_commands.gpt     → openai / gpt-4o
         INFO  slash_commands.gemini  → gemini / gemini-2.5-flash
-        INFO  slash_commands.xai     → xai / grok-3
+        INFO  slash_commands.xai     → xai / grok-4.5
 
     This is the diagnostic that makes "why is /claude returning Haiku?"
     answerable in 5 seconds: ``journalctl --user -u prometheus.service |

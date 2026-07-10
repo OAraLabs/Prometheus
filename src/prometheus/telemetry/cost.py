@@ -55,6 +55,12 @@ PRICING: dict[str, tuple[float, float]] = {
     # xAI (not re-verified in PR #19 — docs.x.ai no longer lists grok-3)
     "grok-3": (3.00, 15.00),
     "grok-3-mini": (0.30, 0.50),
+    # grok-4.x — carried over from the grok-3 flagship rate as a PLACEHOLDER
+    # (docs.x.ai pricing unreachable from this box; under the SuperGrok
+    # subscription the marginal cost is $0 anyway — this only affects the
+    # telemetry cost column for API-key usage). Verify at first keyed use.
+    "grok-4.3": (3.00, 15.00),
+    "grok-4.5": (3.00, 15.00),
     # -- CLOUD EXPANSION (2026-07) — values from the 2026-07-05 web research
     # pass; verify each against the provider's pricing console at first live
     # use (no keys existed on this box when they were entered).

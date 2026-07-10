@@ -29,7 +29,7 @@ SLASH_COMMAND_DEFAULT_MODELS: tuple[str, ...] = (
     "claude-sonnet-4-5",   # /claude default per PR #18
     "gpt-4o",              # /gpt default
     "gemini-2.5-pro",      # /gemini default
-    "grok-3",              # /xai default
+    "grok-4.5",            # /xai default
     # CLOUD EXPANSION (2026-07) — pricing entered from the 2026-07-05
     # research pass, verify at first live use
     "deepseek-v4-flash",   # /deepseek default

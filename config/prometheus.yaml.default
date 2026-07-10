@@ -195,7 +195,7 @@ router:
 # (claude-sonnet-4-5-20250929). Anthropic pre-4.6 aliases resolve
 # server-side; 4.6+ IDs are already dateless pinned snapshots. For
 # OpenAI / Gemini / xAI use the model name the provider exposes
-# (e.g. gpt-4o, gemini-2.5-pro, grok-3).
+# (e.g. gpt-4o, gemini-2.5-pro, grok-4.5).
 #
 # After editing, restart the daemon and grep journalctl for "slash_commands"
 # to verify the wiring:
@@ -216,7 +216,7 @@ slash_commands:
   xai:
     provider: xai
     api_key_env: XAI_API_KEY
-    model: grok-3
+    model: grok-4.5    # request EXPLICITLY: grok-3/grok-4 aliases serve grok-4.3
   # CLOUD EXPANSION (2026-07) — /deepseek /kimi /glm /mimo. Same rules as
   # above: the command only works once the key env var is in
   # ~/.config/prometheus/env and the daemon has been restarted.

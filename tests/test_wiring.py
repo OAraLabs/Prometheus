@@ -4747,7 +4747,7 @@ class TestGraftRouterWirePhase4:
         ov = router.get_override_for_session("telegram:202")
         assert ov is not None
         assert ov.provider_config["provider"] == "xai"
-        assert ov.provider_config["model"] == "grok-3"
+        assert ov.provider_config["model"] == "grok-4.5"
 
     @pytest.mark.integration
     def test_telegram_grok_is_alias_for_xai(self):
@@ -4764,7 +4764,7 @@ class TestGraftRouterWirePhase4:
         ov = router.get_override_for_session("telegram:203")
         assert ov is not None
         assert ov.provider_config["provider"] == "xai"
-        assert ov.provider_config["model"] == "grok-3"
+        assert ov.provider_config["model"] == "grok-4.5"
 
     # ── /local — clears override ──
 

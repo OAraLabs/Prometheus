@@ -60,7 +60,7 @@ CLOUD_PROVIDER_MODELS: dict[str, list[tuple[str, str, str]]] = {
         ("gemini-2.5-pro", "Best quality", "$1.25/$10 per 1M tokens"),
     ],
     "xai": [
-        ("grok-3", "Flagship", "$3/$15 per 1M tokens"),
+        ("grok-4.5", "Flagship", "$3/$15 per 1M tokens (est.)"),
         ("grok-3-mini", "Fast + cheap", "$0.30/$0.50 per 1M tokens"),
     ],
     # -- CLOUD EXPANSION (2026-07) — pricing from the 2026-07-05 research
