@@ -1259,12 +1259,19 @@ def create_app(
             # Telegram agree: user slash_commands.<key> config merged over the preset.
             preset = _resolve_preset(key, config) or _OVERRIDE_PRESETS[key]
             env = preset.get("api_key_env", "")
+            available = bool(env and os.environ.get(env))
+            # xAI SuperGrok can be authed via OAuth (the subscription) instead of
+            # XAI_API_KEY — PRs #99/#100. is_logged_in() is a store-presence probe:
+            # no network, no token refresh, so it's safe on a catalog GET.
+            if key == "xai" and not available:
+                from prometheus.providers import xai_oauth
+                available = xai_oauth.is_logged_in()
             catalog.append({
                 "key": key, "label": _PRESET_LABELS.get(key, key),
                 "provider": preset.get("provider", "unknown"),
                 "model": preset.get("model", "unknown"),
                 "is_default": False,
-                "available": bool(env and os.environ.get(env)),
+                "available": available,
             })
         return catalog
 

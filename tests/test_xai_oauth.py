@@ -232,6 +232,55 @@ class TestOAuthEndpoints:
         assert r.json()["logged_out"] is True
 
 
+class TestModelCatalogAvailability:
+    """GET /api/models must report xai available when OAuth is logged in,
+    even with no XAI_API_KEY set (PRs #99/#100)."""
+
+    def _client(self):
+        import pytest as _pytest
+        _pytest.importorskip("fastapi")
+        from fastapi.testclient import TestClient
+        from prometheus.router.model_router import ModelRouter, RouterConfig
+        from prometheus.web.server import create_app
+        router = ModelRouter(
+            RouterConfig(),
+            primary_provider=object(),
+            primary_adapter=object(),
+            primary_model="qwen3.5-32b",
+        )
+        cfg = {"model": {"model": "qwen3.5-32b", "provider": "local"}}
+        return TestClient(create_app(cfg, model_router=router))
+
+    def _xai_entry(self, client):
+        r = client.get("/api/models")
+        assert r.status_code == 200
+        return next(m for m in r.json()["models"] if m["key"] == "xai")
+
+    def test_xai_available_via_oauth_without_api_key(self):
+        import os
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("XAI_API_KEY", None)
+            with patch("prometheus.providers.xai_oauth.is_logged_in", return_value=True):
+                entry = self._xai_entry(self._client())
+        assert entry["available"] is True
+
+    def test_xai_unavailable_when_no_key_and_logged_out(self):
+        import os
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("XAI_API_KEY", None)
+            with patch("prometheus.providers.xai_oauth.is_logged_in", return_value=False):
+                entry = self._xai_entry(self._client())
+        assert entry["available"] is False
+
+    def test_xai_available_via_api_key_does_not_probe_oauth(self):
+        import os
+        with patch.dict(os.environ, {"XAI_API_KEY": "sk-xai-test"}, clear=False):
+            with patch("prometheus.providers.xai_oauth.is_logged_in") as probe:
+                entry = self._xai_entry(self._client())
+        assert entry["available"] is True
+        probe.assert_not_called()  # short-circuit: key present → no OAuth probe
+
+
 class TestCallableBearerInProvider:
     def test_provider_resolves_callable_per_request(self):
         from prometheus.providers.openai_compat import OpenAICompatProvider
