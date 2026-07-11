@@ -5,7 +5,7 @@ Thanks for your interest in contributing! Here's how to get started.
 ## Setup
 
 ```bash
-git clone https://github.com/whieber1/Prometheus-.git
+git clone https://github.com/OAraLabs/Prometheus.git
 cd Prometheus-
 pip install -e ".[dev]"
 git config core.hooksPath .githooks   # enable pre-commit secret scanning
@@ -91,7 +91,7 @@ Check the GitHub issues or the roadmap in README.md. Good first contributions:
 
 ## Architecture Decisions
 
-If your contribution changes the architecture (new subsystem, new provider, new gateway), open an issue first to discuss. The architecture doc (`sovereign-harness-architecture.md`) is the reference for design decisions.
+If your contribution changes the architecture (new subsystem, new provider, new gateway), open an issue first to discuss. The guide pages under `docs/guide/` (especially the [feature reference](docs/guide/features.md)) are the reference for the current design.
 
 ## License
 
