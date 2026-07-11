@@ -1263,6 +1263,21 @@ def main() -> None:
     import uuid
     session_id = f"cli-{uuid.uuid4().hex[:8]}"
 
+    # PASSIVE RECALL (MEMORY-3 follow-up): the CLI chats against the same
+    # ~/.prometheus/memory.db the daemon writes (WAL — cross-process readers
+    # are safe), so interactive CLI turns recall stored facts like the
+    # gateway surfaces do. Fail-open: no store, no recall, no crash.
+    memory_recall = None
+    try:
+        from prometheus.memory.recall import MemoryRecall, RecallConfig
+        from prometheus.memory.store import MemoryStore
+
+        recall_cfg = RecallConfig.from_config(config)
+        if recall_cfg.enabled:
+            memory_recall = MemoryRecall(store=MemoryStore(), config=recall_cfg)
+    except Exception:
+        log.warning("Memory recall unavailable for CLI session", exc_info=True)
+
     ctx_cfg = config.get("context", {})
     context = LoopContext(
         provider=provider,
@@ -1285,6 +1300,7 @@ def main() -> None:
         microcompact_keep_chars_no_lcm=ctx_cfg.get("microcompact_keep_chars_no_lcm", 500),
         tool_loader=tool_loader,
         session_id=session_id,
+        memory_recall=memory_recall,
     )
 
     async def _async_main() -> None:

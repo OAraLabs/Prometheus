@@ -343,6 +343,21 @@ sentinel:
   idle_threshold_minutes: 15
   dream_interval_minutes: 30
 
+# Passive memory recall (MEMORY-3 follow-up). At the start of every agent
+# turn the latest user message is matched (FTS5, any-token) against the
+# facts in ~/.prometheus/memory.db, and the best few ride THAT turn's
+# system prompt as a "# Recalled memory" section. Request-only: recalled
+# facts never enter durable history (the extractor would re-ingest them).
+# Fails open — a missing or broken memory.db never blocks a turn. Applies
+# to the chat surfaces (Telegram/Slack/Discord/web/CLI); coding mode, gym,
+# and evals never recall.
+memory:
+  recall:
+    enabled: true
+    max_facts: 6          # hard cap on facts injected per turn
+    max_chars: 900        # hard cap on the rendered block, preamble included
+    min_confidence: 0.6   # ignore low-confidence extracted facts
+
 # Beacon dashboard + REST/WS control plane. ON by default (Onboarding
 # Phase 0): the daemon mints a PROMETHEUS_API_TOKEN into the env file on
 # first start if none is set, so on-by-default is not open-by-default.

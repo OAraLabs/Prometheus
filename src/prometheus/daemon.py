@@ -773,8 +773,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
         session_manager.lcm_engine = lcm_engine
 
     # Memory extractor (optional, from Sprint 5)
+    memory_recall = None  # set below when the store comes up; web path reads it
     try:
         from prometheus.memory.extractor import MemoryExtractor
+        from prometheus.memory.recall import MemoryRecall, RecallConfig
         from prometheus.memory.store import MemoryStore
         from prometheus.memory.wiki_compiler import WikiCompiler
         from prometheus.tools.builtin.wiki_compile import set_wiki_compiler
@@ -785,6 +787,25 @@ async def run_daemon(args: argparse.Namespace) -> None:
         wiki_compiler = WikiCompiler(store=memory_store)
         set_wiki_compiler(wiki_compiler, memory_store)
         logger.info("Wiki compiler initialised at %s", wiki_compiler.wiki_root)
+
+        # PASSIVE RECALL (MEMORY-3 follow-up): relevant stored facts ride each
+        # turn's request-only system prompt — the read half of the extraction
+        # pipeline, which was write-only to the model since Sprint 5.
+        # Late-assigned onto agent_loop (built long before the store; same
+        # pattern as session_manager.lcm_engine above) — run_async reads the
+        # attribute per call, so this reaches every subsequent turn.
+        recall_cfg = RecallConfig.from_config(config)
+        if recall_cfg.enabled:
+            memory_recall = MemoryRecall(store=memory_store, config=recall_cfg)
+            agent_loop.memory_recall = memory_recall
+            logger.info(
+                "Memory recall wired (max_facts=%d, max_chars=%d, min_confidence=%.2f)",
+                recall_cfg.max_facts,
+                recall_cfg.max_chars,
+                recall_cfg.min_confidence,
+            )
+        else:
+            logger.info("Memory recall disabled (memory.recall.enabled=false)")
 
         extractor = MemoryExtractor(
             store=memory_store,
@@ -1312,6 +1333,11 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 # turns could never trigger assembly-time compaction even with
                 # compaction.enabled=true. One line, months of config-dark.
                 compactor=compactor,
+                # PASSIVE RECALL: same compactor lesson — this pre-built
+                # context bypasses AgentLoop.run_async, so thread it here or
+                # web/Beacon turns silently never recall. None when the
+                # extractor block failed or recall is disabled.
+                memory_recall=memory_recall,
             )
 
             # Beacon D1: construct the profile store so GET /api/profiles returns
