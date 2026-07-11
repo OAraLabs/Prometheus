@@ -55,7 +55,8 @@ async def test_request_message_content_is_contentblock_list() -> None:
     provider = _CapturingProvider()
     ks = KnowledgeSynthesizer(store=_FakeStore(), provider=provider, model="m")
 
-    insight = await ks._generate_insight(["EntA", "EntB"])
+    cluster = ["EntA", "EntB"]
+    insight = await ks._generate_insight(cluster, ks._gather_cluster_facts(cluster))
 
     # The call succeeded → an insight came back (it never could, pre-fix).
     assert insight is not None
@@ -89,7 +90,8 @@ async def test_call_failure_surfaces_to_telemetry(tmp_path: Path) -> None:
     )
 
     # No insight on failure (the legacy contract is preserved)...
-    assert await ks._generate_insight(["EntA", "EntB"]) is None
+    cluster = ["EntA", "EntB"]
+    assert await ks._generate_insight(cluster, ks._gather_cluster_facts(cluster)) is None
 
     # ...AND the failure is now visible in telemetry.silent_failures (side
     # effect: a row exists), where pre-fix it was only an ERROR log.
@@ -127,8 +129,9 @@ def test_insight_page_slug_confined_to_queries_dir(tmp_path: Path) -> None:
     assert len(written) == 1
     page = written[0]
     # Confined: direct child of queries/, safe charset, nothing escaped.
+    # (Name is date-free since the dedup fix — one stable page per cluster.)
     assert page.parent == queries
-    assert re.fullmatch(r"insight-\d{8}-[a-z0-9-]+\.md", page.name)
+    assert re.fullmatch(r"insight-[a-z0-9-]+\.md", page.name)
     assert not list((tmp_path / "wiki").rglob("evil*"))
     assert "$backup_root" in page.read_text(encoding="utf-8")  # content keeps raw entities
 
@@ -143,5 +146,5 @@ def test_insight_page_slug_empty_entities_fallback(tmp_path: Path) -> None:
     )
     ks._write_insight_page(SynthInsight(entities=["///", "$$$"], insight="t", tokens_used=1))
 
-    written = list((tmp_path / "wiki" / "queries").glob("insight-*-cluster.md"))
+    written = list((tmp_path / "wiki" / "queries").glob("insight-cluster.md"))
     assert len(written) == 1

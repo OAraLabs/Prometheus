@@ -6,6 +6,9 @@ Changes from original:
   - Calls ModelProvider instead of Claude API directly
   - Retains identical extraction prompt, entity categories, confidence scoring,
     deduplication logic, and batch size (10-20 events per call)
+  - 2026-07 wiki-quality audit: machine-harness sessions (bakeoff/eval,
+    coding mode, gym, smoke, "system") are excluded from mining, and a fact
+    that paraphrases an existing one folds into that row before persist
   - Writes facts to the SQLite memories table only; the human-facing wiki
     under ``~/.prometheus/wiki/`` is a pure projection rendered from that
     store by the WikiCompiler (there is no second markdown writer here)
@@ -21,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Callable
 
@@ -61,6 +65,73 @@ Messages:
 
 _BATCH_SIZE = 15  # messages per extraction call
 _DEFAULT_CADENCE_SECONDS = 1800  # 30 minutes
+
+# ------------------------------------------------------------------
+# Extraction hygiene (2026-07 wiki-quality audit)
+# ------------------------------------------------------------------
+
+# Machine-harness session families: eval/bakeoff runs, coding mode, gym
+# harvests, smoke scripts, and the reserved "system" id. Their chatter is
+# fixture/eval material, not conversation with the user — mining it filed the
+# eval library "marshmallow" as a client organization and dozens of
+# path-trivia "facts" about the user. Module constants are the per-install
+# tuning surface (same idiom as entity_validation).
+_MACHINE_SESSION_PREFIXES: tuple[str, ...] = (
+    "bakeoff:",
+    "coding:",
+    "eval:",
+    "gym:",
+    "smoke:",
+)
+_MACHINE_SESSION_IDS = frozenset({"system"})
+
+
+def _is_machine_session(session_id: str | None) -> bool:
+    """True iff *session_id* belongs to a machine harness, not a user chat."""
+    sid = (session_id or "").strip()
+    return sid in _MACHINE_SESSION_IDS or sid.startswith(_MACHINE_SESSION_PREFIXES)
+
+
+# Near-duplicate folding: the model re-states the same fact in slightly
+# different words on every pass (people/will.md accumulated ~80 path-trivia
+# paraphrases). ``persist_memory`` dedups exact normalized matches only, so
+# paraphrases pile up as new rows. A new fact whose token set overlaps an
+# existing fact of the same entity at or above this threshold is folded into
+# that row instead. Deterministic — no embeddings, no network.
+_NEAR_DUP_THRESHOLD = 0.75
+_NEAR_DUP_SCAN_LIMIT = 200  # store rows scanned per entity when folding
+
+# Scaffolding the extraction model wraps every fact in ("The user's ...",
+# "... appears to be ..."). Excluded from the similarity token set so
+# paraphrases differing only in scaffolding fold together.
+_FACT_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "been", "being", "by", "for",
+    "from", "has", "have", "her", "his", "in", "is", "it", "its", "of", "on",
+    "or", "s", "that", "the", "their", "this", "to", "was", "were", "with",
+    "user", "users",
+    "also", "appear", "appears", "based", "called", "indicates", "indicating",
+    "likely", "named", "seems", "suggesting", "suggests",
+})
+_FACT_TOKEN_RE = re.compile(r"[a-z0-9.]+")
+
+
+def _fact_token_set(fact: str) -> frozenset[str]:
+    """Content tokens of a fact: lowercased, stopwords dropped, edge dots
+    stripped (keeps IPs/versions whole while shedding sentence periods)."""
+    tokens = (t.strip(".") for t in _FACT_TOKEN_RE.findall((fact or "").lower()))
+    return frozenset(t for t in tokens if t and t not in _FACT_STOPWORDS)
+
+
+def _near_dup_similarity(a: frozenset[str], b: frozenset[str]) -> float:
+    """max(Jaccard, containment) over two token sets.
+
+    Containment catches "same fact plus extra inferred fluff", which pure
+    Jaccard under-scores.
+    """
+    if not a or not b:
+        return 0.0
+    overlap = len(a & b)
+    return max(overlap / len(a | b), overlap / min(len(a), len(b)))
 
 
 class MemoryExtractor:
@@ -176,6 +247,20 @@ class MemoryExtractor:
                 "not mined into memory", skipped,
             )
 
+        # HYGIENE: drop machine-harness sessions (evals/bakeoff, coding mode,
+        # gym, smoke, "system"). Their fixture chatter is not knowledge about
+        # the user — see _MACHINE_SESSION_PREFIXES.
+        conversational_parts = [
+            part for part in user_parts
+            if not _is_machine_session(part.session_id)
+        ]
+        machine_skipped = len(user_parts) - len(conversational_parts)
+        if machine_skipped:
+            log.debug(
+                "MemoryExtractor: skipped %d machine-session message(s) — "
+                "not mined into memory", machine_skipped,
+            )
+
         messages = [
             {
                 "id": part.message_id,
@@ -184,7 +269,7 @@ class MemoryExtractor:
                 "content": part.content,
                 "timestamp": part.timestamp,
             }
-            for part in user_parts
+            for part in conversational_parts
         ]
 
         if not messages:
@@ -273,6 +358,13 @@ class MemoryExtractor:
             if reason is not None:
                 quarantine(str(entity_name), reason, context="extractor")
                 continue
+            # Near-duplicate folding: rewrite a paraphrase to the stored
+            # canonical text so persist_memory's exact-normalized dedup merges
+            # it into the existing row (mention_count++, sources unioned)
+            # instead of minting a new one.
+            canonical = self._fold_near_duplicate(entity_name, fact["fact"])
+            if canonical is not None:
+                fact["fact"] = canonical
             try:
                 self._store.persist_memory(
                     entity_type=fact.get("entity_type", "concept"),
@@ -293,6 +385,43 @@ class MemoryExtractor:
             except Exception:
                 log.exception("MemoryExtractor: failed to persist fact: %s", fact)
         return persisted, persisted_facts
+
+    def _fold_near_duplicate(self, entity_name: str, fact: object) -> str | None:
+        """Return the stored fact text *fact* is a near-duplicate of, or ``None``.
+
+        Best-effort — any lookup failure means "no fold", never a failed pass.
+        """
+        if not isinstance(fact, str):
+            return None
+        new_tokens = _fact_token_set(fact)
+        if not new_tokens:
+            return None
+        try:
+            candidates = self._store.search_memories(
+                entity=entity_name, limit=_NEAR_DUP_SCAN_LIMIT
+            )
+            target = entity_name.strip().lower()
+            for row in candidates:
+                # search_memories(entity=) is a LIKE %...% match — hold
+                # folding to exact (case-insensitive) entity identity.
+                if (row.get("entity_name") or "").strip().lower() != target:
+                    continue
+                existing = row.get("fact") or ""
+                sim = _near_dup_similarity(new_tokens, _fact_token_set(existing))
+                if sim >= _NEAR_DUP_THRESHOLD:
+                    if existing != fact:
+                        log.debug(
+                            "MemoryExtractor: folding near-duplicate fact for %r"
+                            " (similarity %.2f): %r -> %r",
+                            entity_name, sim, fact, existing,
+                        )
+                    return existing
+        except Exception:
+            log.debug(
+                "MemoryExtractor: near-duplicate scan failed for %r — "
+                "persisting without folding", entity_name, exc_info=True,
+            )
+        return None
 
     async def _call_model(self, prompt: str) -> str | None:
         """Invoke the model via LLMCallEnvelope. Returns None on failure."""
