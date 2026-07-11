@@ -176,8 +176,49 @@ class MemoryStore:
                 level               INTEGER NOT NULL DEFAULT 1,
                 timestamp           REAL NOT NULL
             );
+
+            -- FTS sync triggers (passive-recall sprint). Both FTS tables are
+            -- external-content (content=); FTS5 requires index maintenance to
+            -- go through the special 'delete' command keyed by the CONTENT
+            -- table's rowid. The store used to hand-roll DML instead —
+            -- INSERT without rowid (mints an orphan index row per write) and
+            -- plain DELETE (never reaches the index) — which corrupted the
+            -- index over time ("fts5: missing row N from content table").
+            -- Triggers make every write path sync by construction, including
+            -- raw SQL like dedupe_existing. _migrate_fts_integrity() rebuilds
+            -- once to heal indexes corrupted by the old path.
+            CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, id, content)
+                VALUES (new.rowid, new.id, new.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, id, content)
+                VALUES ('delete', old.rowid, old.id, old.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, id, content)
+                VALUES ('delete', old.rowid, old.id, old.content);
+                INSERT INTO messages_fts(rowid, id, content)
+                VALUES (new.rowid, new.id, new.content);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(rowid, id, entity_name, fact)
+                VALUES (new.rowid, new.id, new.entity_name, new.fact);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, id, entity_name, fact)
+                VALUES ('delete', old.rowid, old.id, old.entity_name, old.fact);
+            END;
+            CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, id, entity_name, fact)
+                VALUES ('delete', old.rowid, old.id, old.entity_name, old.fact);
+                INSERT INTO memories_fts(rowid, id, entity_name, fact)
+                VALUES (new.rowid, new.id, new.entity_name, new.fact);
+            END;
         """))
         self._migrate_manual_column()
+        self._migrate_fts_integrity()
 
     def _migrate_manual_column(self) -> None:
         """Add the ``manual`` flag column to a pre-manual-layer memories table.
@@ -203,7 +244,41 @@ class MemoryStore:
             )
         )
 
-    def _snapshot_db(self) -> None:
+    def _migrate_fts_integrity(self) -> None:
+        """One-time rebuild of both FTS indexes (passive-recall sprint).
+
+        DBs written before the sync triggers existed carry corrupted
+        external-content indexes: the old hand-rolled DML inserted without a
+        rowid (orphan index rows) and deleted without the FTS 'delete'
+        command, so any MATCH could raise "fts5: missing row N from content
+        table". ``PRAGMA user_version`` gates the rebuild to once per DB;
+        the triggers keep it consistent from then on. Fail loud — a failed
+        rebuild propagates rather than leaving search broken but silent.
+        """
+        version = self._read(
+            lambda conn: conn.execute("PRAGMA user_version").fetchone()[0]
+        )
+        if version >= 1:
+            return
+        has_rows = self._read(
+            lambda conn: conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            or conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        )
+        if has_rows:
+            # Only snapshot DBs with data — fresh/empty stores (every unit
+            # test, first boot) have nothing to protect.
+            self._snapshot_db(reason="FTS rebuild")
+
+        def _op(conn):
+            conn.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
+            conn.execute("INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')")
+            conn.execute("PRAGMA user_version = 1")
+
+        self._write(_op)
+        if has_rows:
+            log.info("MemoryStore: FTS indexes rebuilt (one-time integrity migration)")
+
+    def _snapshot_db(self, *, reason: str = "manual migration") -> None:
         """Copy the DB file out-of-tree, timestamped, before a migration."""
         src = self._db_path
         if not src.exists():
@@ -211,7 +286,7 @@ class MemoryStore:
         ts = time.strftime("%Y%m%dT%H%M%S", time.localtime())
         dst = src.with_name(f"{src.name}.backup-{ts}")
         shutil.copy2(src, dst)
-        log.info("MemoryStore: snapshotted %s -> %s before manual migration", src, dst)
+        log.info("MemoryStore: snapshotted %s -> %s before %s", src, dst, reason)
 
     # ------------------------------------------------------------------
     # Messages
@@ -236,14 +311,12 @@ class MemoryStore:
         now = time.time()
 
         def _op(conn):
+            # FTS stays in sync via the messages_fts_* triggers (OR REPLACE
+            # is DELETE+INSERT under the hood, firing both AD and AI).
             conn.execute(
                 "INSERT OR REPLACE INTO messages (id, session_id, role, content, timestamp, compressed)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
                 (mid, session_id, role, content, now, int(compressed)),
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO messages_fts (id, content) VALUES (?, ?)",
-                (mid, content),
             )
 
         self._write(_op)
@@ -374,11 +447,7 @@ class MemoryStore:
                 raise MemoryWriteError(
                     f"persist_memory: INSERT wrote {cur.rowcount} rows (expected 1)"
                 )
-            conn.execute(
-                "INSERT OR REPLACE INTO memories_fts (id, entity_name, fact)"
-                " VALUES (?, ?, ?)",
-                (mid, entity_name, fact),
-            )
+            # FTS index entry is created by the memories_fts_ai trigger.
             return mid
 
         return self._write(_op)
@@ -440,8 +509,16 @@ class MemoryStore:
         entity_type: str | None = None,
         min_confidence: float = 0.0,
         limit: int = 20,
+        match_any: bool = False,
     ) -> list[dict]:
-        """Search memories by full-text query or by entity name / type."""
+        """Search memories by full-text query or by entity name / type.
+
+        ``match_any`` switches the FTS query from implicit AND to OR over
+        the tokens. The default AND is right for targeted lookups; recall
+        passes whole-message keyword sets where requiring every token to
+        appear in one fact would almost never match (bm25 rank still puts
+        multi-token hits first).
+        """
         if query:
             # FTS5 search. Sanitize like the LCM stores — this site passed
             # the raw query into MATCH, so punctuation ('.', '?') raised
@@ -451,6 +528,10 @@ class MemoryStore:
             safe_query = sanitize_fts5_query(query)
             if not safe_query:
                 return []
+            if match_any:
+                # The sanitizer emits space-joined quoted word tokens (no
+                # spaces inside a token), so splitting on " " is exact.
+                safe_query = " OR ".join(safe_query.split(" "))
             sql = (
                 "SELECT m.* FROM memories m"
                 " JOIN memories_fts fts ON m.id = fts.id"
@@ -532,29 +613,17 @@ class MemoryStore:
         values = list(updates.values()) + [memory_id]
 
         def _op(conn):
+            # FTS re-index happens via the memories_fts_au trigger.
             conn.execute(
                 f"UPDATE memories SET {set_clause} WHERE id = ?", values  # noqa: S608
             )
-            # Update FTS5 if entity_name or fact changed
-            if "entity_name" in updates or "fact" in updates:
-                row = conn.execute(
-                    "SELECT entity_name, fact FROM memories WHERE id = ?",
-                    (memory_id,),
-                ).fetchone()
-                if row:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO memories_fts (id, entity_name, fact)"
-                        " VALUES (?, ?, ?)",
-                        (memory_id, row["entity_name"], row["fact"]),
-                    )
 
         self._write(_op)
 
     def delete_memory(self, memory_id: str) -> None:
-        """Delete a memory and its FTS5 entry."""
+        """Delete a memory (its FTS entry follows via the AD trigger)."""
         def _op(conn):
             conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
-            conn.execute("DELETE FROM memories_fts WHERE id = ?", (memory_id,))
 
         self._write(_op)
 

@@ -634,6 +634,13 @@ class LoopContext:
     # Fires once per call that reaches execution, after all input mutations.
     # Inert by default → no live model-facing behavior change (Hard Rule 5).
     tool_call_observer: object | None = None
+    # PASSIVE RECALL (MEMORY-3 follow-up): optional MemoryRecall. When wired,
+    # run_loop matches the latest user message against memory.db facts and
+    # appends a "# Recalled memory" section to THIS run's request-only system
+    # prompt (the steer/nudge channel) — never to messages/history, or the
+    # extractor would re-ingest its own output next cycle. None (benchmarks,
+    # evals, coding mode, gym) = no recall, byte-identical prompts.
+    memory_recall: object | None = None
 
 
 def _effective_max_tool_iterations(context: LoopContext) -> int:
@@ -805,6 +812,31 @@ async def run_loop(
         active_system_prompt, active_tools = context.adapter.format_request(
             context.system_prompt, tool_schema
         )
+
+    # PASSIVE RECALL (MEMORY-3 follow-up): surface stored facts relevant to
+    # the latest user message as a request-only system-prompt section for
+    # this run. Same never-persisted channel as steers and the empty-retry
+    # nudge — recalled facts committed to durable history would be
+    # re-extracted on the next memory cycle (a feedback loop). Fail-open:
+    # a recall error must never block the turn.
+    if context.memory_recall is not None:
+        _latest_user_text = next(
+            (m.text for m in reversed(messages) if m.role == "user" and m.text),
+            None,
+        )
+        if _latest_user_text:
+            try:
+                _recall_block = context.memory_recall.recall(_latest_user_text)
+            except Exception:
+                _recall_block = ""
+                log.warning(
+                    "MemoryRecall raised — continuing without recall",
+                    exc_info=True,
+                )
+            if _recall_block:
+                active_system_prompt = (
+                    f"{active_system_prompt}\n\n{_recall_block}"
+                )
 
     circuit_breaker = _CircuitBreaker(max_identical=3, max_any=5)
     # Per-turn repeat guard. The circuit breaker above trips at max_identical
@@ -2611,6 +2643,7 @@ class AgentLoop:
         file_mutation_verifier: object | None = None,
         tool_result_max: int = 0,
         compactor: object | None = None,
+        memory_recall: object | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
@@ -2646,6 +2679,12 @@ class AgentLoop:
         # the loop runs without verification (back-compat for benchmarks
         # and unit tests that build AgentLoop without supplying a config).
         self._file_mutation_verifier = file_mutation_verifier
+        # PASSIVE RECALL (MEMORY-3 follow-up): PUBLIC — the daemon assigns
+        # this after construction (same late-wiring pattern as
+        # session_manager.lcm_engine) because the MemoryStore is built in
+        # the extractor block, long after the AgentLoop. run_async reads it
+        # at call time, so late assignment reaches every subsequent turn.
+        self.memory_recall = memory_recall
 
     def add_post_task_hook(self, hook: Callable) -> None:
         """Append a callback invoked after each completed task.
@@ -2720,6 +2759,7 @@ class AgentLoop:
             file_mutation_verifier=self._file_mutation_verifier,
             tool_result_max=self._tool_result_max,
             compactor=self._compactor,
+            memory_recall=self.memory_recall,
         )
 
         last_text = ""
