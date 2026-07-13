@@ -1,0 +1,10 @@
+# Dict-wrap specialist TRAIN harvest. Captures dict-wrap repair pairs from the
+# shapes the model proven-wraps. Run with --harvest into a dedicated db.
+series: dictwrap
+experiment: train
+taskset: gym/tasksets/dictwrap-train.yaml
+runs_per_task: 1
+variable:
+  adapter_unwrap:
+    tools: [task_create, task_list, grep]
+notes: dict-wrap specialist training set — task_create.command/.prompt, grep.root, task_list.status.
