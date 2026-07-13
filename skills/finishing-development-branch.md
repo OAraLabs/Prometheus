@@ -1,11 +1,11 @@
 ---
 name: finishing-development-branch
-description: "Use when implementation is complete and all tests pass - guides completion of development work by presenting structured options for merge, PR, or cleanup."
-version: 1.0.0
-author: obra/superpowers
+description: "Use when implementation is complete and all tests pass -- guides completion of development work by presenting structured options for merge, PR, or cleanup."
+version: 1.0.1
+author: Prometheus (original: obra/superpowers)
 license: MIT
 ---
-<!-- Provenance: obra/superpowers | skills/finishing-a-development-branch/SKILL.md | MIT -->
+<!-- Adapted from obra/superpowers | skills/finishing-a-development-branch/SKILL.md | MIT -->
 
 # Finishing a Development Branch
 

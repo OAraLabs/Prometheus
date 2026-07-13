@@ -1,20 +1,20 @@
 ---
 name: find-nearby
-description: Find nearby places (restaurants, cafes, bars, pharmacies, etc.) using OpenStreetMap. Works with coordinates, addresses, cities, zip codes, or Telegram location pins. No API keys needed.
-version: 1.0.0
+description: Find nearby places (restaurants, cafes, bars, pharmacies, etc.) using OpenStreetMap. Works with coordinates, addresses, cities, or zip codes. No API keys needed.
+version: 1.0.1
+author: Prometheus
+license: MIT
 metadata:
-  hermes:
-    tags: [location, maps, nearby, places, restaurants, local]
-    related_skills: []
+  tags: [location, maps, nearby, places, restaurants, local]
+  related_skills: []
 ---
-<!-- Provenance: NousResearch/hermes-agent | skills/leisure/find-nearby/SKILL.md | MIT -->
-<!-- provenance: NousResearch/hermes-agent | skills/leisure/find-nearby/SKILL.md | MIT -->
+<!-- Adapted from NousResearch/hermes-agent | skills/leisure/find-nearby/SKILL.md | MIT -->
 
 # Find Nearby — Local Place Discovery
 
 Find restaurants, cafes, bars, pharmacies, and other places near any location. Uses OpenStreetMap (free, no API keys). Works with:
 
-- **Coordinates** from Telegram location pins (latitude/longitude in conversation)
+- **Coordinates** (latitude/longitude)
 - **Addresses** ("near 123 Main St, Springfield")
 - **Cities** ("restaurants in downtown Austin")
 - **Zip codes** ("pharmacies near 90210")
@@ -23,7 +23,7 @@ Find restaurants, cafes, bars, pharmacies, and other places near any location. U
 ## Quick Reference
 
 ```bash
-# By coordinates (from Telegram location pin or user-provided)
+# By coordinates (user-provided)
 python3 SKILL_DIR/scripts/find_nearby.py --lat <LAT> --lon <LON> --type restaurant --radius 1500
 
 # By address, city, or landmark (auto-geocoded)
@@ -53,19 +53,19 @@ python3 SKILL_DIR/scripts/find_nearby.py --near "90210" --type pharmacy --json
 
 ## Workflow
 
-1. **Get the location.** Look for coordinates (`latitude: ... / longitude: ...`) from a Telegram pin, or ask the user for an address/city/zip.
+1. **Get the location.** Look for coordinates (`latitude: ... / longitude: ...`) or ask the user for an address/city/zip.
 
 2. **Ask for preferences** (only if not already stated): place type, how far they're willing to go, any specifics (cuisine, "open now", etc.).
 
 3. **Run the script** with appropriate flags. Use `--json` if you need to process results programmatically.
 
-4. **Present results** with names, distances, and Google Maps links. If the user asked about hours or "open now," check the `hours` field in results — if missing or unclear, verify with `web_search`.
+4. **Present results** with names, distances, and Google Maps links. If the user asked about hours or "open now," check the `hours` field in results — if missing or unclear, verify with a web search.
 
 5. **For directions**, use the `directions_url` from results, or construct: `https://www.google.com/maps/dir/?api=1&origin=<LAT>,<LON>&destination=<LAT>,<LON>`
 
 ## Tips
 
 - If results are sparse, widen the radius (1500 → 3000m)
-- For "open now" requests: check the `hours` field in results, cross-reference with `web_search` for accuracy since OSM hours aren't always complete
+- For "open now" requests: check the `hours` field in results, cross-reference with a web search for accuracy since OSM hours aren't always complete
 - Zip codes alone can be ambiguous globally — prompt the user for country/state if results look wrong
 - The script uses OpenStreetMap data which is community-maintained; coverage varies by region

@@ -1,12 +1,16 @@
 ---
 name: internal-comms
-description: A set of resources to help me write all kinds of internal communications, using the formats that my company likes to use. Claude should use this skill whenever asked to write some sort of internal communications (status reports, leadership updates, 3P updates, company newsletters, FAQs, incident reports, project updates, etc.).
-license: Complete terms in LICENSE.txt
+description: Templates and guidelines for writing internal communications -- status reports, leadership updates, 3P updates, newsletters, FAQs, incident reports, and project updates. Use when asked to draft any kind of internal communication.
+version: 1.0.0
+tags: [Writing, Communication, Templates, Business]
 ---
-<!-- Provenance: anthropics/skills | skills/internal-comms/SKILL.md | Proprietary (see LICENSE.txt) -->
 
-## When to use this skill
-To write internal communications, use this skill for:
+# Internal Communications
+
+Guidelines for writing internal communications. Use this skill when asked to write status reports, leadership updates, 3P updates, newsletters, FAQs, incident reports, or project updates.
+
+## When to Use
+
 - 3P updates (Progress, Plans, Problems)
 - Company newsletters
 - FAQ responses
@@ -15,19 +19,109 @@ To write internal communications, use this skill for:
 - Project updates
 - Incident reports
 
-## How to use this skill
+## How to Use
 
-To write any internal communication:
+1. Identify the communication type from the request
+2. Follow the appropriate format below
+3. Adapt tone and depth to the audience (team, leadership, company-wide)
 
-1. **Identify the communication type** from the request
-2. **Load the appropriate guideline file** from the `examples/` directory:
-    - `examples/3p-updates.md` - For Progress/Plans/Problems team updates
-    - `examples/company-newsletter.md` - For company-wide newsletters
-    - `examples/faq-answers.md` - For answering frequently asked questions
-    - `examples/general-comms.md` - For anything else that doesn't explicitly match one of the above
-3. **Follow the specific instructions** in that file for formatting, tone, and content gathering
+## Communication Formats
 
-If the communication type doesn't match any existing guideline, ask for clarification or more context about the desired format.
+### 3P Updates (Progress, Plans, Problems)
 
-## Keywords
-3P updates, company newsletter, company comms, weekly update, faqs, common questions, updates, internal comms
+Structure:
+```
+## Progress (what got done)
+- Completed items with measurable outcomes
+- Key milestones reached
+
+## Plans (what's next)
+- Upcoming work with estimated timelines
+- Dependencies and blockers to watch
+
+## Problems (risks and issues)
+- Current blockers with impact assessment
+- Risks with proposed mitigations
+```
+
+Guidelines:
+- Be specific and quantifiable
+- Lead with the most impactful items
+- Problems section should include proposed solutions, not just complaints
+- Keep each bullet to 1-2 sentences
+
+### Status Reports
+
+Structure:
+```
+## Summary (1-2 sentences)
+
+## Key Metrics
+- metric: value (trend)
+
+## Highlights
+- Major accomplishments
+
+## Risks / Blockers
+- Issue: impact + mitigation
+
+## Next Steps
+- Action items with owners and dates
+```
+
+### Leadership Updates
+
+- Lead with business impact, not technical details
+- Include decisions needed from leadership
+- Quantify everything possible
+- Keep under 1 page
+- Use executive summary format: conclusion first, then supporting details
+
+### Company Newsletters
+
+- Warm, inclusive tone
+- Mix of accomplishments, upcoming events, and people spotlights
+- Keep sections scannable with headers and bullet points
+- Include a call to action or "looking ahead" section
+
+### FAQ Responses
+
+- Direct answer first, then context
+- Use the actual question as the header
+- Keep answers concise but complete
+- Link to deeper resources where relevant
+
+### Incident Reports
+
+Structure:
+```
+## Incident Summary
+- What happened (1-2 sentences)
+- Impact: who/what was affected
+- Duration: start to resolution
+
+## Timeline
+- HH:MM -- event description
+
+## Root Cause
+
+## Resolution
+
+## Action Items
+- [ ] Preventive measure (owner, deadline)
+```
+
+### Project Updates
+
+- Current phase and overall health (green/yellow/red)
+- Progress against milestones
+- Budget and resource status
+- Key decisions made or needed
+- Updated timeline if changed
+
+## General Guidelines
+
+- Write file output using `file_write` if the user wants a saved document
+- Match the organization's existing style if examples are provided
+- Ask for clarification if the communication type or audience is unclear
+- Always have the user review before finalizing or sending

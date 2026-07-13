@@ -72,7 +72,7 @@ Useful when iterating on the same task — Claude Code keeps its own context.
 Claude Code uses CWD as its workspace root. Always `cd` first or pass `--cwd`:
 
 ```bash
-(cd /home/will/projects/foo && claude -p "<task>")
+(cd ~/projects/foo && claude -p "<task>")
 ```
 
 ## Delegation Prompt Structure

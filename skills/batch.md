@@ -1,6 +1,9 @@
 ---
 name: batch
-description: "Run a skill or prompt against multiple inputs in parallel. Use when you need to apply the same operation across many files, items, or inputs — e.g., review 5 PRs, summarize 10 articles, or process a list of URLs."
+description: "Run a skill or prompt against multiple inputs in parallel. Use when you need to apply the same operation across many files, items, or inputs -- e.g., review 5 PRs, summarize 10 articles, or process a list of URLs."
+version: 1.0.1
+author: Prometheus
+license: MIT
 ---
 <!-- Provenance: whieber1/Prometheus | src/reference_data/subsystems/skills.json (batch.ts reference) | MIT -->
 
