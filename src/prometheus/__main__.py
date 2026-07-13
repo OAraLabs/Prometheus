@@ -220,8 +220,12 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
     try:
         from prometheus.skills.loader import load_skill_registry
         ts.set_skill_registry(load_skill_registry())
-    except Exception:
-        pass
+    except Exception as exc:
+        # Daemon-reachable (daemon.py delegates here): a corrupt skill file or
+        # import error must NOT silently leave skill search dead forever — the
+        # MEMORY.md-at-0-bytes failure shape. Log loudly (audit H8).
+        log.warning("skill registry load failed — skill search disabled: %s",
+                    exc, exc_info=True)
     registry.register(ts)
 
     # Sprint 11: Audit query tool (requires audit logger from security gate)

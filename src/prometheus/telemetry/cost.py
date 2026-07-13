@@ -155,3 +155,23 @@ class CostTracker:
             "total_output_tokens": self._total_output,
             "records": len(self._records),
         }
+
+
+# ── module-level handle (audit H/T3: make cost accounting actually accumulate) ──
+# The daemon registers a CostTracker here ONLY for cloud providers. The agent
+# loop's per-LLM-call usage rows all flow through one seam —
+# ``ToolCallTelemetry.record_subsystem_run`` (written by ``LLMCallEnvelope``) —
+# which feeds this handle, so cost covers every entry point (telegram / web /
+# autonomous), not one gateway. None on the local box, where the feed is a
+# no-op and ``report()`` honestly says "$0.00 (no cloud API usage)".
+_cost_tracker_handle: CostTracker | None = None
+
+
+def set_cost_tracker_handle(tracker: CostTracker | None) -> None:
+    """Register (or clear) the process-wide cost tracker the telemetry seam feeds."""
+    global _cost_tracker_handle
+    _cost_tracker_handle = tracker
+
+
+def get_cost_tracker_handle() -> CostTracker | None:
+    return _cost_tracker_handle
