@@ -382,6 +382,50 @@ def create_app(
         )
         return {"run_id": idempotency_key, "status": "sent"}
 
+    @app.post("/api/paperclip/wake")
+    async def paperclip_wake(request: Request):
+        """Paperclip heartbeat webhook — target for Paperclip's ``http`` adapter.
+
+        Body: the adapter's wake payload
+        ``{ "runId": str, "agentId": str, "companyId"?: str, "context"?: {...} }``
+        Returns: ``{ "status": "accepted", "run_id": str }``
+
+        Fire-and-forget by contract: Paperclip's ``http`` adapter never reads
+        this response body, so the 200 returns as soon as the heartbeat task is
+        spawned; every observable outcome (checkout, status PATCH, comments,
+        cost events) flows through the Paperclip REST API from the gateway
+        (see prometheus.gateway.paperclip). Bearer auth comes from the standard
+        ``/api/`` middleware — configure the adapter's ``headers`` with
+        ``Authorization: Bearer <PROMETHEUS_API_TOKEN>``.
+
+        Failure modes (fail loud):
+          * 503 when ``gateway.paperclip.enabled`` is false / gateway unwired
+          * 400 on malformed JSON or a body missing ``runId``/``agentId``
+        """
+        gateway = getattr(app.state, "paperclip_gateway", None)
+        if gateway is None or not hasattr(gateway, "start_heartbeat"):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "paperclip gateway not enabled — set "
+                    "gateway.paperclip.enabled (and api_url) then restart"
+                },
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
+        if not isinstance(body, dict):
+            return JSONResponse(
+                status_code=400, content={"error": "body must be a JSON object"}
+            )
+        try:
+            wake = gateway.parse_wake(body)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        gateway.start_heartbeat(wake)
+        return {"status": "accepted", "run_id": wake.run_id}
+
     @app.get("/api/sessions/{session_id}/messages")
     async def get_messages(session_id: str, since: str | None = None):
         """Durable conversation history from the LCM store.

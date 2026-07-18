@@ -149,6 +149,21 @@ gateway:
     skill_event_notifications: quiet   # off | quiet | verbose
     long_reply_threshold: 800          # chars; longer replies open a thread
 
+  # Paperclip fleet orchestration (github.com/paperclipai/paperclip) —
+  # Prometheus as a managed "agent employee". In Paperclip, create an agent
+  # with adapter type `http`, url http://<this-host>:8005/api/paperclip/wake,
+  # and headers {"Authorization": "Bearer <PROMETHEUS_API_TOKEN>"}. Each wake
+  # runs the heartbeat protocol (checkout -> agent turn -> status/comment ->
+  # cost event) against api_url; work turns appear in Beacon as sessions
+  # named paperclip:issue:<id>.
+  paperclip:
+    enabled: false
+    api_url: "http://127.0.0.1:3100"  # Paperclip server base URL
+    api_key: ""                       # Set via PROMETHEUS_PAPERCLIP_API_KEY (agent API key;
+                                      # empty = Paperclip local trusted mode)
+    timeout_seconds: 30               # per Paperclip API call
+    comment_max_chars: 4000           # cap on posted progress comments
+
 whisper:
   enabled: false
   model: "base"

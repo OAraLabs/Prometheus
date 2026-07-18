@@ -103,6 +103,23 @@ async def launch_web(
     # the WebSocket uses, without duplicating the session+agent plumbing.
     app.state.ws_bridge = bridge
 
+    # Paperclip fleet orchestration: when gateway.paperclip.enabled, mount the
+    # heartbeat client behind POST /api/paperclip/wake. Runs work turns through
+    # the SAME bridge flow as Beacon chat (sessions paperclip:issue:{id}).
+    # A bad config raises here — an enabled-but-broken gateway must fail the
+    # boot loudly, not silently drop wakes (config-dark law).
+    paperclip_cfg = (config.get("gateway", {}) or {}).get("paperclip") or {}
+    if isinstance(paperclip_cfg, dict) and paperclip_cfg.get("enabled"):
+        from prometheus.gateway.paperclip import PaperclipGateway
+
+        app.state.paperclip_gateway = PaperclipGateway(
+            paperclip_cfg, bridge, daemon_config=config
+        )
+        logger.info(
+            "Paperclip gateway enabled — wake endpoint POST /api/paperclip/wake -> %s",
+            paperclip_cfg.get("api_url"),
+        )
+
     logger.info("Starting Mission Control — REST on :%d, WebSocket on :%d", api_port, ws_port)
 
     # Run both servers concurrently
