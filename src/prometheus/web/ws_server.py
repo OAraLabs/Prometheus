@@ -365,6 +365,49 @@ class WebSocketBridge:
         """
         await self._handle_send_message(session_id, content, client_msg_id=client_msg_id, mode=mode, tool_choice=tool_choice)
 
+    async def run_turn_awaited(self, session_id: str, content: str) -> tuple[str, Any]:
+        """Run ONE agent turn in ``session_id`` and await its completion.
+
+        Machine-caller counterpart to ``dispatch_user_message`` (which is
+        fire-and-forget for chat surfaces): the Paperclip gateway needs the
+        final assistant text AND the turn's token usage to report back to its
+        orchestrator. The turn still goes through the exact same flow as a
+        Beacon chat message — session persistence, LCM, and live WS broadcast
+        — so a heartbeat renders in Beacon like any other conversation.
+
+        No slash-command routing and no image preprocessing: content here is a
+        machine-built work prompt, never a user chat message.
+
+        Returns ``(final_text, usage)`` where usage is the last
+        ``UsageSnapshot`` run_loop yielded (None if the loop produced none).
+        Raises on agent failure instead of swallowing (fail loud to the
+        caller, which owns external error reporting).
+        """
+        if not self.session_mgr or not self.loop_context:
+            raise RuntimeError(
+                "bridge not fully wired (session_mgr/loop_context missing) — "
+                "cannot run an awaited turn"
+            )
+        session = self.session_mgr.get_or_create(session_id)
+        turn_index = session.add_user_message(content)
+        row_id = session.last_persisted_row_id()
+        ts = time.time()
+        await self.broadcast({
+            "type": "chat_message",
+            "timestamp": ts,
+            "payload": {
+                "session_id": session_id,
+                "role": "user",
+                "content": content,
+                "content_json": json.dumps([{"type": "text", "text": content}]),
+                "message_id": row_id,
+                "ordinal": turn_index,
+                "client_msg_id": None,
+                "created_at": ts,
+            },
+        })
+        return await self._run_agent(session_id, session, raise_on_error=True)
+
     async def _handle_send_message(
         self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
         tool_choice: object | None = None
@@ -504,10 +547,18 @@ class WebSocketBridge:
             },
         })
 
-    async def _run_agent(self, session_id: str, session: Any, mode: str = "agent", tool_choice: object | None = None) -> None:
+    async def _run_agent(
+        self, session_id: str, session: Any, mode: str = "agent", tool_choice: object | None = None,
+        raise_on_error: bool = False,
+    ) -> tuple[str, Any]:
         """Run the agent loop and stream results over WebSocket. `mode` ('agent'|'chat')
         is threaded as a per-call run_loop arg — NEVER stored on the shared loop_context —
-        so concurrent turns can't cross-talk (Sprint B / Piece 2)."""
+        so concurrent turns can't cross-talk (Sprint B / Piece 2).
+
+        Returns ``(accumulated_text, last_usage)`` for awaited callers
+        (``run_turn_awaited``); the fire-and-forget chat path ignores it.
+        ``raise_on_error=True`` re-raises after the fail-loud logging/broadcast
+        instead of swallowing (the awaited caller reports errors externally)."""
         from prometheus.engine.agent_loop import run_loop
 
         # Update state
@@ -521,6 +572,7 @@ class WebSocketBridge:
 
         msg_id = f"asst-{int(time.time() * 1000)}"
         accumulated = ""
+        last_usage: Any = None
 
         try:
             messages = session.get_messages()
@@ -528,6 +580,8 @@ class WebSocketBridge:
             async for event, _usage in run_loop(
                 self.loop_context, messages, mode=mode, session_id=session_id, tool_choice=tool_choice
             ):
+                if _usage is not None:
+                    last_usage = _usage
                 event_type = type(event).__name__
 
                 if event_type == "AssistantTextDelta":
@@ -576,6 +630,7 @@ class WebSocketBridge:
                 "timestamp": time.time(),
                 "payload": {"session_id": session_id, "message_id": msg_id},
             })
+            return accumulated, last_usage
 
         except Exception as e:
             # FAIL LOUD (#74-adjacent follow-up): this except used to emit only a WS
@@ -601,6 +656,9 @@ class WebSocketBridge:
                 "timestamp": time.time(),
                 "payload": {"message": str(e)},
             })
+            if raise_on_error:
+                raise
+            return accumulated, last_usage
 
         finally:
             if self.agent_state_ref:
