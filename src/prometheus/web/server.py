@@ -220,7 +220,7 @@ def create_app(
                 "/api/cron", "/api/approvals", "/api/chat",
                 "/api/config", "/api/skills", "/api/profiles",
                 "/api/wiki/stats", "/api/sentinel", "/api/events/recent",
-                "/api/files", "/api/documents",
+                "/api/files", "/api/documents", "/api/artifacts",
             ],
         }
 
@@ -1044,6 +1044,40 @@ def create_app(
             "binary": binary,
             "content": content,
         }
+
+    # ── Artifacts (feat/artifacts-api) — the agent's OUTBOX, served by content id ──
+    #
+    # /api/files browses + text-previews the workspace; this pair DELIVERS files.
+    # The agent publishes by saving into ~/.prometheus/files (get_artifacts_dir());
+    # clients list the manifest and download by sha-derived id. No client-supplied
+    # paths on the wire — the traversal class /api/files must defend against
+    # simply doesn't exist here — ids survive renames, identical bytes dedup.
+    # Scan-on-read + an mtime/size hash cache; no database, no watcher.
+    # (Beacon: chat download chips; Beacon Desktop artifacts drawer later.)
+
+    @app.get("/api/artifacts")
+    async def list_artifacts():
+        from prometheus.config.paths import get_artifacts_dir
+        from prometheus.web.artifacts import scan_artifacts
+
+        return {"artifacts": scan_artifacts(get_artifacts_dir())}
+
+    @app.get("/api/artifacts/{artifact_id}")
+    async def download_artifact(artifact_id: str):
+        from prometheus.config.paths import get_artifacts_dir
+        from prometheus.web.artifacts import resolve_artifact
+
+        target = resolve_artifact(get_artifacts_dir(), artifact_id)
+        if target is None:
+            return JSONResponse(status_code=404, content={"error": "unknown artifact id"})
+        from fastapi.responses import FileResponse
+
+        return FileResponse(
+            target,
+            filename=target.name,
+            media_type="application/octet-stream",
+            headers={"Cache-Control": "no-store"},
+        )
 
     # ── Documents Editor (SPRINT Documents Editor, Phase A) ─────────
     #
