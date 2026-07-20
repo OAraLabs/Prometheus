@@ -171,3 +171,28 @@ def get_documents_dir() -> Path:
 
     documents_dir.mkdir(parents=True, exist_ok=True)
     return documents_dir
+
+
+def get_artifacts_dir() -> Path:
+    """Return the agent's artifact OUTBOX (~/.prometheus/files).
+
+    The delivery boundary for files the agent produces FOR the human: anything
+    saved here is published — indexed by /api/artifacts and downloadable by
+    remote clients (Beacon's chat download chips). Nothing outside it is ever
+    served, so the agent controls exactly what crosses the wire by choosing
+    where it writes. Sibling of the workspace (agent working files) and the
+    documents root (editor surface); ~/.prometheus/files is where the agent
+    already saves deliverables by convention.
+
+    Resolution order:
+    1. PROMETHEUS_ARTIFACTS_DIR environment variable
+    2. ~/.prometheus/files/
+    """
+    env_dir = os.environ.get("PROMETHEUS_ARTIFACTS_DIR")
+    if env_dir:
+        artifacts_dir = Path(env_dir)
+    else:
+        artifacts_dir = get_config_dir() / "files"
+
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    return artifacts_dir
