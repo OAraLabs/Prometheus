@@ -738,6 +738,72 @@ def create_app(
             "user": _snapshot(get_user_store(), _USER_MAX_CHARS),
         }
 
+    @app.put("/api/memory/current")
+    async def put_memory_current(request: Request):
+        """Replace MEMORY.md / USER.md content (Beacon's Memory editor).
+
+        Body: {"memory": "<full text>" | null, "user": "<full text>" | null} — null/absent
+        leaves that file untouched. Writes go through the SAME FileMemoryStore the agent's
+        memory tool uses (per-entry sanitize + char budgets); the previous content is
+        snapshotted to ~/.prometheus/memory-history/ first, so every edit is reversible.
+        Rejects over-budget content with 400 BEFORE touching the file.
+        """
+        try:
+            from prometheus.memory.hermes_memory_tool import (
+                _MEMORY_MAX_CHARS,
+                _USER_MAX_CHARS,
+                get_memory_store,
+                get_user_store,
+            )
+        except Exception:
+            return JSONResponse(status_code=503, content={"error": "memory module unavailable"})
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "body must be JSON"})
+        if not isinstance(body, dict):
+            return JSONResponse(status_code=400, content={"error": "body must be an object"})
+
+        from datetime import datetime, timezone
+
+        def _snapshot_file(store) -> None:
+            path = store._path
+            if not path.exists():
+                return
+            history = path.parent / "memory-history"
+            history.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            (history / f"{stamp}-{path.name}").write_bytes(path.read_bytes())
+
+        def _apply(store, raw: str, limit: int, label: str):
+            entries = [line.strip() for line in raw.splitlines() if line.strip()]
+            total = sum(len(e) + 1 for e in entries)
+            if total > limit:
+                return f"{label}: {total} chars exceeds the {limit} budget"
+            _snapshot_file(store)
+            store.clear()
+            for e in entries:
+                store.add(e)
+            return None
+
+        results: dict[str, Any] = {}
+        for key, store, limit, label in (
+            ("memory", get_memory_store(), _MEMORY_MAX_CHARS, "MEMORY.md"),
+            ("user", get_user_store(), _USER_MAX_CHARS, "USER.md"),
+        ):
+            raw = body.get(key)
+            if raw is None:
+                continue
+            if not isinstance(raw, str):
+                return JSONResponse(status_code=400, content={"error": f"{key} must be a string"})
+            err = _apply(store, raw, limit, label)
+            if err:
+                return JSONResponse(status_code=400, content={"error": err})
+            results[key] = len(store.list_entries())
+
+        return {"ok": True, "written": results}
+
     # ── Skills (richer list + content + pin/unpin) ─────────────────
 
     @app.get("/api/skills/list")
