@@ -797,6 +797,18 @@ def create_app(
                 continue
             if not isinstance(raw, str):
                 return JSONResponse(status_code=400, content={"error": f"{key} must be a string"})
+            # Optimistic concurrency (Beacon editor): base_<key> = the content the client loaded.
+            # If the file moved since (the agent's memory tool writes the same store), refuse with
+            # 409 + the current truth — the editor keeps the draft and rebases. Absent base = no
+            # check (older clients keep last-writer-wins).
+            base = body.get(f"base_{key}")
+            if isinstance(base, str):
+                current = "\n".join(store.list_entries())
+                if base != current:
+                    return JSONResponse(
+                        status_code=409,
+                        content={"error": f"{label} changed since it was loaded", "current": current},
+                    )
             err = _apply(store, raw, limit, label)
             if err:
                 return JSONResponse(status_code=400, content={"error": err})
