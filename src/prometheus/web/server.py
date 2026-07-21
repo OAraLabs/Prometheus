@@ -382,6 +382,38 @@ def create_app(
         )
         return {"run_id": idempotency_key, "status": "sent"}
 
+    @app.post("/api/chat/interrupt")
+    async def interrupt_chat(request: Request):
+        """Stop the running agent turn in a session — the chat Stop button.
+
+        Body: ``{ "session_id": str }``
+        Returns: ``{ "session_id": str, "stopped": bool }`` — ``stopped`` is
+        false when no turn is running (idempotent; stopping a quiet session is
+        not an error). HTTP twin of the WS ``interrupt`` frame, same transport
+        split as send: Beacon POSTs commands, outcomes stream over the bridge
+        (all clients see the broadcast ``chat_done{interrupted:true}``).
+
+        Failure modes (parity with /api/chat/send):
+          * 400 when ``session_id`` is missing/empty
+          * 503 when the daemon hasn't wired a ``ws_bridge``
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
+        if not isinstance(body, dict):
+            return JSONResponse(status_code=400, content={"error": "body must be a JSON object"})
+        session_id = (body.get("session_id") or "").strip()
+        if not session_id:
+            return JSONResponse(status_code=400, content={"error": "session_id is required"})
+        bridge = getattr(app.state, "ws_bridge", None)
+        if bridge is None or not hasattr(bridge, "interrupt_turn"):
+            return JSONResponse(
+                status_code=503,
+                content={"error": "chat interrupt unavailable — ws_bridge not wired"},
+            )
+        return {"session_id": session_id, "stopped": bridge.interrupt_turn(session_id)}
+
     @app.post("/api/paperclip/wake")
     async def paperclip_wake(request: Request):
         """Paperclip heartbeat webhook — target for Paperclip's ``http`` adapter.

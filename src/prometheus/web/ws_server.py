@@ -58,6 +58,13 @@ class WebSocketBridge:
         self._api_token = api_token or ""
         self._clients: set[Any] = set()
         self._server: Any = None
+        # Interrupt plumbing (feat/ws-interrupt-frame): the running turn's
+        # asyncio.Task per session, registered by _run_agent itself so BOTH
+        # entry paths (fire-and-forget chat + awaited Paperclip turns) are
+        # stoppable. _interrupted marks a cancel as a DELIBERATE user stop —
+        # any unflagged CancelledError (daemon shutdown) keeps propagating.
+        self._turn_tasks: dict[str, asyncio.Task] = {}
+        self._interrupted: set[str] = set()
 
     @property
     def auth_required(self) -> bool:
@@ -251,6 +258,18 @@ class WebSocketBridge:
                         },
                     })
 
+        elif cmd_type == "interrupt":
+            # Stop the running turn: { type: "interrupt", payload: { session_id } }.
+            # Ack goes to the REQUESTING socket only; every client learns the
+            # outcome from the broadcast chat_done{interrupted:true} frame.
+            session_id = payload.get("session_id", "")
+            stopped = self.interrupt_turn(session_id) if session_id else False
+            await self._send_one(websocket, {
+                "type": "interrupt_ack",
+                "timestamp": time.time(),
+                "payload": {"session_id": session_id, "stopped": stopped},
+            })
+
     async def _handle_file_upload(
         self,
         session_id: str,
@@ -407,6 +426,22 @@ class WebSocketBridge:
             },
         })
         return await self._run_agent(session_id, session, raise_on_error=True)
+
+    def interrupt_turn(self, session_id: str) -> bool:
+        """Stop the running agent turn in ``session_id`` (the chat Stop button).
+
+        Flags the session as deliberately interrupted, THEN cancels the turn's
+        task — order matters, so ``_run_agent``'s CancelledError handler always
+        sees the flag and can distinguish a user stop from a system cancel.
+        Returns False when no turn is running (idempotent — stopping a quiet
+        session is not an error, the caller just gets ``stopped: false``).
+        """
+        task = self._turn_tasks.get(session_id)
+        if task is None or task.done():
+            return False
+        self._interrupted.add(session_id)
+        task.cancel()
+        return True
 
     async def _handle_send_message(
         self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
@@ -573,6 +608,16 @@ class WebSocketBridge:
         msg_id = f"asst-{int(time.time() * 1000)}"
         accumulated = ""
         last_usage: Any = None
+        original_len: int | None = None
+
+        # Register THIS task as the session's running turn so interrupt_turn()
+        # can cancel it. asyncio.current_task() covers both entry paths
+        # (create_task from _handle_send_message AND the awaited Paperclip
+        # call). Last-write-wins on a concurrent second turn in the same
+        # session — the Stop button targets the latest turn.
+        _task = asyncio.current_task()
+        if _task is not None:
+            self._turn_tasks[session_id] = _task
 
         try:
             messages = session.get_messages()
@@ -632,6 +677,37 @@ class WebSocketBridge:
             })
             return accumulated, last_usage
 
+        except asyncio.CancelledError:
+            # A cancel is a user interrupt ONLY when interrupt_turn() flagged
+            # this session; anything else (daemon shutdown, task GC) must keep
+            # propagating or teardown would hang on a swallowed cancel.
+            if session_id not in self._interrupted:
+                raise
+            self._interrupted.discard(session_id)
+            logger.info("turn interrupted by user (session=%s)", session_id)
+            # Keep what the turn produced. Completed rounds are already on
+            # session.messages (run_loop appends in place) — persist that
+            # tail. A mid-generation stop (nothing appended yet, but text
+            # already streamed to every client) is kept as a partial
+            # assistant turn so the visible bubble survives a reload. A stop
+            # mid-round-N>1 drops only round N's in-flight tail — the
+            # completed rounds carry the substance.
+            if original_len is not None:
+                if len(session.messages) == original_len and accumulated:
+                    from prometheus.engine.agent_loop import _make_assistant_msg
+                    session.messages.append(_make_assistant_msg(accumulated))
+                session.persist_loop_result(original_len)
+            await self.broadcast({
+                "type": "chat_done",
+                "timestamp": time.time(),
+                "payload": {
+                    "session_id": session_id,
+                    "message_id": msg_id,
+                    "interrupted": True,
+                },
+            })
+            return accumulated, last_usage
+
         except Exception as e:
             # FAIL LOUD (#74-adjacent follow-up): this except used to emit only a WS
             # error frame — invisible in the journal unless a client happened to
@@ -661,6 +737,13 @@ class WebSocketBridge:
             return accumulated, last_usage
 
         finally:
+            # Unregister only if the slot still points at THIS task (a newer
+            # concurrent turn may have overwritten it). Clearing the interrupt
+            # flag here bounds any stale flag from a cancel that lost the race
+            # with normal completion.
+            if self._turn_tasks.get(session_id) is asyncio.current_task():
+                self._turn_tasks.pop(session_id, None)
+            self._interrupted.discard(session_id)
             if self.agent_state_ref:
                 self.agent_state_ref["state"] = "idle"
             await self.broadcast({
