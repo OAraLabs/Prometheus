@@ -88,6 +88,16 @@ class LCMConversationStore:
 
             CREATE INDEX IF NOT EXISTS idx_checkpoints_task
                 ON checkpoints(task_id, step_number DESC);
+
+            -- Durable "forget session" (feat/durable-session-index): hides a
+            -- session from list_sessions() without touching its append-only
+            -- rows. deleted_at is a watermark, not a hard delete — activity
+            -- NEWER than it revives the session (gateway ids like telegram:123
+            -- are stable, so a forgotten chat must resurface when it speaks).
+            CREATE TABLE IF NOT EXISTS session_tombstones (
+                session_id TEXT PRIMARY KEY,
+                deleted_at REAL NOT NULL
+            );
         """)
         self._conn.commit()
         self._migrate_add_content_json()
@@ -450,6 +460,53 @@ class LCMConversationStore:
             (message_id,),
         ).fetchone()
         return row is not None
+
+    # ------------------------------------------------------------------
+    # Session index (feat/durable-session-index)
+    # ------------------------------------------------------------------
+
+    def list_sessions(self) -> list[dict]:
+        """Durable session index: one row of aggregates per ``session_id``.
+
+        This is what lets GET /api/sessions survive a daemon restart — the
+        in-memory SessionManager starts empty, but every persisted session is
+        enumerable here. ``watermark`` is the SAME max-rowid cursor
+        :meth:`max_rowid` reports, so a client can hand it straight to the
+        incremental messages read.
+
+        Tombstoned sessions are excluded unless they have activity newer than
+        ``deleted_at`` (see the schema note — a forgotten stable-id chat must
+        resurface when it speaks again). Ordered most-recently-active first.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT m.session_id            AS session_id,
+                   COUNT(*)                AS message_count,
+                   MIN(m.timestamp)        AS first_timestamp,
+                   MAX(m.timestamp)        AS last_timestamp,
+                   MAX(m.rowid)            AS watermark
+            FROM lcm_messages m
+            LEFT JOIN session_tombstones t ON t.session_id = m.session_id
+            GROUP BY m.session_id
+            HAVING t.deleted_at IS NULL OR MAX(m.timestamp) > t.deleted_at
+            ORDER BY MAX(m.timestamp) DESC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def tombstone_session(self, session_id: str) -> None:
+        """Durably forget a session: hide it from :meth:`list_sessions`.
+
+        The message rows are append-only and stay intact — this only records a
+        ``deleted_at`` watermark. Re-forgetting refreshes the watermark, so a
+        revived-then-forgotten session hides again.
+        """
+        self._conn.execute(
+            "INSERT OR REPLACE INTO session_tombstones (session_id, deleted_at)"
+            " VALUES (?, ?)",
+            (session_id, time.time()),
+        )
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # Lifecycle
