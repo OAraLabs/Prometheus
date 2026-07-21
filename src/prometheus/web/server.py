@@ -270,29 +270,56 @@ def create_app(
 
     @app.get("/api/sessions")
     async def list_sessions():
-        if not session_mgr:
-            return []
+        """Durable-first session index (feat/durable-session-index).
+
+        Enumerates from the LCM store — so the list SURVIVES a daemon restart —
+        then overlays the in-memory working set, which wins on collision (its
+        fields keep their pre-existing live semantics). A durable-only row is a
+        restored session (``live: false``): its history is fully servable via
+        GET /api/sessions/{id}/messages, but the in-memory working set starts
+        fresh on the next message — the known two-stores/no-rehydrate gap.
+        Tombstoned ("forgotten") sessions stay hidden until newer activity.
+        """
         lcm = getattr(app.state, "lcm_engine", None)
         store = lcm.conversation_store if lcm is not None else None
-        sessions = []
-        for sid, session in session_mgr._sessions.items():
+
+        def _gateway(sid: str) -> str:
             # gateway = the id prefix. The daemon assigns session ids as `<gateway>:<chat_id>`
             # (telegram:123, desktop:smoke), so this is authoritative — the client no longer
             # has to infer it from the prefix itself.
             colon = sid.find(":")
-            gateway = sid[:colon] if colon > 0 else "unknown"
-            # watermark = the SAME durable max-rowid cursor GET /api/sessions/{id}/messages
-            # returns (reuses max_rowid). last_active = max message timestamp (sort/display).
-            # Both fall back to 0 only if LCM isn't wired; any real store error propagates (500).
-            sessions.append({
-                "session_id": sid,
-                "gateway": gateway,
-                "created_at": session.created_at,
-                "last_active": store.max_timestamp(sid) if store is not None else 0.0,
-                "message_count": len(session.messages),
-                "watermark": store.max_rowid(sid) if store is not None else 0,
-            })
-        return sessions
+            return sid[:colon] if colon > 0 else "unknown"
+
+        by_id: dict[str, dict] = {}
+        if store is not None:
+            for row in store.list_sessions():
+                sid = row["session_id"]
+                by_id[sid] = {
+                    "session_id": sid,
+                    "gateway": _gateway(sid),
+                    "created_at": row["first_timestamp"],
+                    "last_active": row["last_timestamp"],
+                    "message_count": row["message_count"],
+                    "watermark": row["watermark"],
+                    "live": False,
+                }
+        if session_mgr:
+            for sid, session in session_mgr._sessions.items():
+                # watermark = the SAME durable max-rowid cursor GET /api/sessions/{id}/messages
+                # returns (reuses max_rowid). last_active = max message timestamp (sort/display).
+                # Both fall back to 0 only if LCM isn't wired; any real store error propagates (500).
+                by_id[sid] = {
+                    "session_id": sid,
+                    "gateway": _gateway(sid),
+                    "created_at": session.created_at,
+                    "last_active": store.max_timestamp(sid) if store is not None else 0.0,
+                    "message_count": len(session.messages),
+                    "watermark": store.max_rowid(sid) if store is not None else 0,
+                    "live": True,
+                }
+        return sorted(
+            by_id.values(), key=lambda s: s["last_active"] or 0.0, reverse=True
+        )
 
     @app.post("/api/sessions")
     async def create_session():
@@ -512,15 +539,21 @@ def create_app(
 
     @app.delete("/api/sessions/{session_id}")
     async def clear_session(session_id: str):
-        # "Forget session": REMOVE the in-memory entry so the session stops
-        # being listed by GET /api/sessions (which enumerates
-        # session_mgr._sessions). NOT session_mgr.clear() — that only empties
-        # the message list and leaves the entry listed until a daemon restart,
-        # so junk/test sessions could never be made to disappear. Durable LCM
-        # rows are append-only and deliberately left intact; we forget only the
-        # live session handle. See SessionManager.remove().
+        # "Forget session": REMOVE the in-memory entry AND write a durable
+        # tombstone, so the forget survives a daemon restart now that
+        # GET /api/sessions enumerates from the LCM store. NOT
+        # session_mgr.clear() — that only empties the message list and leaves
+        # the entry listed. Durable LCM rows are append-only and deliberately
+        # left intact; the tombstone merely hides the session from the index
+        # until it has newer activity (stable gateway ids must resurface when
+        # they speak again). See SessionManager.remove() /
+        # LCMConversationStore.tombstone_session().
         if session_mgr:
             session_mgr.remove(session_id)
+        lcm = getattr(app.state, "lcm_engine", None)
+        store = lcm.conversation_store if lcm is not None else None
+        if store is not None:
+            store.tombstone_session(session_id)
         return {"ok": True}
 
     # ── Telemetry ───────────────────────────────────────────────────
