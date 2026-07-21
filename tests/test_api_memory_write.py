@@ -73,3 +73,21 @@ def test_non_string_rejected(client):
     c, _ = client
     assert c.put("/api/memory/current", json={"memory": 42}).status_code == 400
     assert c.put("/api/memory/current", json="nope").status_code == 400
+
+
+def test_stale_base_conflicts_409_without_write(client):
+    c, home = client
+    r = c.put("/api/memory/current", json={"memory": "my edit", "base_memory": "what I loaded (stale)"})
+    assert r.status_code == 409
+    assert "changed since" in r.json()["error"]
+    assert r.json()["current"] == "Lighthouse is the default room."
+    body = c.get("/api/memory/current").json()
+    assert "Lighthouse" in body["memory"]["content"]  # untouched
+    assert not (home / "memory-history").exists()  # no snapshot burned
+
+
+def test_matching_base_writes(client):
+    c, _ = client
+    r = c.put("/api/memory/current", json={"memory": "my edit", "base_memory": "Lighthouse is the default room."})
+    assert r.status_code == 200
+    assert c.get("/api/memory/current").json()["memory"]["content"] == "my edit"
