@@ -19,6 +19,10 @@
 - Skills: skills/
 
 ## Conventions
+- FILES FOR THE USER go in ~/.prometheus/files/ (the OUTBOX). Anything saved there is published:
+  indexed by GET /api/artifacts and downloadable in the user's apps (Beacon shows a download chip
+  when your reply mentions the filename). Do NOT invent sibling dirs (~/.prometheus/downloads etc.)
+  for deliverables — outside the outbox nothing is delivered. Working files stay in the workspace.
 - New tools extend BaseTool in tools/base.py
 - Security checks go through SecurityGate (permissions/)
 - Tool results truncated by tool_result_max in config
