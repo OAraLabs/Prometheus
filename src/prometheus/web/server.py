@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -89,6 +90,22 @@ def _resolve_coding_repo(repo: str) -> Path:
     if not (repo_path / ".git").exists():
         raise ValueError(f"not a git repository (no .git): {repo}")
     return repo_path
+
+
+def _resolve_init_path(path: str) -> Path:
+    """Validate a project-init target: an ABSOLUTE path that, if it exists, is a directory.
+    Unlike :func:`_resolve_coding_repo` this does NOT require the path to exist yet — that is
+    the whole point of init (Loop Manager "from scratch"). Raises ``ValueError`` with a
+    SPECIFIC reason, same contract as the other project validators."""
+    path = (path or "").strip()
+    if not path:
+        raise ValueError("path is required")
+    target = Path(path).expanduser()
+    if not target.is_absolute():
+        raise ValueError(f"path must be absolute: {path}")
+    if target.exists() and not target.is_dir():
+        raise ValueError(f"path exists but is not a directory: {path}")
+    return target
 
 
 def _resolve_project_file(repo: str, name: str) -> Path:
@@ -1733,6 +1750,37 @@ def create_app(
         except OSError as exc:
             return JSONResponse(status_code=500, content={"error": f"write failed: {exc}"})
         return {"mtimeMs": mtime_ms}
+
+    @app.post("/api/project-init")
+    async def init_project(body: dict):
+        """Bootstrap a Loop Manager project FROM SCRATCH: mkdir -p + ``git init`` at an absolute
+        path on the daemon host. This is the one thing a remote Beacon cannot do through
+        /api/project-file (whose validator requires the git repo to already exist). Idempotent —
+        an existing git repo returns 200 with both flags false. Creates directories and ``.git``
+        ONLY; project files stay behind /api/project-file's narrow basename scope, and the
+        capability is no wider than POST /api/code (which already accepts arbitrary repo paths).
+        Bearer auth comes from the standard /api/* middleware."""
+        try:
+            target = _resolve_init_path(str(body.get("path", "")))
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        created_dir = not target.exists()
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return JSONResponse(status_code=500, content={"error": f"mkdir failed: {exc}"})
+        initialized_git = not (target / ".git").exists()
+        if initialized_git:
+            try:
+                proc = subprocess.run(
+                    ["git", "init", "-q"], cwd=target, capture_output=True, text=True
+                )
+            except OSError as exc:
+                return JSONResponse(status_code=500, content={"error": f"git init failed: {exc}"})
+            if proc.returncode != 0:
+                detail = (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}"
+                return JSONResponse(status_code=500, content={"error": f"git init failed: {detail}"})
+        return {"path": str(target), "created_dir": created_dir, "initialized_git": initialized_git}
 
     @app.get("/api/code/{task_id}")
     async def get_coding_run(task_id: str):
