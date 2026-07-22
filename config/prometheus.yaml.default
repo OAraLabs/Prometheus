@@ -308,6 +308,17 @@ learning:
   gepa_min_idle_minutes: 10
   gepa_max_frequency_hours: 24
   gepa_model: default
+  # Live recorder — "record a skill" from browser demonstration traces.
+  # The extension uploads DOM events + screenshots to
+  # POST /api/learning/live-upload; a deterministic pipeline (no model)
+  # synthesizes a SKILL.md, gated by structural quality checks, persisted
+  # through SkillCreator into skills/auto/.
+  live_recorder:
+    enabled: true
+    # Second-pass model review of extracted steps (advisory; blocks only on
+    # "poor" quality with critical issues). Skipped gracefully when the
+    # model provider is unavailable.
+    verify_steps: true
 
 trajectory_export:
   enabled: false

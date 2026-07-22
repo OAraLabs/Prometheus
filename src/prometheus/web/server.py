@@ -125,6 +125,7 @@ def create_app(
     model_router: Any | None = None,
     static_dir: str | Path | None = None,
     boot_sha: str = "unknown",
+    skill_creator: Any | None = None,
 ) -> FastAPI:
     """Create the FastAPI application with all routes."""
 
@@ -149,6 +150,11 @@ def create_app(
     # ── Bearer token auth + body-size guard on /api/* routes ────────
 
     _MAX_BODY_BYTES = 2 * 1024 * 1024  # REST bodies are JSON/text; file uploads use the WS, not /api
+    # Exception to the WS-upload rule: the live recorder's multipart trace
+    # upload (events JSON + JPEG screenshots) comes from the browser
+    # extension, which has no WS client. Capped separately.
+    _MAX_RECORDING_BODY_BYTES = 32 * 1024 * 1024
+    _RECORDING_UPLOAD_PATH = "/api/learning/live-upload"
 
     @app.middleware("http")
     async def _check_bearer_token(request: Request, call_next):
@@ -157,8 +163,13 @@ def create_app(
         # streaming cap belongs at the uvicorn/reverse-proxy layer.
         cl = request.headers.get("content-length")
         if cl is not None:
+            body_cap = (
+                _MAX_RECORDING_BODY_BYTES
+                if request.url.path == _RECORDING_UPLOAD_PATH
+                else _MAX_BODY_BYTES
+            )
             try:
-                if int(cl) > _MAX_BODY_BYTES:
+                if int(cl) > body_cap:
                     return JSONResponse(status_code=413, content={"error": "request body too large"})
             except ValueError:
                 return JSONResponse(status_code=400, content={"error": "invalid Content-Length"})
@@ -179,6 +190,7 @@ def create_app(
     app.state.agent_loop = agent_loop
     app.state.approval_queue = approval_queue
     app.state.model_router = model_router  # Sprint B / Piece 1: REST exposes its per-session overrides
+    app.state.skill_creator = skill_creator  # live recorder: THE write path for auto-skills
     app.state.start_time = _start_time
     app.state.boot_sha = boot_sha
     app.state.agent_state = "idle"
@@ -1362,6 +1374,148 @@ def create_app(
                 for e in edits
             ]
         }
+
+    # ── Live recorder (record-a-skill: extension trace upload) ──────
+    # Multipart upload from the browser extension: `events` + `metadata`
+    # JSON strings plus `screenshot_N` JPEG parts (same field shape as the
+    # old skillforge-web /api/live-upload). The deterministic DOM pipeline
+    # turns the trace into a SKILL.md persisted via SkillCreator, so the
+    # skill_created signal / Activity feed / Skills tab light up unchanged.
+
+    import json as _lr_json
+    import logging as _lr_logging
+
+    _lr_log = _lr_logging.getLogger(__name__)
+    _MAX_EVENTS_JSON_BYTES = 5 * 1024 * 1024
+    _MAX_SCREENSHOT_BYTES = 2 * 1024 * 1024
+    _MAX_SCREENSHOTS = 100
+    _live_recorder_cache: dict[str, Any] = {}
+
+    def _live_recorder_service():
+        """Build (once) the LiveRecorderService from daemon state + config."""
+        if "service" in _live_recorder_cache:
+            return _live_recorder_cache["service"]
+
+        from prometheus.learning.live_recorder.service import LiveRecorderService
+        from prometheus.learning.live_recorder.step_verifier import StepVerifier
+
+        cfg = app.state.config if isinstance(app.state.config, dict) else {}
+        model_cfg = cfg.get("model", {}) or {}
+        lr_cfg = (cfg.get("learning", {}) or {}).get("live_recorder", {}) or {}
+
+        creator = getattr(app.state, "skill_creator", None)
+        provider = None
+        if creator is None or lr_cfg.get("verify_steps", True):
+            try:
+                from prometheus.providers.registry import ProviderRegistry
+                provider = ProviderRegistry.create(model_cfg)
+            except Exception:
+                _lr_log.warning("live recorder: model provider unavailable — "
+                                "step verification disabled", exc_info=True)
+
+        if creator is None:
+            # Daemon didn't thread its SkillCreator (e.g. standalone web
+            # launch). Build one — persist_skill_content makes no model
+            # call, so a missing provider only disables verification.
+            from prometheus.learning.skill_creator import SkillCreator
+            creator = SkillCreator(
+                provider,
+                model=model_cfg.get("model", "default"),
+                telemetry=getattr(app.state, "telemetry", None),
+            )
+            bus = getattr(app.state, "signal_bus", None)
+            if bus is not None:
+                creator.signal_bus = bus
+
+        verifier = None
+        if provider is not None and lr_cfg.get("verify_steps", True):
+            verifier = StepVerifier(
+                provider,
+                model=model_cfg.get("model", "default"),
+                telemetry=getattr(app.state, "telemetry", None),
+            )
+
+        service = LiveRecorderService(
+            creator,
+            step_verifier=verifier,
+            skill_registry=getattr(app.state, "skill_registry", None),
+        )
+        _live_recorder_cache["service"] = service
+        return service
+
+    @app.post("/api/learning/live-upload")
+    async def live_upload(request: Request):
+        cfg = app.state.config if isinstance(app.state.config, dict) else {}
+        lr_cfg = (cfg.get("learning", {}) or {}).get("live_recorder", {}) or {}
+        if not lr_cfg.get("enabled", True):
+            return JSONResponse(
+                status_code=503,
+                content={"error": "live recorder disabled (learning.live_recorder.enabled: false)"},
+            )
+
+        try:
+            form = await request.form()
+        except Exception as exc:  # noqa: BLE001 — malformed multipart, missing python-multipart
+            return JSONResponse(
+                status_code=400, content={"error": f"invalid multipart body: {exc}"}
+            )
+
+        events_json = form.get("events")
+        metadata_json = form.get("metadata")
+        if not isinstance(events_json, str) or not isinstance(metadata_json, str):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "events and metadata form fields are required"},
+            )
+        if len(events_json) > _MAX_EVENTS_JSON_BYTES:
+            return JSONResponse(
+                status_code=400, content={"error": "events JSON too large (max 5MB)"}
+            )
+
+        try:
+            events = _lr_json.loads(events_json)
+            metadata = _lr_json.loads(metadata_json)
+        except _lr_json.JSONDecodeError:
+            return JSONResponse(
+                status_code=400, content={"error": "invalid JSON in events or metadata"}
+            )
+        if not isinstance(events, list) or not events:
+            return JSONResponse(
+                status_code=400, content={"error": "events must be a non-empty array"}
+            )
+        if not isinstance(metadata, dict):
+            return JSONResponse(
+                status_code=400, content={"error": "metadata must be an object"}
+            )
+
+        screenshots: list[bytes] = []
+        for i in range(_MAX_SCREENSHOTS):
+            part = form.get(f"screenshot_{i}")
+            if part is None:
+                break
+            if isinstance(part, str) or not (part.content_type or "").startswith("image/"):
+                return JSONResponse(
+                    status_code=400, content={"error": f"screenshot_{i} is not an image"}
+                )
+            blob = await part.read()
+            if len(blob) > _MAX_SCREENSHOT_BYTES:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"screenshot_{i} too large (max 2MB per screenshot)"},
+                )
+            screenshots.append(blob)
+
+        try:
+            result = await _live_recorder_service().handle_upload(events, metadata, screenshots)
+        except Exception as exc:  # noqa: BLE001 — surface, never 500-with-traceback
+            _lr_log.warning("live recorder: upload processing failed", exc_info=True)
+            return JSONResponse(status_code=502, content={"error": f"processing failed: {exc}"})
+
+        if result.get("status") == "rejected":
+            return JSONResponse(status_code=422, content=result)
+        if result.get("status") == "error":
+            return JSONResponse(status_code=502, content=result)
+        return result
 
     # ── Approvals ──────────────────────────────────────────────────
 
