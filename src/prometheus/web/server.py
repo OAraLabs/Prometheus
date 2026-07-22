@@ -1517,6 +1517,118 @@ def create_app(
             return JSONResponse(status_code=502, content=result)
         return result
 
+    # ── Skill drafts (two-tier trust: human review before skills/auto/) ──
+    # Vision-derived skills never auto-persist — they land as drafts a
+    # human reviews in Beacon (optionally redlining the markdown first).
+    # ACCEPT routes the content through LiveRecorderService.persist_content
+    # — the same validated SkillCreator write path DOM recordings use — so
+    # a reviewed draft gets frontmatter-name validation, the no-overwrite
+    # policy, the skill_created signal, and the registry reload for free.
+    # REJECT archives to drafts/.rejected/ (curator convention: machine-
+    # managed skill files are archived, NEVER deleted).
+
+    _sd_log = _lr_logging.getLogger(__name__)
+    _skill_draft_cache: dict[str, Any] = {}
+
+    def _skill_draft_store():
+        """Build (once) the SkillDraftStore and expose it on app.state."""
+        if "store" in _skill_draft_cache:
+            return _skill_draft_cache["store"]
+        from prometheus.learning.skill_drafts import SkillDraftStore
+
+        store = SkillDraftStore()
+        _skill_draft_cache["store"] = store
+        # Other subsystems (e.g. the video-ingestion pipeline) reach the
+        # same store through app.state instead of building their own.
+        app.state.skill_draft_store = store
+        return store
+
+    async def _emit_draft_signal(kind: str, payload: dict) -> None:
+        """Best-effort ActivitySignal emission (skill_creator._emit_created_signal pattern)."""
+        bus = getattr(app.state, "signal_bus", None)
+        if bus is None:
+            return
+        try:
+            from prometheus.sentinel.signals import ActivitySignal
+
+            await bus.emit(ActivitySignal(kind=kind, payload=payload, source="skill_drafts"))
+        except Exception:
+            _sd_log.debug("skill drafts: signal emission failed", exc_info=True)
+
+    @app.get("/api/learning/skill-drafts")
+    async def list_skill_drafts():
+        return {"drafts": _skill_draft_store().list()}
+
+    @app.get("/api/learning/skill-drafts/{draft_id}")
+    async def get_skill_draft(draft_id: str):
+        try:
+            content, sidecar = _skill_draft_store().get(draft_id)
+        except ValueError:
+            return JSONResponse(
+                status_code=400, content={"error": f"invalid draft id: {draft_id!r}"}
+            )
+        except KeyError:
+            return JSONResponse(status_code=404, content={"error": f"unknown draft: {draft_id}"})
+        return {"draft": sidecar, "content": content}
+
+    @app.post("/api/learning/skill-drafts/{draft_id}/accept")
+    async def accept_skill_draft(draft_id: str, body: dict | None = None):
+        store = _skill_draft_store()
+        try:
+            content, sidecar = store.get(draft_id)
+        except ValueError:
+            return JSONResponse(
+                status_code=400, content={"error": f"invalid draft id: {draft_id!r}"}
+            )
+        except KeyError:
+            return JSONResponse(status_code=404, content={"error": f"unknown draft: {draft_id}"})
+
+        # Beacon redline: the reviewer may accept an edited version.
+        edited = (body or {}).get("content")
+        if edited is not None:
+            if not isinstance(edited, str) or not edited.strip():
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "content must be a non-empty string when provided"},
+                )
+            content = edited
+
+        source = sidecar.get("source", "unknown")
+        service = _live_recorder_service()
+        path = await service.persist_content(
+            content, trigger=f"skill draft {draft_id} accepted ({source})"
+        )
+        if path is None:
+            # Validation refused it (e.g. missing frontmatter name:) —
+            # leave the draft in place so the reviewer can fix and retry.
+            return JSONResponse(
+                status_code=422,
+                content={"error": "persistence rejected the content "
+                                  "(missing/invalid frontmatter name:)"},
+            )
+
+        store.remove_accepted(draft_id)
+        await _emit_draft_signal("skill_draft_accepted", {
+            "draft_id": draft_id,
+            "skill_name": path.stem,
+            "skill_path": str(path),
+        })
+        return {"status": "accepted", "skill_name": path.stem, "skill_path": str(path)}
+
+    @app.post("/api/learning/skill-drafts/{draft_id}/reject")
+    async def reject_skill_draft(draft_id: str):
+        store = _skill_draft_store()
+        try:
+            store.reject(draft_id)
+        except ValueError:
+            return JSONResponse(
+                status_code=400, content={"error": f"invalid draft id: {draft_id!r}"}
+            )
+        except KeyError:
+            return JSONResponse(status_code=404, content={"error": f"unknown draft: {draft_id}"})
+        await _emit_draft_signal("skill_draft_rejected", {"draft_id": draft_id})
+        return {"status": "rejected", "draft_id": draft_id}
+
     # ── Approvals ──────────────────────────────────────────────────
 
     @app.get("/api/approvals")
