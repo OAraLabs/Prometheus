@@ -1063,6 +1063,40 @@ def main() -> None:
              "the addendum's highest-leverage lever)",
     )
 
+    # Record-a-skill phase 2: score a candidate VLM against the annotated
+    # session corpus before enabling it for video ingestion.
+    bakeoff_parser = subparsers.add_parser(
+        "bakeoff-vlm",
+        help="Score a vision model against the annotated skill corpus "
+             "(golden-SKILL.md diff, hallucination-penalized)",
+    )
+    bakeoff_parser.add_argument(
+        "--corpus", required=True,
+        help="Corpus root containing videos and a ground_truth/ dir "
+             "(e.g. ~/projects/skillforge)",
+    )
+    bakeoff_parser.add_argument("--model", required=True, help="Vision model name (registry entry)")
+    bakeoff_parser.add_argument(
+        "--provider", default="llama_cpp",
+        help="Provider type for the vision model (default: llama_cpp)",
+    )
+    bakeoff_parser.add_argument(
+        "--base-url", default="http://localhost:8080",
+        help="Vision model endpoint (default: http://localhost:8080)",
+    )
+    bakeoff_parser.add_argument("--limit", type=int, default=0, help="Max videos to score (0 = all)")
+    bakeoff_parser.add_argument("--fps", type=float, default=2.0, help="Frame extraction rate")
+    bakeoff_parser.add_argument("--no-audio", action="store_true", help="Skip audio transcription")
+    bakeoff_parser.add_argument(
+        "--force", action="store_true",
+        help="Run even if model_registry.yaml says the model lacks vision support",
+    )
+    bakeoff_parser.add_argument(
+        "--threshold", type=float, default=0.75,
+        help="Mean accuracy required for a PASS verdict (default: 0.75)",
+    )
+    bakeoff_parser.add_argument("--output", default=None, help="Write a JSON report to this path")
+
     # SUNRISE: export-traces — write golden tool-call traces to JSONL for fine-tuning.
     export_parser = subparsers.add_parser(
         "export-traces", help="Export golden tool-call traces to a JSONL file",
@@ -1111,6 +1145,11 @@ def main() -> None:
     if args.command == "doctor":
         from prometheus.cli.doctor import run_doctor_command
         sys.exit(run_doctor_command(args))
+
+    # `prometheus bakeoff-vlm` — vision-model corpus scoring (record-a-skill).
+    if args.command == "bakeoff-vlm":
+        from prometheus.cli.bakeoff import run_bakeoff_command
+        sys.exit(run_bakeoff_command(args))
 
     # `prometheus install-service` — systemd user unit installer.
     if args.command == "install-service":
