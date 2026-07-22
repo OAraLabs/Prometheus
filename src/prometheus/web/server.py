@@ -1517,6 +1517,86 @@ def create_app(
             return JSONResponse(status_code=502, content=result)
         return result
 
+    # Video ingestion trigger (phase 2 producer). Processing a recording
+    # takes minutes (frame extraction + per-keyframe VLM digest), so the
+    # route starts a background task and returns immediately; the durable
+    # output is a skill DRAFT (never skills/auto/ — two-tier trust) plus a
+    # skill_draft_created signal when it lands.
+
+    _video_ingest_tasks: set[Any] = set()
+
+    @app.post("/api/learning/video-ingest")
+    async def video_ingest(body: dict):
+        import asyncio as _vi_asyncio
+
+        cfg = app.state.config if isinstance(app.state.config, dict) else {}
+        vi_cfg = (cfg.get("learning", {}) or {}).get("video_ingest", {}) or {}
+        if not vi_cfg.get("enabled", False):
+            return JSONResponse(
+                status_code=503,
+                content={"error": "video ingestion disabled "
+                                  "(learning.video_ingest.enabled: false)"},
+            )
+        vision_model_cfg = dict(vi_cfg.get("vision_model") or {})
+        if not vision_model_cfg.get("model"):
+            return JSONResponse(
+                status_code=503,
+                content={"error": "no vision model configured "
+                                  "(learning.video_ingest.vision_model)"},
+            )
+
+        source = str(body.get("source", "")).strip()
+        if not source:
+            return JSONResponse(status_code=400, content={"error": "source is required"})
+        force = bool(body.get("force", False))
+
+        async def _run_ingestion() -> None:
+            from prometheus.learning.video_ingest.pipeline import ingest_video_to_skill
+
+            outcome = await ingest_video_to_skill(
+                source, vision_model_cfg=vision_model_cfg, force=force,
+            )
+            if outcome.get("status") != "ok":
+                _lr_log.warning(
+                    "video ingestion of %s did not produce a draft: %s",
+                    source, outcome.get("error") or outcome.get("reason"),
+                )
+                await _emit_draft_signal("video_ingest_failed", {
+                    "source": source,
+                    "status": outcome.get("status"),
+                    "detail": outcome.get("error") or outcome.get("reason") or "",
+                })
+                return
+
+            skill = outcome["skill"]
+            sidecar = _skill_draft_store().create(
+                skill["content"],
+                source="video_ingestion",
+                provenance={
+                    "video_source": source,
+                    "session_dir": outcome.get("session_dir"),
+                    "vision_model": {k: v for k, v in vision_model_cfg.items()
+                                     if "key" not in k.lower()},
+                    "quality_gate": outcome.get("quality_gate"),
+                    "digest_stats": outcome.get("digest_stats"),
+                    "step_count": skill.get("step_count"),
+                    "parameter_count": skill.get("parameter_count"),
+                },
+            )
+            await _emit_draft_signal("skill_draft_created", {
+                "draft_id": sidecar["draft_id"],
+                "title": sidecar.get("title"),
+                "source": "video_ingestion",
+                "video_source": source,
+            })
+
+        task = _vi_asyncio.create_task(_run_ingestion())
+        _video_ingest_tasks.add(task)
+        task.add_done_callback(_video_ingest_tasks.discard)
+        return {"status": "started", "source": source,
+                "note": "a skill draft will appear in /api/learning/skill-drafts "
+                        "when processing completes"}
+
     # ── Skill drafts (two-tier trust: human review before skills/auto/) ──
     # Vision-derived skills never auto-persist — they land as drafts a
     # human reviews in Beacon (optionally redlining the markdown first).

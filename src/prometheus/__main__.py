@@ -1063,6 +1063,27 @@ def main() -> None:
              "the addendum's highest-leverage lever)",
     )
 
+    # Record-a-skill phase 2: video/YouTube -> skill DRAFT (human review).
+    ingest_parser = subparsers.add_parser(
+        "ingest-video",
+        help="Turn a screen recording or YouTube URL into a skill draft "
+             "for review in Beacon",
+    )
+    ingest_parser.add_argument("source", help="Video file path or http(s)/YouTube URL")
+    ingest_parser.add_argument("--model", default=None, help="Vision model override")
+    ingest_parser.add_argument("--provider", default=None, help="Provider type override")
+    ingest_parser.add_argument("--base-url", default=None, help="Vision endpoint override")
+    ingest_parser.add_argument("--fps", type=float, default=2.0, help="Frame extraction rate")
+    ingest_parser.add_argument("--no-audio", action="store_true", help="Skip narration transcription")
+    ingest_parser.add_argument(
+        "--work-dir", default=None,
+        help="Session directory (reuse to resume a crashed digest)",
+    )
+    ingest_parser.add_argument(
+        "--force", action="store_true",
+        help="Run even if model_registry.yaml says the model lacks vision support",
+    )
+
     # Record-a-skill phase 2: score a candidate VLM against the annotated
     # session corpus before enabling it for video ingestion.
     bakeoff_parser = subparsers.add_parser(
@@ -1150,6 +1171,11 @@ def main() -> None:
     if args.command == "bakeoff-vlm":
         from prometheus.cli.bakeoff import run_bakeoff_command
         sys.exit(run_bakeoff_command(args))
+
+    # `prometheus ingest-video` — video/YouTube -> skill draft (record-a-skill).
+    if args.command == "ingest-video":
+        from prometheus.cli.ingest_video import run_ingest_video_command
+        sys.exit(run_ingest_video_command(args, load_config(args.config)))
 
     # `prometheus install-service` — systemd user unit installer.
     if args.command == "install-service":

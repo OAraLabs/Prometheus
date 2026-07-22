@@ -319,6 +319,21 @@ learning:
     # "poor" quality with critical issues). Skipped gracefully when the
     # model provider is unavailable.
     verify_steps: true
+  # Video ingestion — the vision leg of record-a-skill. Screen recordings
+  # or YouTube URLs are digested by a vision model and synthesized through
+  # the same funnel as DOM recordings, but ALWAYS land as drafts requiring
+  # human review in Beacon (two-tier trust). The VLM is a swappable
+  # registry entry: vision_model must match a config/model_registry.yaml
+  # family whose capabilities.vision.supported is true (run
+  # `prometheus bakeoff-vlm` against the annotated corpus before enabling
+  # a new model). Runtime deps: ffmpeg (or imageio-ffmpeg); optional:
+  # yt-dlp (URLs), faster-whisper (narration), scikit-image (keyframe dedup).
+  video_ingest:
+    enabled: false
+    vision_model:              # same shape as the top-level `model:` block
+      provider: llama_cpp
+      base_url: "http://localhost:8080"
+      model: gemma-4
 
 trajectory_export:
   enabled: false
