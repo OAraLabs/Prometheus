@@ -10,6 +10,7 @@ sends responses back with MarkdownV2 formatting and message chunking.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -42,6 +43,11 @@ if TYPE_CHECKING:
     from prometheus.tools.base import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+# How often to re-assert the Telegram "typing…" indicator during a turn.
+# Telegram expires a chat action after ~5s, so this MUST stay under that or the
+# indicator visibly flickers off mid-turn.
+TYPING_REFRESH_SECONDS = 4.0
 
 # MarkdownV2 special characters that must be escaped
 _MARKDOWN_V2_ESCAPE = re.compile(r"([_\*\[\]\(\)~`>#+\-=|{}.!\\])")
@@ -1775,26 +1781,63 @@ class TelegramAdapter(BasePlatformAdapter):
             )
         return response_text
 
-    async def _dispatch_to_agent(self, event: MessageEvent) -> None:
-        """Route a message through AgentLoop and send the response."""
-        if self._app:
+    async def _keep_typing(self, chat_id: Any, interval: float | None = None) -> None:
+        """Re-assert the typing indicator until cancelled.
+
+        Telegram clears "typing…" about 5 seconds after each
+        ``sendChatAction``, so the historical single call at dispatch made any
+        turn longer than that look dead — the exact complaint that a slow local
+        model "isn't responding" when it is mid-tool-call. Refreshing on a
+        sub-5s cadence keeps the indicator continuously lit for the whole turn.
+
+        Best-effort throughout: a failed action never interrupts the turn.
+
+        ``interval`` resolves from the module global at CALL time (not as a
+        bound default), so the cadence stays patchable for tests.
+        """
+        if interval is None:
+            interval = TYPING_REFRESH_SECONDS
+        while True:
             try:
                 await self._app.bot.send_chat_action(
-                    chat_id=event.chat_id, action=ChatAction.TYPING
+                    chat_id=chat_id, action=ChatAction.TYPING
                 )
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                pass  # typing indicator is best-effort
+                logger.debug("typing indicator refresh failed", exc_info=True)
+            await asyncio.sleep(interval)
 
+    @contextlib.asynccontextmanager
+    async def _typing(self, chat_id: Any):
+        """Hold the typing indicator for the duration of the block."""
+        if not self._app:
+            yield
+            return
+        task = asyncio.create_task(self._keep_typing(chat_id))
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def _dispatch_to_agent(self, event: MessageEvent) -> None:
+        """Route a message through AgentLoop and send the response."""
         session = self.session_manager.get_or_create(event.session_key())
         # Telegram inbound is a real human: provenance="user", trusted. Routes
         # through the same shared core as inject_turn (the re-engagement path).
-        response_text = await self._run_agent_turn(
-            session,
-            event.text,
-            session_id=event.session_key(),
-            provenance="user",
-            is_trusted=True,
-        )
+        # The typing indicator runs for the WHOLE turn (see _keep_typing) —
+        # a single send_chat_action expires after ~5s, so multi-minute turns
+        # used to look dead in the client.
+        async with self._typing(event.chat_id):
+            response_text = await self._run_agent_turn(
+                session,
+                event.text,
+                session_id=event.session_key(),
+                provenance="user",
+                is_trusted=True,
+            )
 
         # Voice-mode routing — prefer voice reply when the chat is in
         # voice mode (and synthesis succeeds); fall back to plain text on
