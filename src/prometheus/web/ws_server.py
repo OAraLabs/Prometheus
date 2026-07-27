@@ -31,6 +31,16 @@ WS_CLOSE_UNAUTHORIZED = 4401
 # open; long enough for a real client's first round-trip.
 AUTH_FRAME_TIMEOUT_SECONDS = 5.0
 
+# Cadence of the ``agent_progress`` liveness pulse emitted while a turn runs.
+# A turn can legitimately produce NO frames for minutes (a slow local model
+# thinking before its first token, or one long tool call), which is
+# indistinguishable from a dead daemon to a client — that ambiguity is what
+# drove Beacon's "no reply after 30s" false alarm. This is the positive signal:
+# while it keeps arriving the turn is alive, so a client never has to guess
+# with a bare timeout. 3s is frequent enough to feel live and is negligible
+# traffic next to token deltas.
+PROGRESS_INTERVAL_SECONDS = 3.0
+
 
 class WebSocketBridge:
     """Bridges SignalBus events to WebSocket clients."""
@@ -204,7 +214,11 @@ class WebSocketBridge:
                 await self._send_one(websocket, {
                     "type": "error",
                     "timestamp": time.time(),
-                    "payload": {"message": f"invalid mode {mode!r} — expected 'agent' or 'chat'"},
+                    "payload": {
+                        "session_id": session_id,
+                        "message": f"invalid mode {mode!r} — expected 'agent' or 'chat'",
+                        "kind": "bad_request",
+                    },
                 })
                 return
             # force-search: validate an optional per-message tool_choice against the live tool
@@ -220,7 +234,11 @@ class WebSocketBridge:
                 await self._send_one(websocket, {
                     "type": "error",
                     "timestamp": time.time(),
-                    "payload": {"message": str(exc)},
+                    "payload": {
+                        "session_id": session_id,
+                        "message": str(exc),
+                        "kind": "bad_request",
+                    },
                 })
                 return
             if session_id and content:
@@ -596,19 +614,36 @@ class WebSocketBridge:
         instead of swallowing (the awaited caller reports errors externally)."""
         from prometheus.engine.agent_loop import run_loop
 
-        # Update state
+        # Update state. session_id rides every agent_state frame: with more than
+        # one session alive, "thinking" is meaningless unless a client can tell
+        # WHICH conversation it belongs to (Beacon could not, so it could not
+        # scope a per-chat indicator).
         if self.agent_state_ref:
             self.agent_state_ref["state"] = "thinking"
         await self.broadcast({
             "type": "agent_state",
             "timestamp": time.time(),
-            "payload": {"state": "thinking"},
+            "payload": {"state": "thinking", "session_id": session_id},
         })
 
         msg_id = f"asst-{int(time.time() * 1000)}"
         accumulated = ""
         last_usage: Any = None
         original_len: int | None = None
+
+        # Live turn shape, mutated as events stream and sampled by the
+        # heartbeat task. A plain dict (not locals) so the heartbeat sees
+        # updates without threading state through every branch.
+        progress = {
+            "phase": "thinking",   # thinking → generating → tool → …
+            "tool_name": None,
+            "round": 1,            # model calls so far, 1-based (round N in flight)
+            "chars": 0,            # assistant characters streamed this turn
+            "tool_calls": 0,
+        }
+        heartbeat = asyncio.create_task(
+            self._emit_progress(session_id, msg_id, progress, time.time())
+        )
 
         # Register THIS task as the session's running turn so interrupt_turn()
         # can cancel it. asyncio.current_task() covers both entry paths
@@ -629,8 +664,14 @@ class WebSocketBridge:
                     last_usage = _usage
                 event_type = type(event).__name__
 
+                if event_type == "AssistantTurnComplete":
+                    # One model call finished; anything further is a new round.
+                    progress["round"] = int(progress["round"]) + 1
+
                 if event_type == "AssistantTextDelta":
                     accumulated += event.text
+                    progress["phase"] = "generating"
+                    progress["chars"] = len(accumulated)
                     await self.broadcast({
                         "type": "chat_delta",
                         "timestamp": time.time(),
@@ -642,6 +683,9 @@ class WebSocketBridge:
                     })
 
                 elif event_type == "ToolExecutionStarted":
+                    progress["phase"] = "tool"
+                    progress["tool_name"] = event.tool_name
+                    progress["tool_calls"] = int(progress["tool_calls"]) + 1
                     await self.broadcast({
                         "type": "tool_call_start",
                         "timestamp": time.time(),
@@ -653,6 +697,9 @@ class WebSocketBridge:
                     })
 
                 elif event_type == "ToolExecutionCompleted":
+                    # Tool done → the model is thinking again until it emits.
+                    progress["phase"] = "thinking"
+                    progress["tool_name"] = None
                     await self.broadcast({
                         "type": "tool_call_end",
                         "timestamp": time.time(),
@@ -727,16 +774,35 @@ class WebSocketBridge:
                     )
             except Exception:
                 logger.warning("telemetry record for _run_agent failure itself failed", exc_info=True)
+            # session_id lets a client render this INLINE in the right chat
+            # instead of filing it in a side panel; the structured fields turn
+            # "Client error '400 Bad Request'" into a cause and a next step.
+            # `message` is kept as the top-level key it has always been, so
+            # existing clients keep working unchanged.
+            from prometheus.api.turn_errors import classify_turn_error
+            detail = classify_turn_error(e)
             await self.broadcast({
                 "type": "error",
                 "timestamp": time.time(),
-                "payload": {"message": str(e)},
+                "payload": {
+                    "session_id": session_id,
+                    "message": detail["message"],
+                    "kind": detail["kind"],
+                    "provider": detail["provider"],
+                    "status": detail["status"],
+                    "hint": detail["hint"],
+                },
             })
             if raise_on_error:
                 raise
             return accumulated, last_usage
 
         finally:
+            # Stop the liveness pulse FIRST — a heartbeat outliving its turn
+            # would tell clients a finished turn is still running. Cancel
+            # without awaiting: this runs on the cancellation path too, where
+            # awaiting could re-raise before the frames below are sent.
+            heartbeat.cancel()
             # Unregister only if the slot still points at THIS task (a newer
             # concurrent turn may have overwritten it). Clearing the interrupt
             # flag here bounds any stale flag from a cancel that lost the race
@@ -749,8 +815,53 @@ class WebSocketBridge:
             await self.broadcast({
                 "type": "agent_state",
                 "timestamp": time.time(),
-                "payload": {"state": "idle"},
+                "payload": {"state": "idle", "session_id": session_id},
             })
+
+    async def _emit_progress(
+        self,
+        session_id: str,
+        message_id: str,
+        progress: dict[str, Any],
+        started_at: float,
+        interval: float | None = None,
+    ) -> None:
+        """Pulse ``agent_progress`` every ``interval`` seconds while a turn runs.
+
+        Started and cancelled by :meth:`_run_agent`. Samples the live
+        ``progress`` dict rather than owning state, so it reports what the turn
+        is ACTUALLY doing (which tool, which round, how much text so far)
+        instead of a bare "still alive".
+
+        Never raises: a broadcast failure here must not kill the turn or leave
+        an unretrieved exception on a task nobody awaits.
+
+        ``interval`` resolves from the module global at CALL time (not as a
+        bound default), so the cadence stays patchable for tests.
+        """
+        if interval is None:
+            interval = PROGRESS_INTERVAL_SECONDS
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                await self.broadcast({
+                    "type": "agent_progress",
+                    "timestamp": time.time(),
+                    "payload": {
+                        "session_id": session_id,
+                        "message_id": message_id,
+                        "phase": progress["phase"],
+                        "tool_name": progress["tool_name"],
+                        "round": progress["round"],
+                        "chars": progress["chars"],
+                        "tool_calls": progress["tool_calls"],
+                        "elapsed_s": round(time.time() - started_at, 1),
+                    },
+                })
+            except asyncio.CancelledError:
+                raise  # normal teardown — the turn ended
+            except Exception:
+                logger.debug("agent_progress emit failed", exc_info=True)
 
     async def _on_signal(self, signal: Any) -> None:
         """Forward a SignalBus event to all connected clients."""
