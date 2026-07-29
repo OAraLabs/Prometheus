@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,7 +42,13 @@ class TestWhisperSTT:
         assert "no whisper engine" in result.output.lower()
 
     def test_detect_engine_none(self):
-        with patch("shutil.which", return_value=None):
+        # Two detection paths: the CLI probes (shutil.which) and the
+        # faster-whisper python package (the [voice] extra). Neutralise both,
+        # or this fails on hosts that happen to have the package installed.
+        # A None entry in sys.modules makes `import faster_whisper` raise
+        # ImportError, which is what the detector treats as "not installed".
+        with patch("shutil.which", return_value=None), \
+                patch.dict(sys.modules, {"faster_whisper": None}):
             assert _detect_whisper_engine() is None
 
     def test_detect_engine_whisper(self):
