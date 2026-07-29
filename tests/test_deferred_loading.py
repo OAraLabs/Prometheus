@@ -59,15 +59,12 @@ class TestDeferredLoading:
         # "search" keyword maps to grep and web_search
         assert "grep" in names or "web_search" in names
 
-    def test_on_demand_returns_schema_regardless_of_deferred(self, registry):
-        loader = DynamicToolLoader(registry, deferred_config={
-            "enabled": True,
-            "always_loaded": ["bash"],
-        })
-        # on_demand should return schema even for non-loaded tools
-        schema = loader.on_demand("web_search")
-        assert schema is not None
-        assert schema["name"] == "web_search"
+    def test_on_demand_is_gone(self, registry):
+        """on_demand() was deleted (feat/deferred-tools-tier-aware): it had no
+        production callers and read as live mid-run schema-injection
+        infrastructure — the #120 prefix-mutation bug class if ever wired."""
+        loader = DynamicToolLoader(registry, deferred_config={"enabled": True})
+        assert not hasattr(loader, "on_demand")
 
     def test_all_schemas_returns_everything(self, registry):
         loader = DynamicToolLoader(registry, deferred_config={

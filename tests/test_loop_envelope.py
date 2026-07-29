@@ -159,6 +159,10 @@ def _usage_rows(tel: ToolCallTelemetry) -> list[tuple]:
         "SELECT operation, outcome, input_tokens, output_tokens, round_index,"
         " session_id, model, thinking, summary_json"
         " FROM subsystem_runs WHERE subsystem = 'agent_loop'"
+        # These tests assert the ENVELOPE's per-call usage rows. run_loop now
+        # also writes one 'tool_advertisement' row per run (deferred-loading
+        # A/B accounting) — different producer, excluded here.
+        " AND operation != 'tool_advertisement'"
         " ORDER BY round_index"
     ).fetchall()
 

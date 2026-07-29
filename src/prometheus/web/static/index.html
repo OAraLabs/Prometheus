@@ -94,6 +94,24 @@
   .feed-empty { padding: 20px; text-align: center; color: var(--text-dim); }
   .feed-time { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
 
+  /* Tools panel (deferred loading toggle) */
+  .tools-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; margin-bottom: 8px;
+  }
+  .tools-label { font-size: 13px; }
+  .tools-modes { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .tools-modes button {
+    font: inherit; font-size: 11px; padding: 3px 10px; cursor: pointer;
+    background: transparent; border: none; color: var(--muted, #8a93a0);
+  }
+  .tools-modes button + button { border-left: 1px solid var(--border); }
+  .tools-modes button.active { background: var(--panel-2); color: var(--fg, #e6ebf0); font-weight: 600; }
+  .tools-status { font-size: 12px; color: var(--muted, #8a93a0); margin-bottom: 6px; }
+  .tools-status .eff-on { color: #6fc27c; }
+  .tools-status .eff-off { color: #c2946f; }
+  .tools-note { font-size: 11px; color: var(--muted, #8a93a0); opacity: 0.75; font-style: italic; }
+
   /* Memory panel */
   .mem-section {
     margin-bottom: 14px; padding: 8px; background: var(--panel-2);
@@ -214,6 +232,24 @@
       <h2>Skills <span class="badge" id="skills-count">0</span></h2>
       <div class="panel-body" id="skills">
         <div class="feed-empty">Loading…</div>
+      </div>
+    </div>
+
+    <div class="panel" style="flex: 0 0 auto;">
+      <h2>Tools <span class="badge" id="deferred-badge">…</span></h2>
+      <div class="panel-body" id="tools-panel">
+        <div class="tools-row">
+          <span class="tools-label">Deferred tool loading</span>
+          <span class="tools-modes" id="deferred-modes">
+            <button data-mode="auto" onclick="setDeferred('auto')">Auto</button>
+            <button data-mode="on" onclick="setDeferred(true)">On</button>
+            <button data-mode="off" onclick="setDeferred(false)">Off</button>
+          </span>
+        </div>
+        <div class="tools-status" id="deferred-status">Loading…</div>
+        <!-- Spec: never imply live effect — this is repeated from the API's
+             `applies` field and must stay visible at all times. -->
+        <div class="tools-note" id="deferred-note">Changes apply at the next run start — not to a session already running.</div>
       </div>
     </div>
   </div>
@@ -485,6 +521,68 @@
     }
   }
 
+  // ── Deferred tool loading toggle ─────────────────────────────────────
+  // REST is the source of truth; the WS merely triggers re-hydration (same
+  // pattern as memory/skills). Auth: attach the localStorage bearer when the
+  // user has set one (same convention as the WS auth frame above).
+  function authHeaders() {
+    try {
+      const token = localStorage.getItem("prometheus_token");
+      return token ? { "Authorization": `Bearer ${token}` } : {};
+    } catch { return {}; }
+  }
+
+  function renderDeferred(d) {
+    const badge = document.getElementById("deferred-badge");
+    const status = document.getElementById("deferred-status");
+    const note = document.getElementById("deferred-note");
+    // Active button = the CONFIGURED tri-state (what the user chose), while
+    // the status line shows the EFFECTIVE result and its source — the spec's
+    // "auto → enabled (local provider)" vs "explicitly disabled" split.
+    const mode = d.configured === true ? "on" : d.configured === false ? "off" : "auto";
+    document.querySelectorAll("#deferred-modes button").forEach((b) => {
+      b.classList.toggle("active", b.dataset.mode === mode);
+    });
+    if (d.effective === null || d.effective === undefined) {
+      badge.textContent = "?";
+      status.textContent = d.source || "effective state unknown";
+    } else {
+      const eff = d.effective ? "deferred" : "full catalog";
+      badge.textContent = d.advertised_count !== null ? `${d.advertised_count}/${d.total_tools}` : eff;
+      status.innerHTML =
+        `Effective: <span class="${d.effective ? "eff-on" : "eff-off"}">${eff}</span>` +
+        ` — ${escapeHtml(d.source || "")}` +
+        (d.advertised_count !== null
+          ? ` · advertising ${d.advertised_count} of ${d.total_tools} tools`
+          : "");
+    }
+    if (d.applies) note.textContent = `Changes apply at the ${d.applies} — not to a session already running.`;
+  }
+
+  async function refreshDeferred() {
+    try {
+      const resp = await fetch(`${API_BASE}/api/tools/deferred`, { headers: authHeaders() });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      renderDeferred(await resp.json());
+    } catch (e) {
+      document.getElementById("deferred-status").textContent = `error: ${e.message}`;
+    }
+  }
+
+  window.setDeferred = async function(value) {
+    try {
+      const resp = await fetch(`${API_BASE}/api/tools/deferred`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ enabled: value }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      renderDeferred(await resp.json());
+    } catch (e) {
+      document.getElementById("deferred-status").textContent = `save failed: ${e.message}`;
+    }
+  };
+
   async function hydrateFeed() {
     try {
       const resp = await fetch(`${API_BASE}/api/activity/recent?limit=100`);
@@ -564,8 +662,12 @@
   refreshStatus();
   refreshMemory();
   refreshSkills();
+  refreshDeferred();
   // Light periodic refresh — covers cases where signals don't trigger.
   setInterval(refreshStatus, 30_000);
+  // No WS signal exists for config changes; a slow poll keeps a second
+  // browser tab honest after a toggle elsewhere.
+  setInterval(refreshDeferred, 30_000);
   setInterval(() => { feedEvents = [...feedEvents]; renderFeed(); }, 10_000);
 </script>
 

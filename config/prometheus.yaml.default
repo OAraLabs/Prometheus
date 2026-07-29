@@ -60,7 +60,13 @@ context:
 
 tools:
   deferred_loading:
-    enabled: false                          # all tool schemas in prompt by default
+    # Tri-state: true | false | auto (default). "auto" resolves at run start —
+    # enabled on local backends (llama.cpp/Ollama tiers, where ~8k tokens of
+    # schemas crowd a small window and fewer tools help small-model calling),
+    # disabled on cloud API providers (big windows + prefix caching make the
+    # full stable catalog cheap). Explicit true/false always wins. The
+    # advertised set is frozen per run either way.
+    enabled: auto
     always_loaded: [bash, task_create, read_file, write_file, edit_file, grep, glob, tool_search]
     mcp_always_deferred: true
     search_mcp: true
