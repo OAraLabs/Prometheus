@@ -30,9 +30,23 @@ fi
 #       No real OAra host contains "prometheus", so masking it cannot hide one.
 ALLOWLIST_REGEX='oara-prometheus'
 
+# Obvious non-secrets: test fixtures and doc placeholders. A real leaked
+# credential does not have "test"/"fake"/"example" sitting in it. Applied ONLY
+# to the credential-shape patterns below (those marked skip_placeholders=1),
+# never to the original infrastructure checks, so existing strictness is
+# unchanged.
+#
+# WHY this exemption exists: the repo's own tests legitimately contain
+# key-shaped fixtures (`sk-ant-wizard-test-000000`, `xoxb-test-token`). Without
+# it, editing any provider test would block the commit — and a hook that cries
+# wolf trains you to reach for `--no-verify`, which is strictly worse than a
+# hook with one narrow, documented blind spot.
+PLACEHOLDER_REGEX='(?i)(test|fake|example|dummy|placeholder|sample|redacted|never|your[-_]?(key|token)|xxxx|0000)'
+
 check_pattern() {
     local label="$1"
     local pattern="$2"
+    local skip_placeholders="${3:-0}"
 
     while IFS= read -r file; do
         [ -f "$file" ] || continue
@@ -45,6 +59,10 @@ check_pattern() {
             # longer matches, the only hit was an allowlisted false positive.
             stripped=$(printf '%s' "$match" | sed -E "s/${ALLOWLIST_REGEX}//g")
             printf '%s' "$stripped" | grep -qP "$pattern" || continue
+            if [ "$skip_placeholders" = "1" ] && \
+               printf '%s' "$match" | grep -qP "$PLACEHOLDER_REGEX"; then
+                continue
+            fi
             echo "  BLOCKED  $file:$match"
             echo "           reason: $label"
             echo ""
@@ -82,6 +100,30 @@ check_pattern "Hardcoded user SSH key path" \
 #    ALLOWLIST_REGEX above (a package name, not a host).
 check_pattern "Infrastructure hostname (OAra-*)" \
     'OAra-|oara-'
+
+# ── Credential shapes (added 2026-07-27 after a repo secret audit) ──────────
+# GitHub's server-side push protection already blocks most PROVIDER keys, but
+# it is the last line, not the first: it fires after you've committed and
+# pushed. These catch the same material at commit time, plus the class GitHub
+# CANNOT recognise — this project's own opaque tokens (see #8).
+#
+# All use skip_placeholders=1 so the repo's key-shaped test fixtures don't
+# block ordinary work (see PLACEHOLDER_REGEX).
+
+# 7. Provider API keys, by their real prefixes. Length floors are set above the
+#    repo's fixture lengths so obvious fakes don't match in the first place.
+check_pattern "Provider API key (Anthropic/OpenAI/GitHub/Google/xAI/Slack/AWS)" \
+    'sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AIza[A-Za-z0-9_-]{30,}|xai-[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16}' \
+    1
+
+# 8. THE GAP THIS AUDIT FOUND: Prometheus/OAra issue their own 64-char opaque
+#    tokens (PROMETHEUS_API_TOKEN, OARA_API_TOKEN, BRIDGE_BACKEND_TOKEN). They
+#    carry no vendor prefix, so they are indistinguishable from random hex to
+#    GitHub's provider-pattern scanner — nothing upstream would stop them. Match
+#    on the ASSIGNMENT instead: a long opaque value bound to a secret-ish name.
+check_pattern "Opaque secret assigned to a credential-named variable" \
+    '(?i)(api[_-]?key|api[_-]?token|auth[_-]?token|access[_-]?token|bearer|secret|password|passwd)["'"'"']?\s*[:=]\s*["'"'"']?[A-Za-z0-9+/=_-]{32,}' \
+    1
 
 if [ "$BLOCKED" -eq 1 ]; then
     echo "=== COMMIT BLOCKED ==="
