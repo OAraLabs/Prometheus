@@ -599,6 +599,11 @@ class LoopContext:
     tool_result_max: int = 0
     tool_results_turn_budget: int = 8000  # max tokens across ALL results per turn
     microcompact_after_turns: int = 3     # compact tool results older than N turns
+    # Rewriting history invalidates the provider's cached prompt prefix. That
+    # trade is worth it on a small local window and a clear loss on a cloud
+    # one (see _microcompact_old_results), so cloud tiers skip it by default.
+    # Set True to force the old behavior everywhere.
+    microcompact_on_cloud: bool = False
     microcompact_keep_chars: int = 200    # chars to keep per compacted result
     microcompact_keep_chars_no_lcm: int = 500  # chars if LCM hasn't ingested
     lcm_engine: object | None = None      # LCMEngine for microcompaction checks
@@ -1798,6 +1803,37 @@ def _apply_cross_result_budget(
     return new_results
 
 
+def _classify_tool_error(
+    *, is_error: bool, metadata: dict | None
+) -> str | None:
+    """Separate "the tool ran and reported failure" from "the call failed".
+
+    ``pytest`` exiting 1 on failing tests is the tool working correctly — the
+    command executed, produced output, and reported a real result the model can
+    act on. That was previously indistinguishable from a call that never ran
+    (bad arguments, missing tool, an exception), and both landed as
+    ``tool_error``. On the EMBERFALL baseline this dragged bash to 82% "success"
+    when zero of the failures were model- or call-level faults, which both
+    understates reliability and hides genuine breakage in the same bucket.
+
+    A tool that ran to completion exposes its exit status in
+    ``ToolResult.metadata['returncode']``; a call that never got there has no
+    returncode at all. That presence check is the discriminator.
+
+    Returns None on success, ``"nonzero_exit"`` when the tool ran and exited
+    non-zero, else ``"tool_error"``.
+    """
+    if not is_error:
+        return None
+    if isinstance(metadata, dict):
+        rc = metadata.get("returncode")
+        # rc == 0 with is_error set means the tool asserted failure on its own
+        # terms rather than via exit status — that is a real tool error.
+        if isinstance(rc, int) and not isinstance(rc, bool) and rc != 0:
+            return "nonzero_exit"
+    return "tool_error"
+
+
 def _microcompact_old_results(
     context: LoopContext,
     messages: list[ConversationMessage],
@@ -1809,6 +1845,25 @@ def _microcompact_old_results(
     Only touches ToolResultBlock content in messages older than N turns.
     """
     if current_turn < context.microcompact_after_turns:
+        return
+
+    # CACHE-AWARE GATE (fix/history-append-only). Rewriting history mid-run
+    # invalidates the provider's cached prompt prefix from that point on, and
+    # every cached token then gets re-billed at full rate. Measured on the
+    # EMBERFALL baseline: this fired at turn 4, saved ~3.6k tokens, and put
+    # ~92%-cacheable context (492k of 535k input tokens) back at full price —
+    # a large net loss under cached-input pricing.
+    #
+    # Microcompaction exists to protect SMALL LOCAL CONTEXT WINDOWS, where a
+    # few thousand tokens genuinely decide whether a run survives. Cloud tiers
+    # have windows orders of magnitude larger, so the saving is noise and the
+    # cache cost is not. Default: skip on cloud, keep for local.
+    #
+    # Unknown/missing adapter => compact (never silently disable a context
+    # safeguard just because provenance is unclear).
+    adapter = getattr(context, "adapter", None)
+    is_cloud = adapter is not None and getattr(adapter, "tier", None) == "off"
+    if is_cloud and not getattr(context, "microcompact_on_cloud", False):
         return
 
     from prometheus.engine.messages import ToolResultBlock as TRB
@@ -1825,6 +1880,8 @@ def _microcompact_old_results(
                 break
 
     compacted = 0
+    chars_before = 0
+    chars_after = 0
     for i in range(fresh_boundary):
         msg = messages[i]
         if not hasattr(msg, "content") or not isinstance(msg.content, list):
@@ -1857,15 +1914,46 @@ def _microcompact_old_results(
             # Extract tool name from the block or content
             first_line = content.split("\n", 1)[0][:80]
             summary = content[:keep_chars]
+            replacement = f"[microcompacted] {first_line}...\n{summary}"
             msg.content[j] = TRB(
                 tool_use_id=block.tool_use_id,
-                content=f"[microcompacted] {first_line}...\n{summary}",
+                content=replacement,
                 is_error=False,
             )
             compacted += 1
+            chars_before += len(content)
+            chars_after += len(replacement)
 
     if compacted:
-        log.debug("Microcompacted %d old tool results (turn %d)", compacted, current_turn)
+        dropped = chars_before - chars_after
+        log.info(
+            "Microcompacted %d old tool results at turn %d (-%d chars) — "
+            "the prompt prefix changed, so any provider cache is invalidated "
+            "from this round on",
+            compacted, current_turn, dropped,
+        )
+        # Record it. This used to be log.debug ONLY, which is why a 3,595-token
+        # mid-run history shrink was invisible until someone diffed per-round
+        # token counts by hand. A rewrite of history must always leave a trace.
+        if context.telemetry is not None:
+            try:
+                context.telemetry.record_run(
+                    subsystem="agent_loop",
+                    operation="microcompact",
+                    outcome="success",
+                    session_id=getattr(context, "session_id", None),
+                    model=getattr(context, "model", None),
+                    round_index=current_turn,
+                    summary={
+                        "results_compacted": compacted,
+                        "chars_dropped": dropped,
+                        "chars_before": chars_before,
+                        "chars_after": chars_after,
+                        "cache_prefix_invalidated": True,
+                    },
+                )
+            except Exception:
+                log.warning("microcompact telemetry write failed", exc_info=True)
 
 
 async def _safe_execute(
@@ -2543,7 +2631,13 @@ async def _execute_tool_call(
             success=not result.is_error,
             retries=retries_used,
             latency_ms=_latency_ms,
-            error_type="tool_error" if result.is_error else None,
+            # "ran and exited non-zero" is not "the call failed" — see
+            # _classify_tool_error. Keeping both under tool_error made a
+            # pytest run with failing tests look like a broken tool.
+            error_type=_classify_tool_error(
+                is_error=result.is_error,
+                metadata=getattr(result, "metadata", None),
+            ),
             # Capture the tool's own error message so `tool_error` rows are
             # diagnosable instead of blank (audit fix #4).
             error_detail=(result.output or "")[:2000] if result.is_error else None,
