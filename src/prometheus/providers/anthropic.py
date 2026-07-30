@@ -222,6 +222,8 @@ class AnthropicProvider(ModelProvider):
         # Streaming state
         content_blocks: list[Any] = []
         current_block: dict[str, Any] | None = None
+        cached_input: int | None = None
+        cache_write: int | None = None
         input_tokens = 0
         output_tokens = 0
         stop_reason: str | None = None
@@ -251,6 +253,12 @@ class AnthropicProvider(ModelProvider):
                     if etype == "message_start":
                         usage = event.get("message", {}).get("usage", {})
                         input_tokens = usage.get("input_tokens", 0)
+                        # Anthropic reports prompt caching as separate counters
+                        # (they are NOT included in input_tokens): reads are the
+                        # cache hit, creations are the one-off write cost.
+                        from prometheus.providers.openai_compat import _parse_cache_usage
+
+                        cached_input, cache_write = _parse_cache_usage(usage)
 
                     elif etype == "content_block_start":
                         current_block = event.get("content_block", {})
@@ -332,6 +340,8 @@ class AnthropicProvider(ModelProvider):
             usage=UsageSnapshot(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                cached_input_tokens=cached_input,
+                cache_write_tokens=cache_write,
             ),
             stop_reason=stop_reason,
         )

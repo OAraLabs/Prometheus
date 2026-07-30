@@ -87,6 +87,67 @@ def _native_tool_choice(tool_choice: object) -> object:
     )
 
 
+def _coerce_int(value: object) -> int | None:
+    """Non-negative int, or None. Providers occasionally send null/strings."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        return int(value) if value >= 0 else None
+    if isinstance(value, str):
+        try:
+            n = int(value.strip())
+        except ValueError:
+            return None
+        return n if n >= 0 else None
+    return None
+
+
+def _parse_cache_usage(usage: dict[str, Any]) -> tuple[int | None, int | None]:
+    """Extract (cached_input_tokens, cache_write_tokens) from a usage object.
+
+    Providers disagree on where prompt-cache accounting lives, and an
+    OpenAI-*compatible* endpoint is not obliged to match OpenAI exactly — xAI,
+    DeepSeek and friends each picked their own spelling. Rather than pin one
+    shape, probe the known ones in order of specificity and return None when a
+    provider says nothing at all.
+
+    None is deliberately NOT folded into 0: "this provider reports no cache
+    information" and "the cache was cold this round" are different findings,
+    and conflating them would make an unsupported provider look like a 0%
+    hit rate forever.
+    """
+    if not isinstance(usage, dict):
+        return None, None
+
+    cached: int | None = None
+    write: int | None = None
+
+    # OpenAI / xAI / most compat servers: nested details object.
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        cached = _coerce_int(details.get("cached_tokens"))
+    write_details = usage.get("completion_tokens_details")
+    if isinstance(write_details, dict) and write is None:
+        # Some servers report cache writes here; harmless when absent.
+        write = _coerce_int(write_details.get("cache_write_tokens"))
+
+    # DeepSeek-style flat keys (prompt_cache_hit_tokens / _miss_tokens).
+    if cached is None:
+        cached = _coerce_int(usage.get("prompt_cache_hit_tokens"))
+    # Anthropic-style, in case a compat shim passes them straight through.
+    if cached is None:
+        cached = _coerce_int(usage.get("cache_read_input_tokens"))
+    if write is None:
+        write = _coerce_int(usage.get("cache_creation_input_tokens"))
+    # Last resort: a flat cached_tokens on the usage object itself.
+    if cached is None:
+        cached = _coerce_int(usage.get("cached_tokens"))
+
+    return cached, write
+
+
 class OpenAICompatProvider(ModelProvider):
     """Provider for any OpenAI-compatible chat completions API.
 
@@ -170,7 +231,7 @@ class OpenAICompatProvider(ModelProvider):
         if last_error is not None:
             raise last_error
 
-    async def _call_once(
+    async def _call_once(  # noqa: C901 - stream parsing is inherently branchy
         self, request: ApiMessageRequest
     ) -> AsyncIterator[ApiStreamEvent]:
         """Single attempt to /v1/chat/completions (or /chat/completions)."""
@@ -224,6 +285,8 @@ class OpenAICompatProvider(ModelProvider):
         accumulated_text = ""
         accumulated_tool_calls: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
+        cached_input: int | None = None
+        cache_write: int | None = None
         input_tokens = 0
         output_tokens = 0
 
@@ -248,6 +311,7 @@ class OpenAICompatProvider(ModelProvider):
                         u = chunk["usage"] or {}
                         input_tokens = u.get("prompt_tokens", 0)
                         output_tokens = u.get("completion_tokens", 0)
+                        cached_input, cache_write = _parse_cache_usage(u)
 
                     for choice in chunk.get("choices", []):
                         finish_reason = choice.get("finish_reason") or finish_reason
@@ -287,6 +351,8 @@ class OpenAICompatProvider(ModelProvider):
             usage=UsageSnapshot(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                cached_input_tokens=cached_input,
+                cache_write_tokens=cache_write,
             ),
             stop_reason=finish_reason,
             dropped_malformed=dropped_malformed,

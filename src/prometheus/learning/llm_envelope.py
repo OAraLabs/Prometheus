@@ -254,6 +254,8 @@ class LLMCallEnvelope:
         started = time.time()
         usage_in: int | None = None
         usage_out: int | None = None
+        usage_cached: int | None = None
+        usage_cache_write: int | None = None
         stop_reason: str | None = None
         dropped_malformed = 0
         complete_seen = False
@@ -266,6 +268,10 @@ class LLMCallEnvelope:
                     if event.usage is not None:
                         usage_in = event.usage.input_tokens
                         usage_out = event.usage.output_tokens
+                        # None-safe: providers that report no cache info leave
+                        # these None, which is stored as NULL (distinct from 0).
+                        usage_cached = getattr(event.usage, "cached_input_tokens", None)
+                        usage_cache_write = getattr(event.usage, "cache_write_tokens", None)
                     stop_reason = event.stop_reason
                     dropped_malformed = getattr(event, "dropped_malformed", 0)
                     msg = event.message
@@ -302,6 +308,8 @@ class LLMCallEnvelope:
                 summary={"exception_type": type(exc).__name__},
                 input_tokens=usage_in,
                 output_tokens=usage_out,
+                cached_input_tokens=usage_cached,
+                cache_write_tokens=usage_cache_write,
                 round_index=round_index,
                 session_id=session_id,
                 model=request.model,
@@ -360,6 +368,8 @@ class LLMCallEnvelope:
         session_id: str | None,
         model: str | None,
         thinking: bool | None,
+        cached_input_tokens: int | None = None,
+        cache_write_tokens: int | None = None,
     ) -> None:
         """Best-effort ``subsystem_runs`` write with the F1 usage columns."""
         if self._telemetry is None:
@@ -373,6 +383,8 @@ class LLMCallEnvelope:
                 summary=summary,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
+                cache_write_tokens=cache_write_tokens,
                 round_index=round_index,
                 session_id=session_id,
                 model=model,
