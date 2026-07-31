@@ -342,17 +342,13 @@ class TestDynamicToolLoader:
         all_schemas = loader.active_schemas(None)
         assert len(all_schemas) == len(registry.list_tools())
 
-    def test_on_demand_returns_schema(self):
+    def test_on_demand_is_deleted(self):
+        # on_demand() was removed (feat/deferred-tools-tier-aware): zero
+        # production callers, and it read as live mid-run schema-injection
+        # machinery — the #120 prefix-mutation bug class if ever wired.
         registry = self._make_registry()
         loader = DynamicToolLoader(registry)
-        schema = loader.on_demand("grep")
-        assert schema is not None
-        assert schema["name"] == "grep"
-
-    def test_on_demand_returns_none_for_unknown(self):
-        registry = self._make_registry()
-        loader = DynamicToolLoader(registry)
-        assert loader.on_demand("nonexistent_tool") is None
+        assert not hasattr(loader, "on_demand")
 
     def test_all_schemas_returns_everything(self):
         registry = self._make_registry()

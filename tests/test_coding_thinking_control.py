@@ -70,6 +70,9 @@ def _thinking_flags(tel: ToolCallTelemetry) -> list[int | None]:
         r[0]
         for r in tel._conn.execute(
             "SELECT thinking FROM subsystem_runs WHERE subsystem='agent_loop'"
+            # Envelope rows only — run_loop's per-run 'tool_advertisement'
+            # row (deferred-loading accounting) has no thinking flag.
+            " AND operation != 'tool_advertisement'"
             " ORDER BY timestamp"
         ).fetchall()
     ]

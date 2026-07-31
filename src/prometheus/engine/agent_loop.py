@@ -706,12 +706,60 @@ async def run_loop(
     )
     _force_spent = False
 
+    # Tool advertisement (feat/deferred-tools-tier-aware). Resolved ONCE here,
+    # before the round loop, and tool_schema is never reassigned below — the
+    # advertised catalog is frozen for the run. Changing it mid-run is the
+    # #120 prefix-mutation bug class (it invalidates the provider's cached
+    # prompt prefix from the tools block onward, i.e. everything).
+    #
+    # This call site previously used active_schemas() with no arguments, which
+    # could not see the adapter — so tier-aware ("auto") resolution was
+    # structurally impossible and every registered tool shipped every round
+    # (measured: 49 schemas, ~9.6k tokens, 60.7% of round 0 on the EMBERFALL
+    # baseline, of which 3 tools were used).
     tool_schema: list[dict] = []
+    deferred_tools_active = False
+    deferred_source = "tools disabled"
     if tools_enabled:
-        if context.tool_loader is not None and hasattr(context.tool_loader, "active_schemas"):
+        if context.tool_loader is not None and hasattr(context.tool_loader, "resolve_deferred"):
+            deferred_tools_active, deferred_source = (
+                context.tool_loader.resolve_deferred(context.adapter)
+            )
+            tool_schema = context.tool_loader.schemas_for_run(deferred_tools_active)
+        elif context.tool_loader is not None and hasattr(context.tool_loader, "active_schemas"):
+            # Duck-typed loaders (tests, plugins) without the tri-state API.
+            deferred_source = "legacy loader (no tri-state support)"
             tool_schema = context.tool_loader.active_schemas()
         elif context.tool_registry is not None and hasattr(context.tool_registry, "to_api_schema"):
+            deferred_source = "no tool loader (registry direct)"
             tool_schema = context.tool_registry.to_api_schema()
+
+    # A/B measurability: one row per run stating what was advertised and why,
+    # so deferred-vs-full comparisons come straight out of the DB instead of
+    # being reconstructed from token counts.
+    if context.telemetry is not None and tools_enabled:
+        try:
+            _registered_total = (
+                len(context.tool_registry.list_tools())
+                if context.tool_registry is not None
+                and hasattr(context.tool_registry, "list_tools")
+                else None
+            )
+            context.telemetry.record_run(
+                subsystem="agent_loop",
+                operation="tool_advertisement",
+                outcome="success",
+                session_id=getattr(context, "session_id", None),
+                model=getattr(context, "model", None),
+                summary={
+                    "deferred_active": deferred_tools_active,
+                    "source": deferred_source,
+                    "advertised": len(tool_schema),
+                    "registered_total": _registered_total,
+                },
+            )
+        except Exception:
+            log.debug("tool_advertisement telemetry write failed", exc_info=True)
 
     # Sprint 10 / Phase 2: route the first user message through ModelRouter.
     # The canonical router returns a RouteDecision with pre-instantiated
@@ -2326,10 +2374,19 @@ async def _execute_tool_call(
             is_error=True,
         )
 
-    # Lucky guess: tool is registered but wasn't in the active prompt schema
-    if context.tool_loader is not None and hasattr(context.tool_loader, "_deferred_enabled"):
-        if context.tool_loader._deferred_enabled:
-            loaded_names = {s["name"] for s in context.tool_loader.active_schemas()}
+    # Lucky guess: tool is registered but wasn't in the active prompt schema.
+    # Recomputes the run-start resolution rather than reading stored state:
+    # resolve_deferred(config, adapter) is deterministic within a run, and the
+    # shared LoopContext must not carry per-run mutable state (concurrent
+    # turns cross-talk — see the per-message `mode` precedent). A config flip
+    # mid-run can at worst mislabel THIS telemetry row; it can never change
+    # the advertised catalog, which was frozen at run start.
+    if context.tool_loader is not None and hasattr(context.tool_loader, "resolve_deferred"):
+        _lg_deferred, _ = context.tool_loader.resolve_deferred(context.adapter)
+        if _lg_deferred:
+            loaded_names = {
+                s["name"] for s in context.tool_loader.schemas_for_run(True)
+            }
             if tool_name not in loaded_names:
                 log.info("Lucky guess: model called deferred tool %s", tool_name)
                 if context.telemetry is not None:

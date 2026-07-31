@@ -289,5 +289,8 @@ class TestTerminalTelemetry:
         loop_rows = tel._conn.execute(
             "SELECT COUNT(*) FROM subsystem_runs"
             " WHERE subsystem='agent_loop' AND session_id='coding:t-test'"
+            # Envelope rounds only — run_loop's per-run 'tool_advertisement'
+            # row (deferred-loading accounting) also carries this session id.
+            " AND operation != 'tool_advertisement'"
         ).fetchone()[0]
         assert loop_rows == 2

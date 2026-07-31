@@ -11,9 +11,12 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -220,6 +223,7 @@ def create_app(
                 "/api/cron", "/api/approvals", "/api/chat",
                 "/api/config", "/api/skills", "/api/profiles",
                 "/api/wiki/stats", "/api/sentinel", "/api/events/recent",
+                "/api/tools/deferred",
                 "/api/files", "/api/documents", "/api/artifacts",
             ],
         }
@@ -969,6 +973,117 @@ def create_app(
             return JSONResponse(status_code=400, content={"error": "invalid name"})
         rec = SkillStateStore().set_pinned(name, False)
         return {"name": name, "pinned": rec.pinned, "state": rec.state}
+
+    # ── Tools: deferred loading (feat/deferred-tools-tier-aware) ────
+
+    def _deferred_cfg() -> dict:
+        """The live tools.deferred_loading dict (created if absent) — the SAME
+        nested object the DynamicToolLoader holds, so a mutation here is what
+        the next run's resolve_deferred() reads."""
+        return config.setdefault("tools", {}).setdefault("deferred_loading", {})
+
+    def _tool_loader():
+        bridge = getattr(app.state, "ws_bridge", None)
+        lc = getattr(bridge, "loop_context", None)
+        return getattr(lc, "tool_loader", None), getattr(lc, "adapter", None)
+
+    def _deferred_status() -> dict:
+        from prometheus.context.dynamic_tools import _normalize_enabled
+
+        cfg = _deferred_cfg()
+        configured = _normalize_enabled(cfg.get("enabled", "auto"))
+        loader, adapter = _tool_loader()
+        if loader is not None and hasattr(loader, "resolve_deferred"):
+            effective, source = loader.resolve_deferred(adapter)
+            advertised = len(loader.schemas_for_run(effective))
+            total = len(loader.schemas_for_run(False))
+        else:
+            # Web-only mode (no agent loop wired): report config, not effect.
+            effective, source = None, "daemon loop not wired — cannot resolve"
+            advertised = total = None
+        return {
+            "configured": configured,
+            "effective": effective,
+            "source": source,
+            "advertised_count": advertised,
+            "total_tools": total,
+            "always_loaded": list(cfg.get("always_loaded", [])),
+            # The UI must repeat this verbatim: nothing here is live-applied.
+            "applies": "next run start",
+        }
+
+    @app.get("/api/tools/deferred")
+    async def get_deferred_tools():
+        """Deferred-loading state: configured tri-state, EFFECTIVE resolution
+        and its source ("auto → enabled (local provider)" vs "explicitly
+        disabled"), and the advertised/total schema counts."""
+        return _deferred_status()
+
+    @app.put("/api/tools/deferred")
+    async def put_deferred_tools(body: dict):
+        """Set the tri-state override. Body: {"enabled": true|false|"auto"}.
+
+        "auto" IS the cleared state (there is no separate delete — auto means
+        "no explicit override"). Applies at the NEXT run start: the loader
+        re-reads the value when a run begins and freezes the advertised set
+        for that run — a run already in flight is never touched.
+
+        Persists to the live YAML the same way the boot-time config drift
+        guard does (yaml.dump of the shared dict), so the choice survives a
+        daemon restart. Best-effort on the file write: the in-memory update
+        alone already changes the next run, and a read-only config volume
+        shouldn't 500 the toggle — the response says which happened.
+        """
+        if not isinstance(body, dict) or "enabled" not in body:
+            return JSONResponse(
+                status_code=400,
+                content={"error": 'body must be {"enabled": true|false|"auto"}'},
+            )
+        value = body["enabled"]
+        if not (isinstance(value, bool) or (isinstance(value, str) and value.strip().lower() == "auto")):
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"enabled must be true, false, or \"auto\" — got {value!r}"},
+            )
+        normalized = value if isinstance(value, bool) else "auto"
+
+        # 1. In-memory: the shared config dict + the live loader (if wired).
+        _deferred_cfg()["enabled"] = normalized
+        loader, _ = _tool_loader()
+        if loader is not None and hasattr(loader, "set_configured"):
+            loader.set_configured(normalized)
+
+        # 2. Durable: surgical write to the on-disk YAML. Deliberately NOT
+        # yaml.dump(config): the runtime dict has env-var secrets merged into
+        # it (env_override.py maps ANTHROPIC_API_KEY, the Telegram token, etc.
+        # into config["providers"]/["gateway"]) — dumping it would copy live
+        # credentials out of the 0600 env file into the repo-dir YAML. Instead:
+        # fresh-load the file (which contains only what the user put there),
+        # set the ONE key, write that back. Best-effort: the in-memory update
+        # above already governs the next run; a read-only volume must not 500
+        # the toggle — the response reports which layers took.
+        persisted = False
+        try:
+            import yaml as _yaml
+
+            cfg_path = Path("config/prometheus.yaml")
+            if not cfg_path.exists():
+                from prometheus.config.paths import get_config_dir
+
+                cfg_path = get_config_dir() / "prometheus.yaml"
+            if cfg_path.exists():
+                with cfg_path.open(encoding="utf-8") as fh:
+                    on_disk = _yaml.safe_load(fh) or {}
+                on_disk.setdefault("tools", {}).setdefault(
+                    "deferred_loading", {}
+                )["enabled"] = normalized
+                with cfg_path.open("w", encoding="utf-8") as fh:
+                    _yaml.dump(on_disk, fh, default_flow_style=False, sort_keys=False)
+                persisted = True
+        except Exception:
+            logger.warning("deferred-loading toggle: config persist failed", exc_info=True)
+
+        return {**_deferred_status(), "persisted": persisted}
 
     # ── Cron ────────────────────────────────────────────────────────
 
