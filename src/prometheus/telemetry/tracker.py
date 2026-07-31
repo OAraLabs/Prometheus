@@ -196,6 +196,13 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("session_id", "TEXT"),
         ("model", "TEXT"),
         ("thinking", "INTEGER"),
+        # Prompt-cache accounting (per round). The agent loop re-sends a
+        # near-identical prefix every round, so the cached fraction is the
+        # single biggest lever on cost — but it was previously invisible.
+        # NULL means "the provider reported nothing about caching", which is
+        # deliberately distinct from 0 ("cache was cold this round").
+        ("cached_input_tokens", "INTEGER"),
+        ("cache_write_tokens", "INTEGER"),
     ],
 }
 
@@ -463,6 +470,8 @@ class ToolCallTelemetry:
         session_id: str | None = None,
         model: str | None = None,
         thinking: bool | None = None,
+        cached_input_tokens: int | None = None,
+        cache_write_tokens: int | None = None,
     ) -> None:
         """Record one autonomous-subsystem cycle / pass / invocation.
 
@@ -495,8 +504,9 @@ class ToolCallTelemetry:
                   (id, timestamp, subsystem, operation,
                    duration_ms, outcome, summary_json,
                    input_tokens, output_tokens, round_index,
-                   session_id, model, thinking)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   session_id, model, thinking,
+                   cached_input_tokens, cache_write_tokens)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     uuid4().hex,
@@ -512,6 +522,8 @@ class ToolCallTelemetry:
                     session_id,
                     model,
                     None if thinking is None else int(thinking),
+                    cached_input_tokens,
+                    cache_write_tokens,
                 ),
             )
             self._conn.commit()
