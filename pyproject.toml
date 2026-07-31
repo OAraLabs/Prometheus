@@ -41,8 +41,9 @@ slack = ["slack-bolt>=1.18.0", "slack-sdk>=3.27.0"]
 # (discord.py pulls aiohttp); import-guarded exactly like the slack extra.
 discord = ["discord.py>=2.3.0"]
 # Polish sprint WS2: Beacon dashboard backend + WS bridge. Optional so the
-# CLI/Telegram-only path stays slim.
-web = ["fastapi>=0.110", "uvicorn>=0.27", "websockets>=12"]
+# CLI/Telegram-only path stays slim. python-multipart backs the live
+# recorder's multipart trace upload (POST /api/learning/live-upload).
+web = ["fastapi>=0.110", "uvicorn>=0.27", "websockets>=12", "python-multipart>=0.0.9"]
 evals = [
     "deepeval>=2.0",
     "arize-phoenix>=5.0",

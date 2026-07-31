@@ -32,6 +32,7 @@ async def launch_web(
     agent_loop: Any | None = None,
     approval_queue: Any | None = None,
     loop_context: Any | None = None,
+    skill_creator: Any | None = None,
     static_dir: str | None = None,
     api_host: str = "0.0.0.0",
     api_port: int = 8005,
@@ -74,6 +75,7 @@ async def launch_web(
         approval_queue=approval_queue,
         model_router=getattr(loop_context, "model_router", None),
         static_dir=static_dir,
+        skill_creator=skill_creator,
     )
 
     # Wire agent state ref into the app

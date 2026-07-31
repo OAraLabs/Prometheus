@@ -1354,17 +1354,29 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
             api_port = web_config.get("api_port", 8005)
             ws_port = web_config.get("ws_port", 8010)
+            # Live recorder: give the web layer the daemon's SkillCreator
+            # (signal_bus-wired) and the live SkillRegistry so trace uploads
+            # persist through THE auto-skill write path and the running
+            # agent picks new skills up via reload_user_skills().
+            try:
+                ts = registry.get("tool_search")
+                web_skill_registry = ts.get_skill_registry() if ts else None
+            except Exception:
+                web_skill_registry = None
+
             web_task = asyncio.create_task(launch_web(
                 config=config,
                 boot_sha=boot_sha,
                 signal_bus=signal_bus if "signal_bus" in dir() else None,
                 session_mgr=session_manager,
                 telemetry=telemetry,
+                skill_registry=web_skill_registry,
                 lcm_engine=lcm_engine if "lcm_engine" in dir() else None,
                 agent_loop=agent_loop,
                 approval_queue=approval_queue if "approval_queue" in dir() else None,
                 loop_context=loop_context,
                 profile_store=profile_store,
+                skill_creator=skill_creator if "skill_creator" in dir() else None,
                 api_port=api_port,
                 ws_port=ws_port,
             ))
