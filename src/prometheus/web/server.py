@@ -338,12 +338,54 @@ def create_app(
         )
 
     @app.post("/api/sessions")
-    async def create_session():
+    async def create_session(request: Request):
+        """Mint a session id, stamped with its origin gateway.
+
+        Body (optional): ``{"gateway": "desktop"}``.
+
+        Session ids are ``<gateway>:<uuid>`` — the same convention Telegram
+        (``telegram:<chat>``), voice, and the bakeoff harness already follow,
+        and the one GET /api/sessions parses to report each row's ``gateway``.
+        This route previously minted a BARE uuid, so every session created
+        from Beacon reported ``gateway: "unknown"`` and rendered as a cryptic
+        "UN" chip — 30 of 127 sessions on the live box, all of them ordinary
+        desktop chats mislabelled as unidentifiable.
+
+        Defaults to ``desktop`` because this route exists for the desktop/web
+        chat surface; a caller that is something else says so explicitly.
+
+        Existing bare-uuid sessions keep working — ids are immutable and the
+        gateway parse already falls back to "unknown" for them.
+        """
+        import re
         import uuid
-        sid = str(uuid.uuid4())
+
+        gateway = "desktop"
+        try:
+            body = await request.json()
+            # PRESENT-but-empty is a caller bug, not "unspecified" — it falls
+            # through to the charset guard below and 400s rather than silently
+            # becoming "desktop". Absent key / no body → the default.
+            if isinstance(body, dict) and "gateway" in body:
+                gateway = str(body["gateway"] or "").strip()
+        except Exception:
+            pass  # no/invalid body → the default; this route has no required input
+
+        # The id is parsed by splitting on the FIRST colon, so a colon in the
+        # gateway would silently truncate it. Keep the charset boring.
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", gateway, re.I):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": f"invalid gateway {gateway!r} — expected 1-32 chars "
+                             "of [A-Za-z0-9_-], no colons"
+                },
+            )
+
+        sid = f"{gateway.lower()}:{uuid.uuid4()}"
         if session_mgr:
             session_mgr.get_or_create(sid)
-        return {"session_id": sid}
+        return {"session_id": sid, "gateway": gateway.lower()}
 
     @app.post("/api/chat/send")
     async def send_chat(request: Request):
