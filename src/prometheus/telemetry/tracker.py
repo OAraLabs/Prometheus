@@ -50,6 +50,20 @@ POLICY_ERROR_TYPES: frozenset[str] = frozenset(
     {"permission_denied", "hook_blocked"}
 )
 
+# Same denominator-honesty argument, different cause: the tool RAN to
+# completion and reported a non-zero exit status (``pytest`` with failing
+# tests, ``grep`` finding nothing, a build that legitimately fails). The call
+# was well-formed and executed — the failure is in the world, not in tool
+# calling — so it must not count against the model's tool-call success rate.
+# It is still surfaced separately, because a rising count is real signal.
+#
+# Measured impact: on the EMBERFALL baseline this single conflation reported
+# bash at 82% success when every one of the "failures" was a correct execution.
+EXECUTED_ERROR_TYPES: frozenset[str] = frozenset({"nonzero_exit"})
+
+# Everything that must be kept out of the success-rate denominator.
+NON_CALL_FAILURE_TYPES: frozenset[str] = POLICY_ERROR_TYPES | EXECUTED_ERROR_TYPES
+
 
 _SCHEMA_SQL_TABLES = """
 CREATE TABLE IF NOT EXISTS tool_calls (
@@ -811,13 +825,15 @@ class ToolCallTelemetry:
             # counting them double-counts failures in the success rate.
             # D3: policy denials count toward ``total`` (the call happened) but
             # not toward ``failures`` or the success-rate denominator.
-            _ph = ",".join("?" * len(POLICY_ERROR_TYPES))
+            # Also excludes ``nonzero_exit`` (the tool ran; the command
+            # reported failure) — see NON_CALL_FAILURE_TYPES.
+            _ph = ",".join("?" * len(NON_CALL_FAILURE_TYPES))
             t_total, t_succ, t_denied = self._conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(success), 0), "
                 f"COALESCE(SUM(error_type IN ({_ph})), 0) "
                 "FROM tool_calls WHERE timestamp >= ? "
                 "AND tool_name != '_loop_transition'",
-                (*POLICY_ERROR_TYPES, since),
+                (*NON_CALL_FAILURE_TYPES, since),
             ).fetchone() or (0, 0, 0)
             t_total, t_succ, t_denied = (
                 int(t_total or 0), int(t_succ or 0), int(t_denied or 0),
@@ -1066,6 +1082,13 @@ class ToolCallTelemetry:
                 mt["denials"] += 1
                 td["denials"] += 1
                 total_denials += 1
+                continue
+
+            # The tool executed and the command exited non-zero. Reported in
+            # its own bucket, kept out of the success-rate math.
+            if error_type in EXECUTED_ERROR_TYPES:
+                mt["nonzero_exits"] = mt.get("nonzero_exits", 0) + 1
+                td["nonzero_exits"] = td.get("nonzero_exits", 0) + 1
                 continue
 
             total += 1
