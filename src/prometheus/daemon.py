@@ -430,6 +430,13 @@ async def run_daemon(args: argparse.Namespace) -> None:
         divergence_detector=divergence_detector,
         post_result_hooks=post_result_hooks or None,
         max_tool_iterations=model_config.get("max_tool_iterations", 25),
+        # The DAEMON path was dropping this while __main__.py passed it, so
+        # LoopContext.max_tool_iterations_cloud stayed None and
+        # _effective_max_tool_iterations fell back to the LOCAL cap for every
+        # provider. Live evidence: a grok-4.5 turn stopped at "26/25" with
+        # max_tool_iterations_cloud: 50 sitting correctly in the config —
+        # the config was right, the daemon just never received it.
+        max_tool_iterations_cloud=model_config.get("max_tool_iterations_cloud", 50),
         tool_loader=tool_loader,
         nudge=nudge,
         file_mutation_verifier=fmv,
