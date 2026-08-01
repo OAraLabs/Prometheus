@@ -78,7 +78,11 @@ adapter:
 
 security:
   permission_mode: "default"
-  workspace_root: "~"
+  # The boundary the SecurityGate enforces for file operations. Ships tight by
+  # default — widen deliberately (e.g. "~" or "~/projects") if you want the
+  # agent working across your home directory. Coding runs, documents, and the
+  # artifact outbox have their own confinement and are not limited by this.
+  workspace_root: "~/.prometheus/workspace"
   denied_commands:
     - "rm -rf /"
     - "rm -rf ~"
@@ -496,6 +500,13 @@ hooks: {}
 evals:
   results_dir: "~/.prometheus/eval_results"
   skip_network_tasks: true
+  # Judge independence: with no judge_base_url the LLM judge auto-detects the
+  # SAME endpoint the main model uses — i.e. the model grades itself. Fine for
+  # smoke checks; for scores you intend to compare or publish, point the judge
+  # at a different model. Any OpenAI-compatible server with structured-output
+  # support works (llama.cpp, Ollama).
+  # judge_base_url: "http://localhost:11434"   # e.g. a local Ollama
+  # judge_model: "qwen2.5:7b-instruct"
 
 tracing:
   enabled: false
