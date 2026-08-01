@@ -1,7 +1,7 @@
 """MCP transport resolution — stdio vs HTTP vs SSE.
 
 Donor: OpenClaw src/agents/mcp-transport-config.ts, mcp-stdio.ts, mcp-http.ts
-License: MIT (Anthropic)
+License: MIT (OpenClaw Foundation)
 
 Source: Prometheus (OAra AI Lab)
 License: MIT

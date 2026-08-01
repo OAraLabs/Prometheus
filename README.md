@@ -30,38 +30,30 @@ prometheus daemon         # always-on: web API + gateways + cron + background la
 - **Visible memory that rides every prompt** — `MEMORY.md` and `USER.md` you can read, structured facts mined from conversations every 30 minutes, and passive recall that FTS-matches each message against the memory store and injects what's relevant.
 - **Lossless context** — DAG-based compression with full-text search so long sessions don't drop facts; originals are always recoverable.
 - **Sandboxed coding runs** — point it at a repo and an acceptance command; it iterates to green in a clone and hands you a reviewable branch. Never merges, never pushes.
+- **Telemetry that stays home** — every tool call, repair, and token count logged to SQLite on your own disk and sent nowhere. It's the raw material for tuning the adapter and fine-tuning your own model: the data big labs keep for themselves, kept by you instead.
 - **A desktop cockpit** — Beacon pairs to the daemon over your LAN or tailnet and gives every subsystem a native surface.
 
 > **Status:** Active development. Expect rough edges. Fixes land weekly. Feedback welcome.
 
 **Deeper docs** — the guide pages under [`docs/guide/`](docs/guide/):
-[Install & first flight](docs/guide/install.md) · [Feature reference](docs/guide/features.md) · [Beacon desktop](docs/guide/beacon.md) · [Coding Mode & Loop Manager](docs/guide/coding-mode.md) · [Memory & knowledge](docs/guide/memory.md) · [Models & providers](docs/guide/providers.md) · [HTTP & WebSocket API](docs/guide/api.md)
+[Install & first flight](docs/guide/install.md) · [Feature reference](docs/guide/features.md) · [Beacon desktop](docs/guide/beacon.md) · [Coding Mode & Loop Manager](docs/guide/coding-mode.md) · [Record a Skill](docs/guide/record-a-skill.md) · [Memory & knowledge](docs/guide/memory.md) · [Models & providers](docs/guide/providers.md) · [HTTP & WebSocket API](docs/guide/api.md)
 
 ---
 
-## Prior art and influences
-
-**Not a fork, and not a port.** Prometheus is an original Python codebase. Several of its subsystems were designed by studying the *architecture and behavior* of proven open-source projects, then reimplementing those ideas from scratch — no source code was copied or translated. The table credits the prior art that shaped each subsystem's design:
-
-| Subsystem | Influence | What the design drew on |
-|-----------|-----------|-------------------------|
-| Agent loop | Claude Code patterns (via Sigrid Jin's clean-room analysis) | The tool-registry / hook-pipeline / permission-governance shape |
-| Always-on gateway | Hermes | The always-on messaging + cron + credential-rotation model |
-| Context management | Lossless-Claw / OpenClaw | The DAG-based lossless-compression-with-FTS approach |
-| Production patterns | OpenClaw | Memory-extractor / archive-bridge / heartbeat patterns |
-| Knowledge base | Karpathy's LLM Wiki (concept) | Memory extraction → wiki pages → cross-referenced knowledge |
-
-Where a subsystem's design was shaped by external prior art, the relevant source file credits that influence in a header comment. The implementation is Prometheus's own.
-
 ## What we built from scratch
 
-Three subsystems had no meaningful prior art and are wholly original:
+The interesting work is original:
 
 - **Model Adapter Layer** — the gap between Claude-quality tool-calling and what open models actually produce. Validates, auto-repairs, enforces output schemas, retries with specific error context.
 - **SENTINEL** — a proactive layer that watches for idle time and acts, instead of only reacting to prompts. Nudges, dreams, synthesizes.
 - **Wiki Knowledge System** — turns every conversation into a compounding knowledge base that cross-references itself over time.
+- **The coding engine's iterate-to-green policy** — "done" is a verdict, not a claim: sandboxed rounds until the acceptance command exits 0, with failure-fingerprint step-back and zero-progress aborts.
+- **The fine-tuning gym** — frozen task-sets, dual scoring (raw emission vs post-repair execution), and a refusal to declare winners it can't statistically back.
+- **SYMBIOTE** — experimental self-modification with blue-green deploy and auto-rollback.
 
-These are where most of the interesting work lives.
+### Provenance
+
+**Provenance.** Prometheus is an original codebase, not a fork: 250 of its 309 Python modules were written from scratch — including everything that makes it interesting: the Model Adapter Layer, SENTINEL, SYMBIOTE, the Wiki Knowledge System, the coding engine, and the fine-tuning gym. Like most real software, it started on the shoulders of open source: early scaffolding (base file tools, cron, the engine skeleton) was adapted from MIT-licensed projects — chiefly OpenHarness, with smaller pieces from Hermes Agent and OpenClaw — and the engine has since diverged to under 4% code similarity with its starting point. Every adapted file names its source in a header comment; full notices are in [NOTICE](NOTICE). Several other subsystems (the gateways, LSP integration, teacher escalation) were designed by studying prior art and implemented clean-room.
 
 ---
 
@@ -87,13 +79,13 @@ Prometheus isn't a wrapper around `ollama.chat()`. It's a complete agent operati
 
 **SENTINEL transforms the agent from reactive to proactive.** Most agents sit idle until you talk to them. Prometheus has a background intelligence layer that watches tool performance patterns, consolidates memory, lints its own knowledge base, and discovers cross-entity insights — all while you're away. Three of four phases use zero LLM calls. The fourth is budget-capped at 2,000 tokens. It nudges you via Telegram when it finds something interesting but never acts without permission.
 
-**A compounding knowledge base inspired by Karpathy's LLM Wiki concept.** Every 30 minutes, a Memory Extractor pulls structured facts from your conversations. A WikiCompiler builds entity pages with cross-references. The wiki grows and connects itself over time. Point Obsidian at the markdown files and the graph view lights up.
+**A compounding knowledge base inspired by Karpathy's LLM Wiki concept.** Every 30 minutes, a Memory Extractor pulls structured facts from your conversations, and the wiki recompiles the affected entity pages automatically — extraction and compilation are one loop, not a manual step. The wiki then maintains itself: SENTINEL's zero-LLM linter patrols for orphans, broken links, and stale pages; dedup gates keep repeated insights from piling up; and passive recall feeds the accumulated facts back into every turn. Point Obsidian at the markdown files and the graph view lights up.
 
 **Infrastructure self-awareness via the AnatomyScanner.** At startup, Prometheus scans your hardware (CPU, RAM, GPU VRAM), detects the loaded model and its quantization, maps your Tailscale network peers, checks disk usage, and generates `ANATOMY.md` with Mermaid architecture diagrams of your entire setup. The agent knows exactly what machine it's running on, what model is loaded, and what resources are available.
 
-**An evaluation framework with a local LLM judge.** Most agent evals require API calls to GPT-4. Prometheus uses constrained-decoding on your local model to judge task completion, tool usage accuracy, and hallucination — zero API cost. Failure classification (model vs harness vs unclear) and trend tracking across models and runs.
+**An evaluation framework with a local LLM judge.** Most agent evals require API calls to GPT-4. Prometheus uses constrained-decoding on your local model to judge task completion, tool usage accuracy, and hallucination — zero API cost. Failure classification (model vs harness vs unclear) and trend tracking across models and runs. The judge defaults to the same endpoint as the model under test — point `judge_base_url` at a second model when you want independent judging.
 
-**LSP integration for compiler-grade code intelligence.** Instead of grepping for function names, the agent queries language servers for real symbol definitions, type errors, and references. After every file edit, a diagnostics hook automatically checks for type errors and feeds them back to the model in the same turn.
+**LSP integration for compiler-grade code intelligence.** Instead of grepping for function names, the agent queries language servers for real symbol definitions, type errors, and references. After every file edit, a diagnostics hook automatically checks for type errors and feeds them back to the model in the same turn. Off by default — one config flag turns it on.
 
 ## Open Models First, APIs Welcome
 
@@ -116,6 +108,14 @@ The architecture doesn't care where the tokens come from. It cares that the tool
 
 *The [feature reference](docs/guide/features.md) covers everything below in depth — including which subsystems are on by default and which are opt-in.*
 
+Three commitments run through everything below:
+
+**Refuses to lie to you.** Untrusted input — cron payloads, task output, file contents — carries provenance and is fenced off as data, not instructions, before the model sees it. A file-mutation verifier stat-checks every claimed edit and tells the model "CLAIMED but NO CHANGE ON DISK" when nothing actually changed. Telemetry keeps honest denominators (a failing test run is not a failed tool call), the daemon self-reports when it's running stale code, every swallowed exception lands in a queryable silent-failure ledger, "I'll let you know when it's done" must be backed by a real registered task, and a coding run's "done" is a verdict — the acceptance command re-run — not a claim.
+
+**Survives you, restarts, and itself.** Sessions, background tasks, and message ids are durable contracts that outlive daemon restarts. The memory store heals itself — search-index rebuilds, snapshot backups before every migration, writes that either commit or raise. Signals persist before they broadcast, so a crash can never have told you something the disk doesn't know.
+
+**Secure by construction, not by policy.** Tool sandboxes strip API keys from the environment — the agent cannot read its own credentials. The audit log redacts secrets before writing, outbound fetches resolve-and-block private address space, cron passes the same security gate at creation and at execution and fails closed, self-modification is gated behind a dangerous-code scanner, and agent deliverables are served by content id rather than by path.
+
 ### Model Independence
 
 - Runs any model llama.cpp or Ollama can serve — Qwen, Gemma, Llama, Mistral, Phi, DeepSeek, Command-R
@@ -124,14 +124,19 @@ The architecture doesn't care where the tokens come from. It cares that the tool
 - 10+ providers: llama.cpp, Ollama, OpenAI-compatible (OpenAI/Gemini/xAI/DeepSeek/Kimi/GLM/MiMo), Anthropic
 - Configurable adapter strictness: STRICT (small models), MEDIUM (Qwen/Gemma), NONE (cloud APIs)
 - Per-session model override via slash command, REST, or Beacon's model switcher
+- Deferred tool loading (tri-state, default `auto`): cloud models get the full tool catalog; local models get a compact deferred catalog that hands back roughly 8K tokens of context on a 32K window
+- Cache-shaped context: the tool catalog is frozen at run start, any history rewrite is flagged, and mid-run compaction stays off on cloud providers — your prompt prefix is treated as a cache asset
 
 ### 40+ Builtin Tools
 
-`bash`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`, `web_search`, `web_fetch`, `youtube_transcript`, `download_file`, `browser` (Playwright), `image_generate`, `video_generate`, `tts`, `message`, `dashboard`, `notebook_edit`, `cron_create/delete/list`, `task_create/get/list/update/stop/output`, `todo_write`, `skill`, `agent` (subagent spawning), `ask_user`, `sessions_list/send/spawn`, `lcm_grep/expand/describe/expand_query`, `wiki_compile/query/lint`, `sentinel_status`, `audit_query`, `anatomy`, `lsp` (7 actions), plus dynamic MCP tools (`mcp__{server}__{tool}`).
+`bash`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`, `web_search`, `web_fetch`, `youtube_transcript`, `download_file`, `browser` (Playwright), `image_generate`, `video_generate`, `tts`, `message`, `dashboard`, `notebook_edit`, `cron_create/delete/list`, `task_create/get/list/update/stop/output`, `todo_write`, `skill`, `agent` (subagent spawning), `ask_user`, `sessions_list/send/spawn`, `lcm_grep/expand/describe/expand_query`, `wiki_compile/query/lint`, `sentinel_status`, `audit_query`, `anatomy`, `lsp` (7 actions; when enabled), plus dynamic MCP tools (`mcp__{server}__{tool}`).
 
 ### Coding Mode — iterate to green
 
 Point the agent at a repo, a task, and an acceptance command. It clones the repo into a sandbox (cwd jail, env-scrubbed so your provider keys never reach the subprocess), works in rounds until the acceptance command exits 0, and leaves a reviewable branch. **"Done" is a verdict, not a claim** — the session re-runs your acceptance command itself and rejects no-evidence turns. Mid-run supervision (pause / inject / resume) rides a control channel the run polls between episodes. Rounds stream live to Beacon.
+
+- Supervision is fail-safe by construction: a corrupt or missing control file reads as "not paused", and a run with no control channel is byte-identical to an unsupervised one
+- Repeated failures are caught by fingerprint: the failure output is normalized (timings, addresses) and hashed, so hitting the same wall twice triggers an explicit step-back — and zero-progress runs abort instead of burning rounds
 
 ![A finished coding run in Beacon — Converted ✓, acceptance exit 0, and the reviewable diff](docs/assets/shots/run-2-artifact.png)
 
@@ -139,13 +144,22 @@ Beacon's **Loop Manager** turns this into a PM cockpit: register repos, keep a `
 
 ### Skills
 
-The agent writes skills for itself: the SkillCreator turns successful multi-step traces into markdown skill files, the SkillRefiner updates them when better executions come along, and a weekly Curator pass consolidates and prunes (pinned skills are protected; nothing is hard-deleted). Three core skills ship in the package (`commit`, `debug`, `plan`), and the repo carries a **102-file skill library** in [`skills/`](skills/) you can drop into `~/.prometheus/skills/` selectively — it's deliberately not auto-loaded, to keep prompts lean. GEPA (evolutionary skill optimization, judged by your local model) is available as an opt-in idle-time layer.
+The agent writes skills for itself: the SkillCreator turns successful multi-step traces into markdown skill files, the SkillRefiner updates them when better executions come along, and a weekly Curator pass consolidates and prunes (pinned skills are protected; nothing is hard-deleted). Three core skills ship in the package (`commit`, `debug`, `plan`), and the repo carries a **102-file skill library** in [`skills/`](skills/) you can drop into `~/.prometheus/skills/` selectively — it's deliberately not auto-loaded, to keep prompts lean. GEPA (evolutionary skill optimization, judged by your local model) is available as an opt-in idle-time layer — and it runs every candidate through a dangerous-code scanner before promotion.
+
+### Record a Skill
+
+Show the agent a workflow instead of describing it. Two capture paths, two trust levels:
+
+- **Live DOM recording** — record a browser workflow; a deterministic pipeline (no model calls) turns the event trace into a skill, runs it through a five-check quality gate, and auto-persists it to `skills/auto/`
+- **Video / YouTube ingestion** — screen recordings and videos are transcribed and vision-digested into skill drafts that **never** auto-persist: they wait in Beacon for human accept or reject
+
+Ground-truth DOM traces earn autonomy; lossy vision output stays human-reviewed. Full walkthrough: [Record a Skill guide](docs/guide/record-a-skill.md).
 
 ### MCP Integration
 
 - Dynamic tool discovery from any MCP server
-- Collision-free naming (`mcp__{server}__{tool}`), Stdio/HTTP/SSE transport, config fingerprinting
-- Context7 ships ready for up-to-date library documentation
+- Collision-free naming (`mcp__{server}__{tool}`), stdio transport today (HTTP/SSE planned), config fingerprinting
+- Context7 is a two-line config away for up-to-date library documentation
 
 ### Identity System
 
@@ -158,20 +172,33 @@ The agent writes skills for itself: the SkillCreator turns successful multi-step
 ### Security
 
 - 4-level trust model (BLOCKED → APPROVE → AUTO → AUTONOMOUS), origin-aware: background work (SENTINEL, cron, gym) faces stricter gates than what you ask for directly
-- 33+ always-blocked patterns, workspace boundary enforcement, bash intent analysis
+- 8 always-blocked command patterns plus configurable deny lists and bash intent analysis, with workspace boundary enforcement
+- Untrusted-input fencing: every message carries a provenance tag, and content from cron jobs, task output, and files is wrapped as data — not instructions — before it reaches the model
+- Secrets structurally absent: tool sandboxes strip key/token/secret variables from the environment (the agent can't `env` its own keys), the audit log redacts before writing, key updates reject control characters, and key reads return booleans — never values
+- SSRF-hardened outbound: `web_fetch` and `download_file` resolve DNS and refuse private, loopback, and link-local address space before any request leaves the machine
+- Cron is not a bypass: jobs pass the security gate at creation **and** again at execution; blocked runs are recorded and reported — fail closed
 - Audit logging (SQLite + JSONL, queryable via `/audit`), exfiltration detection, prompt-injection defense
 - Approval queue — `/approve`, `/deny`, `/pending` via Telegram, or one-click Approve/Deny cards in Beacon
 - Authenticated control plane — bearer-token REST plus first-frame token auth on the WebSocket bridge
-- Secrets live in `~/.config/prometheus/env`, never in the yaml; a pre-commit hook blocks secrets and network identifiers from ever landing in the repo
+- Secrets live in `~/.config/prometheus/env`, never in the yaml; a pre-commit hook scans staged blobs for provider keys and this project's own opaque tokens before anything lands in the repo
 
 ### Always-On
 
 - Telegram gateway with photo (vision captioning), voice (Whisper STT), document (20+ formats), and sticker handling
-- Slack gateway (Socket Mode) at Telegram parity: 23 slash commands, thread-based long replies, channel whitelists
+- Slack gateway (Socket Mode) at Telegram parity: 45 slash commands, thread-based long replies, channel whitelists
 - Discord gateway at the same parity: `/prometheus` app commands, DM + guild/channel whitelists
 - Cron scheduler (natural-language scheduling supported), heartbeat monitoring, systemd service
-- Durable background tasks (`tasks.db` survives restarts) with an honesty check: "I'll let you know when it's done" must be backed by a real registered task
+- Durable background tasks (`tasks.db` survives restarts) with an honesty check: "I'll let you know when it's done" must be backed by a real registered task — and tasks orphaned by a restart are marked failed instead of pretending to still run
 - 40+ slash commands on Telegram — including mid-turn `/steer`, `/queue`, and per-chat provider overrides
+- **Paperclip fleet gateway** (experimental, off by default) — Prometheus as a hireable agent: a fleet manager wakes it over HTTP, it checks out an issue, works a turn, reports back, and bills from real token usage
+
+### Sessions that behave like sessions
+
+- **They survive restarts** — the session list is durably indexed, so a daemon restart restores every conversation; "Forget" is a durable tombstone that new activity revives
+- **You can stop a running turn** — interrupt over WebSocket or REST; completed rounds persist and the partial reply is kept as a real assistant turn, not discarded
+- **Liveness you can trust** — a progress pulse (phase / tool / round / elapsed) every few seconds distinguishes a long turn from a dead daemon, and failures arrive classified — a billing error says it's a billing error and how to fix it, instead of a blank timeout
+- **An outbox for deliverables** — files the agent produces land in `~/.prometheus/files` and are served by content id (renames don't break links, no path-traversal surface); Beacon shows them as download chips
+- **A real sync contract** — every message has a durable id that doubles as a cursor, so clients resync incrementally after any disconnect
 
 ### Documents & Board
 
@@ -187,19 +214,27 @@ The agent writes skills for itself: the SkillCreator turns successful multi-step
 ### Fine-Tuning Flywheel (in progress)
 
 - Successful tool-call traces and adapter repair-pairs are captured, stored, and mined into an exportable dataset (capture → store → miner → export); browse with `/pairs`
+- Using the big model *is* collecting the corpus: first-try cloud successes are flagged golden at write time and banked as training examples for the local model
 - A gym runs frozen task-sets against live models with deterministic **dual scoring** (raw emission vs post-repair execution) and refuses to declare winners below sample-size thresholds
+- The gym also refuses untrustable results by construction: it probes the backend before starting, rejects two-variable experiments outright, and pins task-set and manifest hashes into every run
+- Corpus harvesting is Goodhart-proofed: pairs are classified by transition type with per-type caps, after one harvest came back 97% a single pattern
 - This is the data-collection half of a LoRA loop for the local model; the training step itself is still on the roadmap
 
 ### Observability
 
-- Tool-call telemetry (SQLite) — success rates per model per tool, surfaced in Beacon's Tool Feed and `/health`
-- Every model call wrapped in an `LLMCallEnvelope` — per-round token accounting, silent failures surfaced
+**Telemetry that stays home.** Local-first people rightly refuse telemetry — because it usually means someone else's server. Prometheus inverts it: every tool call, repair, token count, and failure is recorded to SQLite on your own disk and sent nowhere — the telemetry module contains no network code at all, and the optional tracing exporter is off by default and points at localhost. It exists so *you* hold the data the big labs keep for themselves: the per-model success rates that tune the adapter, the golden traces that become your fine-tuning corpus, and the receipts for what your model actually did. And it's neither slow nor bloated — WAL-mode appends cost sub-milliseconds next to tool calls that take seconds, and months of heavy daily use produce a database around 11 MB. Don't want it anyway? `infrastructure.telemetry_enabled: false` is one line, and `prometheus --reset-telemetry` wipes the slate whenever you like.
+
+- Tool-call telemetry (SQLite) — success rates per model per tool, surfaced in Beacon's Tool Feed and `/health` — with honest denominators: a correctly executed command whose task fails (pytest exit 1) is not counted against the model
+- Every claimed file mutation is verified against disk — created / modified / deleted / **no change** — and "CLAIMED but NO CHANGE ON DISK" goes back to the model on its next turn
+- Every model call wrapped in an `LLMCallEnvelope` — per-round token accounting, and every swallowed exception lands in a queryable silent-failure ledger before any failure policy runs
+- Per-round prompt-cache stats (cached vs cache-write tokens, hit ratio) across providers — a provider that doesn't report is recorded as unknown, never as a fake zero
+- The daemon knows when it's stale: `/api/status` reports the running SHA against the repo's HEAD, so merged-but-not-restarted can never masquerade as deployed
 - Phoenix/OpenTelemetry tracing — env-gated, zero-cost no-ops when off
-- Failure classification in evals (model vs harness vs unclear) with trend tracking
+- Failure classification in evals (model vs harness vs unclear) with trend tracking — the judge runs on your local endpoint; point `judge_base_url` at a second model for independent judging
 
 ### On by default vs opt-in
 
-Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, and the web API are on out of the box. The bigger autonomous subsystems — SENTINEL dreaming, the model router, LSP, GEPA, escalation-to-teacher, Symbiote (experimental self-modification with blue-green deploy + auto-rollback) — ship **off by default** and are one config flag away when you want them. The [feature reference](docs/guide/features.md) marks every subsystem's default.
+Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, and the web API are on out of the box. The bigger autonomous subsystems — SENTINEL dreaming, the model router, LSP, GEPA, escalation-to-teacher, Symbiote (experimental self-modification with blue-green deploy + auto-rollback), the Paperclip gateway, and Record-a-Skill's video ingestion — ship **off by default** and are one config flag away when you want them. The [feature reference](docs/guide/features.md) marks every subsystem's default.
 
 ## Quick Start
 
@@ -267,7 +302,7 @@ Exit code is nonzero when anything is broken, so it also works in scripts.
 
 ### Get Beacon
 
-Grab the desktop app from [beacon-desktop releases](https://github.com/OAraLabs/beacon-desktop/releases) (macOS dmg, Linux AppImage/deb) or build from source (`npm install && npm run dev`). First launch walks you through pairing — the full flow with screenshots is in the [install guide](docs/guide/install.md), and the app tour is in the [Beacon guide](docs/guide/beacon.md).
+Beacon is currently private while it hardens; public builds — macOS dmg, Linux AppImage/deb — arrive with the public release. Early users get draft builds. First launch walks you through pairing — the full flow with screenshots is in the [install guide](docs/guide/install.md), and the app tour is in the [Beacon guide](docs/guide/beacon.md).
 
 ![Beacon's setup wizard pairing with a daemon](docs/assets/shots/install-2-pairing.png)
 
@@ -355,9 +390,11 @@ context:
 security:
   permission_mode: "default"
   workspace_root: "~/.prometheus/workspace"
+  # the shipped default workspace_root is "~" (your whole home directory) —
+  # tightening it to a dedicated folder like this is worth doing
 
 gateway:
-  telegram_enabled: true
+  telegram_enabled: true   # default: false — setup enables it when you add a token
   # token via env: PROMETHEUS_TELEGRAM_TOKEN
 
 memory:
@@ -408,7 +445,7 @@ Cloud slash-commands are configurable per command (provider, key env, model) in 
 python -m prometheus.benchmarks.runner --model gemma4-26b --tier 1
 ```
 
-Latest results (Gemma 4 26B, RTX 4090):
+Results from a 2026-06 run — Gemma 4 26B on an RTX 4090:
 
 ```
 Tasks: 19  |  OK: 19  |  Errors: 0
@@ -419,7 +456,7 @@ Task Completion : 100%
 No Hallucination: 84.7%
 ```
 
-All evaluation runs locally — the LLM judge uses constrained decoding on your own hardware.
+All evaluation runs locally — the LLM judge uses constrained decoding on your own hardware. By default the judge shares the endpoint of the model under test; point `judge_base_url` at a second model for independent judging.
 
 ## Project Structure
 
@@ -435,24 +472,25 @@ prometheus/
 │   ├── permissions/     # Security gate + audit + exfiltration + approval queue
 │   ├── memory/          # LCM engine, wiki compiler, extractor, passive recall
 │   ├── context/         # Token budget, compression, prompt assembly
-│   ├── gateway/         # Telegram, Slack, Discord, cron, heartbeat
-│   ├── web/             # REST API, WebSocket bridge, setup-mode server
+│   ├── gateway/         # Telegram, Slack, Discord, cron, heartbeat, paperclip
+│   ├── web/             # REST API, WebSocket bridge, setup-mode server, artifacts
 │   ├── documents/       # Confined documents service + AI redline suggestions
 │   ├── kanban/          # Projects + stories store
 │   ├── sentinel/        # Observer, AutoDream, wiki lint, consolidation, digest
 │   ├── mcp/  lsp/       # MCP runtime · language-server client
 │   ├── evals/  gym/     # Local-judge evals · fine-tuning gym (dual scoring)
 │   ├── coordinator/     # Subagent spawning, divergence detection
-│   ├── learning/        # Skill creator/refiner, curator, GEPA, pair capture
+│   ├── learning/        # Skill creator/refiner, curator, GEPA, pair capture,
+│   │                    #   live recorder + video ingest (Record a Skill)
 │   ├── symbiote/        # Experimental self-modification (off by default)
 │   ├── infra/           # AnatomyScanner, project configs
 │   ├── telemetry/       # Tool-call tracking + cost
 │   └── config/          # Settings, paths, env overrides, profiles
 ├── templates/           # Identity templates (no personal data)
 ├── skills/              # 102-file skill library (.md, opt-in)
-├── tests/               # 3,400+ tests across 201 files
+├── tests/               # 3,600+ tests across 220+ files
 ├── docs/                # Guides, architecture, sprint reports
-│   └── guide/           # Install · features · Beacon · coding · memory · providers · API
+│   └── guide/           # Install · features · Beacon · coding · skills · memory · providers · API
 ├── gym/                 # Frozen task-sets, harvest corpus
 ├── packaging/           # systemd unit
 └── PROMETHEUS.md        # Agent instructions (like CLAUDE.md)
@@ -461,11 +499,11 @@ prometheus/
 ## Stats
 
 - ~64,000 lines of production Python
-- 3,400+ tests across 201 test files
+- 3,600+ tests across 220+ test files
 - 40+ builtin tools + dynamic MCP tools
 - 102-file skill library + self-authored skills
 - 10+ model providers (local and cloud)
-- ~60 REST routes + an authenticated WebSocket event bridge
+- ~80 REST routes + an authenticated WebSocket event bridge
 - A native desktop cockpit with 13 views
 
 ## Roadmap
@@ -483,16 +521,18 @@ prometheus/
 - [x] Model router with fallback chains + divergence detection
 - [x] Evaluation framework with local LLM judge + fine-tuning gym (dual scoring)
 - [x] LSP integration, MCP integration, migration tool (Hermes/OpenClaw)
+- [x] Durable sessions, turn interrupt, liveness pulse, artifact outbox
+- [x] Record a Skill — live DOM demonstration capture + video/YouTube ingestion
 - [ ] Fine-tuning flywheel (LoRA on collected traces) — *capture/export pipeline shipped; training loop pending*
 - [ ] PyPI release + published Beacon builds
 - [ ] Beacon: attach to running coding runs, pause/inject/resume from the UI
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE). Upstream copyright notices for adapted code are collected in [NOTICE](NOTICE).
 
 ## Credits
 
 Built by [Will Hieber](https://github.com/OAraLabs) / OAra Labs.
 
-Prometheus is an original implementation. Its architecture was informed by studying the design of [OpenHarness](https://github.com/HKUDS/OpenHarness), the [Hermes Agent](https://github.com/NousResearch/hermes-agent), [Lossless-Claw](https://github.com/Martian-Engineering/lossless-claw), and Andrej Karpathy's [LLM Wiki concept](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f); the Claude Code agent-loop patterns were reconstructed from [Sigrid Jin's](https://github.com/instructkr) clean-room analysis rather than from any original source. No source code from these projects was copied or translated into Prometheus.
+Prometheus stands on open source: early scaffolding was adapted from [OpenHarness](https://github.com/HKUDS/OpenHarness), with smaller pieces from the [Hermes Agent](https://github.com/NousResearch/hermes-agent) and [OpenClaw](https://github.com/openclaw/openclaw). Its design was also informed by [Lossless-Claw](https://github.com/Martian-Engineering/lossless-claw), Andrej Karpathy's [LLM Wiki concept](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), and [Sigrid Jin's](https://github.com/instructkr) analysis of Claude Code's agent-loop patterns; adapted portions are credited in-file and in [NOTICE](NOTICE).

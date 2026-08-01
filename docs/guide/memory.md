@@ -41,6 +41,14 @@ Two plain markdown files ride every system prompt:
 
 The agent reads and edits these itself over time. You can inspect them at any point with the `/memory` command, or in Beacon under **Config → Memory**. Because they are size-bounded, the agent has to keep them curated rather than letting them grow without limit.
 
+### Editing memory remotely
+
+You can also edit both files yourself, from anywhere the API reaches — `PUT /api/memory/current` replaces the content of `MEMORY.md` and/or `USER.md`, and Beacon's **Config → Memory** tab is the UI over it. The write path is deliberately careful:
+
+- **Budgets are enforced.** Over-budget content is refused with a 400 and **nothing is written** — the same character limits the agent lives under apply to you.
+- **Every edit is reversible.** The previous content is snapshotted to `~/.prometheus/memory-history/` before each write.
+- **Optional optimistic concurrency.** Send `base_memory`/`base_user` (the content you loaded) alongside your edit; if the agent moved the file in the meantime, the write is refused with a **409 that returns the current truth**, so your editor can rebase the draft instead of silently clobbering the agent's changes. Omit the base fields and you get plain last-writer-wins.
+
 ## Memory extractor
 
 **Default: on**
@@ -106,5 +114,7 @@ Everything user-generated sits under `~/.prometheus/` (config and data are kept 
 - **`telemetry.db`**, **`data/security/audit.db`** — usage telemetry and the security audit log.
 
 Each concern gets its own database — conversations, facts, telemetry, and audit never share a file, so you can inspect or wipe one without touching the others.
+
+The fact store is also **self-healing**: full-text search indexes are kept in sync by SQLite triggers (they can't drift from the tables they index), schema migrations are versioned and applied once per database, and every migration snapshots a `memory.db.backup-<timestamp>` copy before touching anything.
 
 `prometheus --reset-data` deletes all of it — `telemetry.db`, `memory.db`, `lcm.db`, the audit log, `eval_results/`, `wiki/`, `sentinel/`, and auto-generated skills (`skills/auto/`) — after listing exactly what it found and asking for confirmation. Your config files are preserved. (`--reset-telemetry` wipes only the telemetry database.)

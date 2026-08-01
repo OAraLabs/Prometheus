@@ -1,7 +1,7 @@
 """MCP name sanitization — safe tool names without collisions.
 
 Donor: OpenClaw src/agents/pi-bundle-mcp-names.ts
-License: MIT (Anthropic)
+License: MIT (OpenClaw Foundation)
 
 Source: Prometheus (OAra AI Lab)
 License: MIT

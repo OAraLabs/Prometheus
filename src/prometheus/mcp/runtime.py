@@ -1,7 +1,7 @@
 """MCP Runtime — connect to servers, discover tools, call them.
 
 Donor: OpenClaw src/agents/pi-bundle-mcp-runtime.ts
-License: MIT (Anthropic)
+License: MIT (OpenClaw Foundation)
 
 Source: Prometheus (OAra AI Lab)
 License: MIT

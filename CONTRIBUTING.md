@@ -6,7 +6,7 @@ Thanks for your interest in contributing! Here's how to get started.
 
 ```bash
 git clone https://github.com/OAraLabs/Prometheus.git
-cd Prometheus-
+cd Prometheus
 pip install -e ".[dev]"
 git config core.hooksPath .githooks   # enable pre-commit secret scanning
 uv run pytest tests/ -v               # make sure everything passes
@@ -15,6 +15,13 @@ uv run pytest tests/ -v               # make sure everything passes
 > **Note:** Git does not auto-enable hooks from cloned repos (security policy).
 > The `git config core.hooksPath .githooks` step activates the pre-commit hook
 > that blocks accidental commits of secrets, private IPs, and infrastructure data.
+
+Beyond pattern checks, the pre-commit hook scans every **staged blob** for
+provider API keys (OpenAI/Anthropic/Google/xAI-style prefixes and friends) and
+for this project's own 64-character opaque tokens — the kind a generic scanner
+misses because they have no recognizable prefix. Enable it once per clone with
+`git config core.hooksPath .githooks`; it is the only line of defense on this
+repo, so do not skip it.
 
 ## Running Tests
 

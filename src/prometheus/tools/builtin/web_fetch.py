@@ -1,6 +1,6 @@
 # Provenance: HKUDS/OpenHarness (https://github.com/HKUDS/OpenHarness)
 # Original: src/openharness/tools/web_fetch_tool.py
-# License: Apache-2.0
+# License: MIT
 # Modified: Rewritten as Prometheus BaseTool; added SSRF protection;
 #           replaced regex-based stripper with html.parser-based extractor
 #           that preserves dotted names (e.g. asyncio.gather) and applies

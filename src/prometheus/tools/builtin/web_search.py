@@ -1,7 +1,7 @@
 # Provenance: HKUDS/OpenHarness (https://github.com/HKUDS/OpenHarness)
 # Original: src/openharness/tools/web_search_tool.py
-# License: Apache-2.0
-# Modified: Rewritten as Prometheus BaseTool
+# License: MIT
+# Modified: Adapted as Prometheus BaseTool
 
 """Web search via DuckDuckGo HTML — no API key required."""
 

@@ -1,7 +1,7 @@
 """MCP configuration and catalog types.
 
 Donor: OpenClaw src/agents/pi-bundle-mcp-types.ts + mcp-transport-config.ts
-License: MIT (Anthropic)
+License: MIT (OpenClaw Foundation)
 Ported to Python with Pydantic models.
 
 Source: Prometheus (OAra AI Lab)

@@ -1,7 +1,6 @@
-# Provenance: openclaw/openclaw (https://github.com/openclaw/openclaw)
-# Original: src/agents/tools/sessions-spawn-tool.ts
-# License: MIT
-# Modified: Rewritten as Prometheus BaseTool wrapping task manager
+# Provenance: pattern-inspired by openclaw/openclaw sessions-spawn-tool.ts
+#             (concept/tool-name only; no code derived)
+# Implementation: original Prometheus BaseTool wrapping the task manager
 
 """Spawn a new agent session."""
 
