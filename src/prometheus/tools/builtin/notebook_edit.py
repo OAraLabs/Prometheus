@@ -1,6 +1,6 @@
 # Provenance: HKUDS/OpenHarness (https://github.com/HKUDS/OpenHarness)
 # Original: src/openharness/tools/notebook_edit_tool.py
-# License: Apache-2.0
+# License: MIT
 # Modified: Rewritten as Prometheus BaseTool
 
 """Edit Jupyter notebook cells (.ipynb files)."""

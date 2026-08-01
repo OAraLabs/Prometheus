@@ -2,7 +2,7 @@
 
 Donor: OpenClaw src/agents/pi-bundle-mcp-materialize.ts
        + OpenHarness src/openharness/tools/mcp_tool.py
-License: MIT
+License: MIT (OpenClaw Foundation; OpenHarness Contributors)
 
 Source: Prometheus (OAra AI Lab)
 License: MIT

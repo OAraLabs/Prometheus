@@ -1,6 +1,6 @@
 # Provenance: HKUDS/OpenHarness (https://github.com/HKUDS/OpenHarness)
 # Original: src/openharness/tools/ask_user_question_tool.py
-# License: Apache-2.0
+# License: MIT
 # Modified: Rewritten as Prometheus BaseTool
 
 """Ask the user a clarifying question and wait for their response."""

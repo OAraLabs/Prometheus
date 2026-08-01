@@ -1,0 +1,30 @@
+Prometheus — Copyright (c) 2026 Will Hieber / OAra AI Lab. MIT License.
+
+This project includes code adapted from the following MIT-licensed projects.
+The original copyright and permission notices apply to the adapted portions.
+
+--- OpenHarness (https://github.com/HKUDS/OpenHarness) ---
+Copyright (c) 2025 OpenHarness Contributors. MIT License.
+Adapted files (35): src/prometheus/config/paths.py; context/environment.py,
+prometheusmd.py, prompt_assembler.py, system_prompt.py; coordinator/__init__.py,
+agent_definitions.py, coordinator_mode.py; engine/__init__.py, agent_loop.py,
+cost_tracker.py, messages.py, stream_events.py, usage.py; hooks/events.py,
+executor.py, schemas.py, types.py; gateway/cron_scheduler.py, cron_service.py;
+tools/base.py; tools/builtin/agent.py, ask_user.py, bash.py, cron_create.py,
+cron_delete.py, cron_list.py, file_edit.py, file_read.py, file_write.py,
+glob.py, grep.py, notebook_edit.py, web_fetch.py, web_search.py.
+
+--- Hermes Agent (https://github.com/NousResearch/hermes-agent) ---
+Copyright (c) Nous Research. MIT License.
+Adapted files (5): src/prometheus/providers/xai_oauth.py;
+memory/hermes_memory_tool.py; tools/builtin/browser.py, tts.py, message.py.
+
+--- OpenClaw (https://github.com/openclaw/openclaw) ---
+Copyright (c) 2026 OpenClaw Foundation. MIT License.
+Adapted files (9): src/prometheus/mcp/adapter.py, names.py, runtime.py,
+transport.py, types.py; memory/extractor.py; tools/builtin/sessions_list.py,
+sessions_send.py, sessions_spawn.py.
+
+Additional design influences (no code copied): OpenCode and Claude Code
+(LSP integration patterns), Odysseus (teacher-escalation design),
+anthropics/skills (dashboard patterns), Karpathy's LLM Wiki concept.
