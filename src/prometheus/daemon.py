@@ -1384,6 +1384,17 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 # drops it in a `finally`). The same defect was already live
                 # on telegram-vs-cron, which share this instance too.
                 file_mutation_verifier=fmv,
+                # ...and the SIXTH — the first that the field-level parity
+                # guard could NOT have caught: the nudge was never a
+                # LoopContext field at all, it was injected by
+                # AgentLoop.run_async around the loop. Web/Beacon/Bridge
+                # bypass run_async, so with learning.nudge_enabled: true in
+                # the live config the self-reflection prompt reached
+                # telegram/CLI and nothing else. See
+                # tests/test_run_async_web_parity.py for the guard that
+                # catches this whole class (run_async-only behaviour) rather
+                # than just the field-level drift.
+                nudge=nudge,
             )
 
             # Beacon D1: construct the profile store so GET /api/profiles returns

@@ -6226,17 +6226,52 @@ class TestSunriseSkillRefiner:
         assert ok is False
 
 
-class TestSunrisePeriodicNudge:
-    """PeriodicNudge wired into AgentLoop fires at turn intervals."""
+class _RequestCapturingProvider(ModelProvider):
+    """ScriptedProvider that also keeps every ApiMessageRequest it was handed.
 
-    def test_nudge_appended_to_messages_at_interval(self, tmp_path):
-        """After a completed turn at multiple of interval, a nudge user message is appended."""
+    The nudge rides the per-call system prompt, so "did it fire?" can only be
+    answered by looking at what actually went to the model.
+    """
+
+    def __init__(self, responses: list[list]) -> None:
+        self._responses = list(responses)
+        self._call_count = 0
+        self.requests: list[ApiMessageRequest] = []
+
+    async def stream_message(self, request: ApiMessageRequest) -> AsyncIterator:
+        self.requests.append(request)
+        events = self._responses[self._call_count % len(self._responses)]
+        self._call_count += 1
+        for event in events:
+            yield event
+
+    @property
+    def nudged_calls(self) -> list[int]:
+        return [
+            i for i, r in enumerate(self.requests)
+            if "[system-internal]" in (r.system_prompt or "")
+        ]
+
+
+class TestSunrisePeriodicNudge:
+    """PeriodicNudge fires at round intervals, on the request-only channel.
+
+    It used to be appended to ``messages`` as a synthetic user turn; that
+    split ``tool_use`` from its ``tool_result`` on the wire and persisted a
+    turn the human never typed. It now rides ``per_call_system_prompt`` like
+    steers, the empty-retry nudge and passive recall — so these tests assert
+    against the PROVIDER REQUEST, not the message list. See
+    tests/test_run_async_web_parity.py for the parity half.
+    """
+
+    def test_nudge_reaches_the_model_at_interval(self, tmp_path):
+        """A completed round at a multiple of interval nudges the NEXT call."""
         from prometheus.engine.agent_loop import AgentLoop
         from prometheus.learning.nudge import PeriodicNudge
 
         nudge = PeriodicNudge(interval=1, enabled=True)
-        # Single tool use → assistant turn complete (1 turn). Should fire nudge at turn 1.
-        scripted = ScriptedProvider([
+        # Round 1 = the tool call; the nudge it arms is spent on round 2.
+        scripted = _RequestCapturingProvider([
             _tool_response("echo", "t1", {"text": "hi"}),
             _text_response("done"),
         ])
@@ -6249,22 +6284,25 @@ class TestSunrisePeriodicNudge:
             nudge=nudge,
         )
         result = asyncio.run(loop.run_async("system", "do thing"))
-        nudge_msgs = [
-            m for m in result.messages
-            if m.role == "user" and "[system-internal]" in m.text
-        ]
-        assert len(nudge_msgs) >= 1, (
-            "Expected at least one [system-internal] nudge message in result.messages, "
-            f"got roles: {[m.role for m in result.messages]}"
+
+        assert scripted.nudged_calls == [1], (
+            "expected the nudge on the second model call only, got it on "
+            f"{scripted.nudged_calls} of {len(scripted.requests)} calls"
+        )
+        # ...and NOWHERE in the durable history.
+        assert not [m for m in result.messages if "[system-internal]" in m.text], (
+            "the nudge must never become a conversation turn — on the web "
+            "path that is persisted to LCM and rendered in Beacon as a user "
+            "message nobody typed"
         )
 
     def test_nudge_disabled_does_not_inject(self, tmp_path):
-        """Disabled nudge never appends messages."""
+        """Disabled nudge never reaches the model, on either channel."""
         from prometheus.engine.agent_loop import AgentLoop
         from prometheus.learning.nudge import PeriodicNudge
 
         nudge = PeriodicNudge(interval=1, enabled=False)
-        scripted = ScriptedProvider([
+        scripted = _RequestCapturingProvider([
             _tool_response("echo", "t1", {"text": "hi"}),
             _text_response("done"),
         ])
@@ -6277,11 +6315,42 @@ class TestSunrisePeriodicNudge:
             nudge=nudge,
         )
         result = asyncio.run(loop.run_async("system", "do thing"))
-        nudge_msgs = [
-            m for m in result.messages
-            if m.role == "user" and "[system-internal]" in m.text
-        ]
-        assert nudge_msgs == []
+        assert scripted.nudged_calls == []
+        assert not [m for m in result.messages if "[system-internal]" in m.text]
+
+    def test_nudge_never_splits_a_tool_use_from_its_result(self, tmp_path):
+        """REGRESSION: the old user-message injection landed between the
+        assistant's ``tool_use`` turn and the ``tool_result`` that answers it
+        (it ran while run_loop was suspended at the AssistantTurnComplete
+        yield). Anthropic rejects that outright — ``tool_use ids were found
+        without tool_result blocks immediately after``."""
+        from prometheus.engine.agent_loop import AgentLoop
+        from prometheus.learning.nudge import PeriodicNudge
+
+        scripted = _RequestCapturingProvider([
+            _tool_response("echo", "t1", {"text": "hi"}),
+            _tool_response("echo", "t2", {"text": "hi"}),
+            _text_response("done"),
+        ])
+        loop = AgentLoop(
+            provider=scripted,
+            model="test",
+            tool_registry=_make_registry(),
+            telemetry=_tel(tmp_path),
+            nudge=PeriodicNudge(interval=1, enabled=True),
+        )
+        result = asyncio.run(loop.run_async("system", "do thing"))
+
+        for i, msg in enumerate(result.messages):
+            if msg.role != "assistant" or not msg.tool_uses:
+                continue
+            nxt = result.messages[i + 1] if i + 1 < len(result.messages) else None
+            assert nxt is not None and any(
+                isinstance(b, ToolResultBlock) for b in nxt.content
+            ), (
+                f"message {i} is a tool_use turn but the next message is "
+                f"{nxt!r} — the tool_result must come immediately after"
+            )
 
     def test_no_nudge_when_none_passed(self, tmp_path):
         """nudge=None means no injection, no AttributeError."""
