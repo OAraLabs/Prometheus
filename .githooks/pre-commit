@@ -9,14 +9,33 @@ set -euo pipefail
 
 BLOCKED=0
 
-# Get staged files, skip markdown, docs/reference, and the hook itself
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | \
-    grep -v '\.md$' | \
-    grep -v '^docs/' | \
-    grep -v '^reference/' | \
+# Two scopes, because the dangerous classes and the noisy class differ.
+#
+# STAGED_ALL — everything except the hook itself (which necessarily contains
+#   the patterns it hunts for). Prose is where a human pastes a token or an
+#   address while explaining something, so markdown and docs/ ARE scanned for
+#   credentials, private IPs, and key material. They were excluded until
+#   2026-08-01, which is exactly how real tailnet IPs reached three tracked
+#   files (skills/download-model-to-gpu.md, docs/PROMETHEUS-FULL.md,
+#   docs/sprints/GRAFT-ROUTER-WIRE.md) in a public repo. GHAS generic scanning
+#   is unavailable on this plan, so this hook is the only net — a net with a
+#   hole over the most paste-prone files is not a net.
+#
+# STAGED_CODE — excludes markdown and docs/. Used ONLY for the broad
+#   `OAra-|oara-` hostname check, which cannot run over prose without crying
+#   wolf: legitimate repo and project names (oara-site, oara-voice) and the
+#   package name (oara-prometheus) all match it, and a hook that cries wolf
+#   trains you to reach for --no-verify. Hostnames are also the mildest class
+#   here: MagicDNS names do not resolve outside the tailnet. IPs stay blocked
+#   everywhere, which is the control that actually matters.
+STAGED_ALL=$(git diff --cached --name-only --diff-filter=ACM | \
     grep -v '^\.githooks/' || true)
 
-if [ -z "$STAGED_FILES" ]; then
+STAGED_CODE=$(printf '%s\n' "$STAGED_ALL" | \
+    grep -v '\.md$' | \
+    grep -v '^docs/' || true)
+
+if [ -z "$STAGED_ALL" ]; then
     exit 0
 fi
 
@@ -47,6 +66,10 @@ check_pattern() {
     local label="$1"
     local pattern="$2"
     local skip_placeholders="${3:-0}"
+    # scope: "all" (default — includes markdown/docs) or "code" (excludes them)
+    local scope="${4:-all}"
+    local files="$STAGED_ALL"
+    [ "$scope" = "code" ] && files="$STAGED_CODE"
 
     while IFS= read -r file; do
         [ -f "$file" ] || continue
@@ -68,7 +91,7 @@ check_pattern() {
             echo ""
             BLOCKED=1
         done <<< "$matches"
-    done <<< "$STAGED_FILES"
+    done <<< "$files"
 }
 
 echo ""
@@ -99,7 +122,7 @@ check_pattern "Hardcoded user SSH key path" \
 #    attribution). The "oara-prometheus" distribution name is exempted via
 #    ALLOWLIST_REGEX above (a package name, not a host).
 check_pattern "Infrastructure hostname (OAra-*)" \
-    'OAra-|oara-'
+    'OAra-|oara-' 0 code
 
 # ── Credential shapes (added 2026-07-27 after a repo secret audit) ──────────
 # GitHub's server-side push protection already blocks most PROVIDER keys, but

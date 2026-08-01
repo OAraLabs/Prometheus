@@ -2569,7 +2569,7 @@ class JudgeVerdict:
     raw_response: str
 
 class PrometheusJudge:
-    def __init__(self, base_url="http://100.110.140.39:8080", model=None, timeout=120.0)
+    def __init__(self, base_url="http://<gpu-host>:8080", model=None, timeout=120.0)
 
     # Constrained JSON scoring (primary — used by metrics, Sprint 14)
     async def evaluate(task_input, agent_output, expected_behavior, tool_trace=None) -> JudgeVerdict

@@ -321,7 +321,7 @@ router:
     - task_type: tool_heavy
       provider: llama_cpp
       model: ""          # auto-detect from server
-      base_url: http://100.110.140.39:8080
+      base_url: http://<gpu-host>:8080
     - task_type: reasoning
       provider: anthropic
       model: claude-opus-4-7
