@@ -1348,6 +1348,20 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 # web/Beacon turns silently never recall. None when the
                 # extractor block failed or recall is disabled.
                 memory_recall=memory_recall,
+                # THE SAME LESSON, THIRD TIME (2026-07-31). Everything below is
+                # config that AgentLoop threads for telegram/CLI and that this
+                # pre-built context silently dropped, so web/Beacon turns ran on
+                # dataclass defaults no matter what the config said:
+                #   * the iteration caps — Beacon was pinned to the LOCAL 25
+                #     even on cloud models, the bug #124 fixed one call site up
+                #   * tool_loader — without it deferred loading (#121) is inert
+                #     on the web path and /api/tools/deferred cannot report the
+                #     effective state ("daemon loop not wired").
+                # If you add a LoopContext field that AgentLoop populates, add
+                # it HERE too or Beacon quietly won't have it.
+                max_tool_iterations=model_config.get("max_tool_iterations", 25),
+                max_tool_iterations_cloud=model_config.get("max_tool_iterations_cloud", 50),
+                tool_loader=tool_loader,
             )
 
             # Beacon D1: construct the profile store so GET /api/profiles returns
