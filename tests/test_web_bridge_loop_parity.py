@@ -9,7 +9,7 @@
   ``run_async`` entirely, so anything not passed here falls back to the
   dataclass default.
 
-That asymmetry has now silently broken four separate features:
+That asymmetry has now silently broken five separate features:
 
 1. the context compactor (Sprint 2) — compaction.enabled=true did nothing on web
 2. passive memory recall — web turns never recalled
@@ -17,9 +17,12 @@ That asymmetry has now silently broken four separate features:
    the same bug #124 fixed at the *other* call site
 4. ``tool_loader`` — deferred loading (#121) was inert on the web path, and
    ``GET /api/tools/deferred`` could only answer "daemon loop not wired"
+5. ``post_result_hooks`` — with ``lsp.enabled: true`` live, telegram/CLI turns
+   got LSP diagnostics appended to every write and Beacon, which does the most
+   file writing of any surface, got none
 
 Each was invisible because the fallback is a plausible default, not an error.
-This test makes the drift itself fail, so the fifth one gets caught here.
+This test makes the drift itself fail, so the sixth one gets caught here.
 """
 
 from __future__ import annotations
@@ -36,11 +39,43 @@ DAEMON = Path(__file__).resolve().parents[1] / "src" / "prometheus" / "daemon.py
 # each of which must stay justified. Anything else showing up in the drift is a
 # bug, not a style choice.
 #
-# These two are NOT verified-intentional — they are pre-existing drift found
-# while fixing (3) and (4) above, carved out so this guard can land without
-# silently changing web behaviour that hasn't been smoke-tested. Verifying and
-# either wiring or documenting them is tracked as follow-up work.
-KNOWN_UNVERIFIED_DRIFT = {"file_mutation_verifier", "post_result_hooks"}
+# ``post_result_hooks`` USED to be here as unverified drift; it was the fifth
+# instance of the same bug (``lsp.enabled: true`` is live, so telegram/CLI got
+# LSP diagnostics appended to every write and Beacon — the primary coding
+# surface — never did) and is now passed on both paths.
+#
+# ``file_mutation_verifier`` stays out, verified, for two reasons:
+#
+# 1. SHARED MUTABLE STATE. Unlike every other field here, it is not config —
+#    it is a per-turn accumulator, and ``run_daemon`` builds exactly ONE
+#    instance. ``_TurnRecord.mutations`` is a flat list and ``post_turn()``
+#    drains AND resets it globally, with no session or turn key. This
+#    LoopContext is a single object shared by every Beacon session and every
+#    concurrent turn (see ws_server._run_agent, which threads ``mode`` and
+#    ``session_id`` as per-call args precisely so concurrent turns cannot
+#    cross-talk through it). Wiring the verifier here would hand concurrent
+#    turns one accumulator: the turn that finishes first reports the OTHER
+#    turn's file writes as its own and the second reports nothing — which
+#    inverts the feature, whose entire job is checking that the writes YOU
+#    claimed actually landed. Proven below in
+#    ``test_the_verifier_is_a_turn_global_accumulator``.
+#
+# 2. IT WRITES A SYNTHETIC USER MESSAGE INTO THE TRANSCRIPT. The summary is
+#    appended with ``ConversationMessage.from_user_text`` (provenance="user",
+#    is_trusted=True — not ``from_injected``), so ``persist_loop_result``
+#    stores it in LCM and ``GET /api/sessions/{id}/messages`` returns it as
+#    ``role: "user"`` with nothing to distinguish it from something the user
+#    typed. On telegram that message is model-facing only (the gateway renders
+#    just the assistant reply), which is why the omission went unnoticed; on
+#    Beacon it would surface as a chat bubble Will never wrote. The
+#    ``show_in_telegram`` config knob that was meant to govern this is defined
+#    in hooks/file_mutation_verifier.py and never read by anything.
+#
+# Both are fixable — scope the accumulator per turn, and emit the summary via
+# ``from_injected`` so the UI can filter it — but that is a change to the
+# verifier and to the AgentLoop path too (telegram/CLI/cron already share the
+# one instance), not a line at this call site.
+KNOWN_UNVERIFIED_DRIFT = {"file_mutation_verifier"}
 
 
 def _kwargs_by_callee() -> dict[str, set[str]]:
@@ -81,6 +116,46 @@ def test_web_bridge_gets_the_tool_loader():
     """Deferred loading (#121) is inert on the web path without it, and
     /api/tools/deferred cannot resolve the effective state."""
     assert "tool_loader" in _kwargs_by_callee()["LoopContext"]
+
+
+def test_web_bridge_gets_the_post_result_hooks():
+    """With `lsp.enabled: true` this list carries the LSPDiagnosticsHook, which
+    appends type errors to write_file/edit_file results. Without it Beacon —
+    the surface that does the most file writing — is the only path that never
+    sees a diagnostic."""
+    assert "post_result_hooks" in _kwargs_by_callee()["LoopContext"]
+
+
+def test_the_verifier_is_a_turn_global_accumulator():
+    """Evidence for reason (1) of the file_mutation_verifier carve-out.
+
+    One instance, no session/turn key: mutations from separate tool-call flows
+    pile into the same list, and the first ``post_turn()`` drains all of them
+    and leaves the next caller with nothing. Harmless while ONE loop owns the
+    instance; wrong the moment the shared web LoopContext hands it to every
+    concurrent Beacon turn.
+
+    If this ever fails, the verifier has been made turn-scoped — revisit the
+    carve-out above and wire it at the web bridge.
+    """
+    from prometheus.hooks.file_mutation_verifier import FileMutationVerifier
+
+    v = FileMutationVerifier()
+    # Two independent "turns", interleaved the way concurrent turns would be.
+    v.pre_tool_use("write_file", {"path": "/tmp/turn-a.txt"}, "call-a")
+    v.pre_tool_use("write_file", {"path": "/tmp/turn-b.txt"}, "call-b")
+    v.post_tool_use("write_file", {"path": "/tmp/turn-a.txt"}, "call-a")
+    v.post_tool_use("write_file", {"path": "/tmp/turn-b.txt"}, "call-b")
+
+    first = v.post_turn()
+    assert first is not None
+    assert "/tmp/turn-a.txt" in first and "/tmp/turn-b.txt" in first, (
+        "both flows landed in ONE summary — the accumulator has no turn key"
+    )
+    assert v.post_turn() is None, (
+        "the first drain reset the shared state — a concurrent second turn "
+        "would report no mutations at all"
+    )
 
 
 def test_no_new_drift_between_the_two_loops():

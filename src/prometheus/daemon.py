@@ -1362,6 +1362,23 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 max_tool_iterations=model_config.get("max_tool_iterations", 25),
                 max_tool_iterations_cloud=model_config.get("max_tool_iterations_cloud", 50),
                 tool_loader=tool_loader,
+                # ...and the SAME LESSON, FOURTH TIME. `lsp.enabled: true` is
+                # live, so this list holds the LSPDiagnosticsHook that appends
+                # type errors to every write_file/edit_file result — on
+                # telegram/CLI only. Beacon is the primary CODING surface and
+                # was the one path that never saw a diagnostic. The hook is
+                # stateless (orchestrator + delay; the orchestrator is already
+                # a process-wide singleton that web turns reach through
+                # LSPTool), so sharing it across concurrent web turns is safe.
+                # Costs up to diagnostics_delay_ms per file write, same as the
+                # other paths already pay.
+                #
+                # NOT passed, deliberately: `fmv` (file_mutation_verifier). It
+                # is a per-turn ACCUMULATOR held as one daemon-wide instance,
+                # and this context is shared by every Beacon session — see
+                # tests/test_web_bridge_loop_parity.py::KNOWN_UNVERIFIED_DRIFT
+                # for the two verified reasons.
+                post_result_hooks=post_result_hooks or None,
             )
 
             # Beacon D1: construct the profile store so GET /api/profiles returns
