@@ -274,7 +274,7 @@ The full Telegram command table. Slack (`/prometheus-*`) and Discord (`/promethe
 
 ## Observability
 
-**Default: on**, except tracing.
+**Default: on**, except tracing. All of it is local: telemetry writes SQLite on your own disk and contains no network code — the point is that *you* own the data (success rates, repair pairs, golden traces) that feeds the adapter's tuning and the fine-tuning flywheel. The one outbound-capable piece, the Phoenix tracing exporter, is off by default and targets localhost.
 
 - **Tool-call telemetry** — SQLite rows per model per tool: success rates, latency, circuit-breaker trips, lucky guesses, and adapter repairs. Surfaced in Beacon's Tool Feed, `/health`, `/tools`, and the REST API. **Honest denominators:** a tool that ran correctly but whose command exited non-zero (pytest reporting failures, say) is classed `nonzero_exit` and kept **out** of the success-rate denominator — a bash success rate reflects the model's calling, not your test suite's mood.
 - **Token accounting** — every model call is wrapped in an envelope, so per-round token usage is tracked and silent failures surface instead of vanishing.

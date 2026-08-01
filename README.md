@@ -221,6 +221,8 @@ Ground-truth DOM traces earn autonomy; lossy vision output stays human-reviewed.
 
 ### Observability
 
+**Telemetry that stays home.** Local-first people rightly refuse telemetry — because it usually means someone else's server. Prometheus inverts it: every tool call, repair, token count, and failure is recorded to SQLite on your own disk and sent nowhere — the telemetry module contains no network code at all, and the optional tracing exporter is off by default and points at localhost. It exists so *you* hold the data the big labs keep for themselves: the per-model success rates that tune the adapter, the golden traces that become your fine-tuning corpus, and the receipts for what your model actually did.
+
 - Tool-call telemetry (SQLite) — success rates per model per tool, surfaced in Beacon's Tool Feed and `/health` — with honest denominators: a correctly executed command whose task fails (pytest exit 1) is not counted against the model
 - Every claimed file mutation is verified against disk — created / modified / deleted / **no change** — and "CLAIMED but NO CHANGE ON DISK" goes back to the model on its next turn
 - Every model call wrapped in an `LLMCallEnvelope` — per-round token accounting, and every swallowed exception lands in a queryable silent-failure ledger before any failure policy runs
