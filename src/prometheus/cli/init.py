@@ -209,7 +209,7 @@ def _default_config(server: DetectedServer | None, model: str | None) -> dict[st
         },
         "security": {
             "permission_mode": "default",
-            "workspace_root": "~",
+            "workspace_root": "~/.prometheus/workspace",
         },
         "gateway": {
             "telegram_enabled": False,
