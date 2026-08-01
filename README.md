@@ -30,6 +30,7 @@ prometheus daemon         # always-on: web API + gateways + cron + background la
 - **Visible memory that rides every prompt** — `MEMORY.md` and `USER.md` you can read, structured facts mined from conversations every 30 minutes, and passive recall that FTS-matches each message against the memory store and injects what's relevant.
 - **Lossless context** — DAG-based compression with full-text search so long sessions don't drop facts; originals are always recoverable.
 - **Sandboxed coding runs** — point it at a repo and an acceptance command; it iterates to green in a clone and hands you a reviewable branch. Never merges, never pushes.
+- **Telemetry that stays home** — every tool call, repair, and token count logged to SQLite on your own disk and sent nowhere. It's the raw material for tuning the adapter and fine-tuning your own model: the data big labs keep for themselves, kept by you instead.
 - **A desktop cockpit** — Beacon pairs to the daemon over your LAN or tailnet and gives every subsystem a native surface.
 
 > **Status:** Active development. Expect rough edges. Fixes land weekly. Feedback welcome.
