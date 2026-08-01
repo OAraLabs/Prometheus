@@ -1,14 +1,21 @@
-"""PeriodicNudge — inject self-evaluation prompts every N turns.
+"""PeriodicNudge — inject self-evaluation prompts every N rounds.
 
 Invisible to the user. The nudge is an internal system message that asks
 the agent to reflect on its approach and adjust if needed.
 
+``interval`` counts COMPLETED ASSISTANT ROUNDS WITHIN ONE RUN, not user
+turns — the counter is per ``run_loop`` invocation and resets with it. At
+the default 15 that means an ordinary 1-3 round chat reply never nudges;
+it fires only inside a long agentic run, which is what it is for.
+
+Wire it through ``LoopContext.nudge`` and let ``run_loop`` drive it. It is
+consumed as a request-only system-prompt addendum — the ``dict`` below is
+NOT appended to the message list, and must not be: see
+``prometheus.engine.agent_loop._maybe_periodic_nudge`` for the three
+separate ways the old append-a-user-turn channel was wrong.
+
 Usage:
-    nudge = PeriodicNudge(interval=15)
-    # Called each turn from the agent loop:
-    injection = nudge.maybe_inject(turn_count, messages)
-    if injection:
-        messages.append(injection)
+    context = LoopContext(..., nudge=PeriodicNudge(interval=15))
 """
 
 from __future__ import annotations
@@ -33,10 +40,11 @@ _NUDGE_PROMPT = (
 
 @dataclass
 class PeriodicNudge:
-    """Inject a self-evaluation nudge every *interval* turns.
+    """Inject a self-evaluation nudge every *interval* rounds.
 
     Args:
-        interval: Number of user turns between nudges.
+        interval: Completed assistant rounds between nudges, counted within
+            a single run (see the module docstring — NOT user turns).
         prompt: Custom nudge prompt (must stay under 200 tokens).
         enabled: Set False to disable without removing from the loop.
     """
@@ -78,14 +86,16 @@ class PeriodicNudge:
         return cls(interval=interval, enabled=enabled)
 
     def maybe_inject(self, turn_count: int) -> dict | None:
-        """Return a nudge message dict if it's time, else None.
+        """Return a nudge payload if it's time, else None.
 
         Args:
-            turn_count: Current number of completed user turns (1-indexed).
+            turn_count: Completed assistant rounds this run (1-indexed).
 
         Returns:
-            A message dict ``{"role": "user", "content": ..., "_nudge": True}``
-            suitable for appending to the message list, or None.
+            ``{"role": "user", "content": ..., "_nudge": True}``, or None.
+            The caller reads ``content`` and folds it into the per-call
+            system prompt; the ``role`` key is vestigial from the old
+            append-to-messages channel and is deliberately NOT honoured.
         """
         if not self.enabled:
             return None

@@ -597,6 +597,12 @@ def create_app(
                 "role": p.role,
                 "content": p.content,
                 "content_json": p.content_json,
+                # Who actually originated this turn. ``role`` alone cannot say:
+                # the runtime injects several user-ROLE turns that no human
+                # typed (file-mutation-verifier summaries, periodic nudges,
+                # orchestrator feedback, task-supervisor output), and without
+                # this a client renders them as the user's own chat bubbles.
+                # "user" = a real human. See from_injected / Provenance.
                 "provenance": getattr(p, "provenance", "user") or "user",
                 "is_trusted": bool(getattr(p, "is_trusted", True)),
                 "timestamp": p.timestamp,

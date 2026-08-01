@@ -651,6 +651,14 @@ class LoopContext:
     # extractor would re-ingest its own output next cycle. None (benchmarks,
     # evals, coding mode, gym) = no recall, byte-identical prompts.
     memory_recall: object | None = None
+    # SUNRISE: PeriodicNudge — a self-reflection prompt every N completed
+    # assistant rounds within a run. Lives HERE, not on AgentLoop, because
+    # ``AgentLoop.run_async`` is not the only entry point: the web bridge
+    # (web/ws_server.py:_run_agent) drives ``run_loop`` directly with a
+    # pre-built context, so anything the AgentLoop wrapper does around the
+    # loop is invisible to every web / Beacon / Bridge turn. See the module
+    # docstring of tests/test_run_async_web_parity.py.
+    nudge: object | None = None
 
 
 def _effective_max_tool_iterations(context: LoopContext) -> int:
@@ -966,6 +974,13 @@ async def _run_loop(
     empty_retried = False
     pending_empty_nudge = False
 
+    # SUNRISE PeriodicNudge — completed assistant rounds THIS run, and the
+    # nudge text (if any) owed to the next model call. Counted in the loop
+    # rather than in AgentLoop.run_async's `async for` so the web bridge's
+    # direct run_loop call gets it too.
+    nudge_turns = 0
+    pending_periodic_nudge: str | None = None
+
     # SPRINT-loop-envelope (F1): the loop's model calls run inside the shared
     # LLMCallEnvelope like every other _call_model path — silent-failure
     # capture + a per-round usage row (tokens, round, session, model,
@@ -1017,6 +1032,17 @@ async def _run_loop(
                 "call. Respond now with a message or a tool call.]"
             )
             pending_empty_nudge = False
+
+        # SUNRISE PeriodicNudge — the same request-only channel as steers,
+        # the empty-retry nudge and passive recall. It rides THIS call's
+        # system prompt and is never appended to ``messages``; see
+        # _maybe_periodic_nudge for why the old user-message channel was
+        # wrong on all three of the wire, the history and the UI.
+        if pending_periodic_nudge:
+            per_call_system_prompt = (
+                f"{per_call_system_prompt}\n\n{pending_periodic_nudge}"
+            )
+            pending_periodic_nudge = None
 
         # H2: tier-full models lack native tool calling — their tools live in
         # the (formatter-augmented) system prompt and the GBNF grammar set on
@@ -1230,6 +1256,12 @@ async def _run_loop(
         if not turn_is_empty:
             messages.append(final_message)
             yield AssistantTurnComplete(message=final_message, usage=usage), usage
+            # SUNRISE PeriodicNudge: one completed assistant round. Ask the
+            # nudge whether this round is a multiple of its interval and, if
+            # so, owe the text to the NEXT model call (below). A run that
+            # ends here never spends it — there is nothing left to reflect on.
+            nudge_turns += 1
+            pending_periodic_nudge = _maybe_periodic_nudge(context, nudge_turns)
 
         if not final_message.tool_uses:
             # malformed_empty guard: the provider dropped every tool call in
@@ -1564,6 +1596,51 @@ def _make_assistant_msg(text: str) -> ConversationMessage:
     """Build a synthetic assistant message."""
     from prometheus.engine.messages import TextBlock
     return ConversationMessage(role="assistant", content=[TextBlock(text=text)])
+
+
+def _maybe_periodic_nudge(context: LoopContext, turn_count: int) -> str | None:
+    """Return the PeriodicNudge text owed after ``turn_count`` rounds, or None.
+
+    Request-only by design. Until 2026-08-01 the nudge was injected by
+    ``AgentLoop.run_async`` as ``ConversationMessage.from_user_text(...)``
+    appended to ``messages`` mid-iteration, which was wrong three ways:
+
+    * **On the wire.** The append landed while ``run_loop`` was suspended at
+      the ``AssistantTurnComplete`` yield — i.e. AFTER the assistant's
+      ``tool_use`` turn but BEFORE the loop appends the matching
+      ``tool_result``. Anthropic requires the tool_result to be the next
+      message, so a 15th-round nudge split the pair and 400'd the turn
+      (``tool_use ids were found without tool_result blocks immediately
+      after``). It also produced two consecutive user turns.
+    * **In history.** ``provenance="user", is_trusted=True`` made it
+      indistinguishable from something the human typed, and the trailing
+      nudge on the last round was persisted to LCM by every gateway.
+    * **In the UI.** On the web path that persisted turn comes back from
+      ``GET /api/sessions/{id}/messages`` as ``role: "user"`` and renders in
+      Beacon as a message Will never wrote.
+
+    The steer channel (``per_call_system_prompt``) has none of those
+    problems and is already the established home for exactly this kind of
+    machinery-authored, model-facing, never-persisted text — the
+    empty-response retry nudge and passive recall both ride it.
+
+    Fail-open: a nudge that raises must never break the turn.
+    """
+    nudge = getattr(context, "nudge", None)
+    if nudge is None:
+        return None
+    try:
+        payload = nudge.maybe_inject(turn_count)
+    except Exception:
+        log.debug("PeriodicNudge: maybe_inject raised", exc_info=True)
+        return None
+    if not payload:
+        return None
+    text = payload.get("content") if isinstance(payload, dict) else None
+    if not text:
+        return None
+    log.debug("PeriodicNudge: armed for the next call at round %d", turn_count)
+    return str(text)
 
 
 def _malformed_retry_feedback(context: LoopContext, dropped: int) -> str:
@@ -2889,7 +2966,9 @@ class AgentLoop:
         self._post_result_hooks = post_result_hooks
         # Tool Calling Middle Layer
         self._tool_loader = tool_loader
-        # SUNRISE: PeriodicNudge for self-reflection every N turns
+        # SUNRISE: PeriodicNudge for self-reflection every N turns. Forwarded
+        # to LoopContext.nudge in run_async — run_loop owns the injection so
+        # the web bridge's direct run_loop call is not left out.
         self._nudge = nudge
         # WEAVE-PRESS: opaque dict forwarded to ToolExecutionContext.metadata
         # so subsystems like the Printing Press hook can reach into the
@@ -2981,6 +3060,12 @@ class AgentLoop:
             tool_result_max=self._tool_result_max,
             compactor=self._compactor,
             memory_recall=self.memory_recall,
+            # The nudge USED to be injected below, in the `async for` body.
+            # That made it AgentLoop-only, so no web / Beacon / Bridge turn
+            # ever saw it — the parity guard could not catch it either,
+            # because it compares LoopContext FIELDS and this was not one.
+            # It is now a field, so both loops get it and both guards apply.
+            nudge=self._nudge,
         )
 
         last_text = ""
@@ -2993,20 +3078,6 @@ class AgentLoop:
                 last_text = event.message.text
                 last_usage = event.usage
                 turns += 1
-                # PeriodicNudge — inject self-reflection prompt every N turns.
-                # The nudge appears as a [system-internal]-prefixed user message
-                # so the model sees it on the next iteration.
-                if self._nudge is not None:
-                    try:
-                        nudge_msg = self._nudge.maybe_inject(turns)
-                    except Exception:
-                        nudge_msg = None
-                        log.debug("PeriodicNudge: maybe_inject raised", exc_info=True)
-                    if nudge_msg:
-                        messages.append(
-                            ConversationMessage.from_user_text(nudge_msg["content"])
-                        )
-                        log.debug("PeriodicNudge: injected at turn %d", turns)
             elif isinstance(event, ToolExecutionCompleted):
                 self._tool_trace.append({
                     "tool_name": event.tool_name,
