@@ -9,9 +9,10 @@ never a storage mutation. The LCM DAG stays the untouched source of truth.
 
 SINGLE-LAYER BY CONSTRUCTION (the spec's hard constraint): the synthetic
 summary message carries ``provenance="compactor"``, spans contain only
-``provenance == "user"`` messages, and any other provenance is a span
-BARRIER — so a summary can never be ingested into a later span. Very long
-sessions accumulate *sibling* summaries, never summaries of summaries.
+span-transparent messages (``_SPAN_TRANSPARENT``), and any other provenance
+is a span BARRIER — so a summary can never be ingested into a later span.
+Very long sessions accumulate *sibling* summaries, never summaries of
+summaries.
 
 Ships behind ``compaction.enabled`` (default false): with the section absent
 ``from_config`` returns ``None`` and nothing changes anywhere.
@@ -58,6 +59,22 @@ if TYPE_CHECKING:
     from prometheus.providers.base import ModelProvider
 
 log = logging.getLogger(__name__)
+
+# Provenances a compactable span may contain. "user" covers real user turns AND
+# the loop's own assistant/tool-result messages, which default to it.
+#
+# "file_mutation_verifier" is here because that summary is turn-local debris —
+# a claimed-vs-actual disk audit for ONE turn — and it lands at the end of
+# every file-touching turn. Treating it as a barrier (the rule for every other
+# non-user provenance) would pin the compactable prefix at the first file write
+# of the session and stop compaction dead on exactly the long coding sessions
+# it exists for. It is machinery-authored and trusted, so summarizing it away
+# loses nothing: the model already acted on it, turns ago.
+#
+# The single-layer guarantee is untouched — it rests on "compactor" being a
+# barrier, and compactor summaries are substituted at assembly time and never
+# stored, so one can never re-enter a span regardless.
+_SPAN_TRANSPARENT = frozenset({"user", "file_mutation_verifier"})
 
 DEFAULT_THRESHOLD_PCT = 0.75
 DEFAULT_RESERVE_TOKENS = 4096
@@ -234,18 +251,17 @@ class ContextCompactor:
     def _select_span_end(self, messages: list) -> int:
         """End index (exclusive) of the compactable prefix span.
 
-        The span is the contiguous prefix of ``provenance == "user"``
-        messages (which includes the loop's own assistant/tool-result
-        messages — they default to "user" provenance) up to the protected
-        boundary. Any other provenance (task_supervisor, cron, orchestrator,
-        compactor, …) is a BARRIER: trust-tagged injections and managed-task
-        context are never summarized away, and the single-layer guarantee
-        holds because synthetic summaries can never enter a span.
+        The span is the contiguous prefix of span-transparent messages (see
+        :data:`_SPAN_TRANSPARENT`) up to the protected boundary. Any other
+        provenance (task_supervisor, cron, orchestrator, compactor, …) is a
+        BARRIER: trust-tagged injections and managed-task context are never
+        summarized away, and the single-layer guarantee holds because
+        synthetic summaries can never enter a span.
         """
         boundary = self._protected_boundary(messages)
         end = 0
         for i in range(boundary):
-            if getattr(messages[i], "provenance", "user") != "user":
+            if getattr(messages[i], "provenance", "user") not in _SPAN_TRANSPARENT:
                 break
             end = i + 1
         return end

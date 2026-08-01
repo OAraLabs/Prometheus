@@ -195,6 +195,34 @@ async def test_trust_tagged_injection_is_a_barrier_and_never_summarized():
     assert "managed-task context" not in sent_prompt
 
 
+async def test_file_mutation_verifier_summary_is_span_transparent():
+    """The ONE non-user provenance that is NOT a barrier.
+
+    That summary is turn-local debris — a claimed-vs-actual disk audit for a
+    single turn — and it lands at the end of every file-touching turn. If it
+    were a barrier like the others, the compactable prefix would be pinned at
+    the session's first file write and compaction would stop dead on exactly
+    the long coding sessions it exists for.
+    """
+    history = _history()
+    summary_msg = ConversationMessage.from_injected(
+        "[FILE MUTATION VERIFIER]\nFiles touched this turn:\n   ✓ /tmp/x.py — write: created",
+        provenance="file_mutation_verifier",
+        is_trusted=True,
+    )
+    history.insert(4, summary_msg)
+
+    provider = _SummarizerProvider()
+    compactor = _compactor(provider)
+    out = await compactor.apply(history, session_id="s")
+
+    # Span ran straight THROUGH it (contrast the task_supervisor test above,
+    # where the span stopped and the injection survived verbatim at out[1]).
+    assert out[0].text.startswith(SUMMARY_MARKER_PREFIX)
+    assert summary_msg not in out
+    assert "FILE MUTATION VERIFIER" in provider.last_request.messages[0].text
+
+
 async def test_under_threshold_is_identity_with_zero_calls(tmp_path):
     telemetry = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
     provider = _SummarizerProvider()
