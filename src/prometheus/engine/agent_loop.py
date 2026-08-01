@@ -620,10 +620,15 @@ class LoopContext:
     session_state: object | None = None
     # SPRINT-2 WS2: file-mutation verifier. When wired, the loop calls
     # ``pre_tool_use`` / ``post_tool_use`` around every tool dispatch and
-    # ``post_turn`` when a turn ends without further tool calls. A summary
-    # of claimed-vs-actual filesystem changes is appended as a synthetic
-    # user-role message so the agent sees it on its next turn. See
-    # prometheus/hooks/file_mutation_verifier.py.
+    # ``post_turn`` when a turn ends without further tool calls. A summary of
+    # claimed-vs-actual filesystem changes is appended as an injected turn
+    # (``provenance="file_mutation_verifier"``) so the agent sees it on its
+    # next turn. See prometheus/hooks/file_mutation_verifier.py.
+    #
+    # UNIQUE AMONG THE FIELDS HERE: this one is mutable STATE, not config, and
+    # the daemon shares ONE instance across every surface. It is safe on this
+    # shared context only because ``run_loop`` scopes every call to a per-turn
+    # key. Anything else stateful added here needs the same treatment.
     file_mutation_verifier: object | None = None
     # Repair-pair flywheel: failed-call stash awaiting a matching success
     # within this loop run (keyed by tool name; "_malformed" for provider-
@@ -681,7 +686,58 @@ async def run_loop(
 
     Yields (StreamEvent, UsageSnapshot | None) tuples. The loop exits when
     the assistant returns a response with no tool_uses, or after max_turns.
+
+    Thin wrapper around :func:`_run_loop` whose only job is the
+    file-mutation verifier's turn scope. ONE verifier instance is shared by
+    every surface (telegram, CLI, cron, web/Beacon), so its state is keyed by
+    a token minted here — one per invocation, because one ``run_loop`` call
+    IS one turn. The ``finally`` is the point of the wrapper: ``_run_loop``
+    has five ``return`` sites plus max_turns exhaustion plus cancellation
+    (the Stop button closes the generator mid-iteration), and a turn that
+    exits any of those ways without dropping its record would leak snapshots
+    into the shared instance.
     """
+    # A duck-typed verifier without ``new_turn_key`` predates turn scoping;
+    # it keeps its single accumulator and we never pass it a key it can't
+    # accept. Capability is resolved ONCE here so the call sites below don't
+    # each have to guess (and can't fall back silently mid-turn).
+    fmv = getattr(context, "file_mutation_verifier", None)
+    turn_key: str | None = None
+    if fmv is not None and hasattr(fmv, "new_turn_key"):
+        turn_key = fmv.new_turn_key(session_id or context.session_id)
+    try:
+        async for item in _run_loop(
+            context,
+            messages,
+            mode=mode,
+            session_id=session_id,
+            tool_choice=tool_choice,
+            fmv_turn_key=turn_key,
+        ):
+            yield item
+    finally:
+        if turn_key is not None:
+            try:
+                fmv.discard_turn(turn_key=turn_key)
+            except Exception:
+                log.debug(
+                    "FileMutationVerifier.discard_turn raised", exc_info=True,
+                )
+
+
+async def _run_loop(
+    context: LoopContext,
+    messages: list[ConversationMessage],
+    *,
+    mode: str = "agent",
+    session_id: str | None = None,
+    tool_choice: object | None = None,
+    fmv_turn_key: str | None = None,
+) -> AsyncIterator[tuple[StreamEvent, UsageSnapshot | None]]:
+    """The loop body. See :func:`run_loop` — call that, not this."""
+    # Scopes every verifier call below to THIS turn. Empty for a duck-typed
+    # verifier that predates turn scoping (see run_loop).
+    _fmv_kw: dict[str, str] = {} if fmv_turn_key is None else {"turn_key": fmv_turn_key}
     # Sprint B / Piece 2 + force-search: resolve the per-call tool directive. `tool_choice`
     # (auto|none|required|{"tool":X}) is the lever; `mode` is sugar (agent->auto, chat->none).
     # An explicit tool_choice wins, else `mode` resolves; unknown/None -> auto, so an
@@ -1229,14 +1285,23 @@ async def run_loop(
                 return
 
             # SPRINT-2 WS2: turn ended without further tool calls — drain
-            # the file-mutation verifier and append its summary as a
-            # synthetic user-role message so the model sees it on its
-            # next turn. Same channel as PeriodicNudge. None when no
-            # mutations were tracked.
+            # THIS turn's mutations from the shared verifier and append the
+            # summary as an injected turn so the model sees it on its next
+            # turn. Same channel as PeriodicNudge. None when no mutations
+            # were tracked.
+            #
+            # NOT from_user_text: that tagged the summary provenance="user",
+            # is_trusted=True, i.e. indistinguishable from something the
+            # human typed. It reached LCM that way, so the REST history
+            # replayed it as role:"user" (a chat bubble nobody wrote) and the
+            # MemoryExtractor — which mines user-provenance rows — banked
+            # "[FILE MUTATION VERIFIER] ..." as user facts. is_trusted stays
+            # True: this is machinery-authored, not third-party data, so it
+            # keeps its current banner-free rendering to the model.
             fmv = getattr(context, "file_mutation_verifier", None)
             if fmv is not None:
                 try:
-                    summary = fmv.post_turn()
+                    summary = fmv.post_turn(**_fmv_kw)
                 except Exception:
                     summary = None
                     log.debug(
@@ -1244,7 +1309,11 @@ async def run_loop(
                         "skipping summary append", exc_info=True,
                     )
                 if summary:
-                    messages.append(ConversationMessage.from_user_text(summary))
+                    messages.append(ConversationMessage.from_injected(
+                        summary,
+                        provenance="file_mutation_verifier",
+                        is_trusted=True,
+                    ))
             return
 
         tool_calls = final_message.tool_uses
@@ -1269,7 +1338,7 @@ async def run_loop(
         if fmv is not None:
             for _tc in tool_calls:
                 try:
-                    fmv.pre_tool_use(_tc.name, _tc.input or {}, _tc.id)
+                    fmv.pre_tool_use(_tc.name, _tc.input or {}, _tc.id, **_fmv_kw)
                 except Exception:
                     log.debug(
                         "FileMutationVerifier.pre_tool_use raised",
@@ -1335,6 +1404,7 @@ async def run_loop(
                     fmv.post_tool_use(
                         _tc.name, _tc.input or {}, _tc.id,
                         output=_r.content, is_error=_r.is_error,
+                        **_fmv_kw,
                     )
                 except Exception:
                     log.debug(

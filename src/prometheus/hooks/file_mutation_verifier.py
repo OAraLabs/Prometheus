@@ -16,8 +16,18 @@ How it works:
     ``no_change`` (claimed write but disk unchanged — the load-bearing
     case).
   - Post-turn: if any mutations accumulated, emit a one-block summary as
-    a synthetic ``user``-role message so the model sees it on its NEXT
-    turn. Same pattern as PeriodicNudge.
+    a synthetic injected turn so the model sees it on its NEXT turn. Same
+    channel as PeriodicNudge, but tagged ``provenance="file_mutation_
+    verifier"`` rather than masquerading as something the user typed.
+
+TURN SCOPING: ``run_daemon`` builds exactly ONE verifier and hands it to
+every surface — telegram, CLI, cron, and (since this change) web/Beacon.
+State is therefore keyed by ``turn_key``: one key per ``run_loop``
+invocation, minted by the loop itself. Without it a single flat
+accumulator is shared by every concurrent turn, so the first turn to
+finish drains the other's mutations and reports them as its own while
+the second reports nothing — which inverts a feature whose entire job is
+checking that the writes YOU claimed actually landed.
 
 No Hermes precedent: their hooks docs explicitly state file-mutation
 verification "isn't provided as a ready-made feature" (see
@@ -28,7 +38,6 @@ Config:
   hooks:
     file_mutation_verifier:
       enabled: true              # opt-out, on by default
-      show_in_telegram: false    # quiet by default — only fed to model
       truncate_after_n_mutations: 20
 """
 
@@ -38,11 +47,28 @@ import logging
 import os
 import re
 import stat as _stat_mod
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 log = logging.getLogger(__name__)
+
+# Callers that don't mint a turn key (unit tests, duck-typed embedders, any
+# future single-threaded driver) share this one. Safe there BECAUSE they are
+# single-threaded; every concurrent surface goes through run_loop, which always
+# passes a real key.
+DEFAULT_TURN_KEY = "__unscoped__"
+
+# Backstop against records that never get drained: a turn that ends by raising,
+# or one whose run_loop generator is abandoned without being closed, leaves its
+# record behind. run_loop discards in a ``finally`` so this should stay cold —
+# it exists so a caller that forgets cannot leak without bound. Evicting the
+# least-recently-touched turn degrades to "no summary for that turn", never to
+# cross-turn contamination.
+MAX_LIVE_TURNS = 64
 
 
 # Tool names that touch the filesystem. Path extraction is per-tool —
@@ -91,7 +117,7 @@ class _Mutation:
 
 @dataclass
 class _TurnRecord:
-    """Per-turn accumulator. Reset on each PostTurn."""
+    """Per-turn accumulator. Created on first touch, dropped on PostTurn."""
     mutations: list[_Mutation] = field(default_factory=list)
     # Map turn-scoped pre-snapshots by (tool_use_id, path) so post_tool_use
     # can pair them up even when one tool call touches multiple paths.
@@ -164,33 +190,58 @@ def _extract_bash_paths(command: str) -> list[tuple[str, str]]:
 class FileMutationVerifier:
     """Per-turn tracker for claimed vs actual filesystem mutations.
 
+    ONE instance is shared process-wide (see ``run_daemon``), so every entry
+    point takes a ``turn_key`` identifying which in-flight turn it belongs to.
+    Keys are minted per ``run_loop`` invocation; omitting one falls back to
+    :data:`DEFAULT_TURN_KEY`, which is correct only for single-threaded callers.
+
     Lifecycle:
-      pre_tool_use(tool_name, tool_input, tool_use_id)
+      pre_tool_use(tool_name, tool_input, tool_use_id, turn_key=...)
         snapshots the affected path(s) before execution.
-      post_tool_use(tool_name, tool_input, tool_use_id, output, is_error)
+      post_tool_use(tool_name, tool_input, tool_use_id, output, is_error,
+                    turn_key=...)
         snapshots again and records the diff.
-      post_turn() -> str | None
-        returns a summary string when any mutations are pending, ``None``
-        otherwise. Resets internal state. The caller (agent_loop) decides
-        where the summary goes (default: append as a synthetic user-role
-        message so the model sees it on its next turn).
+      post_turn(turn_key=...) -> str | None
+        returns a summary string when that turn has mutations pending,
+        ``None`` otherwise, and drops the turn's record. The caller
+        (agent_loop) decides where the summary goes (default: append as an
+        injected turn so the model sees it on its next turn).
+      discard_turn(turn_key=...)
+        drops a turn's record without rendering — the cleanup path for turns
+        that end early (iteration cap, circuit breaker, interrupt).
     """
 
     def __init__(
         self,
         *,
         enabled: bool = True,
-        show_in_telegram: bool = False,
         truncate_after_n_mutations: int = 20,
     ) -> None:
         self._enabled = bool(enabled)
-        self.show_in_telegram = bool(show_in_telegram)
         self._truncate_n = max(1, int(truncate_after_n_mutations))
-        self._turn = _TurnRecord()
+        # turn_key -> record, least-recently-touched first. Guarded by
+        # ``_lock``: turns are driven by asyncio and interleave at every
+        # ``await``, and gateways are free to drive the loop from a worker
+        # thread, so map mutation must not race.
+        self._turns: OrderedDict[str, _TurnRecord] = OrderedDict()
+        self._lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    @staticmethod
+    def new_turn_key(session_id: str | None = None) -> str:
+        """Mint a key for one turn. Unique per call — a session id alone is
+        NOT enough, since a session can have more than one turn in flight."""
+        return f"{session_id or 'anon'}:{uuid4().hex}"
+
+    @property
+    def live_turns(self) -> int:
+        """Number of turns currently holding state. Diagnostics only; a
+        number that keeps climbing means a caller isn't draining."""
+        with self._lock:
+            return len(self._turns)
 
     # ------------------------------------------------------------------
     # Hook entry points — called by agent_loop
@@ -201,13 +252,21 @@ class FileMutationVerifier:
         tool_name: str,
         tool_input: dict[str, Any],
         tool_use_id: str,
+        *,
+        turn_key: str | None = None,
     ) -> None:
         """Snapshot every path the tool is expected to touch."""
         if not self._enabled:
             return
         try:
-            for p in self._paths_for(tool_name, tool_input):
-                self._turn._pending[(tool_use_id, p)] = _snapshot(p)
+            paths = self._paths_for(tool_name, tool_input)
+            if not paths:
+                # Don't materialise a record for a tool that touches nothing —
+                # otherwise every bash `ls` allocates a turn slot.
+                return
+            snaps = {(tool_use_id, p): _snapshot(p) for p in paths}
+            with self._lock:
+                self._record(turn_key)._pending.update(snaps)
         except Exception:
             log.debug("FileMutationVerifier.pre_tool_use raised", exc_info=True)
 
@@ -219,49 +278,85 @@ class FileMutationVerifier:
         *,
         output: str | None = None,
         is_error: bool = False,
+        turn_key: str | None = None,
     ) -> None:
         """Diff snapshots and record one ``_Mutation`` per tracked path."""
         if not self._enabled:
             return
         try:
             paths = self._paths_for(tool_name, tool_input)
-            for p in paths:
-                before = self._turn._pending.pop((tool_use_id, p), None)
-                if before is None:
-                    # No pre-snapshot — happens if pre_tool_use raised or
-                    # the post_tool_use receives a path the pre couldn't
-                    # extract. Treat ``before`` as absent.
-                    before = _Snapshot(exists=False)
-                after = _snapshot(p)
-                self._turn.mutations.append(_Mutation(
-                    tool=tool_name,
-                    path=p,
-                    claimed_action=self._claim_from(tool_name, tool_input),
-                    before=before,
-                    after=after,
-                    error=(output or "")[:200] if is_error else None,
-                ))
+            if not paths:
+                return
+            claim = self._claim_from(tool_name, tool_input)
+            err = (output or "")[:200] if is_error else None
+            with self._lock:
+                turn = self._record(turn_key)
+                for p in paths:
+                    before = turn._pending.pop((tool_use_id, p), None)
+                    if before is None:
+                        # No pre-snapshot — happens if pre_tool_use raised or
+                        # the post_tool_use receives a path the pre couldn't
+                        # extract. Treat ``before`` as absent.
+                        before = _Snapshot(exists=False)
+                    turn.mutations.append(_Mutation(
+                        tool=tool_name,
+                        path=p,
+                        claimed_action=claim,
+                        before=before,
+                        after=_snapshot(p),
+                        error=err,
+                    ))
         except Exception:
             log.debug(
                 "FileMutationVerifier.post_tool_use raised", exc_info=True,
             )
 
-    def post_turn(self) -> str | None:
-        """Render and reset the per-turn summary. Returns ``None`` when
-        nothing was tracked."""
-        muts = list(self._turn.mutations)
-        # Drop unmatched pre-snapshots that never got a post — they
-        # likely came from a tool that failed before execution, or one
-        # the pre handler didn't recognise; reset to avoid leaking
-        # across turns.
-        self._turn = _TurnRecord()
-        if not muts:
+    def post_turn(self, *, turn_key: str | None = None) -> str | None:
+        """Render THIS turn's summary and drop its record. Returns ``None``
+        when the turn tracked nothing.
+
+        Dropping the record also discards unmatched pre-snapshots — those came
+        from a tool that failed before execution, or one the pre handler
+        didn't recognise, and must not leak into a later turn.
+        """
+        with self._lock:
+            turn = self._turns.pop(self._key(turn_key), None)
+        if turn is None or not turn.mutations:
             return None
-        return self._format_summary(muts)
+        return self._format_summary(turn.mutations)
+
+    def discard_turn(self, *, turn_key: str | None = None) -> None:
+        """Drop a turn's record without rendering. Idempotent — safe to call
+        after ``post_turn`` has already drained it."""
+        with self._lock:
+            self._turns.pop(self._key(turn_key), None)
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _key(turn_key: str | None) -> str:
+        return turn_key or DEFAULT_TURN_KEY
+
+    def _record(self, turn_key: str | None) -> _TurnRecord:
+        """Get-or-create this turn's record. Caller holds ``_lock``."""
+        key = self._key(turn_key)
+        turn = self._turns.get(key)
+        if turn is None:
+            turn = _TurnRecord()
+            self._turns[key] = turn
+            while len(self._turns) > MAX_LIVE_TURNS:
+                evicted, _ = self._turns.popitem(last=False)
+                log.warning(
+                    "FileMutationVerifier: evicted undrained turn %r "
+                    "(>%d live) — that turn gets no summary; a caller is "
+                    "not calling post_turn/discard_turn",
+                    evicted, MAX_LIVE_TURNS,
+                )
+        else:
+            self._turns.move_to_end(key)
+        return turn
 
     def _paths_for(
         self, tool_name: str, tool_input: dict[str, Any],
@@ -339,8 +434,13 @@ def make_default_verifier(config: dict[str, Any] | None = None) -> "FileMutation
         hooks:
           file_mutation_verifier:
             enabled: true
-            show_in_telegram: false
             truncate_after_n_mutations: 20
+
+    ``show_in_telegram`` was specified in SPRINT-2 WS2 and implemented as far
+    as an attribute, but no code ever read it — the summary has always been
+    model-facing only, on every surface. It is gone rather than left as a
+    setting that silently does nothing; an unrecognised key here is ignored,
+    so a config that still carries it keeps loading.
     """
     cfg = (
         ((config or {}).get("hooks") or {}).get("file_mutation_verifier")
@@ -348,6 +448,5 @@ def make_default_verifier(config: dict[str, Any] | None = None) -> "FileMutation
     )
     return FileMutationVerifier(
         enabled=cfg.get("enabled", True),
-        show_in_telegram=cfg.get("show_in_telegram", False),
         truncate_after_n_mutations=cfg.get("truncate_after_n_mutations", 20),
     )

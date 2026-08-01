@@ -548,10 +548,18 @@ def create_app(
         """Durable conversation history from the LCM store.
 
         Response: ``{ "messages": [...], "watermark": <int> }``. Each message is
-        ``{message_id: <int>, ordinal: <int>, session_id, role, content, timestamp}``.
+        ``{message_id: <int>, ordinal: <int>, session_id, role, content, provenance,
+        is_trusted, timestamp}``.
 
         * ``message_id`` is the durable LCM rowid — **monotonic, unique, restart-stable**
           (the store is append-only). It is BOTH the canonical identity AND the cursor.
+        * ``provenance`` says WHO originated the turn; ``role`` does not. Runtime
+          injections (``file_mutation_verifier``, ``task_supervisor``, ``cron``, …) are
+          persisted as ``role: "user"`` because that is their wire role to the model,
+          and a client that renders role alone shows them as chat bubbles the human
+          never typed. Filter or badge on ``provenance != "user"``. ``is_trusted``
+          distinguishes machinery-authored injections (true) from third-party data
+          the model must treat as untrusted (false).
         * ``ordinal`` is ``turn_index`` (the in-memory list position) — an explicitly
           NON-UNIQUE display position that repeats across restart/trim. Do not key on it.
         * ``timestamp`` is display-only — a whole turn can share one timestamp; order by
@@ -589,6 +597,8 @@ def create_app(
                 "role": p.role,
                 "content": p.content,
                 "content_json": p.content_json,
+                "provenance": getattr(p, "provenance", "user") or "user",
+                "is_trusted": bool(getattr(p, "is_trusted", True)),
                 "timestamp": p.timestamp,
             }
             for p in parts

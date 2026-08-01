@@ -1372,13 +1372,18 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 # LSPTool), so sharing it across concurrent web turns is safe.
                 # Costs up to diagnostics_delay_ms per file write, same as the
                 # other paths already pay.
-                #
-                # NOT passed, deliberately: `fmv` (file_mutation_verifier). It
-                # is a per-turn ACCUMULATOR held as one daemon-wide instance,
-                # and this context is shared by every Beacon session — see
-                # tests/test_web_bridge_loop_parity.py::KNOWN_UNVERIFIED_DRIFT
-                # for the two verified reasons.
                 post_result_hooks=post_result_hooks or None,
+                # ...and the FIFTH. This one needed the hook fixed first, not
+                # just wiring: `fmv` is the one field here that is mutable
+                # STATE rather than config, and it held a single flat
+                # accumulator with no turn key. Sharing this context across
+                # concurrent Beacon turns would have made the first turn to
+                # finish report the other's writes as its own — so it was
+                # carved out of the parity guard until the accumulator became
+                # turn-scoped (run_loop now mints one key per invocation and
+                # drops it in a `finally`). The same defect was already live
+                # on telegram-vs-cron, which share this instance too.
+                file_mutation_verifier=fmv,
             )
 
             # Beacon D1: construct the profile store so GET /api/profiles returns

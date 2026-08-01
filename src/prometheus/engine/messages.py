@@ -22,9 +22,14 @@ from pydantic import BaseModel, Field
 # (SPRINT-TEACHER-ESCALATION); untrusted by convention like all injections.
 # "compactor" = synthetic span summaries substituted at prompt-assembly time
 # (SPRINT-CONTEXT-COMPACTOR); machinery-authored, trusted, never stored.
+# "file_mutation_verifier" = the turn-end claimed-vs-actual disk audit
+# (hooks/file_mutation_verifier.py); machinery-authored, trusted, and its OWN
+# value rather than "orchestrator" so surfaces can filter it out of a
+# transcript without also hiding real orchestrator feedback.
 Provenance = Literal[
     "user", "cron", "task_supervisor", "orchestrator", "teacher_escalation", "compactor",
     "supervisor",  # Loop Manager Sprint 2 — a human's mid-run coding-loop steer (trusted)
+    "file_mutation_verifier",
 ]
 
 
