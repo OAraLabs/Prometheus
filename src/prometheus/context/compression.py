@@ -1,10 +1,20 @@
 """ContextCompressor — two-tier context compression.
 
+⚠️ NOT WIRED INTO THE LIVE LOOP (audit H1, 2026-06). This class has no call site
+outside tests + the ``context`` package re-export; ``maybe_compress`` never runs
+in production. The active context-bounding layers are ``ToolResultTruncator``
+(wired in agent_loop) and the cross-result turn budget. The live-config keys
+``context.compression_trigger`` / ``context.fresh_tail_count`` therefore tune
+nothing here (``fresh_tail_count`` is also an independent LCM field). Wiring this
+in is a real hot-path behaviour change (it alters what context the model sees) —
+do not assume it is active; the wire-vs-delete call is deliberately left to the
+owner. Tests exercise it directly, so "tested" must not be read as "wired".
+
 Tier 1 (pruning): strip tool_result content from old messages. Free, no LLM call.
 Tier 2 (summarization): summarize old message batches via ModelProvider when
     pruning alone isn't enough. Added in Sprint 15b GRAFT.
 
-Usage:
+Usage (if ever wired):
     compressor = ContextCompressor(budget, fresh_tail_count=32)
     messages = compressor.maybe_compress(messages)
     # or with Tier 2:
