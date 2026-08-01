@@ -8,9 +8,9 @@ Beacon is the native desktop client for the Prometheus daemon — an Electron ap
 
 ## Getting Beacon
 
-Grab a build from [beacon-desktop releases](https://github.com/OAraLabs/beacon-desktop/releases) — a macOS `.dmg` or a Linux `.AppImage`/`.deb`. Two honest caveats: macOS builds are **unsigned** unless Apple credentials were in the build environment, so Gatekeeper will complain the first time — right-click → Open gets you past it. And there is **no auto-update channel** yet; new versions are a manual download.
+Honest status first: the beacon-desktop repository is **private while it hardens**, and public builds will arrive with the public release — so today, getting Beacon means having repo access and building from source. Two more caveats for when builds do land: macOS builds are **unsigned** unless Apple credentials were in the build environment, so Gatekeeper will complain the first time — right-click → Open gets you past it. And there is **no auto-update channel** yet; new versions are a manual download.
 
-Building from source is quick if you'd rather:
+Building from source is quick if you have access:
 
 ```bash
 git clone https://github.com/OAraLabs/beacon-desktop.git && cd beacon-desktop
@@ -44,7 +44,7 @@ Mission is where Beacon lands you: a banner, a first-flight checklist (right aft
 
 ![Mission Control live — agent state hero, approvals, telemetry, Sentinel, and recent activity](../assets/shots/panel-mission-live.png)
 
-**Mission Control** is the cockpit HUD. A hero card shows the agent's current state (it glows while thinking) alongside model, provider, active profile, and uptime, with quick actions underneath. Around it: an **Approvals** card with one-click Approve/Deny for anything the agent is blocked on, a telemetry headline, a **Sentinel** card (state plus dream count), a task ticker, and a recent-activity strip.
+**Mission Control** is the cockpit HUD. A hero card shows the agent's current state (it glows while thinking) alongside model, provider, active profile, and uptime, with quick actions underneath. Around it: an **Approvals** card with one-click Approve/Deny for anything the agent is blocked on, an **Attention inbox** collecting the things waiting on you, a telemetry headline, a **Sentinel** card (state plus dream count), a task ticker, and a recent-activity strip.
 
 **The Armilla** is the armillary sphere you'll notice spinning above the composer. It isn't decoration-only — it's telemetry-driven. Its spin rate tracks how hard the agent is working, the core pulses with activity, each active session gets its own node on the ecliptic, and a 24-hour horizon dial marks the day's signal events. If the connection drops, the sky freezes — a glanceable "something's wrong." It renders static if your OS requests reduced motion.
 
@@ -67,10 +67,11 @@ What you can actually do here:
 - **Retry or edit your last message.** The most recent user message gets Retry and Edit-last actions.
 - **Attach files.** File picker, paste, or drag-and-drop — images get thumbnails, other files get chips. Agent-mode only.
 - **Copy any message**, and rely on stick-to-bottom streaming with a "Latest ↓" jump chip when you scroll up. Long sessions stay fast because only the last ~120 rows render.
+- **Download what the agent delivers.** Files the agent publishes to its [artifact outbox](api.md#artifacts--the-agents-outbox) appear as download chips in chat — click to fetch by content id.
 
 ![Mid-stream in Beacon — tool calls firing live while the reply streams](../assets/shots/chat-4-reply.png)
 
-The session sidebar shows every live session with gateway badges (Telegram/Desktop/Slack/Discord), unread dots, and relative timestamps. You can filter/search, start a new chat, **rename** a session locally, or **Forget** it — which removes it from the sidebar and the daemon's in-memory working set but does not delete the durable conversation history.
+The session sidebar shows every session with **readable source chips** (Telegram, Desktop, Slack, Discord — parsed from the daemon's gateway stamping), unread dots, and relative timestamps, grouped by recency (Today / Yesterday / earlier). Machine-generated runs — bakeoffs, verification harnesses — fold into a single dashed **"Automated"** chip that's excluded from the default view, so your real conversations aren't buried under the system talking to itself. Inside a conversation, tool strips with more than 6 calls collapse into a per-tool tally instead of a wall of chips. You can filter/search, start a new chat, **rename** a session locally, or **Forget** it — a durable tombstone on the daemon: the session disappears from the index (and stays gone across restarts), the durable history is preserved, and new activity on the same id revives it.
 
 ### Sessions
 
@@ -166,7 +167,7 @@ A tabbed panel of native surfaces over the daemon's configuration. Every tab sha
 
 - **Skills** — the agent's skill library, read-only, with **Pin/Unpin** (pinned skills are protected from automated pruning) and a View action that opens the skill in the preview pane.
 - **Telemetry** — total tool calls, a success gauge, and per-tool stats.
-- **Memory** — snapshots of `MEMORY.md` and `USER.md` with character-budget gauges.
+- **Memory** — an **editor** for `MEMORY.md` and `USER.md` with character-budget gauges. Edits save to the daemon via `PUT /api/memory/current`; if the agent moved the file since you loaded it, the save is refused with a 409 carrying the current truth so you can rebase your draft instead of clobbering — and every write is snapshotted to the daemon's memory history first, so edits are reversible.
 - **Sentinel** — state, dream count, timers, and a tail of the dream log.
 - **Wiki** — page and entity counts for the knowledge base.
 - **Cron** — full CRUD over scheduled jobs: create, **Run now**, enable/disable, delete, with next-run/last-run times and status.
@@ -186,7 +187,8 @@ The things that follow you around every view:
 - **Native notifications** — replies, background-task completion and failure, and disconnects; clicking one focuses the relevant session.
 - **Offline outbox** — messages you send while disconnected queue in a local SQLite cache and drain automatically on reconnect, with the queued count visible in the connection indicator.
 - **Window-state persistence** — bounds, maximized state, and zoom survive relaunches.
-- **Connection indicator** — the dot pinned at the foot of the nav rail. It shows WebSocket state, turns an honest **amber lock when the daemon is rejecting your token (401)** rather than pretending to be merely offline, and displays the outbox count. Click it for a popover with the gateway address, reconnect attempts, outbox detail, and Reconnect / Open Settings actions. Connection Settings itself (⌘,) lets you test REST and WS independently before saving.
+- **Connection indicator** — the dot pinned at the foot of the nav rail. It shows WebSocket state, turns an honest **amber lock when the daemon is rejecting your token (401)** rather than pretending to be merely offline, and displays the outbox count. It also guards against the half-open-socket lie: a **20-second application-level ping** with a quiet-window terminate means a socket that has gone silent is torn down and reconnected instead of sitting there looking healthy — "Connected" can never point at a dead socket. Click it for a popover with the gateway address, reconnect attempts, outbox detail, and Reconnect / Open Settings actions. Connection Settings itself (⌘,) lets you test REST and WS independently before saving.
+- **The ActivityLine** — movement means liveness. While a turn runs, a live line driven by the daemon's 3-second `agent_progress` pulse shows the current phase, tool, and round, so a long-thinking agent never looks hung. And when a turn fails, the structured error frame renders as a **cause with a hint** — "billing", "auth", "rate limit", "backend unreachable" plus one actionable sentence — instead of a bare stack-trace string.
 
 ## Themes — the Skin Codex
 
@@ -215,4 +217,4 @@ Honesty section — the things Beacon does not do yet, so you're not surprised m
 - **Integrations has no add-integration UI** — new integrations mean hand-editing `integrations.json`.
 - **Agent | Chat mode resets to Agent on every launch** — it's deliberately in-memory, not persisted.
 - **The diff viewer and file preview truncate at 256 KB.**
-- **Builds are unsigned (macOS), there's no auto-update, and the app icon is a placeholder.** Every new version is a manual download; Gatekeeper needs right-click → Open the first time.
+- **Builds are unsigned (macOS) and there's no auto-update.** Every new version is a manual download; Gatekeeper needs right-click → Open the first time.

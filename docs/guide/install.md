@@ -91,7 +91,7 @@ The exit code is nonzero when anything is broken, so it also works in scripts an
 
 ## Install Beacon
 
-Beacon is the native desktop cockpit (macOS / Linux). Grab a prebuilt from [beacon-desktop releases](https://github.com/OAraLabs/beacon-desktop/releases) — no Node toolchain needed. (Releases are published from CI drafts, so the latest tag may occasionally lag a few days behind main.)
+Beacon is the native desktop cockpit (macOS / Linux). Honest status: the beacon-desktop repository is **private while it hardens**, and public prebuilt releases will arrive with the public release — until then, installing Beacon requires repo access and the from-source path below. When prebuilds land (`.dmg` for macOS, `.AppImage`/`.deb` for Linux), the notes below apply to them:
 
 - **macOS (Apple Silicon)** — download `Beacon-<version>-arm64.dmg` and drag Beacon to Applications. The build is currently **unsigned**, so Gatekeeper will balk the first time: right-click the app → **Open** → **Open**, or clear the quarantine flag directly:
 
@@ -111,7 +111,7 @@ Beacon is the native desktop cockpit (macOS / Linux). Grab a prebuilt from [beac
   sudo apt install ./Beacon-<version>-amd64.deb
   ```
 
-- **From source**:
+- **From source** (the working path today; requires repo access):
 
   ```bash
   git clone https://github.com/OAraLabs/beacon-desktop.git && cd beacon-desktop
