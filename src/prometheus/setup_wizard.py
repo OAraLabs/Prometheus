@@ -25,7 +25,7 @@ from typing import Any
 import httpx
 import yaml
 
-from prometheus.config.paths import get_config_dir
+from prometheus.config.paths import get_config_dir, get_wiki_root
 from prometheus.providers.registry import CLOUD_DEFAULTS, ProviderRegistry
 
 # Config file lives in the repo's config/ directory (checkout installs).
@@ -773,7 +773,7 @@ Run this wizard again after you're ready:
         config_dir = get_config_dir()
         dirs = [
             config_dir / "workspace",
-            config_dir / "wiki",
+            get_wiki_root(),
             config_dir / "sentinel",
             config_dir / "skills",
             config_dir / "data",

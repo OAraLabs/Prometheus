@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from prometheus.config.paths import get_config_dir
+from prometheus.config.paths import get_config_dir, get_wiki_root
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 log = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ class WikiQueryTool(BaseTool):
     async def execute(
         self, arguments: WikiQueryInput, context: ToolExecutionContext
     ) -> ToolResult:
-        wiki_root = get_config_dir() / "wiki"
+        wiki_root = get_wiki_root()
         index_path = wiki_root / "index.md"
 
         if not index_path.exists():

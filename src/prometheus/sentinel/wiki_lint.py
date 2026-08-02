@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from prometheus.config.paths import get_config_dir
+from prometheus.config.paths import get_config_dir, get_wiki_root
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ class WikiLinter:
     _FIXERS: dict = {}
 
     def __init__(self, wiki_root: Path | None = None) -> None:
-        self.wiki_root = Path(wiki_root) if wiki_root else get_config_dir() / "wiki"
+        self.wiki_root = Path(wiki_root) if wiki_root else get_wiki_root()
 
     def lint(self) -> LintResult:
         """Run all lint checks. No LLM needed."""

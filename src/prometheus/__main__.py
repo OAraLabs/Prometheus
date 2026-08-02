@@ -24,7 +24,7 @@ from typing import Any
 import yaml
 
 from prometheus import __version__
-from prometheus.config.paths import get_config_dir, get_data_dir, get_logs_dir
+from prometheus.config.paths import get_config_dir, get_data_dir, get_logs_dir, get_wiki_root
 from prometheus.engine.agent_loop import AgentLoop, RunResult, run_loop, LoopContext
 from prometheus.engine.messages import ConversationMessage
 from prometheus.engine.stream_events import (
@@ -873,7 +873,7 @@ def _reset_data() -> None:
     ]
     dir_targets = [
         ("eval_results/", config_dir / "eval_results"),
-        ("wiki/", config_dir / "wiki"),
+        ("wiki/", get_wiki_root()),
         ("sentinel/", config_dir / "sentinel"),
         ("skills/auto/", config_dir / "skills" / "auto"),
     ]

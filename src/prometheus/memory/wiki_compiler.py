@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from prometheus.config.paths import get_config_dir
+from prometheus.config.paths import get_config_dir, get_wiki_root
 from prometheus.memory.entity_validation import classify_entity, quarantine
 from prometheus.memory.store import MemoryStore
 
@@ -58,7 +58,7 @@ class WikiCompiler:
     ) -> None:
         self._store = store
         self._wiki = (
-            Path(wiki_root) if wiki_root else get_config_dir() / "wiki"
+            Path(wiki_root) if wiki_root else get_wiki_root()
         )
         self._lock = threading.Lock()
 

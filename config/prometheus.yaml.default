@@ -510,3 +510,14 @@ evals:
 
 tracing:
   enabled: false
+
+# ── Wiki ──────────────────────────────────────────────────────────────────
+# Where the compiled wiki lives. Every consumer — the compiler, the linter,
+# the knowledge synthesizer, the wiki_query tool, the web bridge and the
+# Telegram surfaces — resolves this one key.
+# Default: <config dir>/wiki  (i.e. ~/.prometheus/wiki unless
+# PROMETHEUS_CONFIG_DIR is set). The PROMETHEUS_WIKI env var overrides the
+# default but is itself overridden by this key; scripts/install_obsidian_view.sh
+# reads that env var as the shell mirror of this setting.
+wiki:
+  root: ~/.prometheus/wiki

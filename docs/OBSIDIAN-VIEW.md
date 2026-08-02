@@ -1,7 +1,7 @@
 # Obsidian read-only view of the Prometheus wiki
 
 SPRINT MEMORY-3, Phase 5. A way to *read* the self-maintaining wiki
-(`~/.prometheus/wiki/`) as an Obsidian vault — graph view, backlinks, search —
+(the wiki root — configurable via the `wiki.root` key in `prometheus.yaml` (default: `<config dir>/wiki`, i.e. `~/.prometheus/wiki`)) as an Obsidian vault — graph view, backlinks, search —
 without ever writing to it by hand.
 
 ## The one rule: it is READ-ONLY
@@ -45,14 +45,16 @@ deliberately-pinned knowledge stands out from the ambient, auto-extracted mass.
 scripts/install_obsidian_view.sh
 ```
 
-Copies `config/obsidian/` into `~/.prometheus/wiki/.obsidian/`. Idempotent.
+Copies `config/obsidian/` into `<wiki root>/.obsidian/`. Idempotent.
+The script resolves the root from `$PROMETHEUS_WIKI`, the shell mirror of
+the `wiki.root` config key; set it if you have repointed the wiki.
 Run it on the box that hosts the wiki (the mini), so the color group is present
 before Obsidian first opens the vault. Override the vault path with
 `PROMETHEUS_WIKI=/path/to/vault` if needed.
 
 ## Viewing from the Mac (interactive — not covered by the installer)
 
-Mount `~/.prometheus/wiki/` from the mini over Tailscale/SSHFS and open it as a
+Mount the wiki root (default `~/.prometheus/wiki/`) from the mini over Tailscale/SSHFS and open it as a
 vault in Obsidian on the Mac. Two things to know:
 
 1. **Read-only vs Obsidian's own state.** Obsidian wants to write *its* state

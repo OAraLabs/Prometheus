@@ -20,6 +20,7 @@ if "prometheus.memory" not in sys.modules:
 import pytest  # noqa: E402
 import yaml  # noqa: E402
 
+from prometheus.config.paths import set_wiki_root  # noqa: E402
 from prometheus.memory.store import MemoryStore  # noqa: E402
 from prometheus.memory.wiki_compiler import WikiCompiler  # noqa: E402
 from prometheus.tools.base import ToolExecutionContext, ToolResult  # noqa: E402
@@ -255,10 +256,12 @@ async def test_query_tool_finds_page():
             _make_fact("Dr. Pham", "based in Houston"),
         ])
 
-        # Patch get_config_dir to point to our tmp wiki
+        # Pin the single wiki-root resolver at the tmp wiki. (Was:
+        # patching wq_mod.get_config_dir — no longer the resolution
+        # point now that every consumer calls get_wiki_root().)
         import prometheus.tools.builtin.wiki_query as wq_mod
-        original = wq_mod.get_config_dir
-        wq_mod.get_config_dir = lambda: Path(tmp)
+
+        set_wiki_root(wiki_root)
 
         try:
             tool = WikiQueryTool()
@@ -271,7 +274,7 @@ async def test_query_tool_finds_page():
             assert "Dr. Pham" in result.output
             assert "nephrologist" in result.output
         finally:
-            wq_mod.get_config_dir = original
+            set_wiki_root(None)
 
         store.close()
 
@@ -303,8 +306,7 @@ async def test_query_tool_writes_to_queries():
         ])
 
         import prometheus.tools.builtin.wiki_query as wq_mod
-        original = wq_mod.get_config_dir
-        wq_mod.get_config_dir = lambda: Path(tmp)
+        set_wiki_root(Path(tmp) / "wiki")
 
         try:
             tool = WikiQueryTool()
@@ -327,7 +329,7 @@ async def test_query_tool_writes_to_queries():
             index_after = (wiki_root / "index.md").read_text(encoding="utf-8")
             assert index_after == index_before, "wiki_query must not write index.md"
         finally:
-            wq_mod.get_config_dir = original
+            set_wiki_root(None)
 
         store.close()
 
@@ -355,8 +357,7 @@ async def test_query_payload_bounded_by_size():
             "## Topics\n" + "\n".join(lines) + "\n", encoding="utf-8"
         )
 
-        original = wq_mod.get_config_dir
-        wq_mod.get_config_dir = lambda: Path(tmp)
+        set_wiki_root(Path(tmp) / "wiki")
         try:
             tool = WikiQueryTool()
             ctx = ToolExecutionContext(cwd=Path(tmp))
@@ -367,7 +368,7 @@ async def test_query_payload_bounded_by_size():
             # And the model is told it's a bounded view (not all 5 fit).
             assert "of 5 relevant page" in result.output
         finally:
-            wq_mod.get_config_dir = original
+            set_wiki_root(None)
 
 
 @pytest.mark.asyncio
@@ -384,8 +385,7 @@ async def test_query_truncates_oversized_top_page():
             "## Topics\n- [kubernetes huge page](topics/huge.md)\n", encoding="utf-8"
         )
 
-        original = wq_mod.get_config_dir
-        wq_mod.get_config_dir = lambda: Path(tmp)
+        set_wiki_root(Path(tmp) / "wiki")
         try:
             tool = WikiQueryTool()
             ctx = ToolExecutionContext(cwd=Path(tmp))
@@ -394,7 +394,7 @@ async def test_query_truncates_oversized_top_page():
             assert len(result.output) <= wq_mod._MAX_RESULT_CHARS
             assert "[truncated" in result.output
         finally:
-            wq_mod.get_config_dir = original
+            set_wiki_root(None)
 
 
 # ---------------------------------------------------------------------------
@@ -598,8 +598,7 @@ async def test_manual_ranks_first_in_query():
         WikiCompiler(store=store, wiki_root=wiki_root).regenerate_all()
 
         import prometheus.tools.builtin.wiki_query as wq_mod
-        original = wq_mod.get_config_dir
-        wq_mod.get_config_dir = lambda: Path(tmp)
+        set_wiki_root(Path(tmp) / "wiki")
         try:
             result = await WikiQueryTool().execute(
                 wq_mod.WikiQueryInput(query="kubernetes"),
@@ -609,7 +608,7 @@ async def test_manual_ranks_first_in_query():
             assert "ManualKube" in out and "AmbientKube" in out
             assert out.index("ManualKube") < out.index("AmbientKube"), "manual must rank first"
         finally:
-            wq_mod.get_config_dir = original
+            set_wiki_root(None)
         store.close()
 
 
@@ -631,8 +630,7 @@ async def test_manual_heavy_query_still_respects_budget():
         (wiki_root / "index.md").write_text(
             "## Topics\n" + "\n".join(lines) + "\n", encoding="utf-8")
 
-        original = wq_mod.get_config_dir
-        wq_mod.get_config_dir = lambda: Path(tmp)
+        set_wiki_root(Path(tmp) / "wiki")
         try:
             result = await WikiQueryTool().execute(
                 wq_mod.WikiQueryInput(query="kubernetes"),
@@ -642,7 +640,7 @@ async def test_manual_heavy_query_still_respects_budget():
             assert len(result.output) <= wq_mod._MAX_RESULT_CHARS
             assert "of 5 relevant page" in result.output  # bounded view; not all fit
         finally:
-            wq_mod.get_config_dir = original
+            set_wiki_root(None)
 
 
 def test_lint_exempts_manual_page_across_full_pass():

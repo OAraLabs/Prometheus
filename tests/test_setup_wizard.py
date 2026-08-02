@@ -35,6 +35,11 @@ def tmp_prometheus_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "prometheus.setup_wizard.get_config_dir", lambda: config_dir
     )
+    # The wiki root now resolves through prometheus.config.paths, which reads
+    # PROMETHEUS_CONFIG_DIR — patching only the module-local get_config_dir
+    # binding would leave the wiki pointing outside the temp tree.
+    monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(config_dir))
+    monkeypatch.delenv("PROMETHEUS_WIKI", raising=False)
     return config_dir
 
 

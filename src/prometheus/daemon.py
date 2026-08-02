@@ -23,7 +23,12 @@ from typing import Any
 
 import yaml
 
-from prometheus.config.paths import get_config_dir, get_logs_dir
+from prometheus.config.paths import (
+    get_config_dir,
+    get_logs_dir,
+    resolve_wiki_root,
+    set_wiki_root,
+)
 from prometheus.context.environment import git_head_sha
 from prometheus.engine.agent_loop import AgentLoop
 from prometheus.gateway.archive_writer import ArchiveWriter
@@ -117,6 +122,16 @@ async def run_daemon(args: argparse.Namespace) -> None:
     model_config = config.get("model", {})
     gateway_config = config.get("gateway", {})
     security_config = config.get("security", {})
+
+    # ── Wiki root ───────────────────────────────────────────────────────
+    # Resolved ONCE here and pinned process-wide; every consumer reads it back
+    # through get_wiki_root() and none keeps a fallback. Before this, nine
+    # sites derived the path independently and three ignored
+    # PROMETHEUS_CONFIG_DIR entirely (the web bridge and both Telegram
+    # surfaces), which split the wiki in two under a non-default config dir.
+    wiki_root = resolve_wiki_root(config)
+    set_wiki_root(wiki_root)
+    logger.info("Wiki root resolved to %s", wiki_root)
 
     # ── Env file (Onboarding Phase 0) ───────────────────────────────────
     # Under systemd the unit's EnvironmentFile= already populated these;
@@ -794,7 +809,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
         memory_store = MemoryStore()
 
         # Wiki compiler — auto-compiles after each extraction run
-        wiki_compiler = WikiCompiler(store=memory_store)
+        wiki_compiler = WikiCompiler(store=memory_store, wiki_root=wiki_root)
         set_wiki_compiler(wiki_compiler, memory_store)
         logger.info("Wiki compiler initialised at %s", wiki_compiler.wiki_root)
 
@@ -969,7 +984,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
             signal_bus = SignalBus(telemetry=telemetry)
 
             # Leaf components
-            wiki_linter = WikiLinter()
+            wiki_linter = WikiLinter(wiki_root=wiki_root)
             set_lint_wiki_linter(wiki_linter)
 
             mem_consolidator = None
@@ -997,6 +1012,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     model=model_name,
                     budget_tokens=sentinel_config.get("dream_budget_tokens", 2000),
                     telemetry=telemetry,
+                    wiki_root=wiki_root,
                 )
 
             # Orchestrators

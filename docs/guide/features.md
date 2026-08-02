@@ -101,7 +101,7 @@ Note the sandbox is process-level containment, not a container — see [Honest s
 - **File memory** — a bounded `MEMORY.md` (12K chars) and `USER.md` (8K chars) that ride every system prompt, readable and editable by you.
 - **Memory extractor** — roughly every 30 minutes, mines your conversations into structured facts by entity category with confidence scores (machine-generated sessions are excluded).
 - **Passive recall** — at the start of each turn, your message is matched against the memory store and the top facts (at most 6 facts / 900 chars, minimum 0.6 confidence) are injected as "Recalled memory." It fails open and applies to chat surfaces only. Default: on.
-- **Wiki** — a compiler builds cross-linked markdown entity pages under `~/.prometheus/wiki/` from extracted facts. The output is Obsidian-compatible; an install script wires up the vault view.
+- **Wiki** — a compiler builds cross-linked markdown entity pages under the wiki root (configurable via the `wiki.root` key in `prometheus.yaml` (default: `<config dir>/wiki`, i.e. `~/.prometheus/wiki`)) `~/.prometheus/wiki/` from extracted facts. The output is Obsidian-compatible; an install script wires up the vault view.
 
 ---
 
