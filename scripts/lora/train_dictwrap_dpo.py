@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""QLoRA DPO train: a dict-wrap specialist LoRA for gemma-4-26b-a4b.
+
+Runs on the 4090 in ~/lora-train-venv (peft/trl/datasets/bitsandbytes on
+torch 2.11+cu130). The daemon/llama-server must be STOPPED first — the 24 GB is
+needed for the 4-bit base + LoRA + DPO reference.
+
+Data: the gym pairs export ({prompt: lcm_ref, chosen: <unwrapped call>,
+rejected: <dict-wrapped call>}). The lcm_ref carries only the tool schema, not
+the natural-language ask, so we reconstruct a faithful request from the chosen
+args (per-tool) and present [system+tool, user] as the DPO prompt. The learned
+signal is chosen≻rejected — identical prompt, args unwrapped vs wrapped. The
+held-out eval (Phase 3), not this script, decides whether it generalized.
+
+Target modules: attention q/k/v/o only (shared across the 128 experts → MoE-safe;
+matched by suffix so nesting under a multimodal wrapper is fine).
+
+  --dry-run  : load model, attach LoRA, run ONE DPO step. Validates the brand-new
+               gemma4 arch + the chat-template rendering BEFORE the full train.
+
+HARDWARE FINDING (2026-06-15, single 24GB 4090): this does NOT fit one 24GB card.
+bnb does not 4-bit-quantize the FUSED MoE expert tensors, so the "4-bit" model is
+~22GB resident — no headroom to train. CPU-offloading the frozen experts is the
+right shape but hits an accelerate↔bnb↔transformers chain on this brand-new arch
+(Params4bit `_is_hf_initialized`, then meta-tensor `.item()`). Unblock: run on a
+≥40GB GPU with `--gpu-gib 40` (everything on GPU, no offload, no offload bugs), or
+pin a known-good offload stack validated on a small model first. The dataset +
+this script are otherwise ready.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import torch
+from datasets import Dataset
+from peft import LoraConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from trl import DPOConfig, DPOTrainer
+
+# ── faithful request reconstruction (the lcm_ref dropped the NL ask) ─────────
+
+
+def reconstruct_request(name: str, args: dict) -> str:
+    a = args
+    if name == "task_create":
+        if a.get("command"):
+            return f"Create a background task that runs this exact shell command: {a['command']}"
+        if a.get("prompt"):
+            return f"Create a background agent task whose goal is: {a['prompt']}"
+        return f"Create a background task: {a.get('description','(unspecified)')}"
+    if name == "task_list":
+        return f"List the background tasks that currently have status '{a.get('status','')}'."
+    if name == "grep":
+        if a.get("root"):
+            return f"Search for the pattern '{a.get('pattern','')}' under the directory {a['root']} and report matches."
+        return f"Search the whole workspace for the pattern '{a.get('pattern','')}'."
+    if name == "task_get":
+        return f"Get the full details of background task {a.get('task_id','')}."
+    if name == "cron_create":
+        return f"Create a cron job named '{a.get('name','')}' on schedule '{a.get('schedule','')}' that runs: {a.get('command','')}"
+    if name == "download_file":
+        return f"Download the file at {a.get('url','')}."
+    if name == "task_update":
+        return f"Update background task {a.get('task_id','')}: set its status note to '{a.get('status_note','')}'."
+    return f"Use the {name} tool to handle the request."
+
+
+def render(tok, schema: dict, name: str, chosen_args: dict,
+           raw_chosen: str, raw_rejected: str):
+    """Return (prompt, chosen, rejected) as text. This gemma4 HF tokenizer ships
+    NO chat_template (verified on the 4090), and even if it did the served GGUF's
+    tool-call format is what matters at inference. So the completions are the RAW
+    captured call JSON — exactly what the model emitted — and the prompt presents
+    the schema + a faithful reconstructed request. The only diff between chosen
+    and rejected is unwrapped vs wrapped args, which is the gradient we want.
+    The chat template is tried first in case a future checkpoint sets one."""
+    sys_msg = (
+        "You are a tool-calling assistant. Call tools with arguments that match "
+        "the schema exactly — scalar parameters take scalar values, never a "
+        f"nested object.\nTool: {json.dumps(schema)}"
+    )
+    user = reconstruct_request(name, chosen_args)
+    if getattr(tok, "chat_template", None):
+        base = [{"role": "system", "content": sys_msg}, {"role": "user", "content": user}]
+        cm = lambda a: {"role": "assistant", "tool_calls": [
+            {"type": "function", "function": {"name": name, "arguments": a}}]}
+        try:
+            prompt = tok.apply_chat_template(base, tokenize=False, add_generation_prompt=True)
+            fc = tok.apply_chat_template(base + [cm(chosen_args)], tokenize=False)
+            fr = tok.apply_chat_template(base + [cm(json.loads(raw_rejected).get("input", {}))],
+                                         tokenize=False)
+            if fc.startswith(prompt) and fr.startswith(prompt) and fc != fr:
+                return prompt, fc[len(prompt):], fr[len(prompt):]
+        except Exception:
+            pass
+    # faithful text fallback: raw captured JSON as the completion
+    prompt = f"{sys_msg}\n\nRequest: {user}\nTool call:"
+    return prompt, " " + raw_chosen.strip(), " " + raw_rejected.strip()
+
+
+def build_dataset(pairs_path: Path, tok) -> Dataset:
+    rows = []
+    skipped = 0
+    for line in pairs_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        if r.get("rejected") is None:
+            skipped += 1
+            continue
+        chosen = json.loads(r["chosen"])
+        rejected = json.loads(r["rejected"])
+        ref = json.loads(r["prompt"]) if r["prompt"].lstrip().startswith("{") else {}
+        schema = ref.get("tool_schema", {"name": chosen.get("name")})
+        name = chosen.get("name") or schema.get("name")
+        ca = chosen.get("input", chosen.get("arguments", {}))
+        ra = rejected.get("input", rejected.get("arguments", {}))
+        if ca == ra:  # not a real preference (no wrap diff) — drop
+            skipped += 1
+            continue
+        p, c, rj = render(tok, schema, name, ca, r["chosen"], r["rejected"])
+        rows.append({"prompt": p, "chosen": c, "rejected": rj})
+    print(f"[data] {len(rows)} DPO triples ({skipped} skipped)")
+    return Dataset.from_list(rows)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--pairs", required=True, type=Path)
+    ap.add_argument("--base", required=True, help="HF base model dir (safetensors)")
+    ap.add_argument("--out", required=True, type=Path, help="adapter output dir")
+    ap.add_argument("--rank", type=int, default=16)
+    ap.add_argument("--alpha", type=int, default=32)
+    ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--epochs", type=float, default=1.0)
+    ap.add_argument("--beta", type=float, default=0.1)
+    ap.add_argument("--max-len", type=int, default=512)
+    ap.add_argument("--gpu-gib", type=int, default=20, help="GiB to keep on GPU; rest (experts) → CPU")
+    ap.add_argument("--dry-run", action="store_true", help="1 step — validate arch + rendering")
+    args = ap.parse_args()
+
+    # accelerate's CPU-offload hook passes `_is_hf_initialized` into bnb's
+    # Params4bit.__new__, which this bnb version rejects. Strip the unexpected
+    # kwarg so 4-bit params can be offloaded to CPU (frozen experts → CPU).
+    import bitsandbytes as _bnb
+    _orig = _bnb.nn.Params4bit.__new__
+    def _patched(cls, *a, **kw):
+        kw.pop("_is_hf_initialized", None)
+        return _orig(cls, *a, **kw)
+    _bnb.nn.Params4bit.__new__ = staticmethod(_patched)
+
+    tok = AutoTokenizer.from_pretrained(args.base)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    ds = build_dataset(args.pairs, tok)
+    if len(ds) == 0:
+        print("[fatal] no DPO triples — aborting")
+        return 1
+    # show one rendered triple so the format is auditable in the log
+    print("[sample] prompt tail:", repr(ds[0]["prompt"][-160:]))
+    print("[sample] chosen     :", repr(ds[0]["chosen"][:160]))
+    print("[sample] rejected   :", repr(ds[0]["rejected"][:160]))
+
+    bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                             bnb_4bit_compute_dtype=torch.bfloat16,
+                             bnb_4bit_use_double_quant=True,
+                             llm_int8_enable_fp32_cpu_offload=True)
+    print(f"[model] loading {args.base} (4-bit, GPU+CPU overflow) …")
+    # gemma-4-26B-A4B is MoE and bnb does NOT 4-bit the fused expert tensors, so
+    # the frozen base is ~22GB — too big to TRAIN on one 24GB card. Let accelerate
+    # keep as much (attention = the LoRA target, embeddings) on GPU as fits and
+    # overflow the frozen experts to CPU. Slower forward, but it fits.
+    model = AutoModelForCausalLM.from_pretrained(
+        args.base, quantization_config=bnb, dtype=torch.bfloat16,
+        device_map="auto", max_memory={0: f"{args.gpu_gib}GiB", "cpu": "120GiB"})
+    model.config.use_cache = False
+
+    lora = LoraConfig(r=args.rank, lora_alpha=args.alpha, lora_dropout=0.05,
+                      target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                      bias="none", task_type="CAUSAL_LM")
+
+    cfg = DPOConfig(
+        output_dir=str(args.out), beta=args.beta,
+        per_device_train_batch_size=1, gradient_accumulation_steps=8,
+        learning_rate=args.lr, num_train_epochs=args.epochs,
+        max_steps=1 if args.dry_run else -1,
+        max_length=args.max_len, max_prompt_length=max(256, args.max_len - 140),
+        logging_steps=5, save_strategy="no", bf16=True,
+        gradient_checkpointing=True, report_to=[])
+    trainer = DPOTrainer(model=model, args=cfg, train_dataset=ds,
+                         processing_class=tok, peft_config=lora)
+    print(f"[train] {'DRY RUN (1 step)' if args.dry_run else 'full'} starting …")
+    trainer.train()
+    if not args.dry_run:
+        trainer.save_model(str(args.out))
+        tok.save_pretrained(str(args.out))
+        print(f"[done] adapter → {args.out}")
+    else:
+        print("[dry-run OK] gemma4 loaded, LoRA attached, 1 DPO step ran")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
