@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from prometheus.config.paths import get_wiki_root
+
 if TYPE_CHECKING:
     from prometheus.tools.base import ToolRegistry
 
@@ -121,7 +123,7 @@ def cmd_status(
 
 def cmd_wiki() -> str:
     """Return wiki stats text."""
-    wiki_index = Path.home() / ".prometheus" / "wiki" / "index.md"
+    wiki_index = get_wiki_root() / "index.md"
     if not wiki_index.exists():
         return "Wiki: no index found at ~/.prometheus/wiki/index.md"
 

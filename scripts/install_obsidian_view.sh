@@ -13,6 +13,11 @@
 # rides through every dream-cycle recompile. See docs/OBSIDIAN-VIEW.md.
 #
 # Override the vault location with PROMETHEUS_WIKI=/path/to/vault.
+# PROMETHEUS_WIKI is the shell mirror of the `wiki.root` key in
+# prometheus.yaml — if you have repointed the wiki there, export the same
+# path here. Python resolves wiki.root first, then PROMETHEUS_WIKI, then
+# <config dir>/wiki; this script has no config parser, so it reads the env
+# var and falls back to the same default.
 set -euo pipefail
 
 VAULT="${PROMETHEUS_WIKI:-$HOME/.prometheus/wiki}"

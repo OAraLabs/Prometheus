@@ -249,7 +249,7 @@ under `symbiote.morph.enabled` and `symbiote.backup.enabled`.
   `PROMETHEUS.md`, `scripts/daemon.py`; optionally
   `~/.prometheus/{SOUL,AGENTS,ANATOMY}.md`.
   Excludes `.git/`, `__pycache__/`, `.venv/`, `node_modules/`,
-  `~/.prometheus/wiki/`, `~/.prometheus/memory/`.
+  `~/.prometheus/wiki/` (configurable via the `wiki.root` key in `prometheus.yaml` (default: `<config dir>/wiki`, i.e. `~/.prometheus/wiki`)), `~/.prometheus/memory/`.
 - Manifest at `~/.prometheus/symbiote/backups/manifest.db` (SQLite)
   tracks every snapshot plus a `restore_log` table.
 - Retention: keeps the newest `max_backups` non-exempt snapshots.
@@ -614,7 +614,8 @@ tracks is a future archaeology dig.
 
 ### Directory ownership — one writer per vault directory (Sprint 2, 2026-07-02)
 
-Prometheus owns `~/.prometheus/wiki` (tools/patterns/projects et al.) and NEVER
+Prometheus owns the wiki root — `wiki.root`, default `~/.prometheus/wiki`
+(tools/patterns/projects et al.) — and NEVER
 writes `~/OAra-Brain`; the Jarvis extractor (via the OAra middleware) owns the
 OAra-Brain life-note directories and never writes the wiki. Vault notes carry
 `writer:` frontmatter; the hourly `oara_vault_lint` cron (detection-only)

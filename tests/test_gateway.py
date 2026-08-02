@@ -394,7 +394,12 @@ class TestTelegramCommands:
     @pytest.mark.asyncio
     async def test_cmd_wiki_with_index(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        wiki_dir = tmp_path / ".prometheus" / "wiki"
+        # Resolve through the single wiki-root resolver rather than assuming
+        # ~/.prometheus/wiki: conftest sets PROMETHEUS_CONFIG_DIR, which the
+        # old hardcoded Path.home() form ignored (that was the bug).
+        from prometheus.config.paths import get_wiki_root
+
+        wiki_dir = get_wiki_root()
         wiki_dir.mkdir(parents=True)
         index = wiki_dir / "index.md"
         index.write_text(

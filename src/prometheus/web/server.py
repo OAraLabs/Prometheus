@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from prometheus.config.paths import get_wiki_root
 from prometheus.context.environment import git_head_sha
 
 # Cap on the coding diff payload (matches the files-preview 256 KB cap).
@@ -698,7 +699,7 @@ def create_app(
 
     @app.get("/api/wiki/stats")
     async def get_wiki_stats():
-        wiki_dir = Path.home() / ".prometheus" / "wiki"
+        wiki_dir = get_wiki_root()
         if not wiki_dir.exists():
             return {"page_count": 0, "entity_counts": {}, "last_compiled": None}
 

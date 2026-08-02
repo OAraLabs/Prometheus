@@ -86,7 +86,8 @@ The wiki is Obsidian-compatible, and there is a supported read-only setup — fu
 
 - The wiki is **compiled, not authored**: the compiler wipes and rewrites the pages from `memory.db` on each cycle, so anything you hand-edit in Obsidian is gone on the next compile. Capture goes through `/note`, never the editor.
 - `scripts/install_obsidian_view.sh` installs the repo's Obsidian config (from `config/obsidian/`) into the vault. It includes a graph color group that highlights **manually captured** facts — your `/note` entries render as distinct nodes against the auto-extracted mass. The config survives recompiles, so you install it once.
-- From another machine, mount `~/.prometheus/wiki/` over Tailscale/SSHFS and open it as a vault. Mount the pages read-only, but give `.obsidian/` a writable path — Obsidian needs to write its own workspace state even when your notes stay untouchable.
+- From another machine, mount the wiki root (`wiki.root`, default
+  `~/.prometheus/wiki/`) over Tailscale/SSHFS and open it as a vault. Mount the pages read-only, but give `.obsidian/` a writable path — Obsidian needs to write its own workspace state even when your notes stay untouchable.
 
 ## SENTINEL
 

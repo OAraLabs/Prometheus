@@ -964,7 +964,8 @@ All extend `BaseTool` from `prometheus.tools.base`.
 ### Wiki Maintenance
 
 Transforms extracted memory facts into a persistent, cross-linked Markdown
-wiki at `~/.prometheus/wiki/`. Inspired by the LLM Wiki pattern — knowledge
+wiki at the configured wiki root — configurable via the `wiki.root` key in `prometheus.yaml` (default: `<config dir>/wiki`, i.e. `~/.prometheus/wiki`).
+Inspired by the LLM Wiki pattern — knowledge
 is compiled once and kept current, not re-derived on every query.
 
 ```

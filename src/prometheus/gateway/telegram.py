@@ -28,6 +28,7 @@ from telegram.ext import (
     filters,
 )
 
+from prometheus.config.paths import get_wiki_root
 from prometheus.gateway.config import Platform, PlatformConfig
 from prometheus.gateway.commands import cmd_anatomy, cmd_beacon, cmd_doctor, cmd_profile
 from prometheus.gateway.platform_base import (
@@ -776,11 +777,11 @@ class TelegramAdapter(BasePlatformAdapter):
         if update.effective_chat is None:
             return
 
-        wiki_index = Path.home() / ".prometheus" / "wiki" / "index.md"
+        wiki_index = get_wiki_root() / "index.md"
         if not wiki_index.exists():
             await self.send(
                 update.effective_chat.id,
-                "Wiki: no index found at ~/.prometheus/wiki/index.md",
+                f"Wiki: no index found at {wiki_index}",
                 parse_mode=None,
             )
             return

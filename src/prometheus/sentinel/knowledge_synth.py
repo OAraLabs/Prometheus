@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from prometheus.config.paths import get_config_dir
+from prometheus.config.paths import get_config_dir, get_wiki_root
 
 if TYPE_CHECKING:
     from prometheus.memory.store import MemoryStore
@@ -87,7 +87,7 @@ class KnowledgeSynthesizer:
         self._model = model
         self._budget_tokens = budget_tokens
         self._min_cluster_size = min_cluster_size
-        self._wiki_root = Path(wiki_root) if wiki_root else get_config_dir() / "wiki"
+        self._wiki_root = Path(wiki_root) if wiki_root else get_wiki_root()
         self._telemetry = telemetry
         # Route the synthesis call through the shared envelope (like
         # skill_creator / memory_extractor). The envelope constructs the
