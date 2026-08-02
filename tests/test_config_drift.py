@@ -120,3 +120,153 @@ def test_every_live_config_key_exists_in_the_default_template():
         f"pass — that ratifies the drift this guard exists to catch.\n\n  "
         + "\n  ".join(orphans)
     )
+
+
+# ---------------------------------------------------------------------------
+# Reader direction: every template key should be read by some code.
+#
+# This is the complementary half of the check above, and it ships as a RATCHET
+# rather than a plain assertion, because a plain assertion would need a
+# 35-entry allowlist on day one — and an allowlist that large is the hiding
+# place the guard exists to remove.
+#
+# The register below is a DEBT LIST, not an exemption list. The difference is
+# that it is enforced in BOTH directions:
+#
+#   * a key with no reader that is NOT registered  -> FAIL (new drift)
+#   * a registered key that HAS gained a reader    -> FAIL (register is stale)
+#
+# So it cannot grow quietly, and it cannot rot: fixing a key forces its removal
+# from the list, and the count only goes down. Each entry carries a disposition.
+# ---------------------------------------------------------------------------
+
+# Scanned for readers across src/, scripts/ and tests/ — a config key consumed
+# by a script is legitimately consumed. (Checked 2026-08-02: none of the below
+# are read anywhere in the repo, so the scope is not the reason they are here.)
+_READER_ROOTS = ("src", "scripts", "tests")
+
+# key -> disposition. WIRE = build the control; DELETE = drop the key;
+# DECIDE = needs a product call. Nothing may sit here without one.
+KNOWN_UNREAD: dict[str, str] = {
+    # ── WIRE: declared controls on the Telegram surface, never implemented.
+    # Five keys, zero implementations, on the one surface exposed to the public
+    # internet by design. Tracked as PR 4b (security design questions first).
+    "gateway.rate_limits": "WIRE 4b — section; no rate limiter exists at all",
+    "gateway.rate_limits.messages_per_minute": "WIRE 4b — no limiter to wire into",
+    "gateway.rate_limits.media_downloads_per_minute": "WIRE 4b — no limiter",
+    "gateway.media.allowed_image_types": "WIRE 4b — no MIME check on the inbound path",
+    "gateway.media.allowed_audio_types": "WIRE 4b — no MIME check",
+    "gateway.media.allowed_document_types": "WIRE 4b — no MIME check",
+    "gateway.media.max_file_size_mb": "WIRE 4b — download is unbounded today",
+    "gateway.media": "WIRE 4b — section; all leaves unread",
+    "gateway.media.cache_dir": "WIRE 4b — no quota/eviction either",
+    # ── WIRE: the config lies about live behaviour.
+    "web_tools": "WIRE — section; web_fetch hardcodes timeout=20.0",
+    "web_tools.fetch_timeout_seconds": "WIRE — config says 30, code hardcodes 20.0",
+    "web_tools.fetch_max_chars": "WIRE — tool uses its input-model Field default",
+    "web_tools.search_max_results": "WIRE — tool uses its input-model Field default",
+    "web_tools.download_dir": "DECIDE — no downloader reads it",
+    "web_tools.download_max_mb": "DECIDE — no downloader reads it",
+    "web_tools.youtube_transcript_language": "DECIDE — transcript path ignores it",
+    # ── DECIDE: knobs that may be abandoned rather than pending.
+    "symbiote.language_default": "DECIDE — symbiote may be dormant",
+    "symbiote.min_stars_default": "DECIDE — symbiote may be dormant",
+    "symbiote.morph.auto_rollback": "DECIDE — symbiote may be dormant",
+    "symbiote.backup.pre_graft_backup": "DECIDE — symbiote may be dormant",
+    "printing_press.auto_suggest": "DECIDE",
+    "profiles.custom_dir": "DECIDE — profiles load from a fixed dir",
+    "whisper.device": "DECIDE — engine picks its own device",
+    "learning.auto_skill_creation": "DECIDE — SkillCreator has its own gate",
+    "learning.curator_telegram_summary": "DECIDE",
+    "sentinel.idle_threshold_minutes": "DECIDE — observer uses its own constant",
+    "security.audit.retention_days": "DECIDE — no pruner exists",
+    "evals.skip_network_tasks": "DECIDE — runner does not branch on it",
+    "tools.deferred_loading.search_mcp": "DECIDE — deferred loading is off",
+    "tools.deferred_loading.mcp_always_deferred": "DECIDE — deferred loading is off",
+    "gateway.heartbeat_interval": "DECIDE — heartbeat uses its own interval",
+    "infrastructure.archive_enabled": "DECIDE — the archive lives in the voice stack, not here",
+    # ── DOCUMENTED-ONLY: recorded so the topology is not lost. Values live
+    # only in the local config; the template carries empty placeholders.
+    "infrastructure.gpu_host": "DOCUMENTED-ONLY — local topology, empty in template",
+    "infrastructure.mini_host": "DOCUMENTED-ONLY — local topology, empty in template",
+    "infrastructure.mini_port": "DOCUMENTED-ONLY — local topology",
+}
+
+
+def _reader_blob() -> str:
+    """Source of everything that could legitimately consume a config key.
+
+    Excludes THIS file. The register below quotes the very key names it tracks,
+    so scanning it would make single-segment entries look like their own
+    readers — ``"web_tools"`` in KNOWN_UNREAD matched the reader pattern and
+    the ratchet reported the register stale. The register is bookkeeping, not
+    a consumer.
+    """
+    self_path = Path(__file__).resolve()
+    parts: list[str] = []
+    for root in _READER_ROOTS:
+        for py in (_REPO / root).rglob("*.py"):
+            if py.resolve() == self_path:
+                continue
+            parts.append(py.read_text(encoding="utf-8", errors="replace"))
+    return "\n".join(parts)
+
+
+def _keys_without_readers() -> set[str]:
+    import re as _re
+
+    blob = _reader_blob()
+    unread: set[str] = set()
+
+    def walk(node: object, prefix: tuple[str, ...] = ()) -> None:
+        if not isinstance(node, dict):
+            return
+        for k, v in node.items():
+            path = prefix + (str(k),)
+            if not _re.search(rf'["\']{_re.escape(str(k))}["\']', blob):
+                unread.add(".".join(path))
+            walk(v, path)
+
+    walk(_load(_DEFAULT))
+    return unread
+
+
+def test_no_new_config_key_without_a_reader():
+    """A template key nothing reads is a promise the code does not keep."""
+    unread = _keys_without_readers()
+    new = sorted(unread - set(KNOWN_UNREAD))
+    assert not new, (
+        f"{len(new)} config key(s) in prometheus.yaml.default have no reader in "
+        f"{'/, '.join(_READER_ROOTS)}/. A key nothing reads is a promise the "
+        f"code does not keep — web.ws_auth sat inert for seven weeks asserting "
+        f"the opposite of live behaviour.\n\nEither wire it, delete it, or add "
+        f"it to KNOWN_UNREAD with a disposition.\n\n  " + "\n  ".join(new)
+    )
+
+
+def test_known_unread_register_is_not_stale():
+    """The ratchet: a registered key that gained a reader must be de-registered.
+
+    Without this the register would be an allowlist — write once, hide forever.
+    With it the list can only shrink, and fixing a key forces the bookkeeping.
+    """
+    unread = _keys_without_readers()
+    now_read = sorted(set(KNOWN_UNREAD) - unread)
+    assert not now_read, (
+        f"{len(now_read)} key(s) in KNOWN_UNREAD now HAVE readers. Remove them "
+        f"from the register — it is a shrinking debt list, not an allowlist.\n\n  "
+        + "\n  ".join(f"{k}  ({KNOWN_UNREAD[k]})" for k in now_read)
+    )
+
+
+def test_every_registered_key_carries_a_disposition():
+    """No silent entries. An unexplained entry is the next hiding place."""
+    valid = ("WIRE", "DELETE", "DECIDE", "DOCUMENTED-ONLY")
+    bad = sorted(
+        k for k, v in KNOWN_UNREAD.items()
+        if not v.strip() or not v.strip().startswith(valid)
+    )
+    assert not bad, (
+        f"KNOWN_UNREAD entries must start with one of {valid}:\n  "
+        + "\n  ".join(bad)
+    )

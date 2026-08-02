@@ -138,6 +138,7 @@ class GEPAOptimizer:
         *,
         judge: object | None = None,
         judge_base_url: str | None = None,
+        judge_model: str | None = None,
         telemetry: object | None = None,
         config: dict[str, Any] | None = None,
         trajectories_dir: Path | None = None,
@@ -146,6 +147,7 @@ class GEPAOptimizer:
         self._provider = provider
         self._judge = judge
         self._judge_base_url = judge_base_url
+        self._judge_model = judge_model
         self._telemetry = telemetry
         cfg = config or {}
         self._enabled = bool(cfg.get("gepa_enabled", False))
@@ -168,6 +170,7 @@ class GEPAOptimizer:
         *,
         telemetry: object | None = None,
         judge_base_url: str | None = None,
+        judge_model: str | None = None,
         config_path: str | None = None,
     ) -> GEPAOptimizer | None:
         """Build from prometheus.yaml. Returns None if disabled."""
@@ -195,14 +198,22 @@ class GEPAOptimizer:
         if not learning.get("gepa_enabled", False):
             return None
 
+        evals_cfg = data.get("evals", {}) or {}
         if judge_base_url is None:
-            evals_cfg = data.get("evals", {}) or {}
             judge_base_url = evals_cfg.get("judge_base_url")
+        # evals.judge_model was declared in config but never read here, so the
+        # judge fell through to _detect_model() and graded with whatever the
+        # judge endpoint happened to have loaded. That is the non-determinism
+        # the pin exists to remove — and when judge_base_url coincides with the
+        # main model's base_url it is outright self-judging.
+        if judge_model is None:
+            judge_model = evals_cfg.get("judge_model")
 
         return cls(
             provider,
             telemetry=telemetry,
             judge_base_url=judge_base_url,
+            judge_model=judge_model,
             config=learning,
         )
 
@@ -511,7 +522,9 @@ class GEPAOptimizer:
             return None
         try:
             from prometheus.evals.judge import PrometheusJudge
-            self._judge = PrometheusJudge(base_url=self._judge_base_url)
+            self._judge = PrometheusJudge(
+                base_url=self._judge_base_url, model=self._judge_model
+            )
         except Exception:
             log.exception("GEPA: failed to build PrometheusJudge")
             return None

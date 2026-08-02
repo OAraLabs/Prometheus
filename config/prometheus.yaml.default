@@ -377,8 +377,6 @@ learning:
       base_url: "http://localhost:8080"
       model: gemma-4
 
-  # INERT pending PR 4 — no reader in src/; stacked on the #128 PeriodicNudge fix.
-  periodic_nudge_interval: 15
 trajectory_export:
   enabled: false
   interval_seconds: 86400  # 24h
@@ -556,12 +554,10 @@ evals:
   # smoke checks; for scores you intend to compare or publish, point the judge
   # at a different model. Any OpenAI-compatible server with structured-output
   # support works (llama.cpp, Ollama).
-  # judge_base_url: "http://localhost:11434"   # e.g. a local Ollama
-  # judge_model: "qwen2.5:7b-instruct"
-
+  # judge_model pins WHICH model grades. Without it the judge calls
+  # /v1/models on judge_base_url and grades with whatever is loaded —
+  # non-deterministic, and self-judging when the two endpoints coincide.
   judge_base_url: http://localhost:11434
-  # INERT pending PR 4 — no reader in src/. The judge pin does not currently
-  # bind, which is the self-judging trap this key was added to close.
   judge_model: qwen2.5:7b-instruct
 tracing:
   enabled: false
