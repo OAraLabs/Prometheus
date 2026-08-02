@@ -44,6 +44,7 @@ model:
 # this was config-dark since birth — the compactor only exists when
 # compaction.enabled is true. Default ON; the config-dark audit alarms if
 # an expected-enabled compactor is missing from /api/status.
+  suppress_thinking: true
 compaction:
   enabled: true
 
@@ -58,6 +59,9 @@ context:
   microcompact_keep_chars: 200
   microcompact_keep_chars_no_lcm: 500
 
+  # Per-model context ceilings. Keys are model names as reported by the
+  # provider; each carries an effective_limit in tokens.
+  model_overrides: {}
 tools:
   deferred_loading:
     # Tri-state: true | false | auto (default). "auto" resolves at run start —
@@ -112,10 +116,16 @@ security:
     enabled: false
     timeout_seconds: 300
 
+  allowed_commands: []
 infrastructure:
   archive_enabled: true
   telemetry_enabled: true
 
+  # Local topology. Values are machine-specific and MUST stay in the live
+  # config only — the pre-commit hook blocks real hosts/IPs in this template.
+  gpu_host: ""
+  mini_host: ""
+  mini_port: 8005
 gateway:
   telegram_enabled: false
   telegram_token: ""                # Set via PROMETHEUS_TELEGRAM_TOKEN env var
@@ -131,6 +141,12 @@ gateway:
   media:
     max_file_size_mb: 20
     cache_dir: "~/.prometheus/cache/media"
+    # INERT pending PR 4 — declared allowlists that nothing enforces. Telegram
+    # is the one surface exposed to the public internet by design, so an
+    # allowlist that reads as a control but is not one is worse than none.
+    allowed_image_types: []
+    allowed_audio_types: []
+    allowed_document_types: []
   rate_limits:
     messages_per_minute: 30
     media_downloads_per_minute: 10
@@ -174,6 +190,15 @@ gateway:
     timeout_seconds: 30               # per Paperclip API call
     comment_max_chars: 4000           # cap on posted progress comments
 
+  # Placeholder only — the real prompt lives in the live config. See docs.
+  system_prompt: "# see docs; overridden in live config"
+  briefing_chat_id: ""
+  voice:
+    engine: piper
+    default_mode: auto
+    max_chars: 800
+    model_path: ""
+    opus_bitrate: 32k
 whisper:
   enabled: false
   model: "base"
@@ -225,6 +250,7 @@ router:
 # After editing, restart the daemon and grep journalctl for "slash_commands"
 # to verify the wiring:
 #   journalctl --user -u prometheus.service | grep slash_commands
+  fallback: []
 slash_commands:
   claude:
     provider: anthropic
@@ -287,6 +313,12 @@ slash_commands:
 divergence:
   enabled: false
 
+  threshold: 0.7
+  checkpoint_interval: 5
+  max_rollbacks: 2
+  use_llm_eval: false
+  llm_eval_budget: 500
+  auto_rollback_trust_level: 3
 learning:
   # PeriodicNudge — self-reflection prompt every N agent turns.
   nudge_enabled: true
@@ -345,6 +377,8 @@ learning:
       base_url: "http://localhost:8080"
       model: gemma-4
 
+  # INERT pending PR 4 — no reader in src/; stacked on the #128 PeriodicNudge fix.
+  periodic_nudge_interval: 15
 trajectory_export:
   enabled: false
   interval_seconds: 86400  # 24h
@@ -402,6 +436,13 @@ sentinel:
 # Fails open — a missing or broken memory.db never blocks a turn. Applies
 # to the chat surfaces (Telegram/Slack/Discord/web/CLI); coding mode, gym,
 # and evals never recall.
+  synthesis_enabled: true
+  auto_fix_wiki: true
+  dream_budget_tokens: 2000
+  stale_threshold_days: 90
+  confidence_decay_rate: 0.05
+  digest_lookback_hours: 24
+  nudge_cooldown_minutes: 60
 memory:
   recall:
     enabled: true
@@ -474,6 +515,9 @@ printing_press:
 lsp:
   enabled: false
 
+  auto_diagnostics: true
+  diagnostics_delay_ms: 500
+  servers: {}
 profiles:
   default: "full"
   custom_dir: "~/.prometheus/profiles"
@@ -482,6 +526,11 @@ anatomy:
   enabled: true
   scan_on_startup: true
 
+  include_in_system_prompt: true
+  # Local infrastructure identity. Values are machine-specific and MUST stay
+  # in the live config only — the pre-commit hook blocks real hosts/IPs here.
+  ssh_user: ""
+  ssh_key: ""
 mcp_servers: {}
 
 # H3: lifecycle hooks. Empty by default (no hooks run). Each event maps to a
@@ -495,6 +544,8 @@ mcp_servers: {}
 #     post_tool_use:
 #       - type: http
 #         url: "http://localhost:9090/hook"
+  # Each entry is a server name -> {command, args, connectionTimeoutMs}.
+  # Populated in the live config; empty here.
 hooks: {}
 
 evals:
@@ -508,6 +559,10 @@ evals:
   # judge_base_url: "http://localhost:11434"   # e.g. a local Ollama
   # judge_model: "qwen2.5:7b-instruct"
 
+  judge_base_url: http://localhost:11434
+  # INERT pending PR 4 — no reader in src/. The judge pin does not currently
+  # bind, which is the self-judging trap this key was added to close.
+  judge_model: qwen2.5:7b-instruct
 tracing:
   enabled: false
 
@@ -519,5 +574,21 @@ tracing:
 # PROMETHEUS_CONFIG_DIR is set). The PROMETHEUS_WIKI env var overrides the
 # default but is itself overridden by this key; scripts/install_obsidian_view.sh
 # reads that env var as the shell mirror of this setting.
+  service_name: prometheus
+  phoenix_endpoint: http://127.0.0.1:6006
 wiki:
   root: ~/.prometheus/wiki
+
+
+# ── Doctor ────────────────────────────────────────────────────────────────
+doctor:
+  startup_check: true
+  registry_file: config/model_registry.yaml
+
+# ── Managed tasks ─────────────────────────────────────────────────────────
+tasks:
+  enabled: true
+  default_timeout_seconds: 3600
+  poll_initial_interval_seconds: 5
+  poll_max_interval_seconds: 120
+  reengage_turn_cap: 3
