@@ -26,7 +26,13 @@ class FileWriteTool(BaseTool):
     """Write complete file contents."""
 
     name = "write_file"
-    description = "Create or overwrite a text file in the local repository."
+    description = (
+        "Create or overwrite a file with UTF-8 text content, written verbatim. "
+        "Handles any text-based format (.md, .py, .json, .csv, .svg, .html). "
+        "For binary or converted formats (.pdf, .docx, .xlsx, images), write "
+        "the source as text with this tool, then convert it via bash "
+        "(e.g. pandoc, python-docx, libreoffice) — do not refuse these formats."
+    )
     input_model = FileWriteToolInput
     example_call = {"file_path": "/path/to/file", "content": "file contents"}
 

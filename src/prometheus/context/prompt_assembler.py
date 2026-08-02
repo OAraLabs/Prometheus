@@ -35,6 +35,18 @@ from prometheus.context.system_prompt import (
 log = logging.getLogger(__name__)
 
 
+# Etiquette prepended to the injected memory section. Memory is background
+# knowledge, not a data source to cite — the model should apply it naturally
+# without narrating retrieval (modeled on the consumer prompt's memory rules).
+_MEMORY_ETIQUETTE = (
+    "Treat the facts below as things you already know about the user and the "
+    "work — apply them naturally when relevant. Do not narrate retrieval or "
+    'point at this section: avoid "based on my memory", "I can see", "your '
+    'profile/data", and similar. If a fact is relevant, just use it; if it is '
+    "not, ignore it."
+)
+
+
 def _load_bootstrap_file(filename: str) -> str | None:
     """Load a bootstrap file from ``~/.prometheus/``.
 
@@ -265,7 +277,7 @@ def build_runtime_system_prompt(
     if not memory_content:
         memory_content = _load_memory_and_user()
     if memory_content:
-        dynamic_sections.append(f"# Memory\n\n{memory_content}")
+        dynamic_sections.append(f"# Memory\n\n{_MEMORY_ETIQUETTE}\n\n{memory_content}")
 
     # User's saved files — so the agent knows what files exist without searching
     try:
