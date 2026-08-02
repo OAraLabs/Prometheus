@@ -2668,9 +2668,42 @@ def create_app(
     if static_dir:
         static_path = Path(static_dir)
         if static_path.exists():
-            app.mount("/", StaticFiles(directory=str(static_path), html=True), name="static")
+            app.mount(
+                "/",
+                _HttpOnlyStaticFiles(directory=str(static_path), html=True),
+                name="static",
+            )
 
     return app
+
+
+class _HttpOnlyStaticFiles(StaticFiles):
+    """StaticFiles that declines non-HTTP scopes instead of asserting.
+
+    The static mount is a catch-all at "/", so it receives EVERY request the
+    routes did not claim — including WebSocket handshakes. Upstream StaticFiles
+    opens with ``assert scope["type"] == "http"``, so a WS connection to the
+    REST port raised AssertionError, surfaced as an unhandled ASGI exception and
+    an HTTP 500, and the client retried forever. On 2026-08-02 that was 11,915
+    tracebacks in two days (~9/min) — enough noise to make the log useless for
+    detecting anything else.
+
+    The misrouted client is the underlying bug and is tracked separately. This
+    only stops the server turning a wrong-port connection into an unhandled
+    exception: WebSocket scopes get a clean close, other non-HTTP scopes are
+    declined quietly.
+
+    Close code 1002 is "protocol error" — accurate here, since the peer spoke
+    WebSocket to an endpoint that only serves HTTP.
+    """
+
+    async def __call__(self, scope, receive, send) -> None:  # type: ignore[override]
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1002})
+            return
+        if scope["type"] != "http":
+            return
+        await super().__call__(scope, receive, send)
 
 
 def _sanitize_config(config: dict[str, Any]) -> dict[str, Any]:
