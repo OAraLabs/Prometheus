@@ -579,7 +579,7 @@ def test_post_task_hooks_and_the_skill_they_write(tmp_path, flag, ephemeral):
     flag(SESSION, ephemeral)
     seen: list[tuple[str, list]] = []
 
-    async def _hook(task_description, tool_trace):  # noqa: ANN001
+    async def _hook(task_description, tool_trace, _final_text=""):  # noqa: ANN001
         seen.append((task_description, list(tool_trace)))
 
     provider = _ScriptedProvider([_tool_round("t1"), _text_round()])

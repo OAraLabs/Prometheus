@@ -148,12 +148,18 @@ class SkillRefiner:
         self,
         task_description: str,
         tool_trace: list[dict[str, Any]],
+        final_text: str = "",
     ) -> bool:
         """Post-task-hook entry point.
 
         Find the most recently modified auto-skill and refine it against
         the trace. Skips if no auto-skills exist or the trace is too short.
+
+        ``final_text`` is part of the post-task-hook contract (the turn's
+        final reply); unused here today — the refinement prompt's
+        ``outcome`` field keeps its historical ``task_description`` value.
         """
+        del final_text
         if len(tool_trace) < self._min_tool_calls:
             return False
         if not self._auto_dir.exists():

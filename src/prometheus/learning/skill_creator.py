@@ -1,11 +1,24 @@
 """SkillCreator — auto-generate SKILL.md files from successful tool-call traces.
 
-PostTaskHook: after a task completes with >3 tool calls, analyse the trace
-and produce a reusable skill file under ~/.prometheus/skills/auto/.
+PostTaskHook: after a task completes, decide whether the turn contains a
+reusable procedure and, if so, produce a skill file under
+~/.prometheus/skills/auto/.
+
+The decision is a two-stage gate (2026-08 quality-gate sprint; survey at
+audits/20260803T215431Z-skillcreator-quality-gate-survey.md — 50% of the
+library was one-offs, failed lookups, and duplicates when tool COUNT was
+the only condition):
+
+- Stage 0, deterministic and pre-LLM: 3–50 tool calls, none failed.
+- Stage 1, inside the single generation call: the model sees the final
+  reply text, per-call error flags, and the existing skill list, and may
+  answer ``SKIP: <reason>`` instead of a skill. This is the only layer
+  that catches turns whose calls all succeeded mechanically but whose
+  ANSWER was negative (the failed-lookup class).
 
 Usage:
     creator = SkillCreator(provider)
-    skill_path = await creator.maybe_create(task_record, tool_trace)
+    skill_path = await creator.maybe_create(task_record, tool_trace, final_text)
 """
 
 from __future__ import annotations
@@ -24,13 +37,30 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _MIN_TOOL_CALLS = 3
+# Five-check upper bound: past this a turn is a saga, not a procedure.
+_MAX_TOOL_CALLS = 50
 _AUTO_SKILLS_DIR_NAME = "skills/auto"
 
+# The SKIP opt-out below is load-bearing, not decorative: traces whose calls
+# all exited 0 but whose ANSWER was negative ("that directory doesn't exist")
+# have no deterministic tell — the generation model is the only judge that
+# sees the outcome. tests/test_skill_creator.py::TestStage1LLMOptOut fails
+# if the opt-out is removed from this prompt.
 _GENERATION_PROMPT = """\
 You are a skill generator. Given a sequence of tool calls that accomplished a task,
 produce a SKILL.md file that codifies the approach for reuse.
 
-Format:
+Not every turn deserves a skill. Output exactly:
+
+SKIP: <one-line reason>
+
+instead of a skill file when ANY of these hold:
+- the request was a question, lookup, or capability test, not a procedure to repeat
+- the outcome was a failure or a negative result (nothing found, nonexistent target, task incomplete)
+- the trace only read or inspected things to produce an answer; nothing was built, changed, or configured
+- an existing skill in the list below already covers this approach
+
+Otherwise, format:
 ---
 name: <short-kebab-case-name>
 description: <one-line description of what the skill does>
@@ -51,10 +81,16 @@ description: <one-line description of what the skill does>
 
 Task description: {task_description}
 
-Tool call trace:
+Final response to the user (how the task actually ended):
+{final_text}
+
+Tool call trace (failed calls are marked [ERROR]):
 {trace}
 
-Output ONLY the SKILL.md content. No commentary.
+Existing skills (do NOT re-create these):
+{existing_skills}
+
+Output ONLY the SKILL.md content or the SKIP line. No commentary.
 """
 
 
@@ -105,6 +141,7 @@ class SkillCreator:
         *,
         model: str = "default",
         min_tool_calls: int = _MIN_TOOL_CALLS,
+        max_tool_calls: int = _MAX_TOOL_CALLS,
         auto_dir: Path | None = None,
         signal_bus: object | None = None,
         telemetry: object | None = None,
@@ -114,6 +151,7 @@ class SkillCreator:
         self._provider = provider
         self._model = model
         self._min_tool_calls = min_tool_calls
+        self._max_tool_calls = max_tool_calls
         self._auto_dir = auto_dir or _get_auto_skills_dir()
         # Sprint S1: SignalBus is wired by daemon.py inside the SENTINEL
         # block (after SignalBus exists, since SkillCreator construction
@@ -177,28 +215,60 @@ class SkillCreator:
         self,
         task_description: str,
         tool_trace: list[dict[str, Any]],
+        final_text: str = "",
     ) -> Path | None:
-        """Create a skill if the trace meets the threshold.
+        """Create a skill if the trace passes the two-stage quality gate.
+
+        Stage 0 (deterministic, pre-LLM): 3–50 calls and zero failed calls —
+        a turn that stumbled is not a procedure worth codifying, and the
+        skips here cost nothing.
+
+        Stage 1 (the generation call itself): the model sees the final reply
+        text, the error-flagged trace, and the existing skill list, and may
+        answer ``SKIP: <reason>`` for question/test/failed/already-covered
+        turns. Traces whose calls all succeeded but whose ANSWER was negative
+        are caught only here.
 
         Args:
-            task_description: What the task accomplished.
-            tool_trace: List of dicts with keys: tool_name, arguments, result.
+            task_description: The raw user message that started the turn.
+            tool_trace: List of dicts with keys: tool_name, arguments,
+                result, is_error.
+            final_text: The assistant's final reply for the turn — the only
+                place the semantic outcome lives when every call succeeded
+                mechanically.
 
         Returns:
             Path to the created SKILL.md, or None if skipped.
         """
-        if len(tool_trace) < self._min_tool_calls:
+        n_calls = len(tool_trace)
+        if n_calls < self._min_tool_calls:
             log.debug(
                 "SkillCreator: only %d tool calls (need %d), skipping",
-                len(tool_trace),
+                n_calls,
                 self._min_tool_calls,
+            )
+            return None
+        if n_calls > self._max_tool_calls:
+            log.info(
+                "SkillCreator: %d tool calls (max %d), skipping",
+                n_calls,
+                self._max_tool_calls,
+            )
+            return None
+        errored = sum(1 for call in tool_trace if call.get("is_error"))
+        if errored:
+            log.info(
+                "SkillCreator: trace has %d failed call(s), skipping",
+                errored,
             )
             return None
 
         trace_text = self._format_trace(tool_trace)
         prompt = _GENERATION_PROMPT.format(
             task_description=task_description,
+            final_text=(final_text or "").strip()[:1500] or "(not captured)",
             trace=trace_text,
+            existing_skills=self._existing_skills_listing() or "(none)",
         )
 
         # Envelope returns None on failure (see __init__ on_failure mode); the
@@ -208,13 +278,25 @@ class SkillCreator:
         if content is None or not content.strip():
             return None
 
-        return await self.persist_skill_content(content, trigger=task_description)
+        skip_reason = self._parse_skip(content)
+        if skip_reason is not None:
+            log.info(
+                "SkillCreator: model declined (%s) — task: %.80s",
+                skip_reason or "no reason given",
+                task_description,
+            )
+            return None
+
+        return await self.persist_skill_content(
+            content, trigger=task_description, on_collision="skip",
+        )
 
     async def persist_skill_content(
         self,
         content: str,
         *,
         trigger: str,
+        on_collision: str = "suffix",
     ) -> Path | None:
         """Validate and write skill markdown through the standard auto-skill path.
 
@@ -230,6 +312,14 @@ class SkillCreator:
 
         ``trigger`` is the originating task/request description — used for
         telemetry context and the emitted signal, never for the filename.
+
+        ``on_collision`` decides what an existing ``<slug>.md`` means:
+        ``"suffix"`` (default) writes ``<slug>-<unixtime>.md`` — right for
+        deliberate writers (teacher escalation, record-a-skill, an ACCEPTed
+        draft) that must not lose content. ``"skip"`` treats the collision
+        as near-duplicate evidence and writes nothing — the auto path uses
+        this; the timestamp-suffix behaviour there is how three
+        ``debug-cron-job-failure*`` copies accumulated.
         """
         # PR #20: derive the slug from the LLM's frontmatter ``name:``, not
         # from the raw user message. The pre-PR-#20 path slugified
@@ -267,6 +357,13 @@ class SkillCreator:
 
         # Don't overwrite existing skills
         if path.exists():
+            if on_collision == "skip":
+                log.info(
+                    "SkillCreator: %r already exists — skipping duplicate "
+                    "(near-duplicate gate)",
+                    path.name,
+                )
+                return None
             path = self._auto_dir / f"{slug}-{int(time.time())}.md"
 
         path.write_text(content.strip() + "\n", encoding="utf-8")
@@ -306,6 +403,49 @@ class SkillCreator:
             ))
         except Exception:
             log.debug("SkillCreator: signal emission failed", exc_info=True)
+
+    @staticmethod
+    def _parse_skip(content: str) -> str | None:
+        """Return the model's decline reason, or ``None`` when content is a skill.
+
+        Only the first non-empty line is consulted, so a skill that merely
+        MENTIONS "skip" in its body never trips this. Lenient on the exact
+        shape ("SKIP", "SKIP: reason", "SKIPPING: reason") — a decline that
+        fell through would only die later in ``name:`` extraction as a
+        silent_failure, so leniency converts noise into clean skips.
+        """
+        stripped = content.strip()
+        if not stripped:
+            return None
+        first = stripped.splitlines()[0].strip()
+        if first.upper().startswith("SKIP"):
+            return first.split(":", 1)[1].strip() if ":" in first else ""
+        return None
+
+    def _existing_skills_listing(self, *, cap: int = 100) -> str:
+        """One ``- name: description`` line per existing auto-skill.
+
+        Auto-dir only, deliberately: the duplication pressure this feeds
+        (Stage 1's already-covered check) is auto-vs-auto — three
+        near-identical release-check skills landed in two minutes on
+        2026-08-03 — while builtin/user skills are human-curated. Failure
+        here must never block generation; worst case the model just does
+        not see the list.
+        """
+        lines: list[str] = []
+        try:
+            for path in sorted(self._auto_dir.glob("*.md"))[:cap]:
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                name = self._extract_name(text) or path.stem
+                desc = self._extract_description(text)
+                lines.append(f"- {name}: {desc[:90]}" if desc else f"- {name}")
+        except Exception:
+            log.debug("SkillCreator: existing-skill listing failed", exc_info=True)
+            return ""
+        return "\n".join(lines)
 
     @staticmethod
     def _extract_description(content: str) -> str:
@@ -399,11 +539,17 @@ class SkillCreator:
 
     @staticmethod
     def _format_trace(trace: list[dict[str, Any]]) -> str:
-        """Format a tool trace into readable text."""
+        """Format a tool trace into readable text, marking failed calls.
+
+        Stage 0 skips any-error traces outright, so ``[ERROR]`` only
+        reaches a prompt if that check is ever relaxed — the marker keeps
+        Stage 1 honest independently of Stage 0's configuration.
+        """
         lines: list[str] = []
         for i, call in enumerate(trace, 1):
             tool = call.get("tool_name", "unknown")
             args = call.get("arguments", {})
             result = str(call.get("result", ""))[:200]
-            lines.append(f"{i}. {tool}({args}) → {result}")
+            flag = " [ERROR]" if call.get("is_error") else ""
+            lines.append(f"{i}. {tool}({args}) → {result}{flag}")
         return "\n".join(lines)
