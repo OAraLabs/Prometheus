@@ -51,9 +51,25 @@ The interesting work is original:
 - **The fine-tuning gym** — frozen task-sets, dual scoring (raw emission vs post-repair execution), and a refusal to declare winners it can't statistically back.
 - **SYMBIOTE** — experimental self-modification with blue-green deploy and auto-rollback.
 
+### The guards
+
+A passing test proves the code runs. It does not prove anything calls it. Every guard below exists because a feature was built, tested, green — and never wired; each one is a test that fails the build rather than a convention someone has to remember.
+
+| The invariant | Enforced by |
+|---|---|
+| No source file may resolve the wiki root independently — one resolver, or the build fails | `test_no_site_resolves_the_wiki_root_independently` ([#131](https://github.com/OAraLabs/Prometheus/pull/131)) |
+| Every key in the live config must exist in the shipped template — live ⊆ template, with no allowlist. (Compares against a real install, so it skips on a fresh clone where there is no live config to compare) | `test_every_live_config_key_exists_in_the_default_template` ([#133](https://github.com/OAraLabs/Prometheus/pull/133)) |
+| A register of config keys with no reader that can only shrink — an unregistered key with no reader fails, *and* a registered key that gains one fails as stale | `test_no_new_config_key_without_a_reader` · `test_known_unread_register_is_not_stale` ([#136](https://github.com/OAraLabs/Prometheus/pull/136)) |
+| A tool's advertised `example_call` must validate against its own schema — the example ships inside the tool advertisement, so a wrong one teaches the model a parameter that does not exist | `test_example_call_uses_real_param_names` ([#134](https://github.com/OAraLabs/Prometheus/pull/134)) |
+| Every media and rate check declares fail-closed or fail-open at construction — the registry is built at module level, so an undeclared guard is an import error, not a test failure | `test_every_guard_declares_its_enforcement` · `test_a_guard_without_enforcement_cannot_be_constructed` ([#140](https://github.com/OAraLabs/Prometheus/pull/140)) |
+| An acceptance test that terminates in a registered test double **fails** — registration is what makes a double detectable, wildcard exemptions are refused, and only individually-named doubles can be let through. An *unregistered* substitute is the known gap, and raises a loud warning rather than passing silently | `test_tripwire_end_to_end` — spawns a real inner pytest against the actual enforcement hook (TRIPWIRE, [#75](https://github.com/OAraLabs/Prometheus/pull/75)) |
+| Every allowlisted file type must be provably **admitted**, not merely "not refused" — breach tests prove the door closes; only admission tests prove it opens | `test_every_advertised_document_extension_is_admitted` ([#141](https://github.com/OAraLabs/Prometheus/pull/141)) |
+
+The last one is there because its absence shipped: a control suite whose every case asked "does disabling this let something bad through?" and none asked "does this let the permitted things through?" went green while the document surface silently degraded to PDF-only — 19 of 20 advertised types refused, including two the allowlist explicitly permitted. Over-refusal looks exactly like the control working.
+
 ### Provenance
 
-**Provenance.** Prometheus is an original codebase, not a fork: 250 of its 309 Python modules were written from scratch — including everything that makes it interesting: the Model Adapter Layer, SENTINEL, SYMBIOTE, the Wiki Knowledge System, the coding engine, and the fine-tuning gym. Like most real software, it started on the shoulders of open source: early scaffolding (base file tools, cron, the engine skeleton) was adapted from MIT-licensed projects — chiefly OpenHarness, with smaller pieces from Hermes Agent and OpenClaw — and the engine has since diverged to under 4% code similarity with its starting point. Every adapted file names its source in a header comment; full notices are in [NOTICE](NOTICE). Several other subsystems (the gateways, LSP integration, teacher escalation) were designed by studying prior art and implemented clean-room.
+**Provenance.** Prometheus is an original codebase, not a fork: 264 of its 313 Python modules were written from scratch — the other 49 are the adapted files named one-by-one in [NOTICE](NOTICE) — including everything that makes it interesting: the Model Adapter Layer, SENTINEL, SYMBIOTE, the Wiki Knowledge System, the coding engine, and the fine-tuning gym. Like most real software, it started on the shoulders of open source: early scaffolding (base file tools, cron, the engine skeleton) was adapted from MIT-licensed projects — chiefly OpenHarness, with smaller pieces from Hermes Agent and OpenClaw — and the engine has since diverged to under 4% code similarity with its starting point. Every adapted file names its source in a header comment; full notices are in [NOTICE](NOTICE). Several other subsystems (the gateways, LSP integration, teacher escalation) were designed by studying prior art and implemented clean-room.
 
 ---
 
@@ -83,7 +99,7 @@ Prometheus isn't a wrapper around `ollama.chat()`. It's a complete agent operati
 
 **Infrastructure self-awareness via the AnatomyScanner.** At startup, Prometheus scans your hardware (CPU, RAM, GPU VRAM), detects the loaded model and its quantization, maps your Tailscale network peers, checks disk usage, and generates `ANATOMY.md` with Mermaid architecture diagrams of your entire setup. The agent knows exactly what machine it's running on, what model is loaded, and what resources are available.
 
-**An evaluation framework with a local LLM judge.** Most agent evals require API calls to GPT-4. Prometheus uses constrained-decoding on your local model to judge task completion, tool usage accuracy, and hallucination — zero API cost. Failure classification (model vs harness vs unclear) and trend tracking across models and runs. The judge defaults to the same endpoint as the model under test — point `judge_base_url` at a second model when you want independent judging.
+**An evaluation framework with a local LLM judge.** Most agent evals require API calls to GPT-4. Prometheus uses constrained-decoding on your local model to judge task completion, tool usage accuracy, and hallucination — zero API cost. Failure classification (model vs harness vs unclear) and trend tracking across models and runs. The shipped config points the judge at a separate endpoint and pins the model that grades (`judge_base_url` + `evals.judge_model`); blank `judge_base_url` and the judge falls back to the endpoint under test, which means the model grades itself. Every score records which judge produced it either way.
 
 **LSP integration for compiler-grade code intelligence.** Instead of grepping for function names, the agent queries language servers for real symbol definitions, type errors, and references. After every file edit, a diagnostics hook automatically checks for type errors and feeds them back to the model in the same turn. Off by default — one config flag turns it on.
 
@@ -155,6 +171,8 @@ Show the agent a workflow instead of describing it. Two capture paths, two trust
 
 Ground-truth DOM traces earn autonomy; lossy vision output stays human-reviewed. Full walkthrough: [Record a Skill guide](docs/guide/record-a-skill.md).
 
+Why this only works here: a screen recording of you doing your job is among the most revealing data you own, and every frame of it stays on your disk. A hosted product can't offer the same feature, because shipping your screen to someone else's server *is* the feature — and the problem.
+
 ### MCP Integration
 
 - Dynamic tool discovery from any MCP server
@@ -176,6 +194,10 @@ Ground-truth DOM traces earn autonomy; lossy vision output stays human-reviewed.
 - Untrusted-input fencing: every message carries a provenance tag, and content from cron jobs, task output, and files is wrapped as data — not instructions — before it reaches the model
 - Secrets structurally absent: tool sandboxes strip key/token/secret variables from the environment (the agent can't `env` its own keys), the audit log redacts before writing, key updates reject control characters, and key reads return booleans — never values
 - SSRF-hardened outbound: `web_fetch` and `download_file` resolve DNS and refuse private, loopback, and link-local address space before any request leaves the machine
+- Rate limiting on the public chat surface: a per-chat budget with a global ceiling above it, so one peer can't exhaust the daemon and the aggregate is capped even when every chat is individually under. Messages and media carry **separate** budgets, a refusal doesn't consume budget, and the sender is warned once per window rather than per message
+- Inbound media is checked cheapest-and-earliest-first: declared MIME before any transfer, then the size cap **before download** — then the download itself runs under a hard byte ceiling, because `file_size` is supplied by the peer and the pre-check believed it. Magic bytes are sniffed after, and a declared type that disagrees with the sniffed one is refused; that's the renamed-extension case
+- Media cache is LRU-bounded with a free-disk floor, and classified as a convenience: an unwritable or full cache declines to cache, never to serve
+- **The honest limit:** signature-less text formats have no magic bytes to verify, so they are admitted on their declared type — trusted, but bounded by the allowlist. That's strictly weaker than verifying bytes and strictly stronger than refusing the type outright, which is what it replaced (and which protected nothing while breaking everything)
 - Cron is not a bypass: jobs pass the security gate at creation **and** again at execution; blocked runs are recorded and reported — fail closed
 - Audit logging (SQLite + JSONL, queryable via `/audit`), exfiltration detection, prompt-injection defense
 - Approval queue — `/approve`, `/deny`, `/pending` via Telegram, or one-click Approve/Deny cards in Beacon
@@ -230,7 +252,8 @@ Ground-truth DOM traces earn autonomy; lossy vision output stays human-reviewed.
 - Per-round prompt-cache stats (cached vs cache-write tokens, hit ratio) across providers — a provider that doesn't report is recorded as unknown, never as a fake zero
 - The daemon knows when it's stale: `/api/status` reports the running SHA against the repo's HEAD, so merged-but-not-restarted can never masquerade as deployed
 - Phoenix/OpenTelemetry tracing — env-gated, zero-cost no-ops when off
-- Failure classification in evals (model vs harness vs unclear) with trend tracking — the judge runs on your local endpoint; point `judge_base_url` at a second model for independent judging
+- Failure classification in evals (model vs harness vs unclear) with trend tracking — the judge runs on your local endpoint; `judge_base_url` chooses it and `evals.judge_model` pins which model grades
+- **Every score records which judge produced it** — base URL, model, and whether that model was *pinned* or auto-detected from whatever the endpoint had loaded. `pinned` is the field that matters and can't be inferred from the model name: an auto-detected judge that resolves to `qwen2.5:7b-instruct` records the same name as one pinned to it, but only the pinned run is reproducible. Result files written before this carry no judge key at all — that means **unknown**, permanently, and they must not be compared across paths. Backfilling them would manufacture exactly the false provenance the change exists to prevent
 
 ### On by default vs opt-in
 
@@ -405,6 +428,16 @@ sentinel:
   enabled: false       # opt-in: idle-time dreaming, wiki lint, synthesis
   dream_budget_tokens: 2000
 
+wiki:
+  root: ~/.prometheus/wiki   # the wiki is relocatable — every consumer
+                             # resolves through this one key
+
+heartbeat:
+  maintenance_db: ""   # path to a SQLite file with a maintenance(until_ts) row.
+                       # While the window is open, the "merged-but-dark" drift
+                       # nudge is suppressed — the merge-to-restart gap is
+                       # exactly when drift is expected. Empty = off; fails OPEN.
+
 profile:
   active: "full"       # full | coder | research | assistant | minimal
 ```
@@ -456,7 +489,7 @@ Task Completion : 100%
 No Hallucination: 84.7%
 ```
 
-All evaluation runs locally — the LLM judge uses constrained decoding on your own hardware. By default the judge shares the endpoint of the model under test; point `judge_base_url` at a second model for independent judging.
+All evaluation runs locally — the LLM judge uses constrained decoding on your own hardware. The shipped config gives the judge its own endpoint and pins the grading model (`judge_base_url` + `evals.judge_model`); leave `judge_base_url` blank and the judge falls back to the endpoint under test, i.e. the model grades itself. Each score carries its judge's provenance, so two runs can be compared — or refused comparison.
 
 ## Project Structure
 
@@ -466,7 +499,7 @@ prometheus/
 │   ├── engine/          # Agent loop, sessions, streaming, honesty check
 │   ├── adapter/         # Model Adapter Layer (validator, formatter, enforcer, retry)
 │   ├── providers/       # llama_cpp, ollama, openai_compat, anthropic, xai_oauth, registry
-│   ├── tools/builtin/   # 40+ builtin tools
+│   ├── tools/builtin/   # 49 builtin tools
 │   ├── coding/          # Sandboxed iterate-to-green runs + supervision + livestream
 │   ├── hooks/           # PreToolUse / PostToolUse + hot reload + LSP diagnostics
 │   ├── permissions/     # Security gate + audit + exfiltration + approval queue
@@ -488,7 +521,7 @@ prometheus/
 │   └── config/          # Settings, paths, env overrides, profiles
 ├── templates/           # Identity templates (no personal data)
 ├── skills/              # 102-file skill library (.md, opt-in)
-├── tests/               # 3,600+ tests across 220+ files
+├── tests/               # 4,000+ tests across 239 files
 ├── docs/                # Guides, architecture, sprint reports
 │   └── guide/           # Install · features · Beacon · coding · skills · memory · providers · API
 ├── gym/                 # Frozen task-sets, harvest corpus
@@ -498,12 +531,12 @@ prometheus/
 
 ## Stats
 
-- ~64,000 lines of production Python
-- 3,600+ tests across 220+ test files
-- 40+ builtin tools + dynamic MCP tools
+- ~83,000 lines of production Python across 313 modules
+- 4,000+ tests across 239 test files
+- 49 builtin tools registered by default (plus config-gated LSP, MCP, and vision/STT tools) + dynamic MCP tools
 - 102-file skill library + self-authored skills
 - 10+ model providers (local and cloud)
-- ~80 REST routes + an authenticated WebSocket event bridge
+- 88 REST routes (83 on the main API, 5 on the setup-mode pairing server) + an authenticated WebSocket event bridge
 - A native desktop cockpit with 13 views
 
 ## Roadmap
@@ -533,6 +566,4 @@ MIT — see [LICENSE](LICENSE). Upstream copyright notices for adapted code are 
 
 ## Credits
 
-Built by [Will Hieber](https://github.com/OAraLabs) / OAra Labs.
-
-Prometheus stands on open source: early scaffolding was adapted from [OpenHarness](https://github.com/HKUDS/OpenHarness), with smaller pieces from the [Hermes Agent](https://github.com/NousResearch/hermes-agent) and [OpenClaw](https://github.com/openclaw/openclaw). Its design was also informed by [Lossless-Claw](https://github.com/Martian-Engineering/lossless-claw), Andrej Karpathy's [LLM Wiki concept](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), and [Sigrid Jin's](https://github.com/instructkr) analysis of Claude Code's agent-loop patterns; adapted portions are credited in-file and in [NOTICE](NOTICE).
+Built by [Will Hieber](https://github.com/OAraLabs) / OAra Labs. Its design was informed by Andrej Karpathy's [LLM Wiki concept](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), [Lossless-Claw](https://github.com/Martian-Engineering/lossless-claw), and [Sigrid Jin's](https://github.com/instructkr) analysis of Claude Code's agent-loop patterns. Code lineage and upstream notices: see [Provenance](#provenance) above and [NOTICE](NOTICE).
