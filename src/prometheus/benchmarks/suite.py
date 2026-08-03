@@ -313,8 +313,8 @@ def _builtin_tier1() -> list[TestCase]:
             id="t1_agent_spawn",
             name="Agent tool — spawn explorer",
             tier=1,
-            prompt='Use the Agent tool to spawn an explorer subagent with prompt "List files in /tmp".',
-            expected_tools=["Agent"],
+            prompt='Use the agent tool to spawn an explorer subagent with prompt "List files in /tmp".',
+            expected_tools=["agent"],
             tags=["agent"],
         ),
         # --- Error handling ---
