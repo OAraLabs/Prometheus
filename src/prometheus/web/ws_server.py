@@ -329,8 +329,8 @@ class WebSocketBridge:
 
         if mime_type.startswith("image/"):
             # Image upload → cache + vision
-            from prometheus.gateway.media_cache import cache_image_from_bytes, sniff_image_extension
-            img_ext = ext if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp") else sniff_image_extension(filename)
+            from prometheus.gateway.media_cache import cache_image_from_bytes, extension_from_file_path
+            img_ext = ext if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp") else extension_from_file_path(filename)
             cached_path = cache_image_from_bytes(data, ext=img_ext)
 
             desc = await self._describe_image(cached_path)

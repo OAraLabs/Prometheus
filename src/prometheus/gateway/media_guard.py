@@ -29,15 +29,43 @@ stickers there is no declared type to compare the sniffed type against.
 
 The rule is therefore asymmetric BY NECESSITY, not by oversight:
 
-* declared type present -> it must be allowlisted, it must AGREE with the
-  sniffed type, and the sniffed type must be allowlisted
+* declared type present -> it must be allowlisted, and it must AGREE with the
+  sniffed type when there IS one
 * declared type absent  -> the **sniffed** type alone must be allowlisted
 
-This drops the comparison that has no second operand. It does not weaken the
-control: in both branches the sniffed (unforgeable) type must be in the
-allowlist. Making photos fail for lack of a declaration would reject all
-photos; synthesising a declaration from the filename would compare a sniff
-against a string the peer also controls, which proves nothing.
+This drops the comparison that has no second operand. Making photos fail for
+lack of a declaration would reject all photos; synthesising a declaration from
+the filename would compare a sniff against a string the peer also controls,
+which proves nothing.
+
+⚠ UNKNOWN IS NOT DISALLOWED — the distinction this file got wrong once
+----------------------------------------------------------------------
+``sniff_mime`` returns ``None`` for "I have no signature for this", which is
+NOT the same claim as "this type is not permitted". Conflating them made the
+document surface **PDF-only**: 19 of the 20 advertised document types were
+refused, including ``text/plain`` and ``text/markdown``, which the allowlist
+explicitly permitted. Text formats have no magic bytes — there is no signature
+to add — so "no signature" can never be a refusal reason for them.
+
+The resolution, and why each branch fails the way it does:
+
+* sniff returns a type, and it DISAGREES with the declared type -> **refuse**.
+  This is the renamed-extension attack and the check that actually matters.
+* sniff returns ``None`` and a declared type exists -> **admit on the declared
+  type if it is allowlisted**, and log it. The declared type is peer-supplied,
+  but for a signature-less format it is the only evidence there is, and the
+  allowlist still bounds which declarations are acceptable.
+* sniff returns ``None`` and NO declared type exists -> **refuse**. Nothing to
+  fall back to; admitting would admit arbitrary bytes.
+
+⚠ The honest cost: for signature-less formats the declared type is trusted.
+A payload can be presented as ``text/plain`` and be admitted as long as no
+signature in the table contradicts it. That is strictly weaker than verifying
+magic bytes — and strictly stronger than the behaviour it replaces, which
+refused the type outright and so protected nothing while breaking everything.
+Adding signatures for common container formats would narrow the gap further
+(a ZIP presented as ``text/plain`` would then be caught by disagreement);
+the table currently has none.
 
 Source: novel code for Prometheus, 2026-08-03.
 """
@@ -108,6 +136,27 @@ def sniff_mime(data: bytes) -> str | None:
     return None
 
 
+# Spelling variants a client may declare for a format the signature table emits
+# under its IANA name. Both halves of a disagreement check must speak the same
+# vocabulary: without this, a client declaring the legacy "audio/mp3" for bytes
+# that sniff as "audio/mpeg" is refused for DISAGREEMENT — two spellings of one
+# format reported as a mismatch. Aliases are folded, never widened: this maps
+# names onto each other, it does not admit anything the allowlist excludes.
+_MIME_ALIASES: dict[str, str] = {
+    "audio/mp3": "audio/mpeg",
+    "audio/x-wav": "audio/wav",
+    "audio/wave": "audio/wav",
+    "image/jpg": "image/jpeg",
+}
+
+
+def canonical_mime(mime: str | None) -> str | None:
+    """Fold known spelling variants onto the name the sniffer emits."""
+    if mime is None:
+        return None
+    return _MIME_ALIASES.get(mime.strip().lower(), mime.strip().lower())
+
+
 @dataclass(frozen=True)
 class MediaPolicy:
     """Effective media policy, resolved from config (never from defaults alone)."""
@@ -156,6 +205,7 @@ def check_declared_mime(declared: str | None, kind: str, policy: MediaPolicy) ->
     """Free, pre-download. Absent is NOT a failure — see the module docstring."""
     if declared is None:
         return
+    declared = canonical_mime(declared)
     allowed = policy.allowlist_for(kind)
     if allowed and declared not in allowed:
         raise MediaRejected(
@@ -172,6 +222,7 @@ def check_sniffed_mime(
     Fails CLOSED on a sniff error: a control that degrades to "allow" when its
     detector breaks is not a control.
     """
+    declared = canonical_mime(declared)
     try:
         sniffed = sniff_mime(data)
     except Exception as exc:  # pragma: no cover - defensive
@@ -182,10 +233,31 @@ def check_sniffed_mime(
         raise
 
     if sniffed is None:
-        raise MediaRejected(
-            MEDIA_MIME_SNIFFED.name,
-            "Could not verify file type — refusing.",
+        # UNKNOWN is not DISALLOWED — see the module docstring. Treating the
+        # two as the same thing is what made this surface PDF-only.
+        if declared is None:
+            # Nothing to fall back to (the PhotoSize/Sticker case). Stays
+            # FAIL-CLOSED: admitting here would admit arbitrary bytes, since
+            # neither signal said anything at all.
+            raise MediaRejected(
+                MEDIA_MIME_SNIFFED.name,
+                "Could not verify file type — refusing.",
+            )
+        # A declared type exists and no signature contradicts it. The
+        # allowlist still decides; the declared type is the only evidence
+        # available for a format that has no magic bytes.
+        allowed = policy.allowlist_for(kind)
+        if allowed and declared not in allowed:
+            raise MediaRejected(
+                MEDIA_ALLOWLIST.name, f"Unsupported file type ({declared})."
+            )
+        log.info(
+            "media: no signature for declared type %r (%s) — admitted on the "
+            "declared type; signature-less format",
+            declared,
+            kind,
         )
+        return declared
 
     if declared is not None and sniffed != declared:
         # The renamed-extension case: a .pdf presented as image/png.

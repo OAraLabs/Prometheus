@@ -2176,7 +2176,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
         from prometheus.gateway.media_cache import (
             cache_image_from_bytes,
-            sniff_image_extension,
+            extension_from_file_path,
         )
 
         # Largest resolution is the last element
@@ -2203,7 +2203,7 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             if image_bytes is None:
                 return
-            ext = sniff_image_extension(file_obj.file_path)
+            ext = extension_from_file_path(file_obj.file_path)
             cached_path = cache_image_from_bytes(bytes(image_bytes), ext=ext)
         except Exception as exc:
             logger.error("Failed to download photo: %s", exc)
