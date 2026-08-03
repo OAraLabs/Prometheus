@@ -3107,6 +3107,93 @@ def cmd_voice(
 
 
 # ---------------------------------------------------------------------------
+# /ephemeral — per-session "don't remember this"
+# ---------------------------------------------------------------------------
+
+# The wording is load-bearing, not style. "Prometheus won't remember this" is
+# true: the durable memory pipeline is bypassed end to end. "This isn't
+# recorded" would be FALSE — the permission audit log still records every tool
+# decision (deliberately: an agent running bash with no trail is a worse hole
+# than the one this closes), subsystem_runs still records token counts, cached
+# attachment bytes still sit under ~/.prometheus/cache/, and any file the agent
+# writes while working is an ordinary file nothing tracks. Never promise the
+# second sentence. See prometheus.config.ephemeral for the full boundary.
+_EPHEMERAL_ON_TEXT = (
+    "Ephemeral mode ON — Prometheus won't remember this.\n"
+    "\n"
+    "From the next message on, this chat is not written to the conversation\n"
+    "store, so nothing here is mined into memory, facts, or the wiki, and no\n"
+    "skill is generated from it.\n"
+    "\n"
+    "It is NOT the same as \"this isn't recorded\":\n"
+    "  • tool permission decisions are still audited (on purpose)\n"
+    "  • token counts and timings are still measured\n"
+    "  • attachments you send are still cached on disk\n"
+    "  • files the agent writes while working are still written\n"
+    "  • a cloud model that served the turn still saw the message\n"
+    "\n"
+    "Anything sent BEFORE now is already stored — this only applies going\n"
+    "forward. Turn off with: {prefix}ephemeral off"
+)
+
+_EPHEMERAL_OFF_TEXT = (
+    "Ephemeral mode OFF — this chat is remembered again.\n"
+    "Messages from here on are stored and may be mined into memory."
+)
+
+
+def cmd_ephemeral(session_key: str, arg: str, *, prefix: str = "/") -> str:
+    """Shared /ephemeral core — show or set per-session ephemeral mode.
+
+    ``session_key`` is the full session id (e.g. ``telegram:12345``), the same
+    key ``SessionManager.get_or_create`` and the agent loop resolve against —
+    not a bare chat id. One key, no mapping, nothing to keep in sync.
+
+    A write failure is REPORTED, never swallowed: the user must not be told a
+    privacy mode is on when it is not.
+    """
+    from prometheus.config.ephemeral import (
+        EphemeralFlagWriteError,
+        is_session_ephemeral,
+        set_session_ephemeral,
+    )
+
+    arg = (arg or "").strip().lower()
+    current = is_session_ephemeral(session_key)
+
+    if not arg:
+        state = "ON — Prometheus won't remember this" if current else "OFF"
+        return (
+            f"Ephemeral mode: {state}\n"
+            f"\n"
+            f"  {prefix}ephemeral on   — stop remembering this chat\n"
+            f"  {prefix}ephemeral off  — remember it again\n"
+            f"\n"
+            f"'Won't remember' is not 'isn't recorded' — {prefix}ephemeral on\n"
+            f"prints exactly what it does and does not cover."
+        )
+
+    if arg not in ("on", "off"):
+        return f"Unknown option: {arg}\nUse: {prefix}ephemeral [on|off]"
+
+    want = arg == "on"
+    try:
+        set_session_ephemeral(session_key, want)
+    except EphemeralFlagWriteError as exc:
+        return (
+            f"Could NOT set ephemeral mode: {exc}\n"
+            f"\n"
+            f"The flag did not persist, so nothing has changed — this chat is "
+            f"still being {'remembered' if not current else 'kept ephemeral'}. "
+            f"Do not treat this message as confirmation."
+        )
+
+    if want:
+        return _EPHEMERAL_ON_TEXT.format(prefix=prefix)
+    return _EPHEMERAL_OFF_TEXT
+
+
+# ---------------------------------------------------------------------------
 # Telemetry formatters — /tools /pairs
 # ---------------------------------------------------------------------------
 

@@ -328,6 +328,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("status", self._cmd_status))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
         self._app.add_handler(CommandHandler("reset", self._cmd_reset))
+        self._app.add_handler(CommandHandler("ephemeral", self._cmd_ephemeral))
         self._app.add_handler(CommandHandler("model", self._cmd_model))
         self._app.add_handler(CommandHandler("wiki", self._cmd_wiki))
         self._app.add_handler(CommandHandler("note", self._cmd_note))
@@ -409,6 +410,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("help", "List commands and capabilities"),
                 BotCommand("reset", "Clear conversation context"),
                 BotCommand("clear", "Clear conversation context"),
+                BotCommand("ephemeral", "on|off — stop remembering this chat"),
                 BotCommand("model", "Show current model and provider"),
                 BotCommand("wiki", "Wiki stats and recent entries"),
                 BotCommand("sentinel", "SENTINEL subsystem status"),
@@ -636,7 +638,15 @@ class TelegramAdapter(BasePlatformAdapter):
             "/notifications — off | quiet | verbose\n"
             "/voice     — voice replies: auto | on | off (auto mirrors input)\n"
             "/health    — silent-failure telemetry (last 24h)\n"
-            "/reset     — Clear conversation context\n"
+            "/reset     — Clear conversation context (this session only —\n"
+            "             already-stored history is NOT deleted)\n"
+            "/ephemeral — on|off. ON means Prometheus won't remember this\n"
+            "             chat: nothing is stored to conversation history,\n"
+            "             mined into memory/wiki, or turned into a skill.\n"
+            "             That is not the same as \"isn't recorded\" — tool\n"
+            "             permissions are still audited, token counts still\n"
+            "             measured, attachments still cached, and files the\n"
+            "             agent writes still written. Set it BEFORE you send.\n"
             "/help      — This message\n"
             "\n"
             "Provider overrides (this chat only, sticky until /local):\n"
@@ -667,6 +677,24 @@ class TelegramAdapter(BasePlatformAdapter):
             "Conversation context reset.",
             parse_mode=None,
         )
+
+    async def _cmd_ephemeral(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /ephemeral on|off — per-chat "don't remember this".
+
+        Keyed on the SAME session key ``_dispatch_to_agent`` threads into the
+        session manager and the agent loop, so there is no chat-id-to-session
+        mapping that could drift.
+        """
+        if update.effective_chat is None:
+            return
+        session_key = f"{Platform.TELEGRAM.value}:{update.effective_chat.id}"
+        arg = " ".join(context.args) if getattr(context, "args", None) else ""
+        from prometheus.gateway import commands as _cmds
+
+        text = _cmds.cmd_ephemeral(session_key, arg)
+        await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_model(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

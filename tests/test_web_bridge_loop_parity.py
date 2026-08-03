@@ -35,6 +35,8 @@ import ast
 import dataclasses
 from pathlib import Path
 
+import pytest
+
 from prometheus.engine.agent_loop import LoopContext
 
 DAEMON = Path(__file__).resolve().parents[1] / "src" / "prometheus" / "daemon.py"
@@ -176,3 +178,112 @@ def test_the_defaults_that_made_this_silent():
     assert defaults["max_tool_iterations"] == 25
     assert defaults["max_tool_iterations_cloud"] is None
     assert defaults["tool_loader"] is None
+
+
+# ---------------------------------------------------------------------------
+# The ephemeral flag — the same trap, solved by NOT having a field
+#
+# ``/ephemeral on`` (prometheus.config.ephemeral) is per-SESSION, which makes it
+# the seventh candidate for the drift above — except that passing it at both
+# construction sites would be the WRONG fix, and the guards below pin the right
+# one.
+#
+# The web LoopContext is built ONCE at daemon start and shared by every
+# Beacon/Bridge session. A per-chat privacy flag stored on it would not merely
+# drift; it would CROSS-TALK — one ephemeral chat suppressing persistence for
+# every other web session, or an ordinary chat inheriting a stale False and
+# persisting a turn the user had flagged. That is why ``ws_server._run_agent``
+# already passes ``mode`` and ``session_id`` as per-call ``run_loop``
+# arguments and explicitly never stores them on the shared context.
+#
+# So the flag is resolved INSIDE ``run_loop``, from the effective session id,
+# once per turn. Both construction sites get it because there is nothing to
+# pass — the CROSS-CUTTING §5 shape: prefer a property that cannot be violated
+# over a check that must remember to run.
+# ---------------------------------------------------------------------------
+
+AGENT_LOOP = (
+    Path(__file__).resolve().parents[1]
+    / "src" / "prometheus" / "engine" / "agent_loop.py"
+)
+
+# The chain that carries the per-turn flag from run_loop down to the telemetry
+# write. Every hop must keep the parameter: drop it anywhere and the tail of
+# the chain silently falls back to ``ephemeral=False``, i.e. retention, which
+# is the plausible-default failure this whole file exists to catch.
+_EPHEMERAL_CHAIN = (
+    "_run_loop",
+    "_dispatch_tool_calls",
+    "_safe_execute",
+    "_execute_tool_call",
+)
+
+
+def _func_node(name: str) -> ast.AST:
+    tree = ast.parse(AGENT_LOOP.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    raise AssertionError(f"{name} not found in agent_loop.py")
+
+
+def _param_names(fn: ast.AST) -> set[str]:
+    args = fn.args
+    return {a.arg for a in (*args.args, *args.posonlyargs, *args.kwonlyargs)}
+
+
+def test_ephemeral_is_not_a_loop_context_field():
+    """The guard that keeps the fix correct rather than merely present.
+
+    If ``ephemeral`` ever becomes a LoopContext field, the field-level parity
+    test above starts demanding it be passed at both sites — and passing a
+    per-session value on the ONE shared web context is precisely the
+    cross-talk bug. Adding it here would make this file's other guard enforce
+    the wrong thing, which is worse than no guard."""
+    assert "ephemeral" not in _loop_context_fields(), (
+        "ephemeral became a LoopContext field. The web context is built once "
+        "and shared by every session, so a per-chat privacy flag parked on it "
+        "leaks across chats. Resolve it per-call in run_loop instead."
+    )
+
+
+def test_run_loop_resolves_the_flag_from_the_effective_session_id():
+    """``session_id or context.session_id`` — the per-call argument must win.
+
+    Reading ``context.session_id`` alone would resolve every web turn against
+    the shared context's id, so Beacon would get one answer for all sessions.
+    Same idiom the file-mutation-verifier turn key and the router's override
+    lookup already use, and for the same reason."""
+    src = AGENT_LOOP.read_text(encoding="utf-8")
+    assert "is_session_ephemeral(session_id or context.session_id)" in src, (
+        "run_loop no longer resolves the ephemeral flag from the EFFECTIVE "
+        "session id. On the web path context.session_id is not this turn's "
+        "session — see ws_server._run_agent."
+    )
+
+
+@pytest.mark.parametrize("fn_name", _EPHEMERAL_CHAIN)
+def test_the_ephemeral_flag_survives_every_hop_to_the_telemetry_write(fn_name):
+    """Drop the parameter at any hop and the tail defaults to retention."""
+    assert "ephemeral" in _param_names(_func_node(fn_name)), (
+        f"{fn_name} no longer accepts `ephemeral`; everything downstream of it "
+        f"falls back to ephemeral=False and starts writing content again"
+    )
+
+
+def test_run_async_gates_the_post_task_hooks_on_the_flag():
+    """The hooks are the one suppression that CANNOT move into run_loop — they
+    live in the AgentLoop wrapper by design (see RUN_ASYNC_ONLY in
+    test_run_async_web_parity.py), so they need their own explicit check."""
+    fn = _func_node("run_async")
+    calls = {
+        node.func.id
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "is_session_ephemeral" in calls, (
+        "run_async no longer checks the ephemeral flag before firing post-task "
+        "hooks — SkillCreator would again be handed the raw user message of an "
+        "ephemeral turn and write it into skills/auto/ plus a skill_created "
+        "signal payload"
+    )
