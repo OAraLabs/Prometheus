@@ -588,3 +588,19 @@ tasks:
   poll_initial_interval_seconds: 5
   poll_max_interval_seconds: 120
   reengage_turn_cap: 3
+
+# ── Heartbeat ─────────────────────────────────────────────────────────────
+heartbeat:
+  # Optional path to a SQLite file carrying a single-row
+  # maintenance(until_ts) table. While until_ts is in the future, the
+  # "merged-but-dark" drift nudge is suppressed — the merge-to-restart gap is
+  # exactly when drift is EXPECTED, and every deploy was generating one.
+  #
+  # Empty = feature off, behaviour unchanged. Fails OPEN: if the window cannot
+  # be read the nudge is NOT suppressed, because swallowing a drift alert is
+  # worse than a redundant one.
+  #
+  # Suppression deliberately does not mark the drift as notified, so when the
+  # window closes an un-restarted merge nudges normally rather than being
+  # silenced forever.
+  maintenance_db: ""

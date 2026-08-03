@@ -13,6 +13,7 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from prometheus.config.paths import get_config_dir
 from prometheus.context.environment import git_head_sha
 from prometheus.gateway.cron_service import load_cron_jobs, validate_cron_expression
 
@@ -45,6 +46,7 @@ class Heartbeat:
         notify_chat_id: int | None = None,
         task_progress_interval: int = DEFAULT_TASK_PROGRESS_INTERVAL,
         boot_sha: str | None = None,
+        maintenance_db: str | None = None,
     ) -> None:
         self.interval = interval
         self.gateway = gateway
@@ -70,7 +72,20 @@ class Heartbeat:
         # process loaded; _check_staleness compares it to the live tree HEAD and
         # nudges once per drift, de-duped on the tree_head it last nudged for.
         self._boot_sha = boot_sha
-        self._stale_notified_for: str | None = None
+        # Persisted, not in-memory: a restart is the exact event that RESOLVES
+        # drift, so in-memory state resets precisely when it is about to matter
+        # again (merge -> nudge -> restart -> merge -> nudge for the same
+        # condition). Survives across process lifetimes.
+        self._stale_state_path = get_config_dir() / "data" / "drift_notified.json"
+        self._stale_notified_for: str | None = self._load_stale_state()
+
+        # OPTIONAL maintenance-window source. Empty by default, so the feature
+        # is off and behaviour is unchanged out of the box. When set, it points
+        # at a SQLite file carrying a single-row ``maintenance(until_ts)``
+        # table; while ``until_ts`` is in the future the drift nudge is
+        # suppressed. The merge->restart gap is exactly when drift is EXPECTED,
+        # and every deploy was generating a nudge there.
+        self._maintenance_db = maintenance_db or None
 
     @property
     def signal_bus(self) -> SignalBus | None:
@@ -171,21 +186,81 @@ class Heartbeat:
             self._running = False
             logger.info("Heartbeat stopped")
 
+    def _load_stale_state(self) -> str | None:
+        """The tree_head last nudged for, across process lifetimes."""
+        try:
+            import json
+
+            return json.loads(self._stale_state_path.read_text()).get("notified_for")
+        except Exception:
+            return None
+
+    def _save_stale_state(self, tree_head: str | None) -> None:
+        try:
+            import json
+
+            self._stale_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._stale_state_path.write_text(json.dumps({"notified_for": tree_head}))
+        except Exception as exc:  # never let bookkeeping break the heartbeat
+            logger.debug("Could not persist drift state: %s", exc)
+
+    def _maintenance_active(self) -> bool:
+        """True while an operator-armed maintenance window is open.
+
+        Reads a single-row ``maintenance(until_ts)`` table from the configured
+        SQLite file. Fails OPEN — if the window cannot be read we do NOT
+        suppress, because silently swallowing a drift alert is worse than a
+        redundant one. (Convenience, not a control: see the classification
+        rule — suppression is noise reduction, so it degrades toward noisy.)
+        """
+        if not self._maintenance_db:
+            return False
+        try:
+            import sqlite3
+            from datetime import datetime, timezone
+
+            with sqlite3.connect(f"file:{self._maintenance_db}?mode=ro", uri=True) as conn:
+                row = conn.execute("SELECT until_ts FROM maintenance WHERE id = 1").fetchone()
+            if not row or not row[0]:
+                return False
+            until = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+            return datetime.now(timezone.utc) < until
+        except Exception as exc:
+            logger.debug("Maintenance window unreadable (%s) — not suppressing", exc)
+            return False
+
     async def _check_staleness(self) -> None:
         """Nudge once per drift when the running code (boot SHA) has fallen
         behind the working tree — the 'merged-but-dark' signal. De-duped on
         tree_head: a standing drift pings once, a NEW commit pings again, and a
-        restart (boot == tree) is silent. No-op when the boot SHA is unknown."""
+        restart (boot == tree) is silent. No-op when the boot SHA is unknown.
+
+        Suppressed inside an armed maintenance window. Crucially the suppressed
+        branch does NOT record the tree_head, so when the window closes the
+        drift is still un-notified and the next check nudges normally — the
+        window-close re-evaluation falls out of the ordering rather than
+        needing its own machinery. Without that, a merge landing inside a
+        window that is never followed by a restart would be silenced forever.
+        """
         if not self._boot_sha or self._boot_sha == "unknown":
             return
         tree_head = git_head_sha()
         if tree_head == "unknown" or tree_head == self._boot_sha:
             # In sync (or undeterminable) — reset so a later drift re-nudges.
-            self._stale_notified_for = None
+            if self._stale_notified_for is not None:
+                self._stale_notified_for = None
+                self._save_stale_state(None)
             return
         if tree_head == self._stale_notified_for:
             return  # already nudged for this exact drift
+        if self._maintenance_active():
+            logger.debug(
+                "Drift %s -> %s suppressed: maintenance window armed",
+                self._boot_sha[:8], tree_head[:8],
+            )
+            return  # deliberately WITHOUT recording — re-evaluated on close
         self._stale_notified_for = tree_head
+        self._save_stale_state(tree_head)
         await self._notify(
             f"⚠️ Running {self._boot_sha[:8]}, tree is {tree_head[:8]} — new code "
             f"on disk this process isn't executing. Restart to go live."
