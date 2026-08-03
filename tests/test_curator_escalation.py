@@ -28,6 +28,7 @@ from prometheus.learning.curator import (
     CuratorRun,
     _DEGRADED_THRESHOLD,
     _MAX_BACKOFF_MULTIPLIER,
+    _STARTUP_GRACE_SECONDS,
 )
 from prometheus.learning.skill_state import SkillStateStore
 from prometheus.providers.base import ApiTextDeltaEvent
@@ -289,3 +290,83 @@ class TestCuratorLoopOutcomeRecording:
         loop_rows = [r for r in rows if r["operation"] == "_loop_iteration"]
         assert len(loop_rows) == 1
         assert loop_rows[0]["outcome"] == "skipped"
+
+
+# ---------------------------------------------------------------------------
+# Watermark scheduling (2026-08) — the first wait derives from the PERSISTED
+# last_run_at. The prior sleep-first shape re-armed a full interval on every
+# daemon restart: with the default 7-day interval and a sub-week restart
+# cadence the loop fired exactly once ever (2026-07-17, after the only
+# 7-day uptime streak). Same failure shape as the extractor cursor (PR #145).
+# ---------------------------------------------------------------------------
+
+_INTERVAL = 3600  # comfortably above the ctor's 60s clamp
+_NOW = 1_700_000_000.0
+
+
+def _watermark_curator(
+    tmp_path: Path, *, last_run_at: float | None
+) -> Curator:
+    """Curator over a real on-disk state store; no LLM is ever touched."""
+    store = SkillStateStore(tmp_path / "_state.json")
+    if last_run_at is not None:
+        store.update_curator(last_run_at=last_run_at)
+    return Curator(
+        MagicMock(),
+        state_store=store,
+        auto_dir=tmp_path / "skills" / "auto",
+        reports_dir=tmp_path / "curator",
+        interval_seconds=_INTERVAL,
+    )
+
+
+class TestWatermarkScheduling:
+    """_initial_delay_seconds: max(grace, watermark + interval - now)."""
+
+    def test_never_run_is_due_after_the_startup_grace(self, tmp_path: Path) -> None:
+        """Watermark 0.0 counts as overdue — a brand-new install runs once
+        the daemon has settled (empty skills dir → run_once is LLM-free)."""
+        c = _watermark_curator(tmp_path, last_run_at=None)
+        assert c._initial_delay_seconds(_NOW) == float(_STARTUP_GRACE_SECONDS)
+
+    def test_overdue_watermark_collapses_to_the_grace(self, tmp_path: Path) -> None:
+        c = _watermark_curator(tmp_path, last_run_at=_NOW - 2 * _INTERVAL)
+        assert c._initial_delay_seconds(_NOW) == float(_STARTUP_GRACE_SECONDS)
+
+    def test_midcycle_restart_waits_only_the_remainder(self, tmp_path: Path) -> None:
+        """Half the interval has elapsed → wait the other half, not a fresh
+        full interval. This is the sentence the old code got wrong."""
+        c = _watermark_curator(tmp_path, last_run_at=_NOW - _INTERVAL / 2)
+        assert c._initial_delay_seconds(_NOW) == pytest.approx(_INTERVAL / 2)
+
+    def test_just_ran_waits_the_full_interval(self, tmp_path: Path) -> None:
+        c = _watermark_curator(tmp_path, last_run_at=_NOW)
+        assert c._initial_delay_seconds(_NOW) == pytest.approx(float(_INTERVAL))
+
+    def test_restart_does_not_rearm_a_full_interval(self, tmp_path: Path) -> None:
+        """THE regression: a second process over the same persisted store
+        must see the same remaining wait, not start the countdown over."""
+        first = _watermark_curator(tmp_path, last_run_at=_NOW - 0.75 * _INTERVAL)
+        delay_first = first._initial_delay_seconds(_NOW)
+
+        # "Restart": a fresh Curator + fresh store handle over the same file.
+        second = Curator(
+            MagicMock(),
+            state_store=SkillStateStore(tmp_path / "_state.json"),
+            auto_dir=tmp_path / "skills" / "auto",
+            reports_dir=tmp_path / "curator",
+            interval_seconds=_INTERVAL,
+        )
+        delay_second = second._initial_delay_seconds(_NOW)
+
+        assert delay_first == pytest.approx(0.25 * _INTERVAL)
+        assert delay_second == pytest.approx(delay_first)
+        assert delay_second < _INTERVAL
+
+    def test_unreadable_store_falls_back_to_overdue(self, tmp_path: Path) -> None:
+        """A broken state read must not park the loop for a full interval —
+        running is the recoverable direction (prunings archive, never delete)."""
+        c = _watermark_curator(tmp_path, last_run_at=_NOW)
+        c._state_store = MagicMock()
+        c._state_store.curator.side_effect = RuntimeError("corrupt state")
+        assert c._initial_delay_seconds(_NOW) == float(_STARTUP_GRACE_SECONDS)
