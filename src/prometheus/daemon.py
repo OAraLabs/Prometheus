@@ -753,6 +753,9 @@ async def run_daemon(args: argparse.Namespace) -> None:
         task_manager=task_manager,
         notify_chat_id=_notify_chat,
         boot_sha=boot_sha,
+        # Optional: suppress the merged-but-dark nudge inside an operator-armed
+        # maintenance window. Empty by default (feature off).
+        maintenance_db=(config.get("heartbeat", {}) or {}).get("maintenance_db", ""),
     )
     heartbeat_task = asyncio.create_task(heartbeat.run_forever())
     tasks.append(heartbeat_task)
