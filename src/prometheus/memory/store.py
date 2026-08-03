@@ -23,6 +23,17 @@ log = logging.getLogger(__name__)
 
 _DB_NAME = "memory.db"
 
+# Reserved ``extractor_cursors.scope`` key: the DEFAULT FLOOR for any session
+# that has no cursor row of its own. Not a session id — '*' cannot collide with
+# one, because every real session id is ``<platform>:<id>`` or a reserved
+# literal, and none is a bare asterisk.
+#
+# It is load-bearing, not bookkeeping: a per-session cursor is authoritative
+# when present, and this is what an ABSENT one resolves to. Without it a
+# brand-new session, or a fresh install, would resolve to rowid 0 and read the
+# entire store.
+EXTRACTOR_GLOBAL_SCOPE = "*"
+
 _DEDUP_TRAILING = string.punctuation + " "
 
 
@@ -175,6 +186,25 @@ class MemoryStore:
                 summary_text        TEXT NOT NULL,
                 level               INTEGER NOT NULL DEFAULT 1,
                 timestamp           REAL NOT NULL
+            );
+
+            -- How far the MemoryExtractor has consumed the LCM conversation
+            -- store. Lives here, in the extractor's OWN store, rather than in
+            -- lcm.db: extraction progress is a fact about the consumer, and the
+            -- conversation store stays read-only from the extractor's side.
+            --
+            -- ``scope`` is a session_id, or '*' for the reserved default floor
+            -- (see EXTRACTOR_GLOBAL_SCOPE). ``last_row_id`` is an LCM rowid —
+            -- monotonic, unique, and restart-stable, unlike the timestamp this
+            -- replaced. It superseded a single in-memory float that served two
+            -- scopes at once and therefore failed in BOTH directions: reset to
+            -- 0.0 on every restart (re-mining the oldest rows across all
+            -- sessions) while a per-session pre-compaction flush advanced it
+            -- globally (stranding every other session's rows below it forever).
+            CREATE TABLE IF NOT EXISTS extractor_cursors (
+                scope       TEXT PRIMARY KEY,
+                last_row_id INTEGER NOT NULL,
+                updated_at  REAL NOT NULL
             );
 
             -- FTS sync triggers (passive-recall sprint). Both FTS tables are
@@ -449,6 +479,103 @@ class MemoryStore:
                 )
             # FTS index entry is created by the memories_fts_ai trigger.
             return mid
+
+        return self._write(_op)
+
+    # ------------------------------------------------------------------
+    # Extractor cursors
+    # ------------------------------------------------------------------
+
+    def get_extractor_cursor(self, scope: str) -> int:
+        """Last LCM rowid consumed for *scope*, or 0 if it has no row.
+
+        0 means "no cursor recorded", NOT "start from the beginning" — callers
+        resolve an absent per-session cursor against the reserved global floor
+        (:data:`EXTRACTOR_GLOBAL_SCOPE`), which is what stops a fresh install
+        AND a brand-new session from being read from rowid 0.
+        """
+        row = self._read(lambda conn: conn.execute(
+            "SELECT last_row_id FROM extractor_cursors WHERE scope = ?", (scope,)
+        ).fetchone())
+        return int(row["last_row_id"]) if row else 0
+
+    def set_extractor_cursor(self, scope: str, row_id: int) -> None:
+        """Advance *scope*'s cursor to *row_id*.
+
+        Monotonic by construction: ``MAX(existing, new)``, so an out-of-order
+        or stale write can never rewind a cursor and re-expose already-mined
+        rows. That property is the whole point of the table, so it is enforced
+        in SQL rather than left to every caller.
+        """
+        def _op(conn):
+            conn.execute(
+                "INSERT INTO extractor_cursors (scope, last_row_id, updated_at)"
+                " VALUES (?, ?, ?)"
+                " ON CONFLICT(scope) DO UPDATE SET"
+                "   last_row_id = MAX(last_row_id, excluded.last_row_id),"
+                "   updated_at = excluded.updated_at",
+                (scope, int(row_id), time.time()),
+            )
+
+        self._write(_op)
+
+    def seed_extractor_cursor_if_absent(
+        self, row_id: int, per_session: dict[str, int] | None = None,
+    ) -> bool:
+        """One-time migration: set the global floor to *row_id* if unset.
+
+        THE MIGRATION TRADE, stated where it is made. Seeding at 0 — the
+        obvious default — would make the first pass after this change perform
+        exactly the full-history re-mine the change exists to prevent, once,
+        over the entire conversation store. So the global floor is seeded from
+        the CURRENT max rowid: everything already in the store is treated as
+        consumed. Anything genuinely unmined before this deploy stays unmined,
+        permanently. That is the deliberate cost of not re-mining ~5 MB of
+        history on first boot, and it is a one-way door.
+
+        ``per_session`` additionally writes one row per session at that
+        session's own max rowid. **Given a correct global floor it is
+        behaviourally inert** — an absent per-session cursor already resolves
+        to that floor, and ``_cursor_for`` takes ``max(global, own)``, so a
+        session seeded at its own (lower) max rowid reads exactly the rows it
+        would have read anyway; ``test_per_session_seeding_is_behaviourally_inert``
+        pins that.
+
+        Given an INCORRECT global floor it is not inert — it is a backstop, and
+        that was discovered rather than designed: mutating the global seed to 0
+        left the mined set unchanged, because the per-session rows excluded the
+        same history. Worth stating plainly, because it means the two are not
+        independent controls and a test asserting only the mined set cannot
+        distinguish them (§3b's defence-in-depth variant).
+
+        It is there for AUDITABILITY, which a one-way door earns: after the
+        deploy you can read the table and see, per session, the exact rowid
+        the migration decided was already consumed. With only the '*' row the
+        state is equally correct and shows one number for 131 sessions, so
+        "did the migration do the right thing for MY chat" is unanswerable
+        without re-deriving it. A migration you cannot audit after the fact is
+        one you have to trust, and this one cannot be re-run.
+
+        Returns True if it seeded, False if a cursor already existed (so the
+        caller can log which happened rather than guess).
+        """
+        def _op(conn):
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO extractor_cursors"
+                " (scope, last_row_id, updated_at) VALUES (?, ?, ?)",
+                (EXTRACTOR_GLOBAL_SCOPE, int(row_id), time.time()),
+            )
+            # Only when the global row was genuinely absent: this is the
+            # migration, not a repair. Re-seeding per-session rows on a later
+            # boot could otherwise write a stale floor beside a live cursor.
+            if cur.rowcount == 1 and per_session:
+                now = time.time()
+                conn.executemany(
+                    "INSERT OR IGNORE INTO extractor_cursors"
+                    " (scope, last_row_id, updated_at) VALUES (?, ?, ?)",
+                    [(str(s), int(r), now) for s, r in per_session.items() if s],
+                )
+            return cur.rowcount == 1
 
         return self._write(_op)
 

@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 from prometheus.memory.extractor import MemoryExtractor
 from prometheus.memory.lcm_conversation_store import LCMConversationStore
 from prometheus.memory.lcm_types import MessagePart
-from prometheus.memory.store import MemoryStore
+from prometheus.memory.store import EXTRACTOR_GLOBAL_SCOPE, MemoryStore
 
 _USER_MARKER = "PIZZATOPPING_USERFACT"
 _TASK_MARKER = "RMRF_TASKMARKER"
@@ -46,6 +46,7 @@ async def test_extractor_skips_task_supervisor_provenance(tmp_path):
     )
 
     store = MemoryStore(db_path=tmp_path / "memory.db")
+    store.set_extractor_cursor(EXTRACTOR_GLOBAL_SCOPE, 0)  # see test_extractor_cursor.py
     extractor = MemoryExtractor(store, MagicMock(), lcm_conversation_store=conv)
 
     captured: dict[str, str] = {}

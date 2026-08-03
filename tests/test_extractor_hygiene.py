@@ -29,7 +29,7 @@ from prometheus.memory.extractor import (
 )
 from prometheus.memory.lcm_conversation_store import LCMConversationStore
 from prometheus.memory.lcm_types import MessagePart
-from prometheus.memory.store import MemoryStore
+from prometheus.memory.store import EXTRACTOR_GLOBAL_SCOPE, MemoryStore
 
 _USER_MARKER = "PIZZATOPPING_USERFACT"
 _FIXTURE_MARKER = "MARSHMALLOW_FIXTUREFACT"
@@ -37,6 +37,12 @@ _FIXTURE_MARKER = "MARSHMALLOW_FIXTUREFACT"
 
 def _extractor(tmp_path, conv):
     store = MemoryStore(db_path=tmp_path / "memory.db")
+    # Extraction cursor at the beginning. Pre-2026-08 this was free — the
+    # extractor's watermark was an in-memory float starting at 0.0. It is now a
+    # durable rowid cursor seeded at construction from the store's max rowid, so
+    # a test that ingests BEFORE constructing must say out loud that it wants
+    # those rows treated as new. The assertions below are unchanged.
+    store.set_extractor_cursor(EXTRACTOR_GLOBAL_SCOPE, 0)
     return store, MemoryExtractor(store, MagicMock(), lcm_conversation_store=conv)
 
 
@@ -169,6 +175,7 @@ async def test_paraphrase_folds_into_existing_row(tmp_path):
         role="user", content="ls /home/will/ please",
         session_id="telegram:1", turn_index=0,
     ))
+    store.set_extractor_cursor(EXTRACTOR_GLOBAL_SCOPE, 0)  # see _extractor() above
     extractor = MemoryExtractor(store, MagicMock(), lcm_conversation_store=conv)
 
     async def fake_call_model(prompt: str) -> str:
@@ -206,6 +213,7 @@ async def test_genuinely_different_fact_persists_as_new_row(tmp_path):
         role="user", content="I live in Salt Lake City",
         session_id="telegram:1", turn_index=0,
     ))
+    store.set_extractor_cursor(EXTRACTOR_GLOBAL_SCOPE, 0)  # see _extractor() above
     extractor = MemoryExtractor(store, MagicMock(), lcm_conversation_store=conv)
 
     async def fake_call_model(prompt: str) -> str:
