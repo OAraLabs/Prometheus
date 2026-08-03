@@ -275,6 +275,11 @@ class EvalRunner:
         data = {
             "timestamp": datetime.now().isoformat(),
             "task_count": len(results),
+            # WHO GRADED. A score without judge attribution cannot be compared
+            # with another score — see PrometheusJudge.provenance(). Records
+            # absent this key predate 2026-08-02 and their judge is UNKNOWN;
+            # do not infer one.
+            "judge": self._judge.provenance() if self._judge else None,
             "results": [asdict(r) for r in results],
             "summary": summary,
         }
