@@ -39,9 +39,27 @@ import time
 from pathlib import Path
 from typing import Any
 
+from prometheus.adapter import markup_guard
+
 log = logging.getLogger(__name__)
 
 DEFAULT_TRAINING_DB = "~/.prometheus/data/training.db"
+
+# Marks a row whose `chosen` side is not fit to train on. Set by
+# scripts/flag_corrupt_pairs.py on rows banked before the gate existed, and
+# honoured by scripts/export_training_pairs.py. Flagged, never deleted — these
+# rows are the only evidence of the upstream leak.
+QUALITY_KEY = "quality"
+QUALITY_TEMPLATE_MARKUP = "template_markup"
+
+
+class CorruptPairRejected(ValueError):
+    """A pair whose ``chosen`` side carries leaked chat-template markup.
+
+    Raised rather than silently dropped so the rejection is counted: the
+    existing ``capture_pair`` handler writes a ``silent_failures`` telemetry
+    row, which is what makes the rate measurable instead of assumed.
+    """
 
 PAIR_SOURCES = (
     "levenshtein_repair",
@@ -104,9 +122,28 @@ class PairStore:
         chosen: dict[str, Any],
         meta: dict[str, Any] | None = None,
     ) -> bool:
-        """Insert a pair; returns False on dedupe-hit. Raises on bad source."""
+        """Insert a pair; returns False on dedupe-hit.
+
+        Raises on a bad source, and on a ``chosen`` side carrying leaked
+        chat-template markup (``CorruptPairRejected``). ``capture_pair`` turns
+        either into a ``silent_failures`` row without breaking the turn.
+        """
         if pair_source not in PAIR_SOURCES:
             raise ValueError(f"unknown pair_source {pair_source!r}")
+        # The `chosen` side is the POSITIVE label — what training points
+        # toward. It reached here having passed structure, syntax and type
+        # checks (see adapter/markup_guard), none of which inspect content, so
+        # a string of decoder artifacts can arrive as a perfectly valid `str`.
+        # 10 of 415 banked pairs were exactly that, all self_correction, whose
+        # bar for `chosen` is "the retry succeeded" == "pydantic accepted it".
+        # Guard the whole store rather than one call site: the gym harness and
+        # any future writer use PairStore directly.
+        corrupt = markup_guard.scan_arguments((chosen or {}).get("input"))
+        if corrupt:
+            raise CorruptPairRejected(
+                f"refusing to bank {pair_source}/{tool_name}: chosen side "
+                f"carries chat-template markup — {markup_guard.describe(corrupt)}"
+            )
         context_json = json.dumps(context or {}, default=str, sort_keys=True)
         rejected_json = (
             _call_json(rejected["name"], rejected.get("input", {}))
