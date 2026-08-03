@@ -59,6 +59,13 @@ class ApiMessageCompleteEvent:
     # the parse boundary. The agent loop uses this to give the model
     # structured feedback instead of silently ending the turn.
     dropped_malformed: int = 0
+    # What the server said actually served this call, echoed in its own
+    # response (`{"model": ...}` on both the buffered and streaming shapes).
+    # Ground truth per call, as opposed to the name the caller requested at
+    # construction time — which for six out-of-daemon harnesses is a config
+    # string that stopped matching reality when the server was swapped.
+    # None for providers that do not echo one; callers must tolerate that.
+    served_model: str | None = None
 
 
 ApiStreamEvent = ApiTextDeltaEvent | ApiMessageCompleteEvent
