@@ -254,8 +254,16 @@ class TestPhotoFlowPin:
 
         file_obj = AsyncMock()
         file_obj.file_path = "photos/file_1.jpg"
-        file_obj.download_as_bytearray = AsyncMock(return_value=bytearray(b"jpegbytes"))
+        # Real JPEG magic bytes. The literal b"jpegbytes" only ever worked
+        # because nothing validated inbound media; PR 4b sniffs magic bytes,
+        # so a fixture that is not actually a JPEG is now correctly refused.
+        # The pin still asserts what it always did — a photo produces one
+        # event — it just supplies a photo that is one.
+        file_obj.download_as_bytearray = AsyncMock(
+            return_value=bytearray(b"\xff\xd8\xff\xe0" + b"\x00" * 64)
+        )
         photo = MagicMock()
+        photo.file_size = 68
         photo.get_file = AsyncMock(return_value=file_obj)
 
         update = MagicMock()

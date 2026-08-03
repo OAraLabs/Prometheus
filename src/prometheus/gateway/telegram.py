@@ -124,6 +124,25 @@ class TelegramAdapter(BasePlatformAdapter):
         prometheus_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(config)
+        # Public-surface controls (2026-08-03). Previously the config declared
+        # rate limits and MIME allowlists that nothing enforced.
+        from prometheus.gateway.media_guard import MediaPolicy
+        from prometheus.gateway.rate_limit import RateLimiter
+
+        self._rate_limiter = RateLimiter(
+            messages_per_minute=config.messages_per_minute,
+            media_per_minute=config.media_downloads_per_minute,
+            # Global ceiling defaults to 4x the per-chat budget: high enough
+            # that a second chat is usable, low enough to bound aggregate load.
+            global_messages_per_minute=config.messages_per_minute * 4,
+            global_media_per_minute=config.media_downloads_per_minute * 4,
+        )
+        self._media_policy = MediaPolicy(
+            allowed_image_types=tuple(config.allowed_image_types),
+            allowed_audio_types=tuple(config.allowed_audio_types),
+            allowed_document_types=tuple(config.allowed_document_types),
+            max_file_size_mb=config.max_file_size_mb,
+        )
         self.agent_loop = agent_loop
         self.tool_registry = tool_registry
         self.system_prompt = system_prompt
@@ -2099,6 +2118,55 @@ class TelegramAdapter(BasePlatformAdapter):
     # Sprint 15 GRAFT: media handlers (additive — Hermes parity)
     # ------------------------------------------------------------------
 
+    async def _admit(self, update, budget) -> bool:
+        """Rate-limit gate. Returns False when the event must be dropped.
+
+        Warns the sender ONCE per window — warning on every drop makes the
+        warning the flood, and dropping silently is indistinguishable from the
+        bot being broken.
+        """
+        chat = getattr(update, "effective_chat", None)
+        if chat is None:
+            return True
+        decision = self._rate_limiter.check(chat.id, budget)
+        if decision.allowed:
+            return True
+        if decision.should_warn:
+            from prometheus.gateway.rate_limit import RateLimiter as _RL
+
+            await self.send(chat.id, _RL.warning_text(decision), parse_mode=None)
+        logger.info(
+            "Rate limit: dropped %s for chat %s (scope=%s)",
+            budget.value, chat.id, decision.scope,
+        )
+        return False
+
+    async def _guarded_download(self, update, file_obj, *, declared_mime, kind):
+        """Download under the byte ceiling, then sniff/agree/allowlist.
+
+        Returns bytes, or None if a CONTROL refused (the sender is told why).
+        The pre-download checks run at the CALL SITE before ``get_file()`` —
+        that split is the point: nothing transfers before its declared size
+        and type have had a chance to refuse it.
+        """
+        from prometheus.gateway.media_guard import MediaRejected, validate_inbound
+
+        chat = getattr(update, "effective_chat", None)
+        try:
+            data = bytes(await file_obj.download_as_bytearray())
+            validate_inbound(
+                data=data,
+                declared_mime=declared_mime,
+                kind=kind,
+                policy=self._media_policy,
+            )
+            return data
+        except MediaRejected as rej:
+            logger.info("Media refused by %s: %s", rej.guard_name, rej.message)
+            if chat is not None:
+                await self.send(chat.id, rej.message, parse_mode=None)
+            return None
+
     async def _handle_photo(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -2112,10 +2180,29 @@ class TelegramAdapter(BasePlatformAdapter):
         )
 
         # Largest resolution is the last element
+        from prometheus.gateway.media_guard import (
+            MediaRejected, check_declared_mime, check_size_precheck,
+        )
+        from prometheus.gateway.rate_limit import Budget
+
+        if not await self._admit(update, Budget.MEDIA):
+            return
         photo = update.message.photo[-1]
+        # PhotoSize carries NO mime_type — declared_mime is None and the
+        # sniffed type alone must be allowlisted. See media_guard's module
+        # docstring: this asymmetry is a Telegram fact, not an oversight.
+        try:
+            check_size_precheck(getattr(photo, "file_size", None), self._media_policy)
+        except MediaRejected as rej:
+            await self.send(update.effective_chat.id, rej.message, parse_mode=None)
+            return
         try:
             file_obj = await photo.get_file()
-            image_bytes = await file_obj.download_as_bytearray()
+            image_bytes = await self._guarded_download(
+                update, file_obj, declared_mime=None, kind="image"
+            )
+            if image_bytes is None:
+                return
             ext = sniff_image_extension(file_obj.file_path)
             cached_path = cache_image_from_bytes(bytes(image_bytes), ext=ext)
         except Exception as exc:
@@ -2152,14 +2239,29 @@ class TelegramAdapter(BasePlatformAdapter):
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle incoming voice messages — transcribe via Whisper."""
+        from prometheus.gateway.media_guard import (
+            MediaRejected, check_declared_mime, check_size_precheck,
+        )
+        from prometheus.gateway.rate_limit import Budget
+
+        if not await self._admit(update, Budget.MEDIA):
+            return
         if not update.message or not update.message.voice or not update.effective_chat:
             return
 
         from prometheus.gateway.media_cache import cache_audio_from_bytes
 
         try:
-            file_obj = await update.message.voice.get_file()
-            audio_bytes = await file_obj.download_as_bytearray()
+            _voice = update.message.voice
+            _declared = getattr(_voice, "mime_type", None)
+            check_declared_mime(_declared, "audio", self._media_policy)
+            check_size_precheck(getattr(_voice, "file_size", None), self._media_policy)
+            file_obj = await _voice.get_file()
+            audio_bytes = await self._guarded_download(
+                update, file_obj, declared_mime=_declared, kind="audio"
+            )
+            if audio_bytes is None:
+                return
             cached_path = cache_audio_from_bytes(bytes(audio_bytes), ext=".ogg")
         except Exception as exc:
             logger.error("Failed to download voice memo: %s", exc)
@@ -2188,6 +2290,13 @@ class TelegramAdapter(BasePlatformAdapter):
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle incoming document messages."""
+        from prometheus.gateway.media_guard import (
+            MediaRejected, check_declared_mime, check_size_precheck,
+        )
+        from prometheus.gateway.rate_limit import Budget
+
+        if not await self._admit(update, Budget.MEDIA):
+            return
         if not update.message or not update.message.document or not update.effective_chat:
             return
 
@@ -2213,17 +2322,24 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             return
 
-        # Size check
-        if doc.file_size and doc.file_size > 20 * 1024 * 1024:
-            await self.send(
-                update.effective_chat.id,
-                "Document too large (max 20 MB).",
-            )
+        # Size + declared-type checks, BEFORE any transfer. (Was a hardcoded
+        # 20 * 1024 * 1024 that only coincidentally matched the config default
+        # — change max_file_size_mb and documents still capped at 20.)
+        try:
+            _declared = getattr(doc, "mime_type", None)
+            check_declared_mime(_declared, "document", self._media_policy)
+            check_size_precheck(doc.file_size, self._media_policy)
+        except MediaRejected as rej:
+            await self.send(update.effective_chat.id, rej.message, parse_mode=None)
             return
 
         try:
             file_obj = await doc.get_file()
-            doc_bytes = await file_obj.download_as_bytearray()
+            doc_bytes = await self._guarded_download(
+                update, file_obj, declared_mime=_declared, kind="document"
+            )
+            if doc_bytes is None:
+                return
             cached_path = cache_document_from_bytes(bytes(doc_bytes), original_name)
         except Exception as exc:
             logger.error("Failed to download document: %s", exc)
@@ -2263,6 +2379,13 @@ class TelegramAdapter(BasePlatformAdapter):
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle incoming sticker messages."""
+        from prometheus.gateway.media_guard import (
+            MediaRejected, check_declared_mime, check_size_precheck,
+        )
+        from prometheus.gateway.rate_limit import Budget
+
+        if not await self._admit(update, Budget.MEDIA):
+            return
         if not update.message or not update.message.sticker or not update.effective_chat:
             return
 
@@ -2293,8 +2416,16 @@ class TelegramAdapter(BasePlatformAdapter):
                 description = None
                 try:
                     from prometheus.gateway.media_cache import cache_image_from_bytes
+                    # Sticker, like PhotoSize, carries no mime_type.
+                    check_size_precheck(
+                        getattr(sticker, "file_size", None), self._media_policy
+                    )
                     file_obj = await sticker.get_file()
-                    sticker_bytes = await file_obj.download_as_bytearray()
+                    sticker_bytes = await self._guarded_download(
+                        update, file_obj, declared_mime=None, kind="image"
+                    )
+                    if sticker_bytes is None:
+                        return
                     cached_path = cache_image_from_bytes(bytes(sticker_bytes), ext=".webp")
                     description = await self._describe_image(cached_path)
                 except Exception as exc:

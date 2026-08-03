@@ -45,6 +45,12 @@ class PlatformConfig:
     media_cache_dir: str | None = None  # default: ~/.prometheus/cache/media
     messages_per_minute: int = 30
     media_downloads_per_minute: int = 10
+    # Inbound MIME allowlists. Empty list = allow any type that SNIFFS to a
+    # known signature (still not "allow anything" — unknown bytes are refused
+    # by media_guard). Populated from gateway.media.allowed_*_types.
+    allowed_image_types: list[str] = field(default_factory=list)
+    allowed_audio_types: list[str] = field(default_factory=list)
+    allowed_document_types: list[str] = field(default_factory=list)
 
     @property
     def is_restricted(self) -> bool:

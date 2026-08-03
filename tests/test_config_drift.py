@@ -148,18 +148,9 @@ _READER_ROOTS = ("src", "scripts", "tests")
 # key -> disposition. WIRE = build the control; DELETE = drop the key;
 # DECIDE = needs a product call. Nothing may sit here without one.
 KNOWN_UNREAD: dict[str, str] = {
-    # ── WIRE: declared controls on the Telegram surface, never implemented.
-    # Five keys, zero implementations, on the one surface exposed to the public
-    # internet by design. Tracked as PR 4b (security design questions first).
-    "gateway.rate_limits": "WIRE 4b — section; no rate limiter exists at all",
-    "gateway.rate_limits.messages_per_minute": "WIRE 4b — no limiter to wire into",
-    "gateway.rate_limits.media_downloads_per_minute": "WIRE 4b — no limiter",
-    "gateway.media.allowed_image_types": "WIRE 4b — no MIME check on the inbound path",
-    "gateway.media.allowed_audio_types": "WIRE 4b — no MIME check",
-    "gateway.media.allowed_document_types": "WIRE 4b — no MIME check",
-    "gateway.media.max_file_size_mb": "WIRE 4b — download is unbounded today",
-    "gateway.media": "WIRE 4b — section; all leaves unread",
-    "gateway.media.cache_dir": "WIRE 4b — no quota/eviction either",
+    # (The nine gateway.rate_limits.* / gateway.media.* entries were removed
+    # when PR 4b built the controls the config had been claiming. The register
+    # shrank, which is the only direction it may move.)
     # ── WIRE: the config lies about live behaviour.
     "web_tools": "WIRE — section; web_fetch hardcodes timeout=20.0",
     "web_tools.fetch_timeout_seconds": "WIRE — config says 30, code hardcodes 20.0",

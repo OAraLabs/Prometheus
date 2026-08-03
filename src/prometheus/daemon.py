@@ -493,11 +493,35 @@ async def run_daemon(args: argparse.Namespace) -> None:
         # a bad token (or Telegram being unreachable) must not kill the
         # daemon; the other gateways and the web surface still come up.
         try:
+            # The media/rate fields were previously left to their dataclass
+            # defaults here — the same shape as the two-loop defect: a field
+            # not passed at the construction site silently takes a default,
+            # so the config keys described controls nobody was reading.
+            _media_cfg = (gateway_config.get("media") or {})
+            _rate_cfg = (gateway_config.get("rate_limits") or {})
             tg_config = PlatformConfig(
                 platform=Platform.TELEGRAM,
                 token=telegram_token,
                 allowed_chat_ids=gateway_config.get("allowed_chat_ids", []),
                 proxy_url=gateway_config.get("proxy_url"),
+                max_file_size_mb=_media_cfg.get("max_file_size_mb", 20),
+                media_cache_dir=_media_cfg.get("cache_dir"),
+                messages_per_minute=_rate_cfg.get("messages_per_minute", 30),
+                media_downloads_per_minute=_rate_cfg.get(
+                    "media_downloads_per_minute", 10
+                ),
+                allowed_image_types=list(_media_cfg.get("allowed_image_types") or []),
+                allowed_audio_types=list(_media_cfg.get("allowed_audio_types") or []),
+                allowed_document_types=list(
+                    _media_cfg.get("allowed_document_types") or []
+                ),
+            )
+            # Cache quota + free-disk floor (CONVENIENCE guards, fail open).
+            from prometheus.gateway.media_cache import configure_cache
+
+            configure_cache(
+                max_mb=_media_cfg.get("cache_max_mb", 512),
+                free_disk_floor_mb=_media_cfg.get("free_disk_floor_mb", 1024),
             )
             from prometheus.context.prompt_assembler import build_runtime_system_prompt
             system_prompt = build_runtime_system_prompt(

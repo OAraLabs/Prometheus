@@ -78,13 +78,119 @@ def video_cache_dir() -> Path:
 # Cache functions (following Hermes module-level pattern)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Quota + eviction (2026-08-03). Previously the cache grew without bound and
+# ``cleanup_cache`` below was defined but NEVER CALLED — an orphan guard.
+#
+# Precedent, not hypothetical: the mini hit 100% disk on 2026-08-01 from
+# unpruned nightly copies. An unbounded media cache on the same box is the
+# same failure waiting for a different trigger.
+#
+# Both are CONVENIENCE guards (see gateway.guards): they fail OPEN. A cache
+# that cannot evict, or a disk below the floor, must never drop a message —
+# refuse to CACHE, never refuse to SERVE.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_CACHE_MAX_MB = 512
+_DEFAULT_FREE_DISK_FLOOR_MB = 1024
+
+_cache_max_bytes: int = _DEFAULT_CACHE_MAX_MB * 1024 * 1024
+_free_disk_floor_bytes: int = _DEFAULT_FREE_DISK_FLOOR_MB * 1024 * 1024
+
+
+def configure_cache(*, max_mb: int | None = None, free_disk_floor_mb: int | None = None) -> None:
+    """Set the cache quota and the free-disk floor (called once at daemon start)."""
+    global _cache_max_bytes, _free_disk_floor_bytes
+    if max_mb is not None:
+        _cache_max_bytes = int(max_mb) * 1024 * 1024
+    if free_disk_floor_mb is not None:
+        _free_disk_floor_bytes = int(free_disk_floor_mb) * 1024 * 1024
+
+
+def cache_root() -> Path:
+    return get_config_dir() / "cache"
+
+
+def cache_size_bytes() -> int:
+    root = cache_root()
+    if not root.exists():
+        return 0
+    return sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+
+
+def free_disk_bytes() -> int:
+    import shutil
+
+    try:
+        return shutil.disk_usage(str(cache_root())).free
+    except Exception:
+        return _free_disk_floor_bytes + 1  # unknown -> do not block the write
+
+
+def _below_free_disk_floor() -> bool:
+    return free_disk_bytes() < _free_disk_floor_bytes
+
+
+def evict_lru(target_bytes: int | None = None) -> int:
+    """Evict oldest-first until the cache fits. Returns bytes freed.
+
+    CONVENIENCE: any failure is swallowed. Failing to evict must not block the
+    write that triggered it.
+    """
+    limit = _cache_max_bytes if target_bytes is None else target_bytes
+    freed = 0
+    try:
+        root = cache_root()
+        if not root.exists():
+            return 0
+        files = sorted(
+            (f for f in root.rglob("*") if f.is_file()),
+            key=lambda f: f.stat().st_mtime,
+        )
+        total = sum(f.stat().st_size for f in files)
+        for f in files:
+            if total <= limit:
+                break
+            size = f.stat().st_size
+            f.unlink()
+            total -= size
+            freed += size
+            logger.debug("Cache eviction: removed %s (%d bytes)", f, size)
+    except Exception as exc:
+        logger.warning("Cache eviction failed (continuing): %s", exc)
+    return freed
+
+
+def _cache_write(path: Path, data: bytes) -> str | None:
+    """Write through the quota + floor guards. Returns the path, or None.
+
+    None means "not cached" — the caller must still process the media. This is
+    the fail-open half of the CONVENIENCE classification.
+    """
+    if _below_free_disk_floor():
+        logger.warning(
+            "Free disk below floor (%d MB) — not caching %s; message still processed",
+            _free_disk_floor_bytes // (1024 * 1024), path.name,
+        )
+        return None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    except Exception as exc:
+        logger.warning("Cache write failed (continuing): %s", exc)
+        return None
+    if cache_size_bytes() > _cache_max_bytes:
+        evict_lru()
+    return str(path)
+
+
 def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str:
     """Write image bytes to cache, return absolute path."""
     name = f"img_{uuid4().hex[:12]}{ext}"
     path = image_cache_dir() / name
-    path.write_bytes(data)
-    logger.debug("Cached image: %s (%d bytes)", path, len(data))
-    return str(path)
+    written = _cache_write(path, data)
+    logger.debug("Cached image: %s (%d bytes)", written or "<not cached>", len(data))
+    return written or str(path)
 
 
 def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
@@ -96,18 +202,18 @@ def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
     """
     name = f"vid_{uuid4().hex[:12]}{ext}"
     path = video_cache_dir() / name
-    path.write_bytes(data)
-    logger.debug("Cached video: %s (%d bytes)", path, len(data))
-    return str(path)
+    written = _cache_write(path, data)
+    logger.debug("Cached video: %s (%d bytes)", written or "<not cached>", len(data))
+    return written or str(path)
 
 
 def cache_audio_from_bytes(data: bytes, ext: str = ".ogg") -> str:
     """Write audio bytes to cache, return absolute path."""
     name = f"audio_{uuid4().hex[:12]}{ext}"
     path = audio_cache_dir() / name
-    path.write_bytes(data)
-    logger.debug("Cached audio: %s (%d bytes)", path, len(data))
-    return str(path)
+    written = _cache_write(path, data)
+    logger.debug("Cached audio: %s (%d bytes)", written or "<not cached>", len(data))
+    return written or str(path)
 
 
 def cache_document_from_bytes(data: bytes, original_filename: str) -> str:
@@ -115,9 +221,9 @@ def cache_document_from_bytes(data: bytes, original_filename: str) -> str:
     safe_name = original_filename.replace("/", "_").replace("\\", "_")
     name = f"doc_{uuid4().hex[:12]}_{safe_name}"
     path = document_cache_dir() / name
-    path.write_bytes(data)
-    logger.debug("Cached document: %s (%d bytes)", path, len(data))
-    return str(path)
+    written = _cache_write(path, data)
+    logger.debug("Cached document: %s (%d bytes)", written or "<not cached>", len(data))
+    return written or str(path)
 
 
 def extract_text_from_document(path: str) -> str | None:
