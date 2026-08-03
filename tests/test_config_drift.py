@@ -167,7 +167,8 @@ KNOWN_UNREAD: dict[str, str] = {
     "printing_press.auto_suggest": "DECIDE",
     "profiles.custom_dir": "DECIDE — profiles load from a fixed dir",
     "whisper.device": "DECIDE — engine picks its own device",
-    "learning.auto_skill_creation": "DECIDE — SkillCreator has its own gate",
+    # (learning.auto_skill_creation left the register 2026-08-03: daemon.py
+    # _wire_skill_creator now reads it — the register only shrinks.)
     "learning.curator_telegram_summary": "DECIDE",
     "sentinel.idle_threshold_minutes": "DECIDE — observer uses its own constant",
     "security.audit.retention_days": "DECIDE — no pruner exists",

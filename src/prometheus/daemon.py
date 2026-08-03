@@ -116,6 +116,53 @@ async def _detect_loaded_model_with_retry(
     return detected
 
 
+def _wire_skill_creator(
+    agent_loop: AgentLoop,
+    provider: Any,
+    *,
+    model_name: str,
+    learning_config: dict[str, Any],
+    telemetry: Any = None,
+) -> Any:
+    """Build the daemon's SkillCreator and gate its post-task hook on config.
+
+    Until 2026-08-03 the daemon constructed SkillCreator directly, so
+    ``learning.auto_skill_creation`` had no reader anywhere and
+    ``learning.skill_min_tool_calls`` never left prometheus.yaml — the
+    template promised knobs the live path ignored (survey
+    audits/20260803T215431Z-skillcreator-quality-gate-survey.md §1).
+
+    ``auto_skill_creation: false`` skips ONLY the hook registration. The
+    instance is still built and returned: teacher escalation drafts and
+    record-a-skill trace uploads share it, and neither is "auto" creation.
+
+    Returns None only when construction fails; every caller already
+    tolerates a missing SkillCreator from the import-failure days.
+    """
+    try:
+        from prometheus.learning.skill_creator import SkillCreator
+        skill_creator = SkillCreator(
+            provider,
+            model=model_name,
+            min_tool_calls=int(learning_config.get("skill_min_tool_calls", 3)),
+            telemetry=telemetry,
+        )
+    except Exception as exc:
+        logger.warning("SkillCreator not available: %s", exc)
+        return None
+
+    if not learning_config.get("auto_skill_creation", True):
+        logger.info(
+            "SkillCreator post-task hook disabled (learning.auto_skill_creation: "
+            "false); instance kept for teacher escalation and record-a-skill"
+        )
+        return skill_creator
+
+    agent_loop.add_post_task_hook(skill_creator.maybe_create)
+    logger.info("SkillCreator wired to agent loop post-task hook")
+    return skill_creator
+
+
 async def run_daemon(args: argparse.Namespace) -> None:
     """Main async entry point — start all subsystems."""
     config = load_config(args.config)
@@ -938,13 +985,13 @@ async def run_daemon(args: argparse.Namespace) -> None:
             logger.warning("Anatomy system not available: %s", exc)
 
     # Learning loop — SkillCreator (auto-generate skills from successful tasks)
-    try:
-        from prometheus.learning.skill_creator import SkillCreator
-        skill_creator = SkillCreator(provider, model=model_name, telemetry=telemetry)
-        agent_loop.add_post_task_hook(skill_creator.maybe_create)
-        logger.info("SkillCreator wired to agent loop post-task hook")
-    except Exception as exc:
-        logger.warning("SkillCreator not available: %s", exc)
+    skill_creator = _wire_skill_creator(
+        agent_loop,
+        provider,
+        model_name=model_name,
+        learning_config=config.get("learning", {}) or {},
+        telemetry=telemetry,
+    )
 
     # Teacher escalation (SPRINT-TEACHER-ESCALATION): cloud-teacher recovery
     # for failed local agent turns. Inert unless escalation.teacher_model is
@@ -957,7 +1004,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
         escalation_engine = TeacherEscalation.from_config(
             config,
             telemetry=telemetry,
-            skill_creator=skill_creator if "skill_creator" in dir() else None,
+            skill_creator=skill_creator,
         )
         gateway_registry.attach("escalation_engine", escalation_engine)
         if escalation_engine.is_armed:
@@ -1066,7 +1113,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
             # skill_created / skill_refined events. The setter pattern lets
             # us delay the wire until after SignalBus is constructed
             # (SkillCreator is wired earlier in the daemon, before this block).
-            if "skill_creator" in dir():
+            if skill_creator is not None:
                 skill_creator.signal_bus = signal_bus
             if "skill_refiner" in dir() and skill_refiner is not None:
                 skill_refiner.signal_bus = signal_bus
@@ -1476,7 +1523,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 approval_queue=approval_queue if "approval_queue" in dir() else None,
                 loop_context=loop_context,
                 profile_store=profile_store,
-                skill_creator=skill_creator if "skill_creator" in dir() else None,
+                skill_creator=skill_creator,
                 api_port=api_port,
                 ws_port=ws_port,
             ))
