@@ -12,6 +12,16 @@ Changes from original:
   - Writes facts to the SQLite memories table only; the human-facing wiki
     under ``~/.prometheus/wiki/`` is a pure projection rendered from that
     store by the WikiCompiler (there is no second markdown writer here)
+  - 2026-08 cursor fix: extraction progress is a DURABLE per-scope ROWID
+    cursor in ``memory.db`` (``extractor_cursors``). It replaced a single
+    in-memory ``_last_processed_ts`` float that served two scopes at once and
+    so failed in BOTH directions from one root cause: it reset to 0.0 on every
+    restart (re-mining the 500 oldest uncompacted rows across ALL sessions —
+    and because ``persist_memory`` increments ``mention_count`` on a dedup hit
+    while ``mention_count >= 2`` is the wiki page-worthiness threshold, a
+    re-mine could promote a one-off mention to a wiki page), while a
+    per-session pre-compaction flush advanced the same global value and
+    stranded every other session's older rows below it permanently
 
 TRUST-CONTEXT: this extractor is an autonomous, model-driven write path
 — there is no human in the loop to sanction each fact. Its write surface
@@ -29,7 +39,7 @@ import time
 from typing import TYPE_CHECKING, Callable
 
 from prometheus.memory.entity_validation import classify_entity, quarantine
-from prometheus.memory.store import MemoryStore
+from prometheus.memory.store import EXTRACTOR_GLOBAL_SCOPE, MemoryStore
 
 if TYPE_CHECKING:
     from prometheus.providers.base import ModelProvider
@@ -166,7 +176,11 @@ class MemoryExtractor:
         self._post_extract_callback = post_extract_callback
         self._signal_bus = signal_bus
         self._last_run: float = 0.0
-        self._last_processed_ts: float = 0.0
+        # Progress is now a DURABLE, PER-SCOPE ROWID cursor in ``memory.db``
+        # (``extractor_cursors``), not an in-memory timestamp. The float this
+        # replaced was a single value serving two scopes, and it failed in both
+        # directions at once — see :meth:`_cursor_for` and the module history.
+        self._seeded = False
         # PR fix/memory-lcm-full-rewire (2026-05-26): conversation reads
         # now come from LCM, not MemoryStore.messages (which was unwired
         # — nothing produced to it). If ``lcm_conversation_store`` is
@@ -185,6 +199,20 @@ class MemoryExtractor:
             telemetry=telemetry,
             on_failure="return_none",
         )
+        # Seed the migration floor AT CONSTRUCTION, not lazily on the first
+        # pass. Doing it lazily looked equivalent and was not: the first pass is
+        # 30 minutes after boot (or whenever a compaction flush fires), so
+        # everything said in between would have been seeded PAST and never
+        # mined — the under-extraction failure this whole change exists to cure,
+        # reintroduced by its own migration. Caught by six pre-existing tests
+        # going red, not by reading the code.
+        #
+        # It is a one-time event (INSERT OR IGNORE on an absent cursor), so the
+        # only rows it can skip are those already in the store when the daemon
+        # first boots after this lands. In ``daemon.py`` the gateways start at
+        # ~541 and this runs at ~862, so a message arriving inside that startup
+        # window on that single boot is the residual, bounded loss.
+        self._seed_cursor_once(self._resolve_lcm_conv_store())
 
     @property
     def signal_bus(self) -> object | None:
@@ -201,13 +229,13 @@ class MemoryExtractor:
         Returns ``(count_persisted, list_of_fact_dicts)`` so callers
         (e.g. WikiCompiler) can act on the freshly-extracted facts.
 
-        PR fix/memory-lcm-full-rewire (2026-05-26): read path is now
-        LCMConversationStore.messages_since(self._last_processed_ts).
-        The watermark semantics — strictly greater than, global across
-        sessions (when session_id is None), excludes compacted — match
-        the pre-PR MemoryStore.messages query exactly.
+        Progress is a DURABLE ROWID cursor, per scope
+        (:meth:`_cursor_for`). ``session_id=None`` is the cross-session sweep
+        and reads against the reserved global floor; a ``session_id`` (the
+        pre-compaction flush) reads against that session's own cursor and
+        advances only it, so one session's flush can no longer strand another
+        session's rows.
         """
-        since = self._last_processed_ts
         conv_store = self._resolve_lcm_conv_store()
         if conv_store is None:
             log.debug(
@@ -216,19 +244,37 @@ class MemoryExtractor:
             )
             return 0, []
 
+        self._seed_cursor_once(conv_store)
+        since_row_id = self._cursor_for(session_id)
+
         # LCM read — returns list[MessagePart]. Convert to the dict shape
         # _process_batch / _format_messages expect (matching the legacy
         # MemoryStore.messages row dict: id, session_id, role, content,
         # timestamp). Token counts come from the MessagePart for free
         # but aren't used downstream.
-        parts = conv_store.messages_since(
-            since, limit=500, session_id=session_id
+        #
+        # ``include_compacted=False`` preserves the previous read's semantics —
+        # the extractor must not re-process summaries-of-summaries. Note the
+        # consequence, unchanged from the timestamp cursor but worth stating: a
+        # row compacted before extraction reaches it is skipped AND the cursor
+        # moves past it. Compaction is therefore still the deadline it always
+        # was; this fix is about restarts, not about that race.
+        parts = conv_store.messages_after_id(
+            since_row_id, limit=500, session_id=session_id,
+            include_compacted=False,
         )
 
-        # Watermark advances over EVERY row read this pass — including the
-        # non-user rows skipped below — so untrusted turns aren't re-scanned on
-        # each cadence. Computed before filtering for exactly that reason.
-        max_ts_seen = max((part.timestamp for part in parts), default=None)
+        # The cursor advances over EVERY row READ this pass — including rows
+        # dropped just below as already-consumed, and the non-user /
+        # machine-session rows filtered out further down — so skipped turns
+        # aren't re-scanned on each cadence. Computed from the unfiltered read
+        # for exactly that reason, and per session, because that is the scope
+        # the cursor is keyed on.
+        max_row_by_scope = self._max_row_by_scope(parts, session_id)
+
+        # A sweep's single global-floor query cannot express each session's own
+        # cursor; this applies it per row. See _drop_already_consumed.
+        parts = self._drop_already_consumed(parts, session_id)
 
         # TRUST-CONTEXT: only mine genuine conversation. Injected non-"user"
         # provenance turns (task_supervisor job output now; cron / orchestrator
@@ -274,8 +320,7 @@ class MemoryExtractor:
 
         if not messages:
             # Still advance past any skipped non-user rows so they aren't re-read.
-            if max_ts_seen is not None:
-                self._last_processed_ts = max(self._last_processed_ts, max_ts_seen)
+            self._advance_cursors(max_row_by_scope)
             log.debug("MemoryExtractor: no new user-provenance messages to process")
             return 0, []
 
@@ -289,8 +334,7 @@ class MemoryExtractor:
 
         # Advance over all rows seen this pass (mined + skipped), so a trailing
         # run of skipped task turns isn't re-read on the next pass.
-        if max_ts_seen is not None:
-            self._last_processed_ts = max(self._last_processed_ts, max_ts_seen)
+        self._advance_cursors(max_row_by_scope)
         self._last_run = time.time()
         log.info("MemoryExtractor: persisted %d memories from %d messages", total_persisted, len(messages))
 
@@ -326,6 +370,155 @@ class MemoryExtractor:
             except Exception:
                 log.exception("MemoryExtractor: extraction pass failed")
             await asyncio.sleep(interval)
+
+    # ------------------------------------------------------------------
+    # Cursors
+    #
+    # THE INVARIANT: a per-session cursor is AUTHORITATIVE when present; the
+    # reserved global scope is what an ABSENT one resolves to. Everything below
+    # exists to keep that true, because it is what makes each row mined at most
+    # once no matter which entry point reaches it first:
+    #
+    #   sweep mines to rowid N  → cursor[each touched session] = its max,
+    #                             cursor['*'] = N
+    #   flush(X) reads > cursor[X]                → never re-reads the sweep's rows
+    #   flush(X) mines to M     → cursor[X] = M    (global untouched)
+    #   next sweep reads X from cursor[X] = M      → never re-reads the flush's rows
+    #   brand-new session Y     → no cursor row, resolves to '*' = N,
+    #                             and every row of Y is > N anyway
+    #
+    # The version this replaced had ONE float for both scopes, so the third and
+    # fourth lines collided: a flush advanced the value the sweep read from.
+    # ------------------------------------------------------------------
+
+    def _cursor_for(self, session_id: str | None) -> int:
+        """The rowid floor for the QUERY.
+
+        ``max`` of the global floor and the session's own cursor — never
+        either alone. A session cursor ahead of the global floor means a flush
+        already consumed those rows; a global floor ahead of the session cursor
+        means a sweep did. Taking the max is the only choice that cannot
+        re-expose rows either one has passed.
+        """
+        global_floor = self._store.get_extractor_cursor(EXTRACTOR_GLOBAL_SCOPE)
+        if session_id is None:
+            return global_floor
+        return max(global_floor, self._store.get_extractor_cursor(session_id))
+
+    def _drop_already_consumed(self, parts: list, session_id: str | None) -> list:
+        """Per-row floor for the cross-session sweep.
+
+        THE GAP THIS CLOSES, found by its own test rather than by reading the
+        code: the sweep issues ONE query against the global floor, so it cannot
+        express "and also respect each session's own cursor". A flush that ran
+        ahead of the global floor left its rows selectable by the next sweep,
+        which re-mined them — the same double-mine the whole fix exists to
+        prevent, just moved one layer down.
+
+        Single-session passes need nothing here: :meth:`_cursor_for` already
+        folded that session's cursor into the query floor.
+        """
+        if session_id is not None:
+            return parts
+        floors: dict[str, int] = {}
+        kept = []
+        for part in parts:
+            sid = part.session_id or ""
+            if sid not in floors:
+                floors[sid] = self._store.get_extractor_cursor(sid) if sid else 0
+            if int(getattr(part, "row_id", 0) or 0) > floors[sid]:
+                kept.append(part)
+        dropped = len(parts) - len(kept)
+        if dropped:
+            log.debug(
+                "MemoryExtractor: %d row(s) already consumed by a per-session "
+                "flush — not re-mined", dropped,
+            )
+        return kept
+
+    @staticmethod
+    def _max_row_by_scope(parts: list, session_id: str | None) -> dict[str, int]:
+        """``{scope: max rowid seen}`` for the rows this pass read.
+
+        A sweep touches many sessions, so it advances each session's own cursor
+        plus the global floor. A single-session pass advances only that session
+        — deliberately NOT the global floor, which is the whole fix: a
+        pre-compaction flush must not move the value every other session is
+        read against.
+        """
+        out: dict[str, int] = {}
+        for part in parts:
+            row_id = int(getattr(part, "row_id", 0) or 0)
+            if not row_id:
+                continue
+            sid = part.session_id
+            if sid:
+                out[sid] = max(out.get(sid, 0), row_id)
+            if session_id is None:
+                out[EXTRACTOR_GLOBAL_SCOPE] = max(
+                    out.get(EXTRACTOR_GLOBAL_SCOPE, 0), row_id
+                )
+        return out
+
+    def _advance_cursors(self, max_row_by_scope: dict[str, int]) -> None:
+        """Persist the pass's progress. Best-effort per scope.
+
+        A cursor that fails to advance means rows are re-read next pass — noisy
+        but not lossy — so a write failure must not abort the pass. It IS
+        logged: silently failing to advance is how a cursor becomes decorative.
+        """
+        for scope, row_id in max_row_by_scope.items():
+            try:
+                self._store.set_extractor_cursor(scope, row_id)
+            except Exception:
+                log.warning(
+                    "MemoryExtractor: failed to advance cursor for scope %r to "
+                    "rowid %d — those rows will be re-read next pass",
+                    scope, row_id, exc_info=True,
+                )
+
+    def _seed_cursor_once(self, conv_store: object | None) -> None:
+        """Seed the global floor from the store's CURRENT max rowid, once.
+
+        See :meth:`MemoryStore.seed_extractor_cursor_if_absent` for the trade.
+        Called from ``__init__``; retried on the first pass only if the store
+        was not yet resolvable then (late-wired CLI paths). A no-op the moment
+        a cursor row exists, so it can never rewind a live cursor.
+        """
+        if self._seeded or conv_store is None:
+            return
+        self._seeded = True
+        try:
+            existing = self._store.get_extractor_cursor(EXTRACTOR_GLOBAL_SCOPE)
+            if existing:
+                return
+            # The global floor comes from the TABLE's max rowid, never from
+            # list_sessions(): that aggregate excludes tombstoned sessions
+            # ("forget session"), so a floor derived from it sits BELOW a
+            # forgotten chat's rows and the first pass re-mines them. The live
+            # box has 5 tombstones and would have been correct only by
+            # coincidence (its highest row happens not to be tombstoned).
+            high = int(conv_store.max_rowid_all())  # type: ignore[attr-defined]
+            # Per-session AUDIT rows still come from list_sessions(); a
+            # tombstoned session correctly gets none and falls back to the
+            # global floor, which is now guaranteed to be at or above its rows.
+            per_session: dict[str, int] = {}
+            for row in conv_store.list_sessions():  # type: ignore[attr-defined]
+                sid = row.get("session_id")
+                if sid:
+                    per_session[str(sid)] = int(row.get("watermark") or 0)
+            if self._store.seed_extractor_cursor_if_absent(high, per_session):
+                log.info(
+                    "MemoryExtractor: seeded the extraction cursor at rowid %d "
+                    "across %d session(s) (existing history treated as already "
+                    "consumed — see seed_extractor_cursor_if_absent for the "
+                    "trade)", high, len(per_session),
+                )
+        except Exception:
+            log.warning(
+                "MemoryExtractor: cursor seeding failed; this pass falls back "
+                "to whatever cursor exists", exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Internal

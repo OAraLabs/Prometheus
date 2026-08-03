@@ -629,6 +629,11 @@ class TestMemoryLCMRewireWiring:
         # Build a MemoryExtractor with LCM injected directly + a stubbed
         # envelope so no real LLM call happens.
         facts_store = MemoryStore(db_path=tmp_path / "facts.db")
+        # Extraction cursor at the beginning — this test ingests before
+        # constructing, and the cursor is now seeded at construction from the
+        # store's max rowid. See tests/test_extractor_cursor.py.
+        from prometheus.memory.store import EXTRACTOR_GLOBAL_SCOPE
+        facts_store.set_extractor_cursor(EXTRACTOR_GLOBAL_SCOPE, 0)
         extractor = MemoryExtractor(
             store=facts_store,
             provider=MagicMock(),
@@ -640,16 +645,23 @@ class TestMemoryLCMRewireWiring:
             '"fact":"prefers kebab-case","confidence":0.9,"tags":[]}'
         ))
 
-        # First run: should see 2 messages, advance watermark to 2.0.
+        # First run: should see both messages and advance the cursor past them.
+        #
+        # This used to assert `extractor._last_processed_ts == 2.0`. The CLAIM
+        # is unchanged — progress advances, so a second run is a no-op — but
+        # the marker it read is gone: progress is now a durable per-scope rowid
+        # cursor in memory.db rather than an in-memory timestamp. Asserting the
+        # same behaviour through the new marker, not asserting the old one.
         count, facts = asyncio.run(extractor.run_once())
-        assert extractor._last_processed_ts == 2.0
         assert count >= 1  # at least one fact persisted
+        cursor_after_first = facts_store.get_extractor_cursor(EXTRACTOR_GLOBAL_SCOPE)
+        assert cursor_after_first > 0
 
-        # Second run: no new messages → early-return, watermark unchanged.
+        # Second run: no new messages → early-return, cursor unchanged.
         count2, facts2 = asyncio.run(extractor.run_once())
         assert count2 == 0
         assert facts2 == []
-        assert extractor._last_processed_ts == 2.0
+        assert facts_store.get_extractor_cursor(EXTRACTOR_GLOBAL_SCOPE) == cursor_after_first
 
         conv_store.close()
         facts_store.close()

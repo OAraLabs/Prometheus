@@ -435,6 +435,20 @@ class LCMConversationStore:
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_message(r) for r in rows]
 
+    def max_rowid_all(self) -> int:
+        """Highest rowid in the table, across EVERY session — or 0 if empty.
+
+        Deliberately not derived from :meth:`list_sessions`, which excludes
+        tombstoned sessions. A migration floor computed from that aggregate
+        sits BELOW a forgotten chat's rows, so those rows read as new and get
+        re-mined on the first pass — the exact replay the extractor cursor
+        exists to prevent, reintroduced by the thing that prevents it.
+        """
+        row = self._conn.execute(
+            "SELECT MAX(rowid) AS mx FROM lcm_messages"
+        ).fetchone()
+        return int(row["mx"]) if row and row["mx"] is not None else 0
+
     def max_rowid(self, session_id: str) -> int:
         """Current max ``rowid`` for a session, or ``0`` if it has none.
 
