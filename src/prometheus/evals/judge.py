@@ -97,11 +97,41 @@ class PrometheusJudge:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout = timeout
+        # What _detect_model() actually resolved to, so provenance() can report
+        # the judge that graded rather than the judge that was requested.
+        self._resolved_model: str | None = model
+
+    def provenance(self) -> dict[str, object]:
+        """Who graded this — recorded ALONGSIDE every score.
+
+        A score with no judge attribution cannot be compared with another
+        score. Before 2026-08-02 two judges ran concurrently: the nightly
+        script pinned its model, while the in-daemon GEPA optimizer passed
+        ``model=None`` and graded with whatever the endpoint had loaded. The
+        numbers were indistinguishable in the artifact, so cross-comparison
+        was unsound and there was no way to tell after the fact.
+
+        ``pinned`` is the field that matters and is NOT inferable from
+        ``model`` alone: an auto-detected judge that happens to resolve to
+        ``qwen2.5:7b-instruct`` records the same model name as one pinned to
+        it, but only the pinned run is reproducible.
+
+        ``model`` is None until the first call when auto-detecting — that is
+        honest, not a gap: nothing has been graded yet, so no judge identity
+        exists to record.
+        """
+        return {
+            "base_url": self._base_url,
+            "model": self._resolved_model or self._model,
+            "pinned": self._model is not None,
+        }
 
     async def _detect_model(self) -> str:
         """Query /v1/models to find the loaded model."""
         if self._model:
             return self._model
+        if self._resolved_model:
+            return self._resolved_model
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(f"{self._base_url}/v1/models")
@@ -110,6 +140,9 @@ class PrometheusJudge:
                 if models:
                     detected = models[0].get("id", "unknown")
                     log.debug("Judge detected model: %s", detected)
+                    # Cache it so provenance() reports the judge that actually
+                    # graded, not just the one that was requested.
+                    self._resolved_model = detected
                     return detected
         except Exception as exc:
             log.warning("Could not detect judge model: %s", exc)

@@ -301,6 +301,13 @@ class GEPAOptimizer:
                     "skill": skill_path.stem,
                     "old_score": current_score,
                     "new_score": best_score,
+                    # WHO GRADED these two numbers. Until 2026-08-02 this path
+                    # ran an UNPINNED judge while the nightly script ran a
+                    # pinned one, and the records were indistinguishable — so a
+                    # GEPA score and a nightly score could not be compared and
+                    # nobody could tell. Never infer this field; absent means
+                    # unknown.
+                    "judge": self._judge_provenance(),
                 })
             else:
                 # Scanner refused or filesystem error — count as unchanged.
@@ -513,6 +520,17 @@ class GEPAOptimizer:
                     assistant_msg = (msg.get("content", "") or "")[:200]
             lines.append(f"#{i} [{tool}] user={user_msg!r} assistant={assistant_msg!r}")
         return "\n".join(lines)
+
+    def _judge_provenance(self) -> dict[str, object] | None:
+        """Who graded — or None if no judge is available.
+
+        Reads through the same lazy accessor the scoring path uses, so the
+        recorded judge is necessarily the one that produced the numbers rather
+        than a separately-constructed lookalike.
+        """
+        judge = self._get_or_build_judge()
+        prov = getattr(judge, "provenance", None)
+        return prov() if callable(prov) else None
 
     def _get_or_build_judge(self) -> object | None:
         """Lazily construct the default ``PrometheusJudge`` if none was supplied."""
