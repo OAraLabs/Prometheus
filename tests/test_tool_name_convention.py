@@ -10,15 +10,22 @@ is the *model*, on every call.
 The failure was asymmetric across adapter tiers, which is why it stayed
 invisible:
 
-  * tier ``full``/``light`` (local models) — ``ToolRegistry.get`` is a plain
-    case-sensitive dict lookup, so ``get("agent")`` misses and the validator's
-    ``_fuzzy_match_tool_name`` lowercases both sides, matching ``Agent`` at
-    Levenshtein distance 0. The call is *repaired* rather than dispatched, and
-    ``capture_pair`` banks it as a ``levenshtein_repair`` training pair —
-    teaching the flywheel the model erred when the harness was inconsistent.
-  * tier ``off`` (Anthropic + cloud providers — what the daemon actually runs)
-    — ``validate_and_repair`` returns early, so there is no fuzzy net at all.
-    A model that emitted ``agent`` got a hard ``Unknown tool: agent``.
+  * tier ``full``/``light`` (local models — the daemon's DEFAULT path; the live
+    ``model.provider: llama_cpp`` config resolves to ``light``) —
+    ``ToolRegistry.get`` is a plain case-sensitive dict lookup, so
+    ``get("agent")`` misses and the validator's ``_fuzzy_match_tool_name``
+    lowercases both sides, matching ``Agent`` at Levenshtein distance 0. The
+    call is *repaired* rather than dispatched, and ``capture_pair`` banks it as
+    a ``levenshtein_repair`` training pair — teaching the flywheel the model
+    erred when the harness was inconsistent.
+  * tier ``off`` (Anthropic + any ``ProviderRegistry.is_cloud`` provider — the
+    on-demand cloud routes) — ``validate_and_repair`` returns early, so there
+    is no fuzzy net at all. A model that emitted ``agent`` got a hard
+    ``Unknown tool: agent``.
+
+So the same name defect self-corrected on the tier the daemon defaults to and
+hard-failed on the tier it routes to on demand — which is precisely why
+neither surfaced.
 
 This test pins the convention for every default-registered tool so a future
 tool cannot reintroduce a name the docs and the model disagree about.
