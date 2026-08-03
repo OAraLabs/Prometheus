@@ -147,6 +147,10 @@ gateway:
     allowed_image_types: []
     allowed_audio_types: []
     allowed_document_types: []
+    # Cache quota + free-disk floor. CONVENIENCE guards (see gateway.guards):
+    # they fail OPEN — below the floor we refuse to CACHE, never to SERVE.
+    cache_max_mb: 512
+    free_disk_floor_mb: 1024
   rate_limits:
     messages_per_minute: 30
     media_downloads_per_minute: 10
