@@ -12,7 +12,7 @@ from prometheus.gateway.media_cache import (
     cache_image_from_bytes,
     cleanup_cache,
     extract_text_from_document,
-    sniff_image_extension,
+    extension_from_file_path,
 )
 
 
@@ -54,10 +54,10 @@ class TestMediaCache:
         assert result is None
 
     def test_sniff_extension(self):
-        assert sniff_image_extension("photos/abc.png") == ".png"
-        assert sniff_image_extension("photos/abc.webp") == ".webp"
-        assert sniff_image_extension(None) == ".jpg"
-        assert sniff_image_extension("no_ext") == ".jpg"
+        assert extension_from_file_path("photos/abc.png") == ".png"
+        assert extension_from_file_path("photos/abc.webp") == ".webp"
+        assert extension_from_file_path(None) == ".jpg"
+        assert extension_from_file_path("no_ext") == ".jpg"
 
     def test_cleanup_cache(self, tmp_path, monkeypatch):
         import time

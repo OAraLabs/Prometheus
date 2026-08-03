@@ -249,8 +249,18 @@ def extract_text_from_document(path: str) -> str | None:
         return None
 
 
-def sniff_image_extension(file_path: str | None) -> str:
-    """Guess image extension from a Telegram file_path string."""
+def extension_from_file_path(file_path: str | None) -> str:
+    """Pick a cache-filename extension by matching *file_path*'s suffix.
+
+    ⚠ This does NOT inspect content. It was called ``sniff_image_extension``,
+    which claimed verification it never performed — a grep for "is the file
+    type checked anywhere?" found a name that answered yes and stopped there.
+    Renamed so the name states what it does.
+
+    Falls back to ``.jpg`` for anything unrecognised, including ``None``. That
+    fallback is only safe because this picks a filename, not a policy; the
+    actual type control is ``media_guard.sniff_mime`` on the magic bytes.
+    """
     if file_path:
         for ext in (".png", ".webp", ".gif", ".jpeg", ".jpg"):
             if file_path.lower().endswith(ext):

@@ -141,12 +141,43 @@ gateway:
   media:
     max_file_size_mb: 20
     cache_dir: "~/.prometheus/cache/media"
-    # INERT pending PR 4 — declared allowlists that nothing enforces. Telegram
-    # is the one surface exposed to the public internet by design, so an
-    # allowlist that reads as a control but is not one is worse than none.
-    allowed_image_types: []
-    allowed_audio_types: []
-    allowed_document_types: []
+    # ENFORCED since PR #140 (was inert before it). Empty list = no restriction
+    # for that kind. Telegram is the one surface exposed to the public internet
+    # by design, so these are real controls, not documentation.
+    #
+    # ⚠ Two rules learned the hard way — see tests/test_media_admission.py,
+    # which asserts a legitimate file of EVERY type below is actually ADMITTED:
+    #   1. A type here must be spelled as the sniffer/declarer produces it.
+    #      "audio/mp3" looks right and is wrong — real MP3s are "audio/mpeg",
+    #      so that entry silently refused every MP3.
+    #   2. allowed_document_types must AGREE with the extension gate
+    #      (SUPPORTED_DOCUMENT_TYPES in gateway/media_cache.py). When the gate
+    #      advertised 20 types and this list named 3, the other 17 passed the
+    #      gate and were rejected here. A test pins the two together.
+    allowed_image_types:
+      - image/jpeg
+      - image/png
+      - image/gif
+      - image/webp
+    allowed_audio_types:
+      - audio/ogg
+      - audio/mpeg   # NOT audio/mp3 — that is what the signature table emits
+      - audio/wav
+    allowed_document_types:
+      - application/pdf
+      - text/plain
+      - text/markdown
+      - text/csv
+      - text/html
+      - text/javascript
+      - text/x-python
+      - text/x-shellscript
+      - text/typescript
+      - application/json
+      - application/sql
+      - application/toml
+      - application/xml
+      - application/x-yaml
     # Cache quota + free-disk floor. CONVENIENCE guards (see gateway.guards):
     # they fail OPEN — below the floor we refuse to CACHE, never to SERVE.
     cache_max_mb: 512
