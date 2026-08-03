@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable
 
+from prometheus.adapter import markup_guard
 from prometheus.engine.messages import (
     ConversationMessage,
     ToolResultBlock,
@@ -2544,6 +2545,53 @@ async def _execute_tool_call(
                         error_type="lucky_guess",
                         error_detail=f"Tool {tool_name} called without being in prompt schema",
                     )
+
+    # Content gate. GBNF validated structure, json.loads validated syntax and
+    # pydantic is about to validate type — none of the three asks what a string
+    # SAYS, so leaked chat-template markup satisfies all of them and executes.
+    # It already has: 13 recorded calls carried it and every one succeeded,
+    # including a live wiki_compile whose entity_name was raw decoder artifacts.
+    # Runs BEFORE model_validate because the corrupt value is a perfectly valid
+    # `str` — the type check cannot be the thing that catches this.
+    _markup = markup_guard.scan_arguments(tool_input)
+    if _markup:
+        log.warning(
+            "Rejected %s: chat-template markup in arguments — %s",
+            tool_name, markup_guard.describe(_markup),
+        )
+        # Rejected, never stripped: a repaired-in-place value is a value nobody
+        # saw. Feed the model specifics and let the retry loop work — which
+        # also files the corrupt attempt as the REJECTED side of a pair, the
+        # inverse of how these values used to be banked as `chosen`.
+        _stash_pending_pair(
+            context,
+            tool_name,
+            rejected_name=tool_name,
+            rejected_input=tool_input,
+            error=markup_guard.describe(_markup),
+            source="self_correction",
+        )
+        if context.telemetry is not None:
+            import json as _json
+            try:
+                _markup_call = _json.dumps(
+                    {"name": tool_name, "input": tool_input}, default=str
+                )
+            except Exception:
+                _markup_call = None
+            context.telemetry.record(
+                model=context.model,
+                tool_name=tool_name,
+                success=False,
+                error_type="template_markup",
+                error_detail=markup_guard.describe(_markup),
+                parsed_tool_call=_markup_call,
+            )
+        return ToolResultBlock(
+            tool_use_id=tool_use_id,
+            content=markup_guard.rejection_message(tool_name, _markup),
+            is_error=True,
+        )
 
     try:
         parsed_input = tool.input_model.model_validate(tool_input)
