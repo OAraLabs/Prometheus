@@ -29,7 +29,7 @@ class AgentToolInput(BaseModel):
 class AgentTool(BaseTool):
     """Spawn a subagent to handle a task in isolated context."""
 
-    name = "Agent"
+    name = "agent"
     description = (
         "Launch a subagent to handle a complex task autonomously. "
         "The subagent runs with isolated context and returns its result."

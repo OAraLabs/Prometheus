@@ -387,9 +387,9 @@ class TestAgentTool:
         from prometheus.tools.builtin.agent import AgentTool
 
         tool = AgentTool()
-        assert tool.name == "Agent"
+        assert tool.name == "agent"
         schema = tool.to_api_schema()
-        assert schema["name"] == "Agent"
+        assert schema["name"] == "agent"
         assert "input_schema" in schema
 
     @pytest.mark.asyncio

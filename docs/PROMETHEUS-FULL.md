@@ -1650,7 +1650,7 @@ class AgentToolInput(BaseModel):
     model: str | None = None
 
 class AgentTool(BaseTool):
-    name = "Agent"
+    name = "agent"
     # Reads SubagentSpawner from context.metadata["subagent_spawner"]
     async def execute(arguments: AgentToolInput, context: ToolExecutionContext) -> ToolResult
 ```
