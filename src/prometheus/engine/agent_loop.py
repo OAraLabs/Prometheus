@@ -32,6 +32,7 @@ from prometheus.engine.stream_events import (
     ToolExecutionCompleted,
     ToolExecutionStarted,
 )
+from prometheus.config.ephemeral import is_session_ephemeral
 from prometheus.engine.usage import UsageSnapshot
 from prometheus.providers.base import (
     ApiMessageCompleteEvent,
@@ -705,6 +706,19 @@ async def run_loop(
     (the Stop button closes the generator mid-iteration), and a turn that
     exits any of those ways without dropping its record would leak snapshots
     into the shared instance.
+
+    It also resolves the turn's EPHEMERAL flag, for the same reason and with
+    the same scope: one ``run_loop`` call is one turn on one session. This is
+    deliberately NOT a ``LoopContext`` field. ``run_daemon`` builds the web
+    ``LoopContext`` ONCE at startup and every Beacon/Bridge session shares that
+    single instance — which is exactly why ``mode`` and ``session_id`` are
+    per-call arguments here rather than context fields (see
+    ``ws_server._run_agent``). A per-chat privacy flag parked on the shared
+    context would leak across concurrent sessions: one ephemeral chat would
+    silently suppress persistence for every other web session, or worse, an
+    ordinary chat would inherit ``False`` and persist a turn the user had
+    flagged. Resolving it HERE means both loop construction sites get it by
+    construction, with nothing to remember to pass and nothing to cross-talk.
     """
     # A duck-typed verifier without ``new_turn_key`` predates turn scoping;
     # it keeps its single accumulator and we never pass it a key it can't
@@ -714,6 +728,11 @@ async def run_loop(
     turn_key: str | None = None
     if fmv is not None and hasattr(fmv, "new_turn_key"):
         turn_key = fmv.new_turn_key(session_id or context.session_id)
+    # The EFFECTIVE session id, same idiom as the verifier key above and the
+    # router's override lookup below: the per-call argument wins, because on
+    # the web path ``context.session_id`` belongs to the shared context and is
+    # not this turn's session.
+    ephemeral = is_session_ephemeral(session_id or context.session_id)
     try:
         async for item in _run_loop(
             context,
@@ -722,6 +741,7 @@ async def run_loop(
             session_id=session_id,
             tool_choice=tool_choice,
             fmv_turn_key=turn_key,
+            ephemeral=ephemeral,
         ):
             yield item
     finally:
@@ -742,8 +762,14 @@ async def _run_loop(
     session_id: str | None = None,
     tool_choice: object | None = None,
     fmv_turn_key: str | None = None,
+    ephemeral: bool = False,
 ) -> AsyncIterator[tuple[StreamEvent, UsageSnapshot | None]]:
-    """The loop body. See :func:`run_loop` — call that, not this."""
+    """The loop body. See :func:`run_loop` — call that, not this.
+
+    ``ephemeral`` is resolved by :func:`run_loop` for the turn's session and
+    threaded down to the tool-execution path, where it nulls the content
+    columns on ``telemetry.tool_calls`` and skips repair-pair capture.
+    """
     # Scopes every verifier call below to THIS turn. Empty for a duck-typed
     # verifier that predates turn scoping (see run_loop).
     _fmv_kw: dict[str, str] = {} if fmv_turn_key is None else {"turn_key": fmv_turn_key}
@@ -1415,6 +1441,7 @@ async def _run_loop(
                 context, _runnable,
                 raw_model_output=raw_model_output_this_turn,
                 served_model=served_model_this_turn,
+                ephemeral=ephemeral,
             )
             if _runnable
             else []
@@ -2164,6 +2191,8 @@ async def _safe_execute(
     tc: object,
     raw_model_output: str | None,
     served_model: str | None = None,
+    *,
+    ephemeral: bool = False,
 ) -> ToolResultBlock:
     """Run one tool call, always returning a correctly-correlated
     ``ToolResultBlock`` and never raising.
@@ -2181,6 +2210,7 @@ async def _safe_execute(
             context, tc.name, tc.id, tc.input,
             raw_model_output=raw_model_output,
             served_model=served_model,
+            ephemeral=ephemeral,
         )
     except Exception as exc:  # noqa: BLE001 — isolating tool failure is the point
         log.error(
@@ -2193,7 +2223,10 @@ async def _safe_execute(
                     tool_name=tc.name,
                     success=False,
                     error_type="tool_exception",
-                    error_detail=str(exc)[:2000],
+                    # The row stays (it is a denominator); the exception text
+                    # goes, because a tool exception routinely quotes the input
+                    # that produced it.
+                    error_detail=None if ephemeral else str(exc)[:2000],
                     served_model=served_model,
                 )
             except Exception:  # pragma: no cover - telemetry must not mask result
@@ -2229,6 +2262,8 @@ async def _dispatch_tool_calls(
     tool_calls: list,
     raw_model_output: str | None = None,
     served_model: str | None = None,
+    *,
+    ephemeral: bool = False,
 ) -> list[ToolResultBlock]:
     """Dispatch tool calls with parallel execution for read-only tools.
 
@@ -2244,9 +2279,19 @@ async def _dispatch_tool_calls(
     model produced for this turn (before adapter parsing). Forwarded to
     each ``_execute_tool_call`` so successful cloud-provider calls get
     captured as golden traces in telemetry.
+
+    ``ephemeral`` rides every ``_safe_execute`` for the same reason
+    ``raw_model_output`` does: the decision belongs to the turn, and the only
+    place that can act on it is the per-call telemetry write at the bottom of
+    ``_execute_tool_call``.
     """
     if len(tool_calls) == 1:
-        return [await _safe_execute(context, tool_calls[0], raw_model_output, served_model)]
+        return [
+            await _safe_execute(
+                context, tool_calls[0], raw_model_output, served_model,
+                ephemeral=ephemeral,
+            )
+        ]
 
     # Partition into read-only and mutating based on tool.is_read_only()
     read_only: list[tuple[int, object]] = []   # (original_index, tool_call)
@@ -2267,7 +2312,9 @@ async def _dispatch_tool_calls(
     # CancelledError during loop teardown still propagates, which is correct.
     if read_only:
         async def _run_ro(idx, tc):
-            return idx, await _safe_execute(context, tc, raw_model_output, served_model)
+            return idx, await _safe_execute(
+                context, tc, raw_model_output, served_model, ephemeral=ephemeral
+            )
 
         results.extend(
             await asyncio.gather(*[_run_ro(idx, tc) for idx, tc in read_only])
@@ -2275,7 +2322,12 @@ async def _dispatch_tool_calls(
 
     # Run mutating tools sequentially (order matters)
     for idx, tc in mutating:
-        results.append((idx, await _safe_execute(context, tc, raw_model_output, served_model)))
+        results.append((
+            idx,
+            await _safe_execute(
+                context, tc, raw_model_output, served_model, ephemeral=ephemeral
+            ),
+        ))
 
     # Restore original order
     results.sort(key=lambda x: x[0])
@@ -2370,6 +2422,7 @@ async def _execute_tool_call(
     *,
     raw_model_output: str | None = None,
     served_model: str | None = None,
+    ephemeral: bool = False,
 ) -> ToolResultBlock:
     """Execute a single tool call, running hooks if configured.
 
@@ -2378,6 +2431,25 @@ async def _execute_tool_call(
     turn. Passed through to ``telemetry.record()`` on the success path
     so cloud-provider wins with zero adapter retries get flagged as
     ``is_golden=1`` for later fine-tuning use.
+
+    ``ephemeral`` (per-turn, resolved in :func:`run_loop`) is the "Prometheus
+    won't remember this" flag. It does NOT suppress the telemetry row — the
+    row is the denominator of every tool success rate, and dropping it would
+    silently bias those rates with no marker to correct for. It nulls the
+    three columns that carry content instead:
+
+    * ``raw_model_output`` — the model's complete turn text
+    * ``parsed_tool_call`` — the entire tool input, verbatim
+    * ``error_detail`` — up to 2 000 chars of the tool's own output
+
+    Nulling ``raw_model_output`` also makes ``is_golden`` False by
+    construction (``ToolCallTelemetry.record`` requires it to be non-None), so
+    an ephemeral call cannot be picked up by the nightly golden-trace export
+    into ``~/.prometheus/trajectories/`` either. That is a consequence worth
+    stating out loud rather than a coincidence to rely on silently.
+
+    It also skips repair-pair capture (``training.db``), whose ``chosen`` /
+    ``rejected`` payloads are full tool-call JSON.
     """
     # Pre-tool hook (Sprint 2)
     if context.hook_executor is not None:
@@ -2440,8 +2512,10 @@ async def _execute_tool_call(
                     "Adapter repaired tool name %r → %r before execution: %s",
                     _original_tool_name, tool_name, "; ".join(repair_log),
                 )
-            if repair_log:
+            if repair_log and not ephemeral:
                 # An adapter repair IS a labeled pair: as-emitted vs repaired.
+                # Both halves carry the verbatim tool input, so an ephemeral
+                # turn contributes no training pair at all.
                 try:
                     from prometheus.learning.pair_capture import capture_pair, get_store
                     if get_store() is not None:
@@ -2633,7 +2707,7 @@ async def _execute_tool_call(
             repair_log = list(repair_log) + _unwrap_log  # counts as repairs
             try:
                 from prometheus.learning.pair_capture import capture_pair, get_store
-                if get_store() is not None:
+                if get_store() is not None and not ephemeral:
                     capture_pair(
                         pair_source="schema_repair",
                         model_id=context.model,
@@ -2914,9 +2988,19 @@ async def _execute_tool_call(
             ),
             # Capture the tool's own error message so `tool_error` rows are
             # diagnosable instead of blank (audit fix #4).
-            error_detail=(result.output or "")[:2000] if result.is_error else None,
-            raw_model_output=raw_model_output,
-            parsed_tool_call=parsed_tool_json,
+            #
+            # EPHEMERAL: the row itself always lands — model, tool, success,
+            # retries, latency, error_type, repairs are the denominators of
+            # every success rate and cost report, and a missing row biases
+            # them invisibly. Only the three content-bearing columns go null.
+            # Note that `raw_model_output=None` also forces is_golden=0, which
+            # keeps the row out of the nightly trajectories/ export.
+            error_detail=(
+                None if ephemeral
+                else ((result.output or "")[:2000] if result.is_error else None)
+            ),
+            raw_model_output=None if ephemeral else raw_model_output,
+            parsed_tool_call=None if ephemeral else parsed_tool_json,
             provider=provider_name,
             repairs=len(repair_log),
             served_model=served_model,
@@ -2929,9 +3013,10 @@ async def _execute_tool_call(
     # task_create's "'command' is required for local_bash tasks" is the
     # canonical live example (D2).
     if not result.is_error:
-        _capture_success_pairs(
-            context, tool_name, _original_tool_name, tool_input, provider_name
-        )
+        if not ephemeral:
+            _capture_success_pairs(
+                context, tool_name, _original_tool_name, tool_input, provider_name
+            )
     elif "is required" in (result.output or "")[:200]:
         _stash_pending_pair(
             context,
@@ -3167,16 +3252,31 @@ class AgentLoop:
 
         # Post-task learning hooks — fire each in registration order;
         # a failing hook does not block subsequent hooks.
+        #
+        # EPHEMERAL: skipped entirely. The hooks are handed
+        # ``hook(user_message, tool_trace)`` — ``user_message`` is the raw text
+        # the user typed. SkillCreator sends it to the model as the
+        # ``task_description`` of a skill-generation prompt and writes the
+        # result to ``~/.prometheus/skills/auto/<name>.md``, then emits a
+        # ``skill_created`` signal whose payload carries ``trigger_task`` (the
+        # message's first 200 chars) into ``telemetry.signal_events``. The
+        # trace is still drained below so it cannot leak into the next turn.
         if self._post_task_hooks and self._tool_trace:
-            for hook in self._post_task_hooks:
-                try:
-                    await hook(user_message, self._tool_trace)
-                except Exception:
-                    log.debug(
-                        "Post-task hook %s failed",
-                        getattr(hook, "__qualname__", repr(hook)),
-                        exc_info=True,
-                    )
+            if is_session_ephemeral(session_id):
+                log.debug(
+                    "Ephemeral session %s — skipping %d post-task hook(s)",
+                    session_id, len(self._post_task_hooks),
+                )
+            else:
+                for hook in self._post_task_hooks:
+                    try:
+                        await hook(user_message, self._tool_trace)
+                    except Exception:
+                        log.debug(
+                            "Post-task hook %s failed",
+                            getattr(hook, "__qualname__", repr(hook)),
+                            exc_info=True,
+                        )
             self._tool_trace = []
 
         return result

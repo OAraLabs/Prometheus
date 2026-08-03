@@ -42,6 +42,7 @@ from __future__ import annotations
 import logging
 import time
 
+from prometheus.config.ephemeral import is_session_ephemeral
 from prometheus.engine.messages import ConversationMessage
 
 log = logging.getLogger(__name__)
@@ -374,8 +375,32 @@ class ChatSession:
             return 0
 
     def clear(self) -> None:
-        """Reset conversation history."""
+        """Reset conversation history.
+
+        IN-MEMORY ONLY. This is the whole of what ``/reset`` does: the durable
+        LCM rows, their FTS entries, any summary, and anything already mined
+        into ``memory.db`` or the wiki all survive it, and the MemoryExtractor
+        watermark is untouched — so a message cleared here is still mined on
+        the next cadence tick. If you want a turn not to be remembered, that
+        decision has to be made BEFORE it is sent: see
+        ``prometheus.config.ephemeral``.
+        """
         self.messages = []
+
+    def set_lcm_engine(self, engine: object | None) -> None:
+        """Point this session at an LCM engine, or at ``None`` for no durable
+        persistence at all.
+
+        ``None`` is what makes a session ephemeral: every persist site in this
+        class is already guarded by ``if self._lcm_engine is not None``, so a
+        null engine turns the whole durable path — message rows, FTS index,
+        the compaction that produces summaries, and therefore every downstream
+        consumer (MemoryExtractor → memory.db → wiki) — into a no-op without a
+        second branch anywhere. :class:`SessionManager` re-applies this on
+        every ``get_or_create`` so a mid-conversation toggle takes effect on
+        the next turn.
+        """
+        self._lcm_engine = engine
 
     def trim(self, max_messages: int = MAX_SESSION_MESSAGES) -> None:
         """Truncate from the front if history exceeds *max_messages*."""
@@ -398,13 +423,36 @@ class SessionManager:
         # = lcm_engine``.
         self.lcm_engine: object | None = None
 
+    def _effective_lcm_engine(self, session_id: str) -> object | None:
+        """The engine this session may persist through — ``None`` if ephemeral.
+
+        Resolved through the real config-backed reader on every call (no
+        cache), which is what lets ``/ephemeral on`` take effect on the very
+        next turn and survive a daemon restart.
+        """
+        if is_session_ephemeral(session_id):
+            return None
+        return self.lcm_engine
+
     def get_or_create(self, session_id: str) -> ChatSession:
-        """Return the existing session or create a new one."""
-        if session_id not in self._sessions:
-            self._sessions[session_id] = ChatSession(
-                session_id, lcm_engine=self.lcm_engine
+        """Return the existing session or create a new one.
+
+        The ephemeral flag is re-applied on EVERY call, not just at creation.
+        A chat that toggles mid-conversation already has a cached ChatSession
+        holding a live engine reference; without the re-apply, ``/ephemeral
+        on`` would do nothing until the daemon restarted — the precise shape
+        of "the setting appears to take effect because a value with that name
+        exists".
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            session = ChatSession(
+                session_id, lcm_engine=self._effective_lcm_engine(session_id)
             )
-        return self._sessions[session_id]
+            self._sessions[session_id] = session
+        else:
+            session.set_lcm_engine(self._effective_lcm_engine(session_id))
+        return session
 
     def get(self, session_id: str) -> "ChatSession | None":
         """Return the existing session for ``session_id``, or None.

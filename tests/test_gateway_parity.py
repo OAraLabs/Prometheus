@@ -123,6 +123,18 @@ MANIFEST: tuple[Family, ...] = (
         "reset", (), _cmds("reset", "prometheus-reset", "reset"),
         shared_gap="one-line session_manager.clear + fixed reply string",
     ),
+    Family(
+        "ephemeral", ("cmd_ephemeral",), _cmds("ephemeral", None, None),
+        gap_reason=(
+            "The COMMAND is Telegram-only for now; the BEHAVIOUR is not. "
+            "Suppression lives in SessionManager.get_or_create and run_loop, "
+            "both surface-agnostic and keyed on the session id, so a Slack or "
+            "Discord session whose id is flagged is already honoured — there "
+            "is simply no command there yet to set the flag. cmd_ephemeral is "
+            "in the shared commands layer precisely so wiring the other two is "
+            "a handler apiece, not a reimplementation."
+        ),
+    ),
     Family("help", ("cmd_help",), _cmds("help", "prometheus-help", "help")),
     Family("status", ("cmd_status",), _cmds("status", "prometheus-status", "status")),
     Family("model", ("cmd_model",), _cmds("model", "prometheus-model", "model")),
