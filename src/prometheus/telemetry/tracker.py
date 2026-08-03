@@ -80,7 +80,14 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     raw_model_output  TEXT,                -- raw text the model produced BEFORE adapter parsing
     parsed_tool_call  TEXT,                -- validated tool call as JSON {"name": ..., "input": {...}}
     is_golden         INTEGER NOT NULL DEFAULT 0, -- 1 = cloud + success + zero retries + captured raw
-    repairs           INTEGER NOT NULL DEFAULT 0  -- M2: adapter repairs applied (fuzzy name, coercion, ...)
+    repairs           INTEGER NOT NULL DEFAULT 0, -- M2: adapter repairs applied (fuzzy name, coercion, ...)
+    -- What the server said actually served this call, echoed back in the
+    -- completion response. SEPARATE from `model`, which is the name the
+    -- caller REQUESTED. They disagree whenever a harness passes a config
+    -- string that no longer matches the loaded model — which is why
+    -- `gemma4-26b` rows kept being written months after the server moved to
+    -- Qwen. NULL when the provider does not echo one.
+    served_model      TEXT
 );
 
 -- Circuit Breaker Self-Diagnosis sprint: per-trip diagnostic rows.
@@ -193,6 +200,7 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("parsed_tool_call", "TEXT"),
         ("is_golden", "INTEGER NOT NULL DEFAULT 0"),
         ("repairs", "INTEGER NOT NULL DEFAULT 0"),
+        ("served_model", "TEXT"),
     ],
     "circuit_breaker_diagnostics": [
         ("golden_reference", "TEXT"),
@@ -303,6 +311,7 @@ class ToolCallTelemetry:
         parsed_tool_call: str | None = None,
         provider: str = "",
         repairs: int = 0,
+        served_model: str | None = None,
     ) -> None:
         """Record a single tool-call outcome.
 
@@ -314,6 +323,15 @@ class ToolCallTelemetry:
             (shape ``{"name": ..., "input": {...}}``).
           - ``provider``: provider name string (``"anthropic"``, ``"openai"``,
             ``"llama_cpp"``, ...). Used to compute ``is_golden``.
+
+        ``served_model`` is what the server echoed back as having served this
+        call, captured per-call from the completion response. ``model`` stays
+        the name the caller REQUESTED — the two are recorded side by side and
+        neither overwrites the other, because their disagreement is itself the
+        finding: it is exactly how six out-of-daemon harnesses kept writing
+        ``gemma4-26b`` for months after the server moved to Qwen. Cost is
+        deliberately unaffected — ``CostTracker`` keys off the requested
+        string and is not touched by this field.
 
         ``is_golden`` is computed internally, not passed in: True iff the
         provider is cloud AND ``success`` AND ``retries == 0`` AND
@@ -331,8 +349,9 @@ class ToolCallTelemetry:
             INSERT INTO tool_calls
               (id, timestamp, model, tool_name, success, retries, latency_ms,
                error_type, error_detail,
-               raw_model_output, parsed_tool_call, is_golden, repairs)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               raw_model_output, parsed_tool_call, is_golden, repairs,
+               served_model)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 uuid4().hex,
@@ -348,6 +367,7 @@ class ToolCallTelemetry:
                 parsed_tool_call,
                 1 if is_golden else 0,
                 int(repairs),
+                served_model,
             ),
         )
         self._conn.commit()

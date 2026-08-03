@@ -518,6 +518,7 @@ class LlamaCppProvider(ModelProvider):
         finish_reason: str | None = None
         input_tokens = 0
         output_tokens = 0
+        served_model: str | None = None
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             async with client.stream("POST", url, json=payload) as response:
@@ -537,6 +538,11 @@ class LlamaCppProvider(ModelProvider):
                         chunk = json.loads(data)
                     except json.JSONDecodeError:
                         continue
+
+                    # Ground truth for "what served this call" — llama.cpp
+                    # echoes it on every chunk. Cheap, and unlike a boot-time
+                    # /v1/models probe it cannot go stale mid-session.
+                    served_model = chunk.get("model") or served_model
 
                     if "usage" in chunk:
                         u = chunk["usage"] or {}
@@ -628,4 +634,5 @@ class LlamaCppProvider(ModelProvider):
             ),
             stop_reason=finish_reason,
             dropped_malformed=dropped_malformed,
+            served_model=served_model,
         )

@@ -999,6 +999,7 @@ async def _run_loop(
         final_message: ConversationMessage | None = None
         usage = UsageSnapshot()
         dropped_malformed = 0
+        served_model_this_turn: str | None = None
 
         # SPRINT-2 WS1: drain queued steers as a system-prompt addendum
         # for THIS model call only. Steers arrive from the gateway's
@@ -1153,6 +1154,10 @@ async def _run_loop(
                 # provider dropped at parse time (empty function name).
                 # getattr for providers predating the field.
                 dropped_malformed = getattr(event, "dropped_malformed", 0)
+                # Per-TURN, never stored on the shared LoopContext: concurrent
+                # turns would cross-talk (the per-message `mode` precedent).
+                # Threaded as a parameter exactly like raw_model_output.
+                served_model_this_turn = getattr(event, "served_model", None)
 
         if _markup_filter is not None:
             # Release any withheld tag-lookalike text now that the stream ended.
@@ -1407,7 +1412,9 @@ async def _run_loop(
 
         _ran = (
             await _dispatch_tool_calls(
-                context, _runnable, raw_model_output=raw_model_output_this_turn
+                context, _runnable,
+                raw_model_output=raw_model_output_this_turn,
+                served_model=served_model_this_turn,
             )
             if _runnable
             else []
@@ -2156,6 +2163,7 @@ async def _safe_execute(
     context: LoopContext,
     tc: object,
     raw_model_output: str | None,
+    served_model: str | None = None,
 ) -> ToolResultBlock:
     """Run one tool call, always returning a correctly-correlated
     ``ToolResultBlock`` and never raising.
@@ -2172,6 +2180,7 @@ async def _safe_execute(
         return await _execute_tool_call(
             context, tc.name, tc.id, tc.input,
             raw_model_output=raw_model_output,
+            served_model=served_model,
         )
     except Exception as exc:  # noqa: BLE001 — isolating tool failure is the point
         log.error(
@@ -2185,6 +2194,7 @@ async def _safe_execute(
                     success=False,
                     error_type="tool_exception",
                     error_detail=str(exc)[:2000],
+                    served_model=served_model,
                 )
             except Exception:  # pragma: no cover - telemetry must not mask result
                 log.debug("telemetry.record failed in _safe_execute", exc_info=True)
@@ -2218,6 +2228,7 @@ async def _dispatch_tool_calls(
     context: LoopContext,
     tool_calls: list,
     raw_model_output: str | None = None,
+    served_model: str | None = None,
 ) -> list[ToolResultBlock]:
     """Dispatch tool calls with parallel execution for read-only tools.
 
@@ -2235,7 +2246,7 @@ async def _dispatch_tool_calls(
     captured as golden traces in telemetry.
     """
     if len(tool_calls) == 1:
-        return [await _safe_execute(context, tool_calls[0], raw_model_output)]
+        return [await _safe_execute(context, tool_calls[0], raw_model_output, served_model)]
 
     # Partition into read-only and mutating based on tool.is_read_only()
     read_only: list[tuple[int, object]] = []   # (original_index, tool_call)
@@ -2256,7 +2267,7 @@ async def _dispatch_tool_calls(
     # CancelledError during loop teardown still propagates, which is correct.
     if read_only:
         async def _run_ro(idx, tc):
-            return idx, await _safe_execute(context, tc, raw_model_output)
+            return idx, await _safe_execute(context, tc, raw_model_output, served_model)
 
         results.extend(
             await asyncio.gather(*[_run_ro(idx, tc) for idx, tc in read_only])
@@ -2264,7 +2275,7 @@ async def _dispatch_tool_calls(
 
     # Run mutating tools sequentially (order matters)
     for idx, tc in mutating:
-        results.append((idx, await _safe_execute(context, tc, raw_model_output)))
+        results.append((idx, await _safe_execute(context, tc, raw_model_output, served_model)))
 
     # Restore original order
     results.sort(key=lambda x: x[0])
@@ -2358,6 +2369,7 @@ async def _execute_tool_call(
     tool_input: dict[str, object],
     *,
     raw_model_output: str | None = None,
+    served_model: str | None = None,
 ) -> ToolResultBlock:
     """Execute a single tool call, running hooks if configured.
 
@@ -2382,6 +2394,7 @@ async def _execute_tool_call(
                     success=False,
                     error_type="hook_blocked",
                     error_detail=pre.reason or f"pre_tool_use hook blocked {tool_name}",
+                    served_model=served_model,
                 )
             return ToolResultBlock(
                 tool_use_id=tool_use_id,
@@ -2397,6 +2410,7 @@ async def _execute_tool_call(
                 success=False,
                 error_type="no_registry",
                 error_detail="No tool registry configured",
+                served_model=served_model,
             )
         return ToolResultBlock(
             tool_use_id=tool_use_id,
@@ -2486,6 +2500,7 @@ async def _execute_tool_call(
                     # forensics + future mining: the as-emitted call (D1 had
                     # to dig the LCM because failure rows lacked this)
                     parsed_tool_call=_failed_call,
+                    served_model=served_model,
                 )
 
             # Phase 3: ESCALATE — retries exhausted + router has escalation
@@ -2515,6 +2530,7 @@ async def _execute_tool_call(
                 success=False,
                 error_type="unknown_tool",
                 error_detail=f"Unknown tool: {tool_name}",
+                served_model=served_model,
             )
         return ToolResultBlock(
             tool_use_id=tool_use_id,
@@ -2544,6 +2560,7 @@ async def _execute_tool_call(
                         success=True,
                         error_type="lucky_guess",
                         error_detail=f"Tool {tool_name} called without being in prompt schema",
+                        served_model=served_model,
                     )
 
     # Content gate. GBNF validated structure, json.loads validated syntax and
@@ -2586,6 +2603,7 @@ async def _execute_tool_call(
                 error_type="template_markup",
                 error_detail=markup_guard.describe(_markup),
                 parsed_tool_call=_markup_call,
+                served_model=served_model,
             )
         return ToolResultBlock(
             tool_use_id=tool_use_id,
@@ -2658,6 +2676,7 @@ async def _execute_tool_call(
                     # forensics + future mining (input_validation rows had
                     # 0/21 parsed_tool_call coverage in all history)
                     parsed_tool_call=_failed_call,
+                    served_model=served_model,
                 )
             return ToolResultBlock(
                 tool_use_id=tool_use_id,
@@ -2748,6 +2767,7 @@ async def _execute_tool_call(
                             success=False,
                             error_type="permission_denied",
                             error_detail=f"User denied permission for {tool_name}",
+                            served_model=served_model,
                         )
                     return ToolResultBlock(
                         tool_use_id=tool_use_id,
@@ -2762,6 +2782,7 @@ async def _execute_tool_call(
                         success=False,
                         error_type="permission_denied",
                         error_detail=decision.reason or f"Permission denied for {tool_name}",
+                        served_model=served_model,
                     )
                 return ToolResultBlock(
                     tool_use_id=tool_use_id,
@@ -2811,6 +2832,7 @@ async def _execute_tool_call(
                 error_type="tool_timeout",
                 error_detail=f"Tool execution exceeded {_timeout:.0f}s timeout",
                 repairs=len(repair_log),
+                served_model=served_model,
             )
         return ToolResultBlock(
             tool_use_id=tool_use_id,
@@ -2897,6 +2919,7 @@ async def _execute_tool_call(
             parsed_tool_call=parsed_tool_json,
             provider=provider_name,
             repairs=len(repair_log),
+            served_model=served_model,
         )
 
     # Repair-pair flywheel: a successful execution completes any pending
