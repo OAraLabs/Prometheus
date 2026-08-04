@@ -282,3 +282,304 @@ class TestSlugifySafety:
         # Sanity check on the actual produced slug — should start the same
         # but should not have a trailing dash like the on-disk evidence did.
         assert slug.startswith("please-go-ahead")
+
+
+# ---------------------------------------------------------------------------
+# Quality gate (2026-08 sprint) — Stage 0 deterministic checks + Stage 1
+# LLM opt-out. The blocked shapes below replicate the 2026-08-03 junk crop
+# (survey: audits/20260803T215431Z-skillcreator-quality-gate-survey.md):
+# a trace with a failed call, an all-calls-succeeded negative lookup (a
+# locate that found nothing), a capability test ("testing to see if you
+# can get this .md?"), and near-duplicates minted minutes apart (three
+# skills from one release-check question).
+# ---------------------------------------------------------------------------
+
+
+def _trace(n: int = 5, *, errors: frozenset[int] = frozenset()) -> list[dict]:
+    """Tool trace in the exact shape run_async hands to post-task hooks."""
+    return [
+        {
+            "tool_name": "bash",
+            "arguments": {"command": f"step {i}"},
+            "result": "exit 1" if i in errors else "ok",
+            "is_error": i in errors,
+        }
+        for i in range(n)
+    ]
+
+
+# Phrases that mark a junk OUTCOME. They reach the prompt only through
+# ``final_text`` / ``task_description`` — none of them appear in
+# ``_GENERATION_PROMPT`` itself (guarded by
+# test_junk_markers_stay_out_of_the_template below), so the fake model's
+# decisions are driven by the turn data, exactly like a real model's.
+_JUNK_OUTCOME_MARKERS = (
+    "couldn't find",
+    "could not find",
+    "not released",
+    "isn't released",
+    "testing to see",
+)
+
+
+class _CompetentModel:
+    """Stands in for a well-behaved skill-generation model.
+
+    Declines junk turns (negative/failed/test outcomes) IF AND ONLY IF the
+    prompt both authorizes ``SKIP:`` and carries the outcome evidence. Two
+    tripwires follow from that conditionality:
+
+    - Remove the SKIP opt-out from ``_GENERATION_PROMPT`` → this emits a
+      full skill for the junk turns → the blocking tests go red.
+    - Stop passing ``final_text`` into the prompt → the outcome evidence
+      vanishes → same result.
+
+    Both are deliberate: the failed-lookup class (every call exits 0,
+    only the ANSWER is negative) has no deterministic catch, so the prompt
+    plumbing IS the gate.
+    """
+
+    def __init__(self, skill_name: str = "generated-skill") -> None:
+        self.skill_name = skill_name
+        self.prompts: list[str] = []
+
+    async def __call__(self, **kwargs) -> str:
+        prompt = kwargs["prompt"]
+        self.prompts.append(prompt)
+        low = prompt.lower()
+        if "skip:" in low and any(m in low for m in _JUNK_OUTCOME_MARKERS):
+            return "SKIP: not a reusable procedure"
+        return _good_skill_content(self.skill_name)
+
+
+def _creator_with_model(
+    tmp_path: Path, model: _CompetentModel
+) -> SkillCreator:
+    creator = SkillCreator(
+        provider=MagicMock(), model="test-model", auto_dir=tmp_path,
+    )
+    # Bound method, not AsyncMock(side_effect=...): mock does not await an
+    # instance whose __call__ is async, it would hand back the coroutine.
+    creator._envelope.call = model.__call__
+    return creator
+
+
+class TestStage0DeterministicGate:
+    """Pre-LLM checks: bounded call count, zero failed calls, no dupes."""
+
+    def test_failed_call_in_trace_skips_before_llm(self, tmp_path: Path) -> None:
+        """One errored call disqualifies the turn — and costs no LLM call.
+
+        The wordpress-feed-migration shape: 2026-08-03 03:16 authored a
+        skill from a trace whose third bash call failed.
+        """
+        creator = _make_creator(tmp_path, _good_skill_content())
+
+        result = asyncio.run(
+            creator.maybe_create(
+                "testing to see if you can get this .md?",
+                _trace(5, errors=frozenset({2})),
+            )
+        )
+
+        assert result is None
+        creator._envelope.call.assert_not_awaited()
+        assert list(tmp_path.iterdir()) == []
+
+    def test_oversized_trace_skips_before_llm(self, tmp_path: Path) -> None:
+        """51 calls is a saga, not a procedure (five-check upper bound)."""
+        creator = _make_creator(tmp_path, _good_skill_content())
+        result = asyncio.run(creator.maybe_create("huge task", _trace(51)))
+        assert result is None
+        creator._envelope.call.assert_not_awaited()
+
+    def test_trace_at_max_bound_still_reaches_llm(self, tmp_path: Path) -> None:
+        creator = _make_creator(tmp_path, _good_skill_content())
+        result = asyncio.run(creator.maybe_create("big but bounded", _trace(50)))
+        assert result is not None
+
+    def test_trace_at_min_bound_still_reaches_llm(self, tmp_path: Path) -> None:
+        creator = _make_creator(tmp_path, _good_skill_content())
+        result = asyncio.run(creator.maybe_create("small but real", _trace(3)))
+        assert result is not None
+
+    def test_name_collision_skips_instead_of_timestamp_duplicate(
+        self, tmp_path: Path
+    ) -> None:
+        """An existing ``<slug>.md`` is near-duplicate evidence → no write.
+
+        The old suffix behaviour is how ``debug-cron-job-failure`` came to
+        exist three times and how the qwen trio kept landing.
+        """
+        original = "---\nname: refactor-auth-module\n---\n# The original\n"
+        (tmp_path / "refactor-auth-module.md").write_text(original)
+        creator = _make_creator(
+            tmp_path, _good_skill_content("refactor-auth-module")
+        )
+
+        result = asyncio.run(creator.maybe_create("again", _trace(5)))
+
+        assert result is None
+        creator._envelope.call.assert_awaited_once()  # post-LLM backstop
+        assert [p.name for p in tmp_path.iterdir()] == ["refactor-auth-module.md"]
+        assert (tmp_path / "refactor-auth-module.md").read_text() == original
+
+    def test_persist_default_still_suffixes_for_deliberate_writers(
+        self, tmp_path: Path
+    ) -> None:
+        """Direct ``persist_skill_content`` callers (teacher escalation,
+        record-a-skill, ACCEPTed drafts) keep the no-content-loss suffix."""
+        (tmp_path / "refactor-auth-module.md").write_text("---\nname: refactor-auth-module\n---\n# old\n")
+        creator = _make_creator(tmp_path, None)
+
+        path = asyncio.run(
+            creator.persist_skill_content(
+                _good_skill_content("refactor-auth-module"), trigger="t"
+            )
+        )
+
+        assert path is not None
+        assert path.name.startswith("refactor-auth-module-")
+        assert len(list(tmp_path.iterdir())) == 2
+
+
+class TestStage1LLMOptOut:
+    """The generation model may decline — and sees what it needs to."""
+
+    def test_failed_lookup_blocked_only_by_the_opt_out(self, tmp_path: Path) -> None:
+        """THE tripwire — the failed-lookup shape.
+
+        2026-08-03: "can you access <X>?" ran three ``ls``-style bash calls
+        that all exited 0, the answer was "it doesn't exist", and a skill
+        got authored anyway. No deterministic check can see that failure;
+        only the generation model can, and only if the prompt (a)
+        authorizes SKIP and (b) carries the final reply. Removing either
+        from ``_GENERATION_PROMPT``/``maybe_create`` turns this test red —
+        by design.
+        """
+        model = _CompetentModel()
+        creator = _creator_with_model(tmp_path, model)
+
+        result = asyncio.run(
+            creator.maybe_create(
+                "can you access the research vault?",
+                _trace(3),
+                final_text=(
+                    "I checked ~/.prometheus and the working directory — I "
+                    "couldn't find any research-vault directory on this machine."
+                ),
+            )
+        )
+
+        assert result is None
+        assert len(model.prompts) == 1, "Stage 0 must pass this trace to the LLM"
+        assert list(tmp_path.iterdir()) == []
+
+    def test_negative_release_check_blocked(self, tmp_path: Path) -> None:
+        """The qwen shape: a lookup whose answer is 'that doesn't exist'."""
+        model = _CompetentModel()
+        creator = _creator_with_model(tmp_path, model)
+
+        result = asyncio.run(
+            creator.maybe_create(
+                "qwen 27b 3.8 is out. can you check on github?",
+                _trace(4),
+                final_text=(
+                    "Qwen 3.8 27B is not released — the closest real release "
+                    "is Qwen 3.6."
+                ),
+            )
+        )
+
+        assert result is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_capability_test_turn_blocked(self, tmp_path: Path) -> None:
+        """The .md-read-test shape: the user is probing, not asking for work."""
+        model = _CompetentModel()
+        creator = _creator_with_model(tmp_path, model)
+
+        result = asyncio.run(
+            creator.maybe_create(
+                "testing to see if you can get this .md? [30KB document]",
+                _trace(3),
+                final_text="Yes — I can read it. Here's a summary of the plan.",
+            )
+        )
+
+        assert result is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_reusable_procedure_still_authored(self, tmp_path: Path) -> None:
+        """The gate must not eat real procedures — the other direction.
+
+        The switch-llama-server-model shape: multi-step, mutating, completed
+        successfully. The same competent model that declines junk emits a
+        skill here, and the file lands.
+        """
+        model = _CompetentModel("switch-llama-server-model")
+        creator = _creator_with_model(tmp_path, model)
+
+        result = asyncio.run(
+            creator.maybe_create(
+                "switch the llama-server model to the new Qwen build",
+                _trace(6),
+                final_text=(
+                    "Done — updated the systemd service file and restarted "
+                    "llama-server; Qwen3.6 is now serving."
+                ),
+            )
+        )
+
+        assert result is not None
+        assert result.name == "switch-llama-server-model.md"
+        assert "name: switch-llama-server-model" in result.read_text()
+
+    def test_prompt_carries_outcome_and_existing_skills(self, tmp_path: Path) -> None:
+        """Stage 1's inputs actually reach the prompt: SKIP authorization,
+        the final reply, the task, and the existing skill list."""
+        (tmp_path / "check-ai-model-release-github.md").write_text(
+            "---\n"
+            "name: check-ai-model-release-github\n"
+            "description: Investigate the existence of a model release on GitHub.\n"
+            "---\n# x\n"
+        )
+        model = _CompetentModel("switch-llama-server-model")
+        creator = _creator_with_model(tmp_path, model)
+
+        asyncio.run(
+            creator.maybe_create(
+                "switch the llama-server model to the new Qwen build",
+                _trace(6),
+                final_text="Done — service restarted; Qwen3.6 now serving.",
+            )
+        )
+
+        prompt = model.prompts[0]
+        assert "SKIP:" in prompt
+        assert "Done — service restarted; Qwen3.6 now serving." in prompt
+        assert "switch the llama-server model" in prompt
+        assert "check-ai-model-release-github" in prompt
+        assert "Investigate the existence of a model release" in prompt
+
+    def test_junk_markers_stay_out_of_the_template(self) -> None:
+        """The fake model keys on outcome phrases from the TURN, so the
+        template must never contain them — otherwise every prompt would
+        look junk-shaped and the positive-direction test would lie."""
+        from prometheus.learning.skill_creator import _GENERATION_PROMPT
+
+        low = _GENERATION_PROMPT.lower()
+        for marker in _JUNK_OUTCOME_MARKERS:
+            assert marker not in low, (
+                f"_GENERATION_PROMPT now contains {marker!r}; reword the "
+                "template or pick a different marker"
+            )
+
+    def test_error_flags_render_in_the_trace_format(self) -> None:
+        """[ERROR] marks failed calls so Stage 1 stays honest even if the
+        Stage 0 any-error skip is ever relaxed."""
+        text = SkillCreator._format_trace(_trace(3, errors=frozenset({1})))
+        lines = text.splitlines()
+        assert "[ERROR]" not in lines[0]
+        assert lines[1].endswith("[ERROR]")
+        assert "[ERROR]" not in lines[2]

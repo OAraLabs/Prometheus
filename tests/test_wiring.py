@@ -6120,15 +6120,15 @@ class TestSunriseAgentLoopHooksList:
 
         calls: list[str] = []
 
-        async def hook_first(task, trace):
+        async def hook_first(task, trace, _final_text=""):
             calls.append(f"first:{task}:{len(trace)}")
 
-        async def hook_explodes(_task, _trace):
+        async def hook_explodes(_task, _trace, _final_text=""):
             calls.append("explodes")
             raise RuntimeError("boom")
 
-        async def hook_last(task, _trace):
-            calls.append(f"last:{task}")
+        async def hook_last(task, _trace, final_text=""):
+            calls.append(f"last:{task}:{final_text}")
 
         # Provider that yields a single AssistantTurnComplete after one tool call,
         # so the post-task hooks fire on the trace.
@@ -6151,7 +6151,9 @@ class TestSunriseAgentLoopHooksList:
         asyncio.run(loop.run_async("system", "do thing"))
         assert calls[0].startswith("first:do thing:")
         assert calls[1] == "explodes"
-        assert calls[2] == "last:do thing"
+        # Hooks receive the turn's final reply as the third argument — the
+        # semantic outcome SkillCreator's Stage 1 gate reads.
+        assert calls[2] == "last:do thing:done"
 
 
 class TestSunriseSkillRefiner:

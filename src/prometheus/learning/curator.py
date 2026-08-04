@@ -100,6 +100,10 @@ _DEFAULT_ARCHIVE_AFTER_DAYS = 90
 _DEFAULT_MIN_IDLE_SECONDS = 0                   # 0 = always run on tick
 _DEFAULT_MAX_PRUNINGS_PER_RUN = 10              # safety cap
 
+# Floor on the first wait of a process: an overdue Curator still lets the
+# daemon finish starting (model warmup, gateway wiring) before its LLM pass.
+_STARTUP_GRACE_SECONDS = 120
+
 # Sprint 4 A2: eternal-loop escalation. After this many consecutive
 # CuratorRun results with non-empty errors, emit `curator_degraded` on the
 # bus, log at ERROR, and back off exponentially. The previous Sprint 1
@@ -340,10 +344,14 @@ class Curator:
         :data:`_MAX_BACKOFF_MULTIPLIER` × interval so a broken provider
         doesn't get hammered every cycle.
         """
-        # Defer the first run by one interval to avoid clobbering on every restart.
-        # Hermes does the same for first-run safety.
+        # The first wait derives from the PERSISTED watermark, not process
+        # start. The old sleep-first shape re-armed a full interval on every
+        # daemon restart; with a 7-day interval and a sub-week restart
+        # cadence the loop fired exactly once ever (2026-07-17) — the same
+        # in-memory-state-vs-durable-cursor failure as the extractor
+        # watermark (PR #145).
         try:
-            await asyncio.sleep(self._interval)
+            await asyncio.sleep(self._initial_delay_seconds(time.time()))
         except asyncio.CancelledError:
             return
         while self._running:
@@ -387,6 +395,28 @@ class Curator:
                 await asyncio.sleep(sleep_s)
             except asyncio.CancelledError:
                 break
+
+    def _initial_delay_seconds(self, now: float) -> float:
+        """Seconds until this process's first run, from the persisted watermark.
+
+        ``max(grace, last_run_at + interval - now)``: an overdue or never-run
+        watermark collapses to the startup grace, and a mid-cycle restart
+        waits out only the REMAINDER of the interval instead of re-arming a
+        full one. A never-run store (watermark 0.0) counts as overdue by
+        construction — on a brand-new install the skills dir is empty and
+        ``run_once`` short-circuits the LLM pass, so the early run is free.
+        An unreadable store also falls back to overdue: running is the
+        recoverable direction (prunings archive, never delete).
+        """
+        try:
+            watermark = float(self._state_store.curator().last_run_at)
+        except Exception:
+            log.debug(
+                "Curator: watermark read failed — treating as never-run",
+                exc_info=True,
+            )
+            watermark = 0.0
+        return max(float(_STARTUP_GRACE_SECONDS), watermark + self._interval - now)
 
     def _compute_sleep(self, consecutive_failures: int) -> float:
         """Exponential backoff capped at ``_MAX_BACKOFF_MULTIPLIER`` × interval."""

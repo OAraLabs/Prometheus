@@ -3146,8 +3146,11 @@ class AgentLoop:
         """Append a callback invoked after each completed task.
 
         Hooks fire sequentially in registration order. Each hook receives
-        ``(task_description, tool_trace)`` and should return a coroutine.
-        One hook's failure does not block subsequent hooks.
+        ``(task_description, tool_trace, final_text)`` — ``final_text`` is
+        the assistant's final reply for the turn, the only place the
+        semantic outcome lives when every tool call succeeded mechanically
+        (SkillCreator's Stage 1 gate reads it) — and should return a
+        coroutine. One hook's failure does not block subsequent hooks.
         """
         self._post_task_hooks.append(hook)
 
@@ -3254,8 +3257,10 @@ class AgentLoop:
         # a failing hook does not block subsequent hooks.
         #
         # EPHEMERAL: skipped entirely. The hooks are handed
-        # ``hook(user_message, tool_trace)`` — ``user_message`` is the raw text
-        # the user typed. SkillCreator sends it to the model as the
+        # ``hook(user_message, tool_trace, last_text)`` — ``user_message`` is
+        # the raw text the user typed, ``last_text`` the assistant's final
+        # reply (the turn's semantic outcome, which SkillCreator's Stage 1
+        # gate reads). SkillCreator sends the message to the model as the
         # ``task_description`` of a skill-generation prompt and writes the
         # result to ``~/.prometheus/skills/auto/<name>.md``, then emits a
         # ``skill_created`` signal whose payload carries ``trigger_task`` (the
@@ -3270,7 +3275,7 @@ class AgentLoop:
             else:
                 for hook in self._post_task_hooks:
                     try:
-                        await hook(user_message, self._tool_trace)
+                        await hook(user_message, self._tool_trace, last_text)
                     except Exception:
                         log.debug(
                             "Post-task hook %s failed",
