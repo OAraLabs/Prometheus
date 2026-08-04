@@ -240,6 +240,78 @@ def get_wiki_root() -> Path:
     return resolve_wiki_root()
 
 
+# ---------------------------------------------------------------------------
+# BRAIN VAULT root — the second brain (~/brain-vault)
+#
+# A SECOND, SEPARATE root. It is NOT the Prometheus wiki: that one lives under
+# ``get_wiki_root()`` (default ``~/.prometheus/wiki``) and is a machine-owned
+# projection of ``memory.db``. The brain vault is a git repo of hand- and
+# ingest-compiled knowledge with its own zone rules (its CLAUDE.md §1), and
+# conflating the two would let a writer aimed at one land in the other.
+# Whether the Prometheus wiki eventually becomes a zone inside the vault is
+# explicitly DEFERRED — until then they are two roots and two idioms.
+#
+# NAMING: everything user-facing says "brain vault", never bare "vault".
+# ``symbiote.backup.vault_root`` already exists and means something entirely
+# different (snapshot storage), and one word meaning two things in one config
+# file is the collision class that has already cost a session.
+# ---------------------------------------------------------------------------
+
+_vault_root_override: Path | None = None
+
+_DEFAULT_VAULT_DIR = "brain-vault"
+
+
+def set_vault_root(root: str | Path | None) -> None:
+    """Pin the brain-vault root for this process (called once at daemon start).
+
+    Same reason as :func:`set_wiki_root`: the vault tools are registered with
+    no arguments and resolve the root inside ``execute()``, so they cannot be
+    handed it at construction.
+
+    Passing ``None`` clears the override (used by tests).
+    """
+    global _vault_root_override
+    _vault_root_override = Path(root).expanduser() if root is not None else None
+
+
+def resolve_vault_root(config: dict | None = None) -> Path:
+    """Resolve the brain-vault root from config, env, then the default.
+
+    Resolution order:
+    1. ``vault.root`` in the supplied config mapping
+    2. ``PROMETHEUS_VAULT`` environment variable
+    3. ``Path.home() / "brain-vault"``
+
+    Pure: does not read or mutate the process-wide override, and — like
+    :func:`resolve_wiki_root` and unlike the other helpers here — **does not
+    create the directory**. An absent vault is a real, reportable state
+    ("the brain vault is not present at X"), and creating an empty one would
+    convert that loud failure into a silent no-results.
+    """
+    if config:
+        configured = (config.get("vault") or {}).get("root")
+        if configured:
+            return Path(str(configured)).expanduser()
+    env_dir = os.environ.get("PROMETHEUS_VAULT")
+    if env_dir:
+        return Path(env_dir).expanduser()
+    return Path.home() / _DEFAULT_VAULT_DIR
+
+
+def get_vault_root() -> Path:
+    """Return the brain-vault root: pinned override, else env, else default.
+
+    This is the function every consumer calls. There is exactly one other way
+    to name this location and it is a bug — see
+    ``tests/test_vault_root_resolution.py``, which fails the build on a
+    re-derived root.
+    """
+    if _vault_root_override is not None:
+        return _vault_root_override
+    return resolve_vault_root()
+
+
 def get_artifacts_dir() -> Path:
     """Return the agent's artifact OUTBOX (~/.prometheus/files).
 

@@ -281,6 +281,15 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
     try_register(registry, "TodoWriteTool",
                  "prometheus.tools.builtin.todo_write", "TodoWriteTool")
 
+    # Brain vault (~/brain-vault) — READ ONLY. Registered via try_register so an
+    # absent or broken vault surfaces as a WARN + subsystem_runs row rather
+    # than a quietly missing capability. Distinct from WikiQueryTool, which
+    # reads the Prometheus wiki: different root, different corpus.
+    try_register(registry, "VaultSearchTool",
+                 "prometheus.tools.builtin.vault", "VaultSearchTool")
+    try_register(registry, "VaultReadTool",
+                 "prometheus.tools.builtin.vault", "VaultReadTool")
+
     # AnatomyTool — daemon wires ``set_anatomy_components`` at startup
     # (scripts/daemon.py:550); execute() degrades gracefully when the
     # scanner isn't initialised (e.g. CLI mode). Audit B3 / Phase 1 orphan.
