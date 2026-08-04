@@ -26,7 +26,9 @@ import yaml
 from prometheus.config.paths import (
     get_config_dir,
     get_logs_dir,
+    resolve_vault_root,
     resolve_wiki_root,
+    set_vault_root,
     set_wiki_root,
 )
 from prometheus.context.environment import git_head_sha
@@ -179,6 +181,23 @@ async def run_daemon(args: argparse.Namespace) -> None:
     wiki_root = resolve_wiki_root(config)
     set_wiki_root(wiki_root)
     logger.info("Wiki root resolved to %s", wiki_root)
+
+    # ── Brain vault root ────────────────────────────────────────────────
+    # A SECOND, separate root: the brain-vault repo, read-only. Pinned the same
+    # way and for the same reason as the wiki root above — the vault tools are
+    # registered with no arguments and resolve it inside execute().
+    # Deliberately NOT the Prometheus wiki: log both so a misconfiguration
+    # that points one at the other is visible in the first ten lines of a boot
+    # rather than inferred later from odd search results.
+    vault_root = resolve_vault_root(config)
+    set_vault_root(vault_root)
+    logger.info("Brain vault root resolved to %s (read-only)", vault_root)
+    if vault_root == wiki_root:
+        logger.warning(
+            "Brain vault root and Prometheus wiki root are THE SAME PATH (%s) "
+            "— they are different corpora with different owners; check "
+            "vault.root / wiki.root", vault_root,
+        )
 
     # ── Env file (Onboarding Phase 0) ───────────────────────────────────
     # Under systemd the unit's EnvironmentFile= already populated these;

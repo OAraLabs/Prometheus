@@ -610,6 +610,32 @@ tracing:
 wiki:
   root: ~/.prometheus/wiki
 
+# ── Brain vault ───────────────────────────────────────────────────────────
+# The brain-vault second brain: a git repo of knowledge compiled from the full
+# claude.ai + Claude Code history. Prometheus reads it and NEVER writes to it
+# (vault_search / vault_read); the vault's own CLAUDE.md §1 zone rules make
+# that binding, not optional.
+#
+# This is a SEPARATE root from `wiki:` above. That one is the Prometheus wiki,
+# a machine-owned projection of memory.db; this one is hand- and
+# ingest-compiled and is not Prometheus's to regenerate. Do not point them at
+# the same path — the daemon logs a warning if you do.
+#
+# Not to be confused with `symbiote.backup.vault_root`, which is snapshot
+# storage and unrelated. Everything user-facing about THIS one says
+# "brain vault".
+#
+# The default below is a GENERIC placeholder, not anyone's real vault. Point it
+# at yours in the live config (config/prometheus.yaml, which is gitignored) or
+# via PROMETHEUS_VAULT in the systemd EnvironmentFile — the same place tokens
+# live. This repo is public, so a real vault path does not belong in a tracked
+# file; the pre-commit hook enforces that and is right to.
+#
+# An absent vault is not an error at startup: the tools report it clearly when
+# called, naming the resolved path and this key.
+vault:
+  root: ~/brain-vault
+
 
 # ── Doctor ────────────────────────────────────────────────────────────────
 doctor:
