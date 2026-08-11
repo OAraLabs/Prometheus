@@ -22,12 +22,28 @@ _DEFAULT_MAX_TOKENS = 4000
 class ToolResultTruncator:
     """Truncate tool output that exceeds the configured token budget.
 
-    Truncation strategies:
+    Truncation strategies (``_STRATEGIES`` — name-keyed; the names are pinned
+    to the real registry by tests/test_truncation_contract.py, because a tool
+    rename would otherwise silently demote it to the default strategy):
     - bash       : keep last 100 lines
     - read_file  : first 50 lines + last 50 lines with a gap marker
     - grep       : top 20 results
-    - default    : hard-truncate with a token-count trailer
+    - default    : head + tail window + a trailer that is true at this layer
+
+    THE NOTICE CONTRACT (selector survey, 2026-08-11): whatever this class
+    emits becomes part of the tool result the model reasons over. A notice
+    must therefore be TRUE (state what was kept and what was received — never
+    imply the payload it was handed is the whole artifact) and ACTIONABLE
+    (name a recovery that actually works; the full output is NOT retained
+    anywhere, so the only honest advice is re-running the tool narrower).
+    tests/test_truncation_contract.py holds every strategy to that contract.
     """
+
+    # Tail window the DEFAULT strategy preserves. Tools put their own state at
+    # the END of a result — wiki_query's budget marker, web_fetch's cut
+    # notice, vault_read's continue offset — and a head-only cut beheaded all
+    # of them: the model lost the content AND the notice saying how to get it.
+    _DEFAULT_TAIL_CHARS = 400
 
     def __init__(self, max_tokens: int = _DEFAULT_MAX_TOKENS) -> None:
         self._max_tokens = max_tokens
@@ -68,12 +84,9 @@ class ToolResultTruncator:
         if estimate_tokens(output) <= self._max_tokens:
             return output
 
-        if tool_name == "bash":
-            return self._truncate_bash(output)
-        if tool_name == "read_file":
-            return self._truncate_file_read(output)
-        if tool_name == "grep":
-            return self._truncate_grep(output)
+        strategy = self._STRATEGIES.get(tool_name)
+        if strategy is not None:
+            return strategy(self, output)
         return self._truncate_default(output)
 
     def __call__(self, tool_name: str, output: str) -> str:
@@ -113,10 +126,40 @@ class ToolResultTruncator:
         return result
 
     def _truncate_default(self, output: str) -> str:
-        """Hard-truncate to approximately max_tokens, append a trailer."""
+        """Head + tail window + a trailer that is true at this layer.
+
+        Replaces a head-only cut whose trailer said "[truncated at N tokens]"
+        with N = the size of the payload it was HANDED. Both halves were dead
+        wrong in live use (2026-08-11 vault audit): the head-only cut beheaded
+        every tool's own tail-positioned notice, and the trailer read as the
+        artifact's size — a 72k-char page whose upstream cap had already cut
+        it to 48k was reported as "12041 tokens". This layer knows exactly two
+        true things, what it received and what it kept; the trailer states
+        those, says the remainder was NOT retained, and names the one recovery
+        that actually works.
+        """
         char_limit = self._max_tokens * 4
         if len(output) <= char_limit:
             return output
-        truncated = output[:char_limit]
-        token_count = estimate_tokens(output)
-        return truncated + f"\n[truncated at {token_count} tokens]"
+        tail_keep = min(self._DEFAULT_TAIL_CHARS, char_limit // 4)
+        head_keep = char_limit - tail_keep
+        dropped = len(output) - head_keep - tail_keep
+        return (
+            output[:head_keep]
+            + f"\n[... {dropped} chars omitted ...]\n"
+            + output[-tail_keep:]
+            + f"\n[truncated by the per-result budget: kept the first "
+            f"{head_keep} and last {tail_keep} chars of the {len(output)} "
+            f"received — the rest was not retained; re-run the tool with "
+            f"narrower arguments if more is needed]"
+        )
+
+    # Name-keyed strategy table. Introspectable on purpose:
+    # tests/test_truncation_contract.py asserts every key names a tool in the
+    # registry the daemon actually builds, so a rename cannot silently demote
+    # a tool to the default strategy.
+    _STRATEGIES = {
+        "bash": _truncate_bash,
+        "read_file": _truncate_file_read,
+        "grep": _truncate_grep,
+    }
