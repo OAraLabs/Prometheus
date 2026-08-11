@@ -165,3 +165,20 @@ class TestMemoryToolEndToEnd:
         ))
         assert "fact one" in result.output
         assert "fact two" in result.output
+
+
+def test_memory_is_reachable_by_the_model() -> None:
+    """Membership is necessary and NOT sufficient — see the anatomy twin.
+
+    Pointed at this tool specifically because MemoryTool is the canonical
+    orphan: registered late, and MEMORY.md sat at 0 bytes for six weeks. Being
+    in the registry was never the property that mattered.
+    """
+    from tests.support.advertisement import advertised_names, registered_names
+    from tests.test_tool_advertisement import DEFERRED_BY_DESIGN
+
+    assert "memory" in registered_names()
+    assert "memory" in advertised_names() or "memory" in DEFERRED_BY_DESIGN, (
+        "memory is registered but neither advertised nor classified as "
+        "deferred-by-design — it is invisible to the model"
+    )

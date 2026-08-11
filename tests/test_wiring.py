@@ -6948,6 +6948,24 @@ class TestWeaveWebToolsWiring:
         names = {t.name for t in registry.list_tools()}
         assert "web_search" in names
 
+    def test_the_web_and_media_tools_are_reachable_not_just_registered(self):
+        """The four assertions above check registry membership. The model is
+        handed schemas_for_run(), a different set — all four of these tools are
+        DEFERRED under the shipped default, so "registered" was never the
+        property that made them usable. Classified explicitly in
+        tests/test_tool_advertisement.py; web_search and web_fetch are flagged
+        there as promotion candidates for exactly the reason vault_search
+        failed."""
+        from tests.support.advertisement import advertised_names, registered_names
+        from tests.test_tool_advertisement import DEFERRED_BY_DESIGN
+
+        for name in ("youtube_transcript", "download_file", "web_fetch", "web_search"):
+            assert name in registered_names()
+            assert name in advertised_names() or name in DEFERRED_BY_DESIGN, (
+                f"{name} is registered but neither advertised nor classified — "
+                f"it is invisible to the model"
+            )
+
     def test_youtube_transcript_exported_from_builtin(self):
         from prometheus.tools.builtin import YouTubeTranscriptTool
         assert YouTubeTranscriptTool().name == "youtube_transcript"
