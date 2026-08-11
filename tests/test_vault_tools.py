@@ -124,9 +124,9 @@ def _search_result(query: str):
     ))
 
 
-def _read_result(path: str):
+def _read_result(path: str, **kwargs):
     return asyncio.run(VaultReadTool().execute(
-        VaultReadTool.input_model(path=path), None,
+        VaultReadTool.input_model(path=path, **kwargs), None,
     ))
 
 
@@ -593,3 +593,337 @@ def test_the_descriptions_say_brain_vault_not_bare_vault():
             f"{tool.name} description has a double space — left behind when the\n"
             f"pre-commit hook forced the private repo name out of it"
         )
+
+
+# ---------------------------------------------------------------------------
+# 7. Paging — offset windows, outline, honest notices
+# ---------------------------------------------------------------------------
+#
+# The defect this section pins: the vault's biggest pages were truncated at
+# 48k with a TRAILING notice, the daemon's default per-result truncator
+# (tool_result_max=4000 tokens -> first 16,000 chars kept) then beheaded the
+# payload, and the model saw neither the tail of the page nor any notice
+# saying how to get it. Both directions throughout, per §2c: the new offset
+# REACHES what the cap hid, AND the un-paged read still says what remains and
+# how to continue — from the HEAD of the result, where truncation layers
+# cannot drop it.
+
+from prometheus.tools.builtin.vault import _window  # noqa: E402
+
+_SENTINEL_TAIL = "TAIL-SENTINEL-PAST-THE-OLD-CAP"
+_SENTINEL_EOF = "FINAL-LINE-SENTINEL"
+_LONG_LINE_CHARS = 15_000  # longer than the default window: forces a hard cut
+
+
+def _build_paged_page() -> str:
+    """~70k chars engineered to meet every boundary shape at once.
+
+    Unique numbered 108-char lines mean a 12,000-char boundary lands mid-line
+    essentially always (the snap must engage), and one 15k-char line with no
+    newline is longer than the whole window (the hard-cut branch must engage,
+    mid-line by construction). Sentinels sit past the old 48k cap and on the
+    final line, and one heading sits deep enough to be a real jump target.
+    """
+    parts = []
+    for i in range(220):
+        parts.append(f"line-{i:04d} " + "x" * 97)
+    parts.append("## Deep-Section marker")
+    parts.append("N" * _LONG_LINE_CHARS)
+    for i in range(220, 400):
+        parts.append(f"line-{i:04d} " + "y" * 97)
+    parts.append(_SENTINEL_TAIL)
+    for i in range(400, 500):
+        parts.append(f"line-{i:04d} " + "z" * 97)
+    parts.append(_SENTINEL_EOF)
+    return "\n".join(parts) + "\n"
+
+
+@pytest.fixture
+def paged(tmp_path, monkeypatch):
+    """A vault whose one big page exercises every windowing branch."""
+    root = tmp_path / "brain-vault"
+    (root / "wiki").mkdir(parents=True)
+    text = _build_paged_page()
+    (root / "wiki" / "Big-Page.md").write_text(text, encoding="utf-8")
+    (root / "wiki" / "small.md").write_text(
+        "# Small\n\nfits in one window\n", encoding="utf-8",
+    )
+    monkeypatch.delenv("PROMETHEUS_VAULT", raising=False)
+    set_vault_root(root)
+    try:
+        yield root, text
+    finally:
+        set_vault_root(None)
+
+
+_CONTINUE_OFFSET = re.compile(r'"offset": (\d+)\}')
+
+
+def test_windows_tile_and_reassemble_the_exact_file(paged):
+    """THE COMPLETENESS CLAIM: concatenating every window IS the file.
+
+    Newline-snapping is where tiling would break, so the fixture forces both
+    boundary shapes: unique 108-char lines put every default boundary
+    mid-line (each end must snap back to a newline), and the 15k no-newline
+    line forces the hard cut (the next window then STARTS mid-line). The
+    walk asserts both branches actually fired — a fixture whose boundaries
+    happened to land on newlines would prove nothing about the snap."""
+    _, text = paged
+    snapped = hard_cut = False
+    chunks: list[str] = []
+    offset = 0
+    while True:
+        start, end = _window(text, offset, 12_000)
+        assert end > start, "a window made no progress"
+        chunks.append(text[start:end])
+        if end == len(text):
+            break
+        if text[end - 1] == "\n":
+            snapped = True
+        else:
+            hard_cut = True
+        offset = end  # tiling: next window starts exactly where this ended
+    assert "".join(chunks) == text, "windows dropped or doubled characters"
+    assert len(chunks) >= 5, "fixture did not span multiple windows"
+    assert snapped, "no boundary exercised the newline snap"
+    assert hard_cut, "no boundary exercised the mid-line hard cut"
+
+
+def test_a_sentinel_past_the_old_48k_cap_is_reachable_by_offset(paged):
+    """The admission half: what the single-shot cap hid, offset reaches."""
+    _, text = paged
+    pos = text.index(_SENTINEL_TAIL)
+    assert pos > 48_000, "fixture regressed — sentinel no longer past the old cap"
+    r = _read_result("wiki/Big-Page.md", offset=pos - 50)
+    assert not r.is_error, r.output
+    assert _SENTINEL_TAIL in r.output
+
+    tail = _read_result("wiki/Big-Page.md", offset=len(text) - 500)
+    assert _SENTINEL_EOF in tail.output, "the final line is still unreachable"
+    assert f"of {len(text)}]" in tail.output
+
+
+def test_the_unpaged_read_still_truncates_and_says_how_to_continue(paged):
+    """The refusal half: no offset -> the tail stays hidden AND the result
+    says so honestly — true total, real next offset, positioned at the HEAD
+    where the daemon's head-keeping truncators cannot drop it (the old
+    trailing notice died there every single time)."""
+    _, text = paged
+    r = _read_result("wiki/Big-Page.md")
+    assert not r.is_error
+    assert _SENTINEL_TAIL not in r.output
+
+    m = _CONTINUE_OFFSET.search(r.output)
+    assert m, f"no continue offset in output head: {r.output[:300]!r}"
+    _, expected_end = _window(text, 0, 12_000)
+    assert int(m.group(1)) == expected_end, "the notice names a fake next window"
+    assert "[partial view — " in r.output
+    assert f"of {len(text)}]" in r.output, "the header must state the TRUE size"
+    assert r.output.index('"offset"') < 2_000, "continue notice is not head-positioned"
+
+
+def test_the_continue_offset_chains_reads_without_gap_or_overlap(paged):
+    """Interface-level tiling: the seam line appears in exactly one window."""
+    _, text = paged
+    first = _read_result("wiki/Big-Page.md")
+    nxt = int(_CONTINUE_OFFSET.search(first.output).group(1))
+    seam = text[nxt:nxt + 30]  # unique numbered lines make this unambiguous
+    assert seam not in first.output, "window 1 leaked past its stated end"
+    second = _read_result("wiki/Big-Page.md", offset=nxt)
+    assert seam in second.output, "window 2 does not start at the stated offset"
+
+
+def test_a_page_that_fits_carries_no_paging_furniture(paged):
+    """The negative direction: paging must be invisible when nothing is cut."""
+    r = _read_result("wiki/small.md")
+    assert not r.is_error
+    assert "fits in one window" in r.output
+    assert re.search(r"\(\d+ chars\)", r.output), "complete reads state their size"
+    assert "[partial view" not in r.output
+    assert "## Outline" not in r.output
+    assert '"offset"' not in r.output
+
+
+def test_offset_errors_are_loud_and_name_the_valid_range(paged):
+    """A bad address gets an error naming the real bounds, not empty success."""
+    _, text = paged
+    r = _read_result("wiki/Big-Page.md", offset=-5)
+    assert r.is_error
+    assert "offset" in r.output.lower()
+
+    past = _read_result("wiki/Big-Page.md", offset=len(text) + 7)
+    assert past.is_error
+    assert str(len(text)) in past.output, "the error must name the true size"
+    assert "past the end" in past.output
+
+
+def test_max_chars_is_clamped_not_trusted(paged):
+    """Floor 1000, ceiling 48000 — a wild value degrades to a sane window."""
+    _, text = paged
+    tiny = _read_result("wiki/Big-Page.md", max_chars=10)
+    n1 = int(_CONTINUE_OFFSET.search(tiny.output).group(1))
+    assert 500 <= n1 <= 1_000, f"floor not applied: first window ended at {n1}"
+
+    huge = _read_result("wiki/Big-Page.md", max_chars=10_000_000)
+    n2 = int(_CONTINUE_OFFSET.search(huge.output).group(1))
+    assert 40_000 < n2 <= 48_000, f"ceiling not applied: first window ended at {n2}"
+
+
+def test_the_outline_lists_real_headings_with_exact_offsets(paged):
+    """An outline entry is a jump target: its offset must be the real one."""
+    _, text = paged
+    off = text.index("## Deep-Section marker")
+    r = _read_result("wiki/Big-Page.md")
+    assert "## Outline — 1 heading(s)" in r.output
+    assert f"@{off} ## Deep-Section marker" in r.output
+
+
+def test_a_crowded_outline_elides_the_middle_but_keeps_the_tail(tmp_path, monkeypatch):
+    """Tail headings are the point — they are what single-shot reads never
+    showed — so elision drops the MIDDLE, states what it dropped, and keeps
+    both ends."""
+    root = tmp_path / "brain-vault"
+    (root / "wiki").mkdir(parents=True)
+    parts = []
+    for i in range(30):
+        parts.append(f"## H-{i:02d}")
+        parts.append("filler " * 120)
+    text = "\n".join(parts) + "\n"
+    (root / "wiki" / "crowded.md").write_text(text, encoding="utf-8")
+    monkeypatch.delenv("PROMETHEUS_VAULT", raising=False)
+    set_vault_root(root)
+    try:
+        tail_off = text.index("## H-29")
+        assert tail_off > 12_000, "fixture regressed — tail heading inside window 1"
+        r = _read_result("wiki/crowded.md")
+        assert "## Outline — 30 heading(s)" in r.output
+        assert "@0 ## H-00" in r.output
+        assert f"@{tail_off} ## H-29" in r.output, "tail heading lost to elision"
+        assert "+6 more headings between @" in r.output, "elision went silent"
+    finally:
+        set_vault_root(None)
+
+
+def test_frontmatter_comment_lines_stay_out_of_the_outline(tmp_path, monkeypatch):
+    """Standing-Principles keeps a changelog of '#   + …' YAML comments in its
+    frontmatter. To a naive heading regex those are level-1 headings; an
+    outline advertising jump targets into YAML teaches the model garbage."""
+    root = tmp_path / "brain-vault"
+    (root / "wiki").mkdir(parents=True)
+    text = (
+        "---\ntype: concept\n"
+        "#   + changelog-entry-that-looks-like-a-heading\n"
+        "---\n\n# Real Title\n\n"
+        + "prose " * 2_600
+        + "\n## Real-Section\n\nmore prose\n"
+    )
+    (root / "wiki" / "fm.md").write_text(text, encoding="utf-8")
+    monkeypatch.delenv("PROMETHEUS_VAULT", raising=False)
+    set_vault_root(root)
+    try:
+        r = _read_result("wiki/fm.md")
+        assert "## Outline" in r.output, "over-window page must carry an outline"
+        assert not re.search(r"@\d+ #   \+", r.output), (
+            "a YAML comment line became an outline jump target"
+        )
+        assert re.search(r"@\d+ ## Real-Section", r.output)
+    finally:
+        set_vault_root(None)
+
+
+def test_the_default_window_survives_the_default_daemon_truncator(paged):
+    """THE LAYER-COUPLING PIN. The daemon's per-result truncator
+    (tool_result_max, default 4000 tokens at 4 chars/token) keeps heads and
+    appends its own trailer. A default vault_read window must pass through it
+    UNTOUCHED, or the continue notice dies in the middle layer and paging is
+    dead on arrival — which is precisely how the original 48k single-shot
+    behaved in the live daemon. Asserted as an identity, worst case included:
+    a max-length outline over long headings plus a long vault-relative path."""
+    from prometheus.context.truncation import ToolResultTruncator
+
+    truncator = ToolResultTruncator(4000)
+    r = _read_result("wiki/Big-Page.md")
+    assert truncator.truncate("vault_read", r.output) == r.output, (
+        "a default window no longer fits tool_result_max=4000 — shrink the "
+        "window or the outline"
+    )
+
+    root, _ = paged
+    crowded_dir = root / "wiki" / "sources" / "concepts"
+    crowded_dir.mkdir(parents=True)
+    name = "A-Deliberately-Long-Concept-Page-Name-Padding-The-Worst-Case-Header.md"
+    parts = []
+    for i in range(30):
+        parts.append(f"## Heading-{i:02d} " + "verbose-heading-text-" * 5)
+        parts.append("body " * 400)
+    (crowded_dir / name).write_text("\n".join(parts) + "\n", encoding="utf-8")
+    worst = _read_result(f"wiki/sources/concepts/{name}")
+    assert "## Outline" in worst.output  # precondition: the expensive path fired
+    assert truncator.truncate("vault_read", worst.output) == worst.output, (
+        "worst-case window + outline exceeds tool_result_max=4000"
+    )
+
+
+def test_paging_does_not_open_the_confinement_door(vault):
+    """The refusal twin: an offset read is still a read — same guard, same
+    refusal. A symlink out of wiki/ must not become reachable because the
+    request carried a parameter."""
+    r = _read_result("wiki/sneaky.md", offset=10)
+    assert r.is_error
+    assert "escapes the brain vault root" in r.output
+    assert "SECRET" not in r.output
+
+
+def test_a_directory_read_ignores_offset_harmlessly(vault):
+    """Decided, not accidental: listings are small; offset is meaningless
+    there and must not error a legitimate browse."""
+    r = _read_result("wiki", offset=7)
+    assert not r.is_error
+    assert "is a directory" in r.output
+
+
+def test_search_context_lines_carry_jump_offsets(vault):
+    """The search→read handoff: search reads FULL bodies and can cite a line
+    a windowed read never reaches, so every context line names its offset."""
+    root, _ = vault
+    text = (root / "wiki" / "sources" / "projects" / "Prometheus.md").read_text(
+        encoding="utf-8",
+    )
+    off = text.index("The daemon runs a llama.cpp backend.")
+    out = _search("llama.cpp")
+    assert f"@{off} The daemon runs a llama.cpp backend." in out, out
+
+
+@pytest.mark.skipif(
+    REAL_VAULT is None or not (REAL_VAULT / "wiki").is_dir(),
+    reason=(
+        "PROMETHEUS_VAULT is unset or has no wiki/ tree. The fixture tests "
+        "above cover every windowing branch; this one additionally proves the "
+        "OPERATOR'S REAL over-cap pages are now fully reachable."
+    ),
+)
+def test_the_real_standing_principles_tail_is_reachable():
+    """Against the genuine article: the page whose hidden tail motivated the
+    feature. Its outline must offer a jump target past the old 48k cap, and
+    reading at that offset must return content the un-paged read hid."""
+    set_vault_root(REAL_VAULT)
+    try:
+        sp = "wiki/sources/concepts/Standing-Principles.md"
+        first = _read_result(sp)
+        if first.is_error:
+            pytest.skip(f"real vault lacks {sp}")
+        deep = [
+            int(m.group(1))
+            for m in re.finditer(r"@(\d+) ", first.output)
+            if int(m.group(1)) > 48_000
+        ]
+        if not deep:
+            pytest.skip("no outline entry past 48k — page shape changed")
+        r = _read_result(sp, offset=deep[-1])
+        assert not r.is_error
+        assert len(r.output) > 200
+        assert first.output[-4_000:] != r.output[-4_000:], (
+            "the deep read returned the same content as the un-paged read"
+        )
+    finally:
+        set_vault_root(None)
