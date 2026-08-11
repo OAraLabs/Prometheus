@@ -1380,6 +1380,9 @@ def main() -> None:
         tool_loader=tool_loader,
         session_id=session_id,
         memory_recall=memory_recall,
+        # The engine built above (create_lcm_engine) — the CLI ingests its
+        # turns into it, and the microcompactor checks it; None if unavailable.
+        lcm_engine=lcm_engine,
     )
 
     async def _async_main() -> None:

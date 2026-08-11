@@ -3111,6 +3111,7 @@ class AgentLoop:
         microcompact_on_cloud: bool = False,
         microcompact_keep_chars: int = 200,
         microcompact_keep_chars_no_lcm: int = 500,
+        lcm_engine: object | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
@@ -3164,6 +3165,11 @@ class AgentLoop:
         # the extractor block, long after the AgentLoop. run_async reads it
         # at call time, so late assignment reaches every subsequent turn.
         self.memory_recall = memory_recall
+        # LCM engine for the microcompactor's is_ingested check — PUBLIC for
+        # the same reason as memory_recall above: the daemon builds the engine
+        # ~370 lines after the AgentLoop and late-assigns it; run_async reads
+        # the attribute per call.
+        self.lcm_engine = lcm_engine
 
     def add_post_task_hook(self, hook: Callable) -> None:
         """Append a callback invoked after each completed task.
@@ -3247,6 +3253,7 @@ class AgentLoop:
             microcompact_keep_chars_no_lcm=self._microcompact_keep_chars_no_lcm,
             compactor=self._compactor,
             memory_recall=self.memory_recall,
+            lcm_engine=self.lcm_engine,
             # The nudge USED to be injected below, in the `async for` body.
             # That made it AgentLoop-only, so no web / Beacon / Bridge turn
             # ever saw it — the parity guard could not catch it either,
