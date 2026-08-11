@@ -35,6 +35,22 @@ says so AND states what it did not cover — the ``wiki/`` scope, and the
 ``raw/`` tree that holds the unsummarised sources. A silent empty result is
 the exact shape of the LCM ``summary_store`` bug, where every recall returned
 "no results" from the day the engine landed and nothing ever said why.
+
+WINDOWED READS. Three truncation layers stand between a vault file and the
+model: this module's own ceiling, the daemon's per-result truncator
+(``context.tool_result_max``, default 4000 tokens ≈ 16,000 chars, head-kept),
+and the per-turn cross-result budget. The original single-shot read shipped a
+48k payload whose truncation notice trailed at char ~48,030 — the second
+layer beheaded it at 16,000, so the model never saw the notice once, and the
+tail of every large page (systematically the NEWEST content) was invisible
+with nothing saying so. ``vault_read`` therefore returns WINDOWS: default
+12,000 chars, sized to pass the default middle layer untouched, with the
+range, the true total, and the continue offset stated at the HEAD of the
+result — head-positioned because every downstream layer keeps heads — plus
+an outline of ``@offset heading`` jump targets. Search context lines carry
+the same ``@offset`` prefix: search reads FULL bodies, so it can cite a line
+a from-the-top read would never reach, and the offset turns the follow-up
+read into a jump instead of a crawl.
 """
 
 from __future__ import annotations
@@ -86,8 +102,12 @@ def _is_journal(rel: str) -> bool:
     name = Path(rel).name
     return name in _JOURNAL_NAMES or name.startswith("COMPILE-REPORT")
 
-# Payload ceiling, same shape and reasoning as wiki_query: bound by SIZE, not
-# page count, so a few large pages cannot blow past the working window.
+# SEARCH payload ceiling, same shape and reasoning as wiki_query: bound by
+# SIZE, not page count, so a few large pages cannot blow past the working
+# window. Serves vault_search ONLY — vault_read windows are the _READ_*
+# constants below. One value serving two scopes fails in both directions at
+# once: raising the search budget must not silently widen reads, nor the
+# reverse.
 _MAX_RESULT_TOKENS = 12_000
 _CHARS_PER_TOKEN = 4
 _MAX_RESULT_CHARS = _MAX_RESULT_TOKENS * _CHARS_PER_TOKEN
@@ -95,6 +115,30 @@ _MAX_RESULT_CHARS = _MAX_RESULT_TOKENS * _CHARS_PER_TOKEN
 _MAX_PAGES = 8
 _CONTEXT_LINES_PER_PAGE = 4
 _CONTEXT_LINE_CHARS = 300
+
+# vault_read windowing. The default is sized to SURVIVE the daemon's own
+# per-result truncator (context.tool_result_max, default 4000 tokens ≈ 16,000
+# chars, head-kept): window + header + outline + notices must estimate under
+# 4000 tokens, or the middle layer beheads the result and the model never
+# sees the continue offset — the exact failure paging exists to fix.
+# tests/test_vault_tools.py pins that property as an identity assertion.
+#
+# PAGING NOTE — the no-write AST guard in tests/test_vault_tools.py is
+# receiver-blind: it bans attribute calls BY NAME (.replace/.copy/.move/
+# .rename/.touch/...), so even str.replace or dict.copy in THIS module fails
+# the build. Use slicing, re.sub, or dict(...) instead.
+_READ_WINDOW_CHARS = 12_000   # default window
+_READ_WINDOW_MIN = 1_000      # max_chars floor — smaller windows thrash turns
+_READ_WINDOW_MAX = 48_000     # max_chars ceiling — the old single-shot cap
+
+# Outline: heading jump-targets shown on the first window of an over-window
+# file. Elision keeps HEAD AND TAIL entries — the tail is the point: on an
+# append-style page the newest headings live there, and they are exactly what
+# single-shot reads never showed. Elision is stated, never silent.
+_OUTLINE_KEEP = 12            # entries kept at each end when elided
+_OUTLINE_MAX = 2 * _OUTLINE_KEEP
+_OUTLINE_LINE_CHARS = 80
+_HEADING = re.compile(r"^#{1,6} .*$", re.M)
 
 
 class VaultRootUnavailable(Exception):
@@ -295,8 +339,20 @@ def _line_matches(line_low: str, words: set[str]) -> bool:
     return False
 
 
+def _frontmatter_end(text: str) -> int:
+    """Char offset where the body starts — past a leading YAML frontmatter block.
+
+    Standing-Principles keeps a changelog of YAML comment lines (``#   + …``)
+    inside its frontmatter; a naive heading scan reads those as level-1
+    headings, and an outline would then advertise jump targets into YAML.
+    No closing fence means no frontmatter — offset 0, the degenerate case.
+    """
+    m = re.match(r"---\r?\n.*?\r?\n---\r?\n", text, re.S)
+    return m.end() if m else 0
+
+
 def _context_for(page: Path, words: set[str]) -> list[str]:
-    """Matching lines from *page*, padded with its opening prose.
+    """Matching lines from *page* as ``@offset text``, padded with opening prose.
 
     Padding matters: an index hit means the query matched the page's TITLE or
     SUMMARY, so the only "matching" line in the body is often the heading
@@ -304,36 +360,43 @@ def _context_for(page: Path, words: set[str]) -> list[str]:
     useless — the caller learns the page exists and nothing about what it
     says. So thin results are topped up with the first substantive lines,
     skipping YAML frontmatter and headings.
+
+    The ``@offset`` prefix is the handoff to vault_read: search reads FULL
+    page bodies, so it can cite a line a windowed from-the-top read would
+    never reach — Standing-Principles' tail was findable and unreadable at
+    once. With the offset, the follow-up read is a jump, not a crawl.
     """
     try:
         text = page.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
 
-    lines = text.splitlines()
-    # Skip a leading YAML frontmatter block.
-    start = 0
-    if lines and lines[0].strip() == "---":
-        for i in range(1, len(lines)):
-            if lines[i].strip() == "---":
-                start = i + 1
-                break
-
-    body = [ln.strip() for ln in lines[start:] if ln.strip()]
+    body = _frontmatter_end(text)
+    lines = [
+        (m.start(), m.group(0).strip())
+        for m in re.finditer(r"^.*$", text, re.M)
+    ]
 
     out: list[str] = []
-    for stripped in body:
+    used: set[int] = set()
+    for off, stripped in lines:
+        if off < body or not stripped:
+            continue
         if _line_matches(stripped.lower(), words):
-            out.append(stripped[:_CONTEXT_LINE_CHARS])
+            out.append(f"@{off} {stripped[:_CONTEXT_LINE_CHARS]}")
+            used.add(off)
             if len(out) >= _CONTEXT_LINES_PER_PAGE:
                 return out
 
-    for stripped in body:
+    for off, stripped in lines:
         if len(out) >= _CONTEXT_LINES_PER_PAGE:
             break
-        if stripped.startswith("#") or stripped in out:
+        if off < body or not stripped:
             continue
-        out.append(stripped[:_CONTEXT_LINE_CHARS])
+        if stripped.startswith("#") or off in used:
+            continue
+        out.append(f"@{off} {stripped[:_CONTEXT_LINE_CHARS]}")
+        used.add(off)
     return out
 
 
@@ -461,6 +524,118 @@ class VaultSearchTool(BaseTool):
 # vault_read
 # ---------------------------------------------------------------------------
 
+def _window(text: str, start: int, max_chars: int) -> tuple[int, int]:
+    """The half-open ``[start, end)`` span one read returns.
+
+    ``end`` snaps back to the last newline inside the window so the next
+    window starts at a line boundary — except when the window holds no
+    newline at all (a single line longer than the window), where the only
+    correct move is a hard mid-line cut. Progress is guaranteed either way:
+    a snap lands after a newline at-or-past ``start``, and the hard cut is a
+    full window. Consecutive windows TILE — ``end_k == start_{k+1}``, and
+    the concatenation of every chunk is the file, byte for byte —
+    tests/test_vault_tools.py asserts that literally, on a fixture whose
+    boundaries land mid-line.
+    """
+    window = max(_READ_WINDOW_MIN, min(max_chars, _READ_WINDOW_MAX))
+    total = len(text)
+    hard_end = min(start + window, total)
+    if hard_end >= total:
+        return start, total
+    nl = text.rfind("\n", start, hard_end)
+    return start, (nl + 1) if nl != -1 else hard_end
+
+
+def _outline(text: str) -> list[str]:
+    """``@offset heading`` jump targets for the first window of a large file.
+
+    Head AND tail entries survive elision: the tail headings are the ones a
+    from-the-top reader never met. Frontmatter is excluded so YAML comment
+    lines cannot masquerade as level-1 headings (Standing-Principles keeps
+    its changelog that way).
+    """
+    body = _frontmatter_end(text)
+    heads = [
+        (m.start(), m.group(0).rstrip())
+        for m in _HEADING.finditer(text)
+        if m.start() >= body
+    ]
+    if not heads:
+        return []
+
+    def entry(off: int, heading: str) -> str:
+        return f"@{off} {heading[:_OUTLINE_LINE_CHARS]}"
+
+    if len(heads) <= _OUTLINE_MAX:
+        shown = [entry(o, h) for o, h in heads]
+    else:
+        hidden = heads[_OUTLINE_KEEP:-_OUTLINE_KEEP]
+        shown = (
+            [entry(o, h) for o, h in heads[:_OUTLINE_KEEP]]
+            + [
+                f"… +{len(hidden)} more headings between "
+                f"@{hidden[0][0]} and @{hidden[-1][0]}"
+            ]
+            + [entry(o, h) for o, h in heads[-_OUTLINE_KEEP:]]
+        )
+    return [f"## Outline — {len(heads)} heading(s)", *shown]
+
+
+def _render_window(rel: Path, text: str, offset: int, max_chars: int) -> ToolResult:
+    """One window of *text* with honest, HEAD-POSITIONED paging state.
+
+    The continue notice leads because every downstream truncation layer
+    keeps heads: the original single-shot notice TRAILED a 48k payload that
+    the daemon's default per-result truncator beheads at 16k, so in live use
+    the model never saw it once. A tail echo covers the no-clip case. Every
+    figure names the file's TRUE size — the trailer the middle layer writes
+    counts the payload it was handed, which is how "truncated at 12041
+    tokens" came to describe an 18,000-token page. Offsets are printed as
+    bare integers, never comma-grouped: they exist to be passed back.
+    """
+    total = len(text)
+    if offset < 0:
+        return ToolResult(
+            output=(
+                f"Invalid offset {offset} — vault_read offsets are 0-based "
+                f"character positions into {rel}."
+            ),
+            is_error=True,
+        )
+    if total and offset >= total:
+        window = max(_READ_WINDOW_MIN, min(max_chars, _READ_WINDOW_MAX))
+        return ToolResult(
+            output=(
+                f"Offset {offset} is past the end of {rel} — the file is "
+                f"{total} chars (valid offsets 0-{total - 1}; the final "
+                f"window starts at {max(0, total - window)})."
+            ),
+            is_error=True,
+        )
+
+    start, end = _window(text, offset, max_chars)
+    chunk = text[start:end]
+    if start == 0 and end == total:
+        return ToolResult(output=f"# brain vault: {rel} ({total} chars)\n\n{chunk}")
+
+    parts = [f"# brain vault: {rel} [chars {start}-{end} of {total}]"]
+    continue_note = None
+    if end < total:
+        continue_note = (
+            f"[partial view — {total - end} chars remain after {end}; "
+            f'continue: vault_read {{"path": "{rel}", "offset": {end}}}]'
+        )
+        parts.append(continue_note)
+        if start == 0:
+            outline = _outline(text)
+            if outline:
+                parts.append("\n".join(outline))
+    parts.append(chunk)
+    if continue_note:
+        parts.append(continue_note)
+    return ToolResult(output="\n\n".join(parts))
+
+
 class VaultReadInput(BaseModel):
     """Arguments for vault_read."""
 
@@ -469,6 +644,22 @@ class VaultReadInput(BaseModel):
             "Path relative to the brain vault root, e.g. "
             "'wiki/sources/concepts/Standing-Principles.md' or "
             "'raw/claude-chats/2026-04-24-prometheus3.md'."
+        ),
+    )
+    offset: int = Field(
+        default=0,
+        description=(
+            "Character position to start reading from (0-based). A partial "
+            "read names the next offset to continue with, and its outline "
+            "lists '@offset heading' jump targets."
+        ),
+    )
+    max_chars: int = Field(
+        default=_READ_WINDOW_CHARS,
+        description=(
+            "Window size in characters, clamped to 1000-48000. The default "
+            "leaves room for the daemon's per-result budget; raise it only "
+            "for a deliberate long pull."
         ),
     )
 
@@ -480,8 +671,10 @@ class VaultReadTool(BaseTool):
     description = (
         "Read a file from the BRAIN VAULT by its vault-relative "
         "path — compiled pages under wiki/, original sources under raw/, "
-        "human notes under notes/. Read-only. Use vault_search first to find "
-        "the path."
+        "human notes under notes/. Read-only. Large files come in windows: "
+        "a partial read names the true size, the next offset, and an "
+        "outline of '@offset heading' jump targets. Use vault_search first "
+        "to find the path (its context lines carry @offset for jumping)."
     )
     input_model = VaultReadInput
     example_call = {"path": "wiki/index.md"}
@@ -554,10 +747,4 @@ class VaultReadTool(BaseTool):
             )
 
         rel = resolved.relative_to(root)
-        if len(text) > _MAX_RESULT_CHARS:
-            text = (
-                text[:_MAX_RESULT_CHARS]
-                + f"\n\n[truncated at {_MAX_RESULT_CHARS} chars — "
-                f"the full page is on disk at {rel}]"
-            )
-        return ToolResult(output=f"# brain vault: {rel}\n\n{text}")
+        return _render_window(rel, text, arguments.offset, arguments.max_chars)
