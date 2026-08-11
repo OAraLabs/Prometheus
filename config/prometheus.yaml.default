@@ -71,7 +71,13 @@ tools:
     # full stable catalog cheap). Explicit true/false always wins. The
     # advertised set is frozen per run either way.
     enabled: auto
-    always_loaded: [bash, task_create, read_file, write_file, edit_file, grep, glob, tool_search]
+    # web_search/web_fetch/memory promoted 2026-08-11 (promotion review):
+    # "look that up", a bare URL, or "remember that I…" give the model no
+    # signal to search its own tool list — the web pair had 180 real calls
+    # through 07-25 and ZERO from the day deferral activated. ~670 est
+    # tokens buys the class out; the advertised set stays ~74% below the
+    # full catalog.
+    always_loaded: [bash, task_create, read_file, write_file, edit_file, grep, glob, tool_search, web_search, web_fetch, memory]
     mcp_always_deferred: true
     search_mcp: true
 

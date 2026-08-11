@@ -96,15 +96,18 @@ DEFERRED_BY_DESIGN: dict[str, tuple[str, str]] = {
     "wiki_lint": ("Maintenance operation, run deliberately.", "lint the wiki for broken links"),
     "wiki_compile": ("Maintenance operation; the compiler also runs automatically.", "compile the wiki from memory facts"),
 
-    # ── ⚠ PROMOTION CANDIDATES. Defensible today, probably wrong. Each is a tool
-    # a user reaches for with phrasing that gives the model NO signal to search
-    # its own tool list — which is precisely how vault_search failed.
-    "web_search": ("⚠ 'look that up' / 'what's the latest on X' gives no signal to search the tool list.", "search the web"),
-    "web_fetch": ("⚠ A bare URL in a prompt gives no signal to search the tool list.", "fetch a url and return its text"),
-    "wiki_query": ("⚠ 'what do you know about X' gives no signal to search the tool list.", "search the wiki for knowledge"),
+    # ── ⚠ NO-SIGNAL CLASS — reviewed 2026-08-11
+    # (audits/20260811T232710Z-promotion-review.md). A tool a user reaches for
+    # with phrasing that gives the model no cue to search its own tool list —
+    # precisely how vault_search failed. web_search, web_fetch and memory were
+    # PROMOTED to the template's always_loaded: the web pair had 180 real
+    # calls through 07-25 and ZERO from the day deferral activated (the vault
+    # failure observed in telemetry, not argued from an annotation); memory is
+    # cost-trivial insurance on the silent-"remember" failure. The entries
+    # below stay deferred, each with its dated reason.
+    "wiki_query": ("⚠ No-signal shape, but reviewed 2026-08-11 and kept deferred ON EVIDENCE: advertised for months pre-deferral with zero lifetime calls, so advertisement was never its binding constraint, and passive memory recall serves the read path with no tool choice at all. Revisit only if recall proves insufficient.", "search the wiki for knowledge"),
     "vault_search": ("⚠ Same failure mode, observed live 2026-08-10. Promoted in the operator's live config; the shipped default keeps it deferred because a fresh install has no vault.", "search the brain vault"),
     "vault_read": ("⚠ Paired with vault_search; same reasoning.", "read a brain vault page"),
-    "memory": ("⚠ 'remember that I...' is a durable-fact signal the model may not connect to a tool.", "manage persistent memory entries"),
     "anatomy": ("Infrastructure introspection; /anatomy and /status cover the human path.", "query infrastructure hardware and gpu state"),
     "download_file": ("bash+curl covers it; explicit by nature.", "download a file from a url"),
     "youtube_transcript": ("A YouTube URL is a strong explicit signal.", "fetch a youtube transcript"),
@@ -205,6 +208,24 @@ def test_the_core_file_tools_are_advertised():
     advertised = advertised_names()
     for name in ("bash", "read_file", "write_file", "edit_file", "grep", "glob"):
         assert name in advertised, f"{name} is not advertised"
+
+
+def test_the_no_signal_trio_is_advertised_in_the_shipped_default():
+    """Promotion review 2026-08-11: web_search and web_fetch had 180 real
+    calls through 07-25 and ZERO from the day deferral activated — the vault
+    failure observed in telemetry, not argued from an annotation. memory
+    rides along as cheap insurance on the silent-'remember' failure.
+
+    wiki_query deliberately does NOT appear here: advertised for months
+    pre-deferral, never once chosen — advertisement was not its binding
+    constraint. Its DEFERRED_BY_DESIGN entry carries the dated verdict."""
+    advertised = advertised_names()
+    for name in ("web_search", "web_fetch", "memory"):
+        assert name in advertised, f"{name} fell out of the shipped default"
+    assert "wiki_query" not in advertised, (
+        "wiki_query was promoted without revisiting the 2026-08-11 evidence "
+        "(zero lifetime calls while advertised) — see the promotion review"
+    )
 
 
 def test_tool_search_itself_is_advertised():
