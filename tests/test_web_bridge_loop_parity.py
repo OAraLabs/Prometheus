@@ -25,8 +25,17 @@ That asymmetry has now silently broken six separate features:
    state and had to be made turn-scoped before the shared web context could
    safely hold it (see KNOWN_UNVERIFIED_DRIFT below for the full account).
 
+7. the microcompact/turn-budget keys (selector survey, 2026-08-11) — a NEW
+   geometry the two-loop comparison was structurally blind to: five config
+   keys (``tool_results_turn_budget``, ``microcompact_*``) were threaded by
+   ``__main__.py`` only, so BOTH daemon constructions lacked them EQUALLY and
+   the drift set was empty. Masked twice over: the dataclass defaults happen
+   to equal the live config values, so behavior matched until the day someone
+   edited the key. The guard below now extracts the CLI's config-backed
+   kwargs too and requires them at both daemon sites.
+
 Each was invisible because the fallback is a plausible default, not an error.
-This test makes the drift itself fail, so the seventh one gets caught here.
+This test makes the drift itself fail, so the eighth one gets caught here.
 """
 
 from __future__ import annotations
@@ -76,6 +85,14 @@ DAEMON = Path(__file__).resolve().parents[1] / "src" / "prometheus" / "daemon.py
 KNOWN_UNVERIFIED_DRIFT: set[str] = set()
 
 
+MAIN = Path(__file__).resolve().parents[1] / "src" / "prometheus" / "__main__.py"
+
+# Config-backed kwargs the CLI threads that the daemon deliberately does not.
+# Same policy as KNOWN_UNVERIFIED_DRIFT: keep it empty; every entry needs a
+# reason a reader can check and a test that fails when it stops being true.
+CLI_ONLY_CONFIG: set[str] = set()
+
+
 def _kwargs_by_callee() -> dict[str, set[str]]:
     tree = ast.parse(DAEMON.read_text(encoding="utf-8"))
     out: dict[str, set[str]] = {}
@@ -86,6 +103,39 @@ def _kwargs_by_callee() -> dict[str, set[str]]:
         if name in ("LoopContext", "AgentLoop"):
             out.setdefault(name, set()).update(k.arg for k in node.keywords if k.arg)
     return out
+
+
+def _config_backed_kwargs(source: str, callees: tuple[str, ...]) -> set[str]:
+    """Kwarg names in *callees* calls whose VALUE reads config (a ``.get`` call).
+
+    "Config-backed" is the precise universe for the instance-7 guard: a kwarg
+    whose value is a literal (``max_tokens=4096``) or a per-run variable
+    (``system_prompt=...``) is a per-path choice, but one whose value is
+    ``cfg.get("key", default)`` is a config key with a reader — and a config
+    key one path reads while another silently defaults is exactly the
+    coincidence-masked class the survey found. Selecting on the value SHAPE
+    means no manual list of exempt kwargs can rot.
+    """
+    tree = ast.parse(source)
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name not in callees:
+            continue
+        for kw in node.keywords:
+            if kw.arg is None:
+                continue
+            reads_config = any(
+                isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Attribute)
+                and inner.func.attr == "get"
+                for inner in ast.walk(kw.value)
+            )
+            if reads_config:
+                found.add(kw.arg)
+    return found
 
 
 def _loop_context_fields() -> set[str]:
@@ -156,6 +206,63 @@ def test_no_new_drift_between_the_two_loops():
         f"dataclass default. Pass them at the web-bridge LoopContext in "
         f"daemon.py, or add them to KNOWN_UNVERIFIED_DRIFT with a reason."
     )
+
+
+def test_config_the_cli_threads_reaches_both_daemon_loops():
+    """Instance 7's guard: the two-loop comparison cannot see a field BOTH
+    daemon constructions lack equally, so it compares against the CLI too.
+
+    Every LoopContext kwarg whose value is a config read in ``__main__.py``
+    must be passed at BOTH daemon sites. This is the exact shape that hid the
+    microcompact/turn-budget keys: config-backed on the CLI, absent from both
+    daemon constructions, masked by defaults that happened to equal the live
+    config values — so nothing misbehaved until the key was edited, and then
+    only the CLI obeyed."""
+    fields = _loop_context_fields()
+    cli = _config_backed_kwargs(MAIN.read_text(encoding="utf-8"), ("LoopContext",)) & fields
+    assert cli, "the CLI LoopContext no longer threads any config — extractor broken?"
+    daemon = _kwargs_by_callee()
+    for site in ("AgentLoop", "LoopContext"):
+        missing = cli - daemon[site] - CLI_ONLY_CONFIG
+        assert not missing, (
+            f"config-backed LoopContext kwargs the CLI threads but the daemon's "
+            f"{site} construction does not: {sorted(missing)}. That surface will "
+            f"silently run on dataclass defaults no matter what the config says "
+            f"— and if the default equals today's live value, nothing will look "
+            f"wrong until the key is edited. Pass them in daemon.py, or add to "
+            f"CLI_ONLY_CONFIG with a checkable reason."
+        )
+
+
+def test_the_config_backed_extractor_recognises_what_it_hunts():
+    """§3b: the guard above is only as good as its classifier. A synthetic
+    construction with one config-backed kwarg, one literal, and one variable
+    must classify as exactly the config-backed one — if the ``.get`` idiom in
+    the codebase ever changes shape, this fails before the guard goes blind."""
+    src = (
+        "ctx = LoopContext(\n"
+        "    threaded=cfg.get('context', {}).get('threaded', 3),\n"
+        "    literal=4096,\n"
+        "    per_run=session_id,\n"
+        ")\n"
+    )
+    assert _config_backed_kwargs(src, ("LoopContext",)) == {"threaded"}
+
+
+def test_the_survey_five_reach_both_daemon_sites():
+    """The instance-7 story pinned by name: the five keys found CLI-only on
+    2026-08-11 must stay threaded at both daemon constructions."""
+    daemon = _kwargs_by_callee()
+    five = {
+        "tool_results_turn_budget",
+        "microcompact_after_turns",
+        "microcompact_on_cloud",
+        "microcompact_keep_chars",
+        "microcompact_keep_chars_no_lcm",
+    }
+    assert five <= _loop_context_fields()
+    assert five <= daemon["AgentLoop"], sorted(five - daemon["AgentLoop"])
+    assert five <= daemon["LoopContext"], sorted(five - daemon["LoopContext"])
 
 
 def test_carveouts_are_still_real():

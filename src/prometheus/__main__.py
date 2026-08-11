@@ -1374,6 +1374,7 @@ def main() -> None:
         tool_result_max=ctx_cfg.get("tool_result_max", 4000),
         tool_results_turn_budget=ctx_cfg.get("tool_results_turn_budget", 8000),
         microcompact_after_turns=ctx_cfg.get("microcompact_after_turns", 3),
+        microcompact_on_cloud=ctx_cfg.get("microcompact_on_cloud", False),
         microcompact_keep_chars=ctx_cfg.get("microcompact_keep_chars", 200),
         microcompact_keep_chars_no_lcm=ctx_cfg.get("microcompact_keep_chars_no_lcm", 500),
         tool_loader=tool_loader,

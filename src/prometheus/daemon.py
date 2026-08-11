@@ -522,6 +522,17 @@ async def run_daemon(args: argparse.Namespace) -> None:
         nudge=nudge,
         file_mutation_verifier=fmv,
         tool_result_max=config.get("context", {}).get("tool_result_max", 4000),
+        # Selector-survey 2026-08-11: the five below had config keys the CLI
+        # threaded and the daemon did not — every daemon surface ran on
+        # dataclass defaults that coincidentally EQUALLED the live config
+        # values (8000/3/False/200/500), so editing the key changed the CLI
+        # and silently did nothing here. Same class as max_tool_iterations_cloud
+        # above; the parity guard now checks CLI-threaded config kwargs too.
+        tool_results_turn_budget=config.get("context", {}).get("tool_results_turn_budget", 8000),
+        microcompact_after_turns=config.get("context", {}).get("microcompact_after_turns", 3),
+        microcompact_on_cloud=config.get("context", {}).get("microcompact_on_cloud", False),
+        microcompact_keep_chars=config.get("context", {}).get("microcompact_keep_chars", 200),
+        microcompact_keep_chars_no_lcm=config.get("context", {}).get("microcompact_keep_chars_no_lcm", 500),
         compactor=compactor,
     )
 
@@ -1444,6 +1455,20 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 model_router=model_router,
                 divergence_detector=divergence_detector,
                 tool_result_max=config.get("context", {}).get("tool_result_max", 4000),
+                # ...and the SEVENTH (selector-survey 2026-08-11) — a NEW
+                # geometry the drift guard was structurally blind to: these
+                # five had config keys that only __main__.py threaded, so BOTH
+                # daemon constructions lacked them EQUALLY and the two-loop
+                # comparison saw no drift. Masked further by coincidence: the
+                # dataclass defaults equal today's live config values, so
+                # behavior matched until the day someone edited the key. The
+                # parity guard now also checks CLI-threaded config kwargs
+                # against both daemon sites.
+                tool_results_turn_budget=config.get("context", {}).get("tool_results_turn_budget", 8000),
+                microcompact_after_turns=config.get("context", {}).get("microcompact_after_turns", 3),
+                microcompact_on_cloud=config.get("context", {}).get("microcompact_on_cloud", False),
+                microcompact_keep_chars=config.get("context", {}).get("microcompact_keep_chars", 200),
+                microcompact_keep_chars_no_lcm=config.get("context", {}).get("microcompact_keep_chars_no_lcm", 500),
                 # Phase 3.5: web bridge is its own session namespace.
                 session_id="web",
                 # Sprint 2 (OAra): the web path was the ONLY path without the

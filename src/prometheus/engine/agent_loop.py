@@ -3098,11 +3098,26 @@ class AgentLoop:
         tool_result_max: int = 0,
         compactor: object | None = None,
         memory_recall: object | None = None,
+        tool_results_turn_budget: int = 8000,
+        microcompact_after_turns: int = 3,
+        microcompact_on_cloud: bool = False,
+        microcompact_keep_chars: int = 200,
+        microcompact_keep_chars_no_lcm: int = 500,
     ) -> None:
         self._provider = provider
         self._model = model
         self._tool_result_max = tool_result_max
         self._compactor = compactor
+        # Selector-survey 2026-08-11: these five were LoopContext fields with
+        # config keys that only __main__.py threaded, so every daemon surface
+        # ran on the dataclass defaults — invisible because the defaults
+        # happened to EQUAL the live config values. Defaults here mirror the
+        # LoopContext defaults so omitting them stays behavior-identical.
+        self._tool_results_turn_budget = tool_results_turn_budget
+        self._microcompact_after_turns = microcompact_after_turns
+        self._microcompact_on_cloud = microcompact_on_cloud
+        self._microcompact_keep_chars = microcompact_keep_chars
+        self._microcompact_keep_chars_no_lcm = microcompact_keep_chars_no_lcm
         self._max_tokens = max_tokens
         self._max_turns = max_turns
         self._max_tool_iterations = max_tool_iterations
@@ -3217,6 +3232,11 @@ class AgentLoop:
             session_state=session_state,
             file_mutation_verifier=self._file_mutation_verifier,
             tool_result_max=self._tool_result_max,
+            tool_results_turn_budget=self._tool_results_turn_budget,
+            microcompact_after_turns=self._microcompact_after_turns,
+            microcompact_on_cloud=self._microcompact_on_cloud,
+            microcompact_keep_chars=self._microcompact_keep_chars,
+            microcompact_keep_chars_no_lcm=self._microcompact_keep_chars_no_lcm,
             compactor=self._compactor,
             memory_recall=self.memory_recall,
             # The nudge USED to be injected below, in the `async for` body.
