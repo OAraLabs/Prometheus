@@ -900,6 +900,11 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # which happens after this point, so this ordering is safe.
     if lcm_engine is not None:
         session_manager.lcm_engine = lcm_engine
+        # Same late-wiring for the loop itself: run_async reads the attribute
+        # per call, so every telegram/CLI/bakeoff turn from here on carries it
+        # into its LoopContext and the microcompactor's is_ingested check has
+        # a real engine instead of the always-None dead branch.
+        agent_loop.lcm_engine = lcm_engine
 
     # Memory extractor (optional, from Sprint 5)
     memory_recall = None  # set below when the store comes up; web path reads it
@@ -1529,6 +1534,23 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 # catches this whole class (run_async-only behaviour) rather
                 # than just the field-level drift.
                 nudge=nudge,
+                # ...and the SEVENTH — the first that NEITHER guard could see,
+                # because no path passed it: LoopContext.lcm_engine existed
+                # only as a dataclass default, so the microcompactor's
+                # is_ingested branch was dead code and microcompact_keep_chars
+                # was unreachable on every surface. Shared-state analysis (the
+                # fmv lesson, applied BEFORE wiring this time): the loop's one
+                # consumer (_microcompact_old_results) is read-only —
+                # is_ingested → SELECT 1 on a WAL sqlite connection created
+                # with check_same_thread=False — synchronous (atomic under the
+                # event loop) and holding no per-turn state, so concurrent web
+                # turns sharing this instance cannot cross-talk. The same
+                # engine already serves concurrent web writes via session
+                # persistence (session_manager.lcm_engine) and the REST
+                # history routes; this adds a point-read to that established
+                # sharing regime. See tests/test_microcompact.py::
+                # TestSharedEngineSafety.
+                lcm_engine=lcm_engine,
             )
 
             # Beacon D1: construct the profile store so GET /api/profiles returns

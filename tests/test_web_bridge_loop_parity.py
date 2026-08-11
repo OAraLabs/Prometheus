@@ -49,6 +49,7 @@ import pytest
 from prometheus.engine.agent_loop import LoopContext
 
 DAEMON = Path(__file__).resolve().parents[1] / "src" / "prometheus" / "daemon.py"
+MAIN = DAEMON.parent / "__main__.py"
 
 # Names the AgentLoop path passes that the web bridge intentionally does not,
 # each of which must stay justified. Anything else showing up in the drift is a
@@ -191,6 +192,79 @@ def test_web_bridge_gets_the_file_mutation_verifier():
     assert "file_mutation_verifier" in _kwargs_by_callee()["LoopContext"]
 
 
+def test_the_lcm_engine_reaches_all_three_construction_sites():
+    """``lcm_engine`` is the drift variant NEITHER guard could see.
+
+    The six instances above were asymmetries: one path configured a field, the
+    other didn't. ``LoopContext.lcm_engine`` was configured by NO path — the
+    field guard's agent side never contained it, and ``run_async`` had no
+    ``self.lcm_engine`` read for the wrapper guard to flag. So the
+    microcompactor's ``is_ingested`` branch was dead code and
+    ``microcompact_keep_chars`` was unreachable on every surface: all three
+    paths silently used ``microcompact_keep_chars_no_lcm``.
+
+    Wiring it onto the SHARED web context got the fmv treatment (item 6 in the
+    module docstring) BEFORE the wiring rather than after: the loop's one
+    consumer is read-only (``is_ingested`` → indexed ``SELECT 1`` on a WAL
+    connection created with ``check_same_thread=False``), synchronous, and
+    holds no per-turn state — nothing to key, nothing to cross-talk. Proven
+    behaviourally in tests/test_microcompact.py::TestSharedEngineSafety.
+
+    Three sites, three shapes, all pinned here:
+
+    * web ``LoopContext(...)`` — a direct kwarg (the engine exists by then);
+    * daemon ``AgentLoop`` — a LATE ASSIGNMENT (``agent_loop.lcm_engine = …``),
+      because the loop is built ~370 lines before the engine; the ctor kwarg
+      form would pass ``None`` and freeze the dead branch back in;
+    * CLI ``LoopContext(...)`` in ``__main__.py`` — a direct kwarg from
+      ``create_lcm_engine``.
+
+    Note what wiring does NOT yet change: ``is_ingested`` receives a
+    ``tool_use_id`` and LCM ids are per-message, so it returns False for every
+    block until the tool_use_id ↔ message_id mapping lands (see the caveat on
+    ``LCMEngine.is_ingested``). The keep-more path stays the live behaviour;
+    this fixes the plumbing so the config stops being a lie, not the outcome.
+    """
+    assert "lcm_engine" in _kwargs_by_callee()["LoopContext"], (
+        "the web-bridge LoopContext no longer passes lcm_engine — web/Beacon "
+        "turns fall back to the dead-branch default"
+    )
+
+    daemon_tree = ast.parse(DAEMON.read_text(encoding="utf-8"))
+    late_assigned = any(
+        isinstance(node, ast.Assign)
+        and any(
+            isinstance(t, ast.Attribute)
+            and t.attr == "lcm_engine"
+            and isinstance(t.value, ast.Name)
+            and t.value.id == "agent_loop"
+            for t in node.targets
+        )
+        for node in ast.walk(daemon_tree)
+    )
+    assert late_assigned, (
+        "daemon.py no longer assigns agent_loop.lcm_engine — telegram/CLI/"
+        "bakeoff turns fall back to the dead-branch default (the AgentLoop is "
+        "built before the engine exists, so the ctor kwarg cannot carry it)"
+    )
+
+    cli_tree = ast.parse(MAIN.read_text(encoding="utf-8"))
+    cli_kwargs = {
+        kw.arg
+        for node in ast.walk(cli_tree)
+        if isinstance(node, ast.Call)
+        and (getattr(node.func, "id", None) or getattr(node.func, "attr", None))
+        == "LoopContext"
+        for kw in node.keywords
+        if kw.arg
+    }
+    assert "lcm_engine" in cli_kwargs, (
+        "__main__.py's CLI LoopContext no longer passes lcm_engine — the one "
+        "surface that ingests into the engine on every turn would stop "
+        "checking it"
+    )
+
+
 def test_no_new_drift_between_the_two_loops():
     """The actual guard: every LoopContext field the AgentLoop path configures
     must also be configured on the web path."""
@@ -285,6 +359,11 @@ def test_the_defaults_that_made_this_silent():
     assert defaults["max_tool_iterations"] == 25
     assert defaults["max_tool_iterations_cloud"] is None
     assert defaults["tool_loader"] is None
+    # None here means "LCM never ingested anything" — the microcompactor
+    # quietly keeps the longer no_lcm char budget, which LOOKS like working
+    # microcompaction. That plausibility is how the field stayed dead on all
+    # three paths at once.
+    assert defaults["lcm_engine"] is None
 
 
 # ---------------------------------------------------------------------------
