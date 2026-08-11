@@ -123,6 +123,7 @@ def create_app(
     telemetry: Any | None = None,
     skill_registry: Any | None = None,
     profile_store: Any | None = None,
+    profile_state: Any | None = None,
     lcm_engine: Any | None = None,
     agent_loop: Any | None = None,
     approval_queue: Any | None = None,
@@ -190,6 +191,11 @@ def create_app(
     app.state.telemetry = telemetry
     app.state.skill_registry = skill_registry
     app.state.profile_store = profile_store
+    # ActiveProfileState — the SAME holder the loop constructions resolve
+    # through. When present it is the single source of truth; the bare
+    # app.state.active_profile string below is only the fallback for
+    # profile_state-less embeddings (tests, standalone create_app).
+    app.state.profile_state = profile_state
     app.state.lcm_engine = lcm_engine
     app.state.agent_loop = agent_loop
     app.state.approval_queue = approval_queue
@@ -200,7 +206,10 @@ def create_app(
     app.state.agent_state = "idle"
     app.state.current_model = config.get("model", {}).get("model", "unknown")
     app.state.current_provider = config.get("model", {}).get("provider", "unknown")
-    app.state.active_profile = config.get("profiles", {}).get("default", "full")
+    app.state.active_profile = (
+        profile_state.name if profile_state is not None
+        else config.get("profiles", {}).get("default", "full")
+    )
 
     # Coding live-stream (feat/coding-livestream): tails telemetry.db per coding
     # run and fans coding_round/coding_complete/coding_stream_error over the WS
@@ -270,7 +279,11 @@ def create_app(
             "state": app.state.agent_state,
             "model": app.state.current_model,
             "provider": app.state.current_provider,
-            "profile": app.state.active_profile,
+            "profile": (
+                app.state.profile_state.name
+                if getattr(app.state, "profile_state", None) is not None
+                else app.state.active_profile
+            ),
             "uptime_seconds": time.time() - app.state.start_time,
             "running_sha": running_sha,
             "tree_head": tree_head,
@@ -682,14 +695,26 @@ def create_app(
             {
                 "name": p.name,
                 "description": p.description,
-                "is_active": p.name == app.state.active_profile,
+                "is_active": p.name == (
+                    profile_state.name if profile_state is not None
+                    else app.state.active_profile
+                ),
             }
             for p in profile_store.list_profiles()
         ]
 
     @app.put("/api/profiles/active")
     async def set_active_profile(body: dict):
+        """Switch the active profile — through the SAME holder the loop
+        constructions resolve, so the switch reaches the next run on every
+        surface. Before the holder existed this route set a cosmetic string
+        that nothing downstream ever read."""
         name = body.get("name", "")
+        if profile_state is not None:
+            if profile_state.set(name) is None:
+                return JSONResponse(status_code=404, content={"error": "profile not found"})
+            app.state.active_profile = profile_state.name  # keep display in sync
+            return {"ok": True, "profile": profile_state.name}
         if profile_store and profile_store.get(name):
             app.state.active_profile = name
             return {"ok": True, "profile": name}

@@ -2018,17 +2018,28 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id = update.effective_chat.id
         args = (update.message.text or "").split(maxsplit=1)
         arg = args[1].strip() if len(args) > 1 else ""
-        current = getattr(self, "_active_profile_name", "full")
+        # Prefer the daemon-shared ActiveProfileState: the loops resolve
+        # advertisement through it per run, so a switch here reaches the next
+        # turn on EVERY surface. The per-adapter attribute is the fallback for
+        # holder-less embeddings and was, before the holder existed, a name
+        # nothing ever read back.
+        state = getattr(self, "profile_state", None)
+        current = (
+            state.name if state is not None
+            else getattr(self, "_active_profile_name", "full")
+        )
 
         text = cmd_profile(arg=arg, current=current)
 
-        # If switching, store the new profile name on the adapter
         if arg:
-            from prometheus.config.profiles import ProfileStore
-            store = ProfileStore()
-            profile = store.get(arg.strip())
-            if profile is not None:
-                self._active_profile_name = profile.name
+            if state is not None:
+                state.set(arg)
+            else:
+                from prometheus.config.profiles import ProfileStore
+                store = ProfileStore()
+                profile = store.get(arg.strip())
+                if profile is not None:
+                    self._active_profile_name = profile.name
 
         await self.send(chat_id, text, parse_mode=None)
 

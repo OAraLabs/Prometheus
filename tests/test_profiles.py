@@ -42,14 +42,16 @@ class TestBuiltinProfiles:
         assert coder is not None
         assert coder.tools is not None
         assert "bash" in coder.tools
-        assert "file_read" in coder.tools
+        # Registry name — the list said "file_read" for years while the tool
+        # was registered as read_file; see test_profile_wiring.py's guard.
+        assert "read_file" in coder.tools
         assert "wiki_query" not in coder.tools
 
     def test_minimal_profile_has_fewest_tools(self) -> None:
         store = ProfileStore(custom_dir=Path("/tmp/empty_profiles_dir_test"))
         minimal = store.get("minimal")
         assert minimal is not None
-        assert minimal.tools == ["bash", "file_read"]
+        assert minimal.tools == ["bash", "read_file"]
 
     def test_research_profile_excludes_mutations(self) -> None:
         store = ProfileStore(custom_dir=Path("/tmp/empty_profiles_dir_test"))

@@ -1357,6 +1357,19 @@ def main() -> None:
         log.warning("Memory recall unavailable for CLI session", exc_info=True)
 
     ctx_cfg = config.get("context", {})
+
+    # Agent profile: the CLI has no /profile switching, so the holder stays on
+    # profiles.default for the session — but it must still filter, or the CLI
+    # advertises a different catalog than the daemon under the same config.
+    profile_resolver = None
+    try:
+        from prometheus.config.profiles import ActiveProfileState, get_profile_store
+        profile_resolver = ActiveProfileState(
+            get_profile_store(), config.get("profiles", {}).get("default", "full"),
+        ).get
+    except Exception:
+        log.warning("profile store unavailable — advertisement unfiltered", exc_info=True)
+
     context = LoopContext(
         provider=provider,
         model=model_name,
@@ -1383,6 +1396,7 @@ def main() -> None:
         # The engine built above (create_lcm_engine) — the CLI ingests its
         # turns into it, and the microcompactor checks it; None if unavailable.
         lcm_engine=lcm_engine,
+        profile_resolver=profile_resolver,
     )
 
     async def _async_main() -> None:
