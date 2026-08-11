@@ -1134,16 +1134,25 @@ class SlackAdapter(BasePlatformAdapter):
         from prometheus.gateway.commands import cmd_profile
 
         text_arg = self._cmd_text(command)
-        current = getattr(self, "_active_profile_name", "full")
+        # Daemon-shared ActiveProfileState first (the loops resolve through
+        # it per run); per-adapter attribute only for holder-less embeddings.
+        state = getattr(self, "profile_state", None)
+        current = (
+            state.name if state is not None
+            else getattr(self, "_active_profile_name", "full")
+        )
         text = cmd_profile(arg=text_arg, current=current)
 
         if text_arg:
             try:
-                from prometheus.config.profiles import ProfileStore
-                store = ProfileStore()
-                profile = store.get(text_arg.strip())
-                if profile is not None:
-                    self._active_profile_name = profile.name
+                if state is not None:
+                    state.set(text_arg)
+                else:
+                    from prometheus.config.profiles import ProfileStore
+                    store = ProfileStore()
+                    profile = store.get(text_arg.strip())
+                    if profile is not None:
+                        self._active_profile_name = profile.name
             except Exception:
                 logger.debug("profile switch persistence skipped", exc_info=True)
 

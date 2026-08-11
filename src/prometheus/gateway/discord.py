@@ -1083,14 +1083,23 @@ class DiscordAdapter(BasePlatformAdapter):
     async def _app_profile(self, interaction: Any, args: str) -> None:
         from prometheus.gateway.commands import cmd_profile
 
-        current = getattr(self, "_active_profile_name", "full")
+        # Daemon-shared ActiveProfileState first (the loops resolve through
+        # it per run); per-adapter attribute only for holder-less embeddings.
+        state = getattr(self, "profile_state", None)
+        current = (
+            state.name if state is not None
+            else getattr(self, "_active_profile_name", "full")
+        )
         text = cmd_profile(arg=args, current=current)
         if args:
             try:
-                from prometheus.config.profiles import ProfileStore
-                profile = ProfileStore().get(args.strip())
-                if profile is not None:
-                    self._active_profile_name = profile.name
+                if state is not None:
+                    state.set(args)
+                else:
+                    from prometheus.config.profiles import ProfileStore
+                    profile = ProfileStore().get(args.strip())
+                    if profile is not None:
+                        self._active_profile_name = profile.name
             except Exception:
                 logger.debug("profile switch persistence skipped", exc_info=True)
         await self._respond(interaction, text)

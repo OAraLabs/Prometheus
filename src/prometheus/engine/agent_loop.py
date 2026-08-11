@@ -609,6 +609,11 @@ class LoopContext:
     microcompact_keep_chars: int = 200    # chars to keep per compacted result
     microcompact_keep_chars_no_lcm: int = 500  # chars if LCM hasn't ingested
     lcm_engine: object | None = None      # LCMEngine for microcompaction checks
+    # Agent profile (selector survey → wired): a zero-arg callable returning
+    # the ACTIVE AgentProfile (or None = unfiltered). A RESOLVER rather than a
+    # profile so /profile and Beacon switches reach the NEXT run through this
+    # long-lived context — per-session values must be per-call parameters.
+    profile_resolver: object | None = None
     # Phase 3.5: session_id used by the router's per-session override lookup.
     # Telegram: str(chat_id). Slack: str(channel_id). CLI: "cli". Web: "web".
     # Reserved: None and "system" never match any override (eval/benchmark/
@@ -825,6 +830,35 @@ async def _run_loop(
             deferred_source = "no tool loader (registry direct)"
             tool_schema = context.tool_registry.to_api_schema()
 
+    # Agent profile filter (selector survey → wired). Applied HERE — after
+    # source resolution so it treats all three sources identically, before
+    # the freeze so the run stays prefix-stable, and before the telemetry row
+    # so "advertised" states what the model actually saw. Resolved per run:
+    # a /profile or Beacon switch affects the next run, not a restart.
+    active_profile = None
+    if tools_enabled and tool_schema and context.profile_resolver is not None:
+        try:
+            active_profile = context.profile_resolver()
+        except Exception:
+            log.warning("profile resolver failed — advertising unfiltered", exc_info=True)
+        if active_profile is not None:
+            from prometheus.config.profiles import filter_tools_by_profile
+
+            filtered = filter_tools_by_profile(tool_schema, active_profile)
+            if filtered:
+                tool_schema = filtered
+            else:
+                # A profile that filters the catalog to NOTHING is a config
+                # error wearing a quiet face — advertising zero tools is the
+                # vault_search failure shape (the model concludes the
+                # capability does not exist). Fail loud, run unfiltered.
+                log.error(
+                    "profile %r filtered all %d advertised tools — "
+                    "advertising unfiltered instead; fix the profile's tool "
+                    "names", active_profile.name, len(tool_schema),
+                )
+                active_profile = None
+
     # A/B measurability: one row per run stating what was advertised and why,
     # so deferred-vs-full comparisons come straight out of the DB instead of
     # being reconstructed from token counts.
@@ -847,6 +881,7 @@ async def _run_loop(
                     "source": deferred_source,
                     "advertised": len(tool_schema),
                     "registered_total": _registered_total,
+                    "profile": getattr(active_profile, "name", None),
                 },
             )
         except Exception:
@@ -3112,6 +3147,7 @@ class AgentLoop:
         microcompact_keep_chars: int = 200,
         microcompact_keep_chars_no_lcm: int = 500,
         lcm_engine: object | None = None,
+        profile_resolver: object | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
@@ -3127,6 +3163,7 @@ class AgentLoop:
         self._microcompact_on_cloud = microcompact_on_cloud
         self._microcompact_keep_chars = microcompact_keep_chars
         self._microcompact_keep_chars_no_lcm = microcompact_keep_chars_no_lcm
+        self._profile_resolver = profile_resolver
         self._max_tokens = max_tokens
         self._max_turns = max_turns
         self._max_tool_iterations = max_tool_iterations
@@ -3254,6 +3291,7 @@ class AgentLoop:
             compactor=self._compactor,
             memory_recall=self.memory_recall,
             lcm_engine=self.lcm_engine,
+            profile_resolver=self._profile_resolver,
             # The nudge USED to be injected below, in the `async for` body.
             # That made it AgentLoop-only, so no web / Beacon / Bridge turn
             # ever saw it — the parity guard could not catch it either,

@@ -498,10 +498,29 @@ async def run_daemon(args: argparse.Namespace) -> None:
     except Exception as exc:
         logger.warning("Context compactor not available: %s", exc)
 
+    # Agent profile state (selector survey 2026-08-11 → wired). ONE holder
+    # every surface shares: profiles.default seeds it, /profile and Beacon's
+    # PUT /api/profiles/active mutate it, and BOTH loop constructions resolve
+    # through it per run — before this, the filter had no caller and /profile
+    # wrote a name nobody read. Degrades to None (= unfiltered advertisement)
+    # if the store cannot load; a broken custom YAML must not kill the daemon.
+    profile_state = None
+    profile_store = None
+    try:
+        from prometheus.config.profiles import ActiveProfileState, get_profile_store
+        profile_store = get_profile_store()
+        profile_state = ActiveProfileState(
+            profile_store, config.get("profiles", {}).get("default", "full"),
+        )
+        logger.info("Agent profile active: %s", profile_state.name)
+    except Exception as exc:
+        logger.warning("profile store unavailable — advertisement unfiltered: %s", exc)
+
     # Agent loop
     agent_loop = AgentLoop(
         provider=provider,
         model=model_name,
+        profile_resolver=profile_state.get if profile_state else None,
         tool_registry=registry,
         adapter=adapter,
         permission_checker=security_gate,
@@ -614,6 +633,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 session_manager=session_manager,
                 prometheus_config=config,
             )
+            # Same late-wiring pattern as memory_recall: the /profile command
+            # mutates THE holder the loops resolve, instead of a per-adapter
+            # attribute nothing read.
+            telegram.profile_state = profile_state
             gateway_registry.register_adapter(telegram)
             await telegram.start()
             archive.archive_event("telegram_started")
@@ -748,6 +771,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 session_manager=session_manager,
                 prometheus_config=config,
             )
+            slack_adapter.profile_state = profile_state
             # SPRINT G1: registering replays every subsystem attached so far
             # (cost tracker, approval queue, printing press, …) onto Slack.
             gateway_registry.register_adapter(slack_adapter)
@@ -802,6 +826,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 session_manager=session_manager,
                 prometheus_config=config,
             )
+            discord_adapter.profile_state = profile_state
             # SPRINT G1 contract: registering replays every subsystem attached
             # so far (cost tracker, approval queue, printing press, …) onto
             # Discord.
@@ -1487,6 +1512,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 # web/Beacon turns silently never recall. None when the
                 # extractor block failed or recall is disabled.
                 memory_recall=memory_recall,
+                # Agent profile: same holder as the AgentLoop path, resolved
+                # per run — a Beacon profile switch reaches the next web turn
+                # through this pre-built context too, not just telegram/CLI.
+                profile_resolver=profile_state.get if profile_state else None,
                 # THE SAME LESSON, THIRD TIME (2026-07-31). Everything below is
                 # config that AgentLoop threads for telegram/CLI and that this
                 # pre-built context silently dropped, so web/Beacon turns ran on
@@ -1553,17 +1582,11 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 lcm_engine=lcm_engine,
             )
 
-            # Beacon D1: construct the profile store so GET /api/profiles returns
-            # the real profiles. The server endpoints, launcher param, and desktop
-            # profile-switch UI were all ready; the daemon just never passed a
-            # store (→ [] → dead UI). A profile-load error must not take down the
-            # whole web bridge, so it degrades to None (the launcher handles None).
-            try:
-                from prometheus.config.profiles import get_profile_store
-                profile_store = get_profile_store()
-            except Exception as exc:
-                logger.warning("profile store unavailable: %s", exc)
-                profile_store = None
+            # Beacon D1 + selector survey: the store AND the active-profile
+            # holder are built once, before the AgentLoop — the web layer gets
+            # the same objects so GET /api/profiles lists the real profiles
+            # and PUT /api/profiles/active mutates the state the loops
+            # actually resolve, instead of a cosmetic app.state string.
 
             api_port = web_config.get("api_port", 8005)
             ws_port = web_config.get("ws_port", 8010)
@@ -1589,6 +1612,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 approval_queue=approval_queue if "approval_queue" in dir() else None,
                 loop_context=loop_context,
                 profile_store=profile_store,
+                profile_state=profile_state,
                 skill_creator=skill_creator,
                 api_port=api_port,
                 ws_port=ws_port,

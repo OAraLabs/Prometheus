@@ -37,6 +37,18 @@ class AgentProfile:
 # ------------------------------------------------------------------
 # Builtin profiles
 # ------------------------------------------------------------------
+#
+# Every name in a ``tools`` list must be a REGISTERED tool name —
+# tests/test_profile_wiring.py pins each one to the registry the daemon
+# actually builds (with a documented carve-out for conditionally-registered
+# tools like "lsp", which run_daemon registers only when lsp.enabled). The
+# original lists said file_read/file_write/file_edit for tools registered
+# as read_file/write_file/edit_file, and nothing could catch it: the filter
+# these lists feed had no caller, so there was no far side for a test to
+# stand on. Wrong from birth, discovered the day the selector was wired
+# (survey, 2026-08-11). A name that is REGISTERED-but-absent simply drops
+# out of the intersection at advertisement time — conditional tools in a
+# profile are harmless when their condition is off.
 
 _BUILTINS: dict[str, AgentProfile] = {
     "full": AgentProfile(
@@ -52,7 +64,7 @@ _BUILTINS: dict[str, AgentProfile] = {
         description="Focused coding. Lean context, fast tool calls.",
         bootstrap_files=["SOUL.md"],
         tools=[
-            "bash", "file_read", "file_write", "file_edit", "grep", "glob",
+            "bash", "read_file", "write_file", "edit_file", "grep", "glob",
             "todo_write", "task_create", "agent", "lsp",
         ],
         exclude_tools=[],
@@ -64,7 +76,7 @@ _BUILTINS: dict[str, AgentProfile] = {
         bootstrap_files=["SOUL.md"],
         tools=[
             "wiki_query", "wiki_compile", "lcm_grep", "lcm_expand",
-            "lcm_describe", "lcm_expand_query", "file_read", "grep", "glob",
+            "lcm_describe", "lcm_expand_query", "read_file", "grep", "glob",
         ],
         exclude_tools=[],
         subsystems={"sentinel": False, "wiki": True, "cron": False, "learning": False},
@@ -74,7 +86,7 @@ _BUILTINS: dict[str, AgentProfile] = {
         description="Conversational assistant. Memory-rich, tool-light.",
         bootstrap_files=["SOUL.md", "AGENTS.md"],
         tools=[
-            "wiki_query", "lcm_grep", "file_read", "bash", "cron_list",
+            "wiki_query", "lcm_grep", "read_file", "bash", "cron_list",
             "sentinel_status", "todo_write",
         ],
         exclude_tools=[],
@@ -84,7 +96,7 @@ _BUILTINS: dict[str, AgentProfile] = {
         name="minimal",
         description="Maximum context for conversation. Almost no tool overhead.",
         bootstrap_files=["SOUL.md"],
-        tools=["bash", "file_read"],
+        tools=["bash", "read_file"],
         exclude_tools=[],
         subsystems={"sentinel": False, "wiki": False, "cron": False, "learning": False},
     ),
@@ -96,7 +108,7 @@ _BUILTINS: dict[str, AgentProfile] = {
             "github_search",
             "symbiote_scout", "symbiote_harvest", "symbiote_graft",
             "symbiote_status",
-            "bash", "file_read", "file_write", "file_edit", "grep", "glob",
+            "bash", "read_file", "write_file", "edit_file", "grep", "glob",
         ],
         exclude_tools=[],
         subsystems={"sentinel": False, "wiki": False, "cron": False, "learning": False},
@@ -150,6 +162,50 @@ class ProfileStore:
 def get_profile_store() -> ProfileStore:
     """Return a ProfileStore using the default config directory."""
     return ProfileStore()
+
+
+class ActiveProfileState:
+    """The ONE holder for which profile is currently active.
+
+    Every surface converges here: ``profiles.default`` seeds it at daemon
+    start, ``/profile <name>`` (telegram/slack/discord) and Beacon's
+    ``PUT /api/profiles/active`` mutate it, and both loop constructions
+    resolve through :meth:`get` PER RUN — so a switch affects the very next
+    turn with no restart and no reconstruction. Before this existed, each
+    gateway stored the switched name on itself and nothing ever read it
+    back; the selector survey (2026-08-11) found the whole profile
+    mechanism was a label.
+
+    State is a single profile-name string (attribute reads/writes are
+    atomic), so concurrent turns need no lock; a mid-switch run resolves
+    whichever name was current when its advertisement froze.
+    """
+
+    def __init__(self, store: ProfileStore, default_name: str = "full") -> None:
+        self._store = store
+        self._name = default_name if store.get(default_name) else "full"
+        if self._name != default_name:
+            log.warning(
+                "profiles.default names unknown profile %r — using 'full'",
+                default_name,
+            )
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def set(self, name: str) -> AgentProfile | None:
+        """Switch to *name* if it exists; returns the profile, or None
+        (state unchanged) for an unknown name."""
+        profile = self._store.get((name or "").strip())
+        if profile is not None:
+            self._name = profile.name
+        return profile
+
+    def get(self) -> AgentProfile | None:
+        """The active profile, resolved fresh so custom-profile edits and
+        store reloads are honored."""
+        return self._store.get(self._name)
 
 
 def filter_tools_by_profile(
