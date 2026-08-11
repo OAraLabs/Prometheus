@@ -47,3 +47,24 @@ class TestWikiToolsRegisteredViaDaemonBuild:
         assert any("wiki" in n.lower() for n in names), (
             f"No wiki tool by name in {sorted(names)}"
         )
+
+
+def test_wiki_tools_are_reachable_by_the_model() -> None:
+    """The class this file previously could not see.
+
+    It asserted ``WikiCompileTool in registered_types`` — a membership check on
+    the registry. Both wiki tools are DEFERRED under the shipped default, so the
+    model is never offered them; they are reachable only via ``tool_search``.
+    That is a defensible choice for wiki_compile (a maintenance operation) and a
+    questionable one for wiki_query, which answers "what do you know about X" —
+    phrasing that gives the model no signal to go searching its tool list. Both
+    are classified explicitly rather than left to chance.
+    """
+    from tests.support.advertisement import advertised_names, registered_names
+    from tests.test_tool_advertisement import DEFERRED_BY_DESIGN
+
+    for name in ("wiki_compile", "wiki_query"):
+        assert name in registered_names()
+        assert name in advertised_names() or name in DEFERRED_BY_DESIGN, (
+            f"{name} is registered but neither advertised nor classified"
+        )

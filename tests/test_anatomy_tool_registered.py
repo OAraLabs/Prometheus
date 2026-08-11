@@ -123,3 +123,20 @@ def _make_awaitable(result):
     async def _coro():
         return result
     return _coro()
+
+
+def test_anatomy_is_reachable_by_the_model() -> None:
+    """Membership is necessary and NOT sufficient.
+
+    The test above asserts ``anatomy`` is in the registry. The model receives
+    ``schemas_for_run()`` — a different, much smaller set — so a registered tool
+    can be entirely uncallable. ``vault_search`` shipped exactly that way.
+    """
+    from tests.support.advertisement import advertised_names, registered_names
+    from tests.test_tool_advertisement import DEFERRED_BY_DESIGN
+
+    assert "anatomy" in registered_names()
+    assert "anatomy" in advertised_names() or "anatomy" in DEFERRED_BY_DESIGN, (
+        "anatomy is registered but neither advertised nor classified as "
+        "deferred-by-design — it is invisible to the model"
+    )

@@ -543,6 +543,28 @@ def test_the_tools_are_in_the_registry_the_daemon_actually_builds():
     assert "vault_read" in names, sorted(names)
 
 
+def test_the_tools_are_ADVERTISED_not_merely_registered():
+    """The assertion the test above should have been all along.
+
+    ``test_the_tools_are_in_the_registry_the_daemon_actually_builds`` passed on
+    the day this feature shipped, and the feature did not work: deferred loading
+    advertised 8 of 52 tools and neither vault tool was among them, so the model
+    was never offered them and said — correctly — that it had no brain vault.
+
+    Membership in the registry is necessary and not sufficient. This asserts the
+    tool is either in the shipped default's advertised set or deliberately
+    classified as deferred with a tested discovery path.
+    """
+    from tests.support.advertisement import advertised_names, registered_names
+    from tests.test_tool_advertisement import DEFERRED_BY_DESIGN
+
+    for name in ("vault_search", "vault_read"):
+        assert name in registered_names()
+        assert name in advertised_names() or name in DEFERRED_BY_DESIGN, (
+            f"{name} is registered but invisible to the model"
+        )
+
+
 def test_the_registered_instances_are_the_real_classes():
     """Registered-but-wrong is its own failure mode."""
     from prometheus.__main__ import create_tool_registry
@@ -567,3 +589,7 @@ def test_the_descriptions_say_brain_vault_not_bare_vault():
     has already cost a session."""
     for tool in (VaultSearchTool(), VaultReadTool()):
         assert "BRAIN VAULT" in tool.description or "brain vault" in tool.description
+        assert "  " not in tool.description, (
+            f"{tool.name} description has a double space — left behind when the\n"
+            f"pre-commit hook forced the private repo name out of it"
+        )

@@ -354,7 +354,7 @@ class VaultSearchTool(BaseTool):
 
     name = "vault_search"
     description = (
-        "Search the BRAIN VAULT  — Will's second brain, compiled "
+        "Search the BRAIN VAULT — Will's second brain, compiled "
         "from his full claude.ai and Claude Code history: projects, decisions, "
         "people, companies and standing engineering principles. Returns "
         "matching page paths with context; read a full page with vault_read. "
@@ -478,7 +478,7 @@ class VaultReadTool(BaseTool):
 
     name = "vault_read"
     description = (
-        "Read a file from the BRAIN VAULT  by its vault-relative "
+        "Read a file from the BRAIN VAULT by its vault-relative "
         "path — compiled pages under wiki/, original sources under raw/, "
         "human notes under notes/. Read-only. Use vault_search first to find "
         "the path."
