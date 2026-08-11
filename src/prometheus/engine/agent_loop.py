@@ -2020,8 +2020,16 @@ def _apply_cross_result_budget(
             share = max(100, int(budget * tokens / total))
             char_limit = share * 4  # estimate_tokens uses chars/4
             if len(r.content) > char_limit:
+                # NOTICE CONTRACT (selector survey 2026-08-11): the old text
+                # prescribed "lcm_expand or re-read". lcm_expand expands LCM
+                # summary nodes and cannot recover a tool result truncated
+                # before injection (it was never stored), and re-reading
+                # returns the same head — advice that cannot be followed is
+                # worse than none. Say what happened and what actually works.
                 trimmed = r.content[:char_limit] + \
-                    "\n[truncated — use lcm_expand or re-read for full content]"
+                    "\n[truncated to fit the per-turn tool-result budget — " \
+                    "the rest was not retained; re-run the tool with " \
+                    "narrower arguments if needed]"
                 new_results[i] = ToolResultBlock(
                     tool_use_id=r.tool_use_id,
                     content=trimmed,
