@@ -357,11 +357,18 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # boot. Before this, a config with no tools: section advertised zero
     # tools and nothing anywhere said so — the only traces were telemetry
     # rows and per-call "Lucky guess" lines.
+    #
+    # FL-2u: this counts what the LOADER RESOLVES, not what the config
+    # says. The first version read len(config[...]["always_loaded"]) and
+    # went stale the moment absence stopped meaning zero — it reported 0
+    # while the model was being offered 11 tools. A record that describes
+    # the config instead of the runtime is CROSS-CUTTING §12, and the
+    # upgrade harness caught it by reading this very line.
     _dl_cfg = config.get("tools", {}).get("deferred_loading") or {}
     logger.info(
         "Tool advertisement baseline: %d always_loaded of %d registered "
         "(deferred mode: %s)",
-        len(_dl_cfg.get("always_loaded") or []),
+        len(tool_loader.schemas_for_run(True)),
         len(registry.list_tools()),
         _dl_cfg.get("enabled", "auto"),
     )
