@@ -869,7 +869,12 @@ def _reset_telemetry() -> None:
 def _reset_data() -> None:
     """Delete all user data after confirmation.  Preserves config files."""
     import shutil
-    from prometheus.config.paths import get_config_dir, get_data_dir
+    from prometheus.config.paths import (
+        get_config_dir,
+        get_data_dir,
+        get_lcm_db_path,
+        get_legacy_lcm_db_path,
+    )
 
     config_dir = get_config_dir()
     data_dir = get_data_dir()
@@ -877,8 +882,14 @@ def _reset_data() -> None:
     file_targets = [
         ("telemetry.db", config_dir / "telemetry.db"),
         ("memory.db", config_dir / "memory.db"),
-        ("data/lcm.db", data_dir / "lcm.db"),
+        ("data/lcm.db", get_lcm_db_path()),
         ("data/security/audit.db", data_dir / "security" / "audit.db"),
+        # Installs predating the single-resolution-point fix (2026-08-12) grew
+        # a second lcm.db in the config root, written by CheckpointStore, whose
+        # checkpoints.messages_json holds full conversation messages. It is
+        # never written to now, but "delete all user data" has to mean it.
+        # Prints "(not found)" on a fresh install, so the listing stays honest.
+        ("lcm.db (legacy)", get_legacy_lcm_db_path()),
     ]
     dir_targets = [
         ("eval_results/", config_dir / "eval_results"),

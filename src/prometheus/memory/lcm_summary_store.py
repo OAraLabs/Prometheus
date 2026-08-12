@@ -13,26 +13,24 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from prometheus.config.paths import get_config_dir
+from prometheus.config.paths import get_lcm_db_path
 from prometheus.memory.lcm_fts5 import sanitize_fts5_query
 from prometheus.memory.lcm_types import SummaryNode
-
-_DB_NAME = "lcm.db"
-
-
-def _default_db_path() -> Path:
-    return get_config_dir() / _DB_NAME
 
 
 class LCMSummaryStore:
     """SQLite store for the LCM summary DAG with FTS5 search.
 
-    The underlying database file is shared with :class:`LCMConversationStore`;
-    each store owns its own tables within the same ``lcm.db`` file.
+    The underlying database file is shared with
+    :class:`~prometheus.memory.lcm_conversation_store.LCMConversationStore` and
+    :class:`~prometheus.coordinator.divergence.CheckpointStore`; each store
+    owns its own tables within the same ``lcm.db`` file. "Shared" is load
+    bearing and was fiction until 2026-08-12 — see
+    :func:`~prometheus.config.paths.get_lcm_db_path`.
     """
 
     def __init__(self, db_path: Path | None = None) -> None:
-        self._db_path = db_path if db_path is not None else _default_db_path()
+        self._db_path = db_path if db_path is not None else get_lcm_db_path()
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._apply_schema()
