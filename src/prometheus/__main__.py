@@ -951,6 +951,12 @@ def main() -> None:
         help="Enable debug logging",
     )
     parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="Show INFO logs on the console in chat/--once mode (they always "
+             "land in ~/.prometheus/logs/cli.log; the console default is "
+             "WARNING so the reply isn't buried in operator logging)",
+    )
+    parser.add_argument(
         "--setup", action="store_true",
         help="[alias for `prometheus setup`] Run first-time setup wizard",
     )
@@ -1150,12 +1156,35 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Logging
+    # Logging — FIRSTLIGHT GAP-3. On the CLI SURFACES (interactive chat and
+    # --once; args.command is None on that fallthrough) the console defaults
+    # to WARNING so a stranger's first answer isn't buried in httpx/audit/
+    # loop INFO lines, while a file handler keeps the full INFO stream in
+    # ~/.prometheus/logs/cli.log (before this, the console spam was also the
+    # ONLY record of a CLI run). -v/--verbose restores the old console
+    # stream verbatim (same format, same stderr); --debug is unchanged.
+    # Subcommands — including `prometheus daemon`, which layers its own
+    # file logging on top — keep the exact pre-GAP-3 configuration: root at
+    # INFO with a single stderr handler.
     log_level = logging.DEBUG if args.debug else logging.INFO
+    cli_surface = args.command is None
+    console = logging.StreamHandler(sys.stderr)
+    if cli_surface and not args.verbose and not args.debug:
+        console.setLevel(logging.WARNING)
+    handlers: list[logging.Handler] = [console]
+    if cli_surface:
+        try:
+            from prometheus.config.paths import get_logs_dir
+            cli_log = logging.FileHandler(
+                get_logs_dir() / "cli.log", encoding="utf-8"
+            )
+            handlers.append(cli_log)
+        except Exception:
+            pass  # an unwritable logs dir must not kill the CLI
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        handlers=[logging.StreamHandler(sys.stderr)],
+        handlers=handlers,
     )
 
     # `prometheus setup` — the ONE canonical wizard (Onboarding Phase 0).
