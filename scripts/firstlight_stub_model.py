@@ -38,17 +38,26 @@ MODEL_ID = "firstlight-stub-model"
 
 MODE = "normal"
 
+# The tool-call SCRIPT one conversation walks through (upgrade-harness
+# populate needs richer turns than a single glob). Request k's position in
+# the script = the number of role:"tool" messages it carries — stateless
+# and deterministic across sessions. The default reproduces the original
+# single-glob behavior exactly (the fresh-install harness and the CLI
+# logging tests depend on it).
+SCRIPT: list[dict] = [{"name": "glob", "arguments": {"pattern": "*"}}]
 
-def _completion_body(*, want_tool_call: bool) -> dict:
+
+def _completion_body(*, step: dict | None) -> dict:
     """The assistant message for one round, non-streaming shape."""
-    if want_tool_call:
+    if step is not None:
         message = {
             "role": "assistant",
             "content": None,
             "tool_calls": [{
                 "id": f"call_fl_{uuid.uuid4().hex[:8]}",
                 "type": "function",
-                "function": {"name": "glob", "arguments": json.dumps({"pattern": "*"})},
+                "function": {"name": step["name"],
+                             "arguments": json.dumps(step["arguments"])},
             }],
         }
         finish = "tool_calls"
@@ -110,14 +119,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "invalid JSON"})
             return
 
-        saw_tool_result = any(
-            isinstance(m, dict) and m.get("role") == "tool"
-            for m in req.get("messages", [])
+        results_seen = sum(
+            1 for m in req.get("messages", [])
+            if isinstance(m, dict) and m.get("role") == "tool"
         )
-        want_tool_call = (MODE == "no-final") or not saw_tool_result
+        if MODE == "no-final":
+            step: dict | None = SCRIPT[min(results_seen, len(SCRIPT) - 1)]
+        elif results_seen < len(SCRIPT):
+            step = SCRIPT[results_seen]
+        else:
+            step = None
 
         if not req.get("stream"):
-            self._send_json(200, _completion_body(want_tool_call=want_tool_call))
+            self._send_json(200, _completion_body(step=step))
             return
 
         # SSE stream: role delta, payload delta(s), finish, usage, [DONE] —
@@ -134,12 +148,13 @@ class Handler(BaseHTTPRequestHandler):
             }
 
         events: list[dict] = [chunk({"role": "assistant"})]
-        if want_tool_call:
+        if step is not None:
             events.append(chunk({"tool_calls": [{
                 "index": 0,
                 "id": f"call_fl_{uuid.uuid4().hex[:8]}",
                 "type": "function",
-                "function": {"name": "glob", "arguments": json.dumps({"pattern": "*"})},
+                "function": {"name": step["name"],
+                             "arguments": json.dumps(step["arguments"])},
             }]}))
             events.append(chunk({}, finish="tool_calls"))
         else:
@@ -165,13 +180,27 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    global MODE
+    global MODE, SCRIPT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--mode", choices=["normal", "models-500", "no-final"],
                         default="normal")
+    parser.add_argument(
+        "--script", type=str, default=None,
+        help="JSON list of tool calls one conversation walks through, e.g. "
+             '\'[{"name":"glob","arguments":{"pattern":"*"}},'
+             '{"name":"write_file","arguments":{"path":"n.md","content":"x"}}]\''
+             " (default: the single glob call)",
+    )
     args = parser.parse_args()
     MODE = args.mode
+    if args.script:
+        script = json.loads(args.script)
+        assert isinstance(script, list) and all(
+            isinstance(s, dict) and "name" in s and "arguments" in s
+            for s in script
+        ), "--script must be a JSON list of {name, arguments} objects"
+        SCRIPT = script
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"firstlight stub model listening on 127.0.0.1:{args.port} mode={MODE}",
           flush=True)
