@@ -408,6 +408,54 @@ def check_gateways(config: dict[str, Any]) -> list[DiagnosticCheck]:
     return [telegram, slack, discord]
 
 
+def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
+    """How many tools the model is actually OFFERED (FIRSTLIGHT FL-2u / A).
+
+    Registered is not advertised (Standing-Principles §2d): the model
+    receives ``schemas_for_run()``, not the registry. FL-2u's fix makes an
+    absent ``always_loaded`` fall back to the shipped set, so this row
+    should never read zero by accident — but an operator who writes
+    ``always_loaded: []`` on purpose gets exactly what they asked for, and
+    this is where that stays VISIBLE rather than being discovered as "the
+    agent can't do anything".
+    """
+    try:
+        from prometheus.__main__ import create_tool_registry
+        from prometheus.context.dynamic_tools import DynamicToolLoader
+
+        deferred = (config.get("tools", {}) or {}).get("deferred_loading")
+        registry = create_tool_registry({})
+        loader = DynamicToolLoader(registry, deferred)
+        advertised = sorted(
+            s.get("name") for s in loader.schemas_for_run(True)
+        )
+        total = len(registry.list_tools())
+    except Exception as exc:  # diagnostics must never crash the doctor
+        return DiagnosticCheck(
+            name="Advertised tools", category="resources", status="warning",
+            message=f"could not resolve the advertised set ({exc})",
+            fix="Run `prometheus doctor --debug` and report this — the "
+                "advertised set is what the model can actually call.",
+        )
+
+    if not advertised:
+        return DiagnosticCheck(
+            name="Advertised tools", category="resources", status="error",
+            message=f"NONE — 0 of {total} registered tools are offered to "
+                    f"the model, so it cannot call anything",
+            fix="Remove `tools.deferred_loading.always_loaded: []` from your "
+                "config to get the shipped set, or list the tools you want "
+                "advertised.",
+        )
+    preview = ", ".join(advertised[:6])
+    more = f" (+{len(advertised) - 6} more)" if len(advertised) > 6 else ""
+    return DiagnosticCheck(
+        name="Advertised tools", category="resources", status="ok",
+        message=f"{len(advertised)} of {total} registered offered to the "
+                f"model: {preview}{more}",
+    )
+
+
 def check_whisper(config: dict[str, Any]) -> DiagnosticCheck:
     """Whisper available when voice is enabled?"""
     whisper_cfg = config.get("whisper", {}) or {}
@@ -453,6 +501,7 @@ def run_extended_checks(
         check_web_port(config),
         check_token(config),
         *check_gateways(config),
+        check_advertised_tools(config),
         check_whisper(config),
     ]
 

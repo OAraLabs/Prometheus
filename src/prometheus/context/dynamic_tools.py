@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from prometheus.config.shipped_defaults import SHIPPED_ALWAYS_LOADED
 from prometheus.tools.base import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -121,8 +122,17 @@ class DynamicToolLoader:
         # decision isn't known until run start (resolve_deferred), so the set
         # must be ready either way. Do NOT mutate this set per-tier — it is
         # the frozen A/B baseline (see PR feat/deferred-tools-tier-aware).
+        # FIRSTLIGHT FL-2u: the fallback is the SHIPPED set, not []. An
+        # install that upgrades keeps its old config, which predates the
+        # key — and [] with deferred loading active (mode "auto" resolves
+        # ON for every local provider) means ADVERTISE NOTHING: the model
+        # is handed no tools it can call, silently. Absence must be safe.
+        # An operator who genuinely wants an empty set writes
+        # ``always_loaded: []`` explicitly, which is honoured (the key is
+        # present, so the fallback never fires).
+        configured = self._deferred.get("always_loaded")
         self._always_loaded: frozenset[str] = frozenset(
-            self._deferred.get("always_loaded", [])
+            SHIPPED_ALWAYS_LOADED if configured is None else configured
         )
 
     @property
