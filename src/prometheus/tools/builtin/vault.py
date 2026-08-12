@@ -17,7 +17,7 @@ READ-ONLY, STRUCTURALLY. This module imports no write API. There is no
 ``unlink`` anywhere in it — not "unused", *absent*. ``is_read_only()``
 returning True is a claim; ``tests/test_vault_tools.py`` parses this file's
 AST and fails the build if a write call appears, which is the part that
-cannot rot. The vault's own CLAUDE.md §1 makes this binding rather than
+cannot rot. The vault's own BRAIN.md §1 makes this binding rather than
 tasteful: ``raw/`` is immutable, ``wiki/memory/`` belongs to the Prometheus
 compiler, ``notes/`` is human-only, and the standing instruction for any
 agent is *"when in doubt: read anywhere, write nowhere."*
