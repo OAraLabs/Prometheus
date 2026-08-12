@@ -22,18 +22,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable, TYPE_CHECKING
 
-from prometheus.config.paths import get_config_dir
+from prometheus.config.paths import get_lcm_db_path
 
 if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
-
-_DB_NAME = "lcm.db"
-
-
-def _default_db_path() -> Path:
-    return get_config_dir() / _DB_NAME
 
 
 # ============================================================================
@@ -222,10 +216,19 @@ class CheckpointStore:
 
     Uses the same database as LCMConversationStore and LCMSummaryStore
     to keep all conversation state in one place.
+
+    That sentence was false from the first commit until 2026-08-12: this class
+    resolved its own default to ``get_config_dir() / "lcm.db"`` while the two
+    stores it names were opened by ``LCMEngine`` at ``get_data_dir() /
+    "lcm.db"``. Both files carry a ``checkpoints`` table — the conversation
+    store's schema creates one too — so a reader who found the table in the
+    data-dir file and saw it empty had no way to tell it was the wrong one.
+    Everything now resolves through
+    :func:`~prometheus.config.paths.get_lcm_db_path`.
     """
 
     def __init__(self, db_path: Path | None = None) -> None:
-        self._db_path = db_path if db_path is not None else _default_db_path()
+        self._db_path = db_path if db_path is not None else get_lcm_db_path()
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._apply_schema()
 

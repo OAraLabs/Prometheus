@@ -120,6 +120,67 @@ def get_tasks_db_path() -> Path:
     return get_data_dir() / "tasks.db"
 
 
+# ---------------------------------------------------------------------------
+# LCM DATABASE — THE single resolution point.
+#
+# Before 2026-08-12 four sites named this file and they did not agree. Three
+# private ``_default_db_path()`` copies (``memory/lcm_conversation_store.py``,
+# ``memory/lcm_summary_store.py``, ``coordinator/divergence.py``) returned
+# ``get_config_dir() / "lcm.db"``, while ``LCMEngine`` passed
+# ``get_data_dir() / "lcm.db"`` explicitly to the two stores it builds.
+#
+# So "the shared lcm.db" — a phrase in all three class docstrings — was TWO
+# files: conversations and summaries in ``data/``, checkpoints in the config
+# root. ``CheckpointStore()`` is bare-constructed at daemon start regardless of
+# ``divergence.enabled``, so every install grows the config-root file whether or
+# not the feature is on.
+#
+# Which location is correct was never ambiguous: LCMConversationStore's own
+# schema creates the ``checkpoints`` table (lcm_conversation_store.py, "Checkpoint
+# table for divergence detection"), in the data-dir file, and CheckpointStore's
+# docstring says it "uses the same database as LCMConversationStore and
+# LCMSummaryStore to keep all conversation state in one place." The intent was
+# always one file in ``data/``; only the checkpoint writer's default disagreed.
+#
+# Everything now reads through here. No consumer keeps a fallback, and
+# ``tests/test_lcm_db_path_resolution.py`` fails the build on a re-derived path.
+# ---------------------------------------------------------------------------
+
+_LCM_DB_NAME = "lcm.db"
+
+
+def get_lcm_db_path() -> Path:
+    """Return the LCM database path (``<data dir>/lcm.db``).
+
+    One file, three table families: conversation messages
+    (:class:`~prometheus.memory.lcm_conversation_store.LCMConversationStore`),
+    the summary DAG (:class:`~prometheus.memory.lcm_summary_store.LCMSummaryStore`)
+    and divergence checkpoints
+    (:class:`~prometheus.coordinator.divergence.CheckpointStore`).
+
+    Callers that need a different file — tests, the gym, per-run sandboxes —
+    pass ``db_path`` explicitly. This is only the default.
+    """
+    return get_data_dir() / _LCM_DB_NAME
+
+
+def get_legacy_lcm_db_path() -> Path:
+    """Return the pre-2026-08-12 config-root ``lcm.db``.
+
+    NOT a location anything writes to any more. It exists so the one reader
+    that must still know about it — ``prometheus reset-data``, which promises
+    to delete all user data — can clean up a file left behind on installs that
+    predate the single-resolution-point fix. ``checkpoints.messages_json``
+    holds full conversation messages, so a forgotten file here is a privacy
+    miss, not just clutter.
+
+    Deliberately NOT migrated into :func:`get_lcm_db_path`'s file: see the
+    FL-3 PR body for the trade, and ``tests/test_lcm_db_path_resolution.py``
+    for the test that pins the decision as deliberate.
+    """
+    return get_config_dir() / _LCM_DB_NAME
+
+
 def get_project_config_dir(cwd: str | Path) -> Path:
     """Return the per-project .prometheus directory."""
     project_dir = Path(cwd).resolve() / ".prometheus"

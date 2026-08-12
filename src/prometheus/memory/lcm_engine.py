@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from prometheus.config.paths import get_config_dir, get_data_dir
+from prometheus.config.paths import get_lcm_db_path
 from prometheus.context.token_estimation import estimate_tokens
 from prometheus.memory.lcm_assembler import LCMAssembler
 from prometheus.memory.lcm_compaction import LCMCompactor
@@ -106,7 +106,7 @@ class LCMEngine:
         db_path: Path | None = None,
     ) -> None:
         self._config = config or _load_config_from_yaml()
-        self._db_path = db_path or (get_data_dir() / "lcm.db")
+        self._db_path = db_path or get_lcm_db_path()
 
         # Internal stores.
         self._conv_store = LCMConversationStore(self._db_path)
