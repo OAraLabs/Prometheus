@@ -29,11 +29,18 @@ ten minutes; THIS one proves their six-month-old install survives
       is the source of truth for the docs' downgrade section
   U7  teardown, no residue
 
-KNOWN-DEFECT RATCHET (same idea as FL-1's --strict-shutdown): findings on
-the KNOWN list below are reported LOUDLY and tolerated by default so the
-harness can gate everything else while a defect awaits its own round;
---strict-state turns them fatal. Everything NOT on the list is fatal
-immediately.
+KNOWN-DEFECT RATCHET, NOW A GATE (same arc as FL-1's --strict-shutdown):
+findings below were reported-but-tolerated while each awaited its own
+round. FL-2u's fix took the list to ZERO, so --strict-state is now the
+DEFAULT: any finding fails the run. --lenient-state restores the old
+tolerate-and-report behaviour for bisecting pre-fix SHAs.
+
+  FL-2u  FIXED (D+A): an upgraded install kept its old config and
+         advertised nothing. The reader's fallback is now the shipped
+         set, so absence is safe and no config migration is needed. The
+         detector below stays armed — it reads the daemon's own boot
+         line, and it is what caught the boot line still reporting the
+         stale config-derived count after the behaviour was fixed.
 
   FL-3   the two-location lcm.db, REFINED BY THIS HARNESS'S FIRST RUN:
          no stranding happens on a v0.1.0 upgrade (conversation rows were
@@ -645,9 +652,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", default=".")
     parser.add_argument("--keep", action="store_true")
-    parser.add_argument("--strict-state", action="store_true",
-                        help="known-defect findings (FL-3, FL-2u) become "
-                             "failures — flip on as each defect's fix lands")
+    parser.add_argument("--strict-state", dest="strict_state",
+                        action="store_true", default=True,
+                        help="any known-defect finding is a failure "
+                             "(DEFAULT since FL-2u's fix took the list to "
+                             "zero — the ratchet is now a gate)")
+    parser.add_argument("--lenient-state", dest="strict_state",
+                        action="store_false",
+                        help="report findings without failing (for bisecting "
+                             "old SHAs, where FL-2u/FL-3 still fire)")
     parser.add_argument("--mutate", default="none",
                         choices=["none", "drop-table", "delete-db"],
                         help="self-test levers: tamper with state so U5's "

@@ -91,8 +91,17 @@ def _run_once(home: Path, *extra: str) -> subprocess.CompletedProcess:
     for passthrough in ("PYTHONPATH", "VIRTUAL_ENV"):
         if passthrough in os.environ:
             env[passthrough] = os.environ[passthrough]
+    # --config is EXPLICIT on purpose. load_config() searches the
+    # repo-local config/prometheus.yaml FIRST and only then
+    # $PROMETHEUS_CONFIG_DIR — so setting HOME is not isolation: run from
+    # a checkout that has a live config (the operator's own) and these
+    # tests silently drive the REAL model instead of the stub. They passed
+    # in CI and in worktrees only because neither has that file
+    # (Standing-Principles §3b — green for an environmental accident).
     return subprocess.run(
-        [sys.executable, "-m", "prometheus", *extra, "--once", "list files"],
+        [sys.executable, "-m", "prometheus",
+         "--config", str(home / ".prometheus" / "prometheus.yaml"),
+         *extra, "--once", "list files"],
         capture_output=True, text=True, timeout=120, env=env, cwd=home,
     )
 
