@@ -130,6 +130,14 @@ class Harness:
         self.logs = self.work / "logs"
         self.home.mkdir()
         self.logs.mkdir()
+        # Every subprocess runs with HOME set to this isolated tree, so THIS
+        # is git's global config for them. A --source mounted read-only under
+        # a different uid (running the harness inside a container) otherwise
+        # trips git's dubious-ownership guard at S1. safe.directory is
+        # deliberately ignored from env/-c scopes — a global config file is
+        # the only place it counts. Same fix as the upgrade harness.
+        (self.home / ".gitconfig").write_text(
+            "[safe]\n\tdirectory = *\n", encoding="utf-8")
         self.venv = self.work / "venv"
         self.stub_port = free_port()
         self.api_port = free_port()
@@ -179,7 +187,7 @@ class Harness:
     def s1_clone(self) -> str:
         out = subprocess.run(
             ["git", "-C", str(self.source), "rev-parse", "HEAD"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env=self.env(),
         )
         if out.returncode != 0:
             raise StepFailure(f"--source {self.source} is not a git repo: "
