@@ -162,7 +162,8 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
     from prometheus.tools.builtin.cron_delete import CronDeleteTool
     from prometheus.tools.builtin.cron_list import CronListTool
 
-    workspace = security_cfg.get("workspace_root")
+    from prometheus.config.shipped_defaults import resolve_workspace_root
+    workspace = resolve_workspace_root(security_cfg)
     registry = ToolRegistry()
 
     # Funnel (honest-async-promises Layer d): register bash and task_create FIRST
@@ -517,6 +518,8 @@ def create_security_gate(security_cfg: dict[str, Any]):
         audit_logger = AuditLogger(get_data_dir() / "security")
 
     # Sprint 11: exfiltration detector
+    from prometheus.config.shipped_defaults import resolve_workspace_root
+
     exfil_detector = None
     exfil_cfg = security_cfg.get("exfiltration", {})
     if exfil_cfg.get("enabled", True):
@@ -524,7 +527,7 @@ def create_security_gate(security_cfg: dict[str, Any]):
 
     return SecurityGate(
         mode=security_cfg.get("permission_mode", "default"),
-        workspace_root=security_cfg.get("workspace_root"),
+        workspace_root=resolve_workspace_root(security_cfg),
         denied_commands=security_cfg.get("denied_commands"),
         denied_paths=security_cfg.get("denied_paths"),
         allowed_commands=security_cfg.get("allowed_commands"),

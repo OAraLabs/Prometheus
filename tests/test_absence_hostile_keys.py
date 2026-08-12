@@ -103,51 +103,10 @@ def test_a_configured_set_still_wins():
 # nobody looked for"). Both are FAIL-OPEN rather than fail-dead, both are
 # security-adjacent, and both are therefore reported rather than fixed here.
 
-KNOWN_DEGENERATE: dict[str, str] = {
-    "gateway.media.allowed_{image,audio,document}_types":
-        "absent -> [] -> media_guard's `if allowed and ...` (media_guard.py:"
-        "210,250,270) SKIPS the MIME check entirely, so an install whose "
-        "config predates PR #141 has NO type filtering on the Telegram "
-        "surface — the one exposed to the public internet by design. #141 "
-        "fixed the shipped TEMPLATE; it did not make absence safe.",
-    "security.workspace_root":
-        "absent -> None -> SecurityGate._within_workspace (checker.py:459) "
-        "returns True unconditionally, so file operations are not confined "
-        "at all. The template ships a value; a config that omits the key "
-        "silently has no workspace boundary.",
-}
-
-
-def test_media_allowlists_absent_still_skip_the_mime_check():
-    """Debt-list pin. When this goes RED, the defect is fixed — move the key
-    to ABSENCE_SAFE with a real far-side assertion and delete this."""
-    from prometheus.gateway.media_guard import MediaPolicy
-
-    media_cfg: dict = {}  # a config section that predates the keys
-    policy = MediaPolicy(
-        allowed_image_types=tuple(media_cfg.get("allowed_image_types") or []),
-        allowed_audio_types=tuple(media_cfg.get("allowed_audio_types") or []),
-        allowed_document_types=tuple(
-            media_cfg.get("allowed_document_types") or []),
-        max_file_size_mb=media_cfg.get("max_file_size_mb", 20),
-    )
-    assert policy.allowlist_for("image") == (), (
-        "media allowlists are no longer degenerate on absence — promote "
-        "them out of KNOWN_DEGENERATE"
-    )
-
-
-def test_workspace_root_absent_still_confines_nothing():
-    """Debt-list pin, far side through the real checker."""
-    from prometheus.permissions.checker import SecurityGate
-
-    # The exact shape from_config produces for a config lacking the key:
-    # sec.get("workspace_root") -> None.
-    gate = SecurityGate(workspace_root=None)
-    assert gate._within_workspace("/etc/passwd") is True, (
-        "workspace_root absence now confines file operations — promote it "
-        "out of KNOWN_DEGENERATE"
-    )
+# EMPTY as of 2026-08-12. Both original entries were FIXED and promoted to
+# ABSENCE_SAFE below; the list may only shrink, and it reached zero. A new
+# entry needs a disposition and a pin asserting the defect is still there.
+KNOWN_DEGENERATE: dict[str, str] = {}
 
 
 @pytest.mark.parametrize("key", sorted(KNOWN_DEGENERATE))
@@ -157,3 +116,320 @@ def test_every_debt_entry_states_why(key):
     assert len(why) > 80 and "absent" in why, (
         f"{key} needs a reason naming what absence produces"
     )
+
+
+# ---------------------------------------------------------------------------
+# PROMOTED 2026-08-12 — the two fail-open entries, now ABSENCE_SAFE.
+#
+# Both were worse than FL-2u's fail-DEAD case: a degenerate fallback that
+# disables a SECURITY control announces nothing. FL-2u's install was visibly
+# useless (no tools); these two look like a working system.
+#
+# Both directions per §2c — a control needs breach tests AND admission tests,
+# or the suite is blind in one direction by construction. The fail-closed
+# over-correction (confine everything to nothing / refuse every file) would
+# satisfy a breach-only suite perfectly.
+# ---------------------------------------------------------------------------
+
+# ── security.workspace_root ──────────────────────────────────────────────────
+
+def _gate_from_yaml(tmp_path, security: dict | None, *, raw: str | None = None):
+    """The REAL consumer, from a real config FILE.
+
+    ``SecurityGate.from_config`` takes a PATH, not a dict — passing a dict
+    lands in its bare ``except`` and silently yields ``sec = {}``, so a test
+    that hands it a dict proves nothing about the key it names. (Written that
+    way here first; the explicit-value test is what caught it.)
+    """
+    import yaml
+
+    from prometheus.permissions.checker import SecurityGate
+
+    path = tmp_path / "prometheus.yaml"
+    path.write_text(
+        raw if raw is not None else yaml.safe_dump({"security": security or {}}),
+        encoding="utf-8",
+    )
+    return SecurityGate.from_config(path)
+
+
+def test_workspace_root_absent_still_confines(tmp_path):
+    """BREACH direction. Was: absent -> None -> _within_workspace returned
+    True for every path, so file operations had no boundary at all."""
+    gate = _gate_from_yaml(tmp_path, {"permission_mode": "default"})
+    assert gate._within_workspace("/etc/passwd") is False, (
+        "a config with no workspace_root confines nothing — the fail-open "
+        "default is back"
+    )
+
+
+def test_workspace_root_absent_still_admits_the_workspace(tmp_path):
+    """ADMISSION direction. A boundary that refuses its own workspace is a
+    broken product, and a breach-only suite would call it a pass.
+
+    The expected path is LITERAL, not derived from SHIPPED_WORKSPACE_ROOT.
+    Written the derived way first, and mutation M2 — repointing the constant
+    at /nonexistent/nowhere — SURVIVED: the test built its input from the
+    value under test, so the two moved together and no input could ever fail
+    it. A self-referential assertion is not an assertion. Drift between this
+    literal and the constant is caught by the template pin below.
+    """
+    from pathlib import Path
+
+    gate = _gate_from_yaml(tmp_path, {"permission_mode": "default"})
+    inside = str(Path("~/.prometheus/workspace/notes.md").expanduser())
+    assert gate._within_workspace(inside) is True, (
+        f"{inside} is inside the shipped workspace and was refused — an "
+        f"over-correction here makes the agent unable to touch its own files"
+    )
+
+
+def test_explicit_workspace_root_still_wins(tmp_path):
+    """The resolver must not override an operator who set the key."""
+    from pathlib import Path
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    gate = _gate_from_yaml(tmp_path, {"workspace_root": str(root)})
+    assert gate._within_workspace(str(root / "x")) is True
+    assert gate._within_workspace("/etc/passwd") is False
+
+
+def test_an_unreadable_config_confines_rather_than_opening_up(tmp_path):
+    """Bonus hardening, and worth pinning because it is the scarier path.
+
+    ``from_config`` swallows every failure into ``sec = {}`` — so a corrupt,
+    truncated or unparseable config used to produce workspace_root=None, i.e.
+    NO confinement at all, from a file nobody could read. It now lands on the
+    shipped root. A config the system cannot understand must not be the one
+    that grants the most access.
+    """
+    gate = _gate_from_yaml(tmp_path, None, raw="{ this: is: not: valid: yaml")
+    assert gate._within_workspace("/etc/passwd") is False
+
+
+def test_securitygate_none_still_means_no_confinement():
+    """The class-level API is UNCHANGED and that is deliberate.
+
+    39 of SecurityGate's 43 construction sites omit workspace_root — tests,
+    and callers confined another way. The defect was never "None disables
+    confinement"; it was a CONFIG that merely omits the key landing on None.
+    Fixing the class instead of the readers would have been a 39-site change
+    with a security meaning nobody asked for.
+    """
+    from prometheus.permissions.checker import SecurityGate
+
+    assert SecurityGate(workspace_root=None)._within_workspace("/etc/passwd") is True
+
+
+#: The ONE site allowed to read ``workspace_root`` without the resolver, with
+#: its reason. Documents carry their own root and the template states they are
+#: not limited by this key; substituting the shipped default there 403s every
+#: write. A named, asserted-exact exemption — not a list that can grow quietly.
+_RAW_WORKSPACE_READERS: dict[str, str] = {
+    "prometheus/web/server.py":
+        "Documents service — has its own root; the template says documents "
+        "are NOT limited by workspace_root. The shipped default confines the "
+        "editor to a directory its root is not under.",
+}
+
+
+def test_workspace_root_readers_are_the_resolver_plus_one_named_exemption():
+    """Single resolver. Four separate ``sec.get("workspace_root")`` calls is
+    the shape §1b warns about — "six edits and a seventh next quarter".
+
+    Enforced in BOTH directions, like ``KNOWN_UNREAD``: an unlisted raw reader
+    fails (new drift), and a listed file that no longer has one fails too
+    (stale exemption). So the list cannot grow quietly or rot.
+    """
+    import re
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parent.parent / "src"
+    found = {
+        str(p.relative_to(src))
+        for p in src.rglob("*.py")
+        if p.name != "shipped_defaults.py"
+        for line in p.read_text(encoding="utf-8").splitlines()
+        if re.search(r'\.get\(\s*["\']workspace_root["\']', line)
+    }
+    new = sorted(found - set(_RAW_WORKSPACE_READERS))
+    assert not new, (
+        "read workspace_root through resolve_workspace_root(), not .get() — "
+        "a second reader is a second default:\n  " + "\n  ".join(new)
+    )
+    stale = sorted(set(_RAW_WORKSPACE_READERS) - found)
+    assert not stale, (
+        "exemption no longer needed — delete it:\n  " + "\n  ".join(stale)
+    )
+
+
+def test_media_allowlists_have_exactly_one_reader():
+    """Same guard for the media keys, and it closes a real hole.
+
+    Mutation M8 — reverting the DAEMON's construction line to
+    ``list(_media_cfg.get("allowed_image_types") or [])`` — SURVIVED the
+    behavioural tests, because they build a policy the way the daemon does
+    rather than driving ``run_daemon`` itself. The resolver was covered; the
+    CALL SITE was not (§2d: testing the mechanism is not testing the
+    outcome). Driving the real daemon here is not viable, so the regression
+    path is closed at the source instead — and this test says plainly that
+    that is what it proves.
+    """
+    import re
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parent.parent / "src"
+    pattern = re.compile(
+        r'\.get\(\s*["\']allowed_(image|audio|document)_types["\']')
+    offenders = [
+        f"{p.relative_to(src)}:{i}"
+        for p in src.rglob("*.py")
+        if p.name != "shipped_defaults.py"
+        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+        if pattern.search(line)
+    ]
+    assert not offenders, (
+        "read the media allowlists through resolve_media_allowlist(), not "
+        "`.get(...) or []` — that idiom collapses ABSENT into EXPLICITLY "
+        "EMPTY, which media_guard reads as 'no restriction':\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_documents_exemption_is_the_documented_contract():
+    """The exemption is only legitimate because the TEMPLATE says so. If that
+    sentence ever leaves the template, the exemption needs re-arguing."""
+    from pathlib import Path
+
+    import re
+
+    raw = (Path(__file__).resolve().parent.parent
+           / "config" / "prometheus.yaml.default").read_text(encoding="utf-8")
+    # Un-wrap: strip comment markers and collapse whitespace, so the assertion
+    # survives a re-flow of the comment. Pinning the exact line break would
+    # make this a test of the formatter, not of the claim (§3c).
+    flat = re.sub(r"\s+", " ", raw.replace("#", " "))
+    assert "documents, and the artifact outbox have their own confinement" in flat, (
+        "the template no longer states that documents are exempt from "
+        "workspace_root — the web/server.py exemption needs re-arguing"
+    )
+
+
+# ── gateway.media.allowed_*_types ────────────────────────────────────────────
+
+def _policy_from_config_without_the_keys():
+    """The REAL consumer, built the way daemon.py builds it for a gateway
+    media section that predates the keys."""
+    from prometheus.gateway.config import Platform, PlatformConfig
+    from prometheus.gateway.media_guard import MediaPolicy
+
+    from prometheus.config.shipped_defaults import resolve_media_allowlist
+
+    media_cfg: dict = {}
+    cfg = PlatformConfig(
+        platform=Platform.TELEGRAM,
+        token="x",
+        allowed_image_types=resolve_media_allowlist(
+            media_cfg, "allowed_image_types"),
+        allowed_audio_types=resolve_media_allowlist(
+            media_cfg, "allowed_audio_types"),
+        allowed_document_types=resolve_media_allowlist(
+            media_cfg, "allowed_document_types"),
+    )
+    return MediaPolicy(
+        allowed_image_types=tuple(cfg.allowed_image_types),
+        allowed_audio_types=tuple(cfg.allowed_audio_types),
+        allowed_document_types=tuple(cfg.allowed_document_types),
+        max_file_size_mb=cfg.max_file_size_mb,
+    )
+
+
+def test_media_allowlists_absent_still_refuse_a_disallowed_type():
+    """BREACH direction. Was: absent -> [] -> ``if allowed and ...`` skipped
+    the MIME check entirely, so a pre-#141 install filtered nothing."""
+    import pytest as _pytest
+
+    from prometheus.gateway.media_guard import MediaRejected, check_declared_mime
+
+    policy = _policy_from_config_without_the_keys()
+    with _pytest.raises(MediaRejected) as exc:
+        check_declared_mime("image/bmp", "image", policy)
+    # §3b: assert guard IDENTITY. "something refused it" is satisfied by any
+    # layer; this test is named after the declared-MIME check.
+    assert exc.value.guard_name == "media.mime_declared", (
+        f"refused by {exc.value.guard_name}, not the declared-MIME check"
+    )
+
+
+def test_media_allowlists_absent_still_admit_a_legitimate_file():
+    """ADMISSION direction — §2c, the one PR #140 shipped without.
+
+    Over-refusal looks exactly like the control working: a fail-closed
+    over-correction here would make the Telegram surface silently useless
+    while every breach test stayed green.
+    """
+    from prometheus.gateway.media_guard import check_declared_mime, validate_inbound
+
+    policy = _policy_from_config_without_the_keys()
+    jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01" + b"\x00" * 32
+    check_declared_mime("image/jpeg", "image", policy)
+    assert validate_inbound(
+        data=jpeg, declared_mime="image/jpeg", kind="image", policy=policy
+    ) == "image/jpeg"
+
+
+def test_explicitly_empty_allowlist_still_means_no_restriction():
+    """The documented opt-out must survive the fix.
+
+    The template says "Empty list = no restriction for that kind", and an
+    operator who wrote ``[]`` meant it. Absence is not that statement — it is
+    a config written before the key existed. The whole fix is keeping those
+    two apart; collapsing them the OTHER way would be just as wrong.
+    """
+    from prometheus.config.shipped_defaults import resolve_media_allowlist
+
+    assert resolve_media_allowlist({"allowed_image_types": []},
+                                   "allowed_image_types") == []
+
+
+def test_explicit_media_allowlist_still_wins():
+    from prometheus.config.shipped_defaults import resolve_media_allowlist
+
+    assert resolve_media_allowlist(
+        {"allowed_image_types": ["image/png"]}, "allowed_image_types",
+    ) == ["image/png"]
+
+
+def test_platformconfig_default_is_not_degenerate():
+    """§1b's under-population shape: a construction site that forgets these
+    kwargs must not silently produce "no restriction"."""
+    from prometheus.config.shipped_defaults import SHIPPED_ALLOWED_IMAGE_TYPES
+    from prometheus.gateway.config import Platform, PlatformConfig
+
+    cfg = PlatformConfig(platform=Platform.TELEGRAM, token="x")
+    assert cfg.allowed_image_types == list(SHIPPED_ALLOWED_IMAGE_TYPES)
+
+
+def test_shipped_media_allowlists_equal_the_template():
+    """The constant and the documented default cannot drift — same pin as
+    SHIPPED_ALWAYS_LOADED's."""
+    from pathlib import Path
+
+    import yaml
+
+    from prometheus.config.shipped_defaults import (
+        SHIPPED_ALLOWED_AUDIO_TYPES,
+        SHIPPED_ALLOWED_DOCUMENT_TYPES,
+        SHIPPED_ALLOWED_IMAGE_TYPES,
+        SHIPPED_WORKSPACE_ROOT,
+    )
+
+    repo = Path(__file__).resolve().parent.parent
+    tpl = yaml.safe_load(
+        (repo / "config" / "prometheus.yaml.default").read_text(encoding="utf-8"))
+    media = tpl["gateway"]["media"]
+    assert list(SHIPPED_ALLOWED_IMAGE_TYPES) == media["allowed_image_types"]
+    assert list(SHIPPED_ALLOWED_AUDIO_TYPES) == media["allowed_audio_types"]
+    assert list(SHIPPED_ALLOWED_DOCUMENT_TYPES) == media["allowed_document_types"]
+    assert SHIPPED_WORKSPACE_ROOT == tpl["security"]["workspace_root"]

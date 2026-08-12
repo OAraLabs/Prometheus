@@ -1458,7 +1458,22 @@ def create_app(
         denied = sec.get("denied_paths") or []
         # Defense in depth: denied paths feed BOTH the sandbox confinement and
         # the SecurityGate composed over it.
-        gate = SecurityGate(denied_paths=denied, workspace_root=sec.get("workspace_root"))
+        #
+        # DELIBERATELY NOT resolve_workspace_root(): this is the ONE reader
+        # that must keep `.get()`'s bare None. Documents carry their OWN root
+        # (above), and the template says so in as many words — "Coding runs,
+        # documents, and the artifact outbox have their own confinement and
+        # are not limited by this." Substituting the shipped default here
+        # confines the editor to ~/.prometheus/workspace, which its root is
+        # not under, and every write 403s. Found by the ADMISSION direction
+        # (§2c): five test_api_documents cases went red while every breach
+        # test stayed green — an over-correction is indistinguishable from a
+        # working control unless something asserts the door still opens.
+        # An operator who SET the key still gets the extra confinement, as
+        # before; only the degenerate-default substitution is skipped.
+        gate = SecurityGate(
+            denied_paths=denied, workspace_root=sec.get("workspace_root"),
+        )
         return DocumentsService(root, denied_paths=denied, gate=gate)
 
     def _documents_error(exc) -> JSONResponse:

@@ -612,6 +612,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
             # defaults here — the same shape as the two-loop defect: a field
             # not passed at the construction site silently takes a default,
             # so the config keys described controls nobody was reading.
+            from prometheus.config.shipped_defaults import resolve_media_allowlist
+
             _media_cfg = (gateway_config.get("media") or {})
             _rate_cfg = (gateway_config.get("rate_limits") or {})
             tg_config = PlatformConfig(
@@ -625,11 +627,18 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 media_downloads_per_minute=_rate_cfg.get(
                     "media_downloads_per_minute", 10
                 ),
-                allowed_image_types=list(_media_cfg.get("allowed_image_types") or []),
-                allowed_audio_types=list(_media_cfg.get("allowed_audio_types") or []),
-                allowed_document_types=list(
-                    _media_cfg.get("allowed_document_types") or []
-                ),
+                # `... or []` here collapsed ABSENT and EXPLICITLY-EMPTY into
+                # the same value, and media_guard reads [] as "no restriction"
+                # — so every config predating #141 had NO type filtering on
+                # the one surface exposed to the public internet. The resolver
+                # keeps the two apart: absent -> the shipped allowlist,
+                # `[]` -> the operator's deliberate opt-out.
+                allowed_image_types=resolve_media_allowlist(
+                    _media_cfg, "allowed_image_types"),
+                allowed_audio_types=resolve_media_allowlist(
+                    _media_cfg, "allowed_audio_types"),
+                allowed_document_types=resolve_media_allowlist(
+                    _media_cfg, "allowed_document_types"),
             )
             # Cache quota + free-disk floor (CONVENIENCE guards, fail open).
             from prometheus.gateway.media_cache import configure_cache

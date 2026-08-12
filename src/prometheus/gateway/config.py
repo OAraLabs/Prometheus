@@ -9,6 +9,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from prometheus.config.shipped_defaults import (
+    SHIPPED_ALLOWED_AUDIO_TYPES,
+    SHIPPED_ALLOWED_DOCUMENT_TYPES,
+    SHIPPED_ALLOWED_IMAGE_TYPES,
+)
+
 
 class Platform(str, Enum):
     """Supported messaging platforms."""
@@ -48,9 +54,18 @@ class PlatformConfig:
     # Inbound MIME allowlists. Empty list = allow any type that SNIFFS to a
     # known signature (still not "allow anything" — unknown bytes are refused
     # by media_guard). Populated from gateway.media.allowed_*_types.
-    allowed_image_types: list[str] = field(default_factory=list)
-    allowed_audio_types: list[str] = field(default_factory=list)
-    allowed_document_types: list[str] = field(default_factory=list)
+    #
+    # The DEFAULT is the shipped allowlist, not []. These fields feed a
+    # control, and `default_factory=list` meant any construction site that
+    # forgot to pass them silently produced "no restriction" — §1b's
+    # under-population-at-a-real-construction-site shape. A caller that wants
+    # no filtering must now say so by passing `[]` explicitly.
+    allowed_image_types: list[str] = field(
+        default_factory=lambda: list(SHIPPED_ALLOWED_IMAGE_TYPES))
+    allowed_audio_types: list[str] = field(
+        default_factory=lambda: list(SHIPPED_ALLOWED_AUDIO_TYPES))
+    allowed_document_types: list[str] = field(
+        default_factory=lambda: list(SHIPPED_ALLOWED_DOCUMENT_TYPES))
 
     @property
     def is_restricted(self) -> bool:
