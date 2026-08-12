@@ -1957,6 +1957,12 @@ def create_app(
 
         session = session_mgr.get_or_create(f"web:{session_id}")
         session.add_user_message(content)
+        # pre_len AFTER the user append — the index in result.messages where
+        # the loop's new content starts, same as every gateway adapter. The
+        # old ``len(...) - 1`` here re-included the user turn: re-appended in
+        # memory and re-persisted to LCM every call (the duplicate user rows
+        # the 2026-08-11 survey found on web: sessions).
+        pre_len = len(session.get_messages())
 
         try:
             system_prompt = config.get("gateway", {}).get(
@@ -1968,7 +1974,7 @@ def create_app(
                 messages=session.get_messages(),
                 tools=app.state.skill_registry.list_schemas() if app.state.skill_registry else None,
             )
-            session.add_result_messages(result.messages, len(session.get_messages()) - 1)
+            session.add_result_messages(result.messages, pre_len)
             return {
                 "text": result.text,
                 "turns": result.turns,

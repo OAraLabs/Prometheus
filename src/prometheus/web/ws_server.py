@@ -75,6 +75,10 @@ class WebSocketBridge:
         # any unflagged CancelledError (daemon shutdown) keeps propagating.
         self._turn_tasks: dict[str, asyncio.Task] = {}
         self._interrupted: set[str] = set()
+        # Per-session turn locks (fix: duplicate LCM rows, 2026-08-11 survey).
+        # Same shape as the telegram gateway's M6 lock map: turns on ONE
+        # session serialize; turns on different sessions stay concurrent.
+        self._turn_locks: dict[str, asyncio.Lock] = {}
 
     @property
     def auth_required(self) -> bool:
@@ -600,6 +604,23 @@ class WebSocketBridge:
             },
         })
 
+    def _turn_lock_for(self, session_id: str) -> asyncio.Lock:
+        """Return the per-session turn lock, creating it on first use.
+
+        Mirror of the telegram gateway's ``_turn_lock_for`` (M6), including
+        its resilience to bridges built via ``__new__`` in tests: the lock
+        map lazily initializes if absent.
+        """
+        locks = getattr(self, "_turn_locks", None)
+        if locks is None:
+            locks = {}
+            self._turn_locks = locks
+        lock = locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[session_id] = lock
+        return lock
+
     async def _run_agent(
         self, session_id: str, session: Any, mode: str = "agent", tool_choice: object | None = None,
         raise_on_error: bool = False,
@@ -608,12 +629,20 @@ class WebSocketBridge:
         is threaded as a per-call run_loop arg — NEVER stored on the shared loop_context —
         so concurrent turns can't cross-talk (Sprint B / Piece 2).
 
+        Turns on ONE session are serialized by a per-session lock (parity
+        with the telegram gateway's M6 lock; 2026-08-11 duplicate-rows fix).
+        Without it, rapid-fire sends spawned N concurrent ``run_loop``s all
+        appending in place to the SAME ``session.messages`` list — model
+        rounds interleaved across turns, and each finishing turn re-persisted
+        every other in-flight turn's tail to LCM (up to N copies per row).
+        The lock is held from ``original_len`` capture through the tail
+        persist, which is exactly the invariant ``persist_loop_result``
+        needs. Different sessions still run concurrently.
+
         Returns ``(accumulated_text, last_usage)`` for awaited callers
         (``run_turn_awaited``); the fire-and-forget chat path ignores it.
         ``raise_on_error=True`` re-raises after the fail-loud logging/broadcast
         instead of swallowing (the awaited caller reports errors externally)."""
-        from prometheus.engine.agent_loop import run_loop
-
         # Update state. session_id rides every agent_state frame: with more than
         # one session alive, "thinking" is meaningless unless a client can tell
         # WHICH conversation it belongs to (Beacon could not, so it could not
@@ -627,9 +656,6 @@ class WebSocketBridge:
         })
 
         msg_id = f"asst-{int(time.time() * 1000)}"
-        accumulated = ""
-        last_usage: Any = None
-        original_len: int | None = None
 
         # Live turn shape, mutated as events stream and sampled by the
         # heartbeat task. A plain dict (not locals) so the heartbeat sees
@@ -645,15 +671,66 @@ class WebSocketBridge:
             self._emit_progress(session_id, msg_id, progress, time.time())
         )
 
-        # Register THIS task as the session's running turn so interrupt_turn()
-        # can cancel it. asyncio.current_task() covers both entry paths
-        # (create_task from _handle_send_message AND the awaited Paperclip
-        # call). Last-write-wins on a concurrent second turn in the same
-        # session — the Stop button targets the latest turn.
         _task = asyncio.current_task()
-        if _task is not None:
-            self._turn_tasks[session_id] = _task
 
+        try:
+            # Serialize turns per session. The heartbeat above keeps pulsing
+            # "thinking" for a queued turn — honest UX, the turn IS pending.
+            # A cancel landing while we WAIT here propagates out (there is
+            # nothing to persist and the task was never registered, so
+            # interrupt_turn cannot have targeted it); the outer finally
+            # still reaps the heartbeat.
+            async with self._turn_lock_for(session_id):
+                # Register THIS task as the session's running turn so
+                # interrupt_turn() can cancel it. asyncio.current_task()
+                # covers both entry paths (create_task from
+                # _handle_send_message AND the awaited Paperclip call).
+                # Registration happens INSIDE the lock: the Stop button
+                # targets the turn that is actually running — a queued turn
+                # is not stoppable until it starts (stop it again then).
+                if _task is not None:
+                    self._turn_tasks[session_id] = _task
+                return await self._run_agent_locked(
+                    session_id, session, mode=mode, tool_choice=tool_choice,
+                    raise_on_error=raise_on_error, msg_id=msg_id,
+                    progress=progress,
+                )
+        finally:
+            # Stop the liveness pulse FIRST — a heartbeat outliving its turn
+            # would tell clients a finished turn is still running. Cancel
+            # without awaiting: this runs on the cancellation path too, where
+            # awaiting could re-raise before the frames below are sent.
+            heartbeat.cancel()
+            # Unregister only if the slot still points at THIS task (a newer
+            # concurrent turn may have overwritten it). Clearing the interrupt
+            # flag here bounds any stale flag from a cancel that lost the race
+            # with normal completion.
+            if self._turn_tasks.get(session_id) is asyncio.current_task():
+                self._turn_tasks.pop(session_id, None)
+            self._interrupted.discard(session_id)
+            if self.agent_state_ref:
+                self.agent_state_ref["state"] = "idle"
+            await self.broadcast({
+                "type": "agent_state",
+                "timestamp": time.time(),
+                "payload": {"state": "idle", "session_id": session_id},
+            })
+
+    async def _run_agent_locked(
+        self, session_id: str, session: Any, *, mode: str,
+        tool_choice: object | None, raise_on_error: bool,
+        msg_id: str, progress: dict,
+    ) -> tuple[str, Any]:
+        """Serialized core of :meth:`_run_agent` (holds the session's turn
+        lock — same split as the telegram gateway's ``_run_agent_turn`` /
+        ``_run_agent_turn_locked``). ``original_len`` capture, the in-place
+        ``run_loop`` appends, and the LCM tail persist all happen under the
+        lock, on BOTH the normal and the interrupted exit paths."""
+        from prometheus.engine.agent_loop import run_loop
+
+        accumulated = ""
+        last_usage: Any = None
+        original_len: int | None = None
         try:
             messages = session.get_messages()
             original_len = len(messages)
@@ -796,27 +873,6 @@ class WebSocketBridge:
             if raise_on_error:
                 raise
             return accumulated, last_usage
-
-        finally:
-            # Stop the liveness pulse FIRST — a heartbeat outliving its turn
-            # would tell clients a finished turn is still running. Cancel
-            # without awaiting: this runs on the cancellation path too, where
-            # awaiting could re-raise before the frames below are sent.
-            heartbeat.cancel()
-            # Unregister only if the slot still points at THIS task (a newer
-            # concurrent turn may have overwritten it). Clearing the interrupt
-            # flag here bounds any stale flag from a cancel that lost the race
-            # with normal completion.
-            if self._turn_tasks.get(session_id) is asyncio.current_task():
-                self._turn_tasks.pop(session_id, None)
-            self._interrupted.discard(session_id)
-            if self.agent_state_ref:
-                self.agent_state_ref["state"] = "idle"
-            await self.broadcast({
-                "type": "agent_state",
-                "timestamp": time.time(),
-                "payload": {"state": "idle", "session_id": session_id},
-            })
 
     async def _emit_progress(
         self,
