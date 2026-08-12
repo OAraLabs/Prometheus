@@ -363,16 +363,12 @@ class Harness:
                 f"/api/sessions/firstlight-e2e/messages within 240s",
                 daemon_log_path)
 
-        # KNOWN DEFECT FL-1 (ratcheted, not hidden): the daemon does not exit
-        # on SIGTERM or SIGINT — uvicorn and the cron scheduler shut down
-        # within ~3s and the process then hangs indefinitely (verified with a
-        # 30s SIGINT probe too, so a stranger's Ctrl+C hangs the same way).
-        # Production never felt it because systemd escalates to SIGKILL at
-        # its 90s stop timeout. Until the defect is fixed, the harness
-        # records it loudly and escalates the same way systemd does; pass
-        # --strict-shutdown to turn it into the failure it really is (flip
-        # the flag on in CI in the PR that fixes the defect, so it can never
-        # regress silently).
+        # FL-1 (FIXED): uvicorn's capture_signals used to replace the
+        # daemon's SIGTERM/SIGINT handlers, so the daemon never saw the
+        # signal and hung until SIGKILL. Strict shutdown is now the DEFAULT
+        # — a hang here is a regression, not a known defect. The
+        # --lenient-shutdown escape keeps the old tolerate-and-warn behavior
+        # for bisecting old SHAs.
         self.daemon_proc.send_signal(signal.SIGTERM)
         shutdown_note = "clean SIGTERM shutdown"
         try:
@@ -385,11 +381,12 @@ class Harness:
             self.daemon_proc.wait(timeout=15)
             if self.strict_shutdown:
                 raise StepFailure(
-                    "daemon ignored SIGTERM for 15s (KNOWN DEFECT FL-1; "
-                    "--strict-shutdown is set, so this is now a failure)",
-                    daemon_log_path)
-            shutdown_note = ("SIGKILL required after 15s — KNOWN DEFECT "
-                            "FL-1, a stranger's Ctrl+C hangs the same way")
+                    "daemon ignored SIGTERM for 15s — FL-1-class regression "
+                    "(something re-captured the daemon's signal handlers or "
+                    "a task/thread outlives shutdown; see start_web's "
+                    "_EmbeddedServer note)", daemon_log_path)
+            shutdown_note = ("SIGKILL required after 15s — FL-1-class hang, "
+                             "tolerated only because --lenient-shutdown is set")
             print(f"[FIRSTLIGHT] WARNING: {shutdown_note}")
         self.daemon_proc = None
         return f"status + one REST turn; shutdown: {shutdown_note}"
@@ -470,9 +467,14 @@ def main() -> int:
     parser.add_argument("--self-mutation", default="none",
                         choices=["none", "busy-api"],
                         help="harness-side mutation (harness self-test)")
-    parser.add_argument("--strict-shutdown", action="store_true",
-                        help="treat the FL-1 SIGTERM hang as a failure "
-                             "(flip on in CI when the defect is fixed)")
+    parser.add_argument("--strict-shutdown", dest="strict_shutdown",
+                        action="store_true", default=True,
+                        help="treat a SIGTERM hang as a failure (DEFAULT "
+                             "since the FL-1 fix — the ratchet is a gate)")
+    parser.add_argument("--lenient-shutdown", dest="strict_shutdown",
+                        action="store_false",
+                        help="tolerate a shutdown hang with a loud warning "
+                             "(pre-FL-1 behavior; for bisecting only)")
     args = parser.parse_args()
     return Harness(Path(args.source).resolve(), args.keep, args.stub_mode,
                    args.self_mutation, args.strict_shutdown).main()

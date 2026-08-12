@@ -911,7 +911,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
         # Vet cron commands through the SAME SecurityGate as the agent, at system
         # (restricted) trust, before they run unattended (see cron_scheduler).
         set_cron_security_gate(security_gate)
-        cron_task = asyncio.create_task(run_scheduler_loop())
+        # own_signals=False: the daemon owns SIGTERM/SIGINT; the embedded
+        # scheduler must not re-register them (FL-1 — last registration
+        # wins, and this one was stealing the daemon's shutdown).
+        cron_task = asyncio.create_task(run_scheduler_loop(own_signals=False))
         tasks.append(cron_task)
         logger.info(
             "Cron scheduler started (failure notifier %s)",

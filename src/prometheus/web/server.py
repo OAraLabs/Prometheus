@@ -2755,7 +2755,23 @@ def _sanitize_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 async def start_web(app: FastAPI, host: str = "0.0.0.0", port: int = 8005) -> None:
-    """Start the FastAPI server using uvicorn."""
+    """Start the FastAPI server using uvicorn.
+
+    FIRSTLIGHT FL-1 note, verified by mutation: uvicorn's
+    ``capture_signals()`` looks like it steals SIGTERM/SIGINT from the
+    embedding daemon, but on uvicorn >=0.29 it captures, shuts itself
+    down, RESTORES the previous handlers, and RE-RAISES the signal — so
+    the daemon's own handler still fires and no override is needed here.
+    (The actual FL-1 thief was the embedded cron scheduler's
+    ``loop.add_signal_handler`` registration — one callback per signal
+    per loop, last wins.) A suppression override was tried and removed:
+    with cron fixed, mutating it back to plain ``uvicorn.Server`` changed
+    nothing, and machinery whose absence no test can detect is machinery
+    that rots. The property that matters — a real daemon exits promptly
+    on SIGTERM and SIGINT — is pinned end-to-end by
+    ``tests/test_daemon_shutdown.py``, which catches a regression in ANY
+    component of the chain, this one included.
+    """
     import uvicorn
     config = uvicorn.Config(app, host=host, port=port, log_level="info")
     server = uvicorn.Server(config)

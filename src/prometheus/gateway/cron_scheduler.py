@@ -402,20 +402,31 @@ def _jobs_due(
     return due
 
 
-async def run_scheduler_loop(*, once: bool = False) -> None:
-    """Main scheduler loop. Runs until cancelled or *once* is True (test mode)."""
+async def run_scheduler_loop(*, once: bool = False, own_signals: bool = True) -> None:
+    """Main scheduler loop. Runs until cancelled or *once* is True (test mode).
+
+    ``own_signals`` — asyncio allows exactly ONE callback per signal per
+    loop, so registering here REPLACES whatever the embedding process
+    installed. Standalone runs keep the default and own their shutdown;
+    the daemon passes ``False`` (FIRSTLIGHT FL-1: this registration —
+    running after the daemon's own — was silently stealing SIGTERM/SIGINT,
+    so the daemon's shutdown_event never fired and the process hung until
+    SIGKILL). Embedded, the loop ends via task cancellation like every
+    other daemon task.
+    """
     shutdown = asyncio.Event()
 
     def _on_signal() -> None:
         logger.info("Cron scheduler received shutdown signal")
         shutdown.set()
 
-    try:
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, _on_signal)
-    except (NotImplementedError, RuntimeError):
-        pass  # signal handlers may not work in all contexts
+    if own_signals:
+        try:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, _on_signal)
+        except (NotImplementedError, RuntimeError):
+            pass  # signal handlers may not work in all contexts
 
     write_pid()
     logger.info(
