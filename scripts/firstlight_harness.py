@@ -9,7 +9,7 @@ config, and fails loudly naming WHICH step broke and why:
   S3  prometheus setup --noninteractive              (against a stub model server)
   S4  prometheus doctor                              (must exit 0)
   S5  prometheus --once "..."                        (one CLI turn that CALLS A TOOL)
-  S6  prometheus daemon                              (/api/status answers; one REST turn)
+  S6  prometheus daemon                              (401 bare -> token show -> /api/status; one REST turn)
   S7  teardown                                       (no residue: temp gone, ports closed)
 
 CONTRACT
@@ -85,18 +85,22 @@ def port_open(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
-def http_get(url: str, timeout: float = 5.0) -> tuple[int, str]:
+def http_get(url: str, timeout: float = 5.0,
+             headers: dict[str, str] | None = None) -> tuple[int, str]:
+    req = urllib.request.Request(url, headers=headers or {})
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")
 
 
-def http_post_json(url: str, payload: dict, timeout: float = 10.0) -> tuple[int, str]:
+def http_post_json(url: str, payload: dict, timeout: float = 10.0,
+                   headers: dict[str, str] | None = None) -> tuple[int, str]:
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"}, method="POST",
+        headers={"Content-Type": "application/json", **(headers or {})},
+        method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -280,28 +284,66 @@ class Harness:
         )
         base = f"http://127.0.0.1:{self.api_port}"
         deadline = time.time() + 120
-        status = None
+        first_code = None
         while time.time() < deadline:
             if self.daemon_proc.poll() is not None:
                 raise StepFailure(
                     f"daemon exited rc={self.daemon_proc.returncode} before "
                     f"/api/status ever answered", daemon_log_path)
             try:
-                code, body = http_get(f"{base}/api/status", timeout=2)
-                if code == 200 and '"state"' in body:
-                    status = body
-                    break
+                first_code, _ = http_get(f"{base}/api/status", timeout=2)
+                break
             except Exception:
                 pass
             time.sleep(1)
-        if status is None:
-            raise StepFailure(f"/api/status on {base} never answered 200 "
+        if first_code is None:
+            raise StepFailure(f"/api/status on {base} never answered "
                               f"within 120s", daemon_log_path)
+
+        # Fresh-install security default, pinned in BOTH directions: the
+        # first daemon start MINTS a web API token (printed once; saved to
+        # the env file; `prometheus token show` re-prints it), so a bare
+        # request must be refused...
+        if first_code != 401:
+            raise StepFailure(
+                f"unauthenticated /api/status answered {first_code} — a "
+                f"fresh install must mint a token and refuse bare requests "
+                f"(expected 401)", daemon_log_path)
+        # ...and a client that reads the product's own message gets in. The
+        # harness does what that message says: `prometheus token show`.
+        rc, tok_log = self.run([str(self.venv / "bin" / "prometheus"),
+                                "token", "show"], "s6-token-show", timeout=60)
+        token_lines = [
+            ln.strip() for ln in
+            tok_log.read_text(encoding="utf-8", errors="replace").splitlines()
+            if ln.strip() and not ln.startswith("$")
+        ]
+        if not token_lines or " " in token_lines[0]:
+            raise StepFailure(
+                "`prometheus token show` did not print a token on its first "
+                "line — the fresh install minted one, so show must re-print "
+                "it", tok_log)
+        auth = {"Authorization": f"Bearer {token_lines[0]}"}
+
+        deadline = time.time() + 60
+        status = None
+        while time.time() < deadline:
+            code, body = http_get(f"{base}/api/status", timeout=2, headers=auth)
+            if code == 200 and '"state"' in body:
+                status = body
+                break
+            time.sleep(1)
+        if status is None:
+            raise StepFailure("authenticated /api/status never answered 200 "
+                              "— the token `prometheus token show` printed "
+                              "does not open the API it minted",
+                              daemon_log_path)
 
         code, body = http_post_json(
             f"{base}/api/chat/send",
             {"session_id": "firstlight-e2e",
              "message": "firstlight: run your tool round"},
+            headers=auth,
         )
         if code != 200:
             raise StepFailure(f"POST /api/chat/send -> {code}: {body[:200]}",
@@ -309,7 +351,8 @@ class Harness:
         deadline = time.time() + 240
         while time.time() < deadline:
             code, body = http_get(
-                f"{base}/api/sessions/firstlight-e2e/messages", timeout=5)
+                f"{base}/api/sessions/firstlight-e2e/messages", timeout=5,
+                headers=auth)
             if code == 200 and FINAL_MARKER in body:
                 break
             time.sleep(2)
