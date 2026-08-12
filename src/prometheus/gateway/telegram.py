@@ -166,12 +166,11 @@ class TelegramAdapter(BasePlatformAdapter):
         # it's None and the subscribe path is a no-op.
         self._signal_bus: object | None = None
 
-        # M6: one lock per session so a turn can't interleave with another on
-        # the SAME session — e.g. a managed-task completion calling inject_turn
-        # while a user turn is mid-flight, which would race both coroutines
-        # appending to session.messages (scrambled order + duplicate
-        # turn_index). Different sessions never contend; PTB already serializes
-        # user×user, so this specifically guards user×re-engagement.
+        # M6: per-session turn serialization. The REAL lock lives on the
+        # shared SessionManager (turn_lock_for) so telegram turns and web/WS
+        # bridge turns on the SAME session contend on ONE lock — this local
+        # map is only the fallback for adapters wired without a real manager
+        # (``__new__``-built or stub-managed test instances).
         self._turn_locks: dict[str, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------
@@ -1590,11 +1589,24 @@ class TelegramAdapter(BasePlatformAdapter):
         return None
 
     def _turn_lock_for(self, session_id: str) -> asyncio.Lock:
-        """Return the per-session turn lock (M6), creating it on first use.
+        """Return the per-session turn lock (M6) — shared across surfaces.
 
-        Resilient to adapters built via ``__new__`` (some tests bypass
-        ``__init__``): the lock map lazily initializes if absent.
+        Delegates to :meth:`SessionManager.turn_lock_for`, THE serialization
+        point for turns on one session, so a re-engagement injected here
+        (``inject_turn`` targeting e.g. a ``desktop:*`` session) cannot
+        interleave with a live web/WS-bridge turn on the same ChatSession —
+        two surface-local maps only ever serialized within a surface.
+
+        Back-compat: adapters built via ``__new__`` (some tests bypass
+        ``__init__``) or wired with a stub manager keep the old
+        adapter-local map, lazily initialized — the within-surface
+        guarantee is unchanged.
         """
+        from prometheus.engine.session import SessionManager
+
+        mgr = getattr(self, "session_manager", None)
+        if isinstance(mgr, SessionManager):
+            return mgr.turn_lock_for(session_id)
         locks = getattr(self, "_turn_locks", None)
         if locks is None:
             locks = {}
