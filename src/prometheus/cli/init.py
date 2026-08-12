@@ -519,6 +519,7 @@ def run_init(
     target_dir: Path | None = None,
     timeout: float = 1.0,
     candidates: list[dict[str, str]] | None = None,
+    probe_url: str | None = None,
 ) -> dict[str, Any] | None:
     """Run the fast setup flow. Returns the config that was written.
 
@@ -526,6 +527,16 @@ def run_init(
     config (nothing detected and the user took — or noninteractive mode
     implies — the install-instructions path). ``candidates`` overrides
     the probe list for tests.
+
+    ``probe_url`` (the ``--probe-url`` flag) replaces the four well-known
+    localhost candidates with the two known API shapes at ONE user-supplied
+    URL, via :func:`remote_server_candidates` — the same definition of
+    "what counts as an inference server" the interactive remote prompt and
+    the pairing wizard use. Without it, ``--noninteractive`` on a machine
+    whose server is not on 8080/11434/1234/8000 (or in CI, ever) has
+    nothing to detect and exits without writing a config — the FIRSTLIGHT
+    fresh-install harness is what surfaced that gap. An explicit
+    ``candidates`` still wins (tests).
     """
     from prometheus.config.env_file import get_env_file_path
 
@@ -540,6 +551,9 @@ def run_init(
     print("┌─ Prometheus setup (fast) ─────────────────────────────────────┐")
     print(f"  Config will be written to {cfg_path}")
     print("└───────────────────────────────────────────────────────────────┘")
+
+    if candidates is None and probe_url:
+        candidates = remote_server_candidates(probe_url)
 
     print("\nProbing for local inference servers …")
     servers = detect_local_servers(timeout=timeout, candidates=candidates)
