@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from prometheus.config.shipped_defaults import resolve_workspace_root
 from prometheus.permissions.audit import AuditDecision, AuditLogger
 from prometheus.permissions.exfiltration import ExfiltrationDetector
 from prometheus.permissions.modes import PermissionMode, TrustLevel
@@ -251,7 +252,7 @@ class SecurityGate:
             denied_commands=sec.get("denied_commands") or [],
             denied_paths=sec.get("denied_paths") or [],
             allowed_commands=sec.get("allowed_commands") or [],
-            workspace_root=sec.get("workspace_root"),
+            workspace_root=resolve_workspace_root(sec),
             mode=sec.get("permission_mode", "default"),
             audit_logger=audit_logger,
             exfiltration_detector=exfil_detector,
