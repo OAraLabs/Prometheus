@@ -58,7 +58,14 @@ def vault(tmp_path, monkeypatch):
     (root / "raw" / "claude-chats").mkdir(parents=True)
     (root / "notes").mkdir()
 
-    (root / "CLAUDE.md").write_text("# Vault Router\n", encoding="utf-8")
+    (root / "BRAIN.md").write_text("# Vault Router\n", encoding="utf-8")
+    # The real vault keeps a one-line CLAUDE.md stub so Claude Code's
+    # auto-load reaches BRAIN.md; the fixture mirrors both files.
+    (root / "CLAUDE.md").write_text(
+        "This vault's operating instructions are in BRAIN.md. Read it fully"
+        " before touching anything — zone ownership is binding.\n",
+        encoding="utf-8",
+    )
     (root / "wiki" / "index.md").write_text(
         "# Brain Wiki Index\n\n"
         "- [Standing Principles](sources/concepts/Standing-Principles.md)"
@@ -155,7 +162,7 @@ def test_the_module_contains_no_write_call_at_all():
     })
     assert not found, (
         f"vault.py calls {found} — the brain vault is read-only to Prometheus. "
-        f"Its CLAUDE.md §1 gives raw/ to nobody, wiki/memory/ to the Prometheus "
+        f"Its BRAIN.md §1 gives raw/ to nobody, wiki/memory/ to the Prometheus "
         f"compiler and notes/ to Will; 'read anywhere, write nowhere' is the "
         f"standing rule for every agent touching it."
     )
@@ -311,10 +318,11 @@ def test_reads_inside_the_vault_are_ADMITTED(vault):
     ("wiki/index.md", "Wiki Index"),
     ("raw/claude-chats/2026-04-24-prometheus3.md", "unsummarised"),
     ("notes/scratch.md", "human scratch"),
-    ("CLAUDE.md", "Vault Router"),
+    ("BRAIN.md", "Vault Router"),
+    ("CLAUDE.md", "operating instructions are in BRAIN.md"),
 ])
 def test_every_readable_zone_is_actually_readable(vault, path, needle):
-    """CLAUDE.md §1/§6: raw/ and notes/ are READABLE, just never writable.
+    """BRAIN.md §1/§6: raw/ and notes/ are READABLE, just never writable.
     A confinement bug that locked them out would be invisible to the refusal
     tests and would quietly halve the vault."""
     r = _read_result(path)
