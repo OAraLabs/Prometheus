@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+"""FIRSTLIGHT fresh-install harness — the stranger's first ten minutes, executable.
+
+Drives the exact flow the README promises, in an environment with no host
+config, and fails loudly naming WHICH step broke and why:
+
+  S1  git clone (of --source, at its current SHA) into a temp tree
+  S2  python -m venv + pip install -e '.[full]'      (the README install line)
+  S3  prometheus setup --noninteractive              (against a stub model server)
+  S4  prometheus doctor                              (must exit 0)
+  S5  prometheus --once "..."                        (one CLI turn that CALLS A TOOL)
+  S6  prometheus daemon                              (/api/status answers; one REST turn)
+  S7  teardown                                       (no residue: temp gone, ports closed)
+
+CONTRACT
+  * This file never imports from src/prometheus. It drives the CLI and the
+    HTTP API the way a user does; assertions are on exit codes, files, and
+    wire responses only.
+  * Isolation is environmental, not assumed: product processes run with a
+    minimal, non-inherited environment (fresh HOME under the temp tree), so
+    the operator's real ~/.prometheus, ~/.config/prometheus and env vars
+    cannot leak in — that is the "no step requires something only Will has"
+    guarantee, made mechanical.
+  * The model is scripts/firstlight_stub_model.py (stdlib, OpenAI-compatible).
+    Its FINAL marker is only ever emitted after it has seen a tool result,
+    so the marker appearing in a transcript proves a model->tool->model
+    round trip — the tool-call assertion rides the protocol.
+  * Two harness-owned edits are made to the config setup wrote, and they are
+    infra, not user steps: api_port/ws_port are moved to free ports so a
+    live daemon on the host can never collide with the run.
+
+OUT OF SCOPE — documented, not silently skipped:
+  * real inference (quality, GBNF, adapter tiers) — the stub is a script
+  * messaging gateways (Telegram/Slack/Discord) — need real tokens
+  * voice (whisper/TTS), media pipelines, GPU anything
+  * Beacon/desktop clients; WebSocket streaming semantics beyond boot
+  * cloud providers and anything needing a paid key
+  * long-horizon subsystems (LCM compaction cadence, SENTINEL, curator)
+
+SELF-TEST LEVERS (mutation testing THIS harness's reporting):
+  --stub-mode models-500   breaks S3 (setup finds no server)
+  --stub-mode no-final     breaks S5 (the agent turn can never conclude)
+  --self-mutation busy-api breaks S6 (the API port is already taken)
+A healthy tree must go red at exactly that step, naming it.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+FINAL_MARKER = "FIRSTLIGHT-COMPLETE"
+
+
+class StepFailure(Exception):
+    def __init__(self, why: str, log: Path | None = None) -> None:
+        super().__init__(why)
+        self.log = log
+
+
+# ---------------------------------------------------------------------------
+# Small mechanics
+# ---------------------------------------------------------------------------
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def port_open(port: int) -> bool:
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def http_get(url: str, timeout: float = 5.0) -> tuple[int, str]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+
+
+def http_post_json(url: str, payload: dict, timeout: float = 10.0) -> tuple[int, str]:
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+
+
+def tail(path: Path, lines: int = 40) -> str:
+    if not path or not path.exists():
+        return "(no log captured)"
+    text = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return "\n".join(text[-lines:])
+
+
+class Harness:
+    def __init__(self, source: Path, keep: bool, stub_mode: str,
+                 self_mutation: str) -> None:
+        self.source = source
+        self.keep = keep
+        self.stub_mode = stub_mode
+        self.self_mutation = self_mutation
+        self.work = Path(tempfile.mkdtemp(prefix="firstlight-"))
+        self.clone = self.work / "clone"
+        self.home = self.work / "home"
+        self.logs = self.work / "logs"
+        self.home.mkdir()
+        self.logs.mkdir()
+        self.venv = self.work / "venv"
+        self.stub_port = free_port()
+        self.api_port = free_port()
+        self.ws_port = free_port()
+        self.sha = "?"
+        self.stub_proc: subprocess.Popen | None = None
+        self.daemon_proc: subprocess.Popen | None = None
+        self._mutation_sock: socket.socket | None = None
+
+    # -- environment the product runs in (NOT inherited from the host) -----
+    def env(self) -> dict[str, str]:
+        return {
+            "HOME": str(self.home),
+            "PATH": f"{self.venv}/bin:/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "TERM": "dumb",
+            "PYTHONUNBUFFERED": "1",
+            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        }
+
+    def run(self, cmd: list[str], log_name: str, timeout: int,
+            cwd: Path | None = None, expect_rc: int | None = 0) -> tuple[int, Path]:
+        log = self.logs / f"{log_name}.log"
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write(f"$ {' '.join(cmd)}\n")
+            fh.flush()
+            try:
+                proc = subprocess.run(
+                    cmd, cwd=cwd or self.clone, env=self.env(),
+                    stdout=fh, stderr=subprocess.STDOUT, timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                raise StepFailure(
+                    f"`{' '.join(cmd)}` did not finish within {timeout}s", log
+                )
+        if expect_rc is not None and proc.returncode != expect_rc:
+            raise StepFailure(
+                f"`{' '.join(cmd)}` exited {proc.returncode} "
+                f"(expected {expect_rc})", log,
+            )
+        return proc.returncode, log
+
+    # ------------------------------------------------------------------
+    # Steps
+    # ------------------------------------------------------------------
+
+    def s1_clone(self) -> str:
+        out = subprocess.run(
+            ["git", "-C", str(self.source), "rev-parse", "HEAD"],
+            capture_output=True, text=True,
+        )
+        if out.returncode != 0:
+            raise StepFailure(f"--source {self.source} is not a git repo: "
+                              f"{out.stderr.strip()}")
+        self.sha = out.stdout.strip()
+        self.run(["git", "clone", "--quiet", str(self.source), str(self.clone)],
+                 "s1-clone", timeout=300, cwd=self.work)
+        self.run(["git", "-C", str(self.clone), "checkout", "--quiet",
+                  "--detach", self.sha], "s1-clone", timeout=60, cwd=self.work)
+        # The stranger's tree has no live config. If one rode along, every
+        # later step tests Will's box, not the product (§3b coupling).
+        stray = self.clone / "config" / "prometheus.yaml"
+        if stray.exists():
+            raise StepFailure(f"clone contains a live config at {stray} — "
+                              f"the source tree is leaking operator state")
+        return f"SHA {self.sha[:12]}"
+
+    def s2_install(self) -> str:
+        self.run([sys.executable, "-m", "venv", str(self.venv)],
+                 "s2-install", timeout=120, cwd=self.work)
+        self.run([str(self.venv / "bin" / "pip"), "install", "--quiet",
+                  "-e", ".[full]"], "s2-install", timeout=1500)
+        rc, _ = self.run([str(self.venv / "bin" / "prometheus"), "--help"],
+                         "s2-install", timeout=60)
+        return "pip install -e '.[full]' + entrypoint present"
+
+    def _wait_stub(self) -> None:
+        for _ in range(50):
+            try:
+                code, _ = http_get(f"http://127.0.0.1:{self.stub_port}/health",
+                                   timeout=1)
+                if code == 200:
+                    return
+            except Exception:
+                pass
+            time.sleep(0.1)
+        raise StepFailure("stub model server never became ready", None)
+
+    def s3_setup(self) -> str:
+        stub_log = (self.logs / "stub.log").open("a", encoding="utf-8")
+        self.stub_proc = subprocess.Popen(
+            [str(self.venv / "bin" / "python"),
+             str(self.clone / "scripts" / "firstlight_stub_model.py"),
+             "--port", str(self.stub_port), "--mode", self.stub_mode],
+            stdout=stub_log, stderr=subprocess.STDOUT, env=self.env(),
+        )
+        self._wait_stub()
+        self.run([str(self.venv / "bin" / "prometheus"), "setup",
+                  "--noninteractive", "--timeout", "3",
+                  "--probe-url", f"http://127.0.0.1:{self.stub_port}"],
+                 "s3-setup", timeout=120)
+        cfg = self.home / ".prometheus" / "prometheus.yaml"
+        if not cfg.exists():
+            raise StepFailure(f"setup exited 0 but wrote no config at {cfg}",
+                              self.logs / "s3-setup.log")
+        text = cfg.read_text(encoding="utf-8")
+        if f"127.0.0.1:{self.stub_port}" not in text:
+            raise StepFailure("config does not point at the probed server — "
+                              f"{cfg} lacks the stub URL", self.logs / "s3-setup.log")
+        # Harness infra (documented in the module header): move the web ports
+        # off the defaults so a daemon already running on the host can never
+        # collide with this run. These are ordinary user-settable keys.
+        for key, port in (("api_port", self.api_port), ("ws_port", self.ws_port)):
+            old = f"{key}: {8005 if key == 'api_port' else 8010}"
+            if text.count(old) != 1:
+                raise StepFailure(
+                    f"expected exactly one `{old}` in the generated config, "
+                    f"found {text.count(old)} — the setup template changed; "
+                    f"update the harness's port rewrite", None)
+            text = text.replace(old, f"{key}: {port}")
+        cfg.write_text(text, encoding="utf-8")
+        return f"config written; model={FINAL_MARKER.split('-')[0].lower()}-stub via --probe-url"
+
+    def s4_doctor(self) -> str:
+        _, log = self.run([str(self.venv / "bin" / "prometheus"), "doctor"],
+                          "s4-doctor", timeout=120)
+        return "doctor exit 0"
+
+    def s5_cli_turn(self) -> str:
+        _, log = self.run(
+            [str(self.venv / "bin" / "prometheus"), "--once",
+             "firstlight: enumerate the repository files"],
+            "s5-cli-turn", timeout=300,
+        )
+        if FINAL_MARKER not in log.read_text(encoding="utf-8", errors="replace"):
+            raise StepFailure(
+                f"CLI turn finished without the stub's final marker "
+                f"({FINAL_MARKER}) — the model->tool->model round trip did "
+                f"not complete", log)
+        return "one --once turn, tool round trip proven by marker"
+
+    def s6_daemon_rest(self) -> str:
+        if self.self_mutation == "busy-api":
+            self._mutation_sock = socket.socket()
+            self._mutation_sock.bind(("127.0.0.1", self.api_port))
+            self._mutation_sock.listen(1)
+        daemon_log_path = self.logs / "s6-daemon.log"
+        daemon_log = daemon_log_path.open("a", encoding="utf-8")
+        self.daemon_proc = subprocess.Popen(
+            [str(self.venv / "bin" / "prometheus"), "daemon"],
+            cwd=self.clone, env=self.env(),
+            stdout=daemon_log, stderr=subprocess.STDOUT,
+        )
+        base = f"http://127.0.0.1:{self.api_port}"
+        deadline = time.time() + 120
+        status = None
+        while time.time() < deadline:
+            if self.daemon_proc.poll() is not None:
+                raise StepFailure(
+                    f"daemon exited rc={self.daemon_proc.returncode} before "
+                    f"/api/status ever answered", daemon_log_path)
+            try:
+                code, body = http_get(f"{base}/api/status", timeout=2)
+                if code == 200 and '"state"' in body:
+                    status = body
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+        if status is None:
+            raise StepFailure(f"/api/status on {base} never answered 200 "
+                              f"within 120s", daemon_log_path)
+
+        code, body = http_post_json(
+            f"{base}/api/chat/send",
+            {"session_id": "firstlight-e2e",
+             "message": "firstlight: run your tool round"},
+        )
+        if code != 200:
+            raise StepFailure(f"POST /api/chat/send -> {code}: {body[:200]}",
+                              daemon_log_path)
+        deadline = time.time() + 240
+        while time.time() < deadline:
+            code, body = http_get(
+                f"{base}/api/sessions/firstlight-e2e/messages", timeout=5)
+            if code == 200 and FINAL_MARKER in body:
+                break
+            time.sleep(2)
+        else:
+            raise StepFailure(
+                f"REST turn never produced the stub's final marker in "
+                f"/api/sessions/firstlight-e2e/messages within 240s",
+                daemon_log_path)
+
+        self.daemon_proc.send_signal(signal.SIGTERM)
+        try:
+            rc = self.daemon_proc.wait(timeout=45)
+        except subprocess.TimeoutExpired:
+            self.daemon_proc.kill()
+            raise StepFailure("daemon ignored SIGTERM for 45s (killed)",
+                              daemon_log_path)
+        if rc not in (0, -signal.SIGTERM):
+            raise StepFailure(f"daemon exited rc={rc} on SIGTERM "
+                              f"(expected clean shutdown)", daemon_log_path)
+        self.daemon_proc = None
+        return "status + one REST turn + clean SIGTERM shutdown"
+
+    def s7_teardown(self) -> str:
+        self._stop_procs()
+        for name, port in (("stub", self.stub_port), ("api", self.api_port),
+                           ("ws", self.ws_port)):
+            deadline = time.time() + 10
+            while port_open(port):
+                if time.time() > deadline:
+                    raise StepFailure(f"{name} port {port} still open after "
+                                      f"teardown — a process leaked")
+                time.sleep(0.5)
+        if self.keep:
+            return f"ports closed; --keep set, tree retained at {self.work}"
+        shutil.rmtree(self.work, ignore_errors=False)
+        if self.work.exists():
+            raise StepFailure(f"work tree {self.work} survived removal")
+        return "ports closed, temp tree removed, no residue"
+
+    # ------------------------------------------------------------------
+
+    def _stop_procs(self) -> None:
+        for proc in (self.daemon_proc, self.stub_proc):
+            if proc and proc.poll() is None:
+                proc.send_signal(signal.SIGTERM)
+                try:
+                    proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        if self._mutation_sock is not None:
+            self._mutation_sock.close()
+            self._mutation_sock = None
+        self.daemon_proc = self.stub_proc = None
+
+    def main(self) -> int:
+        steps = [
+            ("S1", "git clone at source SHA", self.s1_clone),
+            ("S2", "pip install -e '.[full]'", self.s2_install),
+            ("S3", "prometheus setup --noninteractive (stub model)", self.s3_setup),
+            ("S4", "prometheus doctor exits 0", self.s4_doctor),
+            ("S5", "one CLI turn that calls a tool (--once)", self.s5_cli_turn),
+            ("S6", "daemon boots; /api/status; one REST turn", self.s6_daemon_rest),
+            ("S7", "teardown, no residue", self.s7_teardown),
+        ]
+        t0 = time.time()
+        print(f"[FIRSTLIGHT] source={self.source} work={self.work}")
+        for sid, name, fn in steps:
+            started = time.time()
+            try:
+                detail = fn()
+            except StepFailure as exc:
+                self._stop_procs()
+                print(f"\n[FIRSTLIGHT] FAILED at {sid} — {name}")
+                print(f"[FIRSTLIGHT] why: {exc}")
+                if exc.log:
+                    print(f"[FIRSTLIGHT] last lines of {exc.log.name}:")
+                    print(tail(exc.log))
+                print(f"[FIRSTLIGHT] full logs kept at: {self.logs}")
+                return 1
+            print(f"[FIRSTLIGHT] {sid} ok ({time.time() - started:5.1f}s) — "
+                  f"{name}: {detail}")
+        print(f"\n[FIRSTLIGHT] PASS — all 7 steps, {time.time() - t0:.1f}s, "
+              f"SHA {self.sha[:12]}")
+        return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", default=".",
+                        help="repo to test (cloned at its current HEAD)")
+    parser.add_argument("--keep", action="store_true",
+                        help="keep the temp tree on success too")
+    parser.add_argument("--stub-mode", default="normal",
+                        choices=["normal", "models-500", "no-final"],
+                        help="stub model mutation (harness self-test)")
+    parser.add_argument("--self-mutation", default="none",
+                        choices=["none", "busy-api"],
+                        help="harness-side mutation (harness self-test)")
+    args = parser.parse_args()
+    return Harness(Path(args.source).resolve(), args.keep, args.stub_mode,
+                   args.self_mutation).main()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -36,6 +36,7 @@ def run_setup(args: argparse.Namespace) -> int:
             noninteractive=bool(getattr(args, "noninteractive", False)),
             target_dir=Path(target_dir) if target_dir else None,
             timeout=float(getattr(args, "timeout", 1.0)),
+            probe_url=getattr(args, "probe_url", None),
         )
         # run_init returns None when it exited cleanly WITHOUT writing a
         # config (no server detected and the user chose the install-
@@ -81,6 +82,13 @@ def add_setup_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--timeout", type=float, default=1.0,
         help="[fast path] per-server probe timeout in seconds (default 1.0)",
+    )
+    parser.add_argument(
+        "--probe-url", type=str, default=None, metavar="URL",
+        help="[fast path] probe THIS inference-server URL instead of the four "
+             "well-known localhost ports — for servers on non-standard ports, "
+             "remote boxes, and CI stubs (FIRSTLIGHT harness). Both known API "
+             "shapes (OpenAI-compatible and Ollama) are tried at the URL.",
     )
 
 
