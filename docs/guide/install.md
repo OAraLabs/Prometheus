@@ -196,4 +196,19 @@ Nothing but the daemon's address and the token leave your machine, and the token
 - **Pairing code rejected or expired** — codes are strict by design: each one lives **15 minutes**, pairs **one client**, and allows **5 wrong attempts** before locking. Restart the daemon (`prometheus daemon`) to mint a fresh code and try again. Only a wrong code burns an attempt.
 - **Beacon connects but shows auth errors** — the token Beacon stored no longer matches the daemon's (e.g. after a rotate). Open Connection Settings (`⌘,`), paste the output of `prometheus token show`, and hit **Test**.
 
+## Upgrading (and what a downgrade actually does)
+
+**Upgrade in place** — for the git install the README documents:
+
+```bash
+cd Prometheus && git pull && pip install -e '.[full]'
+```
+
+then restart the daemon. Your state — `~/.prometheus/*` (databases, sessions, cron jobs, workspace, identity files), your config, and your API token — is not touched by the upgrade itself; schema changes are applied additively the first time the new code opens each store. This is not a promise made from reading the code: `scripts/firstlight_upgrade_harness.py` installs the oldest supported tag (`v0.1.0`), lives in it (turns, sessions, cron, files), upgrades in place, and fails CI if any table, row, or user file goes missing.
+
+Two honest caveats the harness itself reports:
+
+- **An upgraded install keeps its old config** — fixes that ship as *better setup defaults* (for example the advertised-tools default) don't reach a config written by an older version. After upgrading, compare your `prometheus.yaml` against `config/prometheus.yaml.default` for new sections worth adopting, or re-run `prometheus setup` in a scratch directory to see what a fresh config looks like.
+- **Downgrading is not supported, and here is precisely what it does:** tested empirically (HEAD state, `v0.1.0` code) — the old daemon boots, a turn completes, and every table remains readable, so a downgrade is **probably readable but lossy**: columns and stores added since the old version are invisible to it, and anything written into new locations effectively vanishes until you upgrade again. If you must roll back, snapshot `~/.prometheus/` first and treat the downgraded run as read-mostly. We say this plainly rather than pretending it's covered.
+
 Next: the [feature reference](features.md) for what everything does, or the [Beacon guide](beacon.md) for a tour of the app you just installed.
