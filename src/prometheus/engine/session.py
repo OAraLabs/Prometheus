@@ -68,6 +68,7 @@ class ChatSession:
         "session_id", "messages", "created_at",
         "queued_steers", "queued_prompts",
         "_lcm_engine", "_compaction_tasks",
+        "_lcm_persisted_len", "_lcm_persisted_ahead",
     )
 
     def __init__(
@@ -89,6 +90,15 @@ class ChatSession:
         # ``None`` when the session was created before LCM was available
         # (e.g. tests, CLI without LCM) — persistence becomes a no-op.
         self._lcm_engine = lcm_engine
+        # Exact-once persistence watermark (fix: duplicate LCM rows from
+        # overlapping tail persists — see the 2026-08-11 mapping survey).
+        # Every index < _lcm_persisted_len is SETTLED: durably written, or
+        # deliberately skipped (ephemeral interval). _lcm_persisted_ahead
+        # holds indices >= the watermark that were written out of band —
+        # a user row landing (and persisting) while a turn is still
+        # appending its unpersisted tail below it.
+        self._lcm_persisted_len: int = 0
+        self._lcm_persisted_ahead: set[int] = set()
 
     # ------------------------------------------------------------------
     # SPRINT-2 WS1 — /steer and /queue plumbing
@@ -180,11 +190,11 @@ class ChatSession:
                 text, provenance=provenance, is_trusted=is_trusted
             )
         self.messages.append(message)
-        if self._lcm_engine is not None:
-            self._persist_to_lcm(
-                [self.messages[-1]],
-                base_turn_index=new_turn_index,
-            )
+        # seal=False: this writes ONE row that may sit ABOVE a running
+        # turn's still-unpersisted tail (Beacon sends mid-turn; the echo
+        # needs the rowid immediately). Sealing here would mark that tail
+        # settled and the turn's own persist would then skip it — loss.
+        self._persist_to_lcm(new_turn_index, seal=False)
         return new_turn_index
 
     def add_result_messages(
@@ -197,9 +207,13 @@ class ChatSession:
         *result_messages* is ``RunResult.messages`` — the full messages list
         after the agent turn (which includes the user message we already
         added plus any assistant / tool-call / tool-result messages the loop
-        appended).  *original_len* is the index into *result_messages* at
-        which the new content starts (i.e. ``len(session.messages) - 1``
-        before the call, since the user message was already appended).
+        appended). *original_len* is the index into *result_messages* at
+        which the new content starts: ``len(session.get_messages())``
+        captured AFTER ``add_user_message`` appended the user turn — the
+        value every gateway adapter captures as ``pre_len``. (An earlier
+        revision of this docstring said ``len(session.messages) - 1``; that
+        formula is off by one and, implemented literally on the ``/api/chat``
+        route, re-appended and re-persisted the user row every turn.)
 
         PR fix/memory-lcm-full-rewire (2026-05-26): after the in-memory
         append, persist the new messages to LCM (when wired). LCM is the
@@ -208,11 +222,34 @@ class ChatSession:
         raises into the agent's path — failures are surfaced via
         ``telemetry.record_silent_failure``.
         """
-        new = result_messages[original_len:]
+        pre_len = len(self.messages)
+        if pre_len != original_len:
+            # Caller drift: the index does not match the session length, so
+            # the caller's idea of "where the new content starts" is stale
+            # (the /api/chat off-by-one duplicated the user row this way).
+            # The identity skip below corrects the low case; say so, loudly.
+            log.warning(
+                "add_result_messages: original_len=%d but session has "
+                "%d messages (session=%s) — caller passed a stale index",
+                original_len, pre_len, self.session_id,
+            )
+        start = original_len
+        # Identity prefix-skip: run_async hands the loop a SHALLOW copy of
+        # the session list, so any entry of result_messages that is the very
+        # object already sitting at the same position of self.messages is
+        # prefix, not new content — regardless of what the caller claimed
+        # via original_len. A stale/low index therefore re-appends and
+        # re-persists nothing.
+        while (
+            start < len(result_messages)
+            and start < pre_len
+            and result_messages[start] is self.messages[start]
+        ):
+            start += 1
+        new = result_messages[start:]
         if new:
             self.messages.extend(new)
-            if self._lcm_engine is not None:
-                self._persist_to_lcm(new, base_turn_index=original_len)
+            self._persist_to_lcm(pre_len, seal=True)
 
     def _schedule_lcm_compaction(self) -> None:
         """Fire-and-forget LCM ``maybe_compact`` after an ingest batch.
@@ -279,42 +316,102 @@ class ChatSession:
 
         ``original_len`` is ``len(self.messages)`` captured before the loop ran.
         Best-effort, same contract as :meth:`_persist_to_lcm` — never raises.
-        """
-        new = self.messages[original_len:]
-        if new and self._lcm_engine is not None:
-            self._persist_to_lcm(new, base_turn_index=original_len)
 
-    def _persist_to_lcm(
-        self,
-        new_messages: list[ConversationMessage],
-        *,
-        base_turn_index: int,
-    ) -> None:
-        """Persist new messages to LCM. Best-effort — never raises.
-
-        ``turn_index`` is set to ``base_turn_index + i`` so it matches
-        the position in ``self.messages`` after the extend.
+        Exact-once (2026-08-11 duplicate-rows fix): the tail
+        ``self.messages[original_len:]`` may contain rows that are ALREADY
+        durable — a user message that landed (and persisted) mid-turn, or,
+        when turns overlap on one session, rows an earlier-finishing turn's
+        tail persist covered. The watermark inside :meth:`_persist_to_lcm`
+        skips those, so calling this with a conservative (low) or stale
+        ``original_len`` re-writes nothing. This is what stops the N-way
+        row fan the 2026-08-11 survey found in the ``desktop:s4-*``
+        sessions (rowids 461/466/481/496 — one copy per in-flight turn).
         """
+        self._persist_to_lcm(original_len, seal=True)
+
+    def _note_persisted(self, idx: int) -> None:
+        """Record that ``self.messages[idx]`` is durably written.
+
+        Contiguous writes advance the watermark (draining any ahead-marks
+        the advance reaches); a write above the watermark — over a still-
+        unpersisted in-flight tail — is remembered in the ahead-set so the
+        eventual tail persist skips it instead of re-writing it.
+        """
+        if idx == self._lcm_persisted_len:
+            self._lcm_persisted_len += 1
+            while self._lcm_persisted_len in self._lcm_persisted_ahead:
+                self._lcm_persisted_ahead.discard(self._lcm_persisted_len)
+                self._lcm_persisted_len += 1
+        elif idx > self._lcm_persisted_len:
+            self._lcm_persisted_ahead.add(idx)
+
+    def _persist_to_lcm(self, start: int, *, seal: bool) -> None:
+        """Persist the not-yet-persisted rows of ``self.messages[start:]``
+        to LCM. Best-effort — never raises. No-op when no engine is wired.
+
+        ``turn_index`` for each row is its index in ``self.messages`` —
+        unchanged from the original contract, but now computed per row so a
+        span with skips (an already-durable user row in the middle of a
+        turn's tail) still stamps every row with its true position.
+
+        Exact-once: rows below the watermark, and rows in the ahead-set,
+        are skipped — persisting an overlapping span is a safe no-op. This
+        is the choke point that makes EVERY caller idempotent, so a stale
+        ``original_len`` (or two turns racing on one session) can inflate
+        nothing. On a mid-span ingest failure the rows already written stay
+        marked, the rest stay pending, and a later overlapping persist
+        resumes where this one failed (previously the whole remainder was
+        silently lost).
+
+        ``seal=True`` (turn-tail persists) afterwards marks everything below
+        ``len(self.messages)`` settled — including rows deliberately never
+        written, e.g. an ephemeral interval — so the watermark cannot wedge
+        below a permanent hole. ``seal=False`` (single user-row persists)
+        must NOT do that: the row may sit above a running turn's unpersisted
+        tail, and sealing would silently drop that tail from the store.
+        """
+        if self._lcm_engine is None:
+            return
+        wrote_any = False
         try:
-            for i, msg in enumerate(new_messages):
-                self._lcm_engine.ingest_sync(  # type: ignore[union-attr]
+            end = len(self.messages)
+            pending = [
+                i
+                for i in range(max(start, self._lcm_persisted_len), end)
+                if i not in self._lcm_persisted_ahead
+            ]
+            for i in pending:
+                msg = self.messages[i]
+                self._lcm_engine.ingest_sync(
                     session_id=self.session_id,
                     role=msg.role,
                     content=msg.text,
                     content_json=msg.content_json,
-                    turn_index=base_turn_index + i,
+                    turn_index=i,
                     # Persist the turn's trust tag so an injected (untrusted)
                     # task result survives the LCM round-trip rather than being
                     # silently dropped to the trusted default.
                     provenance=msg.provenance,
                     is_trusted=msg.is_trusted,
                 )
+                wrote_any = True
+                self._note_persisted(i)
+            if seal:
+                if end > self._lcm_persisted_len:
+                    self._lcm_persisted_len = end
+                self._lcm_persisted_ahead = {
+                    i for i in self._lcm_persisted_ahead
+                    if i >= self._lcm_persisted_len
+                }
             # Sprint 2 (OAra): the durable-DAG relief valve. maybe_compact was
             # CLI-only for the daemon's whole life — every gateway ingested
             # messages forever and nothing ever summarized. This is the one
             # choke point all paths share (telegram/slack via
             # add_result_messages, web/Beacon/Bridge via persist_loop_result).
-            self._schedule_lcm_compaction()
+            # Skipped when the span was a pure dedup no-op — nothing new to
+            # compact.
+            if wrote_any:
+                self._schedule_lcm_compaction()
         except Exception as exc:
             # Memory persistence MUST NOT be in the agent's critical
             # path. Surface to silent_failures and continue. The
@@ -332,8 +429,9 @@ class ChatSession:
                         exc=exc,
                         context={
                             "session_id": self.session_id,
-                            "new_msgs": len(new_messages),
-                            "base_turn_index": base_turn_index,
+                            "span_start": start,
+                            "persisted_len": self._lcm_persisted_len,
+                            "messages_len": len(self.messages),
                         },
                     )
             except Exception as nested_exc:
@@ -344,15 +442,25 @@ class ChatSession:
                 )
             log.warning(
                 "ChatSession: LCM persist failed for session=%s "
-                "(%d new messages) — agent loop unaffected",
-                self.session_id, len(new_messages),
+                "(span from %d, watermark %d) — agent loop unaffected",
+                self.session_id, start, self._lcm_persisted_len,
                 exc_info=True,
             )
 
     def rollback_last(self) -> None:
-        """Remove the most recently appended message (error recovery)."""
+        """Remove the most recently appended message (error recovery).
+
+        If the popped row was already durable it stays in LCM (append-only
+        store; unchanged behavior) — but the watermark must retreat so the
+        NEXT message at this position persists instead of being skipped as
+        already-written.
+        """
         if self.messages:
             self.messages.pop()
+            idx = len(self.messages)
+            self._lcm_persisted_ahead.discard(idx)
+            if self._lcm_persisted_len > idx:
+                self._lcm_persisted_len = idx
 
     def get_messages(self) -> list[ConversationMessage]:
         """Return the conversation history."""
@@ -386,6 +494,10 @@ class ChatSession:
         ``prometheus.config.ephemeral``.
         """
         self.messages = []
+        # Positions restart at 0, so the watermark must too — otherwise every
+        # post-reset message would look already-persisted and be dropped.
+        self._lcm_persisted_len = 0
+        self._lcm_persisted_ahead.clear()
 
     def set_lcm_engine(self, engine: object | None) -> None:
         """Point this session at an LCM engine, or at ``None`` for no durable
@@ -403,9 +515,19 @@ class ChatSession:
         self._lcm_engine = engine
 
     def trim(self, max_messages: int = MAX_SESSION_MESSAGES) -> None:
-        """Truncate from the front if history exceeds *max_messages*."""
+        """Truncate from the front if history exceeds *max_messages*.
+
+        Every surviving message shifts down by ``dropped`` positions, so the
+        persistence bookkeeping shifts with them (turn_index has always been
+        list position; that contract is unchanged).
+        """
         if len(self.messages) > max_messages:
+            dropped = len(self.messages) - max_messages
             self.messages = self.messages[-max_messages:]
+            self._lcm_persisted_len = max(0, self._lcm_persisted_len - dropped)
+            self._lcm_persisted_ahead = {
+                i - dropped for i in self._lcm_persisted_ahead if i >= dropped
+            }
 
 
 class SessionManager:
