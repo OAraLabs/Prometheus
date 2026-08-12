@@ -351,15 +351,24 @@ slash_commands:
 #     as_subagent: true                # use isolated SubagentSpawner (recommended)
 #     budget_usd: 1.00                 # soft cost cap per escalation (future enforcement)
 
+# Divergence detection — OBSERVATIONAL. Every `checkpoint_interval` tool
+# calls the agent's message history is snapshotted into the `checkpoints`
+# table in lcm.db, and a drift score is computed from goal alignment, tool
+# failure rate and repetition. Crossing `threshold` logs a WARNING naming
+# the task. Nothing is rolled back and no turn is altered.
+#
+# FL-4 retired the rollback half rather than finish it: it was broken in
+# three further places beyond the missing start_task call, and the scoring
+# heuristic has never run in production. `max_rollbacks` and
+# `auto_rollback_trust_level` are gone — they are no longer read anywhere in
+# src/, and a key with no reader is a config that documents fiction.
+# `use_llm_eval` / `llm_eval_budget` went with them: they described an
+# LLM-backed evaluator nobody built.
 divergence:
   enabled: false
 
   threshold: 0.7
   checkpoint_interval: 5
-  max_rollbacks: 2
-  use_llm_eval: false
-  llm_eval_budget: 500
-  auto_rollback_trust_level: 3
 learning:
   # PeriodicNudge — self-reflection prompt every N agent turns.
   nudge_enabled: true

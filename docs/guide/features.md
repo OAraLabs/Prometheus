@@ -254,7 +254,7 @@ The full Telegram command table. Slack (`/prometheus-*`) and Discord (`/promethe
 
 - **MCP** — **Default: on, zero servers configured.** Connect any **stdio** MCP server; its tools appear at runtime as `mcp__{server}__{tool}` with collision-free naming. **Transport honesty:** HTTP and SSE transports are recognized in config but not implemented yet — they resolve and then record a clean `"not yet implemented"` failure rather than pretending to connect.
 - **LSP** — **Default: off.** Language servers spawned lazily by file extension give the agent real symbol definitions, references, and type errors; after every file edit, diagnostics feed back to the model in the same turn.
-- **Subagents** — **Default: on.** The `agent` tool spawns subagents from a registry (see AGENTS.md below). The related divergence detector — checkpoint/rollback with goal-alignment scoring — is **off by default**.
+- **Subagents** — **Default: on.** The `agent` tool spawns subagents from a registry (see AGENTS.md below). The related divergence detector — periodic checkpoints plus a goal-alignment drift score, **observational only: it logs, it never rewinds a conversation** — is **off by default**.
 - **Hooks** — **Default: on, empty.** A PreToolUse / PostToolUse pipeline with hot reload; a file-mutation verifier and the LSP diagnostics hook are the shipped examples.
 - **Printing Press** — **Default: off.** Discovers and installs Go service CLIs into your skills directory on request (`/press`).
 

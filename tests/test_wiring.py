@@ -806,11 +806,22 @@ class TestSprint10Wiring:
         assert len(call_log) >= 1, "ModelRouter.route() was not called in run_loop"
 
     def test_divergence_detector_records_tool_calls(self, tmp_path):
-        """DivergenceDetector.record_tool_call() is invoked after tool execution."""
+        """DivergenceDetector.record_tool_call() is invoked after tool execution.
+
+        FL-4: now scoped to a task, because ONE detector is shared
+        process-wide. Note what this test does and does not prove — it fired
+        happily for four months while the feature wrote nothing, because it
+        supplies the task scope that production never minted. The claim
+        "a checkpoint row actually lands" belongs to
+        ``tests/test_divergence.py::TestCheckpointsLandThroughTheRealLoop``,
+        which drives ``run_loop`` instead of calling the mechanism directly.
+        """
         from prometheus.coordinator.divergence import DivergenceDetector, CheckpointStore
 
         config = {"divergence": {"enabled": True, "checkpoint_interval": 3}}
-        detector = DivergenceDetector(config, checkpoint_store=CheckpointStore())
+        store = CheckpointStore(db_path=tmp_path / "lcm.db")
+        detector = DivergenceDetector(config, checkpoint_store=store)
+        detector.start_task("task-1", "echo some text")
 
         tel = _tel(tmp_path)
         registry = _make_registry()
@@ -824,10 +835,13 @@ class TestSprint10Wiring:
             telemetry=tel,
             divergence_detector=detector,
         )
-        asyncio.run(_execute_tool_call(ctx, "echo", "t1", {"text": "hi"}))
+        asyncio.run(_execute_tool_call(
+            ctx, "echo", "t1", {"text": "hi"}, div_task_id="task-1",
+        ))
 
         # Verify detector recorded the call
-        assert len(detector.tool_calls_since_checkpoint) >= 1
+        assert detector.steps("task-1") >= 1
+        store.close()
 
 
 # ===========================================================================
