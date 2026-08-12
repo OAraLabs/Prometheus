@@ -39,6 +39,7 @@ by session_id, so the queues ride along with the same handle.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -544,6 +545,12 @@ class SessionManager:
         # method) keeps the wire site terse: ``session_manager.lcm_engine
         # = lcm_engine``.
         self.lcm_engine: object | None = None
+        # One lock per session id — THE cross-surface turn serializer.
+        # Every surface that runs agent turns (telegram gateway, web/WS
+        # bridge) resolves its per-session lock here via turn_lock_for(),
+        # so a turn injected through one surface cannot interleave with a
+        # live turn on the same session running through another.
+        self._turn_locks: dict[str, asyncio.Lock] = {}
 
     def _effective_lcm_engine(self, session_id: str) -> object | None:
         """The engine this session may persist through — ``None`` if ephemeral.
@@ -584,6 +591,37 @@ class SessionManager:
         there's no active session, unlike get_or_create.
         """
         return self._sessions.get(session_id)
+
+    def turn_lock_for(self, session_id: str) -> asyncio.Lock:
+        """Return the per-session TURN lock, creating it on first use.
+
+        The single serialization point for agent turns on one session,
+        shared by every surface wired to this manager. The telegram
+        gateway (audit M6) and the web/WS bridge (2026-08-11
+        duplicate-rows fix) each kept a private map of this exact shape,
+        which serialized turns within a surface but not across surfaces:
+        a managed-task re-engagement (``telegram.inject_turn`` targeting
+        e.g. a ``desktop:*`` session) ran under telegram's lock while a
+        live Beacon turn on the SAME session ran under the bridge's lock,
+        and both appended to the shared ``ChatSession.messages``
+        concurrently — interleaved model rounds, scrambled order. (The
+        ChatSession persistence watermark caps the durable damage at zero
+        duplicate LCM rows; it does not prevent the in-memory interleave.)
+        Both surfaces now delegate here.
+
+        Turns on one session serialize; different sessions never contend.
+        The map lazily initializes for managers built via ``__new__`` in
+        tests — the same resilience the surface-local helpers had.
+        """
+        locks = getattr(self, "_turn_locks", None)
+        if locks is None:
+            locks = {}
+            self._turn_locks = locks
+        lock = locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[session_id] = lock
+        return lock
 
     def clear(self, session_id: str) -> None:
         """Clear conversation history for a session (keeps the object)."""

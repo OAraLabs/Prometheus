@@ -75,9 +75,12 @@ class WebSocketBridge:
         # any unflagged CancelledError (daemon shutdown) keeps propagating.
         self._turn_tasks: dict[str, asyncio.Task] = {}
         self._interrupted: set[str] = set()
-        # Per-session turn locks (fix: duplicate LCM rows, 2026-08-11 survey).
-        # Same shape as the telegram gateway's M6 lock map: turns on ONE
-        # session serialize; turns on different sessions stay concurrent.
+        # Per-session turn serialization (fix: duplicate LCM rows, 2026-08-11
+        # survey). The REAL lock lives on the shared SessionManager
+        # (turn_lock_for) so bridge turns and telegram turns (inject_turn
+        # re-engagement) on the SAME session contend on ONE lock — this local
+        # map is only the fallback for bridges wired without a real manager
+        # (tests construct WebSocketBridge with session_mgr=None or a stub).
         self._turn_locks: dict[str, asyncio.Lock] = {}
 
     @property
@@ -605,12 +608,24 @@ class WebSocketBridge:
         })
 
     def _turn_lock_for(self, session_id: str) -> asyncio.Lock:
-        """Return the per-session turn lock, creating it on first use.
+        """Return the per-session turn lock — shared across surfaces.
 
-        Mirror of the telegram gateway's ``_turn_lock_for`` (M6), including
-        its resilience to bridges built via ``__new__`` in tests: the lock
-        map lazily initializes if absent.
+        Delegates to :meth:`SessionManager.turn_lock_for`, THE serialization
+        point for turns on one session, so a live bridge turn cannot
+        interleave with a telegram-side re-engagement (``inject_turn``
+        targeting a ``desktop:*`` session) on the same ChatSession — two
+        surface-local maps only ever serialized within a surface.
+
+        Back-compat (mirror of the telegram shim): bridges built via
+        ``__new__``, with ``session_mgr=None``, or with a stub manager keep
+        the old bridge-local map, lazily initialized — the within-surface
+        guarantee is unchanged.
         """
+        from prometheus.engine.session import SessionManager
+
+        mgr = getattr(self, "session_mgr", None)
+        if isinstance(mgr, SessionManager):
+            return mgr.turn_lock_for(session_id)
         locks = getattr(self, "_turn_locks", None)
         if locks is None:
             locks = {}
