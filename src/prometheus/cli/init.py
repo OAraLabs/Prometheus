@@ -36,6 +36,7 @@ from typing import Any
 import yaml
 
 from prometheus.config.paths import get_config_dir
+from prometheus.config.shipped_defaults import SHIPPED_ALWAYS_LOADED
 
 # ---------------------------------------------------------------------------
 # Local inference-server detection
@@ -188,21 +189,12 @@ def probe_backend(
 # ---------------------------------------------------------------------------
 
 
-# The tool set a FRESH INSTALL advertises to the model — mirrors
-# tools.deferred_loading.always_loaded in config/prometheus.yaml.default,
-# and tests/test_setup_advertised_defaults.py fails the build if the two
-# ever drift. Hardcoded rather than read from the template because pip
-# installs don't ship the template file.
-#
-# FIRSTLIGHT FL-2: setup used to write NO tools: section, so
-# DynamicToolLoader got an EMPTY always_loaded and (deferred mode "auto"
-# resolving ON for every local provider) a fresh install advertised
-# nothing — the model could not act, and the only runtime trace was the
-# loop's "Lucky guess" allowance when a model guessed a tool name anyway.
-SHIPPED_ALWAYS_LOADED: tuple[str, ...] = (
-    "bash", "task_create", "read_file", "write_file", "edit_file",
-    "grep", "glob", "tool_search", "web_search", "web_fetch", "memory",
-)
+# SHIPPED_ALWAYS_LOADED (imported at the top of this module) is the tool
+# set a fresh install advertises. It lives in
+# prometheus.config.shipped_defaults so the READER (DynamicToolLoader) and
+# this WRITER share ONE value: FL-2 made setup write it; FL-2u made the
+# reader fall back to it, so an upgraded install whose config predates the
+# key advertises correctly with no config migration.
 
 
 def _default_config(server: DetectedServer | None, model: str | None) -> dict[str, Any]:
