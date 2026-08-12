@@ -353,6 +353,18 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # DynamicToolLoader — deferred loading support
     from prometheus.context.dynamic_tools import DynamicToolLoader
     tool_loader = DynamicToolLoader(registry, config.get("tools", {}).get("deferred_loading"))
+    # FIRSTLIGHT FL-2b: the advertised baseline gets ONE visible line at
+    # boot. Before this, a config with no tools: section advertised zero
+    # tools and nothing anywhere said so — the only traces were telemetry
+    # rows and per-call "Lucky guess" lines.
+    _dl_cfg = config.get("tools", {}).get("deferred_loading") or {}
+    logger.info(
+        "Tool advertisement baseline: %d always_loaded of %d registered "
+        "(deferred mode: %s)",
+        len(_dl_cfg.get("always_loaded") or []),
+        len(registry.list_tools()),
+        _dl_cfg.get("enabled", "auto"),
+    )
 
     # Sprint 15 wiring fix: daemon was missing adapter, security_gate,
     # model_router, and divergence_detector — all were built but not connected.

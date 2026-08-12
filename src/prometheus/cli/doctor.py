@@ -499,7 +499,9 @@ def run_anatomy_checks(config: dict[str, Any]) -> list[DiagnosticCheck]:
                     name=check.name, category=check.category, status="warning",
                     message=check.message,
                     fix="Run `prometheus setup` (the rich wizard) to generate "
-                        "identity files.",
+                        "identity files. Until then the agent runs with a "
+                        "generic identity (SOUL.md/AGENTS.md shape the system "
+                        "prompt only — tools and the loop are unaffected).",
                 )
             checks.append(check)
         return checks

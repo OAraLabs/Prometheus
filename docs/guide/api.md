@@ -51,7 +51,7 @@ Session semantics worth knowing:
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/chat/send` | Send a chat message (supports optional `tool_choice`) |
+| POST | `/api/chat/send` | Send a chat message. Body: `{"session_id": "my-session", "message": "..."}` (the field is `message`, not `content`); optional `mode` (`"agent"`/`"chat"`) and `tool_choice`. Returns `{"run_id", "status": "sent"}`; the reply streams over the WebSocket and lands in `GET /api/sessions/{session_id}/messages` |
 | POST | `/api/chat/interrupt` | Stop the running agent turn in a session — the chat Stop button. `{"session_id": ...}`; idempotent (`stopped: false` when nothing is running). Completed rounds persist, a mid-generation partial is kept as an assistant turn, and every client sees the broadcast `chat_done{interrupted:true}`. HTTP twin of the WS `interrupt` frame |
 | POST | `/api/chat` | Alternate chat send endpoint |
 
