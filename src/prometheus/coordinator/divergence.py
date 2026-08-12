@@ -1,10 +1,57 @@
 """
-Divergence Detection — Catch when agent goes off-track, checkpoint/rollback.
+Divergence Detection — observe when the agent drifts from the task goal.
 
 Donor patterns:
 - LCM DAG (memory/lcm/) — message persistence, summary relationships
 - OpenClaw memory_extractor — fact extraction patterns
 - Claude Code is_read_only — checkpoint before mutating ops
+
+DETECTION ONLY — the rollback half was RETIRED (FL-4), not shipped dark.
+Sprint 10 built a checkpoint/rollback feature that was broken in four
+independent places, so no checkpoint row was ever written on any box:
+
+1. ``start_task`` had NO CALLER anywhere in ``src/``, so ``current_task_id``
+   stayed ``None`` and both ``maybe_checkpoint`` and ``evaluate`` returned at
+   their first guard. This is the one the survey started from.
+2. ``notify_callback`` was never passed by either construction site
+   (``__main__.create_divergence_detector``), so the human-in-the-loop
+   branch could not fire.
+3. The loop hardcoded ``trust = 1`` while ``auto_rollback_trust_level``
+   defaults to (and the live config set) ``3`` — so ``rollback()`` took the
+   notify branch unconditionally and auto-rollback was unreachable.
+4. On the unreachable success path the restored messages were DISCARDED —
+   the call site used them only for ``len(restored)`` in a log line. The
+   conversation was never rewound. Rollback did not roll back.
+
+Wiring only (1) would have produced checkpoint rows feeding a rollback that
+still could not function — a slower version of the same defect. The scoring
+heuristic below has also never run once in production, and auto-rewinding a
+live conversation on an unvalidated entity/word-overlap score is not a
+default worth arming. So the detector now WRITES checkpoints and REPORTS a
+divergence score, and does nothing else. Rollback, ``notify_callback``,
+``max_rollbacks``, ``auto_rollback_trust_level`` and
+``CheckpointStore.delete_after`` are gone rather than left as dead branches.
+
+Not to be confused with FL-3, which landed the same day (see
+:class:`CheckpointStore`'s docstring): that fixed a SECOND, independent
+reason the table looked empty — this class resolved its default db path to
+a different file than the stores it claimed to share. FL-3 removed the rival
+explanation; the orphan above is why nothing was ever written to EITHER file.
+
+The ``checkpoints`` table is forensic: ``get_latest`` is its read half and
+has no production caller by design. Stated here rather than left to be
+rediscovered.
+
+CONCURRENCY — read this before adding state. ONE ``DivergenceDetector`` is
+constructed per process (``daemon.py`` builds it once and hands the SAME
+object to the ``AgentLoop`` and to the startup-built web ``LoopContext``),
+so nothing task-scoped may live on the detector itself. It used to:
+``current_task_id``, ``step_count``, ``rollback_count`` and the goal were
+plain attributes, which under concurrent sessions is cross-talk, not drift —
+session B's ``start_task`` would reset session A's counters mid-turn and A's
+checkpoints would land under B's goal hash. State is therefore keyed by a
+``task_id`` minted per ``run_loop`` invocation, exactly as
+``FileMutationVerifier`` keys by ``turn_key`` and for the same reason.
 
 Source: Prometheus (OAra AI Lab)
 License: MIT
@@ -17,10 +64,13 @@ import json
 import logging
 import re
 import sqlite3
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Callable, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
+from uuid import uuid4
 
 from prometheus.config.paths import get_lcm_db_path
 
@@ -28,6 +78,15 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+#: Task key used when a caller supplies none. Correct only for
+#: single-threaded callers (benchmarks, evals, the CLI) — every concurrent
+#: surface mints its own via :meth:`DivergenceDetector.new_task_id`.
+DEFAULT_TASK_KEY = "default"
+
+#: Ceiling on simultaneously-tracked tasks. A task is dropped by
+#: ``end_task``; this bounds the damage when a caller never calls it.
+MAX_LIVE_TASKS = 32
 
 
 # ============================================================================
@@ -266,7 +325,11 @@ class CheckpointStore:
         self._conn.commit()
 
     def get_latest(self, task_id: str) -> Optional[Checkpoint]:
-        """Get most recent checkpoint for a task."""
+        """Get most recent checkpoint for a task.
+
+        The read half of a forensic table — no production caller by design
+        (see the module docstring). Used by tests to prove a row landed.
+        """
         row = self._conn.execute(
             """SELECT * FROM checkpoints
                WHERE task_id = ?
@@ -276,14 +339,6 @@ class CheckpointStore:
         if row:
             return Checkpoint.from_db_row(row)
         return None
-
-    def delete_after(self, task_id: str, step_number: int) -> None:
-        """Delete checkpoints after a given step (for rollback cleanup)."""
-        self._conn.execute(
-            "DELETE FROM checkpoints WHERE task_id = ? AND step_number > ?",
-            (task_id, step_number),
-        )
-        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -301,54 +356,109 @@ class CheckpointStore:
 
 @dataclass
 class DivergenceResult:
-    """Result of divergence evaluation."""
+    """Result of divergence evaluation. Observational — see the module
+    docstring on why there is no ``should_rollback``."""
     score: float              # 0.0 = on track, 1.0 = completely off track
-    should_rollback: bool
     reason: str
-    checkpoint: Optional[Checkpoint] = None
+    diverged: bool = False    # score >= threshold; a SIGNAL, not an action
+
+
+@dataclass
+class _TaskState:
+    """Everything that belongs to ONE task.
+
+    Lives in :attr:`DivergenceDetector._tasks`, never on the detector — the
+    detector is a process-wide singleton (see the module docstring).
+    """
+    task_id: str
+    goal_tracker: GoalTracker = field(default_factory=GoalTracker)
+    step_count: int = 0
+    tool_calls_since_checkpoint: list[dict] = field(default_factory=list)
 
 
 class DivergenceDetector:
     """
-    Detect when agent diverges from task goal.
+    Observe when the agent diverges from the task goal.
 
     Uses LCM database for checkpoint persistence (not a separate database).
     Extends the existing memory infrastructure.
+
+    ONE instance is shared process-wide, so every entry point takes a
+    ``task_id`` naming which in-flight task it belongs to. Keys are minted
+    per ``run_loop`` invocation via :meth:`new_task_id`; omitting one falls
+    back to :data:`DEFAULT_TASK_KEY`, which is correct only for
+    single-threaded callers.
+
+    Lifecycle:
+      start_task(task_id, goal_message)   — opens a task's record
+      record_tool_call(..., task_id=...)  — one step
+      maybe_checkpoint(messages, task_id=...) — persists every Nth step
+      evaluate(messages, results, task_id=...) — scores drift
+      end_task(task_id=...)               — drops the record (idempotent)
     """
 
     def __init__(
         self,
         config: dict,
         checkpoint_store: Optional[CheckpointStore] = None,
-        notify_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
         div_config = config.get("divergence", {})
         self.enabled = div_config.get("enabled", False)
         self.checkpoint_interval = div_config.get("checkpoint_interval", 5)
         self.threshold = div_config.get("threshold", 0.7)
-        self.auto_rollback_trust = div_config.get("auto_rollback_trust_level", 3)
-        self.max_rollbacks = div_config.get("max_rollbacks", 2)
-        self.use_llm_eval = div_config.get("use_llm_eval", False)
-        self.llm_eval_budget = div_config.get("llm_eval_budget", 500)
+        # ``use_llm_eval`` / ``llm_eval_budget`` were read here into attributes
+        # nothing consumed — a config key promising an LLM-backed evaluator
+        # that was never built, kept plausible by the assignment itself (the
+        # reader-direction drift guard greps for the key name, and an
+        # assignment satisfies it). Dropped with the rollback half; scoring is
+        # the heuristic below and nothing else.
 
         self.checkpoint_store = checkpoint_store or CheckpointStore()
-        self.goal_tracker = GoalTracker()
-        self.notify_callback = notify_callback
 
-        # Runtime state
-        self.current_task_id: Optional[str] = None
-        self.step_count: int = 0
-        self.rollback_count: int = 0
-        self.tool_calls_since_checkpoint: list[dict] = []
+        # task_id -> state, least-recently-touched first. Guarded by
+        # ``_lock``: turns are driven by asyncio and interleave at every
+        # ``await``, and gateways may drive the loop from a worker thread.
+        self._tasks: OrderedDict[str, _TaskState] = OrderedDict()
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def new_task_id(session_id: str | None = None) -> str:
+        """Mint a key for one task. Unique per call — a session id alone is
+        NOT enough, since a session can have more than one turn in flight."""
+        return f"{session_id or 'anon'}:{uuid4().hex}"
+
+    @property
+    def live_tasks(self) -> int:
+        """Number of tasks currently holding state. Diagnostics only; a
+        number that keeps climbing means a caller isn't calling end_task."""
+        with self._lock:
+            return len(self._tasks)
+
+    # ------------------------------------------------------------------
+    # Lifecycle — called by agent_loop
+    # ------------------------------------------------------------------
 
     def start_task(self, task_id: str, goal_message: str) -> None:
-        """Initialize tracking for a new task."""
-        self.current_task_id = task_id
-        self.step_count = 0
-        self.rollback_count = 0
-        self.tool_calls_since_checkpoint = []
-        self.goal_tracker.set_goal(goal_message)
-        logger.info(f"Divergence tracking started: task={task_id}")
+        """Initialize tracking for a new task.
+
+        A no-op when disabled: without this, ``record_tool_call`` accrues
+        state for a feature that will never read it.
+        """
+        if not self.enabled:
+            return
+        state = _TaskState(task_id=task_id)
+        state.goal_tracker.set_goal(goal_message)
+        with self._lock:
+            self._tasks[task_id] = state
+            while len(self._tasks) > MAX_LIVE_TASKS:
+                evicted, _ = self._tasks.popitem(last=False)
+                logger.warning(
+                    "DivergenceDetector: evicted live task %r (>%d) — that "
+                    "task gets no further checkpoints; a caller is not "
+                    "calling end_task",
+                    evicted, MAX_LIVE_TASKS,
+                )
+        logger.info("Divergence tracking started: task=%s", task_id)
 
     def record_tool_call(
         self,
@@ -356,51 +466,103 @@ class DivergenceDetector:
         args: dict,
         result: object,
         success: bool,
+        *,
+        task_id: str | None = None,
     ) -> None:
-        """Record a tool call for divergence analysis."""
-        self.step_count += 1
-        self.tool_calls_since_checkpoint.append({
-            "step": self.step_count,
-            "tool": tool_name,
-            "args": args,
-            "result": str(result)[:500],  # Truncate large results
-            "success": success,
-            "timestamp": time.time(),
-        })
+        """Record a tool call for divergence analysis.
 
-    def maybe_checkpoint(self, messages: list[dict]) -> Optional[Checkpoint]:
-        """Create checkpoint if interval reached."""
-        if not self.enabled or not self.current_task_id:
-            return None
+        Accrues state ONLY for a task with an open record. Before FL-4 it was
+        guarded by nothing, and the only three methods that cleared
+        ``tool_calls_since_checkpoint`` were the three that never ran — so
+        every tool call the daemon ever dispatched appended a dict carrying
+        the args and 500 chars of result to a list nothing freed for the
+        life of the process.
 
-        if self.step_count > 0 and self.step_count % self.checkpoint_interval == 0:
-            return self._create_checkpoint(messages)
-        return None
+        No ``enabled`` check here deliberately. ``start_task`` is the single
+        gate: a disabled detector opens no record, so an ``enabled`` guard on
+        this path is unreachable — and an unreachable guard is not
+        defence in depth, it is a control no test can pin. Mutation M3 proved
+        it: deleting it left every test green, because the ``state is None``
+        return below refuses the same call for a different reason
+        (Standing Principles §3b). The invariant this relies on: a
+        ``_TaskState`` exists only if ``start_task`` created it.
+        """
+        with self._lock:
+            state = self._get(task_id)
+            if state is None:
+                return
+            state.step_count += 1
+            state.tool_calls_since_checkpoint.append({
+                "step": state.step_count,
+                "tool": tool_name,
+                "args": args,
+                "result": str(result)[:500],  # Truncate large results
+                "success": success,
+                "timestamp": time.time(),
+            })
 
-    def _create_checkpoint(self, messages: list[dict]) -> Checkpoint:
-        """Create and persist a checkpoint."""
-        goal = self.goal_tracker.current_goal
+    def steps(self, task_id: str | None = None) -> int:
+        """Steps recorded for a task; 0 when it has no open record.
+
+        A method, not the old ``step_count`` attribute, deliberately: a
+        duck-typed caller still reading the attribute gets an
+        ``AttributeError`` rather than a bound method that is truthy and
+        ``TypeError``s on comparison.
+        """
+        with self._lock:
+            state = self._get(task_id)
+            return state.step_count if state else 0
+
+    def maybe_checkpoint(
+        self,
+        messages: list[dict],
+        *,
+        task_id: str | None = None,
+    ) -> Optional[Checkpoint]:
+        """Create checkpoint if interval reached.
+
+        Gated on an open record, not on ``enabled`` — same reasoning as
+        ``record_tool_call``.
+        """
+        with self._lock:
+            state = self._get(task_id)
+            if state is None:
+                return None
+            due = (
+                state.step_count > 0
+                and state.step_count % self.checkpoint_interval == 0
+            )
+            if not due:
+                return None
+            return self._create_checkpoint(state, messages)
+
+    def _create_checkpoint(
+        self, state: _TaskState, messages: list[dict],
+    ) -> Checkpoint:
+        """Create and persist a checkpoint. Caller holds ``_lock``."""
+        goal = state.goal_tracker.current_goal
 
         checkpoint = Checkpoint(
-            task_id=self.current_task_id or "",
-            step_number=self.step_count,
+            task_id=state.task_id,
+            step_number=state.step_count,
             goal_description=goal.original_message if goal else "",
             goal_hash=goal.goal_hash if goal else "",
             messages_snapshot=[
                 m.copy() if isinstance(m, dict) else {"content": str(m)}
                 for m in messages
             ],
-            tool_calls=self.tool_calls_since_checkpoint.copy(),
+            tool_calls=list(state.tool_calls_since_checkpoint),
         )
 
         # Persist to LCM store
         self.checkpoint_store.save(checkpoint)
 
         # Clear since-checkpoint buffer
-        self.tool_calls_since_checkpoint = []
+        state.tool_calls_since_checkpoint = []
 
         logger.info(
-            f"Checkpoint created: task={self.current_task_id}, step={self.step_count}"
+            "Checkpoint created: task=%s, step=%d",
+            state.task_id, state.step_count,
         )
         return checkpoint
 
@@ -408,40 +570,41 @@ class DivergenceDetector:
         self,
         messages: list[dict],
         tool_results: list[dict],
+        *,
+        task_id: str | None = None,
     ) -> DivergenceResult:
         """Evaluate current divergence from goal."""
-        if not self.enabled or not self.current_task_id:
-            return DivergenceResult(
-                score=0.0,
-                should_rollback=False,
-                reason="disabled",
-            )
+        if not self.enabled:
+            return DivergenceResult(score=0.0, reason="disabled")
+        with self._lock:
+            state = self._get(task_id)
+            if state is None:
+                return DivergenceResult(score=0.0, reason="no_task")
 
-        # Calculate divergence score
-        score = self._calculate_score(messages, tool_results)
+            score = self._calculate_score(state, messages, tool_results)
 
-        # Determine if rollback needed
-        should_rollback = (
-            score >= self.threshold
-            and self.rollback_count < self.max_rollbacks
-        )
-
-        # Get checkpoint for potential rollback
-        checkpoint = None
-        if should_rollback:
-            checkpoint = self.checkpoint_store.get_latest(self.current_task_id)
-
-        reason = self._build_reason(score, should_rollback)
-
+        diverged = score >= self.threshold
         return DivergenceResult(
             score=score,
-            should_rollback=should_rollback,
-            reason=reason,
-            checkpoint=checkpoint,
+            reason=self._build_reason(score),
+            diverged=diverged,
         )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _get(self, task_id: str | None) -> Optional[_TaskState]:
+        """This task's state, or None. Caller holds ``_lock``."""
+        key = task_id or DEFAULT_TASK_KEY
+        state = self._tasks.get(key)
+        if state is not None:
+            self._tasks.move_to_end(key)
+        return state
 
     def _calculate_score(
         self,
+        state: _TaskState,
         messages: list[dict],
         tool_results: list[dict],
     ) -> float:
@@ -457,11 +620,11 @@ class DivergenceDetector:
         scores: list[float] = []
 
         # 1. Goal alignment (inverted: low alignment = high divergence)
-        alignment = self.goal_tracker.check_alignment(messages, tool_results)
+        alignment = state.goal_tracker.check_alignment(messages, tool_results)
         scores.append(1.0 - alignment)
 
         # 2. Tool failure rate
-        recent_tools = self.tool_calls_since_checkpoint[-10:]
+        recent_tools = state.tool_calls_since_checkpoint[-10:]
         if recent_tools:
             failures = sum(1 for t in recent_tools if not t["success"])
             failure_rate = failures / len(recent_tools)
@@ -475,14 +638,14 @@ class DivergenceDetector:
 
         # 4. Context growth anomaly
         if len(messages) > 20:
-            growth_ratio = len(messages) / max(self.step_count, 1)
+            growth_ratio = len(messages) / max(state.step_count, 1)
             if growth_ratio > 5:  # More than 5 messages per step
                 scores.append(0.3)
 
         # Average all scores
         return sum(scores) / len(scores) if scores else 0.0
 
-    def _build_reason(self, score: float, should_rollback: bool) -> str:
+    def _build_reason(self, score: float) -> str:
         """Build human-readable divergence reason."""
         if score < 0.3:
             return f"on_track (score={score:.2f})"
@@ -490,64 +653,14 @@ class DivergenceDetector:
             return f"minor_drift (score={score:.2f})"
         elif score < self.threshold:
             return f"moderate_drift (score={score:.2f})"
-        else:
-            if should_rollback:
-                return f"diverged (score={score:.2f}), rollback_recommended"
-            else:
-                return f"diverged (score={score:.2f}), max_rollbacks_reached"
+        return f"diverged (score={score:.2f})"
 
-    def rollback(
-        self,
-        checkpoint: Checkpoint,
-        trust_level: int,
-    ) -> tuple[bool, list[dict]]:
-        """
-        Execute rollback to checkpoint.
-
-        Returns (success, restored_messages).
-        """
-        if trust_level < self.auto_rollback_trust:
-            # Need user confirmation for non-autonomous
-            if self.notify_callback:
-                self.notify_callback(
-                    f"Task may be off-track.\n"
-                    f"Divergence: {checkpoint.divergence_score:.2f}\n"
-                    f"Step: {self.step_count}\n"
-                    f"Reply 'rollback' to restore to step {checkpoint.step_number}"
-                )
-            return False, []
-
-        # Auto-rollback for AUTONOMOUS trust
-        self.rollback_count += 1
-        self.step_count = checkpoint.step_number
-
-        # Delete checkpoints after this one
-        self.checkpoint_store.delete_after(
-            self.current_task_id or "", checkpoint.step_number
-        )
-
-        logger.warning(
-            f"Auto-rollback: task={self.current_task_id}, "
-            f"to_step={checkpoint.step_number}, "
-            f"rollback_count={self.rollback_count}/{self.max_rollbacks}"
-        )
-
-        if self.notify_callback:
-            self.notify_callback(
-                f"Auto-rollback to step {checkpoint.step_number}\n"
-                f"Reason: divergence score {checkpoint.divergence_score:.2f}"
-            )
-
-        return True, checkpoint.messages_snapshot
-
-    def end_task(self) -> None:
-        """Clean up after task completion."""
-        if self.current_task_id:
+    def end_task(self, task_id: str | None = None) -> None:
+        """Drop a task's record. Idempotent — safe to call for a task that
+        was never started (disabled detector, or an early-exit turn)."""
+        with self._lock:
+            state = self._tasks.pop(task_id or DEFAULT_TASK_KEY, None)
+        if state is not None:
             logger.info(
-                f"Task ended: {self.current_task_id}, "
-                f"steps={self.step_count}, rollbacks={self.rollback_count}"
+                "Task ended: %s, steps=%d", state.task_id, state.step_count,
             )
-
-        self.current_task_id = None
-        self.goal_tracker.clear()
-        self.tool_calls_since_checkpoint = []

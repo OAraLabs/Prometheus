@@ -738,6 +738,25 @@ async def run_loop(
     # the web path ``context.session_id`` belongs to the shared context and is
     # not this turn's session.
     ephemeral = is_session_ephemeral(session_id or context.session_id)
+    # FL-4: the divergence detector's task scope, minted here for exactly the
+    # reasons the verifier's turn_key is (one shared instance, one run_loop
+    # call = one task) — and HERE rather than in ``AgentLoop.run_async``,
+    # because run_async is only one of five callers. Wiring it there would
+    # have left web/Beacon, the gym runner, the coding session and both CLI
+    # paths untracked: CROSS-CUTTING §2, the two-loop defect, rebuilt.
+    # ``start_task`` is what ``current_task_id`` was always missing — without
+    # it every checkpoint and every evaluation returned at its first guard.
+    div = getattr(context, "divergence_detector", None)
+    div_task_id: str | None = None
+    if div is not None and getattr(div, "enabled", False):
+        try:
+            div_task_id = div.new_task_id(session_id or context.session_id)
+            div.start_task(div_task_id, _goal_message_from(messages))
+        except Exception:
+            # Fail-open: divergence is observational. It must never be able
+            # to break a turn.
+            log.debug("DivergenceDetector.start_task raised", exc_info=True)
+            div_task_id = None
     try:
         async for item in _run_loop(
             context,
@@ -747,6 +766,7 @@ async def run_loop(
             tool_choice=tool_choice,
             fmv_turn_key=turn_key,
             ephemeral=ephemeral,
+            div_task_id=div_task_id,
         ):
             yield item
     finally:
@@ -757,6 +777,30 @@ async def run_loop(
                 log.debug(
                     "FileMutationVerifier.discard_turn raised", exc_info=True,
                 )
+        if div_task_id is not None:
+            # Same reason the verifier drains in a ``finally``: _run_loop has
+            # five return sites plus max_turns exhaustion plus cancellation,
+            # and a task that exits any of those without dropping its record
+            # leaks state into the shared detector.
+            try:
+                div.end_task(div_task_id)
+            except Exception:
+                log.debug("DivergenceDetector.end_task raised", exc_info=True)
+
+
+def _goal_message_from(messages: list[ConversationMessage]) -> str:
+    """The task goal: the most recent user text in the turn's history.
+
+    Same reverse-scan idiom ``AgentLoop.run_async`` uses to recover
+    ``user_message`` from a supplied history. Empty string when there is no
+    user turn (a cron/eval kickoff with a system prompt only), which
+    ``GoalTracker.set_goal`` handles — it yields an empty objective set and
+    an alignment score that never accuses.
+    """
+    for msg in reversed(messages):
+        if getattr(msg, "role", None) == "user":
+            return msg.text or ""
+    return ""
 
 
 async def _run_loop(
@@ -768,12 +812,16 @@ async def _run_loop(
     tool_choice: object | None = None,
     fmv_turn_key: str | None = None,
     ephemeral: bool = False,
+    div_task_id: str | None = None,
 ) -> AsyncIterator[tuple[StreamEvent, UsageSnapshot | None]]:
     """The loop body. See :func:`run_loop` — call that, not this.
 
     ``ephemeral`` is resolved by :func:`run_loop` for the turn's session and
     threaded down to the tool-execution path, where it nulls the content
     columns on ``telemetry.tool_calls`` and skips repair-pair capture.
+
+    ``div_task_id`` scopes every divergence call below to THIS task; None
+    when the detector is absent or disabled.
     """
     # Scopes every verifier call below to THIS turn. Empty for a duck-typed
     # verifier that predates turn scoping (see run_loop).
@@ -1477,6 +1525,7 @@ async def _run_loop(
                 raw_model_output=raw_model_output_this_turn,
                 served_model=served_model_this_turn,
                 ephemeral=ephemeral,
+                div_task_id=div_task_id,
             )
             if _runnable
             else []
@@ -1628,32 +1677,40 @@ async def _run_loop(
 
         messages.append(ConversationMessage(role="user", content=tool_results))
 
-        # Sprint 10: checkpoint + divergence evaluation after tool dispatch
-        if context.divergence_detector is not None:
+        # Sprint 10 / FL-4: checkpoint + divergence evaluation after tool
+        # dispatch. Observational only — the score is REPORTED, never acted
+        # on. See coordinator/divergence.py's module docstring for why the
+        # rollback half was retired rather than finished.
+        if context.divergence_detector is not None and div_task_id is not None:
             dd = context.divergence_detector
-            # Maybe create a checkpoint
-            msg_dicts = [
-                {"role": m.role, "content": m.text or ""}
-                for m in messages
-                if hasattr(m, "role")
-            ]
-            dd.maybe_checkpoint(msg_dicts)
-
-            # Evaluate divergence (only after 3+ steps to gather signal)
-            if dd.step_count > 3:
-                tool_result_dicts = [
-                    {"result": tr.content, "success": not tr.is_error}
-                    for tr in tool_results
+            try:
+                msg_dicts = [
+                    {"role": m.role, "content": m.text or ""}
+                    for m in messages
+                    if hasattr(m, "role")
                 ]
-                div_result = dd.evaluate(msg_dicts, tool_result_dicts)
-                if div_result.should_rollback and div_result.checkpoint:
-                    trust = 1  # default to non-autonomous
-                    rolled_back, restored = dd.rollback(div_result.checkpoint, trust)
-                    if rolled_back:
+                dd.maybe_checkpoint(msg_dicts, task_id=div_task_id)
+
+                # Evaluate divergence (only after 3+ steps to gather signal)
+                if dd.steps(div_task_id) > 3:
+                    tool_result_dicts = [
+                        {"result": tr.content, "success": not tr.is_error}
+                        for tr in tool_results
+                    ]
+                    div_result = dd.evaluate(
+                        msg_dicts, tool_result_dicts, task_id=div_task_id,
+                    )
+                    if div_result.diverged:
+                        # The signal's only consumer. WARNING because the
+                        # point of the feature is that someone reading the
+                        # journal can see the agent going in circles.
                         log.warning(
-                            "Divergence rollback: restoring %d messages",
-                            len(restored),
+                            "Divergence: task=%s %s", div_task_id, div_result.reason,
                         )
+            except Exception:
+                # Fail-open, same posture as start_task/end_task: an
+                # observational subsystem must never break a turn.
+                log.debug("Divergence evaluation raised", exc_info=True)
 
     raise RuntimeError(f"Exceeded maximum turn limit ({context.max_turns})")
 
@@ -2236,6 +2293,7 @@ async def _safe_execute(
     served_model: str | None = None,
     *,
     ephemeral: bool = False,
+    div_task_id: str | None = None,
 ) -> ToolResultBlock:
     """Run one tool call, always returning a correctly-correlated
     ``ToolResultBlock`` and never raising.
@@ -2254,6 +2312,7 @@ async def _safe_execute(
             raw_model_output=raw_model_output,
             served_model=served_model,
             ephemeral=ephemeral,
+            div_task_id=div_task_id,
         )
     except Exception as exc:  # noqa: BLE001 — isolating tool failure is the point
         log.error(
@@ -2307,6 +2366,7 @@ async def _dispatch_tool_calls(
     served_model: str | None = None,
     *,
     ephemeral: bool = False,
+    div_task_id: str | None = None,
 ) -> list[ToolResultBlock]:
     """Dispatch tool calls with parallel execution for read-only tools.
 
@@ -2327,12 +2387,18 @@ async def _dispatch_tool_calls(
     ``raw_model_output`` does: the decision belongs to the turn, and the only
     place that can act on it is the per-call telemetry write at the bottom of
     ``_execute_tool_call``.
+
+    ``div_task_id`` rides along for the same reason again — the divergence
+    detector is process-wide, so its step counter has to be told which task
+    a call belongs to. Note the read-only branch below runs concurrently
+    under ``gather``: that is precisely why the counter cannot be an
+    attribute on the shared detector.
     """
     if len(tool_calls) == 1:
         return [
             await _safe_execute(
                 context, tool_calls[0], raw_model_output, served_model,
-                ephemeral=ephemeral,
+                ephemeral=ephemeral, div_task_id=div_task_id,
             )
         ]
 
@@ -2356,7 +2422,8 @@ async def _dispatch_tool_calls(
     if read_only:
         async def _run_ro(idx, tc):
             return idx, await _safe_execute(
-                context, tc, raw_model_output, served_model, ephemeral=ephemeral
+                context, tc, raw_model_output, served_model,
+                ephemeral=ephemeral, div_task_id=div_task_id,
             )
 
         results.extend(
@@ -2368,7 +2435,8 @@ async def _dispatch_tool_calls(
         results.append((
             idx,
             await _safe_execute(
-                context, tc, raw_model_output, served_model, ephemeral=ephemeral
+                context, tc, raw_model_output, served_model,
+                ephemeral=ephemeral, div_task_id=div_task_id,
             ),
         ))
 
@@ -2466,6 +2534,7 @@ async def _execute_tool_call(
     raw_model_output: str | None = None,
     served_model: str | None = None,
     ephemeral: bool = False,
+    div_task_id: str | None = None,
 ) -> ToolResultBlock:
     """Execute a single tool call, running hooks if configured.
 
@@ -3070,14 +3139,21 @@ async def _execute_tool_call(
             source="self_correction",
         )
 
-    # Sprint 10: record tool call for divergence detection
-    if context.divergence_detector is not None:
-        context.divergence_detector.record_tool_call(
-            tool_name=tool_name,
-            args=tool_input,
-            result=tool_result.content,
-            success=not tool_result.is_error,
-        )
+    # Sprint 10 / FL-4: record tool call for divergence detection. Scoped to
+    # the task minted in ``run_loop``; without a task id there is nothing to
+    # record against, and recording anyway is what grew an unbounded buffer
+    # on every daemon for four months (see divergence.record_tool_call).
+    if context.divergence_detector is not None and div_task_id is not None:
+        try:
+            context.divergence_detector.record_tool_call(
+                tool_name=tool_name,
+                args=tool_input,
+                result=tool_result.content,
+                success=not tool_result.is_error,
+                task_id=div_task_id,
+            )
+        except Exception:
+            log.debug("DivergenceDetector.record_tool_call raised", exc_info=True)
 
     # Post-tool hook (Sprint 2)
     if context.hook_executor is not None:

@@ -2115,26 +2115,43 @@ class CheckpointStore:
     """Persists checkpoints in lcm.db (shared with LCMConversationStore/LCMSummaryStore)."""
     def __init__(db_path: Path | None = None)       # defaults to ~/.prometheus/lcm.db
     def save(checkpoint: Checkpoint) -> None
-    def get_latest(task_id: str) -> Checkpoint | None
-    def delete_after(task_id: str, step_number: int) -> None
+    def get_latest(task_id: str) -> Checkpoint | None   # forensic read; no prod caller
 
 @dataclass
 class DivergenceResult:
     score: float                # 0.0 = on track, 1.0 = off track
-    should_rollback: bool
     reason: str
-    checkpoint: Checkpoint | None
+    diverged: bool              # score >= threshold — a SIGNAL, not an action
 
 class DivergenceDetector:
-    def __init__(config: dict, checkpoint_store: CheckpointStore | None = None,
-                 notify_callback: Callable[[str], None] | None = None)
-    def start_task(task_id: str, goal_message: str) -> None
-    def record_tool_call(tool_name: str, args: dict, result: object, success: bool) -> None
-    def maybe_checkpoint(messages: list[dict]) -> Checkpoint | None
-    def evaluate(messages: list[dict], tool_results: list[dict]) -> DivergenceResult
-    def rollback(checkpoint: Checkpoint, trust_level: int) -> tuple[bool, list[dict]]
-    def end_task() -> None
+    """ONE instance per process, so every entry point takes a task_id."""
+    def __init__(config: dict, checkpoint_store: CheckpointStore | None = None)
+    @staticmethod def new_task_id(session_id: str | None = None) -> str
+    def start_task(task_id: str, goal_message: str) -> None     # no-op when disabled
+    def record_tool_call(tool_name: str, args: dict, result: object,
+                         success: bool, *, task_id: str | None = None) -> None
+    def steps(task_id: str | None = None) -> int
+    def maybe_checkpoint(messages: list[dict], *,
+                         task_id: str | None = None) -> Checkpoint | None
+    def evaluate(messages: list[dict], tool_results: list[dict], *,
+                 task_id: str | None = None) -> DivergenceResult
+    def end_task(task_id: str | None = None) -> None            # idempotent
 ```
+
+**FL-4 (2026-08-12) — detection only; the rollback half was retired.**
+Sprint 10 shipped this feature broken in four independent places, so no
+checkpoint row was ever written on any box: `start_task` had no caller in
+`src/`; `notify_callback` was never passed; the loop hardcoded `trust = 1`
+below the `auto_rollback_trust_level: 3` threshold; and the restored
+messages were discarded rather than applied. `rollback()`,
+`notify_callback`, `delete_after`, `max_rollbacks`,
+`auto_rollback_trust_level`, `use_llm_eval` and `llm_eval_budget` are gone.
+The detector now writes checkpoints and logs a WARNING when the score
+crosses `threshold`; nothing rewinds a conversation.
+
+Task state is keyed by a `task_id` minted per `run_loop` invocation — the
+detector is a process-wide singleton, so per-task state on the object itself
+would cross-talk between concurrent sessions rather than merely drift.
 
 Divergence scoring heuristics (no LLM cost):
 1. Goal alignment — keyword overlap between objectives/entities and recent activity (inverted)
@@ -2173,11 +2190,7 @@ model_router:
 divergence:
   enabled: true
   checkpoint_interval: 5        # checkpoint every N tool calls
-  threshold: 0.7                # score triggering rollback consideration
-  auto_rollback_trust_level: 3  # only AUTONOMOUS trust auto-rolls back
-  max_rollbacks: 2              # prevent infinite rollback loops
-  use_llm_eval: false           # optional LLM-based eval (budget-capped)
-  llm_eval_budget: 500
+  threshold: 0.7                # score at/above which the turn logs a WARNING
 ```
 
 ### Wiring into Existing Modules
@@ -2185,8 +2198,9 @@ divergence:
 | Module | Integration |
 |--------|-------------|
 | `engine/agent_loop.py:LoopContext` | Added `model_router` and `divergence_detector` fields |
-| `engine/agent_loop.py:_execute_tool_call()` | Records each tool call via `divergence_detector.record_tool_call()` after telemetry |
-| `engine/agent_loop.py:run_loop()` | After tool dispatch: calls `maybe_checkpoint()` + `evaluate()` + `rollback()` |
+| `engine/agent_loop.py:_execute_tool_call()` | Records each tool call via `divergence_detector.record_tool_call(task_id=...)` after telemetry |
+| `engine/agent_loop.py:run_loop()` | Mints the task id, calls `start_task()`, drains with `end_task()` in a `finally`. Wired HERE, not in `AgentLoop.run_async` — `run_loop` is the one function all five surfaces call |
+| `engine/agent_loop.py:_run_loop()` | After tool dispatch: `maybe_checkpoint()` + `evaluate()`, logging a WARNING on `diverged` |
 | `engine/agent_loop.py:AgentLoop.__init__()` | Accepts `model_router` and `divergence_detector` kwargs, passes to `LoopContext` |
 | `__main__.py` | `create_model_router(config)` + `create_divergence_detector(config)` factories wired into CLI |
 | `adapter/__init__.py` | Exports `ModelRouter`, `TaskClassifier`, `TaskType`, `ProviderConfig` |
@@ -2208,7 +2222,9 @@ config/
   prometheus.yaml            — model_router + divergence sections added
 tests/
   test_router.py             — 16 tests (classifier accuracy, routing rules, fallback chain)
-  test_divergence.py         — 23 tests (goal extraction, alignment, checkpoint CRUD, rollback)
+  test_divergence.py         — 34 tests (goal extraction, alignment, checkpoint CRUD,
+                               concurrent-task isolation, and an end-to-end run_loop
+                               test asserting a checkpoint ROW lands)
 ```
 
 ---
