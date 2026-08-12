@@ -224,12 +224,14 @@ def _default_config(server: DetectedServer | None, model: str | None) -> dict[st
             "compression_trigger": 0.75,
             "reserved_output": 2000,
         },
+        # Only the two keys DynamicToolLoader actually reads (enabled,
+        # always_loaded). The template also carries mcp_always_deferred /
+        # search_mcp — both reader-less (KNOWN_UNREAD debt), and the drift
+        # ratchet rightly blocked shipping that fiction to fresh installs.
         "tools": {
             "deferred_loading": {
                 "enabled": "auto",
                 "always_loaded": list(SHIPPED_ALWAYS_LOADED),
-                "mcp_always_deferred": True,
-                "search_mcp": True,
             },
         },
         "security": {
