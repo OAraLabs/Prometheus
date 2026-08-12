@@ -188,6 +188,23 @@ def probe_backend(
 # ---------------------------------------------------------------------------
 
 
+# The tool set a FRESH INSTALL advertises to the model — mirrors
+# tools.deferred_loading.always_loaded in config/prometheus.yaml.default,
+# and tests/test_setup_advertised_defaults.py fails the build if the two
+# ever drift. Hardcoded rather than read from the template because pip
+# installs don't ship the template file.
+#
+# FIRSTLIGHT FL-2: setup used to write NO tools: section, so
+# DynamicToolLoader got an EMPTY always_loaded and (deferred mode "auto"
+# resolving ON for every local provider) a fresh install advertised
+# nothing — the model could not act, and the only runtime trace was the
+# loop's "Lucky guess" allowance when a model guessed a tool name anyway.
+SHIPPED_ALWAYS_LOADED: tuple[str, ...] = (
+    "bash", "task_create", "read_file", "write_file", "edit_file",
+    "grep", "glob", "tool_search", "web_search", "web_fetch", "memory",
+)
+
+
 def _default_config(server: DetectedServer | None, model: str | None) -> dict[str, Any]:
     """Build a minimal but functional prometheus.yaml."""
     return {
@@ -206,6 +223,16 @@ def _default_config(server: DetectedServer | None, model: str | None) -> dict[st
             "effective_limit": 24000,
             "compression_trigger": 0.75,
             "reserved_output": 2000,
+        },
+        # Only the two keys DynamicToolLoader actually reads (enabled,
+        # always_loaded). The template also carries mcp_always_deferred /
+        # search_mcp — both reader-less (KNOWN_UNREAD debt), and the drift
+        # ratchet rightly blocked shipping that fiction to fresh installs.
+        "tools": {
+            "deferred_loading": {
+                "enabled": "auto",
+                "always_loaded": list(SHIPPED_ALWAYS_LOADED),
+            },
         },
         "security": {
             "permission_mode": "default",
@@ -377,6 +404,8 @@ def _print_detection_summary(servers: list[DetectedServer]) -> None:
     if not servers:
         print("Local inference: no servers detected on standard ports.")
         print("  Checked llama.cpp:8080, Ollama:11434, LM Studio:1234, vLLM:8000.")
+        print("  Already running a server on another port or machine?")
+        print("    prometheus setup --probe-url http://host:port")
         return
     print(f"Local inference: {len(servers)} server(s) detected:")
     for s in servers:
