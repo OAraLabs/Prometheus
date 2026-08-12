@@ -619,7 +619,7 @@ wiki:
 # ── Brain vault ───────────────────────────────────────────────────────────
 # The brain-vault second brain: a git repo of knowledge compiled from the full
 # claude.ai + Claude Code history. Prometheus reads it and NEVER writes to it
-# (vault_search / vault_read); the vault's own CLAUDE.md §1 zone rules make
+# (vault_search / vault_read); the vault's own BRAIN.md §1 zone rules make
 # that binding, not optional.
 #
 # This is a SEPARATE root from `wiki:` above. That one is the Prometheus wiki,

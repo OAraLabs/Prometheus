@@ -246,7 +246,7 @@ def get_wiki_root() -> Path:
 # A SECOND, SEPARATE root. It is NOT the Prometheus wiki: that one lives under
 # ``get_wiki_root()`` (default ``~/.prometheus/wiki``) and is a machine-owned
 # projection of ``memory.db``. The brain vault is a git repo of hand- and
-# ingest-compiled knowledge with its own zone rules (its CLAUDE.md §1), and
+# ingest-compiled knowledge with its own zone rules (its BRAIN.md §1), and
 # conflating the two would let a writer aimed at one land in the other.
 # Whether the Prometheus wiki eventually becomes a zone inside the vault is
 # explicitly DEFERRED — until then they are two roots and two idioms.
