@@ -672,14 +672,12 @@ Trust rules applied in order:
 `src/prometheus/permissions/sandbox.py` — new code
 
 ```python
-class SandboxedExecution:
-    def __init__(workspace: str | Path, timeout=30, max_output=10_000,
-                 strip_env_keys: list[str] | None = None)
-    async def run(command: str, env_override=None) -> ToolResult
-    @property workspace -> Path
-    # Strips API keys / tokens / secrets from subprocess env automatically
-    # Enforces timeout; truncates output at max_output chars
-```
+# SandboxedExecution was DELETED 2026-08-13. It was never constructed
+# anywhere in src/ — only exported and self-tested — and it was not a
+# sandbox: subprocess + cwd + env scrub + timeout, no namespace, no path
+# enforcement. The real one is prometheus/coding/sandbox.py (ProcessSandbox:
+# full-clone jail, path containment, env allowlist), which says in its own
+# docstring that it is process hygiene rather than a container boundary.
 
 ### `prometheus.context.token_estimation`
 `src/prometheus/context/token_estimation.py` — new code
