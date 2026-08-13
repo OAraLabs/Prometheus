@@ -48,7 +48,7 @@ The flagship feature: a validation layer between the agent loop and whatever mod
 
 ### Model router — Default: off (per-chat overrides: on)
 
-An optional router classifies tasks, follows fallback chains, and can escalate to cloud models. The router itself ships disabled. What is always on is the per-chat override system: `/claude`, `/gpt`, `/gemini`, `/xai`, `/deepseek`, `/kimi`, `/glm`, `/mimo` route the current chat through that provider, `/local` returns to your local model, and `/route` shows what is currently in effect.
+An optional router classifies tasks, follows fallback chains, and can escalate to cloud models. The router itself ships disabled. What is always on is the per-chat override system: `/claude`, `/gpt`, `/gemini`, `/xai`, `/deepseek`, `/kimi`, `/glm`, `/mimo`, `/qwen` route the current chat through that provider, `/local` returns to your local model, and `/route` shows what is currently in effect.
 
 ### Search forcing (tool_choice) — Default: on (per call)
 
@@ -154,7 +154,7 @@ These are the proactive subsystems that act while you are idle. They are the mar
 
 The most complete chat surface. Beyond text it handles inbound photos (vision captioning), voice notes (Whisper speech-to-text), documents in 20+ formats, and stickers. The full command surface:
 
-`/start /clear /reset /status /help /model /route /wiki /note /sentinel /benchmark /context /skills /memory /curator /notifications /voice /health /events /steer /queue /unqueue /clearsteers /anatomy /doctor /profile /beacon /tools /pairs /approve /deny /pending /gepa /symbiote /audit /press /escalations` plus the provider overrides `/claude /gpt /gemini /xai /grok /deepseek /kimi /glm /mimo /local`.
+`/start /clear /reset /status /help /model /route /wiki /note /sentinel /benchmark /context /skills /memory /curator /notifications /voice /health /events /steer /queue /unqueue /clearsteers /anatomy /doctor /profile /beacon /tools /pairs /approve /deny /pending /gepa /symbiote /audit /press /escalations` plus the provider overrides `/claude /gpt /gemini /xai /grok /deepseek /kimi /glm /mimo /qwen /local`.
 
 The standouts: `/steer` injects a course-correction into a turn that is already running, `/queue` and `/unqueue` line up follow-up turns while the agent is busy, and the provider overrides switch a single chat to a cloud model and back. The full table with descriptions is in [Commands](#commands) below.
 
@@ -225,7 +225,7 @@ The full Telegram command table. Slack (`/prometheus-*`) and Discord (`/promethe
 | `/press` | Printing Press CLI library: `list` \| `search` \| `install` \| `installed` \| `update` |
 | `/escalations` | Escalation engine status |
 | `/beacon` | Web bridge / dashboard status |
-| `/claude` `/gpt` `/gemini` `/xai` (`/grok`) `/deepseek` `/kimi` `/glm` `/mimo` | Route this chat through that cloud provider |
+| `/claude` `/gpt` `/gemini` `/xai` (`/grok`) `/deepseek` `/kimi` `/glm` `/mimo` `/qwen` | Route this chat through that cloud provider |
 | `/local` | Clear the override, back to the primary model |
 
 ---

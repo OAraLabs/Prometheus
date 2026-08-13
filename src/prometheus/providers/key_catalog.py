@@ -72,6 +72,7 @@ PRESET_LABELS: dict[str, str] = {
     "kimi": "Kimi",
     "glm": "GLM",
     "mimo": "MiMo",
+    "qwen": "Qwen",
 }
 
 # Where a human gets a key for each preset (console/API-keys pages).
@@ -84,6 +85,7 @@ _PRESET_DOCS_URLS: dict[str, str] = {
     "kimi": "https://platform.kimi.ai/",
     "glm": "https://z.ai/",
     "mimo": "https://platform.xiaomimimo.com/",
+    "qwen": "https://modelstudio.console.alibabacloud.com/",
 }
 
 

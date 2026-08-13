@@ -515,6 +515,35 @@ class TestResolveSlashCommandTarget:
         from prometheus.router.model_router import resolve_slash_command_target
         assert resolve_slash_command_target("definitely-not-real", {}) is None
 
+    def test_base_url_override_is_merged(self):
+        """slash_commands.<cmd>.base_url reaches the resolved target.
+
+        Several providers front more than one host behind one config name —
+        Alibaba pay-as-you-go vs its subscription-plan endpoints, Moonshot
+        .ai vs .cn, GLM z.ai vs bigmodel.cn. Picking between them used to
+        require editing CLOUD_DEFAULTS.
+        """
+        from prometheus.router.model_router import resolve_slash_command_target
+        plan_url = (
+            "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+        )
+        cfg = {"slash_commands": {"qwen": {"base_url": plan_url}}}
+        target = resolve_slash_command_target("qwen", cfg)
+        assert target["base_url"] == plan_url
+        assert target["provider"] == "qwen"          # from preset
+        assert target["api_key_env"] == "QWEN_API_KEY"  # from preset
+
+    def test_base_url_absent_when_not_configured(self):
+        """No user base_url → the key stays absent so CLOUD_DEFAULTS wins.
+
+        ProviderRegistry.create falls back to CLOUD_DEFAULTS only when the
+        config has no base_url; emitting an empty string here would pin every
+        provider to "".
+        """
+        from prometheus.router.model_router import resolve_slash_command_target
+        target = resolve_slash_command_target("qwen", {"slash_commands": {"qwen": {}}})
+        assert "base_url" not in target
+
     def test_warn_emitted_only_once_per_command(self, caplog):
         """First fallback emits WARN; subsequent calls for same command stay quiet."""
         from prometheus.router.model_router import resolve_slash_command_target

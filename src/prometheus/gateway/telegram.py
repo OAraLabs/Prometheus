@@ -380,6 +380,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("kimi", self._cmd_kimi))
         self._app.add_handler(CommandHandler("glm", self._cmd_glm))
         self._app.add_handler(CommandHandler("mimo", self._cmd_mimo))
+        self._app.add_handler(CommandHandler("qwen", self._cmd_qwen))
         self._app.add_handler(CommandHandler("local", self._cmd_local))
         self._app.add_handler(CommandHandler("route", self._cmd_route))
         # SPRINT-TEACHER-ESCALATION Phase 3: escalation stats / budget state
@@ -443,6 +444,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("kimi", "Route this chat through Kimi (Moonshot)"),
                 BotCommand("glm", "Route this chat through GLM (Z.ai)"),
                 BotCommand("mimo", "Route this chat through MiMo (Xiaomi)"),
+                BotCommand("qwen", "Route this chat through Qwen (Alibaba)"),
                 BotCommand("local", "Clear override, back to primary"),
                 BotCommand("route", "Show current routing (primary vs override)"),
             ])
@@ -657,6 +659,7 @@ class TelegramAdapter(BasePlatformAdapter):
             "/kimi      — Kimi (Moonshot)\n"
             "/glm       — GLM (Z.ai)\n"
             "/mimo      — MiMo (Xiaomi)\n"
+            "/qwen      — Qwen (Alibaba)\n"
             "/local     — Back to primary\n"
             "\n"
             "Send any message to chat with the agent."
@@ -1480,6 +1483,12 @@ class TelegramAdapter(BasePlatformAdapter):
     ) -> None:
         """Handle /mimo — set per-session override to MiMo (Xiaomi)."""
         await self._apply_override(update, context, preset_name="mimo")
+
+    async def _cmd_qwen(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /qwen — set per-session override to Qwen (Alibaba)."""
+        await self._apply_override(update, context, preset_name="qwen")
 
     async def _cmd_local(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

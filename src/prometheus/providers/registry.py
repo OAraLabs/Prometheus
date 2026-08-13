@@ -72,10 +72,43 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
         "model": "mimo-v2.5-pro",
         "default_env": "MIMO_API_KEY",
     },
+    "qwen": {
+        # Alibaba Cloud Model Studio, OpenAI-compatible surface.
+        #
+        # This default is the INTERNATIONAL PAY-AS-YOU-GO endpoint: it takes an
+        # ordinary `sk-` Model Studio key and carries no usage-scope
+        # restriction. It is the only Alibaba surface a general-purpose daemon
+        # can point at without reading their acceptable-use terms first.
+        #
+        # The subscription plans are SEPARATE hosts with SEPARATE keys, and the
+        # pairs are not interchangeable (Alibaba: the keys and base URLs "are
+        # completely isolated and must be used in matching pairs"). Both also
+        # restrict usage to interactive programming tools / agents — NOT
+        # automated scripts, application backends, or non-interactive calls.
+        # To point at one, set slash_commands.qwen.base_url in prometheus.yaml:
+        #   Token Plan (Team):
+        #     https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+        #   Coding Plan:
+        #     https://coding-intl.dashscope.aliyuncs.com/v1
+        #
+        # Regional pay-as-you-go bases exist too (dashscope-us, and per-workspace
+        # ap-southeast-1 / ap-northeast-1 / cn-hongkong maas hosts).
+        "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        # qwen3.7-max is carried on both the pay-as-you-go and Token Plan model
+        # lists. Cheaper tiers (qwen3.7-plus, qwen3.6-plus, qwen3.6-flash) and
+        # newer maxes pin via slash_commands.qwen.model.
+        "model": "qwen3.7-max",
+        # Deliberately NOT DASHSCOPE_API_KEY: that var is the WAN 2.5 image
+        # backend's, and it addresses a different host (…/api/v1). Sharing one
+        # var would mean a text key that breaks image generation, or vice versa.
+        "default_env": "QWEN_API_KEY",
+    },
 }
 
 # Providers that use the OpenAI-compatible wire format
-_OPENAI_COMPAT_PROVIDERS = {"openai", "gemini", "xai", "deepseek", "kimi", "glm", "mimo"}
+_OPENAI_COMPAT_PROVIDERS = {
+    "openai", "gemini", "xai", "deepseek", "kimi", "glm", "mimo", "qwen",
+}
 
 
 def _resolve_api_key(config: dict[str, Any], provider_name: str) -> str:
@@ -226,7 +259,7 @@ class ProviderRegistry:
         raise ValueError(
             f"Unknown provider: {provider_name!r}. "
             f"Valid providers: llama_cpp, ollama, stub, openai, anthropic, "
-            f"gemini, xai, deepseek, kimi, glm, mimo"
+            f"gemini, xai, deepseek, kimi, glm, mimo, qwen"
         )
 
     @staticmethod
@@ -239,5 +272,5 @@ class ProviderRegistry:
         """Return all supported provider names."""
         return [
             "llama_cpp", "ollama", "stub", "openai", "anthropic", "gemini",
-            "xai", "deepseek", "kimi", "glm", "mimo",
+            "xai", "deepseek", "kimi", "glm", "mimo", "qwen",
         ]

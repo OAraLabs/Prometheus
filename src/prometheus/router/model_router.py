@@ -321,12 +321,21 @@ OVERRIDE_PRESETS: dict[str, dict[str, str]] = {
         "api_key_env": "MIMO_API_KEY",
         "model": "mimo-v2.5-pro",
     },
+    "qwen": {
+        "provider": "qwen",
+        "api_key_env": "QWEN_API_KEY",
+        # Base URL comes from CLOUD_DEFAULTS["qwen"] (international
+        # pay-as-you-go). Alibaba's subscription plans are different hosts with
+        # different keys — see the CLOUD_DEFAULTS comment, and set
+        # slash_commands.qwen.base_url to switch.
+        "model": "qwen3.7-max",
+    },
 }
 
 # Known slash commands that route through OVERRIDE_PRESETS. Used by
 # log_slash_command_wiring() at startup and by tests.
 SLASH_COMMAND_NAMES: tuple[str, ...] = (
-    "claude", "gpt", "gemini", "xai", "deepseek", "kimi", "glm", "mimo",
+    "claude", "gpt", "gemini", "xai", "deepseek", "kimi", "glm", "mimo", "qwen",
 )
 
 # Track which slash commands we've already warned about falling back to
@@ -342,8 +351,8 @@ def resolve_slash_command_target(
     """Resolve provider + model for a slash command.
 
     Looks up ``prometheus_config["slash_commands"][command_name]`` first;
-    merges any ``provider`` / ``model`` / ``api_key_env`` keys over the
-    matching :data:`OVERRIDE_PRESETS` entry. If the user's config is missing
+    merges any ``provider`` / ``model`` / ``api_key_env`` / ``base_url`` keys
+    over the matching :data:`OVERRIDE_PRESETS` entry. If the user's config is missing
     the section or the specific command, falls back to the preset alone and
     emits a one-time WARN log so the user knows the daemon used a default.
 
@@ -378,6 +387,13 @@ def resolve_slash_command_target(
         resolved["model"] = user_entry["model"]
     if user_entry.get("api_key_env"):
         resolved["api_key_env"] = user_entry["api_key_env"]
+    # base_url is absent from every built-in preset (each provider's default
+    # lives in CLOUD_DEFAULTS), so this only ever ADDS a key. It exists because
+    # several providers front more than one host — Alibaba's pay-as-you-go vs
+    # subscription-plan endpoints, Moonshot's .ai vs .cn, GLM's z.ai vs
+    # bigmodel.cn — and picking between them was previously a code edit.
+    if user_entry.get("base_url"):
+        resolved["base_url"] = user_entry["base_url"]
     return resolved
 
 
@@ -827,6 +843,10 @@ def _build_adapter_for(provider_name: str) -> Any:
         # CLOUD EXPANSION (2026-07): same OpenAI-compat wire path, same
         # API-enforced structure → tier off.
         "deepseek", "kimi", "glm", "mimo",
+        # Alibaba Model Studio's compatible-mode surface enforces tool-call
+        # structure the same way — it must NOT fall through to the local
+        # QwenFormatter default below just because it is named "qwen".
+        "qwen",
     ):
         return ModelAdapter(
             formatter=PassthroughFormatter(),
