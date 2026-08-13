@@ -517,6 +517,37 @@ class SecurityGate:
                 return f"Command matches deny list entry: {denied!r}"
         return ""
 
+    async def request_approval(self, tool_name: str, reason: str) -> bool:
+        """Ask the operator to sanction one APPROVE decision. True = go ahead.
+
+        THE MISSING HOP. ``daemon.py`` has assigned ``_approval_queue`` since
+        the queue existed, ``ApprovalQueue``'s own docstring says "Wire into
+        SecurityGate", and nothing ever read the field — while
+        ``LoopContext.permission_prompt``, the other route from an APPROVE to
+        the operator, was populated by no construction site on any surface.
+        Two orphans facing each other across one missing line, so every
+        APPROVE anywhere fell to ``agent_loop``'s ``else`` branch and became a
+        refusal-with-explanation. The operator was never offered the choice
+        the decision exists to create.
+
+        Fails CLOSED and says why: no queue, or a queue that raises, means the
+        answer is no. A permission prompt that degrades to "yes" when its
+        transport breaks is worse than having none (CROSS-CUTTING §8).
+        """
+        queue = getattr(self, "_approval_queue", None)
+        if queue is None:
+            return False
+        try:
+            from prometheus.permissions.approval_queue import ApprovalResult
+            result = await queue.request_approval(tool_name, reason)
+        except Exception:
+            log.warning(
+                "approval request for %s failed; refusing", tool_name,
+                exc_info=True,
+            )
+            return False
+        return result == ApprovalResult.APPROVED
+
     def _check_denied_path(self, file_path: str) -> str:
         """Return a denial reason if the path falls under a denied prefix.
 

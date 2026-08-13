@@ -2956,8 +2956,16 @@ async def _execute_tool_call(
             from prometheus.permissions.checker import PermissionDecision
             decision = PermissionDecision.approve(_path_unknown)
         if not decision.allowed:
-            if decision.requires_confirmation and context.permission_prompt is not None:
-                confirmed = await context.permission_prompt(tool_name, decision.reason)
+            # The gate's own queue is the fallback prompt. Resolved HERE, in
+            # the one function every surface goes through, rather than wired
+            # at each construction site — that is CROSS-CUTTING §2's lesson,
+            # and `permission_prompt` being populated by NO site on ANY
+            # surface is what it looks like when you rely on wiring instead.
+            _prompt = context.permission_prompt
+            if _prompt is None and context.permission_checker is not None:
+                _prompt = getattr(context.permission_checker, "request_approval", None)
+            if decision.requires_confirmation and _prompt is not None:
+                confirmed = await _prompt(tool_name, decision.reason)
                 if not confirmed:
                     if context.telemetry is not None:
                         context.telemetry.record(
