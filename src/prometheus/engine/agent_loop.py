@@ -2886,7 +2886,12 @@ async def _execute_tool_call(
 
     # Permission check (Sprint 4 + TRUST-CONTEXT)
     if context.permission_checker is not None:
-        _file_path = str(tool_input.get("file_path", "")) or None
+        # THE DEFECT THIS REPLACES: `tool_input.get("file_path")` — a key NO
+        # registered tool declares. The gate got None on every call, so
+        # denied_paths and the workspace boundary were both skipped, from the
+        # initial commit until 2026-08-13. See permissions/tool_paths.py.
+        from prometheus.permissions.tool_paths import gate_path_for
+        _file_path, _path_unknown = gate_path_for(tool_name, tool_input)
         _command = str(tool_input.get("command", "")) or None
         # TRUST-CONTEXT: derive origin from the session_id already
         # threaded through LoopContext (agent_loop.py:538-542 convention).
@@ -2942,6 +2947,14 @@ async def _execute_tool_call(
                 file_path=_file_path,
                 command=_command,
             )
+        if _path_unknown and decision.allowed:
+            # A path exists and could not be resolved to an absolute one
+            # (relative target, or a tool nobody mapped). The gate could not
+            # rule on it, so it must not be treated as cleared: UNKNOWN
+            # prompts. Never silently allowed — that is the shape of the
+            # defect this whole change closes.
+            from prometheus.permissions.checker import PermissionDecision
+            decision = PermissionDecision.approve(_path_unknown)
         if not decision.allowed:
             if decision.requires_confirmation and context.permission_prompt is not None:
                 confirmed = await context.permission_prompt(tool_name, decision.reason)

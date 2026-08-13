@@ -254,7 +254,19 @@ class SecurityGate:
             resolved_cfg = str(Path(config_path).expanduser().resolve())
             if resolved_cfg not in self._denied_paths:
                 self._denied_paths.append(resolved_cfg)
-        self._workspace = Path(workspace_root).expanduser().resolve() if workspace_root else None
+        # MULTI-ROOT. A single root did not survive contact: of 871 recorded
+        # file-tool calls on the live box only 16 were under ~/projects, so a
+        # one-root boundary is a wall of prompts — and a control that prompts
+        # constantly is one that gets turned off (CROSS-CUTTING §4). Accepts a
+        # string (back-compat) or a list.
+        if workspace_root is None or workspace_root == "":
+            self._workspaces: tuple[Path, ...] = ()
+        elif isinstance(workspace_root, (str, Path)):
+            self._workspaces = (Path(workspace_root).expanduser().resolve(),)
+        else:
+            self._workspaces = tuple(
+                Path(w).expanduser().resolve() for w in workspace_root if w
+            )
         self._mode = PermissionMode(mode) if isinstance(mode, str) else mode
 
         # Sprint 11: optional audit + exfiltration
@@ -538,13 +550,23 @@ class SecurityGate:
         return ""
 
     def _within_workspace(self, file_path: str) -> bool:
-        if self._workspace is None:
+        """True when the path is under ANY configured workspace root.
+
+        No roots configured = no confinement, unchanged: that is a deliberate
+        API choice used by most SecurityGate construction sites (tests, and
+        callers confined another way). What must never happen is a CONFIG that
+        merely omits the key landing there — see resolve_workspace_root.
+        """
+        if not self._workspaces:
             return True
-        try:
-            Path(file_path).expanduser().resolve().relative_to(self._workspace)
-            return True
-        except ValueError:
-            return False
+        resolved = Path(file_path).expanduser().resolve()
+        for root in self._workspaces:
+            try:
+                resolved.relative_to(root)
+                return True
+            except ValueError:
+                continue
+        return False
 
     def _is_approve_pattern(self, command: str) -> bool:
         return any(r.search(command) for r in self._approve_re)

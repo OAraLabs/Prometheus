@@ -227,7 +227,7 @@ def test_securitygate_none_still_means_no_confinement():
 #: not limited by this key; substituting the shipped default there 403s every
 #: write. A named, asserted-exact exemption — not a list that can grow quietly.
 _RAW_WORKSPACE_READERS: dict[str, str] = {
-    "prometheus/web/server.py":
+    "src/prometheus/web/server.py":
         "Documents service — has its own root; the template says documents "
         "are NOT limited by workspace_root. The shipped default confines the "
         "editor to a directory its root is not under.",
@@ -245,14 +245,30 @@ def test_workspace_root_readers_are_the_resolver_plus_one_named_exemption():
     import re
     from pathlib import Path
 
-    src = Path(__file__).resolve().parent.parent / "src"
-    found = {
-        str(p.relative_to(src))
-        for p in src.rglob("*.py")
-        if p.name != "shipped_defaults.py"
-        for line in p.read_text(encoding="utf-8").splitlines()
-        if re.search(r'\.get\(\s*["\']workspace_root["\']', line)
-    }
+    # scripts/ TOO. Scanning src/ only is how a THIRD reader hid — the
+    # tool-calling smoke test had its own `.get("workspace_root", "~")` with
+    # its own default, and it crashed the moment the key became a list. A
+    # single-reader guard that does not scan every root is a single-reader
+    # guard in one directory.
+    repo = Path(__file__).resolve().parent.parent
+    found = set()
+    for root_name in ("src", "scripts"):
+        root = repo / root_name
+        if not root.exists():
+            continue
+        for p in root.rglob("*.py"):
+            if p.name == "shipped_defaults.py":
+                continue
+            for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+                # A COMMENT IS NOT A READER. Without this the guard goes red
+                # against the comment explaining why the reader was removed —
+                # §3c, a substring ban cannot tell an assertion from its
+                # negation, and the most careful line in the file is the one
+                # it accuses.
+                if line.lstrip().startswith("#"):
+                    continue
+                if re.search(r'\.get\(\s*["\']workspace_root["\']', line):
+                    found.add(str(p.relative_to(repo)))
     new = sorted(found - set(_RAW_WORKSPACE_READERS))
     assert not new, (
         "read workspace_root through resolve_workspace_root(), not .get() — "

@@ -80,7 +80,7 @@ _SHIPPED_MEDIA_ALLOWLISTS: dict[str, tuple[str, ...]] = {
 # asserts nothing outside this module reads these keys directly.
 # ---------------------------------------------------------------------------
 
-def resolve_workspace_root(security_cfg: dict | None) -> str:
+def resolve_workspace_root(security_cfg: dict | None) -> str | list[str]:
     """The confinement root for a security config section.
 
     Absent or blank -> :data:`SHIPPED_WORKSPACE_ROOT`. Never None: a None
@@ -95,6 +95,10 @@ def resolve_workspace_root(security_cfg: dict | None) -> str:
     value = (security_cfg or {}).get("workspace_root")
     if isinstance(value, str) and value.strip():
         return value
+    if isinstance(value, list):
+        roots = [v for v in value if isinstance(v, str) and v.strip()]
+        if roots:
+            return roots
     return SHIPPED_WORKSPACE_ROOT
 
 
