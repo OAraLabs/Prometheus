@@ -26,7 +26,7 @@ from pathlib import Path
 
 from prometheus.config.paths import get_config_dir
 from prometheus.context.environment import get_environment_info
-from prometheus.context.prometheusmd import load_prometheus_md_prompt
+from prometheus.context.prometheusmd import load_project_files_prompt
 from prometheus.context.system_prompt import (
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
     build_system_prompt,
@@ -268,10 +268,25 @@ def build_runtime_system_prompt(
             "to approach, then use the skill tool to load the skill's instructions."
         )
 
-    # PROMETHEUS.md project instructions
-    prometheus_md = load_prometheus_md_prompt(cwd)
-    if prometheus_md:
-        dynamic_sections.append(prometheus_md)
+    # Project instruction files (PROMETHEUS.md, HERMES.md, CLAUDE.md, etc.)
+    # Stacked loading: collects files from all directory levels walking upward
+    context_cfg = config.get("context", {})
+    stack_project_files = context_cfg.get("stack_project_files", True)
+    max_chars = context_cfg.get("project_file_max_chars", 12000)
+    # AGENTS.md is already gated by bootstrap.load_agents above. Discovery must
+    # honor that gate too, or turning the registry off would silently be undone
+    # the moment an AGENTS.md sits anywhere at or above cwd.
+    excluded_conventions = (
+        () if bootstrap_cfg.get("load_agents", True) else ("AGENTS.md",)
+    )
+    project_prompt = load_project_files_prompt(
+        cwd,
+        max_chars_per_file=max_chars,
+        stack=stack_project_files,
+        exclude=excluded_conventions,
+    )
+    if project_prompt:
+        dynamic_sections.append(project_prompt)
 
     # MEMORY.md + USER.md — auto-load if caller didn't provide memory_content
     if not memory_content:

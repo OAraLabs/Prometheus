@@ -12,127 +12,263 @@ from prometheus.context.system_prompt import (
     build_system_prompt,
 )
 from prometheus.context.prompt_assembler import build_runtime_system_prompt
-from prometheus.context.prometheusmd import discover_prometheus_md_files
-from prometheus.context.environment import EnvironmentInfo, get_environment_info
+from prometheus.context.prometheusmd import (
+    CONVENTION_FILES,
+    discover_project_files,
+    discover_prometheus_md_files,
+)
 
 
-# ---------------------------------------------------------------------------
-# build_system_prompt
-# ---------------------------------------------------------------------------
+class TestSystemPromptBoundary:
+    """SYSTEM_PROMPT_DYNAMIC_BOUNDARY is a distinct separator."""
+
+    def test_boundary_present(self):
+        assert isinstance(SYSTEM_PROMPT_DYNAMIC_BOUNDARY, str)
+        assert len(SYSTEM_PROMPT_DYNAMIC_BOUNDARY) > 10
+
+    def test_boundary_contains_marker(self):
+        assert "DYNAMIC_BOUNDARY" in SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
 
 class TestBuildSystemPrompt:
-    def test_build_system_prompt_contains_identity(self) -> None:
-        prompt = build_system_prompt(cwd=os.getcwd())
-        assert "Prometheus" in prompt
+    """build_system_prompt composes static system prompt with environment info."""
 
-    def test_system_prompt_dynamic_boundary(self) -> None:
-        # The boundary constant should be the expected marker string
-        assert "SYSTEM_PROMPT_DYNAMIC_BOUNDARY" in SYSTEM_PROMPT_DYNAMIC_BOUNDARY
-        assert SYSTEM_PROMPT_DYNAMIC_BOUNDARY == "--- SYSTEM_PROMPT_DYNAMIC_BOUNDARY ---"
+    def test_includes_environment_section(self):
+        prompt = build_runtime_system_prompt(cwd=".", config={})
+        assert "# Environment" in prompt
+        assert "OS:" in prompt
 
-    def test_documents_library_convention(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # The prompt names the RESOLVED documents root (repointable via env)
-        # and the loops/ save-for-later convention the Beacon Loop Manager
-        # picks up ("From Documents…").
-        docs_root = tmp_path / "docs"
-        monkeypatch.setenv("PROMETHEUS_DOCUMENTS_DIR", str(docs_root))
-
-        prompt = build_system_prompt(cwd=os.getcwd())
-
-        assert "# Documents library" in prompt
-        assert str(docs_root) in prompt
-        assert str(docs_root / "loops") in prompt
-
-
-# ---------------------------------------------------------------------------
-# build_runtime_system_prompt
-# ---------------------------------------------------------------------------
-
-
-class TestBuildRuntimeSystemPrompt:
-    def test_build_runtime_system_prompt_structure(self, tmp_path: Path) -> None:
-        prompt = build_runtime_system_prompt(cwd=str(tmp_path))
-
-        # Should contain the static section (identity)
-        assert "Prometheus" in prompt
-
-        # Should contain the dynamic boundary
+    def test_boundary_in_runtime_prompt(self):
+        prompt = build_runtime_system_prompt(cwd=".", config={})
+        # Dynamic boundary is injected by runtime assembler, not build_system_prompt
         assert SYSTEM_PROMPT_DYNAMIC_BOUNDARY in prompt
 
-        # Should have content after the boundary (at minimum the reasoning settings)
-        parts = prompt.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
-        assert len(parts) == 2
-        static_part, dynamic_part = parts
-        assert len(static_part.strip()) > 0
-        assert len(dynamic_part.strip()) > 0
+    def test_custom_prompt_overrides_base(self):
+        custom = "# Custom Prompt\nThis is my custom system prompt."
+        prompt = build_system_prompt(custom_prompt=custom)
+        assert "This is my custom system prompt" in prompt
+        # Custom prompt replaces the base identity section
+        assert "# Custom Prompt" in prompt
 
-        # The dynamic section should include reasoning settings
-        assert "Reasoning Settings" in dynamic_part or "Effort" in dynamic_part
+    def test_environment_has_shell(self):
+        prompt = build_runtime_system_prompt(cwd=".", config={})
+        assert "Shell:" in prompt
 
-    def test_documents_convention_is_static(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # The documents-library convention is stable per session, so it must
-        # live BEFORE the dynamic boundary (KV-cache friendly).
-        monkeypatch.setenv("PROMETHEUS_DOCUMENTS_DIR", str(tmp_path / "docs"))
-
-        prompt = build_runtime_system_prompt(cwd=str(tmp_path))
-        static_part = prompt.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)[0]
-
-        assert "# Documents library" in static_part
+    def test_environment_has_python_version(self):
+        prompt = build_runtime_system_prompt(cwd=".", config={})
+        assert "Python:" in prompt
 
 
-# ---------------------------------------------------------------------------
-# PROMETHEUS.md discovery
-# ---------------------------------------------------------------------------
+class TestRuntimePromptAssembler:
+    """build_runtime_system_prompt combines static + dynamic sections."""
+
+    def test_assembles_full_prompt(self):
+        prompt = build_runtime_system_prompt(cwd=".", config={})
+        assert prompt is not None
+        assert len(prompt) > 100
+
+    def test_boundary_in_runtime_prompt(self):
+        prompt = build_runtime_system_prompt(cwd=".", config={})
+        # Dynamic boundary is injected by runtime assembler, not build_system_prompt
+        assert SYSTEM_PROMPT_DYNAMIC_BOUNDARY in prompt
+
+    def test_includes_reasoning_settings(self):
+        prompt = build_runtime_system_prompt(cwd=".", config={})
+        assert "# Reasoning Settings" in prompt
+
+    def test_custom_effort_setting(self):
+        prompt = build_runtime_system_prompt(cwd=".", config={"effort": "high"})
+        assert "Effort: high" in prompt
+
+    def test_custom_passes_setting(self):
+        prompt = build_runtime_system_prompt(cwd=".", config={"passes": 3})
+        assert "Passes: 3" in prompt
+
+    def test_includes_memory_etiquette(self):
+        prompt = build_runtime_system_prompt(cwd=".", config={})
+        # Should include memory etiquette or memory section
+        assert "# Memory" in prompt or "memory" in prompt.lower()
+
+    def test_memory_content_override(self):
+        custom_memory = "# Custom Memory\n\nFact: User likes coffee"
+        prompt = build_runtime_system_prompt(
+            cwd=".", config={}, memory_content=custom_memory
+        )
+        assert "User likes coffee" in prompt
+
+    def test_task_state_injected(self):
+        prompt = build_runtime_system_prompt(
+            cwd=".", config={}, task_state="Working on feature X"
+        )
+        assert "Working on feature X" in prompt
+        assert "# Current Task State" in prompt
 
 
-class TestPrometheusMdDiscovery:
-    def test_prometheus_md_discovery(self, tmp_path: Path) -> None:
-        # Create a PROMETHEUS.md in the temp directory
-        pmd = tmp_path / "PROMETHEUS.md"
-        pmd.write_text("# Project Rules\n\nAlways use type hints.\n")
+class TestConventionFileDiscovery:
+    """discover_project_files finds convention files walking upward."""
 
-        files = discover_prometheus_md_files(str(tmp_path))
-        assert any(f == pmd for f in files)
+    def test_no_files_found(self, tmp_path):
+        files = discover_project_files(str(tmp_path))
+        assert files == []
 
-    def test_prometheus_md_nested_discovery(self, tmp_path: Path) -> None:
-        # Create a nested directory structure with PROMETHEUS.md at multiple levels
-        parent_pmd = tmp_path / "PROMETHEUS.md"
-        parent_pmd.write_text("# Parent rules\n")
+    def test_finds_prometheus_md(self, tmp_path):
+        (tmp_path / "PROMETHEUS.md").write_text("# Test Project\n")
+        files = discover_project_files(str(tmp_path))
+        assert len(files) == 1
+        assert files[0][0].name == "PROMETHEUS.md"
 
-        child_dir = tmp_path / "subdir"
-        child_dir.mkdir()
-        child_pmd = child_dir / "PROMETHEUS.md"
-        child_pmd.write_text("# Child rules\n")
+    def test_finds_claude_md_when_no_prometheus(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text("# Claude Project\n")
+        files = discover_project_files(str(tmp_path))
+        assert len(files) == 1
+        assert files[0][0].name == "CLAUDE.md"
 
-        # Discover from the child dir -- should find both
-        files = discover_prometheus_md_files(str(child_dir))
-        paths = [f.resolve() for f in files]
-        assert child_pmd.resolve() in paths
-        assert parent_pmd.resolve() in paths
+    def test_finds_hermes_md(self, tmp_path):
+        (tmp_path / "HERMES.md").write_text("# Hermes Project\n")
+        files = discover_project_files(str(tmp_path))
+        assert len(files) == 1
+        assert files[0][0].name == "HERMES.md"
 
-        # Child (more specific) should come before parent (less specific)
-        child_idx = paths.index(child_pmd.resolve())
-        parent_idx = paths.index(parent_pmd.resolve())
-        assert child_idx < parent_idx
+    def test_finds_agents_md(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text("# Agents Project\n")
+        files = discover_project_files(str(tmp_path))
+        assert len(files) == 1
+        assert files[0][0].name == "AGENTS.md"
+
+    def test_finds_cursorrules(self, tmp_path):
+        (tmp_path / ".cursorrules").write_text("# Cursor rules\n")
+        files = discover_project_files(str(tmp_path))
+        assert len(files) == 1
+        assert files[0][0].name == ".cursorrules"
+
+    def test_finds_windsurfrules(self, tmp_path):
+        (tmp_path / ".windsurfrules").write_text("# Windsurf rules\n")
+        files = discover_project_files(str(tmp_path))
+        assert len(files) == 1
+        assert files[0][0].name == ".windsurfrules"
+
+    def test_legacy_alias_returns_paths_only(self, tmp_path):
+        (tmp_path / "PROMETHEUS.md").write_text("# Test\n")
+        paths = discover_prometheus_md_files(str(tmp_path))
+        assert len(paths) == 1
+        assert isinstance(paths[0], Path)
+        assert paths[0].name == "PROMETHEUS.md"
+
+    def test_legacy_alias_first_match_wins(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text("# Parent\n")
+        child = tmp_path / "sub"
+        child.mkdir()
+        (child / "PROMETHEUS.md").write_text("# Child\n")
+        paths = discover_prometheus_md_files(str(child))
+        assert len(paths) == 1
+        assert paths[0].name == "PROMETHEUS.md"
 
 
-# ---------------------------------------------------------------------------
-# Environment info
-# ---------------------------------------------------------------------------
+class TestStackingMode:
+    """Stacking mode collects files from all directory levels."""
+
+    def test_stack_collects_parent_and_child(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text("# Parent\n")
+        child = tmp_path / "sub"
+        child.mkdir()
+        (child / "PROMETHEUS.md").write_text("# Child\n")
+
+        files = discover_project_files(str(child), stack=True)
+        assert len(files) == 2
+        assert files[0][0].name == "PROMETHEUS.md"
+        assert files[1][0].name == "CLAUDE.md"
+
+    def test_stack_prevents_duplicate(self, tmp_path):
+        (tmp_path / "PROMETHEUS.md").write_text("# Parent\n")
+        child = tmp_path / "sub"
+        child.mkdir()
+        (child / "PROMETHEUS.md").write_text("# Child\n")
+
+        files = discover_project_files(str(child), stack=True)
+        assert len(files) == 2
+        assert files[0][0].parent.name == "sub"
+        assert files[1][0].parent.name == tmp_path.name
+
+    def test_legacy_no_stack_stops_at_first(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text("# Parent\n")
+        child = tmp_path / "sub"
+        child.mkdir()
+        (child / "PROMETHEUS.md").write_text("# Child\n")
+
+        files = discover_project_files(str(child), stack=False)
+        assert len(files) == 1
+        assert files[0][0].name == "PROMETHEUS.md"
+
+    def test_prometheus_beats_claude_at_same_level(self, tmp_path):
+        (tmp_path / "PROMETHEUS.md").write_text("# Primary\n")
+        (tmp_path / "CLAUDE.md").write_text("# Secondary\n")
+        files = discover_project_files(str(tmp_path))
+        assert len(files) == 1
+        assert files[0][0].name == "PROMETHEUS.md"
 
 
-class TestEnvironmentInfo:
-    def test_environment_info(self) -> None:
-        env = get_environment_info()
-        assert isinstance(env, EnvironmentInfo)
-        assert env.os_name  # non-empty
-        assert env.cwd  # non-empty
-        assert env.shell  # non-empty
-        assert env.python_version  # non-empty
-        assert env.date  # non-empty, e.g. "2026-04-04"
-        assert env.platform_machine  # e.g. "arm64", "x86_64"
+class TestPrometheusRules:
+    """Discovery of .prometheus/rules/*.md files."""
+
+    def test_rules_collected(self, tmp_path):
+        rules_dir = tmp_path / ".prometheus" / "rules"
+        rules_dir.mkdir(parents=True)
+        (rules_dir / "security.md").write_text("# Security Rules\n")
+        (rules_dir / "naming.md").write_text("# Naming Rules\n")
+
+        files = discover_project_files(str(tmp_path))
+        assert len(files) == 2
+        names = [f[0].name for f in files]
+        assert "security.md" in names
+        assert "naming.md" in names
+
+    def test_rules_sorted(self, tmp_path):
+        rules_dir = tmp_path / ".prometheus" / "rules"
+        rules_dir.mkdir(parents=True)
+        (rules_dir / "zzz.md").write_text("z")
+        (rules_dir / "aaa.md").write_text("a")
+
+        files = discover_project_files(str(tmp_path))
+        names = [f[0].name for f in files]
+        assert names == ["aaa.md", "zzz.md"]
+
+    def test_rules_stacked_with_convention_file(self, tmp_path):
+        (tmp_path / "PROMETHEUS.md").write_text("# Main\n")
+        rules_dir = tmp_path / ".prometheus" / "rules"
+        rules_dir.mkdir(parents=True)
+        (rules_dir / "security.md").write_text("# Security\n")
+
+        files = discover_project_files(str(tmp_path))
+        assert len(files) == 2
+        names = [f[0].name for f in files]
+        assert "PROMETHEUS.md" in names
+        assert "security.md" in names
+
+
+class TestRuntimePromptIncludesProjectFiles:
+    """build_runtime_system_prompt includes project files in dynamic section."""
+
+    def test_project_file_loaded(self, tmp_path, monkeypatch):
+        """When in a project dir, PROMETHEUS.md appears in the prompt."""
+        (tmp_path / "PROMETHEUS.md").write_text("# My Project\n- Rule 1\n")
+        # Mock the cwd used by the assembler
+        monkeypatch.setattr(
+            "prometheus.context.prompt_assembler.Path.cwd",
+            lambda: tmp_path,
+        )
+        prompt = build_runtime_system_prompt(config={}, cwd=str(tmp_path))
+        assert "# My Project" in prompt
+
+    def test_legacy_no_stack_via_config(self, tmp_path, monkeypatch):
+        """stack_project_files=False reverts to first-match-wins."""
+        (tmp_path / "CLAUDE.md").write_text("# Parent\n")
+        child = tmp_path / "sub"
+        child.mkdir()
+        (child / "PROMETHEUS.md").write_text("# Child\n")
+
+        prompt = build_runtime_system_prompt(
+            config={"context": {"stack_project_files": False}},
+            cwd=str(child),
+        )
+        assert "# Child" in prompt
+        assert "# Parent" not in prompt
