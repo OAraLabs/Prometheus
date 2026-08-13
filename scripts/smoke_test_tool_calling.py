@@ -540,7 +540,11 @@ async def main(args):
 
     # ── Build tool registry ──
     security_cfg = config.get("security", {})
-    workspace = os.path.expanduser(security_cfg.get("workspace_root", "~"))
+    # Raw `.get("workspace_root")` here was a THIRD reader with its own
+    # default — the single-resolver guard scanned src/ only and missed
+    # scripts/. It also crashed once workspace_root became a list.
+    from prometheus.config.shipped_defaults import resolve_workspace_root
+    workspace = resolve_workspace_root(security_cfg)
 
     registry = ToolRegistry()
     registry.register(BashTool(workspace=workspace))

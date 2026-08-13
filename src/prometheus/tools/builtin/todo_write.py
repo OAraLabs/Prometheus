@@ -33,7 +33,29 @@ class TodoWriteTool(BaseTool):
     input_model = TodoWriteToolInput
 
     async def execute(self, arguments: TodoWriteToolInput, context: ToolExecutionContext) -> ToolResult:
-        todo_path = Path(context.cwd) / arguments.path
+        # CONFINEMENT. `path` is documented as RELATIVE to the working
+        # directory, and this used to be a bare `Path(context.cwd) / path`:
+        # an absolute path, or `../../../..`, escaped freely and the tool then
+        # mkdir'd and wrote there — a write-anywhere primitive.
+        #
+        # It matters more than it looks: this tool is EXEMPT from the
+        # SecurityGate's path check (permissions/tool_paths.PATH_PARAM_EXEMPT)
+        # precisely because its `path` is a scratchpad-relative identifier
+        # rather than a filesystem path. An exemption without its own guard is
+        # a hole, so the guard lives here. Pinned by
+        # tests/test_gate_sees_the_path.py::test_todo_write_confines_itself.
+        root = Path(context.cwd).resolve()
+        todo_path = (root / arguments.path).resolve()
+        try:
+            todo_path.relative_to(root)
+        except ValueError:
+            return ToolResult(
+                output=(
+                    f"path must stay under the working directory: "
+                    f"{arguments.path!r} resolves outside {root}"
+                ),
+                is_error=True,
+            )
         todo_path.parent.mkdir(parents=True, exist_ok=True)
         prefix = "- [x]" if arguments.checked else "- [ ]"
         existing = todo_path.read_text(encoding="utf-8") if todo_path.exists() else "# TODO\n"

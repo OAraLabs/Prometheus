@@ -23,6 +23,14 @@ _DEFAULT_TIMEOUT = 30
 _DEFAULT_MAX_OUTPUT = 10_000
 
 
+def _is_under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 class BashToolInput(BaseModel):
     """Arguments for the bash tool."""
 
@@ -53,16 +61,25 @@ class BashTool(BaseTool):
         workspace: str | Path | None = None,
         max_output: int = _DEFAULT_MAX_OUTPUT,
     ) -> None:
-        self._workspace = Path(workspace).expanduser().resolve() if workspace else None
+        # Multi-root, mirroring SecurityGate: security.workspace_root may be
+        # a list. A single root did not survive contact on a real box.
+        if not workspace:
+            self._workspaces: tuple[Path, ...] = ()
+        elif isinstance(workspace, (str, Path)):
+            self._workspaces = (Path(workspace).expanduser().resolve(),)
+        else:
+            self._workspaces = tuple(
+                Path(w).expanduser().resolve() for w in workspace if w)
+        self._workspace = self._workspaces[0] if self._workspaces else None
         self._max_output = max_output
 
     async def execute(self, arguments: BashToolInput, context: ToolExecutionContext) -> ToolResult:
         cwd = Path(arguments.cwd).expanduser().resolve() if arguments.cwd else context.cwd.resolve()
 
-        if self._workspace is not None:
-            try:
-                cwd.relative_to(self._workspace)
-            except ValueError:
+        if self._workspaces:
+            if any(_is_under(cwd, root) for root in self._workspaces):
+                pass
+            else:
                 if not arguments.cwd:
                     # No explicit cwd requested — fall back to workspace root
                     # instead of blocking (daemon often runs from repo dir)
