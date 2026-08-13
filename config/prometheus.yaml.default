@@ -88,10 +88,20 @@ adapter:
 
 security:
   permission_mode: "default"
-  # The boundary the SecurityGate enforces for file operations. Ships tight by
-  # default — widen deliberately (e.g. "~" or "~/projects") if you want the
-  # agent working across your home directory. Coding runs, documents, and the
-  # artifact outbox have their own confinement and are not limited by this.
+  # Where write_file / edit_file may write WITHOUT asking. Accepts one path or
+  # a list of them. Ships tight — widen deliberately (e.g. "~/projects") if
+  # you want the agent working across your own directories. Coding runs,
+  # documents and the artifact outbox have their own confinement and are not
+  # limited by this.
+  #
+  # ⚠ THIS IS A SPEED BUMP, NOT CONFINEMENT. It gates write_file and edit_file
+  # only. `bash` is checked on its COMMAND STRING and its own working
+  # directory, never on the paths a command writes to, so
+  # `echo x > /anywhere/file` is not stopped by this key — and a model refused
+  # by write_file will reach for bash unprompted; observed doing exactly that,
+  # and saying so, on 2026-08-13. What it buys is that an ACCIDENTAL write
+  # outside your working area asks first. For anything that must never be
+  # written, use denied_paths below — that one is a refusal.
   workspace_root: "~/.prometheus/workspace"
   denied_commands:
     - "rm -rf /"

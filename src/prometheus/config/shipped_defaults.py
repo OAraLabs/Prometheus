@@ -37,7 +37,9 @@ SHIPPED_ALWAYS_LOADED: tuple[str, ...] = (
     "grep", "glob", "tool_search", "web_search", "web_fetch", "memory",
 )
 
-# security.workspace_root — the directory file operations are confined to.
+# security.workspace_root — where write_file/edit_file may write without
+# asking. NOT confinement: bash is gated on its command string, not on the
+# paths a command touches. See config/prometheus.yaml.default.
 # Absent from an upgraded config, and every reader's fallback was None, which
 # ``SecurityGate._within_workspace`` reads as "no boundary at all".
 SHIPPED_WORKSPACE_ROOT: str = "~/.prometheus/workspace"
@@ -81,7 +83,10 @@ _SHIPPED_MEDIA_ALLOWLISTS: dict[str, tuple[str, ...]] = {
 # ---------------------------------------------------------------------------
 
 def resolve_workspace_root(security_cfg: dict | None) -> str | list[str]:
-    """The confinement root for a security config section.
+    """The workspace root(s) for a security config section.
+
+    Names where write_file/edit_file may write unprompted — not a
+    filesystem confinement; see the module comment above.
 
     Absent or blank -> :data:`SHIPPED_WORKSPACE_ROOT`. Never None: a None
     reaching ``SecurityGate`` disables confinement entirely, which is the
