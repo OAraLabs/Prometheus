@@ -1400,11 +1400,17 @@ class TelegramAdapter(BasePlatformAdapter):
         session_key = f"{Platform.TELEGRAM.value}:{chat_id}"
 
         from prometheus.gateway import commands as _cmds
+        # A leading model name selects it (`/qwen qwen3.7-plus`); anything else
+        # stays the inline message, so the bare command keeps its default.
+        model, args = _cmds.split_model_arg(
+            preset_name, self._prometheus_config, getattr(context, "args", None)
+        )
         text, applied = _cmds.cmd_provider_override(
             self.agent_loop,
             self._prometheus_config,
             session_key,
             preset_name,
+            model=model,
         )
         await self.send(chat_id, text, parse_mode=None)
         if not applied:
@@ -1414,7 +1420,6 @@ class TelegramAdapter(BasePlatformAdapter):
         # the override provider in one round-trip. No auth check here; the
         # command handler itself was already authorized by virtue of reaching
         # this point (same pattern as /benchmark).
-        args = getattr(context, "args", None)
         if args:
             inline_message = " ".join(args)
             event = MessageEvent(

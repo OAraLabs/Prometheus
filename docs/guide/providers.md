@@ -54,7 +54,7 @@ Every cloud provider except Anthropic rides the same OpenAI-compatible wire form
 | Kimi (Moonshot) | `kimi` | `MOONSHOT_API_KEY` | `kimi-k2.6` |
 | GLM (Z.ai / Zhipu) | `glm` | `ZAI_API_KEY` | `glm-5.2` |
 | MiMo (Xiaomi) | `mimo` | `MIMO_API_KEY` | `mimo-v2.5-pro` |
-| Qwen (Alibaba Model Studio) | `qwen` | `QWEN_API_KEY` | `qwen3.7-max` |
+| Qwen (Alibaba Model Studio) | `qwen` | `QWEN_API_KEY` | `qwen3.8-max` |
 
 The defaults live in `src/prometheus/providers/registry.py` (`CLOUD_DEFAULTS`) and carry some hard-won footnotes:
 
@@ -131,7 +131,7 @@ slash_commands:
   qwen:
     provider: qwen
     api_key_env: QWEN_API_KEY
-    model: qwen3.7-max
+    model: qwen3.8-max
     # base_url is optional — omit it for Alibaba's international
     # pay-as-you-go endpoint. Set it to reach a different host, e.g. a
     # subscription plan (read the scope note above first) or a region:
@@ -141,6 +141,38 @@ slash_commands:
 ```
 
 `base_url` is honored on any of these blocks, not just Qwen — useful for the CN-vs-international endpoint splits noted above.
+
+### Switching models within a provider
+
+`model:` sets the default a bare `/qwen` gives you. `models:` lists what else you can switch to:
+
+```yaml
+slash_commands:
+  qwen:
+    model: qwen3.8-max                  # the default — bare /qwen
+    models:                             # everything selectable
+      - qwen3.7-max
+      - qwen3.7-plus
+      - qwen3.6-flash
+```
+
+Then, in any chat:
+
+```
+/qwen                  → the default (qwen3.8-max)
+/qwen qwen3.7-plus     → switch to that model
+/qwen qwen3.6-flash summarize this  → switch, then ask, in one message
+```
+
+A leading token is read as a model **only** when it exactly matches one of the listed models, so `/qwen explain this` still just asks a question on the default. An unlisted model is rejected with the list rather than passed to the provider as a 404.
+
+The same list flattens into `GET /api/models`, so Beacon's model picker shows one entry per model with no Beacon change. The default keeps the bare preset key (`qwen`); alternates get `qwen:<model>`.
+
+Built-in lists ship for Claude, Gemini, DeepSeek, and Qwen, and are deliberately short — only names verified against provider docs, because a wrong name is a runtime 404 that looks like a Prometheus bug. **Your `models:` list replaces the built-in one entirely**, so a provider shipping something new is a config edit and a restart, never a release. Providers with no list offer just their default.
+
+xAI is intentionally single-entry: `grok-3` / `grok-4` / `grok-4-latest` are all silently served as grok-4.3, so offering them would be offering models you do not actually get.
+
+Discovery-by-API was considered and rejected: xAI returns 403 on `GET /v1/models` for standard SuperGrok subscribers even though chat completions work, so enumeration cannot be relied on across providers. The list is configured, not enumerated.
 
 Restart the daemon and grep the journal to verify the wiring:
 

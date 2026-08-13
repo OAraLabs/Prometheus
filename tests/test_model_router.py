@@ -630,3 +630,83 @@ class TestLogSlashCommandWiring:
         joined = "\n".join(info_msgs)
         assert OVERRIDE_PRESETS["claude"]["model"] in joined
         assert OVERRIDE_PRESETS["gpt"]["model"] in joined
+
+
+# ---------------------------------------------------------------------------
+# Per-provider model choices — the flattened catalog + `/qwen <model>` arg
+# ---------------------------------------------------------------------------
+
+
+class TestModelChoices:
+    """resolve_model_choices / split_model_key / resolve_model_target."""
+
+    def setup_method(self):
+        from prometheus.router import model_router as mr
+        mr._FALLBACK_WARNED.clear()
+
+    def test_default_model_is_always_first(self):
+        """Selecting the bare key and its default from the list must agree."""
+        from prometheus.router.model_router import (
+            OVERRIDE_PRESETS,
+            resolve_model_choices,
+        )
+        choices = resolve_model_choices("qwen", {})
+        assert choices[0] == OVERRIDE_PRESETS["qwen"]["model"] == "qwen3.8-max"
+
+    def test_preset_without_choices_offers_just_its_default(self):
+        from prometheus.router.model_router import resolve_model_choices
+        assert resolve_model_choices("glm", {}) == ("glm-5.2",)
+
+    def test_unknown_preset_has_no_choices(self):
+        from prometheus.router.model_router import resolve_model_choices
+        assert resolve_model_choices("definitely-not-real", {}) == ()
+
+    def test_user_models_list_replaces_builtin(self):
+        """A provider shipping a new model is a config edit, not a release."""
+        from prometheus.router.model_router import resolve_model_choices
+        cfg = {"slash_commands": {"qwen": {"models": ["qwen4-max", "qwen4-flash"]}}}
+        choices = resolve_model_choices("qwen", cfg)
+        assert choices == ("qwen3.8-max", "qwen4-max", "qwen4-flash")
+        assert "qwen3.7-max" not in choices  # builtin replaced, not merged
+
+    def test_user_default_model_leads_its_own_list(self):
+        from prometheus.router.model_router import resolve_model_choices
+        cfg = {"slash_commands": {"qwen": {"model": "qwen4-max",
+                                           "models": ["qwen4-flash"]}}}
+        assert resolve_model_choices("qwen", cfg) == ("qwen4-max", "qwen4-flash")
+
+    def test_split_bare_and_composite_keys(self):
+        from prometheus.router.model_router import split_model_key
+        assert split_model_key("qwen") == ("qwen", None)
+        assert split_model_key("qwen:qwen3.7-plus") == ("qwen", "qwen3.7-plus")
+
+    def test_split_uses_first_separator_only(self):
+        """A model name containing a colon still round-trips."""
+        from prometheus.router.model_router import split_model_key
+        assert split_model_key("ollama:qwen3.5:9b") == ("ollama", "qwen3.5:9b")
+
+    def test_target_bare_key_is_preset_default(self):
+        from prometheus.router.model_router import resolve_model_target
+        assert resolve_model_target("qwen", {})["model"] == "qwen3.8-max"
+
+    def test_target_composite_key_selects_listed_model(self):
+        from prometheus.router.model_router import resolve_model_target
+        target = resolve_model_target("qwen:qwen3.7-plus", {})
+        assert target["model"] == "qwen3.7-plus"
+        assert target["provider"] == "qwen"          # rest of preset intact
+        assert target["api_key_env"] == "QWEN_API_KEY"
+
+    def test_target_rejects_model_outside_the_list(self):
+        """The vetted-list boundary: a client picks FROM a list, never names one."""
+        from prometheus.router.model_router import resolve_model_target
+        assert resolve_model_target("qwen:gpt-4o", {}) is None
+        assert resolve_model_target("qwen:../../etc/passwd", {}) is None
+
+    def test_target_unknown_preset_is_none(self):
+        from prometheus.router.model_router import resolve_model_target
+        assert resolve_model_target("nope:some-model", {}) is None
+
+    def test_xai_stays_single_entry(self):
+        """grok-3/-4/-latest are silently served as 4.3 — don't offer them."""
+        from prometheus.router.model_router import resolve_model_choices
+        assert resolve_model_choices("xai", {}) == ("grok-4.5",)

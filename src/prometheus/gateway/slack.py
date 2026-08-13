@@ -1362,12 +1362,17 @@ class SlackAdapter(BasePlatformAdapter):
             await respond(text="Channel id missing from slash payload.")
             return
         session_key = f"slack:{channel}"
+        # A leading model name selects it; anything else is left alone.
+        model, _rest = _cmds.split_model_arg(
+            preset_name, self._prometheus_config, (self._cmd_text(command) or "").split()
+        )
         text, applied = _cmds.cmd_provider_override(
             self.agent_loop,
             self._prometheus_config,
             session_key,
             preset_name,
             prefix=SLACK_COMMAND_PREFIX,
+            model=model,
         )
         # Platform-honest: Telegram dispatches an inline trailing message
         # ("/claude what is 2+2?") through the new provider; Slack slash
