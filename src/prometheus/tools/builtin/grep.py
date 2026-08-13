@@ -21,9 +21,27 @@ class GrepToolInput(BaseModel):
 
     pattern: str = Field(description="Regular expression to search for")
     root: str | None = Field(default=None, description="Search root directory")
-    file_glob: str = Field(default="**/*")
-    case_sensitive: bool = Field(default=True)
-    limit: int = Field(default=200, ge=1, le=2000)
+    file_glob: str = Field(
+        default="**/*",
+        description=(
+            "Which files to search, relative to root. Default searches every "
+            "file recursively. Must be RELATIVE — an absolute pattern raises."
+        ),
+    )
+    case_sensitive: bool = Field(
+        default=True,
+        description=(
+            "Matching is case-SENSITIVE by default. To match any casing, set "
+            "this to false — do NOT retry the search with different casings "
+            "of the pattern. (A live turn burned 7 of its 25 tool calls "
+            "permuting SYMBIOTE/symbiote/Symbiote/symbi before falling back "
+            "to `bash grep -i`, and hit the iteration cap.)"
+        ),
+    )
+    limit: int = Field(
+        default=200, ge=1, le=2000,
+        description="Maximum matching lines to return.",
+    )
 
 
 class GrepTool(BaseTool):

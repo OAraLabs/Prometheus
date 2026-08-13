@@ -23,7 +23,11 @@ class NotebookEditInput(BaseModel):
     cell_index: int = Field(ge=0, description="Zero-based cell index to edit")
     new_source: str = Field(description="New source content for the cell")
     cell_type: Literal["code", "markdown"] = Field(
-        default="code", description="Cell type"
+        default="code",
+        description=(
+            "Whether the cell holds executable code or markdown prose. "
+            "Defaults to code; only used when creating a cell."
+        ),
     )
     mode: Literal["replace", "append"] = Field(
         default="replace",

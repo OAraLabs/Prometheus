@@ -19,7 +19,13 @@ class FileWriteToolInput(BaseModel):
 
     path: str = Field(description="Path of the file to write")
     content: str = Field(description="Full file contents")
-    create_directories: bool = Field(default=True)
+    create_directories: bool = Field(
+        default=True,
+        description=(
+            "Missing parent directories are created by default, so a write to "
+            "a new folder succeeds without a preceding mkdir."
+        ),
+    )
 
 
 class FileWriteTool(BaseTool):

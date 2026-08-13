@@ -19,7 +19,10 @@ class GlobToolInput(BaseModel):
 
     pattern: str = Field(description="Glob pattern relative to the working directory")
     root: str | None = Field(default=None, description="Optional search root")
-    limit: int = Field(default=200, ge=1, le=5000)
+    limit: int = Field(
+        default=200, ge=1, le=5000,
+        description="Maximum paths to return.",
+    )
 
 
 class GlobTool(BaseTool):
