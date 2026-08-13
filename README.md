@@ -49,7 +49,7 @@ The interesting work is original:
 - **Wiki Knowledge System** — turns every conversation into a compounding knowledge base that cross-references itself over time.
 - **The coding engine's iterate-to-green policy** — "done" is a verdict, not a claim: sandboxed rounds until the acceptance command exits 0, with failure-fingerprint step-back and zero-progress aborts.
 - **The fine-tuning gym** — frozen task-sets, dual scoring (raw emission vs post-repair execution), and a refusal to declare winners it can't statistically back.
-- **SYMBIOTE** — experimental self-modification with blue-green deploy and auto-rollback.
+- **SYMBIOTE** — code assimilation *and* self-modification. Scout researches GitHub, Harvest clones and vets (license gate, AST-level security scan), Graft adapts and integrates with provenance headers and a full test run, and MorphEngine hot-swaps the result via blue-green deploy with automatic rollback, backed by a backup vault. **Experimental, off by default** — powerful and unstable; treat it as a research feature.
 
 ### The guards
 
@@ -257,7 +257,7 @@ Why this only works here: a screen recording of you doing your job is among the 
 
 ### On by default vs opt-in
 
-Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, and the web API are on out of the box. The bigger autonomous subsystems — SENTINEL dreaming, the model router, LSP, GEPA, escalation-to-teacher, Symbiote (experimental self-modification with blue-green deploy + auto-rollback), the Paperclip gateway, and Record-a-Skill's video ingestion — ship **off by default** and are one config flag away when you want them. The [feature reference](docs/guide/features.md) marks every subsystem's default.
+Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, and the web API are on out of the box. The bigger autonomous subsystems — SENTINEL dreaming, the model router, LSP, GEPA, escalation-to-teacher, SYMBIOTE (GitHub research → license gate → AST scan → safe graft → blue-green hot swap with auto-rollback; experimental), the Paperclip gateway, and Record-a-Skill's video ingestion — ship **off by default** and are one config flag away when you want them. The [feature reference](docs/guide/features.md) marks every subsystem's default.
 
 ## Quick Start
 
@@ -515,7 +515,7 @@ prometheus/
 │   ├── coordinator/     # Subagent spawning, divergence detection
 │   ├── learning/        # Skill creator/refiner, curator, GEPA, pair capture,
 │   │                    #   live recorder + video ingest (Record a Skill)
-│   ├── symbiote/        # Experimental self-modification (off by default)
+│   ├── symbiote/        # Code assimilation + self-modification (experimental, off by default)
 │   ├── infra/           # AnatomyScanner, project configs
 │   ├── telemetry/       # Tool-call tracking + cost
 │   └── config/          # Settings, paths, env overrides, profiles

@@ -72,7 +72,7 @@ The engine that drives everything: streaming deltas and tool events, a circuit b
 
 **Automation & delegation:** `cron_create` / `cron_delete` / `cron_list` (with a natural-language schedule parser), `task_create` / `task_get` / `task_list` / `task_update` / `task_stop` / `task_output` (durable background tasks), `agent` (spawn a subagent), `ask_user`, `sessions_list` / `sessions_send` / `sessions_spawn`, `lsp` (seven code-intelligence actions), `tool_search` (discover and load deferred tools by keyword — see below)
 
-**Symbiote (experimental, off by default):** `symbiote_scout` / `symbiote_harvest` / `symbiote_graft` / `symbiote_status`, plus a GitHub search tool
+**SYMBIOTE (experimental, off by default):** `symbiote_scout` / `symbiote_harvest` / `symbiote_graft` / `symbiote_status`, plus a GitHub search tool
 
 **Not agent-callable but present:** `vision_analyze` and `whisper_stt` are internal helpers used by the gateways, WebSocket uploads, and the voice CLI — the agent does not call them directly.
 
@@ -114,7 +114,7 @@ These are the proactive subsystems that act while you are idle. They are the mar
 - **Curator** — **Default: on.** A weekly consolidation pass over the skill library: merges and archives, never hard-deletes, and never touches pinned skills. Inspect or trigger it with `/curator`.
 - **GEPA** — **Default: off.** Evolutionary skill optimization: idle-time generation of skill variants judged by your local model. Controlled via `/gepa`.
 - **Escalation to teacher** — **Default: off.** Deterministic failure detection hands the failing exchange to a stronger cloud model, which returns a corrective reply and a drafted skill file. Note: its `budget_usd` cost cap is declared but **not yet enforced** — see [Honest status notes](#honest-status-notes).
-- **Symbiote** — **Default: off. Experimental.** A scout → harvest → graft self-modification pipeline that finds relevant open-source code on GitHub, adapts it, and hot-swaps it in via blue-green deployment with automatic rollback, backed by a backup vault and a license gate. Powerful and unstable; treat it as a research feature.
+- **SYMBIOTE** — **Default: off. Experimental.** Code assimilation *and* self-modification, in one pipeline. Scout researches GitHub for relevant open-source code; Harvest clones and vets it behind a license gate and an AST-level security scan; Graft adapts and integrates it with provenance headers and a full test run; MorphEngine hot-swaps the result via blue-green deployment with automatic rollback, backed by a backup vault. The two halves are separately gated — `symbiote.enabled` for the pipeline, `symbiote.morph.enabled` for the hot swap. Powerful and unstable; treat it as a research feature.
 
 ---
 
