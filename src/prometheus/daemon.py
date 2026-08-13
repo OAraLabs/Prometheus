@@ -377,7 +377,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # model_router, and divergence_detector — all were built but not connected.
     # Phase 2: router now requires primary provider + adapter + model built first.
     adapter = create_adapter(model_config, config.get("adapter"))
-    security_gate = create_security_gate(security_config)
+    security_gate = create_security_gate(security_config, getattr(args, "config", None))
     model_router = create_model_router(config, provider, adapter, model_name)
     # Phase 3: wire the router back into the adapter's RetryEngine so it can
     # consult router.config.escalation_enabled at tool-retry exhaustion and
