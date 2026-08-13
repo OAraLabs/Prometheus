@@ -946,6 +946,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._register(provider, "kimi", self._app_kimi, "Route this channel via Kimi (Moonshot)")
         self._register(provider, "glm", self._app_glm, "Route this channel via GLM (Z.ai)")
         self._register(provider, "mimo", self._app_mimo, "Route this channel via MiMo (Xiaomi)")
+        self._register(provider, "qwen", self._app_qwen, "Route this channel via Qwen (Alibaba)")
         self._register(provider, "local", self._app_local, "Clear the override, back to primary")
         self._register(provider, "route", self._app_route, "Show current routing for this channel")
 
@@ -1038,7 +1039,7 @@ class DiscordAdapter(BasePlatformAdapter):
             "",
             "Provider (`/prometheus provider …`, this channel only):",
             "  claude · gpt · gemini · xai · grok",
-            "  deepseek · kimi · glm · mimo · local · route",
+            "  deepseek · kimi · glm · mimo · qwen · local · route",
             "",
             "Send a message (or DM the bot) to chat with the agent. "
             "Attachments are understood: images (vision), voice (Whisper), "
@@ -1528,6 +1529,9 @@ class DiscordAdapter(BasePlatformAdapter):
 
     async def _app_mimo(self, interaction: Any, args: str) -> None:
         await self._apply_override(interaction, args, preset_name="mimo")
+
+    async def _app_qwen(self, interaction: Any, args: str) -> None:
+        await self._apply_override(interaction, args, preset_name="qwen")
 
     async def _app_local(self, interaction: Any, args: str) -> None:
         """Clear the per-channel provider override, back to primary."""

@@ -290,6 +290,7 @@ _ENV_TEMPLATE = """# Prometheus environment file — secrets live here, not in p
 #   MOONSHOT_API_KEY=      # platform.moonshot.ai — /kimi override
 #   ZAI_API_KEY=           # z.ai API console — /glm override
 #   MIMO_API_KEY=          # api.xiaomimimo.com console — /mimo override
+#   QWEN_API_KEY=          # Alibaba Model Studio console — /qwen override
 #
 # Media generation (optional, paid — never auto-selected):
 #   DASHSCOPE_API_KEY=     # Alibaba DashScope — image_generate backend=dashscope (WAN 2.5)
@@ -312,6 +313,7 @@ _CLOUD_FAST_PROVIDERS: dict[str, tuple[str, str, int]] = {
     "kimi": ("MOONSHOT_API_KEY", "kimi-k2.6", 64000),
     "glm": ("ZAI_API_KEY", "glm-5.2", 64000),
     "mimo": ("MIMO_API_KEY", "mimo-v2.5-pro", 64000),
+    "qwen": ("QWEN_API_KEY", "qwen3.7-max", 64000),
 }
 
 

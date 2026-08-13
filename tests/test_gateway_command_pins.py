@@ -72,6 +72,7 @@ class TestRouteLocalPins:
     # NOTE (CLOUD EXPANSION 2026-07): the /route override list deliberately
     # gained /deepseek /kimi /glm /mimo lines; the pins below were updated to
     # the new expected surface at the same time as the change.
+    # NOTE (2026-08): /qwen (Alibaba Model Studio) added the same way.
     @pytest.mark.asyncio
     async def test_route_no_router_pin(self):
         adapter = _make_adapter()
@@ -90,6 +91,7 @@ class TestRouteLocalPins:
             "  /kimi    — Kimi (Moonshot)\n"
             "  /glm     — GLM (Z.ai)\n"
             "  /mimo    — MiMo (Xiaomi)\n"
+            "  /qwen    — Qwen (Alibaba)\n"
             "  /local   — back to primary"
         )
 
@@ -118,6 +120,7 @@ class TestRouteLocalPins:
             "  /kimi    — Kimi (Moonshot)\n"
             "  /glm     — GLM (Z.ai)\n"
             "  /mimo    — MiMo (Xiaomi)\n"
+            "  /qwen    — Qwen (Alibaba)\n"
             "  /local   — back to primary"
         )
 

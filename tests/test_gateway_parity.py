@@ -224,6 +224,7 @@ MANIFEST: tuple[Family, ...] = (
     Family("kimi", ("cmd_provider_override",), _cmds("kimi", "prometheus-kimi", "kimi")),
     Family("glm", ("cmd_provider_override",), _cmds("glm", "prometheus-glm", "glm")),
     Family("mimo", ("cmd_provider_override",), _cmds("mimo", "prometheus-mimo", "mimo")),
+    Family("qwen", ("cmd_provider_override",), _cmds("qwen", "prometheus-qwen", "qwen")),
     Family("local", ("cmd_local_override",), _cmds("local", "prometheus-local", "local")),
     Family("route", ("cmd_route",), _cmds("route", "prometheus-route", "route")),
 )

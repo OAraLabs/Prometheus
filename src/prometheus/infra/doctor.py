@@ -353,6 +353,7 @@ class Doctor:
             ("Kimi", "MOONSHOT_API_KEY"),
             ("GLM", "ZAI_API_KEY"),
             ("MiMo", "MIMO_API_KEY"),
+            ("Qwen", "QWEN_API_KEY"),
             ("DashScope/WAN", "DASHSCOPE_API_KEY"),
         )
         parts = [

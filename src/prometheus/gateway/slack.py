@@ -451,6 +451,7 @@ class SlackAdapter(BasePlatformAdapter):
         self._app.command("/prometheus-kimi")(self._slash_kimi)
         self._app.command("/prometheus-glm")(self._slash_glm)
         self._app.command("/prometheus-mimo")(self._slash_mimo)
+        self._app.command("/prometheus-qwen")(self._slash_qwen)
         self._app.command("/prometheus-local")(self._slash_local)
         self._app.command("/prometheus-route")(self._slash_route)
 
@@ -754,6 +755,7 @@ class SlackAdapter(BasePlatformAdapter):
             "  /prometheus-kimi           — Kimi (Moonshot)",
             "  /prometheus-glm            — GLM (Z.ai)",
             "  /prometheus-mimo           — MiMo (Xiaomi)",
+            "  /prometheus-qwen           — Qwen (Alibaba)",
             "  /prometheus-local          — back to primary",
             "  /prometheus-route          — current routing (primary vs override)",
             "",
@@ -1413,6 +1415,10 @@ class SlackAdapter(BasePlatformAdapter):
     async def _slash_mimo(self, ack: Any, command: Any, respond: Any) -> None:
         await ack()
         await self._apply_override(command, respond, preset_name="mimo")
+
+    async def _slash_qwen(self, ack: Any, command: Any, respond: Any) -> None:
+        await ack()
+        await self._apply_override(command, respond, preset_name="qwen")
 
     async def _slash_local(self, ack: Any, command: Any, respond: Any) -> None:
         """Clear the per-channel provider override, back to primary."""

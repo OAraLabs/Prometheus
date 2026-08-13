@@ -54,12 +54,14 @@ Every cloud provider except Anthropic rides the same OpenAI-compatible wire form
 | Kimi (Moonshot) | `kimi` | `MOONSHOT_API_KEY` | `kimi-k2.6` |
 | GLM (Z.ai / Zhipu) | `glm` | `ZAI_API_KEY` | `glm-5.2` |
 | MiMo (Xiaomi) | `mimo` | `MIMO_API_KEY` | `mimo-v2.5-pro` |
+| Qwen (Alibaba Model Studio) | `qwen` | `QWEN_API_KEY` | `qwen3.7-max` |
 
 The defaults live in `src/prometheus/providers/registry.py` (`CLOUD_DEFAULTS`) and carry some hard-won footnotes:
 
 - **xAI** — `grok-4.5` is requested *explicitly* because the `grok-3` / `grok-4` / `grok-latest` aliases currently serve grok-4.3.
 - **DeepSeek** — the legacy `deepseek-chat` / `deepseek-reasoner` aliases are deprecated as of 2026-07-24; the defaults use V4 names. The reasoning flagship is `deepseek-v4-pro` if you want to pin it.
 - **Kimi** — the default base URL is the international endpoint (`api.moonshot.ai`). A separate CN endpoint (`api.moonshot.cn`) exists with *separate keys*; set `base_url` in config if your key is CN-issued.
+- **Qwen** — the default is Alibaba's international **pay-as-you-go** endpoint (`dashscope-intl.aliyuncs.com/compatible-mode/v1`), which takes an ordinary `sk-` Model Studio key. Alibaba also sells subscription plans (Token Plan, Coding Plan) on *different hosts with different keys* — per their docs the key/base-URL pairs "are completely isolated and must be used in matching pairs", and plan keys are limited to **interactive use in programming tools and agents**, explicitly not automated scripts, application backends, or other non-interactive callers. Point `slash_commands.qwen.base_url` at a plan endpoint only if your usage fits that scope; unattended paths (cron, briefings, evals, autonomous loops) do not. `QWEN_API_KEY` is deliberately separate from `DASHSCOPE_API_KEY`, which is the WAN image backend on another host.
 
 Any of these can also be your **primary** model — set `model.provider` to the config name and you get the full harness (memory, wiki, security, profiles) on a cloud backend, no GPU required.
 
@@ -73,7 +75,7 @@ You don't have to change your primary model to borrow a cloud one. In any chat (
 | `/gpt` | OpenAI |
 | `/gemini` | Google Gemini |
 | `/xai` (alias `/grok`) | xAI |
-| `/deepseek` `/kimi` `/glm` `/mimo` | DeepSeek / Moonshot / Z.ai / Xiaomi |
+| `/deepseek` `/kimi` `/glm` `/mimo` `/qwen` | DeepSeek / Moonshot / Z.ai / Xiaomi / Alibaba |
 | `/local` | clears the override — back to your primary model |
 | `/route` | shows which provider + model this chat is currently using |
 
@@ -126,7 +128,19 @@ slash_commands:
     provider: mimo
     api_key_env: MIMO_API_KEY
     model: mimo-v2.5-pro
+  qwen:
+    provider: qwen
+    api_key_env: QWEN_API_KEY
+    model: qwen3.7-max
+    # base_url is optional — omit it for Alibaba's international
+    # pay-as-you-go endpoint. Set it to reach a different host, e.g. a
+    # subscription plan (read the scope note above first) or a region:
+    #   base_url: https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+    #   base_url: https://coding-intl.dashscope.aliyuncs.com/v1
+    #   base_url: https://dashscope-us.aliyuncs.com/compatible-mode/v1
 ```
+
+`base_url` is honored on any of these blocks, not just Qwen — useful for the CN-vs-international endpoint splits noted above.
 
 Restart the daemon and grep the journal to verify the wiring:
 

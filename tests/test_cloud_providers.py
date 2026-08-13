@@ -156,6 +156,7 @@ class TestProviderRegistry:
         assert ProviderRegistry.is_cloud("kimi") is True
         assert ProviderRegistry.is_cloud("glm") is True
         assert ProviderRegistry.is_cloud("mimo") is True
+        assert ProviderRegistry.is_cloud("qwen") is True
         assert ProviderRegistry.is_cloud("llama_cpp") is False
         assert ProviderRegistry.is_cloud("ollama") is False
 
@@ -166,7 +167,39 @@ class TestProviderRegistry:
         assert "anthropic" in providers
         assert "llama_cpp" in providers
         # CLOUD EXPANSION (2026-07): +deepseek/kimi/glm/mimo → 11
-        assert len(providers) == 11
+        # Alibaba Model Studio (2026-08): +qwen → 12
+        assert len(providers) == 12
+
+    def test_qwen_is_openai_compat_not_local_adapter(self):
+        """A provider NAMED qwen must not fall through to QwenFormatter.
+
+        Alibaba's compatible-mode surface enforces tool-call structure like any
+        other OpenAI-compatible API, so it belongs on tier=off. The local
+        llama_cpp/ollama default is QwenFormatter + strictness MEDIUM, and the
+        name collision makes that an easy wrong turn.
+        """
+        from prometheus.adapter import ModelAdapter
+        from prometheus.adapter.formatter import PassthroughFormatter
+        from prometheus.router.model_router import _build_adapter_for
+
+        adapter = _build_adapter_for("qwen")
+        assert isinstance(adapter.formatter, PassthroughFormatter)
+        assert adapter.tier == ModelAdapter.TIER_OFF
+
+    def test_qwen_key_env_is_distinct_from_dashscope_image_key(self):
+        """/qwen and the WAN image backend must not share one env var.
+
+        They address different hosts, and Alibaba's plan keys are scoped to
+        matching base URLs — one shared var would mean a text key that breaks
+        image generation, or the reverse.
+        """
+        from prometheus.providers.registry import CLOUD_DEFAULTS
+        from prometheus.tools.builtin.image_generate import (
+            _DASHSCOPE_DEFAULT_KEY_ENV,
+        )
+
+        assert CLOUD_DEFAULTS["qwen"]["default_env"] == "QWEN_API_KEY"
+        assert CLOUD_DEFAULTS["qwen"]["default_env"] != _DASHSCOPE_DEFAULT_KEY_ENV
 
 
 # -----------------------------------------------------------------------

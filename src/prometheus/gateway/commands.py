@@ -1706,6 +1706,7 @@ PROVIDER_PRESET_DISPLAY_NAMES: dict[str, str] = {
     "kimi": "Kimi (moonshot)",
     "glm": "GLM (z.ai)",
     "mimo": "MiMo (xiaomi)",
+    "qwen": "Qwen (alibaba)",
 }
 
 
@@ -1888,6 +1889,7 @@ def cmd_route(
     lines.append(f"  {prefix}kimi    — Kimi (Moonshot)")
     lines.append(f"  {prefix}glm     — GLM (Z.ai)")
     lines.append(f"  {prefix}mimo    — MiMo (Xiaomi)")
+    lines.append(f"  {prefix}qwen    — Qwen (Alibaba)")
     lines.append(f"  {prefix}local   — back to primary")
 
     return "\n".join(lines)
