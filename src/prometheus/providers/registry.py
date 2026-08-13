@@ -20,11 +20,13 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
         "base_url": "https://api.openai.com/v1",
         "model": "gpt-4o",
         "default_env": "OPENAI_API_KEY",
+        "default_base_url_env": "OPENAI_BASE_URL",
     },
     "gemini": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "model": "gemini-2.5-flash",
         "default_env": "GEMINI_API_KEY",
+        "default_base_url_env": "GEMINI_BASE_URL",
     },
     "xai": {
         "base_url": "https://api.x.ai/v1",
@@ -32,10 +34,12 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
         # on the OAuth surface (probed 2026-07-10); see OVERRIDE_PRESETS.
         "model": "grok-4.5",
         "default_env": "XAI_API_KEY",
+        "default_base_url_env": "XAI_BASE_URL",
     },
     "anthropic": {
         "model": "claude-haiku-4-5-20251001",
         "default_env": "ANTHROPIC_API_KEY",
+        "default_base_url_env": "ANTHROPIC_BASE_URL",
     },
     # -- CLOUD EXPANSION (2026-07) — endpoints/models verified 2026-07-05 --
     "deepseek": {
@@ -48,6 +52,7 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
         # slash_commands.deepseek.model or model.model in prometheus.yaml).
         "model": "deepseek-v4-flash",
         "default_env": "DEEPSEEK_API_KEY",
+        "default_base_url_env": "DEEPSEEK_BASE_URL",
     },
     "kimi": {
         # Moonshot AI international endpoint. A separate CN endpoint
@@ -56,6 +61,7 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
         "base_url": "https://api.moonshot.ai/v1",
         "model": "kimi-k2.6",
         "default_env": "MOONSHOT_API_KEY",
+        "default_base_url_env": "MOONSHOT_BASE_URL",
     },
     "glm": {
         # Z.ai (Zhipu) — note the nonstandard /api/paas/v4 path prefix; the
@@ -65,12 +71,14 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
         "base_url": "https://api.z.ai/api/paas/v4",
         "model": "glm-5.2",
         "default_env": "ZAI_API_KEY",
+        "default_base_url_env": "ZAI_BASE_URL",
     },
     "mimo": {
         # Xiaomi MiMo first-party hosted platform.
         "base_url": "https://api.xiaomimimo.com/v1",
         "model": "mimo-v2.5-pro",
         "default_env": "MIMO_API_KEY",
+        "default_base_url_env": "MIMO_BASE_URL",
     },
     "qwen": {
         # Alibaba Cloud Model Studio, OpenAI-compatible surface.
@@ -85,23 +93,28 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
         # completely isolated and must be used in matching pairs"). Both also
         # restrict usage to interactive programming tools / agents — NOT
         # automated scripts, application backends, or non-interactive calls.
-        # To point at one, set slash_commands.qwen.base_url in prometheus.yaml:
+        # This default is also the WRONG endpoint for a WORKSPACE-scoped key: a
+        # key issued against a workspace 403s here and must use that workspace's
+        # own host (https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1).
+        # That hostname identifies the account, so set QWEN_BASE_URL in the env
+        # file rather than base_url in yaml — see _resolve_base_url below.
+        #
+        # Other hosts, all reachable the same way:
         #   Token Plan (Team):
         #     https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
         #   Coding Plan:
         #     https://coding-intl.dashscope.aliyuncs.com/v1
-        #
-        # Regional pay-as-you-go bases exist too (dashscope-us, and per-workspace
-        # ap-southeast-1 / ap-northeast-1 / cn-hongkong maas hosts).
+        #   US region: https://dashscope-us.aliyuncs.com/compatible-mode/v1
         "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-        # qwen3.7-max is carried on both the pay-as-you-go and Token Plan model
-        # lists. Cheaper tiers (qwen3.7-plus, qwen3.6-plus, qwen3.6-flash) and
-        # newer maxes pin via slash_commands.qwen.model.
-        "model": "qwen3.7-max",
+        # Kept in step with OVERRIDE_PRESETS["qwen"]["model"] — this one is the
+        # fallback for `model.provider: qwen` as the PRIMARY, where no preset
+        # supplies a model. Cheaper tiers pin via slash_commands.qwen.model.
+        "model": "qwen3.8-max",
         # Deliberately NOT DASHSCOPE_API_KEY: that var is the WAN 2.5 image
         # backend's, and it addresses a different host (…/api/v1). Sharing one
         # var would mean a text key that breaks image generation, or vice versa.
         "default_env": "QWEN_API_KEY",
+        "default_base_url_env": "QWEN_BASE_URL",
     },
 }
 
@@ -109,6 +122,45 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
 _OPENAI_COMPAT_PROVIDERS = {
     "openai", "gemini", "xai", "deepseek", "kimi", "glm", "mimo", "qwen",
 }
+
+
+def _resolve_base_url(config: dict[str, Any], provider_name: str) -> str:
+    """Resolve the API base URL from config, environment, or the built-in default.
+
+    Mirrors :func:`_resolve_api_key`'s shape on purpose, because a base URL can
+    be as account-identifying as a key. Alibaba Model Studio is the motivating
+    case: a workspace-scoped endpoint embeds the workspace id in its hostname
+    (``https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1``), and a
+    key issued for that workspace 403s against the shared regional host. That
+    URL belongs in the 0600 env file next to the key, not in a yaml file that
+    gets copied between checkouts and pasted into issues.
+
+    Checks, in order:
+      1. ``config["base_url"]`` — explicit, wins outright.
+      2. ``config["base_url_env"]``, else the provider's
+         ``default_base_url_env`` — read from the environment if set.
+      3. ``CLOUD_DEFAULTS[provider]["base_url"]`` — the shared public endpoint.
+
+    Unlike the key resolver this never raises: an unset variable simply falls
+    through to the default, so adding a ``*_BASE_URL`` name costs nothing until
+    someone actually exports it.
+    """
+    direct = config.get("base_url", "")
+    if direct:
+        return str(direct)
+
+    defaults = CLOUD_DEFAULTS.get(provider_name, {})
+    env_name = config.get("base_url_env", "") or defaults.get("default_base_url_env", "")
+    if env_name:
+        from_env = os.environ.get(env_name, "").strip()
+        if from_env:
+            log.info(
+                "Provider %s: base URL from %s (overriding the default endpoint)",
+                provider_name, env_name,
+            )
+            return from_env
+
+    return str(defaults.get("base_url", ""))
 
 
 def _resolve_api_key(config: dict[str, Any], provider_name: str) -> str:
@@ -209,7 +261,7 @@ class ProviderRegistry:
                 else _resolve_api_key(config, provider_name)
             )
             return OpenAICompatProvider(
-                base_url=config.get("base_url", defaults.get("base_url", "")),
+                base_url=_resolve_base_url(config, provider_name),
                 api_key=api_key,
                 model=config.get("model", defaults.get("model", "")),
                 default_max_tokens=config.get("max_tokens", 4096),
@@ -220,12 +272,31 @@ class ProviderRegistry:
             from prometheus.providers.anthropic import AnthropicProvider
 
             api_key = _resolve_api_key(config, provider_name)
-            return AnthropicProvider(
-                api_key=api_key,
-                model=config.get("model", defaults.get("model", "claude-haiku-4-5-20251001")),
-                timeout=config.get("timeout", 120.0),
-                prompt_caching=config.get("prompt_caching", True),
-            )
+            kwargs: dict[str, Any] = {
+                "api_key": api_key,
+                "model": config.get(
+                    "model", defaults.get("model", "claude-haiku-4-5-20251001")
+                ),
+                "timeout": config.get("timeout", 120.0),
+                "prompt_caching": config.get("prompt_caching", True),
+            }
+            # base_url was previously dropped here entirely — AnthropicProvider
+            # has always accepted it, but the factory never passed it, so an
+            # Anthropic-compatible third-party endpoint was unreachable by
+            # config. Only forwarded when actually set, so the default path
+            # keeps AnthropicProvider's own constant.
+            #
+            # Caveat for third-party shims: the provider appends "/messages" to
+            # whatever it is given unless the value already ends in it, so a
+            # base of ".../apps/anthropic" becomes ".../apps/anthropic/messages"
+            # — pass ".../apps/anthropic/v1" if the shim expects /v1/messages.
+            # Headers stay Anthropic's (x-api-key, anthropic-version, and the
+            # prompt-caching beta when enabled); a shim that rejects those needs
+            # provider-side work, not just this passthrough.
+            anthropic_base = _resolve_base_url(config, provider_name)
+            if anthropic_base:
+                kwargs["base_url"] = anthropic_base
+            return AnthropicProvider(**kwargs)
 
         if provider_name == "llama_cpp":
             from prometheus.providers.llama_cpp import LlamaCppProvider

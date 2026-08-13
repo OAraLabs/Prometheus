@@ -142,6 +142,26 @@ slash_commands:
 
 `base_url` is honored on any of these blocks, not just Qwen — useful for the CN-vs-international endpoint splits noted above.
 
+### Endpoint overrides: `<PROVIDER>_BASE_URL`
+
+Every cloud provider also reads an endpoint variable from the env file: `OPENAI_BASE_URL`, `GEMINI_BASE_URL`, `XAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `DEEPSEEK_BASE_URL`, `MOONSHOT_BASE_URL`, `ZAI_BASE_URL`, `MIMO_BASE_URL`, `QWEN_BASE_URL`.
+
+Resolution order is `base_url` in config → `<PROVIDER>_BASE_URL` → the built-in default. Unset simply falls through, so these cost nothing until you use one.
+
+Prefer the env var over yaml when **the hostname identifies your account**. The motivating case: an Alibaba key issued against a workspace **403s on the shared regional host** and must use that workspace's own endpoint, which embeds the workspace id:
+
+```bash
+# ~/.config/prometheus/env  (0600)
+QWEN_API_KEY=sk-...
+QWEN_BASE_URL=https://ws-<workspace-id>.<region>.maas.aliyuncs.com/compatible-mode/v1
+```
+
+A 403 on a key you know is valid almost always means this. `prometheus doctor` reports whether `QWEN_BASE_URL` is set, so the endpoint override is visible when you are diagnosing one.
+
+⚠ The repo's pre-commit hook does **not** recognise these hostnames — its host check matches `OAra-*` only. Keeping a workspace endpoint in the env file (gitignored, 0600) rather than yaml is what keeps it out of a commit; nothing will stop you if you paste it into tracked code.
+
+**Anthropic-compatible third-party endpoints**: `ANTHROPIC_BASE_URL` now reaches the provider (the factory previously dropped it). Two caveats — the provider appends `/messages` unless the value already ends in it, so pass `.../apps/anthropic/v1` if the shim expects `/v1/messages`; and headers stay Anthropic's (`x-api-key`, `anthropic-version`, plus the prompt-caching beta when enabled). A shim that rejects those needs provider-side work, not just this passthrough.
+
 ### Switching models within a provider
 
 `model:` sets the default a bare `/qwen` gives you. `models:` lists what else you can switch to:
