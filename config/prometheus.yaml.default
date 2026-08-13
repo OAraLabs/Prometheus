@@ -98,12 +98,27 @@ security:
     - "rm -rf ~"
     - "DROP TABLE"
     - "mkfs"
+  # Paths the agent may never read or write. ABSOLUTE ONLY — an entry that is
+  # not absolute (or ~-rooted) raises at startup rather than being resolved,
+  # because a relative entry resolves against the DAEMON'S WORKING DIRECTORY,
+  # so the file it protects moves when the process does. That is not a
+  # control; it is a control-shaped thing. (Proven 2026-08-13: moving the
+  # daemon to a deploy clone silently moved "config/prometheus.yaml" off the
+  # file it was meant to protect, and nothing announced it.)
+  #
+  # `*`, `?` and `[...]` are supported and match across `/` — broader than a
+  # shell glob, deliberately, because this is a DENY list.
+  #
+  # The daemon's own config file is denied AUTOMATICALLY from the path it was
+  # actually loaded from — no entry needed, and no template can name an
+  # absolute path that is right for every install.
   denied_paths:
     - "/etc"
     - "/sys"
     - "/boot"
     - "~/.ssh"
-    - "config/prometheus.yaml"
+    - "~/.gnupg"            # GPG keys — the sibling of ~/.ssh
+    - "~/.config/*/*env"    # credential env files (…/prometheus/env, …/oara/middleware.env)
   # Regexes auto-ALLOWed even at SYSTEM trust (background tasks / cron) so a
   # vetted long-running job can run without a human approver. Evaluated AFTER
   # the denied/always-blocked/exfiltration gates (cannot resurrect a block) and

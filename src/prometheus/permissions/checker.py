@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -163,6 +164,49 @@ class PermissionDecision:
 # ---------------------------------------------------------------------------
 
 
+_GLOB_CHARS = "*?["
+
+
+def _is_glob(entry: str) -> bool:
+    return any(c in entry for c in _GLOB_CHARS)
+
+
+def _normalise_denied_path(entry: str) -> str:
+    """Expand and validate ONE ``security.denied_paths`` entry.
+
+    ABSOLUTE ONLY. A relative entry was previously resolved at check time
+    against the daemon's working directory, which means the file it protected
+    was chosen by wherever the process happened to be running — not by the
+    config. That is not a control; it is a control-shaped thing whose target
+    moves. Proven on 2026-08-13: moving the daemon from the dev checkout to a
+    deploy clone silently moved the entry ``config/prometheus.yaml`` off the
+    file it was meant to protect, and nothing in the config, the logs or the
+    restart said so.
+
+    Raising is the point. The alternatives are worse: ignoring the entry
+    removes a control the operator believes they have, and resolving it
+    reinstates the defect. A deny list that cannot say what it protects
+    should stop the process, loudly, with the fix in the message.
+
+    Glob entries (``~/.config/*/env``) are expanded but NOT resolved —
+    ``Path.resolve()`` on a literal ``*`` component would mangle the pattern.
+    """
+    expanded = str(Path(entry).expanduser())
+    if not Path(expanded).is_absolute():
+        raise ValueError(
+            f"security.denied_paths entry {entry!r} is RELATIVE. Entries must "
+            f"be absolute (or start with '~'), because a relative entry is "
+            f"resolved against the daemon's WORKING DIRECTORY — so the file it "
+            f"protects changes whenever the process moves, silently. "
+            f"Use an absolute path, e.g. '/opt/prometheus/{entry}' or "
+            f"'~/{entry}'. NOTE: the daemon's own config file is denied "
+            f"automatically and does not need an entry at all."
+        )
+    if _is_glob(expanded):
+        return expanded
+    return str(Path(expanded).resolve())
+
+
 class SecurityGate:
     """Permission checker for the Prometheus agent loop.
 
@@ -192,11 +236,24 @@ class SecurityGate:
         exfiltration_detector: ExfiltrationDetector | None = None,
         approval_queue: object | None = None,
         allowed_commands: list[str] | None = None,
+        config_path: str | Path | None = None,
     ) -> None:
         self._denied_commands: list[str] = denied_commands or []
         self._denied_paths: list[str] = [
-            str(Path(p).expanduser()) for p in (denied_paths or [])
+            _normalise_denied_path(p) for p in (denied_paths or [])
         ]
+        # The daemon's own config file is denied AUTOMATICALLY. It used to be a
+        # config entry — the relative string "config/prometheus.yaml" — which
+        # is the defect this whole change exists to remove: the file it
+        # protected was chosen by the process's working directory. A template
+        # cannot name an absolute path that is right for every install, so the
+        # honest fix is not a better default but a PROPERTY: the process knows
+        # where it read its config from, so it can deny that file without
+        # anyone writing it down (CROSS-CUTTING §5).
+        if config_path is not None:
+            resolved_cfg = str(Path(config_path).expanduser().resolve())
+            if resolved_cfg not in self._denied_paths:
+                self._denied_paths.append(resolved_cfg)
         self._workspace = Path(workspace_root).expanduser().resolve() if workspace_root else None
         self._mode = PermissionMode(mode) if isinstance(mode, str) else mode
 
@@ -253,6 +310,7 @@ class SecurityGate:
             denied_paths=sec.get("denied_paths") or [],
             allowed_commands=sec.get("allowed_commands") or [],
             workspace_root=resolve_workspace_root(sec),
+            config_path=config_path,
             mode=sec.get("permission_mode", "default"),
             audit_logger=audit_logger,
             exfiltration_detector=exfil_detector,
@@ -448,11 +506,34 @@ class SecurityGate:
         return ""
 
     def _check_denied_path(self, file_path: str) -> str:
-        """Return a denial reason if the path falls under a denied prefix."""
+        """Return a denial reason if the path falls under a denied prefix.
+
+        Entries are normalised ONCE at construction (see
+        :func:`_normalise_denied_path`), so nothing here depends on the
+        process's working directory. Before that, every entry was re-resolved
+        on each call — which made a relative entry protect whichever file
+        happened to sit under the daemon's cwd.
+        """
         resolved = str(Path(file_path).expanduser().resolve())
         for denied in self._denied_paths:
-            resolved_denied = str(Path(denied).expanduser().resolve())
-            if resolved.startswith(resolved_denied):
+            if _is_glob(denied):
+                # A wildcard entry matches the path itself or anything under
+                # it. ``fnmatch``'s ``*`` spans ``/``, which is broader than a
+                # shell glob — deliberately: broader means MORE denied, and
+                # this is a deny list.
+                if fnmatch.fnmatch(resolved, denied) or fnmatch.fnmatch(
+                        resolved, f"{denied.rstrip('/')}/*"):
+                    return f"Path {file_path!r} matches denied pattern {denied!r}"
+            # Match on PATH COMPONENTS, not raw string prefix. A bare
+            # ``startswith`` denied "/etcetera/notes" for the entry "/etc" —
+            # over-refusal, so it never announced itself, and it disagreed
+            # with the glob branch three lines up, which has always compared
+            # component-wise. Two branches of one matcher must not have
+            # different ideas of what "under" means. Surfaced by mutation M5:
+            # forcing every entry down the glob branch changed almost nothing,
+            # which is only true if the two branches nearly agree — the gap
+            # was exactly this.
+            elif resolved == denied or resolved.startswith(denied.rstrip("/") + os.sep):
                 return f"Path {file_path!r} is under denied prefix {denied!r}"
         return ""
 

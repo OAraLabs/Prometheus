@@ -505,7 +505,7 @@ def create_divergence_detector(config: dict[str, Any]):
         return None
 
 
-def create_security_gate(security_cfg: dict[str, Any]):
+def create_security_gate(security_cfg: dict[str, Any], config_path: str | None = None):
     """Create the permission checker (Sprint 4 + Sprint 11 audit/exfil)."""
     from prometheus.permissions.audit import AuditLogger
     from prometheus.permissions.checker import SecurityGate
@@ -533,6 +533,7 @@ def create_security_gate(security_cfg: dict[str, Any]):
         allowed_commands=security_cfg.get("allowed_commands"),
         audit_logger=audit_logger,
         exfiltration_detector=exfil_detector,
+        config_path=config_path,
     )
 
 
@@ -1333,7 +1334,7 @@ def main() -> None:
         )
         model_cfg["model"] = model_name
 
-    security_gate = create_security_gate(security_cfg)
+    security_gate = create_security_gate(security_cfg, getattr(args, "config", None))
     registry = create_tool_registry(security_cfg, security_gate=security_gate)
     adapter = create_adapter(model_cfg, config.get("adapter"))
     lcm_engine = create_lcm_engine(provider)
