@@ -36,7 +36,13 @@ class BashToolInput(BaseModel):
 
     command: str = Field(description="Shell command to execute")
     cwd: str | None = Field(default=None, description="Working directory override")
-    timeout_seconds: int = Field(default=_DEFAULT_TIMEOUT, ge=1, le=600)
+    timeout_seconds: int = Field(
+        default=_DEFAULT_TIMEOUT, ge=1, le=600,
+        description=(
+            "Seconds before the command is killed. Raise it for a known-slow "
+            "command rather than retrying after a timeout."
+        ),
+    )
 
 
 class BashTool(BaseTool):
