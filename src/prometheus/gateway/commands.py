@@ -1715,6 +1715,33 @@ PROVIDER_PRESET_DISPLAY_NAMES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
+def split_model_arg(
+    preset_name: str,
+    prometheus_config: dict | None,
+    args: list[str] | tuple[str, ...] | None,
+) -> tuple[str | None, list[str]]:
+    """Peel a leading model name off a provider command's arguments.
+
+    Provider commands already accept an inline message (``/claude what is
+    2+2?``), so a model argument cannot simply be "the first token". It is
+    taken only when that token is an exact match for one of the preset's
+    selectable models — real prose never is. Everything else stays the
+    message, which keeps ``/claude what is 2+2?`` behaving exactly as before.
+
+    ``/qwen qwen3.7-plus`` → switch, no message.
+    ``/qwen qwen3.7-plus explain this`` → switch, then ask "explain this".
+    ``/qwen explain this`` → default model, ask "explain this".
+    """
+    tokens = list(args or [])
+    if not tokens:
+        return None, []
+    from prometheus.router.model_router import resolve_model_choices
+
+    if tokens[0] in resolve_model_choices(preset_name, prometheus_config or {}):
+        return tokens[0], tokens[1:]
+    return None, tokens
+
+
 def cmd_provider_override(
     agent_loop: Any,
     prometheus_config: dict | None,
@@ -1722,12 +1749,19 @@ def cmd_provider_override(
     preset_name: str,
     *,
     prefix: str = "/",
+    model: str | None = None,
 ) -> tuple[str, bool]:
     """Set a per-session provider override (shared /claude, /gpt, … core).
 
     Validates router availability, ``overrides_enabled``, and the preset's
     API-key env var; records the override on the router keyed by
     ``session_key`` (``telegram:<chat_id>`` / ``slack:<channel_id>``).
+
+    *model* selects a specific model from the preset's vetted list (see
+    :func:`resolve_model_choices`); ``None`` — the bare ``/qwen`` — keeps the
+    preset's default, so the quick command is unchanged for anyone who does not
+    care which model they get. An unrecognised model is rejected with the list
+    rather than passed through to the provider as a 404.
 
     Returns ``(reply_text, applied)`` — ``applied`` is True only when the
     override was actually recorded, so the gateway can decide whether to
@@ -1754,10 +1788,27 @@ def cmd_provider_override(
             False,
         )
 
-    from prometheus.router.model_router import resolve_slash_command_target
+    from prometheus.router.model_router import (
+        resolve_model_choices,
+        resolve_slash_command_target,
+    )
     preset = resolve_slash_command_target(preset_name, prometheus_config or {})
     if preset is None:
         return (f"Unknown override preset '{preset_name}'.", False)
+
+    if model:
+        choices = resolve_model_choices(preset_name, prometheus_config or {})
+        if model not in choices:
+            listed = "\n".join(f"  {prefix}{preset_name} {m}" for m in choices)
+            return (
+                f"{preset_name} has no model '{model}'.\n"
+                f"Available:\n{listed}\n"
+                f"Add more with slash_commands.{preset_name}.models in "
+                f"prometheus.yaml.",
+                False,
+            )
+        preset = dict(preset)
+        preset["model"] = model
 
     # Early feedback if no credential is present — beats failing on the
     # user's next message with an opaque ValueError from the provider
@@ -1793,10 +1844,19 @@ def cmd_provider_override(
         session_key, preset.get("provider"), preset.get("model"), cred["mode"],
     )
     auth_line = f"Auth: {cred['detail']}\n" if cred["detail"] else ""
+    # Surface the siblings — switching models is only "quick" if you can see
+    # what there is to switch to without opening the config.
+    others = [m for m in resolve_model_choices(preset_name, prometheus_config or {})
+              if m != preset.get("model")]
+    others_line = (
+        f"Others: {', '.join(others)}  (e.g. {prefix}{preset_name} {others[0]})\n"
+        if others else ""
+    )
     return (
         f"Switched to {display}.\n"
         f"Model: {preset.get('model', '?')}\n"
         f"{auth_line}"
+        f"{others_line}"
         f"Use {prefix}local to return to primary, {prefix}route to check.",
         True,
     )

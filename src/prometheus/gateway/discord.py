@@ -1485,12 +1485,17 @@ class DiscordAdapter(BasePlatformAdapter):
         if not channel:
             await self._respond(interaction, "Channel id missing from interaction.")
             return
+        # A leading model name selects it; anything else is left alone.
+        model, _rest = _cmds.split_model_arg(
+            preset_name, self._prometheus_config, (args or "").split()
+        )
         text, applied = _cmds.cmd_provider_override(
             self.agent_loop,
             self._prometheus_config,
             f"discord:{channel}",
             preset_name,
             prefix=PROVIDER_PREFIX,
+            model=model,
         )
         # Platform-honest: Telegram dispatches an inline trailing message
         # ("/claude what is 2+2?") through the new provider; a Discord app

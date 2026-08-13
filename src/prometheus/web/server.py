@@ -2021,8 +2021,11 @@ def create_app(
     # → a vetted preset config (never a raw client-supplied provider config). The
     # "local" key clears the override → back to the configured primary.
     from prometheus.router.model_router import (
+        MODEL_KEY_SEPARATOR as _MODEL_SEP,
         OVERRIDE_PRESETS as _OVERRIDE_PRESETS,
         _RESERVED_NO_OVERRIDE_SESSION_IDS as _RESERVED_SESSIONS,
+        resolve_model_choices as _resolve_choices,
+        resolve_model_target as _resolve_model_target,
         resolve_slash_command_target as _resolve_preset,
     )
 
@@ -2054,14 +2057,25 @@ def create_app(
             cred = credential_status(
                 preset.get("provider", ""), preset.get("api_key_env", "")
             )
-            catalog.append({
-                "key": key, "label": _PRESET_LABELS.get(key, key),
-                "provider": preset.get("provider", "unknown"),
-                "model": preset.get("model", "unknown"),
-                "is_default": False,
-                "available": cred["mode"] is not None,
-                "auth": cred["mode"],
-            })
+            base_label = _PRESET_LABELS.get(key, key)
+            # One catalog row per selectable model. The DEFAULT model keeps the
+            # bare preset key ("qwen") so every existing client and stored
+            # override keeps working; alternates get "qwen:<model>". Labels
+            # carry the model only when there is a choice to make, so
+            # single-model providers render exactly as they did before.
+            choices = _resolve_choices(key, config) or (preset.get("model", "unknown"),)
+            multi = len(choices) > 1
+            for model in choices:
+                is_default_model = model == preset.get("model")
+                catalog.append({
+                    "key": key if is_default_model else f"{key}{_MODEL_SEP}{model}",
+                    "label": f"{base_label} · {model}" if multi else base_label,
+                    "provider": preset.get("provider", "unknown"),
+                    "model": model,
+                    "is_default": False,
+                    "available": cred["mode"] is not None,
+                    "auth": cred["mode"],
+                })
         return catalog
 
     def _effective_model(router: Any, session_id: str) -> dict:
@@ -2108,7 +2122,10 @@ def create_app(
         if key == _LOCAL_MODEL_KEY:
             router.clear_override(session_id)
             return _effective_model(router, session_id)
-        preset = _resolve_preset(key, config)  # user config merged over the preset (same as /claude)
+        # Composite-aware: "qwen" takes the preset default, "qwen:qwen3.7-plus"
+        # takes that model — but only if it is in the preset's vetted list, so a
+        # client still cannot name an arbitrary model (let alone a provider).
+        preset = _resolve_model_target(key, config)
         if preset is None:
             return JSONResponse(status_code=400, content={
                 "error": f"unknown model key {key!r}; choose a key from GET /api/models"})

@@ -328,7 +328,7 @@ OVERRIDE_PRESETS: dict[str, dict[str, str]] = {
         # pay-as-you-go). Alibaba's subscription plans are different hosts with
         # different keys — see the CLOUD_DEFAULTS comment, and set
         # slash_commands.qwen.base_url to switch.
-        "model": "qwen3.7-max",
+        "model": "qwen3.8-max",
     },
 }
 
@@ -337,6 +337,48 @@ OVERRIDE_PRESETS: dict[str, dict[str, str]] = {
 SLASH_COMMAND_NAMES: tuple[str, ...] = (
     "claude", "gpt", "gemini", "xai", "deepseek", "kimi", "glm", "mimo", "qwen",
 )
+
+# Selectable models per preset — the allowlist behind the flattened
+# GET /api/models catalog and the `/qwen <model>` argument.
+#
+# THESE LISTS ARE DELIBERATELY CONSERVATIVE. They carry only names verified
+# against provider docs at the time of writing, because a wrong name is a
+# runtime 404 that looks like a Prometheus bug. Providers ship models far
+# faster than this file is edited, so the list is meant to be OVERRIDDEN:
+# `slash_commands.<key>.models` in prometheus.yaml replaces it wholesale, and
+# needs no release. A preset absent here offers just its default model.
+#
+# Enumerating the provider instead was considered and rejected: xAI returns
+# 403 on GET /v1/models for standard SuperGrok subscribers even though
+# chat/completions works (see providers/xai_oauth.py), so discovery cannot be
+# relied on uniformly. The list is configured, not enumerated.
+PRESET_MODEL_CHOICES: dict[str, tuple[str, ...]] = {
+    "claude": (
+        "claude-haiku-4-5-20251001",
+        "claude-sonnet-4-5",
+        "claude-sonnet-5",
+        "claude-opus-5",
+    ),
+    "gemini": ("gemini-2.5-flash", "gemini-2.5-pro"),
+    "deepseek": ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v3.2"),
+    "qwen": (
+        # qwen3.8-max went GA 2026-08-03 and is CHEAPER than 3.7-max
+        # ($2.00/$6.00 vs $2.50/$7.50 per Mtok in/out).
+        "qwen3.8-max",
+        "qwen3.7-max",
+        "qwen3.7-plus",
+        "qwen3.6-plus",
+        "qwen3.6-flash",
+    ),
+    # xai is intentionally single-entry: "grok-3"/"grok-4"/"grok-4-latest" are
+    # silently served as grok-4.3 on the OAuth surface (probed 2026-07-10), so
+    # offering them would be offering models the user does not actually get.
+}
+
+# Separator between a preset key and a specific model in a catalog key
+# ("qwen:qwen3.7-plus"). Split on the FIRST occurrence only, so a model name
+# containing a colon still round-trips.
+MODEL_KEY_SEPARATOR = ":"
 
 # Track which slash commands we've already warned about falling back to
 # the hardcoded preset. Set semantics: warn once per process per command,
@@ -394,6 +436,82 @@ def resolve_slash_command_target(
     # bigmodel.cn — and picking between them was previously a code edit.
     if user_entry.get("base_url"):
         resolved["base_url"] = user_entry["base_url"]
+    return resolved
+
+
+def split_model_key(key: str) -> tuple[str, str | None]:
+    """Split a catalog key into ``(preset_name, model_or_None)``.
+
+    ``"qwen"`` → ``("qwen", None)`` (the preset's default model).
+    ``"qwen:qwen3.7-plus"`` → ``("qwen", "qwen3.7-plus")``.
+    """
+    preset, sep, model = key.partition(MODEL_KEY_SEPARATOR)
+    if not sep:
+        return key.strip(), None
+    return preset.strip(), model.strip() or None
+
+
+def resolve_model_choices(
+    command_name: str,
+    prometheus_config: dict[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Selectable models for a preset, most-preferred first.
+
+    Precedence: a user's ``slash_commands.<name>.models`` list replaces the
+    built-in :data:`PRESET_MODEL_CHOICES` entry outright (so a provider that
+    ships new models is a config edit, not a release). Falls back to the
+    built-in list, then to just the preset's resolved default model.
+
+    The resolved default model is always present and always first — selecting
+    the bare preset key and selecting its default from the list must agree.
+    Returns ``()`` for an unknown preset name.
+    """
+    target = resolve_slash_command_target(command_name, prometheus_config)
+    if target is None:
+        return ()
+
+    default_model = target.get("model", "")
+    cfg = prometheus_config or {}
+    user_entry = (cfg.get("slash_commands") or {}).get(command_name) or {}
+    user_models = user_entry.get("models")
+
+    if isinstance(user_models, (list, tuple)) and user_models:
+        candidates = [str(m).strip() for m in user_models if str(m).strip()]
+    else:
+        candidates = list(PRESET_MODEL_CHOICES.get(command_name, ()))
+
+    ordered = [default_model] if default_model else []
+    for model in candidates:
+        if model and model not in ordered:
+            ordered.append(model)
+    return tuple(ordered)
+
+
+def resolve_model_target(
+    key: str,
+    prometheus_config: dict[str, Any] | None = None,
+) -> dict[str, str] | None:
+    """Resolve a catalog key — bare or ``preset:model`` — to a provider config.
+
+    This is the composite-aware sibling of
+    :func:`resolve_slash_command_target`, used by the REST model switcher and
+    the ``/qwen <model>`` argument. The requested model must appear in
+    :func:`resolve_model_choices`; anything else returns ``None`` rather than
+    being passed through, so a client can pick a *model* from a vetted list but
+    can never inject an arbitrary one.
+
+    Returns ``None`` for an unknown preset or a model outside its list.
+    """
+    preset_name, model = split_model_key(key)
+    target = resolve_slash_command_target(preset_name, prometheus_config)
+    if target is None:
+        return None
+    if model is None:
+        return target
+    if model not in resolve_model_choices(preset_name, prometheus_config):
+        return None
+    resolved = dict(target)
+    resolved["model"] = model
     return resolved
 
 

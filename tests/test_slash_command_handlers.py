@@ -171,8 +171,11 @@ class TestTelegramSlashCommandHandlers:
         chat_id, text, _ = captured["sent_messages"][0]
         assert chat_id == 42
         assert "claude-sonnet-4-5" in text
-        # And explicitly NOT the built-in haiku default.
-        assert "claude-haiku-4-5-20251001" not in text
+        # And explicitly NOT the built-in haiku default AS THE ACTIVE MODEL.
+        # The reply also lists selectable siblings ("Others: …"), which legitimately
+        # includes haiku — so assert on the Model: line rather than the whole text.
+        model_line = next(ln for ln in text.splitlines() if ln.startswith("Model:"))
+        assert model_line == "Model: claude-sonnet-4-5"
 
     def test_slash_claude_falls_back_to_default_when_config_missing(self, monkeypatch, caplog):
         """No slash_commands section → uses built-in Haiku preset + WARN once."""
