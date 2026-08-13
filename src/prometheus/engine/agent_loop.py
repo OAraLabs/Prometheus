@@ -1446,7 +1446,23 @@ async def _run_loop(
             # True: this is machinery-authored, not third-party data, so it
             # keeps its current banner-free rendering to the model.
             fmv = getattr(context, "file_mutation_verifier", None)
+            escapes: list[str] = []
             if fmv is not None:
+                # THE TEETH (outcome layer). Read the paths that ACTUALLY
+                # changed on disk BEFORE post_turn drains the record, and ask
+                # the gate about each one. This is the only check in the
+                # system that survives tool substitution: it watches the
+                # filesystem, not the toolset, so `bash -c "echo x > path"`
+                # is seen exactly as `write_file` would be.
+                #
+                # It is DETECTION, not containment. `_Snapshot` holds no
+                # content, so nothing here can undo a write — which is why the
+                # response is to end the turn and say so plainly, and why the
+                # message must never read as though the write was stopped.
+                try:
+                    escapes = _boundary_escapes(context, fmv, _fmv_kw)
+                except Exception:
+                    log.debug("boundary escape check raised", exc_info=True)
                 try:
                     summary = fmv.post_turn(**_fmv_kw)
                 except Exception:
@@ -1461,6 +1477,15 @@ async def _run_loop(
                         provenance="file_mutation_verifier",
                         is_trusted=True,
                     ))
+            if escapes:
+                log.error(
+                    "BOUNDARY ESCAPE: %d file(s) changed outside the permitted "
+                    "area this turn: %s", len(escapes), ", ".join(escapes),
+                )
+                error_msg = _make_assistant_msg(_boundary_escape_text(escapes))
+                messages.append(error_msg)
+                yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+                return
             return
 
         tool_calls = final_message.tool_uses
@@ -1718,6 +1743,68 @@ async def _run_loop(
 # ---------------------------------------------------------------------------
 # Helpers for run_loop
 # ---------------------------------------------------------------------------
+
+def _boundary_escapes(context, fmv, fmv_kw: dict) -> list[str]:
+    """Paths that CHANGED this turn and the gate would not have permitted.
+
+    Asks the SecurityGate, which is the single holder of the policy — the FMV
+    stays a reporter and learns nothing about denied_paths or workspace roots.
+
+    Only paths the gate would have DENIED or made the user APPROVE count. A
+    path inside the permitted area is ordinary work.
+    """
+    gate = getattr(context, "permission_checker", None)
+    if gate is None or not hasattr(fmv, "landed_paths"):
+        return []
+    escaped: list[str] = []
+    for path in fmv.landed_paths(**fmv_kw):
+        try:
+            decision = gate.evaluate("write_file", file_path=path, origin="user")
+        except Exception:
+            # UNCLASSIFIABLE, and the direction is a deliberate choice rather
+            # than whatever the exception happens to produce (CROSS-CUTTING
+            # §8). A path the gate cannot rule on is NOT treated as an escape
+            # — ending a turn on a classification error is an over-refusal,
+            # and this layer only ever detects. But it must not be silent
+            # either: an unseen path is a hole in the layer's coverage, so it
+            # is logged at WARNING with the path named. Silent `continue` here
+            # was fail-open detection with no trace.
+            log.warning(
+                "boundary check could not classify %s — this turn's coverage "
+                "has a gap and no escape can be ruled out for that path",
+                path, exc_info=True,
+            )
+            continue
+        if not decision.allowed:
+            escaped.append(path)
+    return escaped
+
+
+def _boundary_escape_text(escapes: list[str]) -> str:
+    """The turn's final answer when a write escaped the boundary.
+
+    WORDING IS THE FEATURE. This layer cannot undo anything — the verifier
+    captures size/mtime/mode and no content — so the message must state that
+    the change LANDED and is not recoverable. A detection layer that reads
+    like a prevention layer ("blocked", "prevented", "refused") is the same
+    overclaim that made the workspace boundary a liability until PR #177
+    relabelled it, one layer further in.
+    """
+    listed = "\n".join(f"  - {p}" for p in escapes)
+    n = len(escapes)
+    noun = "file" if n == 1 else "files"
+    return (
+        f"TURN ENDED — {n} {noun} outside the permitted area {'was' if n == 1 else 'were'} "
+        f"CHANGED ON DISK:\n{listed}\n\n"
+        f"These writes ALREADY HAPPENED and CANNOT BE UNDONE — this check runs "
+        f"after the fact and does not hold the previous contents. Nothing was "
+        f"blocked or prevented.\n\n"
+        f"The turn is stopped here so the change is not built on. If it was "
+        f"intended, say so and it can be redone through a permitted path; if "
+        f"it was not, the {noun} above need restoring from version control or "
+        f"a backup."
+    )
+
 
 def _make_assistant_msg(text: str) -> ConversationMessage:
     """Build a synthetic assistant message."""
