@@ -1,4 +1,4 @@
-"""Tests for Sprint 4: SecurityGate, PermissionDecision, SandboxedExecution.
+"""Tests for Sprint 4: SecurityGate, PermissionDecision.
 
 TRUST-CONTEXT (this commit): SecurityGate.evaluate() takes an ``origin``
 parameter. ``"user"`` (Telegram/CLI/Web) skips the ExfiltrationDetector
@@ -18,7 +18,6 @@ from prometheus.permissions import (
     PermissionDecision,
     PermissionMode,
     SecurityGate,
-    SandboxedExecution,
     TrustLevel,
 )
 from prometheus.permissions.checker import (
@@ -466,56 +465,3 @@ class TestSecurityGateFromConfig:
         gate = SecurityGate.from_config("/nonexistent/prometheus.yaml")
         # Should not raise; creates a default gate
         assert gate is not None
-
-
-# ---------------------------------------------------------------------------
-# SandboxedExecution
-# ---------------------------------------------------------------------------
-
-
-class TestSandboxedExecution:
-    def test_runs_simple_command(self, tmp_path):
-        sandbox = SandboxedExecution(workspace=tmp_path)
-        result = asyncio.run(sandbox.run("echo hello"))
-        assert result.output.strip() == "hello"
-        assert result.is_error is False
-
-    def test_captures_stderr(self, tmp_path):
-        sandbox = SandboxedExecution(workspace=tmp_path)
-        result = asyncio.run(sandbox.run("echo err >&2"))
-        assert "err" in result.output
-
-    def test_timeout_enforced(self, tmp_path):
-        sandbox = SandboxedExecution(workspace=tmp_path, timeout=1)
-        result = asyncio.run(sandbox.run("sleep 10"))
-        assert result.is_error is True
-        assert "timed out" in result.output.lower()
-
-    def test_output_truncated(self, tmp_path):
-        sandbox = SandboxedExecution(workspace=tmp_path, max_output=50)
-        # Generate more than 50 chars of output
-        result = asyncio.run(sandbox.run("python3 -c \"print('x' * 200)\""))
-        assert len(result.output) <= 200  # truncation marker adds some chars
-        assert "truncated" in result.output
-
-    def test_env_stripped(self, tmp_path):
-        import os
-        sandbox = SandboxedExecution(workspace=tmp_path)
-        # ANTHROPIC_API_KEY should be stripped from the subprocess env
-        result = asyncio.run(
-            sandbox.run(
-                "echo ${ANTHROPIC_API_KEY:-STRIPPED}",
-                env_override={},
-            )
-        )
-        assert "STRIPPED" in result.output
-
-    def test_workspace_property(self, tmp_path):
-        sandbox = SandboxedExecution(workspace=tmp_path)
-        assert sandbox.workspace == tmp_path.resolve()
-
-    def test_nonzero_exit_is_error(self, tmp_path):
-        sandbox = SandboxedExecution(workspace=tmp_path)
-        result = asyncio.run(sandbox.run("exit 1"))
-        assert result.is_error is True
-        assert result.metadata["returncode"] == 1
