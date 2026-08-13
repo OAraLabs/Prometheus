@@ -104,6 +104,21 @@ class _Snapshot:
     mode: int = 0
 
 
+def _changed(before: _Snapshot, after: _Snapshot) -> bool:
+    """True when the filesystem actually moved under this path.
+
+    Creation, deletion, or any change to size/mtime. Content is not captured
+    (see ``_Snapshot``), so an in-place rewrite of identical length within the
+    same mtime granularity is invisible — a known false negative, and the
+    reason this layer is described as detection rather than containment.
+    """
+    if before.exists != after.exists:
+        return True
+    if not after.exists:
+        return False
+    return (before.size, before.mtime) != (after.size, after.mtime)
+
+
 @dataclass
 class _Mutation:
     """One tracked filesystem touch this turn."""
@@ -310,6 +325,36 @@ class FileMutationVerifier:
             log.debug(
                 "FileMutationVerifier.post_tool_use raised", exc_info=True,
             )
+
+    def landed_paths(self, *, turn_key: str | None = None) -> list[str]:
+        """Paths this turn ACTUALLY changed on disk. Non-draining.
+
+        The teeth of the outcome layer read this, so it is deliberately
+        narrower than what :meth:`post_turn` renders: a mutation is included
+        only when the before/after ``os.stat`` diff shows a real change. A
+        tool that claimed a write and produced none is a REPORTING matter, not
+        a boundary violation — nothing escaped.
+
+        Ground truth, unlike anything available before dispatch. For ``bash``
+        the pre-execution path guess is the regex heuristic in
+        ``_BASH_FS_PATTERNS``, which is deliberately incomplete ("False
+        negatives < false positives") because it is a reporter. This is the
+        after-the-fact diff, so a redirect that the heuristic DID catch is
+        confirmed by bytes rather than by pattern.
+
+        ⚠ HONEST LIMIT, and it decides what the caller may do with this:
+        ``_Snapshot`` holds ``exists``/``size``/``mtime``/``mode`` and NO
+        CONTENT. A caller can learn that a file was overwritten. It can never
+        put the old bytes back. Detection, never containment.
+        """
+        with self._lock:
+            turn = self._turns.get(self._key(turn_key))
+            if turn is None:
+                return []
+            return [
+                m.path for m in turn.mutations
+                if _changed(m.before, m.after)
+            ]
 
     def post_turn(self, *, turn_key: str | None = None) -> str | None:
         """Render THIS turn's summary and drop its record. Returns ``None``
