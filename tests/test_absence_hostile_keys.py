@@ -33,6 +33,8 @@ TWO LISTS, ONE DIRECTION
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from prometheus.config.shipped_defaults import SHIPPED_ALWAYS_LOADED
@@ -326,7 +328,12 @@ def test_the_documents_exemption_is_the_documented_contract():
     # survives a re-flow of the comment. Pinning the exact line break would
     # make this a test of the formatter, not of the claim (§3c).
     flat = re.sub(r"\s+", " ", raw.replace("#", " "))
-    assert "documents, and the artifact outbox have their own confinement" in flat, (
+    # Assert the CLAIM, not the punctuation. Written as an exact phrase first,
+    # and it went red against a rewrite that preserved the meaning and dropped
+    # one comma — §3c: a substring ban cannot tell a claim from its wording.
+    claim = re.search(
+        r"documents.{0,40}artifact outbox have their own confinement", flat)
+    assert claim, (
         "the template no longer states that documents are exempt from "
         "workspace_root — the web/server.py exemption needs re-arguing"
     )

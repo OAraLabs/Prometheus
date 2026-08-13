@@ -190,7 +190,7 @@ Why this only works here: a screen recording of you doing your job is among the 
 ### Security
 
 - 4-level trust model (BLOCKED → APPROVE → AUTO → AUTONOMOUS), origin-aware: background work (SENTINEL, cron, gym) faces stricter gates than what you ask for directly
-- 8 always-blocked command patterns plus configurable deny lists and bash intent analysis, with workspace boundary enforcement
+- 8 always-blocked command patterns plus configurable deny lists and bash intent analysis, plus a workspace boundary on `write_file` / `edit_file` — **a speed bump, not confinement**: `bash` is gated on the command string, not on the paths a command writes to, so a shell redirect goes anywhere. `denied_paths` is the hard stop
 - Untrusted-input fencing: every message carries a provenance tag, and content from cron jobs, task output, and files is wrapped as data — not instructions — before it reaches the model
 - Secrets structurally absent: tool sandboxes strip key/token/secret variables from the environment (the agent can't `env` its own keys), the audit log redacts before writing, key updates reject control characters, and key reads return booleans — never values
 - SSRF-hardened outbound: `web_fetch` and `download_file` resolve DNS and refuse private, loopback, and link-local address space before any request leaves the machine
@@ -412,9 +412,10 @@ context:
 
 security:
   permission_mode: "default"
-  workspace_root: "~/.prometheus/workspace"
-  # the shipped default workspace_root is "~" (your whole home directory) —
-  # tightening it to a dedicated folder like this is worth doing
+  workspace_root: "~/.prometheus/workspace"   # or a list of roots
+  # This is the SHIPPED default (an earlier note here claimed it was "~" —
+  # that was wrong). A path outside every root makes write_file/edit_file ask
+  # first; it does not make the write impossible. See the note below.
 
 gateway:
   telegram_enabled: true   # default: false — setup enables it when you add a token
