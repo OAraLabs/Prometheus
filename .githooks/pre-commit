@@ -135,8 +135,34 @@ check_pattern "Infrastructure hostname (OAra-*)" \
 
 # 7. Provider API keys, by their real prefixes. Length floors are set above the
 #    repo's fixture lengths so obvious fakes don't match in the first place.
-check_pattern "Provider API key (Anthropic/OpenAI/GitHub/Google/xAI/Slack/AWS)" \
-    'sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AIza[A-Za-z0-9_-]{30,}|xai-[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16}' \
+#
+#    2026-08-13 — the sk- branch used to be `sk-[A-Za-z0-9]{32,}`, which demands
+#    32 straight alphanumerics right after "sk-". Every SEGMENTED key therefore
+#    slipped through, because the second hyphen ends the run after two chars:
+#      sk-sp-…  Alibaba Token Plan       MISSED
+#      sk-ws-…  Alibaba workspace        MISSED  (a real one was live in the env file)
+#      o1_…     plan keys with this prefix        MISSED
+#    Only the flat `sk-<32 alnum>` and the explicitly-listed `sk-ant-` matched.
+#    The class now allows internal - and _, so any sk-<segment>-<segment> form
+#    is covered, including vendors we have not met yet. Verified against the
+#    whole tracked tree: no new matches, so this widens coverage without
+#    training anyone to reach for --no-verify.
+check_pattern "Provider API key (Anthropic/OpenAI/Alibaba/GitHub/Google/xAI/Slack/AWS)" \
+    'sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{32,}|o1_[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AIza[A-Za-z0-9_-]{30,}|xai-[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16}' \
+    1
+
+# 7b. Account-identifying provider endpoints. Not a credential, but a hostname
+#     that names YOUR tenant: Alibaba Model Studio workspace endpoints embed the
+#     workspace id (ws-<id>.<region>.maas.aliyuncs.com). Pattern 6 only knows
+#     OAra-* hosts, so these committed clean — and unlike a key you cannot
+#     rotate a workspace id.
+#
+#     Deliberately narrow: it requires a 12+ char opaque id, which every
+#     placeholder form fails (ws-<workspace-id>, ws-abc.…example). Shared public
+#     hosts — token-plan.…, dashscope-intl.…, coding-intl.… — are NOT tenant
+#     identifiers and are not matched. Verified: 0 hits across the tracked tree.
+check_pattern "Account-identifying provider endpoint (Alibaba workspace host)" \
+    'ws-[a-z0-9]{12,}\.[a-z0-9-]+\.maas\.aliyuncs\.com' \
     1
 
 # 8. THE GAP THIS AUDIT FOUND: Prometheus/OAra issue their own 64-char opaque
