@@ -838,3 +838,79 @@ class TestBuildAdapterForCloudProviderTier:
         adapter = _build_adapter_for("llama_cpp")
         # tier is not "off" — local models need the validator/enforcer/retry.
         assert adapter.tier != ModelAdapter.TIER_OFF
+
+
+class TestBaseUrlResolution:
+    """_resolve_base_url — config > env > built-in default.
+
+    A base URL can be as account-identifying as a key (Alibaba workspace
+    endpoints embed the workspace id in the hostname), so it needs the same
+    env-var channel the key already has.
+    """
+
+    def test_default_when_nothing_set(self, monkeypatch):
+        from prometheus.providers.registry import CLOUD_DEFAULTS, _resolve_base_url
+        monkeypatch.delenv("QWEN_BASE_URL", raising=False)
+        assert _resolve_base_url({}, "qwen") == CLOUD_DEFAULTS["qwen"]["base_url"]
+
+    def test_env_var_overrides_default(self, monkeypatch):
+        from prometheus.providers.registry import _resolve_base_url
+        monkeypatch.setenv("QWEN_BASE_URL", "https://ws-test.example/compatible-mode/v1")
+        assert _resolve_base_url({}, "qwen") == "https://ws-test.example/compatible-mode/v1"
+
+    def test_explicit_config_beats_env(self, monkeypatch):
+        from prometheus.providers.registry import _resolve_base_url
+        monkeypatch.setenv("QWEN_BASE_URL", "https://from-env.example/v1")
+        cfg = {"base_url": "https://from-config.example/v1"}
+        assert _resolve_base_url(cfg, "qwen") == "https://from-config.example/v1"
+
+    def test_custom_base_url_env_name(self, monkeypatch):
+        from prometheus.providers.registry import _resolve_base_url
+        monkeypatch.setenv("MY_OWN_ENDPOINT", "https://mine.example/v1")
+        assert _resolve_base_url({"base_url_env": "MY_OWN_ENDPOINT"}, "qwen") == \
+            "https://mine.example/v1"
+
+    def test_blank_env_falls_through(self, monkeypatch):
+        """Whitespace-only must not pin the provider to an empty URL."""
+        from prometheus.providers.registry import CLOUD_DEFAULTS, _resolve_base_url
+        monkeypatch.setenv("QWEN_BASE_URL", "   ")
+        assert _resolve_base_url({}, "qwen") == CLOUD_DEFAULTS["qwen"]["base_url"]
+
+    def test_unset_env_never_raises(self, monkeypatch):
+        """Unlike the key resolver, a missing endpoint var is not an error."""
+        from prometheus.providers.registry import _resolve_base_url
+        for p in ("openai", "gemini", "deepseek", "kimi", "glm", "mimo", "qwen"):
+            monkeypatch.delenv(
+                f"{p.upper()}_BASE_URL", raising=False
+            )
+            assert _resolve_base_url({}, p)  # non-empty default, no exception
+
+    def test_provider_built_from_env_endpoint(self, monkeypatch):
+        """End-to-end through the factory: the provider gets the env URL."""
+        from prometheus.providers.registry import ProviderRegistry
+        monkeypatch.setenv("QWEN_API_KEY", "sk-test-key")
+        monkeypatch.setenv("QWEN_BASE_URL", "https://ws-abc.ap-southeast-1.example/compatible-mode/v1")
+        provider = ProviderRegistry.create({"provider": "qwen", "api_key_env": "QWEN_API_KEY"})
+        assert provider._base_url == "https://ws-abc.ap-southeast-1.example/compatible-mode/v1"
+
+    def test_anthropic_base_url_now_reaches_the_provider(self, monkeypatch):
+        """Regression: the factory used to DROP base_url for anthropic entirely."""
+        from prometheus.providers.registry import ProviderRegistry
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://shim.example/apps/anthropic/v1")
+        provider = ProviderRegistry.create({"provider": "anthropic"})
+        assert provider._base_url == "https://shim.example/apps/anthropic/v1"
+
+    def test_anthropic_keeps_its_default_when_unset(self, monkeypatch):
+        from prometheus.providers.registry import ProviderRegistry
+        from prometheus.providers.anthropic import _ANTHROPIC_API_URL
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        provider = ProviderRegistry.create({"provider": "anthropic"})
+        assert provider._base_url == _ANTHROPIC_API_URL.rstrip("/")
+
+    def test_qwen_cloud_default_matches_preset_model(self):
+        """CLOUD_DEFAULTS and OVERRIDE_PRESETS must not drift on the default model."""
+        from prometheus.providers.registry import CLOUD_DEFAULTS
+        from prometheus.router.model_router import OVERRIDE_PRESETS
+        assert CLOUD_DEFAULTS["qwen"]["model"] == OVERRIDE_PRESETS["qwen"]["model"]

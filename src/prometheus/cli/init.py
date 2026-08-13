@@ -292,6 +292,14 @@ _ENV_TEMPLATE = """# Prometheus environment file — secrets live here, not in p
 #   MIMO_API_KEY=          # api.xiaomimimo.com console — /mimo override
 #   QWEN_API_KEY=          # Alibaba Model Studio console — /qwen override
 #
+# Per-provider endpoint overrides (optional). Each cloud provider reads
+# <PROVIDER>_BASE_URL — OPENAI_/GEMINI_/XAI_/ANTHROPIC_/DEEPSEEK_/MOONSHOT_/
+# ZAI_/MIMO_/QWEN_BASE_URL. Set one when your key is scoped to a private or
+# regional endpoint rather than the provider's shared public host. They live
+# here rather than in prometheus.yaml because such a hostname often identifies
+# the account (Alibaba workspace endpoints embed the workspace id).
+#   QWEN_BASE_URL=         # e.g. https://ws-<id>.<region>.maas.aliyuncs.com/compatible-mode/v1
+#
 # Media generation (optional, paid — never auto-selected):
 #   DASHSCOPE_API_KEY=     # Alibaba DashScope — image_generate backend=dashscope (WAN 2.5)
 #   KLING_ACCESS_KEY=      # klingai.com API console — video_generate (Kling 3.0)
