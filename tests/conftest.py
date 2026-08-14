@@ -153,3 +153,25 @@ def pytest_runtest_call(item: pytest.Item):
         )
     _warn_unregistered_substitutes(item)
     return result
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_prometheus_env(monkeypatch):
+    """Strip ambient PROMETHEUS_* vars the daemon exports into agent shells.
+
+    PROMETHEUS_API_TOKEN turns the web server's bearer-auth middleware on,
+    which 401s every API test that doesn't send a header (the suite's
+    default). PROMETHEUS_FILES_ROOT overrides PROMETHEUS_WORKSPACE_DIR,
+    making /api/files tests browse the real ~/.prometheus instead of the
+    fixture workspace. Tests that need auth set their own token via
+    create_app({"web": {"api_token": ...}}); this fixture makes the suite
+    independent of whatever the host environment happens to export.
+    """
+    monkeypatch.delenv("PROMETHEUS_API_TOKEN", raising=False)
+    monkeypatch.delenv("PROMETHEUS_FILES_ROOT", raising=False)
+    monkeypatch.delenv("PROMETHEUS_TELEGRAM_TOKEN", raising=False)
+    # Real provider keys also leak from the daemon env and flip
+    # "nothing set" assertions (e.g. the provider-key catalog).
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("QWEN_API_KEY", raising=False)
+    monkeypatch.delenv("QWEN_BASE_URL", raising=False)

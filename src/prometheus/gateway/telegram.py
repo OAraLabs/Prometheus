@@ -361,6 +361,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("approve", self._cmd_approve))
         self._app.add_handler(CommandHandler("deny", self._cmd_deny))
         self._app.add_handler(CommandHandler("pending", self._cmd_pending))
+        self._app.add_handler(CommandHandler("grants", self._cmd_grants))
         # SUNRISE Session B: GEPA skill evolution
         self._app.add_handler(CommandHandler("gepa", self._cmd_gepa))
         # GRAFT-SYMBIOTE Session A: GitHub research → graft pipeline
@@ -430,6 +431,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("approve", "Approve a pending tool request"),
                 BotCommand("deny", "Deny a pending tool request"),
                 BotCommand("pending", "List pending approval requests"),
+                BotCommand("grants", "List remembered approval grants"),
                 BotCommand("gepa", "GEPA skill evolution: status | run | history"),
                 BotCommand("symbiote", "GitHub graft pipeline: <problem> | approve | graft | morph | swap | backup | backups | restore | status | abort | history"),
                 BotCommand("audit", "Web capability audit: show last | run | web | <category>"),
@@ -2082,9 +2084,11 @@ class TelegramAdapter(BasePlatformAdapter):
         from prometheus.gateway import commands as _cmds
 
         args = (update.message.text or "").split()
-        request_id = args[1] if len(args) >= 2 else ""
+        # Pass the FULL remaining text (e.g. "session abc123") — cmd_approve
+        # parses the scope verb itself.
+        arg_text = " ".join(args[1:]) if len(args) >= 2 else ""
         queue = getattr(self, "_approval_queue", None)
-        text = await _cmds.cmd_approve(queue, request_id)
+        text = await _cmds.cmd_approve(queue, arg_text)
         await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_deny(
@@ -2111,6 +2115,18 @@ class TelegramAdapter(BasePlatformAdapter):
 
         queue = getattr(self, "_approval_queue", None)
         text = _cmds.cmd_pending(queue)
+        await self.send(update.effective_chat.id, text, parse_mode=None)
+
+    async def _cmd_grants(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /grants command — list remembered approval grants."""
+        if not update.message or not update.effective_chat:
+            return
+        from prometheus.gateway import commands as _cmds
+
+        queue = getattr(self, "_approval_queue", None)
+        text = _cmds.cmd_grants(queue)
         await self.send(update.effective_chat.id, text, parse_mode=None)
 
     # ------------------------------------------------------------------

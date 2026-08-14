@@ -697,6 +697,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
             )
             security_gate._approval_queue = approval_queue
             gateway_registry.attach("_approval_queue", approval_queue)
+            # Reverse attachment: /approve session|always derive a Grant and
+            # record it on the gate, so the shared command core (all
+            # gateways) reaches the decider through the queue handle.
+            approval_queue._security_gate = security_gate
             logger.info("Approval queue wired to gateway adapters")
 
     # WEAVE-PRESS: Printing Press CLI registry

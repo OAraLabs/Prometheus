@@ -434,6 +434,7 @@ class SlackAdapter(BasePlatformAdapter):
         self._app.command("/prometheus-approve")(self._slash_approve)
         self._app.command("/prometheus-deny")(self._slash_deny)
         self._app.command("/prometheus-pending")(self._slash_pending)
+        self._app.command("/prometheus-grants")(self._slash_grants)
         self._app.command("/prometheus-escalations")(self._slash_escalations)
         self._app.command("/prometheus-gepa")(self._slash_gepa)
         self._app.command("/prometheus-symbiote")(self._slash_symbiote)
@@ -763,6 +764,7 @@ class SlackAdapter(BasePlatformAdapter):
             "  /prometheus-approve <id>   — approve a pending tool request",
             "  /prometheus-deny <id>      — deny a pending tool request",
             "  /prometheus-pending        — list pending approval requests",
+            "  /prometheus-grants         — list remembered approval grants",
             "  /prometheus-gepa           — skill evolution: status | run | history",
             "  /prometheus-symbiote       — GitHub graft pipeline (status | history | …)",
             "  /prometheus-audit          — web capability audit: run | <category>",
@@ -1239,10 +1241,10 @@ class SlackAdapter(BasePlatformAdapter):
         await ack()
         from prometheus.gateway import commands as _cmds
 
+        # Full text arg — cmd_approve parses the scope verb itself.
         text_arg = self._cmd_text(command)
-        request_id = text_arg.split()[0] if text_arg else ""
         text = await _cmds.cmd_approve(
-            getattr(self, "_approval_queue", None), request_id,
+            getattr(self, "_approval_queue", None), text_arg,
             prefix=SLACK_COMMAND_PREFIX,
         )
         await respond(text=text)
@@ -1266,6 +1268,13 @@ class SlackAdapter(BasePlatformAdapter):
         from prometheus.gateway import commands as _cmds
 
         await respond(text=_cmds.cmd_pending(getattr(self, "_approval_queue", None)))
+
+    async def _slash_grants(self, ack: Any, command: Any, respond: Any) -> None:
+        """List remembered approval grants."""
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        await respond(text=_cmds.cmd_grants(getattr(self, "_approval_queue", None)))
 
     async def _slash_escalations(self, ack: Any, respond: Any) -> None:
         """Teacher-escalation counters + budget state."""

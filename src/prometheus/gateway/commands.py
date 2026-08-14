@@ -1960,16 +1960,91 @@ def cmd_route(
 # ---------------------------------------------------------------------------
 
 
-async def cmd_approve(queue: Any, request_id: str, *, prefix: str = "/") -> str:
-    """Approve a pending tool request (shared /approve core)."""
+def _is_request_id(token: str) -> bool:
+    """Request ids are short hex strings (uuid4().hex[:8])."""
+    import re as _re
+
+    return bool(_re.fullmatch(r"[0-9a-f]{6,16}", token))
+
+
+async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
+    """Approve a pending tool request (shared /approve core).
+
+    Forms:
+      {prefix}approve <id>           — approve once
+      {prefix}approve session <id>   — approve + remember for this session
+      {prefix}approve always <id>    — approve + remember permanently
+                                       (persists to prometheus.yaml)
+
+    Remembered approvals become SecurityGate GRANTS: they auto-allow matching
+    future calls but can never override a DENY-tier check (grants are
+    evaluated after always-blocked / denied / exfiltration).
+    """
+    usage = (
+        f"Usage: {prefix}approve <id> | "
+        f"{prefix}approve session <id> | {prefix}approve always <id>"
+    )
+    if not arg_text:
+        return usage
+    tokens = arg_text.split()
+    scope = "once"
+    if tokens[0] in ("session", "always"):
+        scope = tokens[0]
+        tokens = tokens[1:]
+    elif len(tokens) > 1 and not _is_request_id(tokens[0]):
+        # First word is not a scope and doesn't look like an id — almost
+        # certainly a mistyped scope word ("forever"). Give the usage back
+        # instead of a confusing "No pending request: <word>".
+        return usage
+    request_id = tokens[0] if tokens else ""
     if not request_id:
-        return f"Usage: {prefix}approve {{request_id}}"
+        return usage
     if queue is None:
         return "Approval queue not active."
+    # Capture the action BEFORE approve(): request_approval pops it from the
+    # pending dict the moment the event fires, and the grant needs the
+    # structured target (path/command) it carries.
+    action = queue.pending.get(request_id)
     ok = await queue.approve(request_id)
-    if ok:
+    if not ok:
+        return f"No pending request: {request_id}"
+    if scope == "once" or action is None:
         return f"Approved: {request_id}"
-    return f"No pending request: {request_id}"
+
+    gate = getattr(queue, "_security_gate", None)
+    if gate is None:
+        return (
+            f"Approved: {request_id} — but no security gate is attached to "
+            f"the approval queue, so the {scope} grant could not be recorded."
+        )
+    from prometheus.permissions.approval_queue import derive_grant
+
+    grant = derive_grant(action)
+    grant.scope = "persistent" if scope == "always" else "session"
+    gate.add_grant(grant)
+    target = grant.value or grant.tool_name
+    if scope == "always":
+        persisted = gate.persist_grant(grant)
+        note = "saved to config" if persisted else "NOT persisted (config write failed)"
+        return f"Approved and remembered permanently ({note}): {grant.kind} {target}"
+    return f"Approved and remembered for this session: {grant.kind} {target}"
+
+
+def cmd_grants(queue: Any, *, prefix: str = "/") -> str:
+    """List remembered approval grants (shared /grants core)."""
+    if queue is None:
+        return "Approval queue not active."
+    gate = getattr(queue, "_security_gate", None)
+    if gate is None:
+        return "No security gate attached — no grants recorded."
+    grants = gate.list_grants()
+    if not grants:
+        return "No approval grants recorded."
+    lines = ["Approval grants:"]
+    for g in grants:
+        target = g.value or "(any target)"
+        lines.append(f"  [{g.scope}] {g.tool_name} — {g.kind}: {target}")
+    return "\n".join(lines)
 
 
 async def cmd_deny(queue: Any, request_id: str, *, prefix: str = "/") -> str:

@@ -414,7 +414,9 @@ class TestApprovalHandlers:
         interaction = _FakeInteraction()
         await adapter._app_approve(interaction, "")
         assert interaction.all_messages == [
-            "Usage: /prometheus ops approve {request_id}"
+            "Usage: /prometheus ops approve <id> | "
+            "/prometheus ops approve session <id> | "
+            "/prometheus ops approve always <id>"
         ]
 
     @pytest.mark.asyncio

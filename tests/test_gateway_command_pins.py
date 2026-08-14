@@ -177,7 +177,10 @@ class TestApprovalPins:
     async def test_approve_usage_pin(self):
         adapter = _make_adapter()
         await adapter._cmd_approve(_make_update(text="/approve"), _make_context())
-        assert _sent_text(adapter) == "Usage: /approve {request_id}"
+        assert _sent_text(adapter) == (
+            "Usage: /approve <id> | /approve session <id> | "
+            "/approve always <id>"
+        )
 
     @pytest.mark.asyncio
     async def test_approve_no_queue_pin(self):

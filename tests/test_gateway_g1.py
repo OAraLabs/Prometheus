@@ -220,7 +220,10 @@ class TestSlackApprovalHandlers:
     async def test_approve_usage(self, ack, respond):
         adapter = _make_slack_adapter()
         await adapter._slash_approve(ack, _cmd(""), respond)
-        assert respond.messages == ["Usage: /prometheus-approve {request_id}"]
+        assert respond.messages == [
+            "Usage: /prometheus-approve <id> | "
+            "/prometheus-approve session <id> | /prometheus-approve always <id>"
+        ]
 
     @pytest.mark.asyncio
     async def test_approve_no_queue(self, ack, respond):

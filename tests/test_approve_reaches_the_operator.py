@@ -39,7 +39,8 @@ class _FakeQueue:
         self.answer = answer
         self.asked: list[tuple[str, str]] = []
 
-    async def request_approval(self, tool_name, description, chat_id=None):
+    async def request_approval(self, tool_name, description, chat_id=None,
+                               grant_file_path=None, grant_command=None):
         self.asked.append((tool_name, description))
         if isinstance(self.answer, Exception):
             raise self.answer
