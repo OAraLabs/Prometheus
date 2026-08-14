@@ -160,6 +160,76 @@ class PermissionDecision:
 
 
 # ---------------------------------------------------------------------------
+# Approval grants — "stop asking me about THIS" (session or persistent)
+# ---------------------------------------------------------------------------
+#
+# CC-style permission memory for the approval layer. When the operator answers
+# an APPROVE prompt with a scoped yes (/approve session <id> or
+# /approve always <id>), the gate records a GRANT derived from the pending
+# request and auto-allows matching calls from then on.
+#
+# Ordering guarantee: grants are evaluated AFTER always-blocked patterns,
+# denied_commands, denied_paths and exfiltration — the same position as the
+# trusted-command allowlist — so a grant can NEVER resurrect a blocked call.
+# It only silences calls that would otherwise have gone to APPROVE.
+
+@dataclass
+class Grant:
+    """One remembered approval.
+
+    kind:
+      "path_prefix"    — file_path resolves under ``value`` (file tools only).
+      "command_prefix" — bash command starts with ``value`` AND is a single
+                         simple invocation (no ; | & ` $() — same guard as the
+                         trusted allowlist, so a prefix grant can't smuggle a
+                         chained command through).
+      "tool"           — the tool itself, any target (produced by strict-mode
+                         approvals whose reason carries no target).
+    """
+
+    kind: str  # "path_prefix" | "command_prefix" | "tool"
+    value: str
+    tool_name: str
+    scope: str = "session"  # "session" (memory-only) | "persistent" (config)
+
+    def matches(self, tool_name: str, file_path: str | None, command: str | None) -> bool:
+        if self.kind == "tool":
+            return tool_name == self.tool_name
+        if self.kind == "path_prefix":
+            if tool_name != self.tool_name or not file_path:
+                return False
+            try:
+                resolved = Path(file_path).expanduser().resolve()
+                resolved.relative_to(Path(self.value).expanduser().resolve())
+                return True
+            except (ValueError, OSError):
+                return False
+        if self.kind == "command_prefix":
+            if tool_name != "bash" or not command:
+                return False
+            if _TRUSTED_CMD_FORBIDDEN.search(command):
+                return False  # single-invocation guard, same as trusted list
+            return command.startswith(self.value)
+        return False
+
+    def to_config_dict(self) -> dict:
+        return {"kind": self.kind, "value": self.value, "tool": self.tool_name}
+
+    @classmethod
+    def from_config_dict(cls, d: dict) -> Grant | None:
+        kind = d.get("kind")
+        if kind not in ("path_prefix", "command_prefix", "tool"):
+            return None
+        return cls(
+            kind=kind,
+            value=str(d.get("value", "")),
+            tool_name=str(d.get("tool", "")),
+            scope="persistent",
+        )
+
+
+
+# ---------------------------------------------------------------------------
 # SecurityGate
 # ---------------------------------------------------------------------------
 
@@ -237,6 +307,7 @@ class SecurityGate:
         approval_queue: object | None = None,
         allowed_commands: list[str] | None = None,
         config_path: str | Path | None = None,
+        grants: list[Grant] | None = None,
     ) -> None:
         self._denied_commands: list[str] = denied_commands or []
         self._denied_paths: list[str] = [
@@ -254,6 +325,7 @@ class SecurityGate:
             resolved_cfg = str(Path(config_path).expanduser().resolve())
             if resolved_cfg not in self._denied_paths:
                 self._denied_paths.append(resolved_cfg)
+        self._config_path = config_path
         # MULTI-ROOT. A single root did not survive contact: of 871 recorded
         # file-tool calls on the live box only 16 were under ~/projects, so a
         # one-root boundary is a wall of prompts — and a control that prompts
@@ -275,6 +347,18 @@ class SecurityGate:
 
         # Sprint 15b GRAFT: optional approval queue for Telegram confirmation
         self._approval_queue = approval_queue
+
+        # Approval grants: remembered approvals. Session grants live in memory
+        # only; persistent grants are also written to prometheus.yaml by
+        # persist_grant() and re-loaded at construction (from_config reads
+        # security.grants). Evaluated after every DENY-tier check, so they can
+        # only suppress APPROVE-tier prompts, never resurrect a blocked call.
+        self._grants: list[Grant] = list(grants or [])
+
+        # reason → target context for APPROVE decisions, so the approval
+        # queue can derive a Grant without parsing free text. Set in
+        # evaluate(), consumed by request_approval(), bounded.
+        self._approve_targets: dict[str, dict[str, str | None]] = {}
 
         # Compile blocked patterns once
         self._blocked_re = [re.compile(p) for p in _ALWAYS_BLOCKED_PATTERNS]
@@ -326,6 +410,12 @@ class SecurityGate:
             mode=sec.get("permission_mode", "default"),
             audit_logger=audit_logger,
             exfiltration_detector=exfil_detector,
+            grants=[
+                g for g in (
+                    Grant.from_config_dict(d) for d in (sec.get("grants") or [])
+                    if isinstance(d, dict)
+                ) if g is not None
+            ],
         )
 
     # ------------------------------------------------------------------
@@ -442,16 +532,37 @@ class SecurityGate:
                 self._audit_log(tool_name, AuditDecision.DENY, reason, file_path)
                 return PermissionDecision.deny(reason)
 
+        # --- Approval grants (both origins) → ALLOW ---
+        # Remembered approvals. Same position as the trusted allowlist: after
+        # every DENY-tier check, before the APPROVE tier — a grant can silence
+        # a prompt, never resurrect a block.
+        if self._grants:
+            matched = next(
+                (g for g in self._grants
+                 if g.matches(tool_name, file_path, command)),
+                None,
+            )
+            if matched is not None:
+                self._audit_log(
+                    tool_name, AuditDecision.ALLOW,
+                    f"Auto-allowed (approval grant: {matched.kind} "
+                    f"{matched.value or matched.tool_name}, {matched.scope})",
+                    command or file_path,
+                )
+                return PermissionDecision.allow(level=TrustLevel.AUTO)
+
         # --- LEVEL 1: write_file / edit_file outside workspace → APPROVE
         # (both origins — this is the path-traversal guarantee) ---
         if tool_name in _APPROVE_TOOLS:
             if self._mode == PermissionMode.STRICT:
                 reason = f"{tool_name} requires confirmation in strict mode"
                 self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason)
+                self._remember_approve_target(reason, file_path=file_path, command=command)
                 return PermissionDecision.approve(reason)
             if file_path and not self._within_workspace(file_path):
                 reason = f"{tool_name} targets path outside workspace: {file_path}"
                 self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason)
+                self._remember_approve_target(reason, file_path=file_path, command=command)
                 return PermissionDecision.approve(reason)
 
         # --- Trusted command allowlist (both origins) → ALLOW ---
@@ -473,6 +584,7 @@ class SecurityGate:
                 if self._mode != PermissionMode.AUTONOMOUS:
                     reason = f"Command requires approval: {command!r}"
                     self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason, command)
+                    self._remember_approve_target(reason, file_path=None, command=command)
                     return PermissionDecision.approve(reason)
 
         # --- LEVEL 2 / 3: allow ---
@@ -525,6 +637,61 @@ class SecurityGate:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Approval grants
+    # ------------------------------------------------------------------
+
+    def _remember_approve_target(
+        self, reason: str, file_path: str | None, command: str | None
+    ) -> None:
+        """Keep the structured target behind an APPROVE reason so the
+        approval queue can derive a Grant without parsing free text."""
+        self._approve_targets[reason] = {"file_path": file_path, "command": command}
+        if len(self._approve_targets) > 128:  # bounded; oldest entries drop
+            for key in list(self._approve_targets)[:32]:
+                self._approve_targets.pop(key, None)
+
+    def approve_target_for(self, reason: str) -> dict[str, str | None]:
+        return self._approve_targets.get(reason, {"file_path": None, "command": None})
+
+    def add_grant(self, grant: Grant) -> None:
+        """Register a grant (dedupes on kind+value+tool)."""
+        for existing in self._grants:
+            if (existing.kind, existing.value, existing.tool_name) == (
+                grant.kind, grant.value, grant.tool_name
+            ):
+                return
+        self._grants.append(grant)
+
+    def list_grants(self) -> list[Grant]:
+        return list(self._grants)
+
+    def persist_grant(self, grant: Grant, config_path: str | Path | None = None) -> bool:
+        """Append a grant to ``security.grants`` in the on-disk YAML.
+
+        Surgical write (fresh-load the file, set the one key, dump) — the same
+        pattern the deferred-loading toggle uses, so env-var secrets merged
+        into the runtime config dict never get copied into the file.
+        """
+        import yaml
+
+        path = Path(config_path or self._config_path or "").expanduser()
+        if not path or not path.exists():
+            return False
+        try:
+            with path.open(encoding="utf-8") as fh:
+                on_disk = yaml.safe_load(fh) or {}
+            grants = on_disk.setdefault("security", {}).setdefault("grants", [])
+            entry = grant.to_config_dict()
+            if entry not in grants:
+                grants.append(entry)
+            with path.open("w", encoding="utf-8") as fh:
+                yaml.dump(on_disk, fh, default_flow_style=False, sort_keys=False)
+            return True
+        except Exception:
+            log.warning("grant persist failed for %r", grant, exc_info=True)
+            return False
+
     def _is_always_blocked(self, command: str) -> bool:
         return any(r.search(command) for r in self._blocked_re)
 
@@ -558,9 +725,14 @@ class SecurityGate:
         queue = getattr(self, "_approval_queue", None)
         if queue is None:
             return False
+        target = self.approve_target_for(reason)
         try:
             from prometheus.permissions.approval_queue import ApprovalResult
-            result = await queue.request_approval(tool_name, reason)
+            result = await queue.request_approval(
+                tool_name, reason,
+                grant_file_path=target.get("file_path"),
+                grant_command=target.get("command"),
+            )
         except Exception:
             log.warning(
                 "approval request for %s failed; refusing", tool_name,

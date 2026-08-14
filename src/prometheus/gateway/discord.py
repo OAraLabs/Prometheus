@@ -929,6 +929,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._register(ops, "approve", self._app_approve, "Approve a pending tool request")
         self._register(ops, "deny", self._app_deny, "Deny a pending tool request")
         self._register(ops, "pending", self._app_pending, "List pending approval requests")
+        self._register(ops, "grants", self._app_grants, "List remembered approval grants")
         self._register(ops, "gepa", self._app_gepa, "Skill evolution: status | run | history")
         self._register(ops, "symbiote", self._app_symbiote, "GitHub graft pipeline: status | history | …")
         self._register(ops, "audit", self._app_audit, "Web capability audit: run | <category>")
@@ -1384,9 +1385,9 @@ class DiscordAdapter(BasePlatformAdapter):
     async def _app_approve(self, interaction: Any, args: str) -> None:
         from prometheus.gateway import commands as _cmds
 
-        request_id = args.split()[0] if args else ""
+        # Full args text — cmd_approve parses the scope verb itself.
         text = await _cmds.cmd_approve(
-            getattr(self, "_approval_queue", None), request_id,
+            getattr(self, "_approval_queue", None), args,
             prefix=OPS_PREFIX,
         )
         await self._respond(interaction, text)
@@ -1406,6 +1407,13 @@ class DiscordAdapter(BasePlatformAdapter):
 
         await self._respond(
             interaction, _cmds.cmd_pending(getattr(self, "_approval_queue", None)),
+        )
+
+    async def _app_grants(self, interaction: Any, args: str) -> None:
+        from prometheus.gateway import commands as _cmds
+
+        await self._respond(
+            interaction, _cmds.cmd_grants(getattr(self, "_approval_queue", None)),
         )
 
     async def _app_gepa(self, interaction: Any, args: str) -> None:

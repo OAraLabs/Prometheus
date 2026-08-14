@@ -25,14 +25,49 @@ class ApprovalResult(str, Enum):
 
 @dataclass
 class PendingAction:
-    """A tool call waiting for user approval."""
+    """A tool call waiting for user approval.
+
+    ``grant_file_path`` / ``grant_command`` carry the STRUCTURED target of the
+    pending call (set by SecurityGate.request_approval) so a scoped approval
+    (/approve session|always) can derive a Grant without parsing the free-text
+    description.
+    """
 
     request_id: str
     tool_name: str
     description: str
     created_at: float = field(default_factory=time.time)
+    grant_file_path: str | None = None
+    grant_command: str | None = None
     _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _result: ApprovalResult = ApprovalResult.TIMEOUT
+
+
+def derive_grant(action: PendingAction, root: str | None = None):
+    """Build the Grant a scoped approval remembers.
+
+    - ``root`` given: grant writes under that path (file tools only).
+    - else a file target: grant the target file's PARENT DIRECTORY ("always
+      allow writes here" — CC's directory-grant semantic).
+    - else a command target: grant that exact command (single invocation).
+    - else: grant the tool itself (strict-mode prompts carry no target).
+    """
+    from pathlib import Path as _Path
+
+    from prometheus.permissions.checker import Grant
+
+    if root:
+        return Grant(
+            kind="path_prefix",
+            value=str(_Path(root).expanduser().resolve()),
+            tool_name=action.tool_name,
+        )
+    if action.grant_file_path:
+        parent = str(_Path(action.grant_file_path).expanduser().resolve().parent)
+        return Grant(kind="path_prefix", value=parent, tool_name=action.tool_name)
+    if action.grant_command:
+        return Grant(kind="command_prefix", value=action.grant_command, tool_name="bash")
+    return Grant(kind="tool", value="", tool_name=action.tool_name)
 
 
 class ApprovalQueue:
@@ -66,17 +101,25 @@ class ApprovalQueue:
         tool_name: str,
         description: str,
         chat_id: int | None = None,
+        grant_file_path: str | None = None,
+        grant_command: str | None = None,
     ) -> ApprovalResult:
         """Queue an action for user approval.
 
         Sends a Telegram message and waits for /approve or /deny response.
         Returns APPROVED, DENIED, or TIMEOUT.
+
+        ``grant_file_path`` / ``grant_command`` are the structured target of
+        the pending call — used to derive a remembered grant when the operator
+        answers with /approve session|always.
         """
         request_id = uuid4().hex[:8]
         action = PendingAction(
             request_id=request_id,
             tool_name=tool_name,
             description=description,
+            grant_file_path=grant_file_path,
+            grant_command=grant_command,
         )
         self.pending[request_id] = action
 
@@ -87,7 +130,9 @@ class ApprovalQueue:
                 f"Permission requested:\n"
                 f"Tool: {tool_name}\n"
                 f"Action: {description}\n\n"
-                f"/approve {request_id} or /deny {request_id}"
+                f"/approve {request_id} or /deny {request_id}\n"
+                f"/approve session {request_id} — remember for this session\n"
+                f"/approve always {request_id} — remember permanently"
             )
             try:
                 await self._telegram.send(target_chat, msg, parse_mode=None)

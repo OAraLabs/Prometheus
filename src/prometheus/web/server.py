@@ -1941,12 +1941,46 @@ def create_app(
         ]
 
     @app.post("/api/approvals/{request_id}/approve")
-    async def approve_action(request_id: str):
+    async def approve_action(request_id: str, body: dict | None = None):
+        """Approve a pending request.
+
+        Body (optional): {"scope": "once"|"session"|"always"} — parity with
+        the chat-gateway verbs (/approve session|always). session/always
+        record a SecurityGate grant; always also persists it to config.
+        """
         queue = app.state.approval_queue
         if not queue:
             return JSONResponse(status_code=404, content={"error": "approval queue not enabled"})
-        ok = await queue.approve(request_id)
-        return {"ok": ok}
+        scope = (body or {}).get("scope", "once")
+        if scope not in ("once", "session", "always"):
+            return JSONResponse(status_code=400, content={"error": 'scope must be "once", "session", or "always"'})
+        from prometheus.gateway import commands as _cmds
+
+        arg_text = request_id if scope == "once" else f"{scope} {request_id}"
+        text = await _cmds.cmd_approve(queue, arg_text)
+        ok = not text.startswith("No pending request")
+        return {"ok": ok, "message": text}
+
+    @app.get("/api/approvals/grants")
+    async def list_grants():
+        """Remembered approval grants — parity with the /grants verb."""
+        queue = app.state.approval_queue
+        if not queue:
+            return []
+        from prometheus.gateway import commands as _cmds
+
+        gate = getattr(queue, "_security_gate", None)
+        if gate is None:
+            return []
+        return [
+            {
+                "kind": g.kind,
+                "value": g.value,
+                "tool": g.tool_name,
+                "scope": g.scope,
+            }
+            for g in gate.list_grants()
+        ]
 
     @app.post("/api/approvals/{request_id}/deny")
     async def deny_action(request_id: str):
