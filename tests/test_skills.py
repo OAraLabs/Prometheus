@@ -232,7 +232,7 @@ def test_skills_for_prompt_returns_name_description_dicts():
 
     result = skills_for_prompt()
     assert result is not None  # builtins always exist (commit/debug/plan)
-    assert all(set(entry.keys()) == {"name", "description"} for entry in result)
+    assert all(set(entry.keys()) == {"name", "description", "core"} for entry in result)
     names = {entry["name"] for entry in result}
     assert "commit" in names and "debug" in names and "plan" in names
 
@@ -252,3 +252,50 @@ def test_skills_for_prompt_none_when_registry_empty():
     empty = SkillRegistry()
     with mock.patch("prometheus.skills.loader.load_skill_registry", return_value=empty):
         assert skills_for_prompt() is None
+
+
+def test_skill_is_core_tier_flag():
+    from prometheus.skills.loader import _skill_is_core
+
+    assert _skill_is_core("---\ntier: core\nname: x\n---\nbody") is True
+    assert _skill_is_core('---\ntier: "core"\n---\nbody') is True
+    assert _skill_is_core("---\nautoload: true\n---\nbody") is True
+    assert _skill_is_core("---\nautoload: yes\n---\nbody") is True
+    assert _skill_is_core("---\nname: x\n---\nbody") is False
+    assert _skill_is_core("---\ntier: tail\n---\nbody") is False
+    assert _skill_is_core("# heading\ntext") is False  # no frontmatter
+    assert _skill_is_core("") is False
+
+
+def test_skill_is_core_fail_open_on_bad_yaml():
+    from prometheus.skills.loader import _skill_is_core
+
+    # Unquoted ": " makes the block invalid YAML; tolerant scan still finds tier.
+    assert _skill_is_core("---\ntier: core\ndescription: bad: colon\n---\n") is True
+    assert _skill_is_core("---\ndescription: bad: colon\n---\n") is False
+
+
+def test_builtin_skills_are_core(tmp_path, monkeypatch):
+    """Builtin commit/debug/plan carry tier: core so the prompt renders them."""
+    from prometheus.skills.loader import get_builtin_skills
+
+    skills = {s.name: s for s in get_builtin_skills()}
+    for name in ("commit", "debug", "plan"):
+        assert skills[name].core is True, f"{name} should be core"
+
+
+def test_user_skill_core_flag_round_trip(tmp_path, monkeypatch):
+    import prometheus.skills.loader as loader
+
+    monkeypatch.setattr(loader, "get_user_skills_dir", lambda: tmp_path)
+    (tmp_path / "reflex.md").write_text(
+        "---\nname: reflex\ndescription: Always-on workflow\ntier: core\n---\nbody",
+        encoding="utf-8",
+    )
+    (tmp_path / "tail.md").write_text(
+        "---\nname: tailskill\ndescription: Reachable on demand\n---\nbody",
+        encoding="utf-8",
+    )
+    skills = {s.name: s for s in loader.load_user_skills()}
+    assert skills["reflex"].core is True
+    assert skills["tailskill"].core is False

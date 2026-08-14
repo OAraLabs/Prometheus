@@ -1,4 +1,5 @@
 ---
+tier: core
 name: commit
 description: Stage, write, and push a well-formed git commit with conventional message and pre-commit checks.
 ---

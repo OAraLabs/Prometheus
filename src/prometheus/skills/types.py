@@ -14,3 +14,4 @@ class SkillDefinition:
     content: str
     source: str  # "builtin" | "user" | "plugin"
     path: str | None = None
+    core: bool = False  # tier: core — name+description rendered in system prompt

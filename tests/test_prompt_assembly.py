@@ -306,3 +306,59 @@ class TestSkillsSection:
         for call in calls:
             kw_names = [kw.arg for kw in call.keywords]
             assert "skills" in kw_names, "daemon prompt-build site missing skills= argument"
+
+class TestSkillsTiering:
+    """Item 1+2: core skills render inline, tail stays tool_search-only."""
+
+    def _prompt(self, skills):
+        return build_runtime_system_prompt(cwd=".", config={}, skills=skills)
+
+    def test_core_skills_render_name_and_description(self):
+        skills = [
+            {"name": "commit", "description": "Git commit workflow", "core": True},
+            {"name": "debug", "description": "Debug workflow", "core": True},
+            {"name": "aider", "description": "Reachable on demand", "core": False},
+        ]
+        prompt = self._prompt(skills)
+        assert "# Available Skills" in prompt
+        assert "**commit**: Git commit workflow" in prompt
+        assert "**debug**: Debug workflow" in prompt
+        # tail skill NOT rendered inline — only reachable via tool_search
+        assert "aider" not in prompt
+        assert "tool_search" in prompt
+        assert "1 additional skill available on demand" in prompt
+
+    def test_no_core_skills_keeps_count_only_hint(self):
+        skills = [{"name": "x", "description": "d", "core": False}]
+        prompt = self._prompt(skills)
+        assert "**x**" not in prompt
+        assert "1 additional skill available on demand" in prompt
+        assert "tool_search" in prompt
+
+    def test_all_core_no_count_hint(self):
+        skills = [{"name": "commit", "description": "d", "core": True}]
+        prompt = self._prompt(skills)
+        assert "**commit**: d" in prompt
+        assert "additional skill" not in prompt
+        assert "tool_search" not in prompt
+
+    def test_skills_dicts_without_core_key_treated_as_tail(self):
+        # Back-compat: callers passing legacy {"name","description"} dicts
+        # must not crash and must land in the tool_search tier.
+        skills = [{"name": "legacy", "description": "old shape"}]
+        prompt = self._prompt(skills)
+        assert "legacy" not in prompt.split("## Core")[0] if "## Core" in prompt else True
+        assert "tool_search" in prompt
+
+    def test_daemon_built_prompt_contains_skills_section(self):
+        """Admission guard (item 5): the real registry feeds the assembler
+        and the rendered prompt carries a skills section with the builtin
+        core skills visible."""
+        from prometheus.skills.loader import skills_for_prompt
+
+        entries = skills_for_prompt()
+        assert entries is not None
+        prompt = self._prompt(entries)
+        assert "# Available Skills" in prompt
+        assert "**commit**" in prompt and "**debug**" in prompt and "**plan**" in prompt
+

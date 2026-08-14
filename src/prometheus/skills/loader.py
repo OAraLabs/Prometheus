@@ -35,6 +35,7 @@ def get_builtin_skills() -> list[SkillDefinition]:
                 content=content,
                 source="builtin",
                 path=str(path),
+                core=_skill_is_core(content),
             )
         )
     return skills
@@ -64,6 +65,7 @@ def load_user_skills() -> list[SkillDefinition]:
                 content=content,
                 source=source,
                 path=str(path),
+                core=_skill_is_core(content),
             )
         )
     return skills
@@ -83,12 +85,14 @@ def load_skill_registry(cwd: str | Path | None = None) -> SkillRegistry:
 def skills_for_prompt() -> list[dict[str, str]] | None:
     """Build the ``skills`` argument for the system-prompt assembler.
 
-    Returns ``[{"name", "description"}, ...]`` for every loaded skill, or
-    ``None`` when there are none (or loading fails) so callers can pass the
-    result straight through. Additive and fail-open: a broken skill file
-    must never block prompt assembly. The assembler only emits the
-    "use tool_search / skill" hint when this is non-empty, so returning
-    ``None`` simply skips the hint.
+    Returns ``[{"name", "description", "core"}, ...]`` for every loaded
+    skill, or ``None`` when there are none (or loading fails) so callers
+    can pass the result straight through. ``core`` is True for skills
+    whose frontmatter opts into the always-visible prompt tier
+    (``tier: core`` or ``autoload: true``); the assembler renders those
+    name+description lines inline and keeps the rest tool_search-only.
+    Additive and fail-open: a broken skill file must never block prompt
+    assembly, so returning ``None`` simply skips the skills section.
     """
     try:
         registry = load_skill_registry()
@@ -97,7 +101,51 @@ def skills_for_prompt() -> list[dict[str, str]] | None:
     skills = registry.list_skills()
     if not skills:
         return None
-    return [{"name": s.name, "description": s.description} for s in skills]
+    return [
+        {"name": s.name, "description": s.description, "core": s.core}
+        for s in skills
+    ]
+
+
+def _skill_is_core(content: str) -> bool:
+    """Return True when a skill opts into the always-visible prompt tier.
+
+    Recognised frontmatter keys (either one is enough): ``tier: core`` or
+    ``autoload: true``. Skills without the flag stay reachable through
+    tool_search only — they are never lost, just not pre-rendered.
+    Fail-open False: malformed or absent frontmatter never breaks prompt
+    assembly and simply keeps the skill out of the core tier.
+    """
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    block = None
+    for i, line in enumerate(lines[1:], 1):
+        if line.strip() == "---":
+            block = chr(10).join(lines[1:i])  # frontmatter block
+            break
+    if block is None:
+        return False
+    try:
+        data = yaml.safe_load(block)
+    except yaml.YAMLError:
+        data = None
+    if isinstance(data, dict):
+        tier = str(data.get("tier", "")).strip().lower()
+        if tier == "core":
+            return True
+        autoload = data.get("autoload", False)
+        return autoload is True or str(autoload).strip().lower() in ("true", "yes", "1")
+    # Fallback tolerant scan for frontmatter that is not valid YAML.
+    for fm_line in block.splitlines():
+        fm = fm_line.strip().lower()
+        if fm.startswith("tier:") and fm[5:].strip().strip("'\"") == "core":
+            return True
+        if fm.startswith("autoload:") and fm[9:].strip().strip("'\"").lower() in (
+            "true", "yes", "1",
+        ):
+            return True
+    return False
 
 
 def _parse_skill_markdown(default_name: str, content: str) -> tuple[str, str]:
