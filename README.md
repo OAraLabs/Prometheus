@@ -19,6 +19,14 @@ prometheus                # chat in the CLI
 prometheus daemon         # always-on: web API + gateways + cron + background layer
 ```
 
+Running the tests from a uv-managed venv? Sync it with the same extras CI uses first:
+
+```bash
+uv sync --extra web --extra anthropic --group dev
+```
+
+Without this, `import fastapi` fails inside `.venv` and three test files won't even collect (the daemon itself doesn't need it — `pip install -e '.[full]'` above already covers everything).
+
 `prometheus setup` probes for a running local inference server, generates your agent's identity, writes a working config with the web API enabled, and smoke-tests the loop. In a hurry? `prometheus setup --fast` (or `--noninteractive`) is the three-question version. On first daemon start a web API token is minted and printed once — `prometheus token show` re-prints it. If anything misbehaves: `prometheus doctor`.
 
 > `pip install 'oara-prometheus[full]'` is the packaged path — CI builds sdist + wheel per tagged release; PyPI publishing lands once the release pipeline is public. Until then, the git checkout above is the path that works for everyone.
