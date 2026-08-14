@@ -1,4 +1,5 @@
 ---
+tier: core
 name: plan
 description: Structure an implementation plan before writing code — requirements, approach, steps, risks.
 ---

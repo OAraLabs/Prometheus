@@ -1,4 +1,5 @@
 ---
+tier: core
 name: debug
 description: Systematic debugging workflow — reproduce, isolate, diagnose, fix, verify.
 ---
