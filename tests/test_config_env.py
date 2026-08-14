@@ -7,7 +7,27 @@ import textwrap
 
 import pytest
 
-from prometheus.config.env_override import apply_env_overrides, read_secret_file
+from prometheus.config.env_override import (
+    ENV_OVERRIDES,
+    SECRET_FILE_VARS,
+    apply_env_overrides,
+    read_secret_file,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_mapped_env(monkeypatch):
+    """Scrub every env var apply_env_overrides reads.
+
+    These tests assert behavior of the override map against a *clean*
+    environment. On a live daemon host, real secrets such as
+    PROMETHEUS_TELEGRAM_TOKEN are set, which leaks into tests that expect
+    a noop (e.g. test_no_env_vars_is_noop) or that a secret file wins
+    (test_secret_file_env_var_override). Deleting every mapped var here
+    makes the file hermetic regardless of where it runs.
+    """
+    for name in (*ENV_OVERRIDES, *SECRET_FILE_VARS):
+        monkeypatch.delenv(name, raising=False)
 
 
 class TestEnvOverrides:
