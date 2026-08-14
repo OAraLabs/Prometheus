@@ -30,7 +30,7 @@ from telegram.ext import (
 
 from prometheus.config.paths import get_wiki_root
 from prometheus.gateway.config import Platform, PlatformConfig
-from prometheus.gateway.commands import cmd_anatomy, cmd_beacon, cmd_doctor, cmd_profile
+from prometheus.gateway.commands import cmd_anatomy, cmd_beacon, cmd_doctor, cmd_gate, cmd_profile
 from prometheus.gateway.platform_base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -353,6 +353,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("clearsteers", self._cmd_clear_steers))
         self._app.add_handler(CommandHandler("anatomy", self._cmd_anatomy))
         self._app.add_handler(CommandHandler("doctor", self._cmd_doctor))
+        self._app.add_handler(CommandHandler("gate", self._cmd_gate))
         self._app.add_handler(CommandHandler("profile", self._cmd_profile))
         self._app.add_handler(CommandHandler("beacon", self._cmd_beacon))
         self._app.add_handler(CommandHandler("tools", self._cmd_tools))
@@ -2068,6 +2069,18 @@ class TelegramAdapter(BasePlatformAdapter):
                     self._active_profile_name = profile.name
 
         await self.send(chat_id, text, parse_mode=None)
+
+    async def _cmd_gate(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /gate [off|on|strict|status] — runtime permission-gate toggle."""
+        if update.effective_chat is None:
+            return
+        chat_id = update.effective_chat.id
+        args = (update.message.text or "").split(maxsplit=1)
+        arg = args[1].strip() if len(args) > 1 else ""
+        gate = getattr(self.agent_loop, "permission_checker", None)
+        await self.send(chat_id, cmd_gate(gate, arg), parse_mode=None)
 
     # ------------------------------------------------------------------
     # Sprint 15b GRAFT: approval queue commands
