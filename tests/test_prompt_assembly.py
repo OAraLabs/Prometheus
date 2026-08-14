@@ -272,3 +272,37 @@ class TestRuntimePromptIncludesProjectFiles:
         )
         assert "# Child" in prompt
         assert "# Parent" not in prompt
+
+
+class TestSkillsSection:
+    """The skills hint is emitted only when a skills list is supplied."""
+
+    def test_skills_hint_emitted_when_skills_present(self):
+        skills = [{"name": "commit", "description": "Git commits"}]
+        prompt = build_runtime_system_prompt(cwd=".", config={}, skills=skills)
+        assert "tool_search" in prompt
+        assert "skill tool" in prompt
+
+    def test_no_skills_hint_when_empty(self):
+        prompt = build_runtime_system_prompt(cwd=".", config={}, skills=None)
+        assert "tool_search to find skills" not in prompt
+
+    def test_daemon_call_sites_pass_skills(self):
+        # Wiring guard (AST): every daemon prompt-build site must pass
+        # skills=skills_for_prompt() so gateway conversations learn the
+        # skill library exists. Regression for the CLI-passes/daemon-
+        # doesn't gap.
+        import ast
+
+        src = (Path(__file__).parent.parent / "src" / "prometheus" / "daemon.py").read_text()
+        tree = ast.parse(src)
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "build_runtime_system_prompt"
+        ]
+        assert len(calls) == 4, f"expected 4 daemon prompt-build sites, found {len(calls)}"
+        for call in calls:
+            kw_names = [kw.arg for kw in call.keywords]
+            assert "skills" in kw_names, "daemon prompt-build site missing skills= argument"

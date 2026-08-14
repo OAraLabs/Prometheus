@@ -80,6 +80,26 @@ def load_skill_registry(cwd: str | Path | None = None) -> SkillRegistry:
     return registry
 
 
+def skills_for_prompt() -> list[dict[str, str]] | None:
+    """Build the ``skills`` argument for the system-prompt assembler.
+
+    Returns ``[{"name", "description"}, ...]`` for every loaded skill, or
+    ``None`` when there are none (or loading fails) so callers can pass the
+    result straight through. Additive and fail-open: a broken skill file
+    must never block prompt assembly. The assembler only emits the
+    "use tool_search / skill" hint when this is non-empty, so returning
+    ``None`` simply skips the hint.
+    """
+    try:
+        registry = load_skill_registry()
+    except Exception:
+        return None
+    skills = registry.list_skills()
+    if not skills:
+        return None
+    return [{"name": s.name, "description": s.description} for s in skills]
+
+
 def _parse_skill_markdown(default_name: str, content: str) -> tuple[str, str]:
     """Extract name and description from a skill markdown file.
 

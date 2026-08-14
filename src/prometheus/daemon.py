@@ -648,8 +648,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 free_disk_floor_mb=_media_cfg.get("free_disk_floor_mb", 1024),
             )
             from prometheus.context.prompt_assembler import build_runtime_system_prompt
+            from prometheus.skills.loader import skills_for_prompt
             system_prompt = build_runtime_system_prompt(
                 cwd=str(Path.cwd()), config=config,
+                skills=skills_for_prompt(),
             )
             telegram = TelegramAdapter(
                 config=tg_config,
@@ -786,8 +788,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
             )
             if "system_prompt" not in dir():
                 from prometheus.context.prompt_assembler import build_runtime_system_prompt
+                from prometheus.skills.loader import skills_for_prompt
                 system_prompt = build_runtime_system_prompt(
                     cwd=str(Path.cwd()), config=config,
+                    skills=skills_for_prompt(),
                 )
             slack_adapter = SlackAdapter(
                 config=slack_config,
@@ -841,8 +845,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
             )
             if "system_prompt" not in dir():
                 from prometheus.context.prompt_assembler import build_runtime_system_prompt
+                from prometheus.skills.loader import skills_for_prompt
                 system_prompt = build_runtime_system_prompt(
                     cwd=str(Path.cwd()), config=config,
+                    skills=skills_for_prompt(),
                 )
             discord_adapter = DiscordAdapter(
                 config=discord_config,
@@ -1499,8 +1505,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
             # Build system prompt if not already available
             if "system_prompt" not in dir():
                 from prometheus.context.prompt_assembler import build_runtime_system_prompt
+                from prometheus.skills.loader import skills_for_prompt
                 system_prompt = build_runtime_system_prompt(
                     cwd=str(Path.cwd()), config=config,
+                    skills=skills_for_prompt(),
                 )
 
             loop_context = LoopContext(
