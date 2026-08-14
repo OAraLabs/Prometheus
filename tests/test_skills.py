@@ -220,3 +220,35 @@ def test_load_skill_registry_includes_builtins():
     assert "commit" in names
     assert "debug" in names
     assert "plan" in names
+
+
+# ---------------------------------------------------------------------------
+# skills_for_prompt — system-prompt payload helper
+# ---------------------------------------------------------------------------
+
+
+def test_skills_for_prompt_returns_name_description_dicts():
+    from prometheus.skills.loader import skills_for_prompt
+
+    result = skills_for_prompt()
+    assert result is not None  # builtins always exist (commit/debug/plan)
+    assert all(set(entry.keys()) == {"name", "description"} for entry in result)
+    names = {entry["name"] for entry in result}
+    assert "commit" in names and "debug" in names and "plan" in names
+
+
+def test_skills_for_prompt_fail_open_on_load_error():
+    import unittest.mock as mock
+    from prometheus.skills.loader import skills_for_prompt
+
+    with mock.patch("prometheus.skills.loader.load_skill_registry", side_effect=RuntimeError("boom")):
+        assert skills_for_prompt() is None
+
+
+def test_skills_for_prompt_none_when_registry_empty():
+    import unittest.mock as mock
+    from prometheus.skills.loader import skills_for_prompt
+
+    empty = SkillRegistry()
+    with mock.patch("prometheus.skills.loader.load_skill_registry", return_value=empty):
+        assert skills_for_prompt() is None
