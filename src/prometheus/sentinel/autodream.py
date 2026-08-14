@@ -167,13 +167,36 @@ class AutoDreamEngine:
             )
 
     async def _phase_wiki_lint(self) -> dict[str, Any]:
-        """Phase 1: Wiki lint + optional auto-fix."""
+        """Phase 1: Wiki lint + optional auto-fix.
+
+        Case-variant duplicates (``duplicate_case``) are broken out into the
+        summary and, when present, emitted as a ``dream_insight`` so they reach
+        the operator instead of dying in the lint log. (wiki-dedupe 2026-08)
+        """
         result = self._wiki_linter.lint()  # type: ignore[union-attr]
+        case_variants = [
+            i for i in result.issues if i.category == "duplicate_case"
+        ]
         summary: dict[str, Any] = {
             "issues": len(result.issues),
             "errors": result.error_count,
             "warnings": result.warning_count,
+            "duplicate_case_variants": len(case_variants),
         }
+        if case_variants:
+            pages = ", ".join(i.page for i in case_variants[:5])
+            more = f" (+{len(case_variants) - 5} more)" if len(case_variants) > 5 else ""
+            await self._bus.emit(ActivitySignal(
+                kind="dream_insight",
+                payload={
+                    "digest": (
+                        f"Wiki has {len(case_variants)} case-variant duplicate "
+                        f"page(s): {pages}{more}. One entity is being written "
+                        "under multiple spellings — run wiki_lint for details."
+                    )
+                },
+                source="autodream",
+            ))
         if result.has_issues and self._auto_fix_wiki:
             fixed = self._wiki_linter.auto_fix(result)  # type: ignore[union-attr]
             summary["auto_fixed"] = fixed

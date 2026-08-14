@@ -28,7 +28,7 @@ class LintIssue:
     """A single wiki health issue."""
 
     severity: str  # "error", "warning", "info"
-    category: str  # "orphan", "broken_link", "stale", "duplicate", "missing_crossref", "imbalance"
+    category: str  # "orphan", "broken_link", "stale", "duplicate", "duplicate_case", "missing_crossref", "imbalance"
     page: str
     detail: str
     fixable: bool = False
@@ -315,10 +315,42 @@ class WikiLinter:
         return issues
 
     def _find_potential_duplicates(self, pages: dict[str, dict]) -> list[LintIssue]:
-        """Pages likely referring to the same entity."""
+        """Pages likely referring to the same entity.
+
+        Two distinct signals, deliberately separated (wiki-dedupe 2026-08):
+
+        * ``duplicate_case`` (error) — exact case variants of the same name
+          ("Mini" vs "mini"). These are NEVER legitimate: one entity, one page.
+          High severity so they cut through the noise and reach the operator.
+        * ``duplicate`` (warning) — substring containment ("Prometheus" inside
+          "Prometheus Daemon"). Mostly heuristic and noisy; kept as a low-signal
+          advisory so it never buries the real case-variant errors.
+        """
         names = [(rel, info["entity_name"]) for rel, info in pages.items()]
         issues = []
         seen: set[tuple[str, str]] = set()
+        by_fold: dict[str, list[tuple[str, str]]] = {}
+        for rel, name in names:
+            by_fold.setdefault(re.sub(r"\s+", " ", name.strip()).casefold(), []).append((rel, name))
+
+        # Exact case variants first — unambiguous, one issue per extra page.
+        for fold_key, group in by_fold.items():
+            if len(group) < 2:
+                continue
+            group_sorted = sorted(group, key=lambda t: t[0])
+            canon_rel, canon_name = group_sorted[0]
+            if self._is_manual(pages[canon_rel]):
+                continue
+            for rel, name in group_sorted[1:]:
+                if self._is_manual(pages[rel]):
+                    continue
+                seen.add((min(rel, canon_rel), max(rel, canon_rel)))
+                issues.append(LintIssue(
+                    severity="error",
+                    category="duplicate_case",
+                    page=rel,
+                    detail=f"Case variant of '{canon_name}' ({canon_rel})",
+                ))
 
         for i, (rel_a, name_a) in enumerate(names):
             norm_a = re.sub(r"\s+", " ", name_a.lower().strip())

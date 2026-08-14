@@ -643,6 +643,65 @@ async def test_manual_heavy_query_still_respects_budget():
             set_wiki_root(None)
 
 
+def test_case_variants_collapse_to_one_canonical_page():
+    """Store rows differing only in case are ONE entity -> ONE page under the
+    canonical (most-mentioned, first-seen) spelling. (wiki-dedupe 2026-08)"""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(tmp)
+        wiki_root = Path(tmp) / "wiki"
+
+        _seed(store, "place", "OAra-mini", "hosted the daemon", 0.9)
+        _seed(store, "place", "OAra-mini", "has 25GB RAM", 0.8)
+        _seed(store, "place", "oara-mini", "rebooted tuesday", 0.7)
+
+        compiler = WikiCompiler(store=store, wiki_root=wiki_root)
+        compiler.compile([
+            _make_fact("OAra-mini", "hosted the daemon", entity_type="place"),
+            _make_fact("oara-mini", "rebooted tuesday", entity_type="place"),
+        ])
+
+        topic_files = list((wiki_root / "topics").glob("*.md"))
+        assert len(topic_files) == 1, (
+            f"case variants must not create separate pages, got {topic_files}"
+        )
+        page = topic_files[0]
+        assert page.stem == "OAra-mini"  # canonical = most mentions, first-seen
+        text = page.read_text(encoding="utf-8")
+        # canonical page absorbs facts from every spelling
+        assert "hosted the daemon" in text
+        assert "rebooted tuesday" in text
+        store.close()
+
+
+def test_compile_prunes_stale_case_variant_pages():
+    """A page written for a now-superseded spelling is removed on recompile —
+    the compiler self-heals duplicates it previously manufactured."""
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(tmp)
+        wiki_root = Path(tmp) / "wiki"
+
+        _seed(store, "place", "OAra-mini", "hosted the daemon", 0.9)
+        _seed(store, "place", "OAra-mini", "has 25GB RAM", 0.8)
+
+        compiler = WikiCompiler(store=store, wiki_root=wiki_root)
+        compiler.compile([
+            _make_fact("OAra-mini", "hosted the daemon", entity_type="place"),
+        ])
+        canonical = wiki_root / "topics" / "OAra-mini.md"
+        assert canonical.exists()
+
+        # Simulate a stale page from an earlier spelling
+        stale = wiki_root / "topics" / "oara-mini.md"
+        stale.write_text("# oara-mini\n", encoding="utf-8")
+
+        compiler.compile([
+            _make_fact("OAra-mini", "has 25GB RAM", entity_type="place"),
+        ])
+        assert canonical.exists(), "canonical page must survive"
+        assert not stale.exists(), "stale case-variant page must be pruned"
+        store.close()
+
+
 def test_lint_exempts_manual_page_across_full_pass():
     """A manual page survives orphan-sweep + stale-flag + duplicate-prune (Phase 4b lint)."""
     from prometheus.sentinel.wiki_lint import WikiLinter
@@ -661,7 +720,7 @@ def test_lint_exempts_manual_page_across_full_pass():
         (wiki / "index.md").write_text("# Index\n", encoding="utf-8")
 
         issues = WikiLinter(wiki_root=wiki).lint().issues
-        removal = ("orphan", "stale", "duplicate")
+        removal = ("orphan", "stale", "duplicate", "duplicate_case")
         manual_flags = [i.category for i in issues
                         if i.page == "topics/PinnedNote.md" and i.category in removal]
         assert manual_flags == [], f"manual page must survive all three checks, got {manual_flags}"

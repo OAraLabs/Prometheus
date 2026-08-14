@@ -399,6 +399,46 @@ class TestWikiLinter:
         missing = [i for i in result.issues if i.category == "missing_crossref"]
         assert len(missing) >= 1
 
+    def test_case_variant_pages_flagged_as_duplicate_case_error(self, tmp_path: Path):
+        """Exact case variants are category=duplicate_case at ERROR severity —
+        unambiguous and operator-visible, unlike noisy substring dupes."""
+        from prometheus.sentinel.wiki_lint import WikiLinter
+
+        wiki = self._setup_wiki(tmp_path)
+        (wiki / "topics" / "Mini.md").write_text(
+            "---\ntype: concept\n---\n# Mini\n", encoding="utf-8")
+        (wiki / "projects").mkdir(exist_ok=True)
+        (wiki / "projects" / "mini.md").write_text(
+            "---\ntype: project\n---\n# mini\n", encoding="utf-8")
+
+        result = WikiLinter(wiki_root=wiki).lint()
+        case_issues = [i for i in result.issues if i.category == "duplicate_case"]
+        assert len(case_issues) == 1, case_issues
+        assert case_issues[0].severity == "error"
+        # the variant is NOT also double-reported as a substring duplicate
+        substring_dups = [
+            i for i in result.issues
+            if i.category == "duplicate" and "mini" in i.page.lower()
+            and "Mini" in i.detail
+        ]
+        assert substring_dups == []
+
+    def test_substring_duplicates_stay_warning_category(self, tmp_path: Path):
+        """Substring containment remains category=duplicate at WARNING severity."""
+        from prometheus.sentinel.wiki_lint import WikiLinter
+
+        wiki = self._setup_wiki(tmp_path)
+        (wiki / "topics" / "Backup.md").write_text(
+            "---\ntype: concept\n---\n# Backup\n", encoding="utf-8")
+        (wiki / "topics" / "Backup Vault.md").write_text(
+            "---\ntype: concept\n---\n# Backup Vault\n", encoding="utf-8")
+
+        result = WikiLinter(wiki_root=wiki).lint()
+        sub = [i for i in result.issues if i.category == "duplicate"]
+        assert sub and all(i.severity == "warning" for i in sub)
+        case = [i for i in result.issues if i.category == "duplicate_case"]
+        assert case == [], "distinct names must not be case-variant errors"
+
     def test_healthy_wiki_returns_no_issues(self, tmp_path: Path):
         from prometheus.sentinel.wiki_lint import WikiLinter
 
@@ -813,3 +853,85 @@ class TestTelemetryReportSince:
         # With since: only recent
         report_recent = tel.report(since=time.time() - 86400)
         assert report_recent["total_calls"] == 1
+
+
+# ======================================================================
+# AutoDream — case-variant duplicate surfacing (wiki-dedupe 2026-08)
+# ======================================================================
+
+
+class TestAutoDreamDuplicateSurfacing:
+    """wiki_lint phase surfaces case-variant duplicates via dream_insight."""
+
+    @pytest.mark.asyncio
+    async def test_emits_dream_insight_on_case_variants(self):
+        from prometheus.sentinel.autodream import AutoDreamEngine
+        from prometheus.sentinel.wiki_lint import WikiLinter, LintResult, LintIssue
+        from prometheus.sentinel.signals import SignalBus
+
+        bus = SignalBus()
+        linter = MagicMock(spec=WikiLinter)
+        linter.lint.return_value = LintResult(issues=[
+            LintIssue(
+                severity="error", category="duplicate_case",
+                page="projects/mini.md",
+                detail="Case variant of 'Mini' (topics/Mini.md)",
+            ),
+            LintIssue(
+                severity="warning", category="duplicate",
+                page="topics/Backup.md",
+                detail="Possible duplicate of 'Backup Vault'",
+            ),
+        ])
+
+        received = []
+
+        async def capture(sig):
+            received.append(sig)
+
+        bus.subscribe("dream_insight", capture)
+
+        engine = AutoDreamEngine(
+            bus, wiki_linter=linter, config={"synthesis_enabled": False, "auto_fix_wiki": False}
+        )
+        await engine.start()
+        results = await engine.run_cycle()
+
+        lint_result = next(r for r in results if r.phase == "wiki_lint")
+        assert lint_result.summary["duplicate_case_variants"] == 1
+        insights = [s for s in received if s.kind == "dream_insight"]
+        assert len(insights) == 1
+        assert "case-variant" in insights[0].payload["digest"]
+        assert "projects/mini.md" in insights[0].payload["digest"]
+
+    @pytest.mark.asyncio
+    async def test_no_insight_without_case_variants(self):
+        from prometheus.sentinel.autodream import AutoDreamEngine
+        from prometheus.sentinel.wiki_lint import WikiLinter, LintResult, LintIssue
+        from prometheus.sentinel.signals import SignalBus
+
+        bus = SignalBus()
+        linter = MagicMock(spec=WikiLinter)
+        linter.lint.return_value = LintResult(issues=[
+            LintIssue(
+                severity="warning", category="duplicate",
+                page="topics/Backup.md",
+                detail="Possible duplicate of 'Backup Vault'",
+            ),
+        ])
+        received = []
+
+        async def capture(sig):
+            received.append(sig)
+
+        bus.subscribe("dream_insight", capture)
+
+        engine = AutoDreamEngine(
+            bus, wiki_linter=linter, config={"synthesis_enabled": False, "auto_fix_wiki": False}
+        )
+        await engine.start()
+        results = await engine.run_cycle()
+
+        lint_result = next(r for r in results if r.phase == "wiki_lint")
+        assert lint_result.summary["duplicate_case_variants"] == 0
+        assert received == [], "substring duplicates must not trigger nudges"

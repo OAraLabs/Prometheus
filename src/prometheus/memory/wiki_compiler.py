@@ -91,6 +91,7 @@ class WikiCompiler:
         # re-running with an unchanged store is a byte-identical no-op.
         linkable = self._page_having_entities()
         touched = {f.get("entity_name", "Unknown") for f in new_facts}
+        self._prune_case_variants(linkable)
 
         pages_created = 0
         pages_updated = 0
@@ -249,6 +250,28 @@ class WikiCompiler:
         subdir = _TYPE_TO_SUBDIR.get(entity_type, _DEFAULT_SUBDIR)
         return self._wiki / subdir / f"{_safe_filename(entity_name)}.md"
 
+    def _prune_case_variants(self, linkable: dict[str, str]) -> None:
+        """Delete entity pages that are stale case-variants of a canonical page.
+
+        With casefold-grouped entities, a store holding both "Mini" and "mini"
+        now yields ONE canonical page; any page file previously written for the
+        other spelling is a duplicate the compiler would otherwise leave behind.
+        Only removes a file when its stem casefolds to a canonical entity's
+        casefold but differs in exact spelling — never touches unrelated pages.
+        (wiki-dedupe 2026-08)
+        """
+        canonical_by_key = {name.casefold(): name for name in linkable}
+        for subdir in _TYPE_TO_SUBDIR.values():
+            d = self._wiki / subdir
+            if not d.exists():
+                continue
+            for page in d.glob("*.md"):
+                stem = page.stem
+                canon = canonical_by_key.get(stem.casefold())
+                if canon is not None and _safe_filename(canon) != stem:
+                    page.unlink()
+                    log.info("WikiCompiler: pruned case-variant page %s", page.name)
+
     def _facts_for_entity(self, entity_name: str) -> list[dict]:
         """All stored facts whose entity_name matches *entity_name* exactly
         (case-insensitive). ``search_memories`` does a ``LIKE %name%`` match,
@@ -262,23 +285,46 @@ class WikiCompiler:
         page: structurally valid AND (>= 2 total mentions OR any manual fact).
         Manual facts (``/note``) earn a page on first mention — you asserting it
         explicitly *is* the signal the >= 2 threshold approximates. Derived from
-        the store so compile and regenerate agree on which links resolve."""
+        the store so compile and regenerate agree on which links resolve.
+
+        Entities are grouped CASE-INSENSITIVELY: the store may hold "Mini",
+        "mini" and "MINI" as distinct rows, but they are one entity and get ONE
+        page under the canonical spelling (most total mentions; first-seen wins
+        ties). ``_facts_for_entity`` already matches case-insensitively, so the
+        canonical page absorbs every spelling's facts. Without this grouping the
+        compiler manufactures one page per case variant. (wiki-dedupe 2026-08)
+        """
         agg: dict[str, dict] = {}
+        order = 0
         for r in self._store.get_all_memories(limit=1_000_000):
             name = r.get("entity_name") or "Unknown"
-            entry = agg.setdefault(
-                name,
-                {"mentions": 0, "type": r.get("entity_type", "concept"), "manual": False},
-            )
-            entry["mentions"] += r.get("mention_count", 1) or 1
+            key = name.casefold()
+            if key not in agg:
+                agg[key] = {
+                    "mentions": 0,
+                    "type": r.get("entity_type", "concept"),
+                    "manual": False,
+                    "spellings": {},  # exact spelling -> mention total
+                    "order": order,
+                }
+                order += 1
+            entry = agg[key]
+            weight = r.get("mention_count", 1) or 1
+            entry["mentions"] += weight
+            entry["spellings"][name] = entry["spellings"].get(name, 0) + weight
             if r.get("manual"):
                 entry["manual"] = True
-        return {
-            name: entry["type"]
-            for name, entry in agg.items()
-            if classify_entity(name) is None
-            and (entry["mentions"] >= 2 or entry["manual"])
-        }
+        linkable: dict[str, str] = {}
+        for entry in agg.values():
+            canonical = max(
+                entry["spellings"].items(),
+                key=lambda kv: (kv[1], -entry["order"]),
+            )[0]
+            if classify_entity(canonical) is None and (
+                entry["mentions"] >= 2 or entry["manual"]
+            ):
+                linkable[canonical] = entry["type"]
+        return linkable
 
     @staticmethod
     def _fact_date(r: dict) -> str:
