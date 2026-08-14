@@ -351,6 +351,27 @@ class SecurityGate:
             tool_input=tool_input,
         )
 
+    # ------------------------------------------------------------------
+    # Runtime mode toggle (Telegram /gate)
+    # ------------------------------------------------------------------
+
+    def set_mode(self, mode: str | PermissionMode) -> PermissionMode:
+        """Change the permission mode at runtime without a restart.
+
+        Accepts a PermissionMode or its string name ("default", "strict",
+        "autonomous"). The new mode applies to every subsequent evaluate()
+        call. In-memory only: a daemon restart restores the mode from
+        config (security.permission_mode), so the gate always comes back
+        ON in its configured posture.
+        """
+        self._mode = (
+            mode if isinstance(mode, PermissionMode) else PermissionMode(mode)
+        )
+        return self._mode
+
+    def current_mode(self) -> PermissionMode:
+        return self._mode
+
     def _mode_trust_level(self) -> int:
         if self._mode == PermissionMode.AUTONOMOUS:
             return TrustLevel.AUTONOMOUS

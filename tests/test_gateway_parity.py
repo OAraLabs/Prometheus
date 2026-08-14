@@ -181,6 +181,8 @@ MANIFEST: tuple[Family, ...] = (
     Family("anatomy", ("cmd_anatomy",), _cmds("anatomy", "prometheus-anatomy", "anatomy")),
     Family("doctor", ("cmd_doctor",), _cmds("doctor", "prometheus-doctor", "doctor")),
     Family("profile", ("cmd_profile",), _cmds("profile", "prometheus-profile", "profile")),
+    Family("gate", ("cmd_gate",), _cmds("gate", None, None),
+           gap_reason="Telegram-only runtime toggle; slack/discord adapters get it when requested"),
     Family("beacon", ("cmd_beacon",), _cmds("beacon", "prometheus-beacon", "beacon")),
     Family("tools", ("cmd_tools",), _cmds("tools", "prometheus-tools", "tools")),
     Family("pairs", ("cmd_pairs",), _cmds("pairs", "prometheus-pairs", "pairs")),

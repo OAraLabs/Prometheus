@@ -3317,3 +3317,49 @@ def cmd_pairs() -> str:
         return "\n".join(lines)
     except Exception as exc:
         return f"Pair stats unavailable: {exc}"
+
+
+def cmd_gate(gate: Any, arg: str = "") -> str:
+    """Handle /gate [off|on|status] — toggle the permission gate at runtime.
+
+    ``gate`` is a SecurityGate (or anything with set_mode/current_mode).
+
+    - /gate off  -> autonomous: no approval prompts (always-blocked
+      patterns and denied_paths STILL enforced).
+    - /gate on   -> back to the mode from config (permission_mode).
+    - /gate      -> show current mode.
+
+    In-memory only: a daemon restart restores the configured mode, so
+    the gate always comes back in its safe posture.
+    """
+    if gate is None:
+        return "No permission gate is wired in this deployment."
+
+    arg = arg.strip().lower()
+    current = getattr(gate, "current_mode", lambda: None)()
+
+    if arg in ("off", "bypass", "autonomous"):
+        gate.set_mode("autonomous")
+        return (
+            "Permission gate OFF (autonomous).\n"
+            "Approval prompts suppressed; always-blocked commands and "
+            "denied paths still enforced.\n"
+            "/gate on to restore. A daemon restart also restores it."
+        )
+    if arg in ("on", "default"):
+        gate.set_mode("default")
+        return "Permission gate ON (default). Approval prompts restored."
+    if arg in ("strict",):
+        gate.set_mode("strict")
+        return "Permission gate set to STRICT (writes + network need approval)."
+    if arg and arg != "status":
+        return f"Unknown gate mode: {arg}\nUsage: /gate [off | on | strict | status]"
+
+    state = current.value if current is not None else "unknown"
+    note = "" if state != "autonomous" else "  <- prompts suppressed"
+    return (
+        f"Permission gate: {state}{note}\n"
+        "/gate off — autonomous (no prompts)\n"
+        "/gate on  — default\n"
+        "/gate strict — extra-cautious"
+    )

@@ -287,6 +287,10 @@ _DIRECT_EVALUATE_TESTS: dict[str, str] = {
     "test_approval_queue.py":
         "asserts the queue's handling of an APPROVE decision, not the path "
         "extraction that produces one",
+    "test_gate_toggle.py":
+        "unit tests of the runtime mode toggle's effect on the decision "
+        "table (APPROVE in default -> ALLOW in autonomous); the path-"
+        "extraction wiring is covered here through _execute_tool_call",
 }
 
 
