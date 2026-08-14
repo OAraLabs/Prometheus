@@ -87,9 +87,15 @@ def _run(tmp_path: Path, command: str, *, roots=None):
         denied_paths=[str(tmp_path / "denied")],
         workspace_root=roots if roots is not None else [str(ws)],
     )
+    # The registry's BashTool must see the SAME workspace roots the gate
+    # does. With an empty security_cfg it falls back to the shipped default
+    # (~/.prometheus/workspace), which does not exist on CI runners — every
+    # bash spawn then died with FileNotFoundError instead of running the
+    # command under test.
+    gate_roots = roots if roots is not None else [str(ws)]
     ctx = LoopContext(
         provider=_Scripted(command), model="t", system_prompt="", max_tokens=256,
-        tool_registry=create_tool_registry({}, gate),
+        tool_registry=create_tool_registry({"workspace_root": gate_roots}, gate),
         permission_checker=gate,
         file_mutation_verifier=FileMutationVerifier(),
         cwd=ws,
@@ -287,7 +293,7 @@ def test_a_path_the_gate_cannot_classify_is_logged_not_swallowed(tmp_path, caplo
     gate = _AngryGate(workspace_root=[str(ws)])
     ctx = LoopContext(
         provider=_Scripted(f"echo -n x > {target}"), model="t", system_prompt="",
-        max_tokens=256, tool_registry=create_tool_registry({}, None),
+        max_tokens=256, tool_registry=create_tool_registry({"workspace_root": [str(ws)]}, None),
         permission_checker=gate,
         file_mutation_verifier=FileMutationVerifier(), cwd=ws,
     )
