@@ -224,7 +224,16 @@ class BackgroundTaskManager:
             on_complete=on_complete,
             reengage_prompt=reengage_prompt,
             timeout_seconds=timeout_seconds,
-            spec={"dir": str(watch_dir), "pattern": watch_pattern},
+            # Resolved ONCE, at create, through the same resolver the
+            # cwd uses. This is the load-bearing half: file_watch tasks
+            # are PERSISTED AND RESUMED across restarts, so a stored
+            # relative string would re-resolve against whatever process
+            # cwd the daemon has after a move — a create-time gate on
+            # that string would be decorative.
+            spec={
+                "dir": self.resolve_task_path(watch_dir, base=cwd),
+                "pattern": watch_pattern,
+            },
         )
         record.output_file.write_text("", encoding="utf-8")
         self._tasks[record.id] = record
@@ -442,6 +451,34 @@ class BackgroundTaskManager:
             raise ValueError(f"No task found with ID: {task_id}")
         return task
 
+    @staticmethod
+    def resolve_task_path(value: str | Path, base: str | Path | None = None) -> str:
+        """The ONE resolution every task path goes through.
+
+        ``_new_record`` already did ``str(Path(cwd).resolve())`` for a task's
+        cwd; this is that line, with ``expanduser()`` added and given a name so
+        ``watch_dir`` can use it too rather than growing a second resolver.
+
+        *base* is what a RELATIVE value resolves against, and passing it is
+        not optional for ``watch_dir``: bare ``resolve()`` anchors to the
+        PROCESS cwd, while the security gate resolves the same argument
+        against ``context.cwd`` (see permissions/tool_paths.gate_path_for).
+        Without a base the gate and the watcher rule on DIFFERENT directories
+        — the gate clears one path and the observer watches another. Caught by
+        outcome: a relative watch_dir landed under the daemon's checkout while
+        the gate had cleared it under the task's cwd.
+
+        ``expanduser`` is the bug fix riding on the same line: without it a
+        ``~/logs`` watch_dir was a LITERAL directory named ``~`` under the
+        process cwd, not the operator's home — so the watcher waited forever on
+        a path nobody meant. It applies to ``cwd`` as well now, which is
+        strictly what that line always intended.
+        """
+        candidate = Path(value).expanduser()
+        if base is not None and not candidate.is_absolute():
+            candidate = Path(base).expanduser() / candidate
+        return str(candidate.resolve())
+
     def _new_record(
         self,
         *,
@@ -465,7 +502,7 @@ class BackgroundTaskManager:
             type=task_type,
             status="running",
             description=description,
-            cwd=str(Path(cwd).resolve()),
+            cwd=self.resolve_task_path(cwd),
             output_file=get_tasks_dir() / f"{task_id}.log",
             command=command,
             created_at=time.time(),
