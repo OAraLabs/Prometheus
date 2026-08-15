@@ -514,9 +514,23 @@ async def run_daemon(args: argparse.Namespace) -> None:
             detected_limit=detected_ctx_size,
         )
         if compactor is not None:
+            # Report the RESOLVED budget, not the configured one. This line
+            # used to print `_effective_limit` — the raw config number — while
+            # the budget actually in force came from limit_for(). During the
+            # 2026-08-14 context outage it read "limit=72000" on a box whose
+            # server had 32768, which is precisely the wrong thing to tell
+            # someone diagnosing an over-budget failure.
+            _resolved = compactor.limit_for(model_name)
+            _source = (
+                "detected" if _resolved == (detected_ctx_size or -1)
+                else "config"
+            )
             logger.info(
-                "Context compactor ENABLED (limit=%d, threshold=%.0f%%)",
-                compactor._effective_limit,
+                "Context compactor ENABLED (limit=%d [%s], cloud_default=%d, "
+                "threshold=%.0f%%)",
+                _resolved,
+                _source,
+                compactor._cloud_default_limit,
                 compactor._threshold_pct * 100,
             )
         else:
