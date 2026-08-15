@@ -457,6 +457,87 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
     )
 
 
+def check_coding_sandbox(config: dict[str, Any]) -> DiagnosticCheck:
+    """Which sandbox backend coding runs use, and whether it can start.
+
+    ``create_sandbox()`` RAISES rather than silently degrading when the
+    requested backend is unavailable, which is the right behaviour — but it
+    raises at the moment a coding run starts, so an operator who selects
+    ``bwrap`` or ``docker`` learns it is unusable only once they try to use
+    it. Both carry a system dependency nothing else announces: bubblewrap is
+    not a Python package, and Docker needs a reachable daemon.
+
+    This reports the backend AND its availability, so the answer arrives at
+    ``doctor`` time rather than mid-run.
+    """
+    coding = config.get("coding", {}) or {}
+    backend = str(coding.get("sandbox_type", "process")).strip().lower()
+
+    # Severity deliberately does NOT consult `coding.enabled`. That key is
+    # documented in prometheus.yaml.default and defaults to false, but NOTHING
+    # READS IT — `run_coding_task()` builds a sandbox regardless, so a coding
+    # run can start whatever the flag says. Gating this row on it would report
+    # "nothing invokes this yet" about a backend that is one command away from
+    # failing, which is the sort of reassuring-but-false line doctor exists to
+    # prevent.
+    if backend == "process":
+        # Available everywhere — but "available" is not "contains". Stating
+        # the limit here is the whole point: ProcessSandbox confines the file
+        # tools and nothing else, and a one-line shell redirect leaves it.
+        return DiagnosticCheck(
+            name="Coding sandbox", category="resources", status="ok",
+            message="backend 'process' — confines file tools only, "
+                    "a shell redirect escapes it",
+        )
+
+    detail: str
+    available: bool
+    if backend == "bwrap":
+        try:
+            from prometheus.coding.sandbox import BwrapSandbox
+
+            if not BwrapSandbox.is_available():
+                available, detail = False, (
+                    "the bwrap binary is not on PATH (install bubblewrap)"
+                )
+            else:
+                chk = BwrapSandbox.self_check()
+                available = bool(chk.ok)
+                detail = "namespace check passed" if chk.ok else chk.detail
+        except Exception as exc:
+            available, detail = False, f"could not be checked ({exc})"
+    elif backend == "docker":
+        try:
+            from prometheus.coding.sandbox import docker_available
+
+            available = docker_available()
+            detail = ("Docker daemon reachable" if available
+                      else "no reachable Docker daemon")
+        except Exception as exc:
+            available, detail = False, f"could not be checked ({exc})"
+    else:
+        return DiagnosticCheck(
+            name="Coding sandbox", category="resources", status="error",
+            message=f"unknown backend {backend!r}",
+            fix="Set coding.sandbox_type to one of: process, bwrap, docker.",
+        )
+
+    if available:
+        return DiagnosticCheck(
+            name="Coding sandbox", category="resources", status="ok",
+            message=f"backend {backend!r} — {detail}",
+        )
+
+    return DiagnosticCheck(
+        name="Coding sandbox", category="resources", status="error",
+        message=f"backend {backend!r} is NOT available — {detail}; "
+                f"coding runs will fail to start",
+        fix=f"Install/start the {backend} backend, or set "
+            f"coding.sandbox_type: process — which starts anywhere but "
+            f"confines file tools only.",
+    )
+
+
 def check_trajectory_export(config: dict[str, Any]) -> DiagnosticCheck:
     """Is golden-trace capture actually accumulating anything?
 
@@ -575,6 +656,7 @@ def run_extended_checks(
         check_token(config),
         *check_gateways(config),
         check_advertised_tools(config),
+        check_coding_sandbox(config),
         check_trajectory_export(config),
         check_whisper(config),
     ]

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+#
+# Records the dev-checkout commit override durably, on the commit itself.
+#
+# .githooks/pre-commit refuses commits made from the SHARED dev checkout
+# unless PROMETHEUS_ALLOW_DEV_COMMIT=1 is set. That override prints a loud
+# banner, but a hook's stderr scrolls away — and the whole argument for
+# having an escape hatch (see deploy_guard.sh) is that an override which
+# ANNOUNCES ITSELF beats a guard people comment out. An announcement nobody
+# can find later is only half of it.
+#
+# So the exception is written into the commit message as a trailer, where
+# `git log --grep=Dev-checkout-override` finds it months later and a
+# reviewer sees it in the PR. This is the analogue of the deploy guard
+# logging its override to the journal: durable, and in the place you would
+# actually look.
+#
+# Install: git config core.hooksPath .githooks
+
+set -euo pipefail
+
+MSG_FILE="${1:?prepare-commit-msg: missing message-file argument}"
+COMMIT_SOURCE="${2:-}"
+
+# Only when the override is actually in play.
+[ "${PROMETHEUS_ALLOW_DEV_COMMIT:-0}" = "1" ] || exit 0
+
+# Only in the main checkout — worktrees are the encouraged path and are never
+# an exception to anything. Same test as pre-commit: --git-dir and
+# --git-common-dir are equal ONLY here.
+_git_dir=$(git rev-parse --absolute-git-dir)
+_common_dir=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
+[ "$_git_dir" = "$_common_dir" ] || exit 0
+
+# Never touch an existing message being reused verbatim: amending, or
+# replaying a commit (merge/squash/message/commit) would otherwise
+# accumulate a trailer per invocation.
+case "$COMMIT_SOURCE" in
+    merge|squash|commit) exit 0 ;;
+esac
+
+TRAILER="Dev-checkout-override: PROMETHEUS_ALLOW_DEV_COMMIT=1"
+
+# Idempotent — a second run must not stack a duplicate trailer.
+if grep -qF "$TRAILER" "$MSG_FILE" 2>/dev/null; then
+    exit 0
+fi
+
+# `git interpret-trailers` places this in the trailer block correctly whether
+# or not the message already has one, rather than blindly appending a line
+# after the comment block git adds below the message.
+printf '%s\n' "$(git interpret-trailers --trailer "$TRAILER" < "$MSG_FILE")" \
+    > "$MSG_FILE"

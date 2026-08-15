@@ -22,6 +22,7 @@ from prometheus.cli.doctor import (
     check_dirs_writable,
     check_gateways,
     check_inference,
+    check_coding_sandbox,
     check_token,
     check_trajectory_export,
     check_web_port,
@@ -454,3 +455,103 @@ class TestTrajectoryExportCheck:
     def test_absent_config_defaults_to_enabled(self, tmp_path):
         self._seed(tmp_path, 0)
         assert check_trajectory_export({}).status == "ok"
+
+
+class TestCodingSandboxCheck:
+    """`doctor` must answer "which backend, and can it start?" BEFORE a run.
+
+    create_sandbox() raises rather than degrading when a backend is
+    unavailable — right behaviour, but it raises when a coding run starts, so
+    an operator who selects bwrap or docker discovers the problem mid-task.
+    Both carry a system dependency nothing else announces.
+    """
+
+    def _check(self, **coding):
+        return check_coding_sandbox({"coding": coding})
+
+    def test_process_backend_states_its_limit(self):
+        """'available' is not 'contains'. ProcessSandbox starts anywhere and
+        a one-line shell redirect leaves it — saying so is the point."""
+        c = self._check(enabled=True, sandbox_type="process")
+        assert c.status == "ok"
+        assert "process" in c.message
+        assert "redirect" in c.message
+
+    def test_default_backend_is_process(self):
+        assert "process" in check_coding_sandbox({}).message
+
+    def test_unknown_backend_is_an_error(self):
+        c = self._check(enabled=True, sandbox_type="nonsense")
+        assert c.status == "error"
+        assert c.fix and "process" in c.fix
+
+    def test_unavailable_backend_errors_when_coding_is_on(self, monkeypatch):
+        monkeypatch.setattr(
+            "prometheus.coding.sandbox.docker_available", lambda: False
+        )
+        c = self._check(enabled=True, sandbox_type="docker")
+        assert c.status == "error"
+        assert "NOT available" in c.message
+        assert "will fail to start" in c.message
+
+    def test_severity_ignores_the_inert_coding_enabled_flag(self, monkeypatch):
+        """`coding.enabled` is documented and defaults to false, but NOTHING
+        reads it — run_coding_task() builds a sandbox regardless. Gating this
+        row on it would report "nothing invokes this yet" about a backend one
+        command away from failing."""
+        monkeypatch.setattr(
+            "prometheus.coding.sandbox.docker_available", lambda: False
+        )
+        for flag in (True, False):
+            c = self._check(enabled=flag, sandbox_type="docker")
+            assert c.status == "error", f"enabled={flag} changed the verdict"
+            assert "will fail to start" in c.message
+
+    def test_available_docker_is_ok(self, monkeypatch):
+        monkeypatch.setattr(
+            "prometheus.coding.sandbox.docker_available", lambda: True
+        )
+        c = self._check(enabled=True, sandbox_type="docker")
+        assert c.status == "ok"
+        assert "reachable" in c.message
+
+    def test_bwrap_missing_binary_names_the_package(self, monkeypatch):
+        """The whole onboarding gap: bubblewrap is not a Python dependency,
+        so the fix has to say what to install."""
+        monkeypatch.setattr(
+            "prometheus.coding.sandbox.BwrapSandbox.is_available",
+            staticmethod(lambda: False),
+        )
+        c = self._check(enabled=True, sandbox_type="bwrap")
+        assert c.status == "error"
+        assert "bubblewrap" in c.message
+
+    def test_bwrap_present_but_blocked_reports_the_host_reason(self, monkeypatch):
+        """Installed is not working. When the kernel refuses the namespace,
+        the self-check's own detail must reach the operator rather than a
+        generic 'unavailable'."""
+        from prometheus.coding.sandbox import BwrapSelfCheck
+
+        monkeypatch.setattr(
+            "prometheus.coding.sandbox.BwrapSandbox.is_available",
+            staticmethod(lambda: True),
+        )
+        monkeypatch.setattr(
+            "prometheus.coding.sandbox.BwrapSandbox.self_check",
+            staticmethod(lambda: BwrapSelfCheck(False, "uid map denied", False, False)),
+        )
+        c = self._check(enabled=True, sandbox_type="bwrap")
+        assert c.status == "error"
+        assert "uid map denied" in c.message
+
+    def test_backend_probe_failure_never_raises(self, monkeypatch):
+        """Diagnostics degrade; they never crash the doctor."""
+        def _boom():
+            raise RuntimeError("docker exploded")
+
+        monkeypatch.setattr(
+            "prometheus.coding.sandbox.docker_available", _boom
+        )
+        c = self._check(enabled=True, sandbox_type="docker")
+        assert c.status == "error"
+        assert "could not be checked" in c.message

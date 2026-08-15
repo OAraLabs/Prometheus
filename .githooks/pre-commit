@@ -1,11 +1,87 @@
 #!/usr/bin/env bash
 #
-# Pre-commit hook: blocks commits containing secrets, private IPs,
-# or infrastructure-specific data that shouldn't go public.
+# Pre-commit hook. Two guards, in order:
+#   1. commits from the SHARED dev checkout are refused (worktrees only)
+#   2. commits containing secrets, private IPs, or infrastructure-specific
+#      data that shouldn't go public are blocked
 #
 # Install: git config core.hooksPath .githooks
 
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Guard 1 — commit from a worktree, not from the shared checkout.
+#
+# Concurrent sessions share one tree, and it collides: a session switched the
+# dev checkout to another branch mid-session and a second session's edits
+# landed on it; a stray `git add` swept unrelated files into #183; stale
+# stashes from unrelated contexts accumulate on main. None of it announced
+# itself — the tree just quietly was not what the last command assumed.
+#
+# The deploy clone already proved the shape: it refuses commits outright
+# (scripts/install-deploy-guards.sh) and that discipline has held. This is
+# the same idea one step weaker — the dev checkout may still be committed
+# from deliberately, but not by accident.
+#
+# WORKTREES ARE EXEMPT, which is the whole point. A linked worktree's
+# --git-dir is .git/worktrees/<name> while --git-common-dir is .git; they are
+# equal ONLY in the main checkout. (core.hooksPath is shared across every
+# worktree, so without this test the guard would block the very workflow it
+# exists to encourage.)
+#
+# ESCAPE HATCH, DELIBERATE AND VISIBLE
+# ------------------------------------
+# PROMETHEUS_ALLOW_DEV_COMMIT=1 permits the commit and records that it did —
+# loudly on stderr, and durably as a Dev-checkout-override trailer added by
+# .githooks/prepare-commit-msg. Same reasoning as
+# PROMETHEUS_ALLOW_UNMERGED_DEPLOY in scripts/deploy_guard.sh: a guard with no
+# override is one people disable wholesale the first time it blocks something
+# legitimate (the --no-verify reflex), and an override that announces itself
+# beats a guard that gets commented out. The trailer is the durable half —
+# a hook's stderr scrolls away, whereas `git log --grep` finds the trailer
+# months later.
+# ---------------------------------------------------------------------------
+_git_dir=$(git rev-parse --absolute-git-dir)
+_common_dir=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
+
+if [ "$_git_dir" = "$_common_dir" ]; then
+    if [ "${PROMETHEUS_ALLOW_DEV_COMMIT:-0}" = "1" ]; then
+        printf '\n' >&2
+        printf 'pre-commit: OVERRIDE ACTIVE (PROMETHEUS_ALLOW_DEV_COMMIT=1)\n' >&2
+        printf 'pre-commit: committing from the SHARED dev checkout, not a worktree.\n' >&2
+        printf 'pre-commit: recorded as a Dev-checkout-override trailer on this commit.\n' >&2
+        printf '\n' >&2
+    else
+        cat <<'MSG' >&2
+
+=== COMMIT REFUSED — this is the shared dev checkout ===
+
+  Other sessions share this tree. Committing here races them: the branch
+  under you can change mid-session, and a stray `git add` picks up their
+  files as well as yours.
+
+  Work in a worktree instead — one per session:
+
+      git -C "$(git rev-parse --show-toplevel)" worktree add \
+          .claude/worktrees/<name> -b <branch> origin/main
+
+  Your staged changes are safe. To move them across:
+
+      git stash push -m <name> -- <paths you touched>
+      # then, inside the new worktree:
+      git stash pop
+
+  Deliberately committing here anyway (rebases, hotfixes, solo work):
+
+      PROMETHEUS_ALLOW_DEV_COMMIT=1 git commit ...
+
+  That is allowed and recorded — it adds a Dev-checkout-override trailer to
+  the commit rather than hiding the exception.
+
+MSG
+        exit 1
+    fi
+fi
 
 BLOCKED=0
 
