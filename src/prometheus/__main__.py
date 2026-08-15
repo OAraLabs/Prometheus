@@ -770,14 +770,28 @@ def run_coding_task(args) -> int:
         get_data_dir().parent / "coding"
     )
     clone_name = f"{task_id}-{int(_time.time())}"
+    # coding.sandbox_type is read HERE because this is the only construction
+    # site for a coding run's sandbox. A backend selected in config but not
+    # threaded to this call is a setting that silently does nothing.
+    coding_cfg = config.get("coding", {}) or {}
+    sandbox_backend = str(coding_cfg.get("sandbox_type", "process"))
     try:
         sandbox = clone_repo_for_sandbox(
-            args.repo, sandbox_parent, name=clone_name
+            args.repo,
+            sandbox_parent,
+            name=clone_name,
+            backend=sandbox_backend,
+            task_id=task_id,
+            network_isolation=bool(coding_cfg.get("network_isolation", False)),
+            image=coding_cfg.get("docker_image") or None,
         )
     except Exception as exc:
+        # A requested-but-unavailable backend raises rather than degrading, so
+        # this abandons the run instead of executing it under weaker
+        # confinement than the operator asked for.
         print(_json.dumps({
             "task_id": task_id, "status": "failed_abandoned",
-            "reason": f"sandbox clone failed: {exc}",
+            "reason": f"sandbox setup failed (backend={sandbox_backend!r}): {exc}",
         }))
         return 1
 
@@ -792,8 +806,20 @@ def run_coding_task(args) -> int:
         ),
         adapter=adapter,
         telemetry=telemetry,
-        max_rounds=args.max_rounds,
-        max_wall_seconds=float(args.max_wall_seconds),
+        # Precedence: explicit CLI flag > config > built-in default. Without
+        # the config leg, coding.max_iterations and
+        # coding.max_task_duration_minutes were near-twins of these flags
+        # that nothing read — a config that looks tunable and is not.
+        max_rounds=(
+            args.max_rounds
+            if args.max_rounds is not None
+            else int(coding_cfg.get("max_iterations", 30))
+        ),
+        max_wall_seconds=float(
+            args.max_wall_seconds
+            if args.max_wall_seconds is not None
+            else float(coding_cfg.get("max_task_duration_minutes", 20)) * 60.0
+        ),
         suppress_thinking=True if args.suppress_thinking else False,
         control_dir=args.control_dir,
     )
@@ -1075,12 +1101,18 @@ def main() -> None:
         help="Task id (default: generated; names the branch coding/<id>)",
     )
     code_parser.add_argument(
-        "--max-rounds", type=int, default=30,
-        help="Model-round cap across the whole run (default: 30)",
+        # default=None so the config can supply it; the effective fallback
+        # lives at the use site. A literal default here would silently win
+        # over coding.max_iterations, which is how that key came to look
+        # settable while doing nothing.
+        "--max-rounds", type=int, default=None,
+        help="Model-round cap across the whole run "
+             "(default: coding.max_iterations, else 30)",
     )
     code_parser.add_argument(
-        "--max-wall-seconds", type=int, default=1200,
-        help="Wall-clock cap for the run (default: 1200)",
+        "--max-wall-seconds", type=int, default=None,
+        help="Wall-clock cap for the run "
+             "(default: coding.max_task_duration_minutes, else 1200)",
     )
     code_parser.add_argument(
         "--sandbox-parent", default=None,

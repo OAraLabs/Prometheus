@@ -174,9 +174,13 @@ class TestClone:
 # DockerSandbox — container-based isolation (subprocess mocked)
 # --------------------------------------------------------------------------- #
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from prometheus.coding.sandbox import DockerSandbox, docker_available
+from prometheus.coding.sandbox import (
+    CONTAINER_WORKDIR,
+    DockerSandbox,
+    docker_available,
+)
 
 
 class TestDockerSandbox:
@@ -224,20 +228,66 @@ class TestDockerSandbox:
             box.resolve("/etc/passwd")
 
     def test_run_executes_docker_exec(self, tmp_path: Path):
+        """run() shells out to `docker exec` and reports its exit code.
+
+        Patches ``asyncio.create_subprocess_exec``, not ``subprocess.run``:
+        run() is a coroutine on the daemon's event loop, and a blocking
+        subprocess call there stalls every other session for the duration of
+        the command. The assertion below on the WORKDIR is the load-bearing
+        one — see test_run_uses_container_workdir_not_host_path.
+        """
         box = self._make_box(tmp_path)
-        # subprocess.run uses text=True, so stdout/stderr are strings
-        fake_result = MagicMock(
-            returncode=0, stdout="hello\n", stderr="",
-            poll=MagicMock(return_value=0),
-        )
-        with patch("prometheus.coding.sandbox.subprocess.run", return_value=fake_result) as mock_run:
+
+        fake_proc = MagicMock()
+        fake_proc.returncode = 0
+        fake_proc.communicate = AsyncMock(return_value=(b"hello\n", None))
+
+        async def _fake_exec(*args, **kwargs):
+            _fake_exec.argv = list(args)
+            return fake_proc
+
+        with patch(
+            "prometheus.coding.sandbox.asyncio.create_subprocess_exec",
+            side_effect=_fake_exec,
+        ):
             result = asyncio.run(box.run("echo hello"))
-            assert result.exit_code == 0
-            assert "hello" in result.output
-            cmd = mock_run.call_args[0][0]
-            assert cmd[0] == "docker"
-            assert cmd[1] == "exec"
-            assert "--workdir" in cmd
+
+        assert result.exit_code == 0
+        assert "hello" in result.output
+        argv = _fake_exec.argv
+        assert argv[0] == "docker"
+        assert argv[1] == "exec"
+        assert "--workdir" in argv
+
+    def test_run_uses_container_workdir_not_host_path(self, tmp_path: Path):
+        """REGRESSION: --workdir must be the in-container mount point.
+
+        The host path does not exist inside the container's mount namespace,
+        so passing str(root) made every exec fail with "no such file or
+        directory" — a failure that reads like the command's fault rather
+        than the sandbox's. Verified against a live container: the host path
+        is genuinely absent inside, only CONTAINER_WORKDIR resolves.
+        """
+        box = self._make_box(tmp_path)
+
+        fake_proc = MagicMock()
+        fake_proc.returncode = 0
+        fake_proc.communicate = AsyncMock(return_value=(b"", None))
+
+        async def _fake_exec(*args, **kwargs):
+            _fake_exec.argv = list(args)
+            return fake_proc
+
+        with patch(
+            "prometheus.coding.sandbox.asyncio.create_subprocess_exec",
+            side_effect=_fake_exec,
+        ):
+            asyncio.run(box.run("true"))
+
+        argv = _fake_exec.argv
+        workdir = argv[argv.index("--workdir") + 1]
+        assert workdir == CONTAINER_WORKDIR
+        assert str(box.root) not in argv
 
     def test_run_on_closed_sandbox_raises(self, tmp_path: Path):
         box = self._make_box(tmp_path)
@@ -266,3 +316,100 @@ class TestDockerSandbox:
         fake = MagicMock(returncode=0, stdout=b"Server version:", stderr=b"")
         with patch("prometheus.coding.sandbox.subprocess.run", return_value=fake):
             assert docker_available() is True
+
+
+# --------------------------------------------------------------------------- #
+# DockerSandbox against a REAL daemon
+#
+# The mocked class above proves argv shape; it cannot prove containment. These
+# do — and they are the only tests in the repo that demonstrate the coding
+# sandbox actually refusing a shell escape, since bwrap is blocked on this
+# host (see tests/test_bwrap_sandbox.py and the BwrapSandbox docstring).
+# Gated on a reachable daemon so machines without Docker skip rather than fail.
+# --------------------------------------------------------------------------- #
+
+requires_docker = pytest.mark.skipif(
+    not docker_available(), reason="no reachable Docker daemon"
+)
+
+
+@requires_docker
+class TestDockerSandboxLive:
+
+    def _live_box(self, tmp_path: Path) -> DockerSandbox:
+        import uuid
+
+        root = tmp_path / "jail"
+        root.mkdir(exist_ok=True)
+        (root / "app.py").write_text("x = 1\n")
+        return DockerSandbox(root=root, task_id=str(uuid.uuid4()))
+
+    def test_shell_redirect_outside_the_jail_is_contained(self, tmp_path: Path):
+        """THE ACCEPTANCE TEST. ProcessSandbox fails this by design (rc=0,
+        file lands outside); the whole point of a kernel/container backend is
+        that it does not."""
+        outside = tmp_path / "outside" / "escaped.txt"
+        outside.parent.mkdir(parents=True, exist_ok=True)
+        outside.unlink(missing_ok=True)
+        box = self._live_box(tmp_path)
+        try:
+            r = asyncio.run(box.run(f"echo pwned > {outside}"))
+            assert not outside.exists(), "redirect escaped the container"
+            assert r.exit_code != 0
+        finally:
+            box.close()
+
+    def test_workspace_is_readable_and_writable(self, tmp_path: Path):
+        """--cap-drop ALL removes CAP_DAC_OVERRIDE, so a root container
+        cannot even READ a user-owned bind mount. Running as the host uid is
+        what makes the jail usable at all — this fails loudly if that
+        regresses."""
+        box = self._live_box(tmp_path)
+        try:
+            assert "x = 1" in asyncio.run(box.run("cat app.py")).output
+            r = asyncio.run(box.run("echo inside > new.txt"))
+            assert r.exit_code == 0
+            assert (box.root / "new.txt").exists()
+        finally:
+            box.close()
+
+    def test_created_files_are_not_root_owned(self, tmp_path: Path):
+        """A container running as root would litter the clone with
+        root-owned artifacts the daemon user cannot clean up."""
+        box = self._live_box(tmp_path)
+        try:
+            asyncio.run(box.run("echo hi > owned.txt"))
+            assert (box.root / "owned.txt").stat().st_uid == os.getuid()
+        finally:
+            box.close()
+
+    def test_root_filesystem_is_read_only(self, tmp_path: Path):
+        box = self._live_box(tmp_path)
+        try:
+            r = asyncio.run(box.run("echo x > /etc/should-not-write"))
+            assert r.exit_code != 0
+            assert "read-only" in r.output.lower()
+        finally:
+            box.close()
+
+    def test_nonzero_exit_is_reported_not_raised(self, tmp_path: Path):
+        box = self._live_box(tmp_path)
+        try:
+            assert asyncio.run(box.run("exit 7")).exit_code == 7
+        finally:
+            box.close()
+
+    def test_timeout_reports_and_leaves_sandbox_usable(self, tmp_path: Path):
+        """After a timeout the container is killed and restarted, so the next
+        iterate-to-green round still has a working sandbox rather than every
+        later call failing against a dead container."""
+        box = self._live_box(tmp_path)
+        try:
+            r = asyncio.run(box.run("sleep 30", timeout_seconds=1.0))
+            assert r.timed_out
+            assert r.exit_code is None
+            follow_up = asyncio.run(box.run("echo still-alive"))
+            assert follow_up.exit_code == 0
+            assert "still-alive" in follow_up.output
+        finally:
+            box.close()

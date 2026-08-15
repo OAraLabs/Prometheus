@@ -9,9 +9,13 @@ never a merge, never a push.
 """
 
 from prometheus.coding.sandbox import (
+    SANDBOX_BACKENDS,
+    BwrapSandbox,
     DockerSandbox,
     ProcessSandbox,
     Sandbox,
+    SandboxBackendUnavailable,
+    SandboxConstructionError,
     SandboxResult,
     SandboxViolation,
     cleanup_stale_docker_containers,
@@ -22,9 +26,13 @@ from prometheus.coding.sandbox import (
 from prometheus.coding.tools import build_coding_registry
 
 __all__ = [
+    "SANDBOX_BACKENDS",
+    "BwrapSandbox",
     "DockerSandbox",
     "ProcessSandbox",
     "Sandbox",
+    "SandboxBackendUnavailable",
+    "SandboxConstructionError",
     "SandboxResult",
     "SandboxViolation",
     "build_coding_registry",
