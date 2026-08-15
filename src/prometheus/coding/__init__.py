@@ -8,13 +8,28 @@ artifact is a feature branch in a dedicated clone of the target repo —
 never a merge, never a push.
 """
 
-from prometheus.coding.sandbox import ProcessSandbox, Sandbox, SandboxResult, SandboxViolation
+from prometheus.coding.sandbox import (
+    DockerSandbox,
+    ProcessSandbox,
+    Sandbox,
+    SandboxResult,
+    SandboxViolation,
+    cleanup_stale_docker_containers,
+    create_sandbox,
+    docker_available,
+    list_stale_docker_containers,
+)
 from prometheus.coding.tools import build_coding_registry
 
 __all__ = [
+    "DockerSandbox",
     "ProcessSandbox",
     "Sandbox",
     "SandboxResult",
     "SandboxViolation",
     "build_coding_registry",
+    "cleanup_stale_docker_containers",
+    "create_sandbox",
+    "docker_available",
+    "list_stale_docker_containers",
 ]

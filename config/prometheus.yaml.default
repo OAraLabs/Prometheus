@@ -459,6 +459,17 @@ trajectory_export:
   output_dir: "~/.prometheus/trajectories/"
   format: jsonl
 
+coding:
+  enabled: false                # SPRINT-coding-mode v2: sandboxed iterate-to-green
+  sandbox_type: process         # process | docker — factory selects backend
+  sandbox_dir: "~/.prometheus/coding/sandboxes/"
+  max_task_duration_minutes: 120
+  max_iterations: 50
+  network_isolation: false      # Only for Docker — drop network access
+  docker_image: "python:3.12-slim"
+  docker_cleanup_max_age_hours: 24
+  docker_cleanup_enabled: true  # Remove stale containers on daemon start
+
 symbiote:
   enabled: false                # GRAFT-SYMBIOTE Session A: scout/harvest/graft pipeline
   github_token: null            # Or set via env: PROMETHEUS_GITHUB_TOKEN (never logged)

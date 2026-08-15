@@ -168,3 +168,101 @@ class TestClone:
         (dest_parent / "run1").mkdir(parents=True)
         with pytest.raises(ValueError, match="already exists"):
             clone_repo_for_sandbox(src, dest_parent, name="run1")
+
+
+# --------------------------------------------------------------------------- #
+# DockerSandbox — container-based isolation (subprocess mocked)
+# --------------------------------------------------------------------------- #
+
+from unittest.mock import patch, MagicMock
+
+from prometheus.coding.sandbox import DockerSandbox, docker_available
+
+
+class TestDockerSandbox:
+
+    def _make_box(self, tmp_path: Path, task_id: str = "test-task", **kw) -> DockerSandbox:
+        root = tmp_path / "jail"
+        root.mkdir(exist_ok=True)
+        with patch("prometheus.coding.sandbox.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+            box = DockerSandbox(root=root, task_id=task_id, **kw)
+        return box
+
+    def test_backend_identifier(self, tmp_path: Path):
+        box = self._make_box(tmp_path)
+        assert box.backend == "docker"
+
+    def test_container_id_deterministic(self, tmp_path: Path):
+        box1 = self._make_box(tmp_path, task_id="task-a")
+        box2 = self._make_box(tmp_path, task_id="task-a")
+        assert box1._container_id == box2._container_id
+
+    def test_network_isolation_flag(self, tmp_path: Path):
+        box = self._make_box(tmp_path, network_isolation=True)
+        assert box._network_isolation is True
+
+    def test_custom_image(self, tmp_path: Path):
+        box = self._make_box(tmp_path, image="my-image:latest")
+        assert box._image == "my-image:latest"
+
+    def test_resolve_inside_jail(self, tmp_path: Path):
+        box = self._make_box(tmp_path)
+        (box.root / "src").mkdir(exist_ok=True)
+        (box.root / "src" / "app.py").touch()
+        assert box.resolve("src/app.py") == box.root / "src" / "app.py"
+
+    def test_resolve_absolute_inside_jail(self, tmp_path: Path):
+        box = self._make_box(tmp_path)
+        x = tmp_path / "jail" / "x"
+        x.touch()
+        assert box.resolve(str(x)) == x
+
+    def test_resolve_outside_jail_raises(self, tmp_path: Path):
+        box = self._make_box(tmp_path)
+        with pytest.raises(SandboxViolation):
+            box.resolve("/etc/passwd")
+
+    def test_run_executes_docker_exec(self, tmp_path: Path):
+        box = self._make_box(tmp_path)
+        # subprocess.run uses text=True, so stdout/stderr are strings
+        fake_result = MagicMock(
+            returncode=0, stdout="hello\n", stderr="",
+            poll=MagicMock(return_value=0),
+        )
+        with patch("prometheus.coding.sandbox.subprocess.run", return_value=fake_result) as mock_run:
+            result = asyncio.run(box.run("echo hello"))
+            assert result.exit_code == 0
+            assert "hello" in result.output
+            cmd = mock_run.call_args[0][0]
+            assert cmd[0] == "docker"
+            assert cmd[1] == "exec"
+            assert "--workdir" in cmd
+
+    def test_run_on_closed_sandbox_raises(self, tmp_path: Path):
+        box = self._make_box(tmp_path)
+        box.close()
+        with pytest.raises(RuntimeError, match="already closed"):
+            asyncio.run(box.run("echo ok"))
+
+    def test_close_removes_container(self, tmp_path: Path):
+        box = self._make_box(tmp_path)
+        fake_result = MagicMock(returncode=0, stdout=b"", stderr=b"")
+        with patch("prometheus.coding.sandbox.subprocess.run", return_value=fake_result) as mock_run:
+            box.close()
+            calls = [c[0][0] for c in mock_run.call_args_list]
+            assert any(c[0] == "docker" and c[1] == "rm" for c in calls)
+
+    def test_docker_available_false_when_no_docker(self):
+        with patch("prometheus.coding.sandbox.subprocess.run", side_effect=FileNotFoundError()):
+            assert docker_available() is False
+
+    def test_docker_available_false_when_docker_fails(self):
+        fake = MagicMock(returncode=1, stdout=b"", stderr=b"not found")
+        with patch("prometheus.coding.sandbox.subprocess.run", return_value=fake):
+            assert docker_available() is False
+
+    def test_docker_available_true_when_docker_ok(self):
+        fake = MagicMock(returncode=0, stdout=b"Server version:", stderr=b"")
+        with patch("prometheus.coding.sandbox.subprocess.run", return_value=fake):
+            assert docker_available() is True
