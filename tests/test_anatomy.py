@@ -753,3 +753,91 @@ class TestUptime:
         with patch("prometheus.config.paths.get_config_dir", return_value=tmp_path):
             result = _read_uptime()
         assert result is None
+
+
+# --------------------------------------------------------------------------- #
+# Two GPUs, two machines — the writer must say WHICH
+#
+# anatomy.py has always captured both cards (`gpu_name` = the inference GPU,
+# `local_gpu_name` = this box's own), with a field comment stating why:
+# "without these fields the agent confidently confuses the two". The writer
+# rendered ONLY `gpu_name`, unlabelled, directly beneath the local Hardware
+# table — so on a split deployment (inference on a remote 4090, a 3090 Ti in
+# the local box) the prompt asserted the remote card was local and the local
+# card did not exist. Populated fields, no consumer.
+# --------------------------------------------------------------------------- #
+
+from prometheus.infra.anatomy import AnatomyState as _State
+from prometheus.infra.anatomy_writer import AnatomyWriter as _Writer
+
+
+def _split_deployment() -> _State:
+    """Inference on a remote card, a different card in this box."""
+    s = _State(hostname="mini")
+    s.gpu_name = "NVIDIA GeForce RTX 4090"
+    s.gpu_vram_total_mb = 24564
+    s.gpu_vram_used_mb = 20810
+    s.gpu_vram_free_mb = 3265
+    s.gpu_is_remote = True
+    s.gpu_inference_host = "198.51.100.9"
+    s.local_gpu_name = "NVIDIA GeForce RTX 3090 Ti"
+    s.local_gpu_vram_total_mb = 24564
+    s.local_gpu_vram_used_mb = 12157
+    s.local_gpu_vram_free_mb = 11956
+    return s
+
+
+class TestGPUAttribution:
+    """Both cards must appear, each tied to its machine."""
+
+    def test_file_names_both_cards(self):
+        md = _Writer()._render(_split_deployment(), [])
+        assert "RTX 4090" in md
+        assert "RTX 3090 Ti" in md, "the local card must not vanish"
+
+    def test_file_marks_the_inference_gpu_remote_with_its_host(self):
+        md = _Writer()._render(_split_deployment(), [])
+        gpu = md[md.index("### GPU"):]
+        assert "REMOTE" in gpu
+        assert "198.51.100.9" in gpu
+
+    def test_file_marks_the_local_card_as_this_machine(self):
+        md = _Writer()._render(_split_deployment(), [])
+        gpu = md[md.index("### GPU"):md.index("### Local backend model")]
+        line = next(l for l in gpu.splitlines() if "3090" in l)
+        assert "this machine" in line.lower()
+
+    def test_summary_attributes_the_local_card_to_the_host(self):
+        """REGRESSION: the tool's first line read
+        'Running on mini + GPU (RTX 4090)' — naming the REMOTE card as the
+        host's own."""
+        line = _Writer().render_summary(_split_deployment()).splitlines()[1]
+        assert "3090" in line, "the 'running on' line must name the LOCAL card"
+        assert "REMOTELY" in line
+        assert "198.51.100.9" in line
+
+    def test_all_local_deployment_reads_naturally(self):
+        s = _State(hostname="box")
+        s.gpu_name = "NVIDIA RTX A6000"
+        s.gpu_is_remote = False
+        line = _Writer().render_summary(s).splitlines()[1]
+        assert "A6000" in line
+        assert "REMOTELY" not in line
+
+    def test_failed_remote_probe_says_so_rather_than_omitting(self):
+        """An absent heading is indistinguishable from 'there is no GPU',
+        which is a different fact."""
+        s = _State(hostname="box")
+        s.gpu_is_remote = True
+        s.gpu_inference_host = "10.0.0.5"
+        s.gpu_probe_error = "SSH credentials not configured"
+        s.local_gpu_name = "NVIDIA RTX 3090 Ti"
+        gpu = _Writer()._render(s, [])
+        assert "### GPU" in gpu
+        assert "not detected" in gpu
+        assert "SSH credentials not configured" in gpu
+
+    def test_no_gpu_emits_no_section(self):
+        md = _Writer()._render(_State(hostname="box"), [])
+        assert "### GPU" not in md
+        assert "GPU" not in _Writer().render_summary(_State(hostname="box")).splitlines()[1]
