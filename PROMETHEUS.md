@@ -1,12 +1,57 @@
 # Prometheus
 
 ## Project Rules
+- **NEVER work in the deploy clone (`~/prometheus-deploy`). Work in `~/Prometheus`.**
+  See "Two checkouts" below — this one has cost real work twice.
 - Python 3.11+, package managed with uv
 - All imports use `from prometheus.` prefix
 - Config lives at config/prometheus.yaml, loaded via prometheus.config
 - Run tests: uv run pytest tests/ -v
 - All donor code has provenance headers (Source, License, Modified)
 - Do not modify files in reference/
+- Stage files BY NAME. `git add tests/` once swept three unrelated untracked
+  files into a provider PR.
+
+## Two checkouts — which one you are in matters
+
+| Path | What it is | May you edit it? |
+|---|---|---|
+| `~/Prometheus` | dev checkout — branch, commit, PR from here | **yes** |
+| `~/prometheus-deploy` | ff-only mirror of `origin/main`; **the tree the daemon runs** | **no** |
+
+The deploy clone is updated one way only:
+
+```bash
+git -C ~/prometheus-deploy fetch origin && git -C ~/prometheus-deploy merge --ff-only origin/main
+```
+
+**Merging a PR and deferring the deploy is two steps, not one.** The daemon's
+`ExecStartPre` guard refuses to boot unless that clone is on `main` AND equal
+to local `origin/main` — *behind* is a refusal too. Skip the ff and you have
+armed a failure on the next restart for any reason, which lands on whoever
+restarts next, not on whoever merged.
+
+Why this is a hard rule rather than a preference — it has failed twice:
+
+1. **353 lines of uncommitted WIP** sat in the clone for ~10 hours. The daemon
+   had booted before the edits landed, so it had never been live, and a
+   restart would have deployed it silently alongside an unrelated change.
+2. **A whole feature was committed there.** That diverged the clone (arming
+   the boot refusal above) and the commit was unpushed and absent from
+   `~/Prometheus` — one `git reset --hard` from being the only copy destroyed.
+
+A local `pre-commit` hook in the deploy clone now refuses commits outright.
+It lives in `.git/hooks/`, which is **not tracked**, so it does not survive
+recreating the clone — reinstall with:
+
+```bash
+scripts/install-deploy-guards.sh
+```
+
+Before restarting the daemon, always check the clone is both clean and equal
+to `origin/main` — `git -C ~/prometheus-deploy status --short` and
+`git -C ~/prometheus-deploy log origin/main..HEAD`. A clone that is *diverged*
+looks the same as one that is merely *behind* until the ff fails.
 
 ## Key Paths
 - Tools: src/prometheus/tools/builtin/

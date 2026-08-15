@@ -412,11 +412,13 @@ class TestApprovalHandlers:
         queue = MagicMock()
         adapter._approval_queue = queue
         interaction = _FakeInteraction()
-        await adapter._app_approve(interaction, "")
+        # A mistyped scope is what still renders usage; bare approve resolves
+        # the single pending request instead of demanding its id.
+        await adapter._app_approve(interaction, "forever abc123")
         assert interaction.all_messages == [
-            "Usage: /prometheus ops approve <id> | "
-            "/prometheus ops approve session <id> | "
-            "/prometheus ops approve always <id>"
+            "Usage: /prometheus ops approve [id] | "
+            "/prometheus ops approve session [id] | "
+            "/prometheus ops approve always [id]"
         ]
 
     @pytest.mark.asyncio

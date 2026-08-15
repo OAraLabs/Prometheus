@@ -219,10 +219,16 @@ class TestSlackApprovalHandlers:
     @pytest.mark.asyncio
     async def test_approve_usage(self, ack, respond):
         adapter = _make_slack_adapter()
+        # Bare approve with no queue attached reports the queue, not usage —
+        # the id is optional now, so usage is reserved for uninterpretable
+        # input (see the mistyped-scope case below).
         await adapter._slash_approve(ack, _cmd(""), respond)
+        assert respond.messages == ["Approval queue not active."]
+        respond.messages.clear()
+        await adapter._slash_approve(ack, _cmd("forever abc123"), respond)
         assert respond.messages == [
-            "Usage: /prometheus-approve <id> | "
-            "/prometheus-approve session <id> | /prometheus-approve always <id>"
+            "Usage: /prometheus-approve [id] | "
+            "/prometheus-approve session [id] | /prometheus-approve always [id]"
         ]
 
     @pytest.mark.asyncio

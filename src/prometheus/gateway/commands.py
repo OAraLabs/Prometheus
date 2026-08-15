@@ -1967,6 +1967,31 @@ def _is_request_id(token: str) -> bool:
     return bool(_re.fullmatch(r"[0-9a-f]{6,16}", token))
 
 
+def _pending_actions(queue: Any) -> list:
+    """Pending approval requests, oldest first.
+
+    Oldest-first matters for the single-request shortcut: when a second
+    request arrives between the prompt and the reply, "the one I was looking
+    at" is the older one.
+    """
+    pending = getattr(queue, "pending", None)
+    if not isinstance(pending, dict):
+        # A stub/mock queue, or a future queue that stores pending work
+        # differently. Report "nothing pending" rather than raising out of a
+        # chat command — and never guess at a shape we cannot read.
+        return []
+    try:
+        return sorted(pending.values(), key=lambda a: getattr(a, "created_at", 0.0))
+    except TypeError:
+        return list(pending.values())
+
+
+def _short(text: str, limit: int = 70) -> str:
+    """One-line, length-capped description for a pending-request listing."""
+    flat = " ".join(str(text or "").split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
 async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     """Approve a pending tool request (shared /approve core).
 
@@ -1981,14 +2006,34 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     evaluated after always-blocked / denied / exfiltration).
     """
     usage = (
-        f"Usage: {prefix}approve <id> | "
-        f"{prefix}approve session <id> | {prefix}approve always <id>"
+        f"Usage: {prefix}approve [id] | "
+        f"{prefix}approve session [id] | {prefix}approve always [id]"
     )
-    if not arg_text:
-        return usage
     tokens = arg_text.split()
     scope = "once"
-    if tokens[0] in ("session", "always"):
+
+    # `/approve all` — clear the whole queue in one message. Each request is
+    # approved ONCE; this deliberately grants nothing persistent, so draining
+    # a backlog can never widen trust the way `always` does.
+    if tokens and tokens[0] == "all":
+        if queue is None:
+            return "Approval queue not active."
+        pending = _pending_actions(queue)
+        if not pending:
+            return "No pending approval requests."
+        approved: list[str] = []
+        for act in pending:
+            rid = getattr(act, "request_id", "")
+            if rid and await queue.approve(rid):
+                approved.append(rid)
+        if not approved:
+            return "No pending approval requests."
+        return (
+            f"Approved {len(approved)} request(s), once each: "
+            + ", ".join(approved)
+        )
+
+    if tokens and tokens[0] in ("session", "always"):
         scope = tokens[0]
         tokens = tokens[1:]
     elif len(tokens) > 1 and not _is_request_id(tokens[0]):
@@ -1996,11 +2041,42 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
         # certainly a mistyped scope word ("forever"). Give the usage back
         # instead of a confusing "No pending request: <word>".
         return usage
-    request_id = tokens[0] if tokens else ""
-    if not request_id:
-        return usage
     if queue is None:
         return "Approval queue not active."
+
+    request_id = tokens[0] if tokens else ""
+    if not request_id:
+        # THE ID IS OPTIONAL WHEN IT IS UNAMBIGUOUS.
+        #
+        # Every form used to demand an explicit 8-hex id, so a bare
+        # `/approve` answered with usage text and nothing else — during an
+        # approval storm that means scrolling back through the prompts to
+        # copy an id, per prompt, which is exactly when you least want to.
+        # Observed live 2026-08-14: five consecutive bare `/approve`
+        # messages, five usage replies, zero approvals.
+        #
+        # Resolving it only when there is exactly ONE pending request keeps
+        # the convenience from ever approving something the operator did not
+        # look at: with several outstanding, they are listed and the id stays
+        # required.
+        pending = _pending_actions(queue)
+        if not pending:
+            return "No pending approval requests."
+        if len(pending) > 1:
+            lines = [
+                f"{len(pending)} pending requests — name one "
+                f"(or {prefix}approve all):"
+            ]
+            for act in pending:
+                lines.append(
+                    f"  {getattr(act, 'request_id', '?')}  "
+                    f"{getattr(act, 'tool_name', '?')} — "
+                    f"{_short(getattr(act, 'description', ''))}"
+                )
+            return "\n".join(lines)
+        request_id = getattr(pending[0], "request_id", "")
+        if not request_id:
+            return usage
     # Capture the action BEFORE approve(): request_approval pops it from the
     # pending dict the moment the event fires, and the grant needs the
     # structured target (path/command) it carries.
@@ -2048,11 +2124,32 @@ def cmd_grants(queue: Any, *, prefix: str = "/") -> str:
 
 
 async def cmd_deny(queue: Any, request_id: str, *, prefix: str = "/") -> str:
-    """Deny a pending tool request (shared /deny core)."""
-    if not request_id:
-        return f"Usage: {prefix}deny {{request_id}}"
+    """Deny a pending tool request (shared /deny core).
+
+    The id is optional on the same terms as :func:`cmd_approve` — resolved
+    only when exactly one request is pending. Denying is the safe direction,
+    but it stays symmetrical on purpose: an operator who learns the shortcut
+    from one command should not be surprised by the other.
+    """
+    request_id = (request_id or "").strip()
     if queue is None:
         return "Approval queue not active."
+    if not request_id:
+        pending = _pending_actions(queue)
+        if not pending:
+            return "No pending approval requests."
+        if len(pending) > 1:
+            lines = [f"{len(pending)} pending requests — name one to deny:"]
+            for act in pending:
+                lines.append(
+                    f"  {getattr(act, 'request_id', '?')}  "
+                    f"{getattr(act, 'tool_name', '?')} — "
+                    f"{_short(getattr(act, 'description', ''))}"
+                )
+            return "\n".join(lines)
+        request_id = getattr(pending[0], "request_id", "")
+        if not request_id:
+            return f"Usage: {prefix}deny [id]"
     ok = await queue.deny(request_id)
     if ok:
         return f"Denied: {request_id}"
