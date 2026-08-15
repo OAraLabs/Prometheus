@@ -126,3 +126,136 @@ class TestGrantMatching:
         gate.add_grant(Grant(kind="command_prefix", value="ls", tool_name="bash"))
         gate.add_grant(Grant(kind="command_prefix", value="ls", tool_name="bash"))
         assert len(gate.list_grants()) == 1
+
+
+# --------------------------------------------------------------------------- #
+# The id is optional when it is unambiguous
+#
+# Live 2026-08-14: five consecutive bare `/approve` messages produced five
+# usage replies and zero approvals. Every form demanded an explicit 8-hex id,
+# so clearing an approval storm meant scrolling back to copy one per prompt.
+# --------------------------------------------------------------------------- #
+
+import asyncio as _asyncio
+from unittest.mock import MagicMock as _MagicMock
+
+from prometheus.gateway.commands import cmd_approve, cmd_deny
+from prometheus.permissions.approval_queue import ApprovalQueue, ApprovalResult
+
+
+def _result_of(queue, request_id: str):
+    """The recorded verdict for a request.
+
+    approve()/deny() set the action's result and wake the waiter; the pending
+    dict is drained by request_approval on the WAITING side, which no test
+    here runs — so asserting on the dict would assert the wrong half.
+    """
+    return queue.pending[request_id]._result
+
+
+def _queue_with(n: int) -> ApprovalQueue:
+    """A queue holding *n* pending requests, oldest first."""
+    from prometheus.permissions.approval_queue import PendingAction
+
+    q = ApprovalQueue()
+    for i in range(n):
+        rid = f"{i:08x}"
+        q.pending[rid] = PendingAction(
+            request_id=rid,
+            tool_name="write_file",
+            description=f"write /tmp/file{i}.txt",
+            created_at=float(i),
+        )
+    return q
+
+
+class TestBareApprove:
+
+    def test_bare_approve_takes_the_only_pending_request(self):
+        q = _queue_with(1)
+        out = _asyncio.run(cmd_approve(q, ""))
+        assert "Approved" in out
+        assert "Usage" not in out
+        assert _result_of(q, "00000000") is ApprovalResult.APPROVED
+
+    def test_bare_approve_with_nothing_pending_says_so(self):
+        out = _asyncio.run(cmd_approve(ApprovalQueue(), ""))
+        assert "No pending approval requests." == out
+
+    def test_bare_approve_with_several_lists_them_and_approves_nothing(self):
+        q = _queue_with(3)
+        out = _asyncio.run(cmd_approve(q, ""))
+        assert "3 pending requests" in out
+        for i in range(3):
+            assert f"{i:08x}" in out
+        # Ambiguity must never be resolved by guessing.
+        assert len(q.pending) == 3
+
+    def test_scope_without_id_also_resolves(self):
+        q = _queue_with(1)
+        out = _asyncio.run(cmd_approve(q, "session"))
+        assert "Usage" not in out
+        assert _result_of(q, "00000000") is ApprovalResult.APPROVED
+
+    def test_explicit_id_still_works(self):
+        q = _queue_with(2)
+        out = _asyncio.run(cmd_approve(q, "00000001"))
+        assert "Approved: 00000001" in out
+        assert "00000000" in q.pending
+
+    def test_single_request_shortcut_picks_the_oldest(self):
+        """A request arriving between prompt and reply must not steal the
+        shortcut — but with 2 pending we list rather than pick, so this
+        asserts the ordering the listing uses."""
+        q = _queue_with(2)
+        out = _asyncio.run(cmd_approve(q, ""))
+        assert out.index("00000000") < out.index("00000001")
+
+    def test_mistyped_scope_still_returns_usage(self):
+        q = _queue_with(1)
+        out = _asyncio.run(cmd_approve(q, "forever abcdef12"))
+        assert "Usage" in out
+        assert len(q.pending) == 1
+
+
+class TestApproveAll:
+
+    def test_approve_all_clears_the_queue(self):
+        q = _queue_with(4)
+        out = _asyncio.run(cmd_approve(q, "all"))
+        assert "Approved 4 request(s)" in out
+        assert all(
+            _result_of(q, f"{i:08x}") is ApprovalResult.APPROVED for i in range(4)
+        )
+
+    def test_approve_all_grants_nothing_persistent(self):
+        """Draining a backlog must not widen trust — that is what `always`
+        is for, deliberately chosen one request at a time."""
+        q = _queue_with(3)
+        gate = _MagicMock()
+        q._security_gate = gate
+        _asyncio.run(cmd_approve(q, "all"))
+        gate.add_grant.assert_not_called()
+        gate.persist_grant.assert_not_called()
+
+    def test_approve_all_with_empty_queue(self):
+        out = _asyncio.run(cmd_approve(ApprovalQueue(), "all"))
+        assert "No pending approval requests." == out
+
+
+class TestBareDeny:
+
+    def test_bare_deny_takes_the_only_pending_request(self):
+        q = _queue_with(1)
+        out = _asyncio.run(cmd_deny(q, ""))
+        assert "Denied" in out
+        assert _result_of(q, "00000000") is ApprovalResult.DENIED
+
+    def test_bare_deny_with_several_lists_them(self):
+        q = _queue_with(2)
+        out = _asyncio.run(cmd_deny(q, ""))
+        assert "2 pending requests" in out
+        assert len(q.pending) == 2
+
+    def test_bare_deny_with_nothing_pending(self):
+        assert _asyncio.run(cmd_deny(ApprovalQueue(), "")) == "No pending approval requests."

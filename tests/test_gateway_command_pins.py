@@ -175,12 +175,29 @@ class TestRouteLocalPins:
 class TestApprovalPins:
     @pytest.mark.asyncio
     async def test_approve_usage_pin(self):
+        """A MISTYPED SCOPE still returns usage.
+
+        Bare `/approve` deliberately no longer does: the id is optional when
+        exactly one request is pending, because demanding an 8-hex id per
+        prompt is what made an approval storm unusable. Usage text is now
+        reserved for input that cannot be interpreted at all.
+        """
+        adapter = _make_adapter()
+        await adapter._cmd_approve(
+            _make_update(text="/approve forever abc123"), _make_context()
+        )
+        assert _sent_text(adapter) == (
+            "Usage: /approve [id] | /approve session [id] | "
+            "/approve always [id]"
+        )
+
+    @pytest.mark.asyncio
+    async def test_bare_approve_no_longer_returns_usage_pin(self):
+        """Regression pin for the live 2026-08-14 failure: five bare
+        `/approve` messages, five usage replies, zero approvals."""
         adapter = _make_adapter()
         await adapter._cmd_approve(_make_update(text="/approve"), _make_context())
-        assert _sent_text(adapter) == (
-            "Usage: /approve <id> | /approve session <id> | "
-            "/approve always <id>"
-        )
+        assert "Usage:" not in _sent_text(adapter)
 
     @pytest.mark.asyncio
     async def test_approve_no_queue_pin(self):

@@ -126,13 +126,19 @@ class ApprovalQueue:
         # Send notification via Telegram
         target_chat = chat_id or self._default_chat_id
         if self._telegram and target_chat:
+            # The bare forms lead: when this is the only pending request the
+            # id is optional, and copying an 8-hex id back is precisely the
+            # friction that made operators type `/approve` alone and get
+            # usage text instead of an approval.
             msg = (
                 f"Permission requested:\n"
                 f"Tool: {tool_name}\n"
                 f"Action: {description}\n\n"
-                f"/approve {request_id} or /deny {request_id}\n"
-                f"/approve session {request_id} — remember for this session\n"
-                f"/approve always {request_id} — remember permanently"
+                f"/approve — approve this (or /deny)\n"
+                f"/approve session — also remember for this session\n"
+                f"/approve always — also remember permanently\n"
+                f"/approve all — approve everything pending, once each\n\n"
+                f"id: {request_id} (only needed if several are pending)"
             )
             try:
                 await self._telegram.send(target_chat, msg, parse_mode=None)
