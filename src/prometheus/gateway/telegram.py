@@ -22,9 +22,11 @@ from telegram import BotCommand, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -321,6 +323,29 @@ class TelegramAdapter(BasePlatformAdapter):
 
         self._app = builder.build()
 
+        # ------------------------------------------------------------------
+        # AUTHORIZATION — must be registered FIRST, in a lower group.
+        #
+        # `chat_allowed()` used to be enforced in exactly one place:
+        # `on_message`, reached only via the text handler below, which is
+        # registered as `filters.TEXT & ~filters.COMMAND`. That `~COMMAND` is
+        # the whole problem — SLASH COMMANDS STRUCTURALLY NEVER REACHED THE
+        # CHECK. All 51 of them were callable by any chat that found the bot,
+        # `/gate off` (suppresses approval prompts globally) and
+        # `/approve always` (persists a trust grant) included.
+        #
+        # A TypeHandler in group -1 runs before every other group, so one
+        # registration covers commands, text, media and callbacks alike — and
+        # covers every handler added in FUTURE, which a per-handler decorator
+        # would not. Raising ApplicationHandlerStop halts dispatch for this
+        # update entirely; nothing downstream runs.
+        #
+        # Fail-open on an update with no chat is deliberate: those carry no
+        # chat to authorize (poll answers and similar), and every handler
+        # already returns early when `effective_chat is None`, so nothing acts
+        # on them. Fail-CLOSED on any chat we can identify and do not allow.
+        self._app.add_handler(TypeHandler(Update, self._authorize_update), group=-1)
+
         # Register handlers
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("clear", self._cmd_clear))
@@ -572,6 +597,38 @@ class TelegramAdapter(BasePlatformAdapter):
                 return SendResult(success=False, error=str(exc))
 
         return SendResult(success=True, message_id=last_message_id)
+
+    async def _authorize_update(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Drop updates from chats outside ``allowed_chat_ids``.
+
+        Registered as a group -1 TypeHandler so it runs before any command,
+        message or media handler — see the comment at the registration site
+        for why a per-handler check was not enough.
+
+        Raises ApplicationHandlerStop to halt dispatch. Returning normally
+        would let the update continue to the real handlers, which is the
+        opposite of what an unauthorized chat should get.
+        """
+        chat = update.effective_chat
+        if chat is None:
+            return  # nothing to authorize; no handler acts without a chat
+        if self.config.chat_allowed(chat.id):
+            return
+        user = update.effective_user
+        logger.warning(
+            "Ignoring update from unauthorized chat %d (user %s): %s",
+            chat.id,
+            getattr(user, "id", "?"),
+            # Log the command name only — never the full text, which for an
+            # unauthorized sender is untrusted content the operator may read
+            # later in a terminal.
+            (update.message.text or "").split()[0][:32]
+            if update.message and update.message.text
+            else "<non-text update>",
+        )
+        raise ApplicationHandlerStop
 
     async def on_message(self, event: MessageEvent) -> None:
         """Handle an incoming message — dispatch to agent and reply."""
