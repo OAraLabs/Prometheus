@@ -2347,6 +2347,18 @@ def create_app(
         from prometheus.coding.managed import create_coding_managed_task
         from prometheus.tasks.manager import get_task_manager
 
+        # The master switch, checked BEFORE anything is validated or spawned.
+        # This route is the reason coding.enabled matters more than a local
+        # CLI flag: it launches model-authored command execution over the
+        # network. The key shipped defaulting to false and gated nothing, so
+        # "coding is off" was true in the config and false in the daemon.
+        if not (config.get("coding", {}) or {}).get("enabled", False):
+            return JSONResponse(status_code=403, content={
+                "error": "coding mode is disabled",
+                "detail": "Set coding.enabled: true in prometheus.yaml and "
+                          "restart the daemon to allow coding runs.",
+            })
+
         repo = str(body.get("repo", "")).strip()
         description = str(body.get("description", "")).strip()
         acceptance = str(body.get("acceptance_command", "")).strip()

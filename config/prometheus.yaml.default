@@ -502,6 +502,13 @@ training:
   db_path: "~/.prometheus/data/training.db"
 
 coding:
+  # MASTER SWITCH — enforced at both entry points: `prometheus code` exits
+  # non-zero, and POST /api/code returns 403. Coding runs execute
+  # model-authored commands against a clone of your repo, so they are
+  # opt-in. (Until 2026-08-15 this key was read by nothing and coding ran
+  # regardless of it; if you set it false and relied on that, you were not
+  # protected.) The daemon's stale-container cleanup below is housekeeping
+  # and runs either way.
   enabled: false                # SPRINT-coding-mode v2: sandboxed iterate-to-green
   # process | bwrap | docker — weakest to strongest; create_sandbox() selects.
   #   process — cwd jail + env scrub. Confines the FILE TOOLS only; a shell

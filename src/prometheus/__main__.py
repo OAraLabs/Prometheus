@@ -753,6 +753,27 @@ def run_coding_task(args) -> int:
     from prometheus.coding.session import CodingSession, CodingTask
 
     config = load_config(args.config)
+
+    # coding.enabled is the master switch, and it now actually switches.
+    # It shipped in prometheus.yaml.default documented as "enabled: false"
+    # and NOTHING read it: not this path, not POST /api/code. An operator
+    # who set it false — or who simply took the shipped default — got a
+    # coding mode that ran anyway. A documented key with a false default
+    # that gates nothing is worse than no key at all, because it answers
+    # "is this off?" with a confident yes.
+    if not (config.get("coding", {}) or {}).get("enabled", False):
+        print(_json.dumps({
+            "ok": False,
+            "error": "coding mode is disabled",
+            "detail": (
+                "coding.enabled is false (its shipped default). Coding runs "
+                "execute model-authored commands against a clone of your "
+                "repo, so they are opt-in. Set `coding.enabled: true` in "
+                "prometheus.yaml to allow them."
+            ),
+        }))
+        return 2
+
     model_cfg = dict(config.get("model", {}))
     provider, model_name = create_provider(model_cfg)
     adapter = create_adapter(model_cfg, config.get("adapter"))
