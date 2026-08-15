@@ -302,11 +302,17 @@ async def run_daemon(args: argparse.Namespace) -> None:
         model_name = config_model
         logger.info("Cloud provider: %s, model: %s", model_config.get("provider"), model_name)
 
-    # Context size detection
+    # Context size detection. The value is CONSUMED (passed to the compactor
+    # below), not just logged — it used to be logged only, so a config
+    # `effective_limit` that outlived a model swap silently won. That is how a
+    # server reporting n_ctx=32768 came to be budgeted at 72000: prompts were
+    # built 2.2x larger than the server could hold, leaving no room to
+    # generate, and every turn returned empty.
+    detected_ctx_size: int | None = None
     if hasattr(provider, "detect_context_size"):
-        ctx_size = await provider.detect_context_size()
-        if ctx_size:
-            logger.info("Server context size: %d tokens", ctx_size)
+        detected_ctx_size = await provider.detect_context_size()
+        if detected_ctx_size:
+            logger.info("Server context size: %d tokens", detected_ctx_size)
 
     # Vision detection
     if hasattr(provider, "detect_vision"):
@@ -505,6 +511,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
         from prometheus.context.compactor import ContextCompactor
         compactor = ContextCompactor.from_config(
             config, provider=provider, model=model_name, telemetry=telemetry,
+            detected_limit=detected_ctx_size,
         )
         if compactor is not None:
             logger.info(

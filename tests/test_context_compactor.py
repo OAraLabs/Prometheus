@@ -395,3 +395,112 @@ async def test_run_loop_without_compactor_sends_full_history():
     sent = loop_provider.requests[0].messages
     assert any("User question 0" in m.text for m in sent)
     assert not any(m.text.startswith(SUMMARY_MARKER_PREFIX) for m in sent)
+
+
+# --------------------------------------------------------------------------- #
+# Context budget resolution — the number must follow the model that is
+# actually serving, and prefer what the server REPORTED over what config guessed.
+#
+# The outage this prevents ran both ways on 2026-08-14:
+#   * llama.cpp reported n_ctx=32768; config said effective_limit: 72000. The
+#     detected value was logged and discarded, so prompts were built 2.2x
+#     larger than the server could hold — no room left to generate, and every
+#     turn came back empty.
+#   * The compactor is constructed ONCE at daemon start against the LOCAL
+#     model, so a session routed to a cloud provider was budgeted as if it
+#     were the local GGUF — capping a far larger window at the local one.
+# --------------------------------------------------------------------------- #
+
+from unittest.mock import MagicMock as _MM
+
+from prometheus.context.compactor import (
+    DEFAULT_CLOUD_LIMIT,
+    ContextCompactor as _CC,
+)
+
+_LOCAL = "Qwen3.6-27B-UD-Q4_K_XL.gguf"
+
+
+def _budget_compactor(**kw) -> _CC:
+    kw.setdefault("provider", _MM())
+    kw.setdefault("model", _LOCAL)
+    kw.setdefault("effective_limit", 72000)
+    return _CC(**kw)
+
+
+class TestLimitResolution:
+
+    def test_detected_beats_configured_for_the_local_model(self):
+        """THE OUTAGE. Config said 72000, the server said 32768."""
+        c = _budget_compactor(detected_limit=32768)
+        assert c.limit_for(_LOCAL) == 32768
+
+    def test_configured_used_when_nothing_detected(self):
+        c = _budget_compactor(detected_limit=None)
+        assert c.limit_for(_LOCAL) == 72000
+
+    def test_explicit_override_beats_detection(self):
+        """An operator who wrote a number meant it — e.g. deliberately
+        budgeting below n_ctx to leave room for long tool results."""
+        c = _budget_compactor(detected_limit=32768, model_overrides={_LOCAL: 20000})
+        assert c.limit_for(_LOCAL) == 20000
+
+    def test_cloud_session_does_not_inherit_the_local_window(self):
+        """A /qwen or /claude session must not be capped at the local GGUF."""
+        c = _budget_compactor(detected_limit=32768)
+        assert c.limit_for("qwen3.8-max") == DEFAULT_CLOUD_LIMIT
+        assert c.limit_for("qwen3.8-max") > c.limit_for(_LOCAL)
+
+    def test_cloud_override_is_honoured(self):
+        c = _budget_compactor(model_overrides={"claude-sonnet-4-5": 200000})
+        assert c.limit_for("claude-sonnet-4-5") == 200000
+
+    def test_cloud_default_is_configurable(self):
+        c = _budget_compactor(cloud_default_limit=1_000_000)
+        assert c.limit_for("some-huge-cloud-model") == 1_000_000
+
+    def test_no_model_falls_back_to_the_local_resolution(self):
+        c = _budget_compactor(detected_limit=32768)
+        assert c.limit_for(None) == 32768
+
+    def test_threshold_follows_the_per_model_limit(self):
+        """The compaction trigger must move with the budget, not stay pinned
+        to whatever the compactor was constructed with."""
+        c = _budget_compactor(detected_limit=32768, reserve_tokens=0, threshold_pct=0.5)
+        assert c._threshold_tokens(_LOCAL) == 16384
+        assert c._threshold_tokens("qwen3.8-max") == DEFAULT_CLOUD_LIMIT // 2
+
+
+class TestFromConfigWiring:
+
+    def test_detected_limit_reaches_the_instance(self):
+        cfg = {"compaction": {"enabled": True}, "context": {"effective_limit": 72000}}
+        c = _CC.from_config(cfg, provider=_MM(), model=_LOCAL, detected_limit=32768)
+        assert c is not None
+        assert c.limit_for(_LOCAL) == 32768
+
+    def test_all_model_overrides_are_flattened_not_just_the_active_one(self):
+        """limit_for() must be able to resolve a model this compactor was NOT
+        built with — that is the whole point of the cloud path."""
+        cfg = {
+            "compaction": {"enabled": True},
+            "context": {
+                "effective_limit": 72000,
+                "model_overrides": {
+                    _LOCAL: {"effective_limit": 28000},
+                    "claude-sonnet-4-5": {"effective_limit": 200000},
+                },
+            },
+        }
+        c = _CC.from_config(cfg, provider=_MM(), model=_LOCAL)
+        assert c is not None
+        assert c.limit_for("claude-sonnet-4-5") == 200000
+
+    def test_cloud_default_read_from_config(self):
+        cfg = {
+            "compaction": {"enabled": True},
+            "context": {"effective_limit": 72000, "cloud_default_limit": 500000},
+        }
+        c = _CC.from_config(cfg, provider=_MM(), model=_LOCAL)
+        assert c is not None
+        assert c.limit_for("qwen3.8-max") == 500000

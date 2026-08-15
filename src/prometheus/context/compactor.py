@@ -81,6 +81,17 @@ DEFAULT_RESERVE_TOKENS = 4096
 DEFAULT_PROTECT_RECENT_TURNS = 8
 DEFAULT_MAX_SUMMARY_TOKENS = 512
 
+# Budget for a session routed to a cloud provider when no per-model override
+# exists. Cloud APIs do not publish context length — Alibaba's /v1/models
+# returns only id/object/created/owned_by, and the other OpenAI-compatible
+# providers are the same — so this is a deliberately CONSERVATIVE floor, not
+# a detection. 128k is at or below every current cloud model this project
+# routes to, so it cannot over-budget; raise it per model via
+# context.model_overrides once you have checked that provider's real limit.
+# The number that matters is that it is not the LOCAL model's window, which
+# is what a cloud session used to inherit.
+DEFAULT_CLOUD_LIMIT = 128_000
+
 # A span smaller than this many messages isn't worth a model call.
 MIN_SPAN_MESSAGES = 4
 
@@ -126,12 +137,32 @@ class ContextCompactor:
         max_summary_tokens: int = DEFAULT_MAX_SUMMARY_TOKENS,
         telemetry: Any | None = None,
         signal_bus: Any | None = None,
+        model_overrides: dict[str, int] | None = None,
+        detected_limit: int | None = None,
+        cloud_default_limit: int = DEFAULT_CLOUD_LIMIT,
     ) -> None:
         from prometheus.learning.llm_envelope import LLMCallEnvelope
 
         self._provider = provider
         self._model = model
         self._effective_limit = int(effective_limit)
+        # Per-model limits, resolved PER CALL rather than frozen at
+        # construction. The compactor is built once at daemon start against
+        # the LOCAL model, but a session can be routed to a cloud provider
+        # (/claude, /qwen, …) whose window is an order of magnitude larger —
+        # budgeting those as if they were the local GGUF wasted almost the
+        # whole context. See limit_for().
+        self._model_overrides: dict[str, int] = dict(model_overrides or {})
+        # What the local inference server actually reported (llama.cpp /props
+        # n_ctx). Ground truth, and it beats the configured global — a config
+        # number that outlived a model swap is exactly how a 32768-token
+        # server came to be budgeted at 72000, leaving no room to generate.
+        self._detected_limit = int(detected_limit) if detected_limit else None
+        # Fallback for a model we have no entry for AND that is not the local
+        # one. Never inherit the local GGUF's window here: cloud models are
+        # far larger, and silently capping a 1M-token model at 28k wastes
+        # almost all of it.
+        self._cloud_default_limit = int(cloud_default_limit)
         self._threshold_pct = float(threshold_pct)
         self._reserve_tokens = int(reserve_tokens)
         self._protect_recent_turns = int(protect_recent_turns)
@@ -165,11 +196,18 @@ class ContextCompactor:
         model: str,
         telemetry: Any | None = None,
         signal_bus: Any | None = None,
+        detected_limit: int | None = None,
     ) -> "ContextCompactor | None":
         """Build from the loaded prometheus.yaml dict.
 
         Returns ``None`` unless ``compaction.enabled`` is truthy — the
         default-off contract: absent section = zero behavior change.
+
+        *detected_limit* is the context size the inference server actually
+        reported (llama.cpp ``/props`` n_ctx). Pass it and the local model
+        needs no config entry at all — which is the point, because an
+        exact-filename override silently stops matching the moment the GGUF
+        is swapped, and the failure is a total inability to answer.
         """
         cfg = config or {}
         comp = cfg.get("compaction") or {}
@@ -183,10 +221,22 @@ class ContextCompactor:
         if isinstance(per_model, dict) and "effective_limit" in per_model:
             effective_limit = int(per_model["effective_limit"])
 
+        # Flatten every per-model entry so limit_for() can resolve a model
+        # this compactor was NOT built with (a cloud override mid-session).
+        flat_overrides: dict[str, int] = {}
+        for name, entry in overrides.items():
+            if isinstance(entry, dict) and "effective_limit" in entry:
+                flat_overrides[str(name)] = int(entry["effective_limit"])
+
         return cls(
             provider=provider,
             model=model,
             effective_limit=effective_limit,
+            model_overrides=flat_overrides,
+            detected_limit=detected_limit,
+            cloud_default_limit=int(
+                ctx.get("cloud_default_limit", DEFAULT_CLOUD_LIMIT)
+            ),
             threshold_pct=comp.get("threshold_pct", DEFAULT_THRESHOLD_PCT),
             reserve_tokens=comp.get("reserve_tokens", DEFAULT_RESERVE_TOKENS),
             protect_recent_turns=comp.get(
@@ -229,8 +279,41 @@ class ContextCompactor:
         total += max(0, int(tools_chars)) // 4  # same chars/4 heuristic
         return total
 
-    def _threshold_tokens(self) -> int:
-        available = max(1, self._effective_limit - self._reserve_tokens)
+    def limit_for(self, model: str | None = None) -> int:
+        """Context budget for whichever model is serving THIS call.
+
+        Precedence, most specific first:
+
+        1. ``context.model_overrides.<model>`` — an operator said so
+           explicitly; nothing should second-guess that.
+        2. The size the local server REPORTED, when this is the local model.
+           llama.cpp publishes ``n_ctx`` at ``/props``, so for local
+           inference the right number is knowable and never needs configuring.
+        3. ``cloud_default_limit`` for any other model — i.e. a session
+           routed to a cloud provider. Cloud APIs do NOT publish context
+           length (Alibaba's ``/v1/models`` returns only id/object/created/
+           owned_by, and the others are the same), so this is a configured
+           floor, not a detection. Override per model when you know better.
+        4. The configured global, as a last resort.
+
+        The failure this ordering exists to prevent runs BOTH ways: budgeting
+        a 32k local server at 72k leaves no room to generate (empty
+        responses), and budgeting a 1M cloud model at the local GGUF's 28k
+        throws away 97% of the window.
+        """
+        name = model or self._model
+        if name and name in self._model_overrides:
+            return int(self._model_overrides[name])
+        if name and name == self._model:
+            # The local model — prefer what the server actually reported.
+            return int(self._detected_limit or self._effective_limit)
+        if name:
+            # Some other model: a cloud override is in play for this session.
+            return int(self._cloud_default_limit)
+        return int(self._detected_limit or self._effective_limit)
+
+    def _threshold_tokens(self, model: str | None = None) -> int:
+        available = max(1, self.limit_for(model) - self._reserve_tokens)
         return int(available * self._threshold_pct)
 
     # -- span selection ----------------------------------------------------
@@ -380,13 +463,20 @@ class ContextCompactor:
         session_id: str = "",
         system_prompt: str = "",
         tools_chars: int = 0,
+        model: str | None = None,
     ) -> list:
         """Return the render view: ``messages`` itself when no compaction is
         needed, or a NEW list with the oldest span replaced by one synthetic
         summary message. NEVER mutates ``messages`` or any message in it.
+
+        *model* is the model actually serving THIS turn, which is not
+        necessarily the one this compactor was built with — a per-session
+        override (/claude, /qwen, …) routes elsewhere while the compactor
+        instance is shared process-wide. Passing it lets the budget follow
+        the session instead of being frozen at daemon start.
         """
         tokens_before = self.estimate_total(system_prompt, messages, tools_chars)
-        threshold = self._threshold_tokens()
+        threshold = self._threshold_tokens(model)
         if tokens_before <= threshold:
             return messages
 

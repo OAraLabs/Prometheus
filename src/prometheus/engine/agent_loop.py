@@ -1221,6 +1221,13 @@ async def _run_loop(
                     session_id=context.session_id or "",
                     system_prompt=per_call_system_prompt,
                     tools_chars=len(str(_payload_tools)) if _payload_tools else 0,
+                    # The model serving THIS turn — a per-session override
+                    # (/claude, /qwen, …) routes elsewhere while the compactor
+                    # instance is shared process-wide. Without this the budget
+                    # stays frozen at the LOCAL model's window, so a cloud
+                    # session with a far larger context was compacted as if it
+                    # were the local GGUF.
+                    model=context.model,
                 )
             except Exception:
                 log.exception(
