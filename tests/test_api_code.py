@@ -81,7 +81,10 @@ def _client_with(monkeypatch, manager: _StubManager) -> TestClient:
     monkeypatch.setattr(
         "prometheus.tasks.manager.get_task_manager", lambda: manager
     )
-    return TestClient(create_app({}))
+    # coding.enabled is a MASTER SWITCH: POST /api/code 403s without it.
+    # These tests exercise the route, so they enable it the way an
+    # operator would.
+    return TestClient(create_app({"coding": {"enabled": True}}))
 
 
 def test_create_launches_managed_task(monkeypatch, tmp_path, repo):
@@ -152,8 +155,14 @@ def test_run_coding_task_emits_report_on_uncaught_exception(monkeypatch, tmp_pat
 
     from prometheus import __main__ as m
 
+    # Explicit config: coding.enabled is a MASTER SWITCH now, so a test that
+    # leaves it to whatever config happens to exist on the machine would pass
+    # or fail by accident. See TestCodingEnabledMasterSwitch below.
+    _cfg = tmp_path / "cfg.yaml"
+    _cfg.write_text("coding:\n  enabled: true\n", encoding="utf-8")
+
     class _Args:
-        config = None
+        config = str(_cfg)
         repo = str(tmp_path / "r")
         task_description = "x"
         acceptance_command = "true"
@@ -353,7 +362,7 @@ def test_diff_returns_full_unified_diff(monkeypatch, tmp_path):
 
     monkeypatch.setattr("prometheus.web.server._coding_sandbox_root", lambda: coding_root.resolve())
     monkeypatch.setattr("prometheus.tasks.manager.get_task_manager", lambda: _DiffManager(out))
-    c = TestClient(create_app({}))
+    c = TestClient(create_app({"coding": {"enabled": True}}))
 
     r = c.get("/api/code/d1/diff")
     assert r.status_code == 200
@@ -372,7 +381,7 @@ def test_diff_rejects_sandbox_outside_coding_dir(monkeypatch, tmp_path):
 
     monkeypatch.setattr("prometheus.web.server._coding_sandbox_root", lambda: (tmp_path / "coding").resolve())
     monkeypatch.setattr("prometheus.tasks.manager.get_task_manager", lambda: _DiffManager(out))
-    c = TestClient(create_app({}))
+    c = TestClient(create_app({"coding": {"enabled": True}}))
     assert c.get("/api/code/d1/diff").status_code == 422
 
 
@@ -380,7 +389,7 @@ def test_diff_not_ready_while_running(monkeypatch, tmp_path):
     out = tmp_path / "out.log"
     out.write_text("starting…\nworking, no report yet\n")  # no JSON report
     monkeypatch.setattr("prometheus.tasks.manager.get_task_manager", lambda: _DiffManager(out))
-    c = TestClient(create_app({}))
+    c = TestClient(create_app({"coding": {"enabled": True}}))
     r = c.get("/api/code/d1/diff")
     assert r.status_code == 200
     assert r.json()["ready"] is False
@@ -390,5 +399,109 @@ def test_diff_unknown_task_404(monkeypatch, tmp_path):
     out = tmp_path / "out.log"
     out.write_text("{}")
     monkeypatch.setattr("prometheus.tasks.manager.get_task_manager", lambda: _DiffManager(out))
-    c = TestClient(create_app({}))
+    c = TestClient(create_app({"coding": {"enabled": True}}))
     assert c.get("/api/code/nope/diff").status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# coding.enabled — the master switch that was not one
+#
+# It shipped in prometheus.yaml.default documented as `enabled: false` and was
+# read by NOTHING: not run_coding_task, not POST /api/code. Setting it false —
+# or taking the shipped default — produced a coding mode that ran anyway. A
+# documented key with a false default that gates nothing is worse than no key,
+# because it answers "is this off?" with a confident yes.
+# --------------------------------------------------------------------------- #
+
+
+class TestCodingEnabledMasterSwitch:
+
+    def _args(self, tmp_path, enabled: bool):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text(f"coding:\n  enabled: {str(enabled).lower()}\n", encoding="utf-8")
+
+        class _Args:
+            config = str(cfg)
+            repo = str(tmp_path / "r")
+            task_description = "x"
+            acceptance_command = "true"
+            task_id = "gated"
+            max_rounds = 5
+            max_wall_seconds = 60
+            sandbox_parent = str(tmp_path / "sb")
+            suppress_thinking = False
+            control_dir = None
+
+        return _Args()
+
+    def test_cli_refuses_when_disabled(self, tmp_path, capsys):
+        import json as _json
+
+        from prometheus import __main__ as m
+
+        rc = m.run_coding_task(self._args(tmp_path, enabled=False))
+        out = capsys.readouterr().out
+        assert rc == 2
+        payload = _json.loads(out[out.index("{"):])
+        assert payload["ok"] is False
+        assert "disabled" in payload["error"]
+        assert "coding.enabled" in payload["detail"]
+
+    def test_cli_refusal_happens_before_any_provider_is_built(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """The gate must short-circuit BEFORE provider/adapter construction —
+        otherwise a disabled coding mode still dials a cloud API."""
+        from prometheus import __main__ as m
+
+        def _explode(*a, **k):
+            raise AssertionError("provider built despite coding being disabled")
+
+        monkeypatch.setattr(m, "create_provider", _explode)
+        assert m.run_coding_task(self._args(tmp_path, enabled=False)) == 2
+
+    def test_cli_default_is_disabled(self, tmp_path, capsys):
+        """An ABSENT key means OFF, matching the shipped default. Defaulting
+        to True here would have preserved the old behaviour silently and
+        left every existing config still ungated."""
+        import json as _json
+
+        from prometheus import __main__ as m
+
+        cfg = tmp_path / "no-coding-block.yaml"
+        cfg.write_text("model: {}\n", encoding="utf-8")
+        args = self._args(tmp_path, enabled=True)
+        args.config = str(cfg)
+
+        rc = m.run_coding_task(args)
+        out = capsys.readouterr().out
+        assert rc == 2
+        assert _json.loads(out[out.index("{"):])["ok"] is False
+
+    def test_api_route_refuses_when_disabled(self):
+        """POST /api/code is the reason this key matters more than a local
+        flag: it launches model-authored command execution over the network."""
+        pytest.importorskip("fastapi")
+        from fastapi.testclient import TestClient
+
+        from prometheus.web.server import create_app
+
+        app = create_app({"coding": {"enabled": False}, "web": {}})
+        client = TestClient(app)
+        r = client.post("/api/code", json={
+            "repo": "/tmp/x", "description": "d", "acceptance_command": "true",
+        })
+        assert r.status_code == 403
+        assert "disabled" in r.json()["error"]
+
+    def test_api_route_refuses_before_validating_the_body(self):
+        """A disabled route must not leak input-validation behaviour — the
+        403 comes first, so an empty body still reads 'disabled', not 400."""
+        pytest.importorskip("fastapi")
+        from fastapi.testclient import TestClient
+
+        from prometheus.web.server import create_app
+
+        client = TestClient(create_app({"coding": {"enabled": False}, "web": {}}))
+        r = client.post("/api/code", json={})
+        assert r.status_code == 403
