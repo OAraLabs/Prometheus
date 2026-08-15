@@ -179,28 +179,111 @@ def test_daemon_guard_has_no_permissive_default_in_CODE():
     )
 
 
-def test_daemon_construction_is_gated_on_BOTH_resolvers():
-    """The construction decision, pinned structurally.
+@pytest.mark.parametrize(
+    "gateway_cfg, token, should_start, refuses_loudly, why",
+    [
+        ({}, "tok", False, False,
+         "key ABSENT + token present — the original defect"),
+        ({"telegram_enabled": True}, "tok", False, True,
+         "enabled, NO allowlist — must refuse AND say so"),
+        ({"telegram_enabled": True, "allowed_chat_ids": []}, "tok", False, True,
+         "enabled, EXPLICITLY empty allowlist — same refusal. The template "
+         "ships [] as its placeholder, so honouring it verbatim (the #141 "
+         "rule) would open every fresh install"),
+        ({"telegram_enabled": True, "allowed_chat_ids": ["x"]}, "tok", False,
+         True, "allowlist of only malformed ids resolves empty — still refused"),
+        ({"telegram_enabled": False, "allowed_chat_ids": [1]}, "tok", False,
+         False, "explicitly off — not a refusal, nothing to report"),
+        ({"telegram_enabled": True, "allowed_chat_ids": [1]}, "", False, False,
+         "no token — nothing configured, not a refusal"),
+        ({"telegram_enabled": True, "allowed_chat_ids": [8139235390]}, "tok",
+         True, False, "ADMISSION: enabled and allowlisted — must start"),
+    ],
+)
+def test_daemon_start_decision(gateway_cfg, token, should_start,
+                               refuses_loudly, why):
+    """The daemon's REAL decision function, not a boolean re-derived here.
 
-    HONEST LIMIT, stated rather than implied: `run_daemon` cannot be driven
-    cheaply here — it constructs the whole subsystem graph. So this asserts
-    that daemon.py's gateway guard is built from the two resolvers, rather
-    than re-deriving the guard's boolean in the test. Re-deriving it would
-    reproduce the author's reading in the assertion and pass either way, which
-    is the failure this file's docstring is about. The behavioural proof for
-    this layer is the live outcome run recorded in the PR, not this test.
+    This was an inline expression inside `run_daemon` and a mutation that
+    neutered it (`if False and ...`) survived the whole suite — the second
+    layer (`chat_allowed`) kept denying messages, so nothing went red while
+    the daemon started an unrestricted gateway that silently ignored everyone.
+    Extracting the decision is what made it assertable at all.
     """
-    src = _daemon_guard_source()
-    assert "resolve_telegram_enabled(gateway_config)" in src
-    assert "resolve_allowed_chat_ids(gateway_config)" in src
-    assert "_tg_enabled and not _tg_chat_ids" in src, (
-        "the refusal branch is gone — an enabled gateway with an empty "
-        "allowlist must not construct an adapter"
+    from prometheus.daemon import telegram_gateway_decision
+
+    starts, refusal = telegram_gateway_decision(gateway_cfg, token)
+    assert starts is should_start, why
+    assert bool(refusal) is refuses_loudly, (
+        f"{why} — refusal text was {refusal!r}")
+    if refusal:
+        assert "allowed_chat_ids" in refusal, (
+            "the refusal must name the key the operator has to fix")
+
+
+def test_daemon_calls_the_decision_and_the_branch_is_not_dead():
+    """AST pin: the construction branch is gated on the decision's result.
+
+    A substring check was what let the neutered-branch mutation through — the
+    mutated line `if False and ... _tg_enabled and not _tg_chat_ids:` still
+    CONTAINED the expected text. This walks the tree instead: the guard must
+    be the plain name the decision assigned, with no `False and` wrapper.
+    """
+    import ast
+
+    tree = ast.parse(_daemon_guard_source())
+    assigns_decision = any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "telegram_gateway_decision"
+        for n in ast.walk(tree)
     )
-    assert "allowed_chat_ids=_tg_chat_ids" in src, (
-        "PlatformConfig is being built from raw config again, bypassing the "
-        "resolver that drops malformed entries and never returns a permissive "
-        "value"
+    assert assigns_decision, (
+        "daemon.py no longer calls telegram_gateway_decision — the start/refuse "
+        "rule has been inlined again, where it cannot be tested"
+    )
+    guards = [n for n in ast.walk(tree)
+              if isinstance(n, ast.If) and isinstance(n.test, ast.Name)
+              and n.test.id == "_tg_start"]
+    assert guards, (
+        "no `if _tg_start:` branch — the adapter must be constructed only when "
+        "the decision says so, and the guard must be the bare name so a "
+        "`False and ...` wrapper cannot hide inside it"
+    )
+
+
+def test_daemon_actually_LOGS_the_refusal():
+    """Silence is not a pass — the operator must be told why.
+
+    An earlier draft of this built the condition and then called
+    ``logger.error`` ITSELF before asserting the record existed. It proved
+    that a test can call a logger; a mutation deleting the daemon's real log
+    call sailed straight through. §2b in its purest form — the check answered
+    cleanly, about the wrong subject. Worse, when that draft was later edited
+    out, nothing replaced it, so for a while the refusal had no assertion at
+    all and a surviving mutation was the only thing that said so.
+
+    This walks daemon.py: the refusal must be reported inside a branch guarded
+    by the bare ``_tg_refusal`` name, so neither deleting the call nor
+    wrapping the guard in ``False and ...`` can hide.
+    """
+    import ast
+
+    tree = ast.parse(_daemon_guard_source())
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.If) and isinstance(node.test, ast.Name)
+                and node.test.id == "_tg_refusal"):
+            continue
+        if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+               and n.func.attr in ("error", "warning")
+               and isinstance(n.func.value, ast.Name)
+               and n.func.value.id == "logger"
+               for n in ast.walk(node)):
+            return
+    raise AssertionError(
+        "daemon.py does not log the Telegram refusal under a bare "
+        "`if _tg_refusal:` guard. A gateway that refuses to start without "
+        "saying why is indistinguishable from one that is simply off, and the "
+        "operator has nothing to act on (§2c)."
     )
 
 

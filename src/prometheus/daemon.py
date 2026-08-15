@@ -165,6 +165,47 @@ def _wire_skill_creator(
     return skill_creator
 
 
+def telegram_gateway_decision(
+    gateway_config: dict[str, Any] | None,
+    token: str,
+) -> tuple[bool, str | None]:
+    """Whether to start the Telegram gateway, and why not when the answer is no.
+
+    EXTRACTED SO IT CAN BE TESTED AT ALL. It was an inline boolean inside
+    ``run_daemon``, and ``run_daemon`` cannot be driven from a test — it builds
+    the entire subsystem graph. A mutation that neutered the refusal branch
+    (``if False and ...``) therefore survived the whole suite: the second layer
+    (``PlatformConfig.chat_allowed``) still denied every message, so nothing
+    went red while the daemon happily started an unrestricted gateway that
+    silently ignored everyone. That is §3b's defence-in-depth variant — the
+    better the layering, the more reliably a disabled control is masked by its
+    neighbour.
+
+    Returning the REASON rather than a bare bool is what makes the refusal
+    observable. A silently dead gateway is indistinguishable from a working
+    control (§2c).
+    """
+    from prometheus.config.shipped_defaults import (
+        resolve_allowed_chat_ids,
+        resolve_telegram_enabled,
+    )
+
+    if not token:
+        return False, None                      # nothing configured; not a refusal
+    if not resolve_telegram_enabled(gateway_config):
+        return False, None                      # explicitly (or by default) off
+    if not resolve_allowed_chat_ids(gateway_config):
+        return False, (
+            "Telegram gateway NOT started: gateway.telegram_enabled is on and a "
+            "token is present, but gateway.allowed_chat_ids is empty or absent. "
+            "An empty allowlist used to mean 'allow every chat', which exposes "
+            "an agent with shell access to anyone who finds the bot. Add your "
+            "chat id to gateway.allowed_chat_ids (find it with @userinfobot), "
+            "or set gateway.telegram_enabled: false to silence this."
+        )
+    return True, None
+
+
 async def run_daemon(args: argparse.Namespace) -> None:
     """Main async entry point — start all subsystems."""
     config = load_config(args.config)
@@ -624,12 +665,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Telegram adapter
     telegram: TelegramAdapter | None = None
     telegram_token = gateway_config.get("telegram_token", "") or os.environ.get("PROMETHEUS_TELEGRAM_TOKEN", "")
-    from prometheus.config.shipped_defaults import (
-        resolve_allowed_chat_ids,
-        resolve_telegram_enabled,
-    )
+    from prometheus.config.shipped_defaults import resolve_allowed_chat_ids
 
-    _tg_enabled = resolve_telegram_enabled(gateway_config)
     _tg_chat_ids = resolve_allowed_chat_ids(gateway_config)
 
     # ABSENCE IS NOT PERMISSION. This block used to read
@@ -638,20 +675,14 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # and the adjacent `allowed_chat_ids`, omitted for the same reason, meant
     # "allow every chat". One defect, two key names.
     #
-    # An enabled gateway with no allowlist REFUSES TO START and says so.
-    # Starting-and-ignoring-everything was the other candidate and is worse:
-    # a silently dead bot is indistinguishable from a working control (§2c),
-    # so the operator has nothing to act on.
-    if telegram_token and _tg_enabled and not _tg_chat_ids:
-        logger.error(
-            "Telegram gateway NOT started: gateway.telegram_enabled is on and a "
-            "token is present, but gateway.allowed_chat_ids is empty or absent. "
-            "An empty allowlist used to mean 'allow every chat', which exposes "
-            "an agent with shell access to anyone who finds the bot. Add your "
-            "chat id to gateway.allowed_chat_ids (find it with @userinfobot), "
-            "or set gateway.telegram_enabled: false to silence this."
-        )
-    elif telegram_token and _tg_enabled:
+    # The decision lives in telegram_gateway_decision() because an inline
+    # boolean here is untestable: run_daemon cannot be driven from a test, and
+    # a mutation neutering this branch survived the entire suite.
+    _tg_start, _tg_refusal = telegram_gateway_decision(
+        gateway_config, telegram_token)
+    if _tg_refusal:
+        logger.error("%s", _tg_refusal)
+    if _tg_start:
         # SPRINT G3: failure-guarded like the Slack/Discord blocks below —
         # a bad token (or Telegram being unreachable) must not kill the
         # daemon; the other gateways and the web surface still come up.
