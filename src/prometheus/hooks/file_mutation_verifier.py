@@ -197,9 +197,20 @@ def _extract_bash_paths(command: str) -> list[tuple[str, str]]:
                 target = m.group(m.lastindex or 1)
                 # Strip quotes that survive shell-style argv splitting.
                 target = target.strip("'\"")
-                if target:
+                if target and not _is_device_sink(target):
                     out.append((target, action))
     return out
+
+
+def _is_device_sink(target: str) -> bool:
+    """True for redirect targets that are kernel device sinks, not files.
+
+    ``> /dev/null`` (or /dev/zero, /dev/stdout, /dev/urandom, …) never
+    changes on disk, so snapshotting it yields a guaranteed "CLAIMED but
+    NO CHANGE ON DISK" — a false positive that poisons the summary. The
+    exception is ``/dev/shm/``: a real tmpfs where files genuinely land.
+    """
+    return target.startswith("/dev/") and not target.startswith("/dev/shm/")
 
 
 class FileMutationVerifier:

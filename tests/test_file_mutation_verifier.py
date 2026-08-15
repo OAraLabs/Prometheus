@@ -59,6 +59,25 @@ class TestPathExtraction:
         paths = [p for p, _ in out]
         assert "/tmp/b" in paths
 
+    def test_bash_dev_null_redirect_is_not_a_mutation(self):
+        """> /dev/null never changes on disk; tracking it would emit a
+        guaranteed "CLAIMED but NO CHANGE ON DISK" false positive."""
+        assert _extract_bash_paths("echo hello > /dev/null") == []
+        assert _extract_bash_paths("cat foo.log >> /dev/null") == []
+
+    def test_bash_real_redirect_next_to_dev_null_still_tracked(self):
+        out = _extract_bash_paths(
+            "echo a > /dev/null && echo b > /tmp/kept.txt"
+        )
+        paths = [p for p, _ in out]
+        assert "/tmp/kept.txt" in paths
+        assert "/dev/null" not in paths
+
+    def test_bash_dev_shm_redirect_still_tracked(self):
+        """/dev/shm is a real tmpfs — writes DO land there."""
+        out = _extract_bash_paths("echo x > /dev/shm/note.txt")
+        assert ("/dev/shm/note.txt", "redirect_write") in out
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle: pre / post / post_turn
@@ -314,6 +333,21 @@ class TestTurnScoping:
         )
         assert v.live_turns == 0
         assert v.post_turn(turn_key="T") is None
+
+    def test_dev_null_redirect_produces_no_summary(self):
+        """> /dev/null must not emit a 'CLAIMED but NO CHANGE ON DISK'
+        warning — /dev/null never changes on disk by definition."""
+        v = FileMutationVerifier()
+        v.pre_tool_use(
+            "bash", {"command": "echo hi > /dev/null"}, "c1", turn_key="T",
+        )
+        v.post_tool_use(
+            "bash", {"command": "echo hi > /dev/null"}, "c1",
+            output="", is_error=False, turn_key="T",
+        )
+        assert v.live_turns == 0
+        summary = v.post_turn(turn_key="T")
+        assert summary is None
 
 
 # ---------------------------------------------------------------------------
