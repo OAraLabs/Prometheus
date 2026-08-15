@@ -70,3 +70,11 @@ config/*.backup*
 /FINDINGS-*.md
 /MEMORY-AUDIT-*.md
 /SPRINT-CLOSEOUT-*.md
+
+# Per-session git worktrees (PROMETHEUS.md "Three trees"). This rule lived in
+# `.git/info/exclude` until 2026-08-15, which is per-clone and untracked — git
+# honoured it, `hatchling` did not, and no other clone had it, so eleven full
+# repo copies rode into the sdist. Anything that decides what a release
+# artifact contains belongs in version control, where every clone and every
+# tool sees the same answer.
+.claude/
