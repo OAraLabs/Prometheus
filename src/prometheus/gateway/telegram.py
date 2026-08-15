@@ -124,6 +124,11 @@ class TelegramAdapter(BasePlatformAdapter):
         model_provider: str = "",
         session_manager: SessionManager | None = None,
         prometheus_config: dict[str, Any] | None = None,
+        # Context window the local inference server REPORTED at startup.
+        # /context resolves the same way the compactor does, and the local
+        # leg of that resolution needs this number — without it the command
+        # reports the configured global, which is the value that was wrong.
+        detected_context_size: int | None = None,
     ) -> None:
         super().__init__(config)
         # Public-surface controls (2026-08-03). Previously the config declared
@@ -150,6 +155,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self.system_prompt = system_prompt
         self.model_name = model_name
         self.model_provider = model_provider
+        self._detected_context_size = detected_context_size
         # cost_tracker / escalation_engine / _approval_queue / _gepa_engine /
         # _printing_press / _backup_vault / _morph_engine: gateway-generic
         # subsystem slots, defaulted to None in BasePlatformAdapter.__init__
@@ -1388,10 +1394,17 @@ class TelegramAdapter(BasePlatformAdapter):
 
         from prometheus.context.token_estimation import estimate_tokens
 
-        # Read effective_limit from config (with model override)
+        # Report the budget for the model actually serving THIS session — a
+        # /qwen or /claude override has a different window than the local
+        # primary, and the whole point of /context is to be believable.
+        _session_key = f"{Platform.TELEGRAM.value}:{update.effective_chat.id}"
         try:
             from prometheus.context.budget import TokenBudget
-            budget = TokenBudget.from_config(model=self.model_name)
+            budget = TokenBudget.from_config(
+                model=self._serving_model_name(_session_key),
+                local_model=self.model_name,
+                detected_limit=getattr(self, "_detected_context_size", None),
+            )
             effective_limit = budget.effective_limit
             reserved_output = budget.reserved_output
         except Exception:
@@ -1792,6 +1805,26 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.error("Agent error for session %s: %s", session_id, exc)
             session.rollback_last()
             return f"Error: {exc}"
+
+    def _serving_model_name(self, session_id: str) -> str:
+        """Model that served this session's turn: the per-session override
+        (/claude, /qwen …) when set, else the daemon primary.
+
+        Sibling of :meth:`_serving_provider_name`. Reporting the PRIMARY
+        model's context budget on a session routed elsewhere is how `/context`
+        came to answer 72000 for a session actually budgeted at 1,000,000.
+        """
+        router = getattr(self.agent_loop, "_model_router", None)
+        if router is not None:
+            try:
+                override = router.get_override_for_session(session_id)
+            except Exception:
+                override = None
+            if override is not None:
+                cfg = getattr(override, "provider_config", None)
+                if isinstance(cfg, dict) and cfg.get("model"):
+                    return str(cfg["model"])
+        return self.model_name or ""
 
     def _serving_provider_name(self, session_id: str) -> str:
         """Provider name that served this session's turn: the per-session

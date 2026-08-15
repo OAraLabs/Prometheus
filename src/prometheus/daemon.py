@@ -683,6 +683,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 model_provider=model_config.get("provider", "llama_cpp"),
                 session_manager=session_manager,
                 prometheus_config=config,
+                detected_context_size=detected_ctx_size,
             )
             # Same late-wiring pattern as memory_recall: the /profile command
             # mutates THE holder the loops resolve, instead of a per-adapter

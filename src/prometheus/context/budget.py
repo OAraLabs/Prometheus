@@ -49,12 +49,25 @@ class TokenBudget:
         cls,
         model: str | None = None,
         config_path: str | None = None,
+        *,
+        local_model: str | None = None,
+        detected_limit: int | None = None,
     ) -> TokenBudget:
         """Build a TokenBudget from prometheus.yaml context section.
 
         Args:
-            model: Active model name — used to apply model_overrides.
+            model: Active model name — the one serving this session.
             config_path: Path to prometheus.yaml; defaults to DEFAULTS_PATH.
+            local_model: The model the local inference server has loaded.
+                Needed to tell "this session is on the local model" from "this
+                session was routed to a cloud provider", which get different
+                budgets. Omit and resolution falls back to exact-match only.
+            detected_limit: Context size the local server reported. Used only
+                when *model* is the local one.
+
+        This mirrors :meth:`ContextCompactor.limit_for` deliberately — a
+        reported budget that disagrees with the enforced one is worse than no
+        report, because it is consulted precisely when something looks wrong.
         """
         import yaml
         from pathlib import Path
@@ -77,9 +90,28 @@ class TokenBudget:
             if isinstance(overrides, dict) and "effective_limit" in overrides:
                 model_overrides[m] = overrides["effective_limit"]
 
-        # Apply model-specific override
+        # Resolution must MATCH ContextCompactor.limit_for(), or the number
+        # reported to the operator is not the number in force. Before this,
+        # exact-match was the only rule, so `/context` answered 72000 on a
+        # local session actually budgeted 32768 (detected) and on a cloud
+        # session actually budgeted 1000000 — wrong in both directions, and
+        # wrong precisely where someone would look to check.
+        #
+        # Precedence, most specific first:
+        #   1. explicit per-model override — an operator said so
+        #   2. detected local window, when this is the local model
+        #   3. cloud default, for any other model (a per-session override)
+        #   4. the configured global
         if model and model in model_overrides:
             effective_limit = model_overrides[model]
+        elif model and local_model and model == local_model and detected_limit:
+            effective_limit = detected_limit
+        elif model and local_model and model != local_model:
+            from prometheus.context.compactor import DEFAULT_CLOUD_LIMIT
+
+            effective_limit = int(
+                ctx.get("cloud_default_limit", DEFAULT_CLOUD_LIMIT)
+            )
 
         return cls(
             effective_limit=effective_limit,

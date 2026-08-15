@@ -385,3 +385,88 @@ class TestTruncationIntegration:
         fresh_budget = TokenBudget(effective_limit=1000, reserved_output=0)
         fresh_budget.add("tool_results", truncated)
         assert fresh_budget.used < budget.used
+
+
+# --------------------------------------------------------------------------- #
+# /context must report the budget that is actually in force
+#
+# TokenBudget did exact-match lookups only — no detection, no cloud default —
+# while ContextCompactor.limit_for() had all three. So `/context` answered
+# 72000 on a local session actually budgeted 32768 (detected) AND on a cloud
+# session actually budgeted 1000000. Wrong in both directions, and wrong
+# exactly where an operator looks to check whether a budget is right.
+# --------------------------------------------------------------------------- #
+
+from unittest.mock import MagicMock as _MMock
+
+from prometheus.context.budget import TokenBudget as _TB
+from prometheus.context.compactor import (
+    DEFAULT_CLOUD_LIMIT as _CLOUD,
+    ContextCompactor as _Comp,
+)
+
+_LOCAL_GGUF = "Qwen3.6-27B-UD-Q4_K_XL.gguf"
+
+
+def _cfg_file(tmp_path, overrides=None, cloud_default=None):
+    import yaml
+    ctx = {"effective_limit": 72000, "reserved_output": 2000}
+    if overrides:
+        ctx["model_overrides"] = {k: {"effective_limit": v} for k, v in overrides.items()}
+    if cloud_default:
+        ctx["cloud_default_limit"] = cloud_default
+    p = tmp_path / "prometheus.yaml"
+    p.write_text(yaml.safe_dump({"context": ctx, "compaction": {"enabled": True}}))
+    return str(p)
+
+
+class TestReportedBudgetMatchesEnforced:
+    """The report and the mechanism must not disagree — that is the whole bug."""
+
+    def test_local_session_reports_the_detected_window(self, tmp_path):
+        b = _TB.from_config(model=_LOCAL_GGUF, config_path=_cfg_file(tmp_path),
+                            local_model=_LOCAL_GGUF, detected_limit=32768)
+        assert b.effective_limit == 32768
+
+    def test_cloud_session_does_not_report_the_local_window(self, tmp_path):
+        b = _TB.from_config(model="qwen3.8-max", config_path=_cfg_file(tmp_path),
+                            local_model=_LOCAL_GGUF, detected_limit=32768)
+        assert b.effective_limit == _CLOUD
+        assert b.effective_limit != 32768
+
+    def test_explicit_override_still_wins(self, tmp_path):
+        cfg = _cfg_file(tmp_path, overrides={"claude-sonnet-4-5": 200000})
+        b = _TB.from_config(model="claude-sonnet-4-5", config_path=cfg,
+                            local_model=_LOCAL_GGUF, detected_limit=32768)
+        assert b.effective_limit == 200000
+
+    def test_cloud_default_is_configurable(self, tmp_path):
+        cfg = _cfg_file(tmp_path, cloud_default=250000)
+        b = _TB.from_config(model="qwen3.8-max", config_path=cfg,
+                            local_model=_LOCAL_GGUF, detected_limit=32768)
+        assert b.effective_limit == 250000
+
+    def test_omitting_local_model_keeps_the_old_exact_match_behaviour(self, tmp_path):
+        """Back-compat: a caller that cannot say which model is local must not
+        silently get the cloud default for the local model."""
+        b = _TB.from_config(model=_LOCAL_GGUF, config_path=_cfg_file(tmp_path))
+        assert b.effective_limit == 72000
+
+    def test_report_equals_enforcement_for_every_case(self, tmp_path):
+        """The invariant that matters. Pinning them together is what stops
+        these two resolvers drifting apart again."""
+        import yaml
+        cfg_path = _cfg_file(tmp_path, overrides={"claude-sonnet-4-5": 200000})
+        cfg = yaml.safe_load(open(cfg_path))
+        comp = _Comp.from_config(cfg, provider=_MMock(), model=_LOCAL_GGUF,
+                                 detected_limit=32768)
+        for model in (_LOCAL_GGUF, "qwen3.8-max", "claude-sonnet-4-5"):
+            reported = _TB.from_config(
+                model=model, config_path=cfg_path,
+                local_model=_LOCAL_GGUF, detected_limit=32768,
+            ).effective_limit
+            enforced = comp.limit_for(model)
+            assert reported == enforced, (
+                f"{model}: /context would report {reported} while the "
+                f"compactor enforces {enforced}"
+            )
