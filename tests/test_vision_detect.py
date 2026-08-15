@@ -48,6 +48,55 @@ async def test_llama_detect_vision_multimodal_false():
         result = await p.detect_vision()
     assert result is False
 
+async def test_llama_detect_vision_modalities_true():
+    """Current llama-server builds report capability under `modalities`."""
+    p = LlamaCppProvider()
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock,
+               return_value=_mock_response(
+                   {"modalities": {"vision": True, "audio": False}})):
+        result = await p.detect_vision()
+    assert result is True
+    assert p.supports_vision is True
+
+
+async def test_llama_detect_vision_modalities_false():
+    p = LlamaCppProvider()
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock,
+               return_value=_mock_response(
+                   {"modalities": {"vision": False, "audio": False}})):
+        result = await p.detect_vision()
+    assert result is False
+
+
+async def test_llama_detect_vision_live_payload_shape_without_mmproj():
+    """The exact /props shape the 4090 returns today — no `multimodal` key.
+
+    Regression guard for the trap this fixes: reading only the legacy keys
+    made detection return False on this shape no matter what was loaded, so
+    an mmproj restart would have changed nothing visible.
+    """
+    p = LlamaCppProvider()
+    live = {
+        "model_path": "/home/x/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+        "modalities": {"vision": False, "video": False, "audio": False},
+        "default_generation_settings": {"n_ctx": 32768},
+        "total_slots": 1,
+    }
+    assert "multimodal" not in live, "sanity: the live payload has no legacy key"
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock,
+               return_value=_mock_response(live)):
+        assert await p.detect_vision() is False
+
+    # ...and the SAME shape with a projector loaded must flip to True.
+    live_with_mmproj = dict(live)
+    live_with_mmproj["modalities"] = {
+        "vision": True, "video": False, "audio": False,
+    }
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock,
+               return_value=_mock_response(live_with_mmproj)):
+        assert await p.detect_vision() is True
+
+
 async def test_llama_detect_vision_nested_legacy():
     p = LlamaCppProvider()
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock,
