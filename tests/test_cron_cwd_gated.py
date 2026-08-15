@@ -263,3 +263,70 @@ class TestCronRoutesAreGated:
         assert r.status_code == 400
         assert "SecurityGate" in r.json()["error"]
         assert Path(c.get("/api/cron").json()[0]["cwd"]) != denied
+
+
+class TestNoWorkspaceLockIsPinned:
+    """A cwd OUTSIDE every workspace root is ALLOWED, with zero prompts.
+
+    UNRULED, NOT INTENDED — see PR #215. The no-workspace-lock decision was
+    made because the evidence for a lock was one sample (1 of 4 persisted jobs
+    carries a cwd, 0 relative, 0 outside a root), not because an unconfined
+    cron cwd is known-good. Will left it unruled deliberately.
+
+    Right now that ruling is honoured only by ACCIDENT of two facts: this call
+    site evaluates the tool name ``"bash"``, and ``_APPROVE_TOOLS`` happens to
+    contain only ``write_file``/``edit_file``. Either could change without
+    anyone connecting it to cron — add ``bash`` to ``_APPROVE_TOOLS`` for an
+    unrelated reason, or rename the tool this site evaluates, and cron jobs
+    outside the workspace would start prompting (and, unattended, refusing)
+    with no one having decided that.
+
+    So the behaviour is pinned here rather than left to fall out. If this goes
+    red, nothing is necessarily broken — but a decision has been made by
+    accident and needs to be made on purpose.
+    """
+
+    def test_cwd_outside_every_workspace_root_is_allowed(self, monkeypatch, tmp_path):
+        from prometheus.permissions.checker import SecurityGate
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        gate = SecurityGate(workspace_root=[str(workspace)], denied_paths=[])
+        monkeypatch.setattr(cs, "_SECURITY_GATE", gate)
+
+        allowed, resolved, reason = cs.normalize_and_vet_cron_job(
+            "echo hi", str(outside),
+        )
+        assert allowed, (
+            f"a cron cwd outside every workspace root was refused ({reason}). "
+            "The no-workspace-lock ruling is UNRULED, NOT INTENDED — see PR "
+            "#215. Check whether 'bash' entered _APPROVE_TOOLS or this site's "
+            "evaluated tool name changed."
+        )
+        assert resolved == str(outside.resolve())
+
+    def test_the_mechanism_that_makes_it_so(self):
+        """Names the two facts the row above depends on, so a red test points
+        at the cause instead of the symptom."""
+        from prometheus.permissions.checker import _APPROVE_TOOLS
+
+        assert "bash" not in _APPROVE_TOOLS, (
+            "'bash' entered _APPROVE_TOOLS — cron cwds outside the workspace "
+            "will now prompt, and unattended jobs will refuse. That may be "
+            "correct, but it is a ruling nobody made: see PR #215."
+        )
+
+    def test_denied_still_wins_outside_the_workspace(self, monkeypatch, tmp_path):
+        """No workspace lock does NOT mean no confinement — denied_paths is
+        unconditional and applies wherever the cwd lands."""
+        from prometheus.permissions.checker import SecurityGate
+
+        denied = tmp_path / "secrets"
+        denied.mkdir()
+        gate = SecurityGate(workspace_root=[str(tmp_path / "ws")],
+                            denied_paths=[str(denied)])
+        monkeypatch.setattr(cs, "_SECURITY_GATE", gate)
+        allowed, _r, _reason = cs.normalize_and_vet_cron_job("echo hi", str(denied))
+        assert not allowed
