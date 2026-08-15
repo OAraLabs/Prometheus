@@ -1225,22 +1225,29 @@ def create_app(
             )
         # SECURITY: refuse to even store a job whose command would be blocked at
         # system trust (the execute path enforces this too — this is fail-fast).
-        from prometheus.gateway.cron_scheduler import vet_cron_command
+        # THE CHOKE POINT, shared with the cron_create tool and the update
+        # route: one resolution of the cwd, one gate decision. A tool-only fix
+        # would leave this route — and it is the one a remote client uses.
+        from prometheus.gateway.cron_scheduler import normalize_and_vet_cron_job
 
-        allowed, reason = vet_cron_command(command)
+        allowed, resolved_cwd, reason = normalize_and_vet_cron_job(
+            command, body.get("cwd"),
+        )
         if not allowed:
             return JSONResponse(
                 status_code=400,
-                content={"error": f"command rejected by SecurityGate: {reason}"},
+                content={"error": f"rejected by SecurityGate: {reason}"},
             )
         job: dict[str, Any] = {
             "name": name,
             "schedule": schedule,
             "command": command,
+            # Always persisted, always absolute. Previously the key was only
+            # written when the caller supplied one, so "absent" meant "resolve
+            # against whatever process runs it later".
+            "cwd": resolved_cwd,
             "enabled": bool(body.get("enabled", True)),
         }
-        if body.get("cwd"):
-            job["cwd"] = str(body["cwd"])
         upsert_cron_job(job)
         return JSONResponse(status_code=201, content={"ok": True, "job": get_cron_job(name)})
 
@@ -1269,19 +1276,28 @@ def create_app(
             command = str(body.get("command", "")).strip()
             if not command:
                 return JSONResponse(status_code=400, content={"error": "command cannot be empty"})
-            from prometheus.gateway.cron_scheduler import vet_cron_command
-
-            allowed, reason = vet_cron_command(command)
-            if not allowed:
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": f"command rejected by SecurityGate: {reason}"},
-                )
             existing["command"] = command
         if "cwd" in body:
             existing["cwd"] = str(body["cwd"]) if body["cwd"] else None
         if "enabled" in body:
             existing["enabled"] = bool(body["enabled"])
+
+        # Vet the RESULTING job, not the delta. Vetting per-field left a hole
+        # this closes: a PUT changing ONLY the cwd touched no `command` branch,
+        # so it was never vetted at all — the edit route could relocate an
+        # already-approved command to ~/.ssh without any check running.
+        # THE CHOKE POINT, same call as the tool and POST.
+        from prometheus.gateway.cron_scheduler import normalize_and_vet_cron_job
+
+        allowed, resolved_cwd, reason = normalize_and_vet_cron_job(
+            str(existing.get("command", "")), existing.get("cwd"),
+        )
+        if not allowed:
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"rejected by SecurityGate: {reason}"},
+            )
+        existing["cwd"] = resolved_cwd
         upsert_cron_job(existing)  # replaces by name + recomputes next_run
         return {"ok": True, "job": get_cron_job(name)}
 
