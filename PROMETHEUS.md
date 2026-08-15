@@ -1,8 +1,17 @@
 # Prometheus
 
 ## Project Rules
-- **NEVER work in the deploy clone (`~/prometheus-deploy`). Work in `~/Prometheus`.**
+- **NEVER work in the deploy clone (`~/prometheus-deploy`).**
   See "Two checkouts" below — this one has cost real work twice.
+- **Commit from a per-session WORKTREE, not from `~/Prometheus` itself.**
+  Sessions run concurrently and share that tree; it has been switched to
+  another branch mid-session, leaving a second session's edits on the wrong
+  one. The pre-commit hook refuses commits from the shared checkout —
+  worktrees are exempt. See "Three trees" below.
+
+  ```bash
+  git worktree add .claude/worktrees/<name> -b <branch> origin/main
+  ```
 - Python 3.11+, package managed with uv
 - All imports use `from prometheus.` prefix
 - Config lives at config/prometheus.yaml, loaded via prometheus.config
@@ -12,12 +21,30 @@
 - Stage files BY NAME. `git add tests/` once swept three unrelated untracked
   files into a provider PR.
 
-## Two checkouts — which one you are in matters
+## Three trees — which one you are in matters
 
-| Path | What it is | May you edit it? |
+| Path | What it is | May you commit from it? |
 |---|---|---|
-| `~/Prometheus` | dev checkout — branch, commit, PR from here | **yes** |
+| `.claude/worktrees/<name>` | per-session worktree — branch, commit, PR from here | **yes** |
+| `~/Prometheus` | shared dev checkout — read, review, `git worktree add` | **only with the override below** |
 | `~/prometheus-deploy` | ff-only mirror of `origin/main`; **the tree the daemon runs** | **no** |
+
+Both refusals are pre-commit hooks, and both have the same reasoning: the
+mistake is invisible at the moment it is made and expensive later.
+
+The shared checkout is a *speed bump*, not a wall — solo work, a rebase, a
+hotfix are all legitimate there. Say so explicitly and it is recorded rather
+than hidden:
+
+```bash
+PROMETHEUS_ALLOW_DEV_COMMIT=1 git commit ...
+```
+
+That prints a banner and adds a `Dev-checkout-override:` trailer to the
+commit, so `git log --grep=Dev-checkout-override` finds every exception
+afterwards. Same bargain as `PROMETHEUS_ALLOW_UNMERGED_DEPLOY` in
+`scripts/deploy_guard.sh`: an override that announces itself beats a guard
+people delete.
 
 The deploy clone is updated one way only:
 

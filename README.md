@@ -274,6 +274,7 @@ Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, a
 - Python 3.11+
 - llama.cpp or Ollama running with any model loaded (or a cloud API key)
 - A Telegram bot token (from @BotFather) — optional, CLI works without it
+- `bubblewrap` or Docker — optional, only for coding mode's stronger sandbox backends (`coding.sandbox_type: bwrap | docker`). The default `process` backend needs neither; `prometheus doctor` reports which backend you have configured and whether it can actually start.
 
 ### Install
 
