@@ -1943,6 +1943,33 @@ def _pending_pairs(context: LoopContext) -> dict:
     return context.pair_pending
 
 
+def _tool_schema_json(context: LoopContext, tool_name: str) -> str | None:
+    """The tool's JSON schema as the model saw it, for golden-trace export.
+
+    Full ``parameters`` here, not the property-name digest ``_pair_context``
+    keeps: a fine-tuning example needs the schema the model was actually
+    conditioned on, and types/enums/descriptions are most of that signal.
+    Best-effort — a missing schema costs one export row, never a turn.
+    """
+    import json as _json
+
+    try:
+        registry = context.tool_registry
+        tool = registry.get(tool_name) if registry is not None else None
+        if tool is None:
+            return None
+        return _json.dumps(
+            {
+                "name": tool_name,
+                "description": (getattr(tool, "description", "") or "")[:1000],
+                "parameters": tool.input_model.model_json_schema(),
+            },
+            default=str,
+        )
+    except Exception:
+        return None
+
+
 def _pair_context(context: LoopContext, tool_name: str) -> dict:
     """Compact reproducible context: LCM reference + the tool schema the
     model saw. Sessions without LCM persistence still get the schema."""
@@ -3272,6 +3299,14 @@ async def _execute_tool_call(
             provider=provider_name,
             repairs=len(repair_log),
             served_model=served_model,
+            # Fine-tuning capture: WHAT was called is not a trainable example
+            # on its own — the situation that prompted it is the input half.
+            # session_id joins back to lcm_messages for that context, and the
+            # schema is stored as the model actually saw it rather than
+            # re-derived from a registry that may have changed by export time.
+            # Ephemeral turns null both, consistent with the content columns.
+            session_id=None if ephemeral else context.session_id,
+            tool_schema=None if ephemeral else _tool_schema_json(context, tool_name),
         )
 
     # Repair-pair flywheel: a successful execution completes any pending

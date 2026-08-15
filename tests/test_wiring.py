@@ -5631,6 +5631,186 @@ class TestCircuitBreakerDiagnosis:
 # ---------------------------------------------------------------------------
 
 
+class TestLcmContextResolver:
+    """The resolver supplies the INPUT half of a trainable example."""
+
+    def _store(self, msgs):
+        return _FakeConvStore({"s1": [
+            _FakeLcmMessage(role, content, ts) for role, content, ts in msgs
+        ]})
+
+    def _resolve(self, msgs, call_ts=100.0):
+        from prometheus.sentinel.golden_trace_exporter import lcm_context_resolver
+
+        resolver = lcm_context_resolver(self._store(msgs))
+        return resolver({"session_id": "s1", "timestamp": call_ts})
+
+    def test_messages_at_or_after_the_call_are_excluded(self):
+        """A later message can contain the tool's own RESULT — including it
+        would put the answer back in the prompt, the defect this replaced."""
+        out = self._resolve([
+            ("user", "before", 50.0),
+            ("tool", "THE RESULT", 100.0),   # exactly at the call
+            ("user", "after", 150.0),
+        ])
+        assert [m["content"] for m in out] == ["before"]
+
+    def test_trailing_assistant_turns_are_trimmed(self):
+        """The target IS an assistant turn, and that turn's prose preamble is
+        also written to LCM — leaving it in duplicates it into the prompt and
+        trains the model to continue itself."""
+        out = self._resolve([
+            ("user", "do the thing", 10.0),
+            ("assistant", "Let me check that file.", 20.0),
+        ])
+        assert [m["role"] for m in out] == ["user"]
+
+    def test_context_is_capped(self):
+        from prometheus.sentinel.golden_trace_exporter import CONTEXT_MESSAGE_LIMIT
+
+        out = self._resolve([("user", f"m{i}", float(i)) for i in range(50)])
+        assert len(out) == CONTEXT_MESSAGE_LIMIT
+        assert out[-1]["content"] == "m49"  # the most RECENT are kept
+
+    def test_missing_session_id_resolves_to_nothing(self):
+        from prometheus.sentinel.golden_trace_exporter import lcm_context_resolver
+
+        resolver = lcm_context_resolver(self._store([("user", "x", 1.0)]))
+        assert resolver({"session_id": None, "timestamp": 100.0}) == []
+
+    def test_no_store_means_no_resolver(self):
+        from prometheus.sentinel.golden_trace_exporter import lcm_context_resolver
+
+        assert lcm_context_resolver(None) is None
+
+    def test_store_failure_is_swallowed(self):
+        """A broken store costs the export, never the daemon."""
+        from prometheus.sentinel.golden_trace_exporter import lcm_context_resolver
+
+        class _Boom:
+            def get_messages(self, *a, **kw):
+                raise RuntimeError("db gone")
+
+        resolver = lcm_context_resolver(_Boom())
+        assert resolver({"session_id": "s1", "timestamp": 1.0}) == []
+
+
+class TestProviderClassificationDrift:
+    """Every provider the registry can produce must be classified.
+
+    `qwen` shipped in 2026-08 and was never added to _CLOUD_PROVIDERS. It
+    still produced golden traces ONLY because OpenAICompatProvider set no
+    provider_name and the class-name fallback mislabelled every
+    OpenAI-compatible provider as "openai". Now that the registry passes the
+    real name through, an unclassified provider stops being captured
+    silently — so the sets are asserted complete rather than trusted.
+    """
+
+    def test_every_registry_provider_is_classified(self):
+        from prometheus.providers.registry import ProviderRegistry
+        from prometheus.telemetry.tracker import (
+            _CLOUD_PROVIDERS,
+            _LOCAL_PROVIDERS,
+        )
+
+        unclassified = [
+            name for name in ProviderRegistry.list_providers()
+            if name not in _CLOUD_PROVIDERS and name not in _LOCAL_PROVIDERS
+        ]
+        assert not unclassified, (
+            f"unclassified providers {unclassified} — golden-trace and "
+            f"cloud-pair capture will silently skip them"
+        )
+
+    def test_no_provider_is_both_cloud_and_local(self):
+        from prometheus.telemetry.tracker import (
+            _CLOUD_PROVIDERS,
+            _LOCAL_PROVIDERS,
+        )
+
+        assert not (_CLOUD_PROVIDERS & _LOCAL_PROVIDERS)
+
+    def test_cloud_set_agrees_with_the_registry(self):
+        """Mislabelling a LOCAL provider as cloud would file student output
+        as teacher exemplars and poison the corpus, so the duplicated set
+        must not claim anything the registry calls local."""
+        from prometheus.providers.registry import ProviderRegistry
+        from prometheus.telemetry.tracker import _CLOUD_PROVIDERS
+
+        for name in ProviderRegistry.list_providers():
+            if name in _CLOUD_PROVIDERS:
+                assert ProviderRegistry.is_cloud(name), (
+                    f"{name} counted as cloud by telemetry but local by the registry"
+                )
+
+    def test_qwen_is_cloud(self):
+        """The specific omission: the busiest cloud model on this box."""
+        from prometheus.telemetry.tracker import _CLOUD_PROVIDERS
+
+        assert "qwen" in _CLOUD_PROVIDERS
+
+    def test_openai_compat_reports_its_real_provider_name(self):
+        """Attribution must survive the shared class — otherwise every
+        OpenAI-compatible provider reports as 'openai'."""
+        from prometheus.providers.registry import ProviderRegistry
+
+        provider = ProviderRegistry.create({
+            "provider": "qwen", "api_key": "test-key", "model": "qwen3.8-max",
+        })
+        assert getattr(provider, "provider_name", "") == "qwen"
+
+    def test_telemetry_flags_qwen_calls_as_golden(self, tmp_path):
+        """End-to-end: a qwen call now qualifies on its own name, not by
+        accidentally being labelled 'openai'."""
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        tel.record(
+            model="qwen3.8-max", tool_name="bash", success=True, retries=0,
+            raw_model_output="prose",
+            parsed_tool_call='{"name":"bash","input":{}}',
+            provider="qwen", session_id="s1",
+        )
+        assert len(tel.get_golden_traces()) == 1
+
+
+class _FakeLcmMessage:
+    """Minimal stand-in for a MessagePart (the resolver uses getattr)."""
+
+    def __init__(self, role: str, content: str, timestamp: float):
+        self.role = role
+        self.content = content
+        self.timestamp = timestamp
+
+
+class _FakeConvStore:
+    """Conversation store returning a canned history per session."""
+
+    def __init__(self, messages_by_session: dict[str, list]):
+        self._by_session = messages_by_session
+
+    def get_messages(self, session_id: str, limit: int = 500, **kw):
+        return self._by_session.get(session_id, [])[:limit]
+
+
+def _conv_store_for(session_id: str, *, at: float | None = None) -> _FakeConvStore:
+    """A store holding one user turn strictly BEFORE the golden call."""
+    import time as _time
+
+    base = (at if at is not None else _time.time()) - 60
+    return _FakeConvStore({
+        session_id: [
+            _FakeLcmMessage("user", "please list the files", base),
+        ]
+    })
+
+
+def _resolver_for(session_id: str):
+    from prometheus.sentinel.golden_trace_exporter import lcm_context_resolver
+
+    return lcm_context_resolver(_conv_store_for(session_id))
+
+
 class TestGoldenTraceCapture:
     """Golden Trace Capture sprint.
 
@@ -5799,28 +5979,102 @@ class TestGoldenTraceCapture:
         tel.record(
             model="claude", tool_name="bash", success=True, retries=0,
             raw_model_output="I will run ls", parsed_tool_call='{"name":"bash","input":{"command":"ls"}}',
-            provider="anthropic",
+            provider="anthropic", session_id="s1",
+            tool_schema='{"name":"bash","parameters":{"type":"object"}}',
         )
         tel.record(
             model="gpt-5", tool_name="bash", success=True, retries=0,
             raw_model_output="Running ls -la", parsed_tool_call='{"name":"bash","input":{"command":"ls -la"}}',
-            provider="openai",
+            provider="openai", session_id="s1",
+            tool_schema='{"name":"bash","parameters":{"type":"object"}}',
         )
-        path = tel.export_golden_traces(output_dir=tmp_path)
+        path = tel.export_golden_traces(
+            output_dir=tmp_path, context_resolver=_resolver_for("s1")
+        )
         assert path.exists()
         assert path.suffix == ".jsonl"
         assert path.name.startswith("golden_traces_")
 
         lines = path.read_text(encoding="utf-8").strip().splitlines()
         assert len(lines) == 2
-        # Each line must parse as JSON with the fine-tuning shape
         for line in lines:
             obj = _json.loads(line)
             assert "messages" in obj
-            assert len(obj["messages"]) == 2
+            # The REAL preceding turn, not a synthesised instruction.
             assert obj["messages"][0]["role"] == "user"
-            assert obj["messages"][1]["role"] == "assistant"
-            assert obj["messages"][1]["content"]  # non-empty
+            assert obj["messages"][0]["content"] == "please list the files"
+            # The target is the tool CALL, carried as tool_calls.
+            final = obj["messages"][-1]
+            assert final["role"] == "assistant"
+            call = final["tool_calls"][0]["function"]
+            assert call["name"] == "bash"
+            assert "ls" in call["arguments"]
+            # And the schema the model saw rides along.
+            assert obj["tools"][0]["function"]["name"] == "bash"
+
+    @pytest.mark.integration
+    def test_export_does_not_leak_the_answer_into_the_prompt(self, tmp_path):
+        """REGRESSION: the old export synthesised the user turn as
+        ``Call the `X` tool appropriately. Reference parsed call: {the call}``
+        — the answer verbatim in the prompt. Training on that teaches
+        copying from context, and no such reference exists at inference."""
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+        import json as _json
+
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        tel.record(
+            model="claude", tool_name="bash", success=True, retries=0,
+            raw_model_output="I will run ls",
+            parsed_tool_call='{"name":"bash","input":{"command":"ls -la /secret"}}',
+            provider="anthropic", session_id="s1",
+        )
+        path = tel.export_golden_traces(
+            output_dir=tmp_path, context_resolver=_resolver_for("s1")
+        )
+        obj = _json.loads(path.read_text(encoding="utf-8").strip())
+        prompt = _json.dumps(obj["messages"][:-1])
+        assert "Reference parsed call" not in prompt
+        assert "ls -la /secret" not in prompt, "target leaked into the input half"
+
+    @pytest.mark.integration
+    def test_traces_without_recoverable_context_are_skipped(self, tmp_path):
+        """Rows predating session_id capture have no input half and can never
+        get one. Emitting them anyway is what made the old corpus untrainable,
+        so they are dropped rather than shaped into something plausible."""
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        tel.record(
+            model="claude", tool_name="bash", success=True, retries=0,
+            raw_model_output="prose", parsed_tool_call='{"name":"bash","input":{}}',
+            provider="anthropic",  # no session_id — the pre-capture shape
+        )
+        path = tel.export_golden_traces(
+            output_dir=tmp_path, context_resolver=_resolver_for("s1")
+        )
+        assert path.read_text(encoding="utf-8").strip() == ""
+
+    @pytest.mark.integration
+    def test_empty_prose_still_produces_a_trainable_example(self, tmp_path):
+        """522 of 1375 live golden rows had EMPTY raw_model_output. Under the
+        old shape those were blank-target examples; now the call is the
+        target, so an empty preamble is merely a turn with no prose."""
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+        import json as _json
+
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        tel.record(
+            model="claude", tool_name="bash", success=True, retries=0,
+            raw_model_output="",  # still golden: not None
+            parsed_tool_call='{"name":"bash","input":{"command":"ls"}}',
+            provider="anthropic", session_id="s1",
+        )
+        path = tel.export_golden_traces(
+            output_dir=tmp_path, context_resolver=_resolver_for("s1")
+        )
+        obj = _json.loads(path.read_text(encoding="utf-8").strip())
+        assert obj["messages"][-1]["content"] == ""
+        assert obj["messages"][-1]["tool_calls"][0]["function"]["name"] == "bash"
 
     @pytest.mark.integration
     def test_export_golden_traces_respects_tool_filter(self, tmp_path):
@@ -5831,15 +6085,19 @@ class TestGoldenTraceCapture:
         tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
         tel.record(
             model="claude", tool_name="bash", success=True, retries=0,
-            raw_model_output="bash-out", parsed_tool_call='{}',
-            provider="anthropic",
+            raw_model_output="bash-out", parsed_tool_call='{"name":"bash","input":{}}',
+            provider="anthropic", session_id="s1",
         )
         tel.record(
             model="claude", tool_name="file_read", success=True, retries=0,
-            raw_model_output="read-out", parsed_tool_call='{}',
-            provider="anthropic",
+            raw_model_output="read-out",
+            parsed_tool_call='{"name":"file_read","input":{}}',
+            provider="anthropic", session_id="s1",
         )
-        path = tel.export_golden_traces(tool_name="bash", output_dir=tmp_path)
+        path = tel.export_golden_traces(
+            tool_name="bash", output_dir=tmp_path,
+            context_resolver=_resolver_for("s1"),
+        )
         lines = path.read_text(encoding="utf-8").strip().splitlines()
         assert len(lines) == 1
         obj = _json.loads(lines[0])
@@ -6400,6 +6658,8 @@ class TestSunrisePeriodicNudge:
 class TestSunriseGoldenTraceExporter:
     """GoldenTraceExporter writes JSONL and emits a signal on success."""
 
+    SESSION = "sess-golden"
+
     def _seed_golden_trace(self, tel, tool_name="bash"):
         """Insert one golden trace row into the telemetry DB."""
         tel.record(
@@ -6409,8 +6669,12 @@ class TestSunriseGoldenTraceExporter:
             retries=0,
             latency_ms=1.0,
             raw_model_output='I\'ll run a command.',
-            parsed_tool_call='{"name":"bash","input":{"command":"ls"}}',
+            parsed_tool_call=f'{{"name":"{tool_name}","input":{{"command":"ls"}}}}',
             provider="anthropic",
+            # An export is only trainable if the call can be rejoined with
+            # the conversation that prompted it.
+            session_id=self.SESSION,
+            tool_schema=f'{{"name":"{tool_name}","parameters":{{"type":"object"}}}}',
         )
 
     def test_run_once_writes_jsonl_and_emits_signal(self, tmp_path):
@@ -6439,6 +6703,7 @@ class TestSunriseGoldenTraceExporter:
                 "nightly_limit": 10,
                 "output_dir": str(out_dir),
             },
+            conversation_store=_conv_store_for(self.SESSION),
         )
         result = asyncio.run(exporter.run_once())
         assert result is not None
@@ -6474,6 +6739,7 @@ class TestSunriseGoldenTraceExporter:
                 "nightly_limit": 5,
                 "output_dir": str(out_dir),
             },
+            conversation_store=_conv_store_for(self.SESSION),
         )
         result = asyncio.run(exporter.run_once())
         assert result is not None
@@ -6510,6 +6776,7 @@ class TestSunriseGoldenTraceExporter:
                 "nightly_limit": limit,
                 "output_dir": str(out_dir),
             },
+            conversation_store=_conv_store_for(self.SESSION),
         )
 
     @staticmethod
@@ -6610,6 +6877,33 @@ class TestSunriseGoldenTraceExporter:
         ]
         assert sorted(on_disk) == [f"tool_{i}" for i in range(4)]
 
+    def test_untrainable_batch_advances_watermark_without_a_file(self, tmp_path):
+        """A batch where every row is untrainable must still move the cursor.
+
+        Those rows can never become exportable — their context was never
+        referenced — so leaving the watermark behind them would re-read the
+        same dead batch every cycle forever, and no later trace would ever
+        be reached."""
+        tel = _tel(tmp_path)
+        # No session_id: the pre-capture shape, permanently unrecoverable.
+        tel.record(
+            model="m", tool_name="bash", success=True, retries=0,
+            raw_model_output="prose",
+            parsed_tool_call='{"name":"bash","input":{}}',
+            provider="anthropic",
+        )
+        out_dir = tmp_path / "trajectories"
+        exporter = self._exporter(tel, out_dir)
+
+        assert asyncio.run(exporter.run_once()) is None
+        assert self._exports(out_dir) == [], "no file for an untrainable batch"
+
+        # A good trace recorded afterwards is still reached.
+        self._seed_golden_trace(tel)
+        path = asyncio.run(exporter.run_once())
+        assert path is not None
+        assert len(self._lines(path)) == 1
+
     def test_corrupt_watermark_re_exports_rather_than_stalling(self, tmp_path):
         """Duplicates cost disk; skipped traces are unrecoverable. On
         unreadable state the cursor restarts rather than stalling."""
@@ -6634,7 +6928,10 @@ class TestSunriseGoldenTraceExporter:
         out_dir = tmp_path / "trajectories"
 
         assert asyncio.run(self._exporter(tel, out_dir).run_once()) is not None
-        dump = tel.export_golden_traces(output_dir=tmp_path / "manual")
+        dump = tel.export_golden_traces(
+            output_dir=tmp_path / "manual",
+            context_resolver=_resolver_for(self.SESSION),
+        )
         assert len(self._lines(dump)) == 1
 
 

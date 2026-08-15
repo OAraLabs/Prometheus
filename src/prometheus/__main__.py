@@ -1305,10 +1305,24 @@ def main() -> None:
         from prometheus.telemetry.tracker import ToolCallTelemetry
         telemetry = ToolCallTelemetry()
         try:
+            # Same pairing the daemon does — a trace without the conversation
+            # that prompted it is not a training example, so the CLI dump
+            # resolves context too rather than emitting context-free rows.
+            from prometheus.memory.lcm_conversation_store import (
+                LCMConversationStore,
+            )
+            from prometheus.sentinel.golden_trace_exporter import (
+                lcm_context_resolver,
+            )
+            try:
+                _conv_store = LCMConversationStore()
+            except Exception:
+                _conv_store = None
             output_path = telemetry.export_golden_traces(
                 tool_name=args.tool,
                 limit=args.limit,
                 output_dir=args.output,
+                context_resolver=lcm_context_resolver(_conv_store),
             )
             print(f"Exported: {output_path}")
             sys.exit(0)

@@ -1310,10 +1310,27 @@ async def run_daemon(args: argparse.Namespace) -> None:
         trajectory_cfg = config.get("trajectory_export", {})
         if trajectory_cfg.get("enabled", False):
             from prometheus.sentinel.golden_trace_exporter import GoldenTraceExporter
+            # The conversation store is what makes an exported trace
+            # trainable: telemetry records the tool call, the LCM store holds
+            # the conversation that prompted it, and the export rejoins them
+            # by session_id. Without it every row is skipped as untrainable.
+            try:
+                from prometheus.memory.lcm_conversation_store import (
+                    LCMConversationStore,
+                )
+                trace_conv_store = LCMConversationStore()
+            except Exception:
+                logger.warning(
+                    "GoldenTraceExporter: no conversation store — golden "
+                    "traces cannot be paired with their context and will be "
+                    "skipped", exc_info=True,
+                )
+                trace_conv_store = None
             golden_exporter = GoldenTraceExporter(
                 telemetry=telemetry,
                 signal_bus=signal_bus if "signal_bus" in dir() else None,
                 config=trajectory_cfg,
+                conversation_store=trace_conv_store,
             )
             exporter_task = await golden_exporter.start()
             if exporter_task is not None:
