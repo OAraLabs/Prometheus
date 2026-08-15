@@ -266,6 +266,9 @@ class ProviderRegistry:
                 model=config.get("model", defaults.get("model", "")),
                 default_max_tokens=config.get("max_tokens", 4096),
                 timeout=config.get("timeout", 120.0),
+                # The registry is the only place that still knows which
+                # service this is; the provider instance cannot infer it.
+                provider_name=provider_name,
             )
 
         if provider_name == "anthropic":

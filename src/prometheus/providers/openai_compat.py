@@ -173,7 +173,20 @@ class OpenAICompatProvider(ModelProvider):
         model: str = "",
         default_max_tokens: int = 4096,
         timeout: float = 120.0,
+        provider_name: str = "",
     ) -> None:
+        # WHICH OpenAI-compatible service this instance talks to — openai,
+        # gemini, xai, deepseek, kimi, glm, mimo, qwen. One class serves all
+        # of them, so without this the only signal left is the class name,
+        # and `_provider_name_for_telemetry`'s fallback maps every one of
+        # them to "openai". That mislabelled every qwen call (the busiest
+        # model on this box) as openai in telemetry, and made golden-trace
+        # flagging depend on "openai" happening to be in _CLOUD_PROVIDERS
+        # rather than on the real provider being classified at all.
+        #
+        # Anything that consumes this MUST classify every name the registry
+        # can produce — see the drift guard in tests/test_wiring.py.
+        self.provider_name = provider_name
         self._base_url = base_url.rstrip("/")
         # api_key may be a static string OR a zero-arg callable resolved per
         # request. The callable form powers rotating credentials (xAI SuperGrok

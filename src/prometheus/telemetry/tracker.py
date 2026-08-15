@@ -20,6 +20,7 @@ import logging
 import sqlite3
 import time
 import traceback as _traceback
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -29,17 +30,36 @@ from prometheus.telemetry.db import connect_telemetry_db
 log = logging.getLogger(__name__)
 
 
-# Cloud provider names that qualify for golden-trace capture.
-# Kept in sync with ProviderRegistry.is_cloud() but duplicated here to
-# avoid a telemetry → providers dependency. Drift is unlikely — this set
-# only changes when a new cloud backend is added to the project.
+# Cloud provider names that qualify for golden-trace capture. Mirrors
+# ProviderRegistry.is_cloud(), duplicated to avoid a telemetry → providers
+# dependency.
+#
+# The previous comment here said "drift is unlikely — this set only changes
+# when a new cloud backend is added". That is exactly what happened and it
+# drifted anyway: `qwen` shipped in 2026-08 and was never added, so the
+# busiest cloud model on this box was not classified as cloud at all. It
+# still produced golden rows ONLY because OpenAICompatProvider set no
+# provider_name and the class-name fallback mislabelled every
+# OpenAI-compatible provider as "openai". Now that the registry passes the
+# real name through, an unclassified provider silently stops being captured
+# — so both sets below are asserted complete against
+# ProviderRegistry.list_providers() by a drift guard in tests/test_wiring.py.
 _CLOUD_PROVIDERS: frozenset[str] = frozenset(
     {
         "openai", "anthropic", "gemini", "xai", "groq",
         # CLOUD EXPANSION (2026-07)
         "deepseek", "kimi", "glm", "mimo",
+        # Alibaba (2026-08) — the omission described above.
+        "qwen",
     }
 )
+
+# Local backends. Explicit rather than "everything not cloud" on purpose:
+# an unclassified name must fail the drift guard, not silently land in
+# whichever bucket the default happens to be. Mislabelling a LOCAL provider
+# as cloud is the worse direction — it would file student output as teacher
+# exemplars and quietly poison the training corpus.
+_LOCAL_PROVIDERS: frozenset[str] = frozenset({"llama_cpp", "ollama", "stub"})
 
 
 # D3 denominator honesty: these error types are POLICY outcomes — the
@@ -201,6 +221,13 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("is_golden", "INTEGER NOT NULL DEFAULT 0"),
         ("repairs", "INTEGER NOT NULL DEFAULT 0"),
         ("served_model", "TEXT"),
+        # Fine-tuning capture (2026-08). Without these a golden row records
+        # WHAT was called but nothing about the situation that prompted it,
+        # so no trainable example can be reconstructed from it afterwards.
+        # NULL on every row written before this shipped — those rows are not
+        # recoverable and are skipped by the export.
+        ("session_id", "TEXT"),      # joins to lcm_messages for the context
+        ("tool_schema", "TEXT"),     # JSON: the schema the model actually saw
     ],
     "circuit_breaker_diagnostics": [
         ("golden_reference", "TEXT"),
@@ -227,6 +254,44 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("cache_write_tokens", "INTEGER"),
     ],
 }
+
+
+# Resolves a golden trace's INPUT half — the conversation that preceded the
+# call. Takes the trace row, returns chat messages ([{role, content}, ...])
+# or [] when unrecoverable. Injected rather than imported so telemetry keeps
+# no dependency on the conversation store; the daemon supplies the LCM-backed
+# implementation (see sentinel/golden_trace_exporter.lcm_context_resolver).
+ContextResolver = "Callable[[dict[str, Any]], list[dict[str, str]]]"
+
+# Column order shared by both golden-trace queries.
+_GOLDEN_COLUMNS = (
+    "rowid", "model", "tool_name", "raw_model_output", "parsed_tool_call",
+    "timestamp", "session_id", "tool_schema",
+)
+
+
+def _golden_row_to_dict(row: tuple) -> dict[str, Any]:
+    """Map a golden-trace row to the dict shape the export consumes."""
+    return dict(zip(_GOLDEN_COLUMNS, row))
+
+
+@dataclass(frozen=True)
+class GoldenExport:
+    """One incremental golden-trace export.
+
+    ``last_rowid`` is the watermark the caller persists to resume from; it is
+    the last row of the batch that was READ, so a batch capped by ``limit``
+    resumes mid-backlog rather than skipping what it did not reach.
+
+    ``path`` is None when every trace in the batch was untrainable. The
+    watermark must still advance in that case — those rows can never become
+    exportable, so re-reading them each cycle would stall the cursor on a
+    permanent backlog. ``count`` is examples WRITTEN, not traces read.
+    """
+
+    path: Path | None
+    count: int
+    last_rowid: int
 
 
 class ToolCallTelemetry:
@@ -312,6 +377,8 @@ class ToolCallTelemetry:
         provider: str = "",
         repairs: int = 0,
         served_model: str | None = None,
+        session_id: str | None = None,
+        tool_schema: str | None = None,
     ) -> None:
         """Record a single tool-call outcome.
 
@@ -350,8 +417,8 @@ class ToolCallTelemetry:
               (id, timestamp, model, tool_name, success, retries, latency_ms,
                error_type, error_detail,
                raw_model_output, parsed_tool_call, is_golden, repairs,
-               served_model)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               served_model, session_id, tool_schema)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 uuid4().hex,
@@ -368,6 +435,8 @@ class ToolCallTelemetry:
                 1 if is_golden else 0,
                 int(repairs),
                 served_model,
+                session_id,
+                tool_schema,
             ),
         )
         self._conn.commit()
@@ -945,7 +1014,8 @@ class ToolCallTelemetry:
         Filtered by ``tool_name`` if provided. Ordered newest-first.
         """
         query = (
-            "SELECT model, tool_name, raw_model_output, parsed_tool_call, timestamp"
+            "SELECT rowid, model, tool_name, raw_model_output, parsed_tool_call,"
+            " timestamp, session_id, tool_schema"
             " FROM tool_calls WHERE is_golden = 1"
         )
         params: list[Any] = []
@@ -960,16 +1030,7 @@ class ToolCallTelemetry:
         except sqlite3.DatabaseError:
             return []
 
-        return [
-            {
-                "model": row[0],
-                "tool_name": row[1],
-                "raw_model_output": row[2],
-                "parsed_tool_call": row[3],
-                "timestamp": row[4],
-            }
-            for row in rows
-        ]
+        return [_golden_row_to_dict(row) for row in rows]
 
     def export_golden_traces(
         self,
@@ -977,18 +1038,29 @@ class ToolCallTelemetry:
         limit: int = 100,
         format: str = "jsonl",
         output_dir: str | Path = "~/.prometheus",
+        context_resolver: "ContextResolver | None" = None,
     ) -> Path:
-        """Export golden traces to a JSONL file suitable for fine-tuning.
+        """Export the most recent golden traces on demand (the CLI path).
 
-        Each line is a chat-completion training example in the
-        ``{"messages": [{"role": "user", ...}, {"role": "assistant", ...}]}``
-        shape — the standard format for OpenAI fine-tuning and Axolotl.
+        Each line is a tool-calling training example: the preceding
+        conversation, then an assistant turn carrying the call as
+        ``tool_calls``, plus the ``tools`` schema the model saw — the shape
+        OpenAI fine-tuning and Axolotl consume. See :meth:`_build_example`
+        for why the old user/assistant split was not trainable.
+
+        Deliberately NOT incremental — see :meth:`export_new_golden_traces`.
+        A human running ``prometheus export-traces`` asking for the last N
+        should get them, not an empty file because the daemon already
+        exported those rows.
 
         Args:
             tool_name: if provided, export only traces for this tool
             limit: max traces to export (default 100)
             format: reserved; currently only "jsonl" is supported
             output_dir: directory to write to (default ~/.prometheus)
+            context_resolver: recovers each trace's preceding conversation.
+                Without it every row is skipped as untrainable, so the CLI
+                and daemon both supply one.
 
         Returns:
             Path to the written JSONL file, e.g.
@@ -1003,27 +1075,225 @@ class ToolCallTelemetry:
         stamp = int(time.time())
         path = out_dir / f"golden_traces_{stamp}.jsonl"
 
-        with path.open("w", encoding="utf-8") as fh:
-            for trace in traces:
-                user_content = (
-                    f"Call the `{trace['tool_name']}` tool appropriately.\n"
-                    f"Reference parsed call: {trace['parsed_tool_call'] or '{}'}"
-                )
-                assistant_content = trace["raw_model_output"] or ""
-                example = {
-                    "messages": [
-                        {"role": "user", "content": user_content},
-                        {"role": "assistant", "content": assistant_content},
-                    ],
-                    "_meta": {
-                        "model": trace["model"],
-                        "tool_name": trace["tool_name"],
-                        "timestamp": trace["timestamp"],
+        written = self._write_golden_jsonl(traces, path, context_resolver)
+        skipped = len(traces) - written
+        if skipped:
+            # Loud, not silent: rows recorded before session_id capture
+            # shipped have no recoverable context and can never be exported.
+            # A quiet drop would read as "there was nothing to export".
+            log.warning(
+                "export_golden_traces: %d of %d traces skipped as untrainable "
+                "(no recoverable context or no parsed call)", skipped, len(traces),
+            )
+        return path
+
+    @staticmethod
+    def _build_example(
+        trace: dict[str, Any],
+        context_messages: list[dict[str, str]],
+    ) -> dict[str, Any] | None:
+        """Shape one golden trace as a tool-calling fine-tuning example.
+
+        THE TARGET IS THE TOOL CALL. The previous shape had this inverted and
+        was not trainable in either half:
+
+        * the ``user`` turn was synthesised as ``Call the `X` tool
+          appropriately. Reference parsed call: {the real call}`` — the answer
+          verbatim in the prompt. That teaches copying from context, and no
+          such reference exists at inference time.
+        * the ``assistant`` turn was ``raw_model_output``, which for cloud
+          providers is only the PROSE preamble: they return the call as a
+          structured field, never in the text stream. Measured over the 1375
+          golden rows on this box — 836 prose-only, 522 EMPTY, 17 containing
+          any tool-call JSON. ~98.7% had a target that was not the call.
+
+        Now the call goes in the assistant turn as an OpenAI-style
+        ``tool_calls`` entry (prose kept as ``content``, which is the real
+        shape of such a turn), the schema the model saw goes in ``tools``,
+        and the input half is the ACTUAL preceding conversation.
+
+        Returns None when the example would not be trainable — no context, or
+        no parsed call to learn. Skipping is deliberate: a corpus of
+        unlearnable rows is worse than a smaller honest one, and the caller
+        counts what it drops.
+        """
+        raw_call = trace.get("parsed_tool_call")
+        if not raw_call or not context_messages:
+            return None
+        try:
+            call = json.loads(raw_call)
+            arguments = json.dumps(call.get("input", {}), ensure_ascii=False)
+        except (TypeError, ValueError):
+            return None
+
+        assistant: dict[str, Any] = {
+            "role": "assistant",
+            # Empty prose is normal and fine now: the signal is the call.
+            "content": trace.get("raw_model_output") or "",
+            "tool_calls": [
+                {
+                    "id": f"call_{trace.get('rowid', 0)}",
+                    "type": "function",
+                    "function": {
+                        "name": call.get("name", trace["tool_name"]),
+                        "arguments": arguments,
                     },
                 }
-                fh.write(json.dumps(example, ensure_ascii=False) + "\n")
+            ],
+        }
 
-        return path
+        example: dict[str, Any] = {
+            "messages": [*context_messages, assistant],
+            "_meta": {
+                "model": trace["model"],
+                "tool_name": trace["tool_name"],
+                "timestamp": trace["timestamp"],
+                "session_id": trace.get("session_id"),
+            },
+        }
+
+        schema = trace.get("tool_schema")
+        if schema:
+            try:
+                example["tools"] = [
+                    {"type": "function", "function": json.loads(schema)}
+                ]
+            except (TypeError, ValueError):
+                pass
+        return example
+
+    def _write_golden_jsonl(
+        self,
+        traces: list[dict[str, Any]],
+        path: Path,
+        context_resolver: "ContextResolver | None" = None,
+    ) -> int:
+        """Write *traces* as fine-tuning JSONL. Returns the number written.
+
+        Rows whose context cannot be recovered are skipped rather than
+        emitted in a degraded shape — see :meth:`_build_example`.
+        """
+        written = 0
+        with path.open("w", encoding="utf-8") as fh:
+            for trace in traces:
+                context_messages: list[dict[str, str]] = []
+                if context_resolver is not None:
+                    try:
+                        context_messages = context_resolver(trace) or []
+                    except Exception:
+                        log.debug("context resolution failed", exc_info=True)
+                        context_messages = []
+                example = self._build_example(trace, context_messages)
+                if example is None:
+                    continue
+                fh.write(json.dumps(example, ensure_ascii=False) + "\n")
+                written += 1
+        return written
+
+    def _golden_rows_after(
+        self,
+        since_rowid: int,
+        limit: int,
+        tool_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Golden traces with ``rowid > since_rowid``, OLDEST first.
+
+        rowid, not timestamp, is the cursor: it is unique and monotonic per
+        insert, so a batch boundary cannot split or duplicate rows that share
+        a timestamp — and it is immune to a clock that steps backwards.
+        Ascending order matters too, so the watermark advances through the
+        backlog in order instead of skipping to the newest N.
+        """
+        query = (
+            "SELECT rowid, model, tool_name, raw_model_output, parsed_tool_call,"
+            " timestamp, session_id, tool_schema"
+            " FROM tool_calls WHERE is_golden = 1 AND rowid > ?"
+        )
+        params: list[Any] = [int(since_rowid)]
+        if tool_name is not None:
+            query += " AND tool_name = ?"
+            params.append(tool_name)
+        query += " ORDER BY rowid ASC LIMIT ?"
+        params.append(max(1, int(limit)))
+
+        try:
+            rows = self._conn.execute(query, tuple(params)).fetchall()
+        except sqlite3.DatabaseError:
+            return []
+
+        return [_golden_row_to_dict(row) for row in rows]
+
+    def export_new_golden_traces(
+        self,
+        *,
+        since_rowid: int = 0,
+        limit: int = 1000,
+        tool_name: str | None = None,
+        format: str = "jsonl",
+        output_dir: str | Path = "~/.prometheus/trajectories/",
+        context_resolver: "ContextResolver | None" = None,
+    ) -> GoldenExport | None:
+        """Export only golden traces newer than *since_rowid*.
+
+        The INCREMENTAL counterpart to :meth:`export_golden_traces`, which
+        dumps the most recent N on demand and is right for a human running
+        ``prometheus export-traces``. A pipeline needs the other contract:
+        each cycle writes only what the last one did not, so the corpus
+        accumulates instead of restating itself.
+
+        That distinction is not academic. The daemon loop previously called
+        the dump-N method on every cycle AND once at startup, so each restart
+        re-wrote the same trailing rows to a new timestamped file — 279 files
+        holding 18 distinct payloads, ~94% of 36 MB duplicated, and a corpus
+        that looked far larger than the training signal in it.
+
+        Returns None when nothing new exists — no empty file is written,
+        since an empty export is not an event worth recording.
+        """
+        if format != "jsonl":
+            raise ValueError(f"Unsupported format: {format!r} (only 'jsonl' is supported)")
+
+        traces = self._golden_rows_after(since_rowid, limit, tool_name)
+        if not traces:
+            return None
+
+        out_dir = Path(output_dir).expanduser().resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        last_rowid = int(traces[-1]["rowid"])
+        # The rowid is in the NAME because a bare `int(time.time())` stamp has
+        # one-second resolution: two exports in the same second resolve to the
+        # same path and the second silently OVERWRITES the first, advancing
+        # the watermark past traces that no longer exist on disk. Back-to-back
+        # cycles are normal now (draining a backlog capped by `limit`), so
+        # that collision is reachable, and it loses data in the one direction
+        # a training corpus cannot recover from. rowid is strictly increasing
+        # across exports, so it cannot collide.
+        path = out_dir / f"golden_traces_{int(time.time())}_{last_rowid}.jsonl"
+        written = self._write_golden_jsonl(traces, path, context_resolver)
+
+        if written == 0:
+            # Every row in the batch was untrainable. Leave no empty file,
+            # but DO advance the watermark: these rows will never become
+            # exportable (their context is gone), so re-reading them every
+            # cycle would stall the cursor forever on a permanent backlog.
+            path.unlink(missing_ok=True)
+            log.warning(
+                "golden export: all %d traces in rowid range (%d, %d] were "
+                "untrainable — skipping past them",
+                len(traces), since_rowid, last_rowid,
+            )
+            return GoldenExport(path=None, count=0, last_rowid=last_rowid)
+
+        # The batch's own last rowid, not a separately-queried MAX: a row
+        # inserted between the two queries would otherwise be skipped
+        # forever. Advancing only past what this batch READ also makes a
+        # truncated batch (limit reached) resume correctly next cycle.
+        if written < len(traces):
+            log.warning(
+                "golden export: %d of %d traces skipped as untrainable",
+                len(traces) - written, len(traces),
+            )
+        return GoldenExport(path=path, count=written, last_rowid=last_rowid)
 
     # ------------------------------------------------------------------
     # Read

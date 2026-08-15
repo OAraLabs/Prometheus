@@ -23,6 +23,7 @@ from prometheus.cli.doctor import (
     check_gateways,
     check_inference,
     check_token,
+    check_trajectory_export,
     check_web_port,
     check_whisper,
     render_report,
@@ -346,3 +347,110 @@ class TestDoctorCommand:
         ])
         assert "✗ Thing: broken" in report
         assert "fix: do the fix" in report
+
+
+class TestTrajectoryExportCheck:
+    """`doctor` must distinguish off-on-purpose from off-by-accident.
+
+    Nothing breaks when golden-trace export is disabled — the traces simply
+    stop accumulating, and the cost only shows up much later as an absent
+    training corpus. Before this row the two states were indistinguishable
+    from outside, separated only by a yaml comment nobody greps.
+    """
+
+    def _seed(self, tmp_path, n_golden: int):
+        """A telemetry DB with *n_golden* golden rows, at the real path."""
+        import os
+        from prometheus.telemetry.tracker import ToolCallTelemetry
+
+        home = tmp_path / "home"
+        (home / ".prometheus").mkdir(parents=True, exist_ok=True)
+        os.environ["HOME"] = str(home)
+        tel = ToolCallTelemetry(db_path=home / ".prometheus" / "telemetry.db")
+        for i in range(n_golden):
+            tel.record(
+                model="m", tool_name="bash", success=True, retries=0,
+                raw_model_output="prose",
+                parsed_tool_call='{"name":"bash","input":{}}',
+                provider="anthropic", session_id=f"s{i}",
+            )
+        return home
+
+    @pytest.fixture(autouse=True)
+    def _restore_home(self):
+        import os
+
+        original = os.environ.get("HOME")
+        yield
+        if original is not None:
+            os.environ["HOME"] = original
+
+    def test_disabled_with_stranded_traces_warns(self, tmp_path):
+        """The forgotten-flag case: traces piling up, nothing exporting."""
+        home = self._seed(tmp_path, 5)
+        check = check_trajectory_export({
+            "trajectory_export": {
+                "enabled": False,
+                "output_dir": str(home / ".prometheus" / "trajectories"),
+            }
+        })
+        assert check.status == "warning"
+        assert "DISABLED" in check.message
+        assert "5 golden trace" in check.message
+        assert check.fix
+
+    def test_disabled_with_nothing_stranded_is_ok(self, tmp_path):
+        """The deliberate case: off, and nothing is being lost by it. The
+        COUNT is what separates this from the row above — the flag alone
+        cannot, which is the whole reason this check reports a consequence."""
+        home = self._seed(tmp_path, 0)
+        check = check_trajectory_export({
+            "trajectory_export": {
+                "enabled": False,
+                "output_dir": str(home / ".prometheus" / "trajectories"),
+            }
+        })
+        assert check.status == "ok"
+        assert "DISABLED" in check.message
+
+    def test_enabled_reports_files_and_backlog(self, tmp_path):
+        home = self._seed(tmp_path, 3)
+        out_dir = home / ".prometheus" / "trajectories"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "golden_traces_1_1.jsonl").write_text("{}\n")
+        check = check_trajectory_export({
+            "trajectory_export": {"enabled": True, "output_dir": str(out_dir)}
+        })
+        assert check.status == "ok"
+        assert "enabled" in check.message
+        assert "1 export file" in check.message
+
+    def test_watermark_is_respected(self, tmp_path):
+        """Already-exported traces are not counted as stranded."""
+        from prometheus.sentinel.golden_trace_exporter import WATERMARK_FILENAME
+
+        home = self._seed(tmp_path, 4)
+        out_dir = home / ".prometheus" / "trajectories"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / WATERMARK_FILENAME).write_text(
+            json.dumps({"last_rowid": 4})
+        )
+        check = check_trajectory_export({
+            "trajectory_export": {
+                "enabled": False, "output_dir": str(out_dir),
+            }
+        })
+        assert check.status == "ok", "exported traces counted as stranded"
+
+    def test_missing_db_does_not_crash_the_doctor(self, tmp_path):
+        """Diagnostics degrade; they never raise."""
+        import os
+
+        os.environ["HOME"] = str(tmp_path / "empty")
+        check = check_trajectory_export({"trajectory_export": {"enabled": False}})
+        assert check.status in ("ok", "warning")
+        assert "unknown" in check.message
+
+    def test_absent_config_defaults_to_enabled(self, tmp_path):
+        self._seed(tmp_path, 0)
+        assert check_trajectory_export({}).status == "ok"
