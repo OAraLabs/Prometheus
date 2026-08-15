@@ -133,9 +133,20 @@ class LlamaCppProvider(ModelProvider):
     async def detect_vision(self) -> bool:
         """Check if llama.cpp was started with --mmproj.
 
-        The /props endpoint includes a "multimodal" field when a vision
-        projector is loaded. Older versions nest it under
-        "default_generation_settings".
+        Three shapes, newest first — current llama-server builds report
+        capability under ``modalities``:
+
+            {"modalities": {"vision": true, "audio": false}}   # current
+            {"multimodal": true}                               # older
+            {"default_generation_settings": {"multimodal": true}}  # oldest
+
+        Reading only the legacy two made this return False *unconditionally*
+        on a current server: the live 4090 endpoint (build b7xxx, serving a
+        27B) has no ``multimodal`` key at any level, only
+        ``modalities: {"vision": false, ...}``. So loading an mmproj would
+        have flipped nothing that Prometheus could see — vision would still
+        report disabled, and the restart would look like it simply failed.
+        Verified against the live /props payload on 2026-08-15.
         """
         url = f"{self._base_url}/props"
         try:
@@ -144,7 +155,10 @@ class LlamaCppProvider(ModelProvider):
                 resp.raise_for_status()
                 props = resp.json()
 
-            multimodal = props.get("multimodal", False)
+            modalities = props.get("modalities") or {}
+            multimodal = bool(modalities.get("vision", False))
+            if not multimodal:
+                multimodal = props.get("multimodal", False)
             if not multimodal:
                 dgs = props.get("default_generation_settings", {})
                 multimodal = dgs.get("multimodal", False)

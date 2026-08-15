@@ -535,6 +535,17 @@ class AnatomyScanner:
                         props = props_resp.json()
                         if props.get("total_slots"):
                             state.inference_features.append("multi_slot")
+                        # This block claimed to "check /props for vision" but
+                        # only ever read total_slots, so /anatomy's answer came
+                        # entirely from the ollama capabilities list or the
+                        # /slots has_vision fallback. Current llama-server
+                        # builds publish the authoritative answer right here,
+                        # under `modalities` — the same key
+                        # LlamaCppProvider.detect_vision reads. Without it the
+                        # two surfaces can disagree about the same server.
+                        modalities = props.get("modalities") or {}
+                        if modalities.get("vision"):
+                            state.vision_enabled = True
                 except Exception:
                     pass
 

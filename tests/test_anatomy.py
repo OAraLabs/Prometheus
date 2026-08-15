@@ -223,6 +223,97 @@ class TestAnatomyScanner:
         asyncio.run(scanner._detect_model(state))
         assert state.model_name is None
 
+    def test_vision_detected_from_props_modalities(self) -> None:
+        """/anatomy must read vision from /props.modalities like the provider.
+
+        Current llama-server builds publish capability under `modalities`.
+        This block previously claimed to "check /props for vision" but only
+        read total_slots, so the answer came entirely from the ollama
+        capabilities list or the /slots has_vision fallback — neither of which
+        a current llama.cpp endpoint necessarily provides. The result was
+        /anatomy reporting vision disabled on a server that had an mmproj
+        loaded, disagreeing with the provider about the same endpoint.
+        """
+        scanner = AnatomyScanner()
+        state = AnatomyState()
+
+        mock_data = {
+            "/v1/models": {"data": [{"id": "qwen3-vl-Q4_K_XL.gguf"}]},
+            # No has_vision anywhere, and no ollama capabilities list —
+            # `modalities` is the ONLY signal present, exactly as on the 4090.
+            "/props": {
+                "total_slots": 1,
+                "modalities": {"vision": True, "video": False, "audio": False},
+            },
+            "/slots": [{}],
+        }
+
+        class FakeResponse:
+            def __init__(self, data, code=200):
+                self._data = data
+                self.status_code = code
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return self._data
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                pass
+            async def get(self, url, **kw):
+                for path, data in mock_data.items():
+                    if path in url:
+                        return FakeResponse(data)
+                return FakeResponse({}, 404)
+
+        with patch("prometheus.infra.anatomy.httpx.AsyncClient", return_value=FakeClient()):
+            asyncio.run(scanner._detect_model_llama_cpp(state))
+
+        assert state.vision_enabled is True, (
+            "vision must be read from /props.modalities — otherwise loading an "
+            "mmproj changes nothing that /anatomy can see"
+        )
+
+    def test_vision_stays_off_when_modalities_says_false(self) -> None:
+        scanner = AnatomyScanner()
+        state = AnatomyState()
+
+        mock_data = {
+            "/v1/models": {"data": [{"id": "Qwen3.8-27B-UD-Q4_K_XL.gguf"}]},
+            "/props": {
+                "total_slots": 1,
+                "modalities": {"vision": False, "video": False, "audio": False},
+            },
+            "/slots": [{}],
+        }
+
+        class FakeResponse:
+            def __init__(self, data, code=200):
+                self._data = data
+                self.status_code = code
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return self._data
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                pass
+            async def get(self, url, **kw):
+                for path, data in mock_data.items():
+                    if path in url:
+                        return FakeResponse(data)
+                return FakeResponse({}, 404)
+
+        with patch("prometheus.infra.anatomy.httpx.AsyncClient", return_value=FakeClient()):
+            asyncio.run(scanner._detect_model_llama_cpp(state))
+
+        assert state.vision_enabled is False
+
     def test_model_detection_parses_llama_cpp(self) -> None:
         scanner = AnatomyScanner()
         state = AnatomyState()
