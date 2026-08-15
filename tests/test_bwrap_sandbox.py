@@ -1,10 +1,27 @@
 """BwrapSandbox — kernel namespace containment for coding runs.
 
-Two tiers, deliberately separated:
+THREE tiers, because "installed" and "works" are different questions and
+so is "neither".
 
-  TestArgvConstruction / TestConstructionFailureDetection / TestSelfCheck
-      Pure-Python or single-invocation checks that hold regardless of whether
-      this host can actually complete a bwrap run. These run unconditionally.
+  TestAvailability / TestSelfCheck
+      Hold on ANY host, including one with no bwrap at all. They assert what
+      the code REPORTS about its environment, never what this particular
+      environment happens to be.
+
+  TestArgvConstruction / TestConstructionFailureDetection
+      Need the bwrap BINARY on PATH — they construct a BwrapSandbox, which
+      refuses without one — but not a working namespace. Gated on
+      ``shutil.which("bwrap")``.
+
+      This tier used to be documented as running "unconditionally", on the
+      stated assumption that "this repo's dev/CI hosts and the deployment
+      host all have it". The CI runner does not, and had been failing 11
+      tests on every push for weeks — long enough that main was red
+      continuously and the gate stopped carrying information. The assumption
+      was never the runner's to satisfy: it is a proxy for a stranger's
+      machine, and a stranger has no bwrap either. Skipping there is honest;
+      installing bubblewrap on the runner would have hidden the fact that
+      BwrapSandbox carries an unstated system dependency.
 
   TestAcceptance / TestRunBehaviour
       The actual containment claims — the shell-redirect escape must fail,
@@ -21,6 +38,7 @@ Two tiers, deliberately separated:
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path
 
 import pytest
@@ -32,12 +50,25 @@ from prometheus.coding.sandbox import (
     SandboxViolation,
 )
 
+_BWRAP_PATH = shutil.which("bwrap")
+
 _CHECK: BwrapSelfCheck = BwrapSandbox.self_check() if BwrapSandbox.is_available() else None
 
 _SKIP_REASON = (
     "bwrap not installed"
     if _CHECK is None
     else f"bwrap present but cannot run a namespaced process here: {_CHECK.detail}"
+)
+
+# Binary on PATH — enough to build argv, not enough to run anything.
+# Deliberately checked against shutil.which directly rather than through
+# BwrapSandbox.is_available(): a gate that calls the code under test would
+# skip the whole tier if that function ever wrongly returned False, turning
+# a real regression into a green run.
+requires_bwrap_binary = pytest.mark.skipif(
+    _BWRAP_PATH is None,
+    reason="bwrap binary not on PATH — argv construction needs it "
+           "(BwrapSandbox refuses to construct without one)",
 )
 
 requires_working_bwrap = pytest.mark.skipif(
@@ -65,10 +96,21 @@ def box(tmp_path: Path) -> BwrapSandbox:
 
 
 class TestAvailability:
-    def test_is_available_checks_path_only(self):
-        # True on any box with the package installed — this repo's dev/CI
-        # hosts and the deployment host all have it (confirmed 2026-08-13).
-        assert BwrapSandbox.is_available() is True
+    def test_is_available_reports_the_truth_about_this_host(self):
+        """``is_available()`` agrees with PATH — on ANY host.
+
+        This asserted ``is True`` outright, justified as "this repo's dev/CI
+        hosts and the deployment host all have it". That is a claim about
+        three specific machines, not about the code, and it was false on the
+        CI runner — so the test failed there permanently while proving
+        nothing anywhere else.
+
+        The invariant worth pinning is the agreement: the function answers
+        "is the binary on PATH", so it must say yes exactly when it is. That
+        holds on a machine with bwrap and on one without, which is the only
+        kind of assertion a stranger's checkout can honour.
+        """
+        assert BwrapSandbox.is_available() is (_BWRAP_PATH is not None)
 
     def test_missing_binary_raises_at_construction(self, tmp_path: Path, monkeypatch):
         monkeypatch.setattr(
@@ -105,6 +147,7 @@ class TestSelfCheck:
         assert BwrapSandbox.self_check().detail
 
 
+@requires_bwrap_binary
 class TestArgvConstruction:
     """Pure argument-list construction — no subprocess involved."""
 
@@ -191,6 +234,7 @@ class TestArgvConstruction:
             sb.resolve("/etc/passwd")
 
 
+@requires_bwrap_binary
 class TestConstructionFailureDetection:
     """The sentinel mechanism must distinguish 'bwrap could not start the
     process' from 'the process ran and exited nonzero' — conflating them
