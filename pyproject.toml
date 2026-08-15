@@ -89,6 +89,45 @@ packages = ["src/prometheus"]
 # extra checkout step.
 include = ["src/prometheus/web/static/*"]
 
+# ---------------------------------------------------------------------------
+# SDIST — an explicit ALLOWLIST, because the default is not a decision.
+#
+# Hatchling's default sdist is "everything the VCS does not ignore". On this
+# repo that produced a 9,790-file tarball, of which 8,872 were `.claude/
+# worktrees/` — eleven full copies of the repo, three of them sitting on
+# commits from BEFORE the 2026-08-01 tailnet-IP purge (9a25a50, #130) and so
+# carrying the pre-scrub blobs of the exact three files that purge cleaned.
+# Another 54 were untracked working-tree files that had never passed
+# .githooks/pre-commit.
+#
+# The reason the default behaved that way is the finding worth keeping:
+# `.claude/worktrees/` was excluded via `.git/info/exclude`, which is
+# PER-CLONE and untracked. Git honoured it, the build backend did not, and no
+# other clone had it — so local, invisible, unversioned state decided what a
+# release artifact contained. `.gitignore` now carries the rule instead.
+#
+# This is an allowlist rather than a denylist deliberately (CROSS-CUTTING §5 —
+# a property that cannot be violated beats a check that must remember to run).
+# A denylist needs a new entry every time someone creates a new scratch
+# directory, and the failure mode is silent shipping. An allowlist's failure
+# mode is a missing file, which is loud.
+#
+# Scope: what is needed to BUILD, INSTALL and VERIFY the package. Not docs/,
+# audits/, gym/, skills/ or root scratch files — those are repository
+# artifacts, not distribution content.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/config",
+    "/packaging",
+    "/templates",
+    "/pyproject.toml",
+    "/README.md",
+    "/LICENSE",
+    "/NOTICE",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
