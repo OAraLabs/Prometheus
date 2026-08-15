@@ -1332,6 +1332,35 @@ async def run_daemon(args: argparse.Namespace) -> None:
     except Exception as exc:
         logger.warning("Curator not available: %s", exc)
 
+    # Coding-mode Docker sandboxes: sweep containers a crashed or killed run
+    # left behind. The config has always described this as happening "on
+    # daemon start"; until this call existed it described nothing, and stale
+    # containers accumulated until someone noticed by hand.
+    try:
+        _coding_cfg = config.get("coding", {}) or {}
+        if _coding_cfg.get("docker_cleanup_enabled", True):
+            from prometheus.coding.sandbox import (
+                cleanup_stale_docker_containers,
+                docker_available,
+            )
+
+            if docker_available():
+                _max_age = float(
+                    _coding_cfg.get("docker_cleanup_max_age_hours", 24)
+                )
+                _removed = await asyncio.to_thread(
+                    cleanup_stale_docker_containers, max_age_hours=_max_age
+                )
+                if _removed:
+                    logger.info(
+                        "Coding sandboxes: removed %d stale container(s) "
+                        "older than %.0fh",
+                        len(_removed), _max_age,
+                    )
+    except Exception as exc:
+        # Never block startup on housekeeping.
+        logger.warning("Coding sandbox cleanup skipped: %s", exc)
+
     # GRAFT-SYMBIOTE Session A: SymbioteCoordinator (Scout → Harvest → Graft).
     # Tools were registered in create_tool_registry; the coordinator is
     # exposed via prometheus.symbiote.set_coordinator() so the tools and

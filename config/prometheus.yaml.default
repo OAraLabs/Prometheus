@@ -459,6 +459,27 @@ trajectory_export:
   output_dir: "~/.prometheus/trajectories/"
   format: jsonl
 
+coding:
+  enabled: false                # SPRINT-coding-mode v2: sandboxed iterate-to-green
+  # process | bwrap | docker — weakest to strongest; create_sandbox() selects.
+  #   process — cwd jail + env scrub. Confines the FILE TOOLS only; a shell
+  #             redirect to an absolute path escapes it. Honest default.
+  #   bwrap   — kernel mount/pid namespace. Closes that hole. Needs
+  #             unprivileged user namespaces (blocked by Ubuntu 24.04's
+  #             kernel.apparmor_restrict_unprivileged_userns=1 default).
+  #   docker  — container isolation, strongest. Needs a reachable daemon.
+  # An unavailable backend RAISES rather than silently degrading: being
+  # handed a weaker sandbox than you asked for is the one failure mode you
+  # would not notice. Pass allow_fallback=True only if you mean best-effort.
+  sandbox_type: process
+  sandbox_dir: "~/.prometheus/coding/sandboxes/"
+  max_task_duration_minutes: 120
+  max_iterations: 50
+  network_isolation: false      # bwrap + docker — drop network access
+  docker_image: "python:3.12-slim"
+  docker_cleanup_max_age_hours: 24
+  docker_cleanup_enabled: true  # Remove stale containers on daemon start
+
 symbiote:
   enabled: false                # GRAFT-SYMBIOTE Session A: scout/harvest/graft pipeline
   github_token: null            # Or set via env: PROMETHEUS_GITHUB_TOKEN (never logged)

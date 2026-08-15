@@ -1,13 +1,20 @@
 """Execution sandbox for coding mode (SPRINT-coding-mode v2, scope item 3).
 
-Two backends. ``ProcessSandbox``: subprocess + cwd jail + env scrub +
-wall/time limits. The jail root is a DEDICATED FULL CLONE of the target repo
-(decided in the spec: hard isolation over disk savings) — never the live
-Prometheus tree. ``BwrapSandbox`` fills the seam this module's docstring used
-to describe as "``DockerSandbox`` is interface-shaped future work" — kernel
-namespace containment via bubblewrap instead of a container runtime. See its
-own docstring for what it adds, and for a live HOST FINDING that currently
-blocks verifying its core claim on this deployment host specifically.
+THREE backends, weakest to strongest, all behind one interface and selected
+by ``create_sandbox()`` / ``coding.sandbox_type``:
+
+- ``ProcessSandbox`` — subprocess + cwd jail + env scrub + wall/time limits.
+  Confines the FILE TOOLS only; a shell redirect to an absolute path escapes
+  it. Honest default, not a container boundary.
+- ``BwrapSandbox`` — kernel mount/pid namespace via bubblewrap. Closes the
+  shell-redirect hole. Needs unprivileged user namespaces; see its docstring
+  for a host finding that blocks it on Ubuntu 24.04 defaults.
+- ``DockerSandbox`` — container isolation: cap-drop ALL, no-new-privileges,
+  pids-limit, read-only rootfs, optional network isolation. Strongest, and
+  the only one that also bounds the process tree's view of the OS itself.
+
+The jail root is a DEDICATED FULL CLONE of the target repo (decided in the
+spec: hard isolation over disk savings) — never the live Prometheus tree.
 
 Defense in depth: SecurityGate vets the coding task's commands at task
 creation (origin="system", like cron); the sandbox ADDITIONALLY refuses any
@@ -22,6 +29,10 @@ PROMETHEUS_API_TOKEN or provider keys in the daemon's environment never
 reach a sandboxed process. This is process-level hygiene, not a container
 boundary — the honest limit of ProcessSandbox, stated here so nobody
 mistakes it for one.
+
+Factory: ``create_sandbox()`` selects the backend based on config
+(``sandbox_type: process|docker``).  Falls back to ProcessSandbox when
+Docker is unavailable.
 """
 
 from __future__ import annotations
@@ -30,10 +41,12 @@ import asyncio
 import logging
 import os
 import shutil
+import subprocess
 import time
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -83,6 +96,11 @@ class Sandbox(ABC):
 
     root: Path
 
+    @property
+    @abstractmethod
+    def backend(self) -> str:
+        """Backend identifier: ``"process"`` or ``"docker"``."""
+
     @abstractmethod
     def resolve(self, path: str) -> Path:
         """Resolve *path* (relative to root, or absolute) inside the jail.
@@ -97,6 +115,10 @@ class Sandbox(ABC):
     ) -> SandboxResult:
         """Run a shell command with cwd=root and a scrubbed environment."""
 
+    def close(self):
+        """Release sandbox resources. No-op for ProcessSandbox."""
+        pass
+
 
 @dataclass
 class ProcessSandbox(Sandbox):
@@ -106,6 +128,13 @@ class ProcessSandbox(Sandbox):
     denied_paths: tuple[Path, ...] = ()
     default_timeout_seconds: float = DEFAULT_RUN_TIMEOUT_SECONDS
     extra_env: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def backend(self) -> str:
+        return "process"
+
+    def close(self):
+        pass  # Nothing to release for process sandbox.
 
     def __post_init__(self) -> None:
         self.root = Path(self.root).resolve()
@@ -315,6 +344,13 @@ class BwrapSandbox(ProcessSandbox):
     isolate_network: bool = True
     _bwrap_path: str = field(default="", repr=False, compare=False)
 
+    @property
+    def backend(self) -> str:
+        # MUST be overridden: subclassing ProcessSandbox would otherwise make
+        # a namespaced run report itself as "process", crediting the weaker
+        # backend in every log line and telemetry row it appears in.
+        return "bwrap"
+
     def __post_init__(self) -> None:
         super().__post_init__()
         found = shutil.which(_BWRAP_BIN)
@@ -520,12 +556,24 @@ def clone_repo_for_sandbox(
     *,
     name: str,
     denied_paths: Iterable[str] = (),
-) -> ProcessSandbox:
+    backend: str = "process",
+    task_id: str | None = None,
+    network_isolation: bool = False,
+    image: str | None = None,
+    allow_fallback: bool = False,
+) -> Sandbox:
     """Create the dedicated full clone and return a sandbox rooted in it.
 
     A FULL ``git clone`` (not a worktree — spec decision: hard isolation
     over disk savings) into ``dest_parent/name``. The clone shares nothing
     writable with the source; the coding run's branch lives here.
+
+    *backend* selects which sandbox wraps the clone — see
+    :func:`create_sandbox`. It defaults to ``"process"`` so existing callers
+    are unchanged, but it must be threaded through from
+    ``coding.sandbox_type``: this is the ONLY place a coding run's sandbox is
+    constructed, so a backend that stops here is a backend no user can reach
+    no matter what their config says.
     """
     import subprocess
 
@@ -540,4 +588,595 @@ def clone_repo_for_sandbox(
         capture_output=True,
         text=True,
     )
-    return ProcessSandbox(root=dest, denied_paths=tuple(denied_paths))
+    return create_sandbox(
+        dest,
+        task_id=task_id or name,
+        backend=backend,
+        denied_paths=tuple(denied_paths),
+        network_isolation=network_isolation,
+        image=image,
+        allow_fallback=allow_fallback,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Docker helpers
+# ---------------------------------------------------------------------------
+
+DOCKER_CONTAINER_PREFIX = "prometheus-coding-"
+DOCKER_IMAGE = "python:3.12-slim"
+DOCKER_LABEL = "prometheus.coding"
+
+# Where the jail clone is mounted INSIDE the container. Host paths do not
+# exist in the container's mount namespace, so every in-container path —
+# --workdir, docker exec --workdir — must use this, never str(self.root).
+CONTAINER_WORKDIR = "/workspace"
+
+_DOCKER_PIDS_LIMIT = 128
+
+# Slack added to a run's own timeout before we give up on `docker exec`
+# itself, so container round-trip overhead is never mistaken for the
+# command overrunning its budget.
+_DOCKER_EXEC_GRACE_SECONDS = 5.0
+
+
+def docker_available() -> bool:
+    """Check whether the Docker daemon is reachable."""
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _container_id_for_task(task_id: str) -> str:
+    """Deterministic container name derivable from the task UUID."""
+    # Strip hyphens to stay within Docker naming limits.
+    safe = task_id.replace("-", "")
+    return f"{DOCKER_CONTAINER_PREFIX}{safe}"
+
+
+# ---------------------------------------------------------------------------
+# DockerSandbox — container-based isolation
+# ---------------------------------------------------------------------------
+
+
+class DockerSandbox(Sandbox):
+    """Sandbox backed by a Docker container.
+
+    Security properties beyond ProcessSandbox:
+    - ``cap-drop ALL`` — no Linux capabilities
+    - ``security-opt=no-new-privileges`` — setuid/setgid blocked
+    - ``--pid="limit=128"`` — PID exhaustion protection
+    - ``--read-only`` root filesystem with tmpfs on /tmp + /workspace
+    - Optional ``--network none`` for network isolation
+    - Mounts the sandbox clone read-write at /workspace
+
+    The container is created lazily on first ``execute()`` and kept alive
+    (``--detach``) so repeated tool calls share the same environment.
+    ``close()`` stops and removes the container.
+    """
+
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        task_id: str,
+        denied_paths: Iterable[str] = (),
+        network_isolation: bool = False,
+        image: str | None = None,
+        default_timeout_seconds: float = DEFAULT_RUN_TIMEOUT_SECONDS,
+    ):
+        self._root = Path(root).resolve()
+        self._task_id = task_id
+        # Same default as ProcessSandbox/BwrapSandbox. Previously this path
+        # hardcoded 60s, so an identical run() call silently got a quarter of
+        # the time budget depending on which backend the config selected —
+        # a per-backend behaviour difference nothing advertised.
+        self.default_timeout_seconds = default_timeout_seconds
+        self._denied_paths = tuple(
+            Path(p).resolve() for p in denied_paths
+        )
+        self._network_isolation = network_isolation
+        self._image = image or DOCKER_IMAGE
+        self._container_id = _container_id_for_task(task_id)
+        self._closed = False
+
+        # Ensure container doesn't already exist (leftover from crash).
+        self._ensure_container()
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    @property
+    def task_id(self) -> str:
+        return self._task_id
+
+    @property
+    def backend(self) -> str:
+        return "docker"
+
+    def _ensure_container(self):
+        """Create (or verify) the Docker container for this sandbox."""
+        # Check if a container with this ID already exists.
+        inspect = subprocess.run(
+            ["docker", "inspect", self._container_id],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if inspect.returncode == 0:
+            # Exists — check if it's running.
+            state = subprocess.run(
+                [
+                    "docker", "inspect",
+                    "--format", "{{.State.Status}}",
+                    self._container_id,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if state.stdout.strip() in ("running", "paused"):
+                return  # Container is live, good.
+            # Dead or exited — remove and recreate.
+            subprocess.run(
+                ["docker", "rm", "-f", self._container_id],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+        # Build the container spec.
+        #
+        # Flag notes, each verified against the live docker CLI rather than
+        # assumed — three of these were wrong in a way that made the backend
+        # unusable, and none of them failed at import time:
+        #   * `--pids-limit N`, NOT `--pid limit=N` (the latter is the PID
+        #     *namespace* flag and docker rejects it outright).
+        #   * NO tmpfs on /workspace: the clone is bind-mounted there, and
+        #     docker REFUSES a tmpfs and a bind at the same target. /tmp
+        #     keeps its tmpfs because nothing is mounted over it.
+        #   * The container must be STARTED, not merely created — `docker
+        #     exec` against a created-but-never-started container fails with
+        #     "container is not running".
+        cmd = [
+            "docker", "create",
+            "--name", self._container_id,
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+            "--pids-limit", str(_DOCKER_PIDS_LIMIT),
+            "--read-only",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+            "--label", DOCKER_LABEL,
+            "--workdir", CONTAINER_WORKDIR,
+            # Run as the HOST user, not root. Two reasons, and the first is
+            # not optional:
+            #   * --cap-drop ALL removes CAP_DAC_OVERRIDE, which is precisely
+            #     the capability that lets root ignore permission bits. A
+            #     root container against a user-owned bind mount therefore
+            #     cannot even READ the workspace — "Permission denied" on
+            #     every file, which reads like a broken mount rather than a
+            #     dropped capability.
+            #   * Files the run creates stay owned by the invoking user
+            #     instead of appearing as root-owned artifacts in the clone.
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            # The image's default HOME may not be writable for that uid; /tmp
+            # is the tmpfs mounted above, so point HOME there rather than
+            # letting tools fail on an unwritable home.
+            "--env", "HOME=/tmp",
+            # Keep the container alive between exec calls; --read-only plus
+            # cap-drop ALL is what bounds it, not the entrypoint.
+            "--entrypoint", "sh",
+        ]
+        if self._network_isolation:
+            cmd.append("--network=none")
+
+        # Mount the sandbox clone at the container's workdir.
+        cmd.extend(["-v", f"{self._root}:{CONTAINER_WORKDIR}"])
+        cmd.append(self._image)
+        cmd.extend(["-c", "while true; do sleep 3600; done"])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to create Docker container {self._container_id}: "
+                f"{result.stderr.strip()}"
+            )
+
+        start = subprocess.run(
+            ["docker", "start", self._container_id],
+            capture_output=True, text=True, timeout=30,
+        )
+        if start.returncode != 0:
+            # Don't leave a created-but-dead container behind to confuse the
+            # next run's inspect branch.
+            subprocess.run(
+                ["docker", "rm", "-f", self._container_id],
+                capture_output=True, timeout=15,
+            )
+            raise RuntimeError(
+                f"Failed to start Docker container {self._container_id}: "
+                f"{start.stderr.strip()}"
+            )
+
+    def resolve(self, path: str) -> Path:
+        """Resolve a path, enforcing containment.
+
+        Tool paths are host-side (the bind-mount source), so containment is
+        the same question as ``ProcessSandbox.resolve()`` — and is answered
+        with the same logic, deliberately. Two things this must NOT do, both
+        of which it did before:
+
+        * **String prefix matching.** ``str(p).startswith(str(root))`` admits
+          a sibling whose name merely extends the root's — ``/jail-evil``
+          "starts with" ``/jail``. ``is_relative_to`` compares path
+          components, so it cannot be fooled that way.
+        * **``strict=True``.** That raises for a path that does not exist
+          yet, so every write to a NEW file inside the jail was rejected as a
+          violation. Non-strict resolution still canonicalises ``..`` and
+          symlinks, which is what containment actually needs.
+        """
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = self._root / candidate
+        try:
+            real = candidate.resolve()
+        except (OSError, ValueError, RuntimeError):
+            # RuntimeError covers a symlink loop.
+            raise SandboxViolation(f"Cannot resolve path {path!r} inside sandbox")
+
+        if not (real == self._root or real.is_relative_to(self._root)):
+            raise SandboxViolation(
+                f"path escapes the sandbox: {path!r} → {real} "
+                f"(root: {self._root})"
+            )
+
+        for denied in self._denied_paths:
+            if real == denied or real.is_relative_to(denied):
+                raise SandboxViolation(
+                    f"path is denied by policy: {path!r} → {real} "
+                    f"(denied root: {denied})"
+                )
+
+        return real
+
+    async def run(
+        self, command: str, *, timeout_seconds: float | None = None
+    ) -> SandboxResult:
+        if self._closed:
+            raise RuntimeError("Sandbox already closed")
+
+        # The container sees the clone at CONTAINER_WORKDIR, never at its
+        # host path — passing str(self._root) here made every exec fail with
+        # "no such file or directory" for a workdir that cannot exist inside
+        # the mount namespace.
+        container_cwd = CONTAINER_WORKDIR
+
+        timeout = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else self.default_timeout_seconds
+        )
+
+        start = time.monotonic()
+
+        try:
+            # Use docker exec for the command. `sh`, not `bash`: the default
+            # image is Debian-slim (which has bash), but a user-supplied
+            # `docker_image` may be Alpine or distroless-ish, where bash is
+            # absent and the exec would fail for a reason that looks like the
+            # command's fault.
+            cmd = [
+                "docker", "exec", "-i",
+                "--workdir", container_cwd,
+                self._container_id,
+                "sh", "-c", command,
+            ]
+            # asyncio, not subprocess.run: this coroutine runs on the daemon's
+            # event loop, and a blocking call here stalls every other session
+            # for the duration of a coding command — which can be minutes.
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            raw, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout + _DOCKER_EXEC_GRACE_SECONDS
+            )
+            duration = time.monotonic() - start
+
+            output = (raw or b"").decode("utf-8", errors="replace")
+
+            # Truncate if needed.
+            if len(output) > _OUTPUT_HEAD_CHARS + _OUTPUT_TAIL_CHARS:
+                output = (
+                    output[:_OUTPUT_HEAD_CHARS]
+                    + f"\n… [{len(output) - _OUTPUT_HEAD_CHARS - _OUTPUT_TAIL_CHARS} chars truncated] …\n"
+                    + output[-_OUTPUT_TAIL_CHARS:]
+                )
+
+            return SandboxResult(
+                exit_code=proc.returncode,
+                output=output,
+                timed_out=False,
+                duration_seconds=duration,
+            )
+
+        except (asyncio.TimeoutError, subprocess.TimeoutExpired):
+            duration = time.monotonic() - start
+            # `docker kill` stops the CONTAINER, which is what actually
+            # guarantees the runaway process tree inside it is gone — the
+            # exec'd child has no life independent of it. Restarting after
+            # leaves the sandbox usable for the next iterate-to-green round
+            # rather than poisoning every later call in the run.
+            await asyncio.get_running_loop().run_in_executor(
+                None, self._kill_and_restart_container
+            )
+            return SandboxResult(
+                exit_code=None,
+                output="",
+                timed_out=True,
+                duration_seconds=duration,
+            )
+
+    def _kill_and_restart_container(self) -> None:
+        """Blocking docker kill+start, for the timeout path's executor."""
+        subprocess.run(
+            ["docker", "kill", self._container_id],
+            capture_output=True, timeout=15,
+        )
+        subprocess.run(
+            ["docker", "start", self._container_id],
+            capture_output=True, timeout=15,
+        )
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", self._container_id],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except Exception:
+            log.exception("Failed to remove Docker container %s", self._container_id)
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+
+SANDBOX_BACKENDS: tuple[str, ...] = ("process", "bwrap", "docker")
+
+
+class SandboxBackendUnavailable(RuntimeError):
+    """The requested backend cannot run here, and fallback was not permitted.
+
+    Raised rather than silently degrading. A caller who asked for container
+    or namespace isolation and quietly received ``ProcessSandbox`` would
+    believe a boundary exists where none does — and ``ProcessSandbox``'s
+    boundary is escapable by a one-line shell redirect. Failing loudly is the
+    only honest option; ``allow_fallback=True`` is available for callers who
+    genuinely mean "best effort".
+    """
+
+
+def create_sandbox(
+    root: str | Path,
+    *,
+    task_id: str,
+    backend: str = "process",
+    denied_paths: Iterable[str] = (),
+    network_isolation: bool = False,
+    image: str | None = None,
+    allow_fallback: bool = False,
+) -> Sandbox:
+    """Create a sandbox for the requested backend.
+
+    Args:
+        root: Resolved path to the sandbox clone root.
+        task_id: UUID string for this coding task (Docker container naming).
+        backend: one of :data:`SANDBOX_BACKENDS` — ``"process"``,
+            ``"bwrap"``, or ``"docker"``, weakest to strongest.
+        denied_paths: Paths inside the root that are off-limits.
+        network_isolation: Docker only — drop network access.
+        image: Docker only — override the container image.
+        allow_fallback: When the requested backend is unavailable, degrade to
+            ``ProcessSandbox`` with a WARNING instead of raising. Default
+            False: see :class:`SandboxBackendUnavailable` for why silence is
+            the wrong default for a security boundary.
+
+    Returns:
+        A :class:`ProcessSandbox`, :class:`BwrapSandbox`, or
+        :class:`DockerSandbox`.
+
+    Raises:
+        ValueError: unknown backend name.
+        SandboxBackendUnavailable: backend is known but not usable here, and
+            ``allow_fallback`` is False.
+    """
+    requested = (backend or "process").strip().lower()
+    if requested not in SANDBOX_BACKENDS:
+        raise ValueError(
+            f"unknown sandbox backend {backend!r}; "
+            f"expected one of {', '.join(SANDBOX_BACKENDS)}"
+        )
+
+    def _unavailable(reason: str) -> Sandbox:
+        if not allow_fallback:
+            raise SandboxBackendUnavailable(
+                f"sandbox backend {requested!r} is unavailable: {reason}. "
+                f"Refusing to fall back to 'process', whose confinement a "
+                f"shell redirect escapes — pass allow_fallback=True if a "
+                f"weaker sandbox is genuinely acceptable for this run."
+            )
+        log.warning(
+            "Sandbox backend %r unavailable (%s) — falling back to 'process', "
+            "which does NOT contain shell writes.", requested, reason,
+        )
+        return ProcessSandbox(root=Path(root), denied_paths=tuple(denied_paths))
+
+    if requested == "docker":
+        if not docker_available():
+            return _unavailable("the Docker daemon is not reachable")
+        return DockerSandbox(
+            root,
+            task_id=task_id,
+            denied_paths=denied_paths,
+            network_isolation=network_isolation,
+            image=image,
+        )
+
+    if requested == "bwrap":
+        if not BwrapSandbox.is_available():
+            return _unavailable("the 'bwrap' binary is not on PATH")
+        # Presence of the binary is not the same claim as "it can actually
+        # create a namespace here" — see BwrapSandbox.self_check() and the
+        # host finding in its docstring.
+        check = BwrapSandbox.self_check()
+        if not check.ok:
+            return _unavailable(check.detail)
+        return BwrapSandbox(
+            root=Path(root),
+            denied_paths=tuple(denied_paths),
+            isolate_network=network_isolation,
+        )
+
+    return ProcessSandbox(root=Path(root), denied_paths=tuple(denied_paths))
+
+
+# ---------------------------------------------------------------------------
+# Stale container management
+# ---------------------------------------------------------------------------
+
+
+def list_stale_docker_containers(
+    max_age_hours: float = 24,
+) -> list[dict]:
+    """List Docker containers matching our label that are older than max_age.
+
+    Returns list of dicts with ``id``, ``name``, ``created``, ``status``.
+    """
+    cutoff = datetime.now(timezone.utc).timestamp() - (max_age_hours * 3600)
+
+    result = subprocess.run(
+        [
+            "docker", "ps", "-a",
+            "--filter", f"label={DOCKER_LABEL}",
+            "--format",
+            "{{.ID}}\t{{.Names}}\t{{.CreatedAt}}\t{{.Status}}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+
+    containers = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        cid, name, created_str, status = parts[0], parts[1], parts[2], parts[3]
+
+        # Parse "2026-08-14 12:00:00 +0000 UTC" or relative like "5 minutes ago".
+        age_hours = _parse_docker_age(created_str)
+        if age_hours is None or age_hours < max_age_hours:
+            continue
+
+        containers.append({
+            "id": cid,
+            "name": name,
+            "created": created_str,
+            "status": status,
+            "age_hours": age_hours,
+        })
+
+    return containers
+
+
+def _parse_docker_age(created_str: str) -> float | None:
+    """Parse Docker's --format {{.CreatedAt}} into hours ago.
+
+    Handles both absolute timestamps and relative strings like
+    "5 minutes ago", "2 hours ago", "3 days ago".
+    """
+    now = datetime.now(timezone.utc).timestamp()
+
+    # Try absolute format first: "2026-08-14 12:00:00 +0000 UTC"
+    try:
+        # Strip trailing " UTC" for parsing.
+        clean = created_str.rstrip().rstrip(" UTC")
+        dt = datetime.strptime(clean.strip(), "%Y-%m-%d %H:%M:%S %z")
+        return (now - dt.timestamp()) / 3600
+    except ValueError:
+        pass
+
+    # Try relative: "5 minutes ago", "2 hours ago", "3 days ago"
+    import re
+    m = re.match(r"(\d+)\s+(second|minute|hour|day|week)s?\s+ago", created_str, re.IGNORECASE)
+    if m:
+        value = int(m.group(1))
+        unit = m.group(2).lower()
+        multipliers = {
+            "second": 1 / 3600,
+            "minute": 1 / 60,
+            "hour": 1,
+            "day": 24,
+            "week": 168,
+        }
+        return value * multipliers.get(unit, 0)
+
+    return None
+
+
+def cleanup_stale_docker_containers(
+    max_age_hours: float = 24,
+    dry_run: bool = False,
+) -> list[str]:
+    """Remove stale Docker containers matching our label.
+
+    Args:
+        max_age_hours: Remove containers older than this.
+        dry_run: If True, list what would be removed without removing.
+
+    Returns:
+        List of container IDs that were (or would be) removed.
+    """
+    stale = list_stale_docker_containers(max_age_hours=max_age_hours)
+    removed = []
+
+    for container in stale:
+        cid = container["id"]
+        if dry_run:
+            log.info(
+                "[dry-run] Would remove stale container %s (%s, %0.1fh old)",
+                cid, container["name"], container["age_hours"],
+            )
+            removed.append(cid)
+        else:
+            try:
+                subprocess.run(
+                    ["docker", "rm", "-f", cid],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                log.info("Removed stale container %s (%s)", cid, container["name"])
+                removed.append(cid)
+            except Exception:
+                log.exception("Failed to remove container %s", cid)
+
+    return removed
