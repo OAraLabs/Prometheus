@@ -283,6 +283,9 @@ class ToolCallMarkupFilter:
     partial tag is withheld until it resolves. ``flush()`` at stream end emits
     anything withheld outside a tag (a lookalike that never completed) and
     drops an unterminated tag body (it is markup either way).
+
+    For already-complete strings (final ``AssistantTurnComplete`` / ``result.text``
+    paths that never saw the stream filter), use :func:`strip_tool_call_markup`.
     """
 
     def __init__(self) -> None:
@@ -326,3 +329,21 @@ class ToolCallMarkupFilter:
             return ""
         out, self._buf = self._buf, ""
         return out
+
+
+def strip_tool_call_markup(text: str) -> str:
+    """One-shot strip of ``<tool_call>…</tool_call>`` spans from a complete string.
+
+    Same semantics as feeding the whole string through :class:`ToolCallMarkupFilter`
+    then :meth:`~ToolCallMarkupFilter.flush`. Used on final assistant text before
+    gateways read ``result.text`` / ``AssistantTurnComplete.message.text`` — the
+    stream filter never touches that path (Telegram/Slack/Discord deliver the
+    completed message, not deltas).
+    """
+    if not text:
+        return text
+    # Fast path: nothing that could be an open tag (full or partial prefix).
+    if "<" not in text:
+        return text
+    f = ToolCallMarkupFilter()
+    return f.feed(text) + f.flush()
