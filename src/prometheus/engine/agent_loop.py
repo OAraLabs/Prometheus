@@ -689,6 +689,146 @@ def _effective_max_tool_iterations(context: LoopContext) -> int:
     return context.max_tool_iterations
 
 
+# Rides the FINAL call's system prompt ONLY. Machinery text never goes into
+# ``messages`` — the per-call channel is what the steer/nudge paths use, and
+# for the same reason: a directive appended to history reaches LCM, replays as
+# a chat bubble nobody wrote, and gets mined as a user fact by MemoryExtractor.
+_BUDGET_SPENT_DIRECTIVE = (
+    "Your tool budget for this turn is now spent. No further tools can run — "
+    "any you request will be discarded, so do not ask for them.\n\n"
+    "Answer the user NOW, using only what you already gathered this turn. "
+    "Give the findings you did reach, say plainly which parts you could not "
+    "determine, and name the single next step you would have taken. A partial "
+    "answer with its gaps marked is far more useful than an apology or a bare "
+    "statement that you ran out of budget."
+)
+
+
+async def _stream_budget_final_answer(
+    context: LoopContext,
+    messages: list[ConversationMessage],
+    *,
+    loop_envelope: object,
+    system_prompt: str | None,
+    round_index: int,
+) -> AsyncIterator[tuple["StreamEvent", UsageSnapshot | None]]:
+    """Spend ONE tools-suppressed call turning a spent budget into an answer.
+
+    The iteration cap used to end the turn with nothing but
+    ``"Tool iteration limit reached (N/M)"``. Every tool result the model had
+    already gathered was discarded, so a turn that was *working* — no circuit
+    breaker trip, no repeat-guard blocks, no errors, just an investigation
+    one call longer than the budget — surfaced to the user as a bare failure.
+    Raising the cap only moves that wall; it does not stop the loss.
+
+    So before giving up, ask the model to say what it found. ``suppress_tools``
+    makes the round structurally tool-free at every tier (payload, prompt
+    schema, AND the llama.cpp GBNF), so this cannot itself spend more budget —
+    which is what makes it safe to do at the exact moment we are worried about
+    a runaway.
+
+    Yields the same ``(event, usage)`` tuples as the loop. Yields NOTHING if
+    the call fails or comes back empty — the caller detects that and falls
+    back to the bare notice, so this can only improve on the old outcome.
+    """
+    directive = (system_prompt or "").rstrip()
+    directive = (
+        f"{directive}\n\n{_BUDGET_SPENT_DIRECTIVE}"
+        if directive
+        else _BUDGET_SPENT_DIRECTIVE
+    )
+
+    # Same projection the normal round uses: this call carries the WHOLE turn's
+    # history (up to 50 tool results), so skipping compaction here is how it
+    # would overflow the window and fail exactly when it is needed most.
+    render_source = messages
+    if context.compactor is not None:
+        try:
+            render_source = await context.compactor.apply(
+                messages,
+                session_id=context.session_id or "",
+                system_prompt=directive,
+                tools_chars=0,
+                model=context.model,
+            )
+        except Exception:
+            log.exception(
+                "ContextCompactor.apply raised on the final-answer pass — "
+                "sending uncompacted"
+            )
+            render_source = messages
+
+    # Local tiers stream tool-call markup inline; the model is told not to call
+    # tools but a filter is cheaper than a leaked "<tool_call>" in a chat
+    # bubble (the class of defect #197 fixed on the normal path).
+    _markup_filter = None
+    if (
+        context.adapter is not None
+        and getattr(context.adapter, "tier", None) != "off"
+    ):
+        from prometheus.adapter.formatter import ToolCallMarkupFilter
+        _markup_filter = ToolCallMarkupFilter()
+
+    parts: list[str] = []
+    usage: UsageSnapshot | None = None
+    try:
+        async for event in loop_envelope.stream(  # type: ignore[attr-defined]
+            provider=context.provider,
+            request=ApiMessageRequest(
+                model=context.model,
+                messages=render_messages_for_model(render_source),
+                system_prompt=directive,
+                max_tokens=context.max_tokens,
+                tools=[],
+                suppress_thinking=context.suppress_thinking,
+                suppress_tools=True,
+                tool_choice="none",
+            ),
+            operation="loop_budget_final_answer",
+            round_index=round_index,
+            session_id=context.session_id,
+        ):
+            if isinstance(event, ApiTextDeltaEvent):
+                parts.append(event.text)
+                if _markup_filter is not None:
+                    visible = _markup_filter.feed(event.text)
+                    if visible:
+                        yield AssistantTextDelta(text=visible), None
+                else:
+                    yield AssistantTextDelta(text=event.text), None
+                continue
+            if isinstance(event, ApiMessageCompleteEvent):
+                usage = event.usage
+                # Non-streaming providers deliver the whole body here.
+                if not parts and (event.message.text or "").strip():
+                    parts.append(event.message.text)
+    except Exception:
+        log.exception(
+            "Final-answer pass failed after the tool budget was exhausted — "
+            "falling back to the bare stop notice"
+        )
+        return
+
+    if _markup_filter is not None:
+        tail = _markup_filter.flush()
+        if tail:
+            yield AssistantTextDelta(text=tail), None
+
+    from prometheus.adapter.formatter import strip_tool_call_markup
+    text = strip_tool_call_markup("".join(parts)).strip()
+    if not text:
+        # Nothing usable — let the caller emit the bare notice rather than
+        # commit an empty assistant turn (the #65 no-empty-turn invariant).
+        return
+
+    # Text-only by construction: any tool call the model emitted anyway is
+    # dropped rather than committed, so this cannot leave a second dangling
+    # tool_use behind it.
+    msg = _make_assistant_msg(text)
+    messages.append(msg)
+    yield AssistantTurnComplete(message=msg, usage=usage or UsageSnapshot()), usage
+
+
 async def run_loop(
     context: LoopContext,
     messages: list[ConversationMessage],
@@ -1543,6 +1683,44 @@ async def _run_loop(
         effective_iter_limit = _effective_max_tool_iterations(context)
         if tool_iteration > effective_iter_limit:
             _log_iteration(context, _IterationReason.MAX_ITERATIONS_HIT, turn, tool_iteration)
+
+            # ``final_message`` carrying THESE tool_uses was already committed
+            # to ``messages`` above, and we are about to not run them. Close
+            # the pairing with explicit not-executed results: without them the
+            # final call ships an assistant turn whose tool_uses have no
+            # matching tool_result, which strict providers reject outright.
+            messages.append(ConversationMessage(
+                role="user",
+                content=[
+                    ToolResultBlock(
+                        tool_use_id=_tc.id,
+                        content=(
+                            "NOT EXECUTED — the turn's tool budget was "
+                            "exhausted before this call could run."
+                        ),
+                        is_error=True,
+                    )
+                    for _tc in tool_calls
+                ],
+            ))
+
+            # Ask for an answer before giving up. Yields nothing if the call
+            # fails or returns empty, in which case we fall through to the
+            # bare notice — this path can only improve on the old outcome.
+            answered = False
+            async for _ev, _u in _stream_budget_final_answer(
+                context,
+                messages,
+                loop_envelope=loop_envelope,
+                system_prompt=per_call_system_prompt,
+                round_index=turn,
+            ):
+                if isinstance(_ev, AssistantTurnComplete):
+                    answered = True
+                yield _ev, _u
+            if answered:
+                return
+
             error_msg = _make_assistant_msg(
                 f"Tool iteration limit reached ({tool_iteration}/{effective_iter_limit}). "
                 f"Stopping to prevent runaway loops."
