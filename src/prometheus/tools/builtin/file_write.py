@@ -11,13 +11,15 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from prometheus.permissions.path_schema import DIR_FIELD, PATH_FIELD
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
 class FileWriteToolInput(BaseModel):
     """Arguments for the file write tool."""
 
-    path: str = Field(description="Path of the file to write")
+    path: str = Field(
+        json_schema_extra=PATH_FIELD,description="Path of the file to write")
     content: str = Field(description="Full file contents")
     create_directories: bool = Field(
         default=True,

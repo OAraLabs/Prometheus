@@ -14,6 +14,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from prometheus.permissions.path_schema import DIR_FIELD, PATH_FIELD
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -26,6 +27,7 @@ class TTSInput(BaseModel):
         description="Voice name (engine-specific, e.g. 'en-us+f3' for espeak-ng)",
     )
     output_path: str | None = Field(
+        json_schema_extra=PATH_FIELD,
         default=None, description="Output file path; auto-generates a temp WAV if omitted"
     )
     engine: str | None = Field(

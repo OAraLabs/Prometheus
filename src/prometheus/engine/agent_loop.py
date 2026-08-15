@@ -3053,7 +3053,31 @@ async def _execute_tool_call(
         # denied_paths and the workspace boundary were both skipped, from the
         # initial commit until 2026-08-13. See permissions/tool_paths.py.
         from prometheus.permissions.tool_paths import gate_path_for
-        _file_path, _path_unknown = gate_path_for(tool_name, tool_input)
+        # The tool's own schema says which params are paths (never guessed
+        # from the name — that mistake has now been made three times), and
+        # `base` is what a relative DIRECTORY root resolves against: the same
+        # cwd the tool itself resolves against, so the gate rules on the path
+        # the tool will actually read.
+        _gate_tool = (
+            context.tool_registry.get(tool_name)
+            if context.tool_registry is not None else None
+        )
+        _gate_schema = None
+        if _gate_tool is not None:
+            try:
+                _gate_schema = _gate_tool.input_model.model_json_schema()
+            except Exception:
+                # The schema IS the fallback's evidence — losing it silently
+                # would reinstate the four-month failure in a new place, so
+                # say so rather than degrade quietly.
+                log.warning(
+                    "SecurityGate: could not read %r's schema — the "
+                    "unmapped-path fallback cannot run for this call",
+                    tool_name, exc_info=True,
+                )
+        _file_path, _path_unknown = gate_path_for(
+            tool_name, tool_input, schema=_gate_schema, base=context.cwd,
+        )
         _command = str(tool_input.get("command", "")) or None
         # TRUST-CONTEXT: derive origin from the session_id already
         # threaded through LoopContext (agent_loop.py:538-542 convention).

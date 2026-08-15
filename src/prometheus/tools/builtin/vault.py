@@ -62,6 +62,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from prometheus.config.paths import get_vault_root
+from prometheus.permissions.path_schema import PATH_FIELD
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 log = logging.getLogger(__name__)
@@ -640,6 +641,7 @@ class VaultReadInput(BaseModel):
     """Arguments for vault_read."""
 
     path: str = Field(
+        json_schema_extra=PATH_FIELD,
         description=(
             "Path relative to the brain vault root, e.g. "
             "'wiki/sources/concepts/Standing-Principles.md' or "

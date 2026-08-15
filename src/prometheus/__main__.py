@@ -164,6 +164,11 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
 
     from prometheus.config.shipped_defaults import resolve_workspace_root
     workspace = resolve_workspace_root(security_cfg)
+    # Same injection shape as BashTool's workspace: the tools get a
+    # RESOLVED value, never the config. grep/glob prune denied paths
+    # out of their results — the gate refuses a denied ROOT, this
+    # covers a legitimate root that CONTAINS one.
+    _denied = security_cfg.get("denied_paths")
     registry = ToolRegistry()
 
     # Funnel (honest-async-promises Layer d): register bash and task_create FIRST
@@ -182,8 +187,8 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
         FileReadTool(),
         FileWriteTool(),
         FileEditTool(),
-        GrepTool(),
-        GlobTool(),
+        GrepTool(denied_paths=_denied),
+        GlobTool(denied_paths=_denied),
         # Cron
         CronCreateTool(),
         CronDeleteTool(),

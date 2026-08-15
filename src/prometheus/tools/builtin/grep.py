@@ -13,6 +13,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from prometheus.permissions.path_schema import DIR_FIELD, PATH_FIELD
+from prometheus.tools.denied_prune import (
+    is_denied,
+    resolve_denied,
+    withheld_note,
+)
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -20,7 +26,8 @@ class GrepToolInput(BaseModel):
     """Arguments for the grep tool."""
 
     pattern: str = Field(description="Regular expression to search for")
-    root: str | None = Field(default=None, description="Search root directory")
+    root: str | None = Field(
+        json_schema_extra=DIR_FIELD,default=None, description="Search root directory")
     file_glob: str = Field(
         default="**/*",
         description=(
@@ -52,6 +59,12 @@ class GrepTool(BaseTool):
     input_model = GrepToolInput
     example_call = {"pattern": "TODO", "root": "."}
 
+    def __init__(self, denied_paths=None) -> None:
+        # Injected like BashTool's workspace — the tool receives a RESOLVED
+        # value, it does not read config. See denied_prune for why results
+        # are pruned rather than the search refused.
+        self._denied = resolve_denied(denied_paths)
+
     def is_read_only(self, arguments: GrepToolInput) -> bool:
         del arguments
         return True
@@ -67,10 +80,14 @@ class GrepTool(BaseTool):
         pattern = re.compile(arguments.pattern, flags)
         matches: list[str] = []
 
+        withheld = 0
         for path in sorted(root.glob(file_glob)):
             if len(matches) >= arguments.limit:
                 break
             if not path.is_file():
+                continue
+            if is_denied(path, self._denied):
+                withheld += 1
                 continue
             try:
                 raw = path.read_bytes()
@@ -89,9 +106,10 @@ class GrepTool(BaseTool):
                     if len(matches) >= arguments.limit:
                         break
 
+        note = withheld_note(withheld)
         if not matches:
-            return ToolResult(output="(no matches)")
-        return ToolResult(output="\n".join(matches))
+            return ToolResult(output="(no matches)" + note)
+        return ToolResult(output="\n".join(matches) + note)
 
 
 def _split_absolute_glob(root: Path, file_glob: str) -> tuple[Path, str]:

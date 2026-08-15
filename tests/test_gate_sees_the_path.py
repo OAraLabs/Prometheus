@@ -171,8 +171,19 @@ def test_a_relative_path_prompts_rather_than_resolving_against_cwd(tmp_path):
 
 def test_an_unmapped_tool_with_a_path_argument_is_loud():
     """An unrecognised file tool must be UNKNOWN, not exempt. Silence is what
-    cost four months."""
-    path, unknown = gate_path_for("some_new_tool", {"output_path": "/tmp/x"})
+    cost four months.
+
+    CONTRACT CHANGED 2026-08-15: the fallback now keys off the tool's own
+    schema declaration rather than the parameter NAME. Guessing from the name
+    is what let `grep.root` through — the third such miss — so the question
+    is answered by the tool. The single production call site
+    (`agent_loop._execute_tool_call`) always supplies the schema, and the
+    build-time guard below is the net for a tool whose author declared
+    nothing."""
+    schema = {"properties": {"output_path": {"x-prometheus-path": "file"}}}
+    path, unknown = gate_path_for(
+        "some_new_tool", {"output_path": "/tmp/x"}, schema=schema,
+    )
     assert path is None
     assert unknown and "unrecognised" in unknown
 
@@ -204,8 +215,16 @@ def test_every_registered_tool_with_a_path_is_mapped_or_exempt():
         props = (schema.get("input_schema") or schema.get("parameters") or {}
                  ).get("properties", {})
         for pname, pspec in props.items():
-            if pname in ("cwd", "root", "watch_dir"):
-                continue  # directory params — deliberately out of scope
+            if pname in ("cwd", "watch_dir"):
+                # STILL out of scope, and now the ONLY things that are.
+                # `root` came into scope 2026-08-15: a read through a denied
+                # root is the same read, and grep prints matching lines.
+                #
+                # cwd/watch_dir are a DIFFERENT class and are surveyed
+                # separately — they are deferred-EXECUTION locations, not
+                # read roots. bash.cwd already has its own workspace lock;
+                # cron_create.cwd and task_create.watch_dir have none at all.
+                continue
             blob = f"{pname} {pspec.get('description', '')}"
             if signal.search(blob) and TOOL_PATH_PARAM.get(name) != pname:
                 if "path" in pname.lower() or "destination" in pname.lower() \
@@ -331,3 +350,103 @@ def test_this_file_reaches_the_gate_through_the_real_dispatch_path():
     text = Path(__file__).read_text(encoding="utf-8")
     assert "_execute_tool_call(" in text
     assert text.count("_execute_tool_call(") >= 2
+
+
+# ── Directory roots: the gate must see them (2026-08-15) ───────────────────
+#
+# `grep --root ~/.ssh` was silently exempt while `read_file ~/.ssh/id_rsa`
+# was refused — and grep prints matching LINES, so it was a content read
+# around denied_paths. The cause was a NAME-pattern enumeration
+# (`_PATH_SHAPED`) with no "root" in it, the third such miss; classification
+# now comes from the tool's own schema.
+
+class TestDirectoryRootsAreInScope:
+
+    def _schema(self, tool_name):
+        from prometheus.__main__ import create_tool_registry
+        for s in create_tool_registry({}, None).list_schemas():
+            if s["name"] == tool_name:
+                return s
+        raise AssertionError(f"{tool_name} not registered")
+
+    @pytest.mark.parametrize("tool", ["grep", "glob"])
+    def test_absolute_root_is_ruled_on(self, tool):
+        path, unknown = gate_path_for(
+            tool, {"root": "/home/will/.ssh"}, schema=self._schema(tool),
+        )
+        assert unknown is None
+        assert path == "/home/will/.ssh", "the gate cannot rule on what it cannot see"
+
+    @pytest.mark.parametrize("tool", ["grep", "glob"])
+    def test_relative_root_resolves_against_base_not_unknown(self, tool, tmp_path):
+        """100 of 124 real roots are relative. UNKNOWN here would prompt on
+        ~81% of rooted calls — and the tool itself resolves against cwd, so
+        refusing to resolve would rule on a different path than it reads."""
+        path, unknown = gate_path_for(
+            tool, {"root": "src/prometheus"},
+            schema=self._schema(tool), base=tmp_path,
+        )
+        assert unknown is None, "a relative directory root must not prompt"
+        assert path == str((tmp_path / "src/prometheus").resolve())
+
+    def test_relative_FILE_target_is_still_unknown(self, tmp_path):
+        """The write-side rule is untouched: resolving a relative WRITE
+        target against the process cwd would let the working directory decide
+        whether a write is allowed."""
+        path, unknown = gate_path_for(
+            "write_file", {"path": "notes.md"},
+            schema=self._schema("write_file"), base=tmp_path,
+        )
+        assert path is None
+        assert unknown and "relative" in unknown
+
+    def test_no_base_falls_back_to_unknown_not_silence(self):
+        """Without a base a relative root cannot be resolved — it must prompt,
+        never resolve to 'this tool targets no path'."""
+        path, unknown = gate_path_for(
+            "grep", {"root": "src"}, schema=self._schema("grep"), base=None,
+        )
+        assert path is None
+        assert unknown
+
+
+class TestPathClassificationComesFromTheSchema:
+    """The third name-pattern enumeration is retired."""
+
+    def test_substring_tuple_is_gone(self):
+        import prometheus.permissions.tool_paths as tp
+
+        assert not hasattr(tp, "_PATH_SHAPED")
+        assert not hasattr(tp, "_looks_path_shaped")
+
+    def test_every_mapped_param_is_declared_in_its_schema(self):
+        """The mapping and the schema must agree — a mapping the schema does
+        not back is the original defect, and a declaration nothing maps is
+        the grep.root hole."""
+        from prometheus.__main__ import create_tool_registry
+        from prometheus.permissions.path_schema import declared_path_params
+
+        for s in create_tool_registry({}, None).list_schemas():
+            name = s["name"]
+            declared = declared_path_params(s)
+            mapped = TOOL_PATH_PARAM.get(name)
+            if mapped:
+                assert mapped in declared, (
+                    f"{name}.{mapped} is mapped but its schema does not "
+                    f"declare it a path (declares: {sorted(declared)})"
+                )
+            for param in declared:
+                assert mapped == param or name in PATH_PARAM_EXEMPT, (
+                    f"{name}.{param} declares itself a path but is neither "
+                    f"mapped nor exempt — this is grep.root verbatim"
+                )
+
+    def test_unmapped_tool_is_loud_only_when_its_schema_says_path(self):
+        """No schema declaration → no guess. The old code guessed from the
+        NAME and got it wrong three times."""
+        assert gate_path_for("some_new_tool", {"output_path": "/tmp/x"}) == (None, None)
+        path, unknown = gate_path_for(
+            "some_new_tool", {"output_path": "/tmp/x"},
+            schema={"properties": {"output_path": {"x-prometheus-path": "file"}}},
+        )
+        assert path is None and unknown and "unrecognised" in unknown

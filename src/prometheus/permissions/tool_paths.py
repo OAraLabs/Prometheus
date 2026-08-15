@@ -48,6 +48,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from prometheus.permissions.path_schema import (
+    PATH_KIND_DIR,
+    declared_path_params,
+)
+
 log = logging.getLogger(__name__)
 
 #: tool name -> the parameter carrying a real filesystem path.
@@ -62,6 +67,13 @@ TOOL_PATH_PARAM: dict[str, str] = {
     "video_generate": "image_path",
     "download_file": "destination",
     "youtube_transcript": "save_to",
+    # Directory roots. Read-only tools, so they never reach the
+    # workspace prompt (_APPROVE_TOOLS is write_file/edit_file only)
+    # — mapping them buys denied_paths enforcement and nothing else,
+    # which is exactly the intent: grep must not be stricter than
+    # read_file, only as strict.
+    "grep": "root",
+    "glob": "root",
 }
 
 #: Tools with a path-SHAPED parameter that is not a filesystem path, each with
@@ -81,19 +93,20 @@ PATH_PARAM_EXEMPT: dict[str, str] = {
         "test_todo_write_confines_itself.",
 }
 
-#: Substrings that make an argument NAME look like it could carry a path.
-#: Used only by the loud fallback and the build-time guard — never as the
-#: source of truth for the mapping above.
-_PATH_SHAPED = ("path", "file", "dir", "destination", "save_to", "output")
-
-
-def _looks_path_shaped(name: str) -> bool:
-    n = name.lower()
-    return any(tok in n for tok in _PATH_SHAPED)
+# _PATH_SHAPED (a substring tuple over parameter NAMES) lived here and was
+# the THIRD name-pattern enumeration to get this wrong: it had no "root",
+# so grep.root/glob.root resolved to "this tool targets no path" and the
+# gate never ruled on them. Replaced by permissions/path_schema.py — the
+# tool's own schema declares which params are paths, so the question is
+# answered rather than guessed.
 
 
 def gate_path_for(
-    tool_name: str, tool_input: dict[str, Any],
+    tool_name: str,
+    tool_input: dict[str, Any],
+    *,
+    schema: dict[str, Any] | None = None,
+    base: Path | str | None = None,
 ) -> tuple[str | None, str | None]:
     """The absolute path this call targets, for the SecurityGate.
 
@@ -105,24 +118,42 @@ def gate_path_for(
       absolute one. The caller MUST treat this as requiring approval; it must
       never fall through to "allowed".
 
-    RELATIVE PATHS ARE UNKNOWN, DELIBERATELY. They are not resolved against
-    the process's working directory. That is the same defect fixed in
+    A relative FILE path is UNKNOWN, DELIBERATELY — not resolved against the
+    process's working directory. That is the same defect fixed in
     ``denied_paths`` on 2026-08-13 — a control whose target is chosen by where
     the process happens to be running — and reinstating it on the input side
     would be worse, because here it decides whether a write is allowed rather
-    than merely which file is protected. A relative path therefore prompts.
-    The right long-term answer is threading each tool's real base directory
-    (a coding run knows its repo); that is a separate change.
+    than merely which file is protected. A relative file path therefore
+    prompts.
+
+    A relative DIRECTORY path resolves against *base* instead. See the
+    asymmetry note at the resolution site: for a read-root, declining to
+    resolve makes the gate rule on a different path than the tool will read,
+    and would prompt on ~81% of real ``grep``/``glob`` calls.
+
+    Args:
+        schema: the tool's advertised JSON schema. Supplies which params the
+            tool DECLARES to be paths (see ``permissions.path_schema``); the
+            loud fallback for unmapped tools reads this rather than guessing
+            from parameter names.
+        base: the directory a relative DIRECTORY param resolves against —
+            the same ``context.cwd`` the tool itself resolves against. Omit
+            it and directory params fall back to UNKNOWN.
     """
     if tool_name in PATH_PARAM_EXEMPT:
         return None, None
 
+    declared = declared_path_params(schema)
+
     param = TOOL_PATH_PARAM.get(tool_name)
     if param is None:
-        # Loud fallback: a tool nobody mapped, carrying a path-shaped
-        # argument. Silence here is exactly what cost four months.
-        stray = [k for k, v in (tool_input or {}).items()
-                 if _looks_path_shaped(k) and isinstance(v, str) and v]
+        # Loud fallback: a tool nobody mapped, carrying a param its own
+        # SCHEMA declares to be a path. Silence here is exactly what cost
+        # four months — and guessing from the NAME is what let grep.root
+        # through, so the question is now answered by the tool.
+        stray = [k for k in declared
+                 if isinstance((tool_input or {}).get(k), str)
+                 and (tool_input or {}).get(k)]
         if stray:
             log.warning(
                 "SecurityGate: tool %r has unmapped path-shaped argument(s) %s "
@@ -146,8 +177,27 @@ def gate_path_for(
     raw = raw.strip()
     candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
-        return None, (
-            f"{tool_name} target {raw!r} is a relative path; the gate resolves "
-            f"no path against the working directory, so the target is unknown"
-        )
+        # DIRECTORY params resolve against the tool's base; FILE params do
+        # not. This asymmetry is deliberate and load-bearing in both
+        # directions:
+        #
+        # * For a FILE target the rule stays "relative → UNKNOWN". Resolving
+        #   against the working directory would let where the process happens
+        #   to be running decide whether a WRITE is allowed — the defect fixed
+        #   in denied_paths on 2026-08-13, and worse on the input side.
+        # * For a DIRECTORY root, refusing to resolve is the unsound option.
+        #   The tool itself computes `_resolve_path(context.cwd, root)`, so a
+        #   gate that declines to resolve rules on a different path than the
+        #   one the tool will actually read. And it is not theoretical: 100 of
+        #   124 real grep/glob roots in telemetry are relative, so UNKNOWN
+        #   here would prompt on ~81% of rooted calls and train the model to
+        #   route around the tool.
+        if declared.get(param) == PATH_KIND_DIR and base is not None:
+            candidate = (Path(base).expanduser() / candidate)
+        else:
+            return None, (
+                f"{tool_name} target {raw!r} is a relative path; the gate "
+                f"resolves no path against the working directory, so the "
+                f"target is unknown"
+            )
     return str(candidate.resolve()), None

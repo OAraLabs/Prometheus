@@ -15,6 +15,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 from pydantic import BaseModel, Field
 
+from prometheus.permissions.path_schema import DIR_FIELD, PATH_FIELD
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -29,6 +30,7 @@ class DownloadFileInput(BaseModel):
 
     url: str = Field(description="HTTP or HTTPS URL to download")
     destination: str | None = Field(
+        json_schema_extra=PATH_FIELD,
         default=None,
         description="Local path to save the file (default: ~/.prometheus/downloads/<filename>)",
     )

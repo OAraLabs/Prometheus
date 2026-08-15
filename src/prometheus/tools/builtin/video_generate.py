@@ -41,6 +41,7 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, Field
 
+from prometheus.permissions.path_schema import DIR_FIELD, PATH_FIELD
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,7 @@ class VideoGenerateInput(BaseModel):
         max_length=2500,
     )
     image_path: str | None = Field(
+        json_schema_extra=PATH_FIELD,
         default=None,
         description=(
             "Optional path to a local image. When set, runs image-to-video "
