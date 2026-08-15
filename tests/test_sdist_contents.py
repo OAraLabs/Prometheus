@@ -35,6 +35,7 @@ state at all. If someone reverts to the default, this test fails here first.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tarfile
@@ -43,6 +44,77 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
+HOOK = REPO / ".githooks" / "pre-commit"
+
+# ---------------------------------------------------------------------------
+# FIXTURES, NOT EXCEPTIONS.
+#
+# Every entry below is deliberate TEST DATA that trips one of the hook's
+# patterns by design. None is a credential, and the host names among them are
+# MagicDNS labels that do not resolve outside the tailnet.
+#
+# Scrubbing them to make a scanner quiet would delete the very data that
+# proves the controls work (§3c — the test that banned the words, not the
+# claim). So the guard allowlists them BY FILE AND BY COUNT instead: a hit in
+# any other file fails, and a SIXTEENTH hit in one of these files fails too.
+# The count is the ratchet; without it this would be a place to hide.
+#
+# Adding an entry here is a claim that the string is test data. Make that
+# claim explicitly, in the reason, or do not add it.
+#
+# NOTE, and it is §3c biting its own author: the first draft of this block
+# QUOTED the flagged tokens while explaining that they are harmless, and the
+# guard promptly failed against this file. The reasons below therefore
+# describe the fixtures without spelling them — the same fix §3c prescribes
+# for prose guards, applied to the allowlist's own justification. Do not
+# re-add the literals here, and do not allowlist this file to work around it.
+# ---------------------------------------------------------------------------
+HOOK_PATTERN_FIXTURES: dict[str, tuple[int, str]] = {
+    "tests/test_wiki.py": (
+        13, "wiki-dedup fixture entities, deliberately case-varied to exercise "
+            "entity normalization; MagicDNS labels, no IPs",
+    ),
+    "src/prometheus/cli/bakeoff.py": (
+        1, "docstring example naming the GPU box by MagicDNS label, not by IP",
+    ),
+    "tests/test_turn_errors.py": (
+        1, "the synthetic provider key in the test asserting a URL query "
+           "string is never echoed to clients — the fixture IS the control",
+    ),
+}
+
+
+def _hook_checks() -> tuple[list[tuple[str, str, str, str]], str, str]:
+    """The hook's own patterns, resolved BY BASH.
+
+    Bash is the only correct parser of bash quoting. A python-side regex over
+    the hook text got this wrong twice while this guard was being written: it
+    broke on the single-quote-embedding idiom in the last pattern, and it read
+    the skip_placeholders/scope arguments as absent whenever they sat past a
+    line continuation — which silently switched off the provider-key check's
+    placeholder exemption and manufactured a false positive against a test
+    fixture.
+
+    So the patterns are never transcribed here. Bash re-reads its own file.
+    """
+    script = r"""
+set -uo pipefail
+check_pattern() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "${3:-0}" "${4:-all}"; }
+eval "$(sed -n '/^PLACEHOLDER_REGEX=/p; /^ALLOWLIST_REGEX=/p' "$1")"
+eval "$(awk '/^check_pattern /{f=1} f{print} f && !/\\$/{f=0}' "$1")"
+printf 'PLACEHOLDER_REGEX\t%s\n' "$PLACEHOLDER_REGEX" >&2
+printf 'ALLOWLIST_REGEX\t%s\n' "$ALLOWLIST_REGEX" >&2
+"""
+    proc = subprocess.run(["bash", "-c", script, "_", str(HOOK)],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0 and proc.stdout.strip(), (
+        f"could not extract patterns from {HOOK}: {proc.stderr}")
+    env = dict(l.split("\t", 1) for l in proc.stderr.splitlines() if "\t" in l)
+    checks = [tuple(l.split("\t")) for l in proc.stdout.splitlines()
+              if l.count("\t") == 3]
+    assert len(checks) >= 8, f"only {len(checks)} patterns parsed — extractor is stale"
+    return checks, env["PLACEHOLDER_REGEX"].replace("(?i)", ""), env["ALLOWLIST_REGEX"]
+
 
 # Roots the sdist is expected to carry. Read from pyproject rather than
 # restated, so the two cannot drift.
@@ -203,4 +275,83 @@ def test_built_sdist_ships_only_tracked_files(tmp_path: Path):
         f"{len(untracked_shipped)} file(s) in the sdist are not tracked by git. "
         f"A release artifact must not contain content that never passed review "
         f"or .githooks/pre-commit.\n\n  " + "\n  ".join(untracked_shipped[:20])
+    )
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv not on PATH")
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not on PATH")
+def test_built_sdist_has_no_hook_pattern_hits_outside_the_fixture_allowlist(
+    tmp_path: Path,
+):
+    """Run .githooks/pre-commit's OWN patterns over a REAL sdist.
+
+    The hook gates what ENTERS the repo. Nothing gated what LEAVES it as a
+    release artifact — which is how 22 tailnet-IP hits and eleven repo copies
+    reached a tarball while every commit along the way was clean. This closes
+    that direction, on the artifact rather than on the configuration.
+
+    Hits are compared against HOOK_PATTERN_FIXTURES by file AND by count, so a
+    new hit fails whether it appears in a new file or in an allowlisted one.
+    """
+    out = tmp_path / "dist"
+    proc = subprocess.run(
+        ["uv", "build", "--sdist", "--offline", "--out-dir", str(out)],
+        cwd=REPO, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        pytest.skip(f"sdist build unavailable here: {proc.stderr.strip()[:200]}")
+
+    extracted = tmp_path / "x"
+    with tarfile.open(next(out.glob("*.tar.gz"))) as tf:
+        tf.extractall(extracted)
+    root = next(extracted.iterdir())
+
+    checks, placeholder, allowlist = _hook_checks()
+    # The hook excludes ITSELF from its own scan (STAGED_ALL drops
+    # ^\.githooks/): that file necessarily contains every pattern it hunts for.
+    files = [p for p in root.rglob("*") if p.is_file()
+             and ".githooks/" not in str(p.relative_to(root))]
+
+    hits: dict[str, list[str]] = {}
+    for label, pattern, skip_ph, scope in checks:
+        subject = files
+        if scope == "code":
+            subject = [p for p in files if p.suffix != ".md"
+                       and not str(p.relative_to(root)).startswith("docs/")]
+        rx = re.compile(pattern)
+        for p in subject:
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if not rx.search(text):
+                continue
+            for i, line in enumerate(text.splitlines(), 1):
+                if not rx.search(line):
+                    continue
+                if not rx.search(re.sub(allowlist, "", line)):   # hook's own mask
+                    continue
+                if skip_ph == "1" and re.search(placeholder, line, re.I):
+                    continue
+                hits.setdefault(str(p.relative_to(root)), []).append(f"{i}: {label}")
+
+    unexpected = {f: v for f, v in hits.items() if f not in HOOK_PATTERN_FIXTURES}
+    assert not unexpected, (
+        "the sdist carries hook-pattern hits in files that are not declared "
+        "test fixtures. Each is a credential, a private IP, or infrastructure "
+        "that must not ship in a release artifact.\n\n"
+        + "\n".join(f"  {f}\n    " + "\n    ".join(v) for f, v in unexpected.items())
+    )
+
+    drift = {
+        f: (len(hits.get(f, [])), expected)
+        for f, (expected, _) in HOOK_PATTERN_FIXTURES.items()
+        if len(hits.get(f, [])) != expected
+    }
+    assert not drift, (
+        "declared-fixture hit counts changed. This allowlist is FIXTURES, not "
+        "exceptions: a new hit in one of these files is a new claim that a "
+        "flagged string is test data, and it must be made deliberately.\n\n"
+        + "\n".join(f"  {f}: found {got}, allowlist says {exp}"
+                    for f, (got, exp) in drift.items())
     )
