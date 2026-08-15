@@ -20,6 +20,7 @@ import logging
 import sqlite3
 import time
 import traceback as _traceback
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -227,6 +228,20 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("cache_write_tokens", "INTEGER"),
     ],
 }
+
+
+@dataclass(frozen=True)
+class GoldenExport:
+    """One incremental golden-trace export.
+
+    ``last_rowid`` is the watermark the caller persists to resume from; it is
+    the last row actually WRITTEN, so a batch capped by ``limit`` resumes
+    mid-backlog rather than skipping what it did not reach.
+    """
+
+    path: Path
+    count: int
+    last_rowid: int
 
 
 class ToolCallTelemetry:
@@ -1003,6 +1018,12 @@ class ToolCallTelemetry:
         stamp = int(time.time())
         path = out_dir / f"golden_traces_{stamp}.jsonl"
 
+        self._write_golden_jsonl(traces, path)
+        return path
+
+    @staticmethod
+    def _write_golden_jsonl(traces: list[dict[str, Any]], path: Path) -> None:
+        """Write *traces* as fine-tuning JSONL. Shared by both export paths."""
         with path.open("w", encoding="utf-8") as fh:
             for trace in traces:
                 user_content = (
@@ -1023,7 +1044,100 @@ class ToolCallTelemetry:
                 }
                 fh.write(json.dumps(example, ensure_ascii=False) + "\n")
 
-        return path
+    def _golden_rows_after(
+        self,
+        since_rowid: int,
+        limit: int,
+        tool_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Golden traces with ``rowid > since_rowid``, OLDEST first.
+
+        rowid, not timestamp, is the cursor: it is unique and monotonic per
+        insert, so a batch boundary cannot split or duplicate rows that share
+        a timestamp — and it is immune to a clock that steps backwards.
+        Ascending order matters too, so the watermark advances through the
+        backlog in order instead of skipping to the newest N.
+        """
+        query = (
+            "SELECT rowid, model, tool_name, raw_model_output, parsed_tool_call,"
+            " timestamp FROM tool_calls WHERE is_golden = 1 AND rowid > ?"
+        )
+        params: list[Any] = [int(since_rowid)]
+        if tool_name is not None:
+            query += " AND tool_name = ?"
+            params.append(tool_name)
+        query += " ORDER BY rowid ASC LIMIT ?"
+        params.append(max(1, int(limit)))
+
+        try:
+            rows = self._conn.execute(query, tuple(params)).fetchall()
+        except sqlite3.DatabaseError:
+            return []
+
+        return [
+            {
+                "rowid": row[0],
+                "model": row[1],
+                "tool_name": row[2],
+                "raw_model_output": row[3],
+                "parsed_tool_call": row[4],
+                "timestamp": row[5],
+            }
+            for row in rows
+        ]
+
+    def export_new_golden_traces(
+        self,
+        *,
+        since_rowid: int = 0,
+        limit: int = 1000,
+        tool_name: str | None = None,
+        format: str = "jsonl",
+        output_dir: str | Path = "~/.prometheus/trajectories/",
+    ) -> GoldenExport | None:
+        """Export only golden traces newer than *since_rowid*.
+
+        The INCREMENTAL counterpart to :meth:`export_golden_traces`, which
+        dumps the most recent N on demand and is right for a human running
+        ``prometheus export-traces``. A pipeline needs the other contract:
+        each cycle writes only what the last one did not, so the corpus
+        accumulates instead of restating itself.
+
+        That distinction is not academic. The daemon loop previously called
+        the dump-N method on every cycle AND once at startup, so each restart
+        re-wrote the same trailing rows to a new timestamped file — 279 files
+        holding 18 distinct payloads, ~94% of 36 MB duplicated, and a corpus
+        that looked far larger than the training signal in it.
+
+        Returns None when nothing new exists — no empty file is written,
+        since an empty export is not an event worth recording.
+        """
+        if format != "jsonl":
+            raise ValueError(f"Unsupported format: {format!r} (only 'jsonl' is supported)")
+
+        traces = self._golden_rows_after(since_rowid, limit, tool_name)
+        if not traces:
+            return None
+
+        out_dir = Path(output_dir).expanduser().resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        last_rowid = int(traces[-1]["rowid"])
+        # The rowid is in the NAME because a bare `int(time.time())` stamp has
+        # one-second resolution: two exports in the same second resolve to the
+        # same path and the second silently OVERWRITES the first, advancing
+        # the watermark past traces that no longer exist on disk. Back-to-back
+        # cycles are normal now (draining a backlog capped by `limit`), so
+        # that collision is reachable, and it loses data in the one direction
+        # a training corpus cannot recover from. rowid is strictly increasing
+        # across exports, so it cannot collide.
+        path = out_dir / f"golden_traces_{int(time.time())}_{last_rowid}.jsonl"
+        self._write_golden_jsonl(traces, path)
+
+        # The batch's own last rowid, not a separately-queried MAX: a row
+        # inserted between the two queries would otherwise be skipped
+        # forever. Advancing only past what was actually written also makes
+        # a truncated batch (limit reached) resume correctly next cycle.
+        return GoldenExport(path=path, count=len(traces), last_rowid=last_rowid)
 
     # ------------------------------------------------------------------
     # Read

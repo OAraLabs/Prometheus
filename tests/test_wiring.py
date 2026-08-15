@@ -6491,6 +6491,152 @@ class TestSunriseGoldenTraceExporter:
         task = asyncio.run(exporter.start())
         assert task is None
 
+    # -- Incremental export: the corpus must accumulate, not restate ------- #
+    #
+    # The exporter used to dump the most recent `nightly_limit` rows every
+    # cycle, and _loop() runs one cycle immediately at startup. Every daemon
+    # restart therefore rewrote the same trailing traces to a new timestamped
+    # file: the live corpus reached 279 files holding 18 distinct payloads,
+    # ~94% of 36 MB duplicated. These pin the watermark that fixes it.
+
+    def _exporter(self, tel, out_dir, limit=10):
+        from prometheus.sentinel.golden_trace_exporter import GoldenTraceExporter
+
+        return GoldenTraceExporter(
+            telemetry=tel,
+            signal_bus=None,
+            config={
+                "enabled": True,
+                "nightly_limit": limit,
+                "output_dir": str(out_dir),
+            },
+        )
+
+    @staticmethod
+    def _exports(out_dir) -> list[Path]:
+        return sorted(Path(out_dir).glob("*.jsonl"))
+
+    @staticmethod
+    def _lines(path) -> list[dict]:
+        import json as _json
+
+        with Path(path).open() as fh:
+            return [_json.loads(line) for line in fh if line.strip()]
+
+    def test_second_cycle_with_no_new_traces_writes_nothing(self, tmp_path):
+        """REGRESSION: a cycle with nothing new must not write a file at all.
+
+        An empty or duplicate export is not a harmless no-op — it is what
+        made the corpus look 15x larger than its actual training signal.
+        """
+        tel = _tel(tmp_path)
+        self._seed_golden_trace(tel)
+        out_dir = tmp_path / "trajectories"
+        exporter = self._exporter(tel, out_dir)
+
+        assert asyncio.run(exporter.run_once()) is not None
+        assert asyncio.run(exporter.run_once()) is None
+        assert len(self._exports(out_dir)) == 1
+
+    def test_restart_does_not_re_export(self, tmp_path):
+        """REGRESSION: the watermark survives the process, so the startup
+        export after a daemon restart is a no-op rather than a duplicate."""
+        tel = _tel(tmp_path)
+        self._seed_golden_trace(tel)
+        out_dir = tmp_path / "trajectories"
+
+        assert asyncio.run(self._exporter(tel, out_dir).run_once()) is not None
+        # A fresh instance is what a restarted daemon builds.
+        for _ in range(3):
+            assert asyncio.run(self._exporter(tel, out_dir).run_once()) is None
+        assert len(self._exports(out_dir)) == 1
+
+    def test_only_new_traces_are_exported(self, tmp_path):
+        """The second file holds the new trace ONLY — not a re-dump."""
+        tel = _tel(tmp_path)
+        self._seed_golden_trace(tel, tool_name="bash")
+        out_dir = tmp_path / "trajectories"
+        exporter = self._exporter(tel, out_dir)
+
+        first = asyncio.run(exporter.run_once())
+        self._seed_golden_trace(tel, tool_name="file_read")
+        second = asyncio.run(exporter.run_once())
+
+        assert second is not None and second != first
+        rows = self._lines(second)
+        assert len(rows) == 1
+        assert rows[0]["_meta"]["tool_name"] == "file_read"
+
+    def test_backlog_larger_than_limit_resumes_without_gaps(self, tmp_path):
+        """A capped batch advances only past what it WROTE, so the next cycle
+        resumes mid-backlog. Watermarking off a separately-queried MAX would
+        silently drop everything the batch did not reach."""
+        tel = _tel(tmp_path)
+        for i in range(5):
+            self._seed_golden_trace(tel, tool_name=f"tool_{i}")
+        out_dir = tmp_path / "trajectories"
+        exporter = self._exporter(tel, out_dir, limit=2)
+
+        seen: list[str] = []
+        while (path := asyncio.run(exporter.run_once())) is not None:
+            seen.extend(r["_meta"]["tool_name"] for r in self._lines(path))
+
+        assert seen == [f"tool_{i}" for i in range(5)], "gap or duplicate in backlog"
+
+    def test_same_second_exports_do_not_overwrite_each_other(self, tmp_path):
+        """REGRESSION: the filename stamp is whole seconds, so back-to-back
+        exports collided on one path and the second overwrote the first —
+        advancing the watermark past traces no longer on disk. Draining a
+        capped backlog makes that collision routine, and losing traces is the
+        one failure a training corpus cannot recover from."""
+        tel = _tel(tmp_path)
+        for i in range(4):
+            self._seed_golden_trace(tel, tool_name=f"tool_{i}")
+        out_dir = tmp_path / "trajectories"
+        exporter = self._exporter(tel, out_dir, limit=1)
+
+        paths = []
+        while (path := asyncio.run(exporter.run_once())) is not None:
+            paths.append(path)
+
+        assert len(paths) == 4
+        assert len(set(paths)) == 4, "same-second exports collided on one path"
+        assert len(self._exports(out_dir)) == 4
+        # And every trace survives on disk, not just in the return values.
+        on_disk = [
+            r["_meta"]["tool_name"]
+            for p in self._exports(out_dir)
+            for r in self._lines(p)
+        ]
+        assert sorted(on_disk) == [f"tool_{i}" for i in range(4)]
+
+    def test_corrupt_watermark_re_exports_rather_than_stalling(self, tmp_path):
+        """Duplicates cost disk; skipped traces are unrecoverable. On
+        unreadable state the cursor restarts rather than stalling."""
+        from prometheus.sentinel.golden_trace_exporter import WATERMARK_FILENAME
+
+        tel = _tel(tmp_path)
+        self._seed_golden_trace(tel)
+        out_dir = tmp_path / "trajectories"
+        exporter = self._exporter(tel, out_dir)
+
+        assert asyncio.run(exporter.run_once()) is not None
+        (out_dir / WATERMARK_FILENAME).write_text("{ not json")
+        assert asyncio.run(exporter.run_once()) is not None
+
+    def test_manual_export_still_dumps_recent_regardless_of_watermark(self, tmp_path):
+        """The CLI path (`prometheus export-traces`) is a user-initiated dump
+        and must NOT inherit the pipeline's incremental semantics — a human
+        asking for the last N should not get an empty file because the daemon
+        already exported them."""
+        tel = _tel(tmp_path)
+        self._seed_golden_trace(tel)
+        out_dir = tmp_path / "trajectories"
+
+        assert asyncio.run(self._exporter(tel, out_dir).run_once()) is not None
+        dump = tel.export_golden_traces(output_dir=tmp_path / "manual")
+        assert len(self._lines(dump)) == 1
+
 
 class TestSunriseMemoryExtractorTaskName:
     """Verify that asyncio.create_task with name='memory_extractor' is reachable.

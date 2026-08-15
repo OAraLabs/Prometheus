@@ -474,12 +474,32 @@ learning:
       base_url: "http://localhost:8080"
       model: gemma-4
 
+# Golden-trace export — cloud "teacher" tool calls written as fine-tuning
+# JSONL. Incremental: each cycle exports only rows newer than the persisted
+# watermark (.export_state.json in output_dir), so the corpus accumulates
+# instead of restating itself on every daemon restart. Deleting the watermark
+# re-exports from the beginning — duplicates, never gaps.
 trajectory_export:
   enabled: false
   interval_seconds: 86400  # 24h
-  nightly_limit: 1000
+  nightly_limit: 1000      # max traces per cycle; a larger backlog drains over
+                           # successive cycles rather than being truncated
   output_dir: "~/.prometheus/trajectories/"
   format: jsonl
+
+# Repair-pair flywheel → ~/.prometheus/data/training.db (see
+# learning/pair_capture.py for the pair sources).
+training:
+  # Local pair sources: adapter repairs, retry-success, self-correction.
+  # These only fire when something went WRONG and was then fixed, so a
+  # well-behaved model banks nothing — a low count here is not a fault.
+  capture_enabled: true
+  # Cloud tool calls stored as chosen-only exemplars (rejected NULL) for
+  # later distillation against local attempts. DEFAULT OFF: it records what
+  # the owner already routes to cloud and never generates traffic of its
+  # own, but it does persist tool-call payloads, so it is opt-in.
+  cloud_golden_capture: false
+  db_path: "~/.prometheus/data/training.db"
 
 coding:
   enabled: false                # SPRINT-coding-mode v2: sandboxed iterate-to-green
