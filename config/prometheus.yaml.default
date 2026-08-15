@@ -61,6 +61,28 @@ context:
 
   # Per-model context ceilings. Keys are model names as reported by the
   # provider; each carries an effective_limit in tokens.
+  # Budget for a session routed to a CLOUD provider (/claude, /qwen, …) when
+  # the model has no entry in model_overrides below.
+  #
+  # Local models need nothing here — the daemon reads n_ctx from the
+  # inference server at startup and uses it, so swapping a GGUF needs no
+  # config change. Cloud providers do NOT publish context length through
+  # their APIs (Alibaba's /v1/models returns only id/object/created/owned_by,
+  # and the others are the same), so this is an assumption, deliberately a
+  # generous one: over-budgeting cloud fails LOUD (a 400 naming the real
+  # limit) while under-budgeting fails SILENT (early compaction quietly
+  # summarising context that did not need it).
+  cloud_default_limit: 1000000
+
+  # Per-model context windows, by EXACT model name. Only needed for models
+  # whose window differs from the rules above — i.e. cloud models materially
+  # SMALLER than cloud_default_limit. Example:
+  #
+  #   model_overrides:
+  #     claude-sonnet-4-5:
+  #       effective_limit: 200000
+  #     gpt-4o:
+  #       effective_limit: 128000
   model_overrides: {}
 tools:
   deferred_loading:

@@ -84,13 +84,25 @@ DEFAULT_MAX_SUMMARY_TOKENS = 512
 # Budget for a session routed to a cloud provider when no per-model override
 # exists. Cloud APIs do not publish context length — Alibaba's /v1/models
 # returns only id/object/created/owned_by, and the other OpenAI-compatible
-# providers are the same — so this is a deliberately CONSERVATIVE floor, not
-# a detection. 128k is at or below every current cloud model this project
-# routes to, so it cannot over-budget; raise it per model via
-# context.model_overrides once you have checked that provider's real limit.
-# The number that matters is that it is not the LOCAL model's window, which
-# is what a cloud session used to inherit.
-DEFAULT_CLOUD_LIMIT = 128_000
+# providers are the same — so this is a configured assumption, not a
+# detection.
+#
+# Set GENEROUS on purpose, and the asymmetry is the reason:
+#
+#   Over-budget on cloud fails LOUD. The provider returns a 400 naming its
+#   real limit, which is diagnosable in one read. Nothing like the local
+#   failure mode, where llama.cpp silently truncates and the model returns
+#   empty content with no indication why.
+#
+#   Under-budget on cloud fails SILENT. Compaction fires early and summarises
+#   context that never needed summarising — quality quietly degrades and
+#   nothing anywhere says so.
+#
+# A conservative floor therefore buys protection against the mild failure at
+# the cost of the invisible one, which is backwards. Models with genuinely
+# smaller windows are named in context.model_overrides instead, where being
+# wrong is a one-line fix rather than a silent tax on every session.
+DEFAULT_CLOUD_LIMIT = 1_000_000
 
 # A span smaller than this many messages isn't worth a model call.
 MIN_SPAN_MESSAGES = 4

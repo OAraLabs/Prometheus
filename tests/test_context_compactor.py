@@ -456,8 +456,26 @@ class TestLimitResolution:
         assert c.limit_for("claude-sonnet-4-5") == 200000
 
     def test_cloud_default_is_configurable(self):
-        c = _budget_compactor(cloud_default_limit=1_000_000)
-        assert c.limit_for("some-huge-cloud-model") == 1_000_000
+        c = _budget_compactor(cloud_default_limit=250_000)
+        assert c.limit_for("some-cloud-model") == 250_000
+
+    def test_cloud_default_is_generous_not_conservative(self):
+        """Deliberate: over-budgeting cloud fails LOUD (the provider returns a
+        400 naming its real limit), while under-budgeting fails SILENT —
+        compaction fires early and quietly summarises context that did not
+        need it. Guarding against the mild failure at the cost of the
+        invisible one is backwards, so the default is set high and genuinely
+        smaller models are named in model_overrides instead."""
+        assert DEFAULT_CLOUD_LIMIT >= 1_000_000
+        c = _budget_compactor(detected_limit=32768)
+        assert c.limit_for("qwen3.8-max") == DEFAULT_CLOUD_LIMIT
+
+    def test_a_smaller_cloud_model_is_named_not_defaulted(self):
+        """Claude and GPT windows are materially below the default, so they
+        must come from an explicit entry rather than inherit it."""
+        c = _budget_compactor(model_overrides={"claude-sonnet-4-5": 200_000})
+        assert c.limit_for("claude-sonnet-4-5") == 200_000
+        assert c.limit_for("claude-sonnet-4-5") < DEFAULT_CLOUD_LIMIT
 
     def test_no_model_falls_back_to_the_local_resolution(self):
         c = _budget_compactor(detected_limit=32768)
