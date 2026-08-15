@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from prometheus.gateway.cron_scheduler import normalize_and_vet_cron_job
 from prometheus.gateway.cron_service import upsert_cron_job, validate_cron_expression
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 from prometheus.tools.builtin.cron_nl import (
@@ -74,12 +75,33 @@ class CronCreateTool(BaseTool):
                 )
             cron_expr = parsed.cron
 
+        # THE CHOKE POINT — shared with POST /api/cron and the update route,
+        # so the cwd is resolved once and identically wherever a job is
+        # written. A cron job runs UNATTENDED at this location, and a gate
+        # that only reads the command string cannot see danger delivered by
+        # location: `cat id_rsa` is unremarkable until the cwd is ~/.ssh.
+        allowed, resolved_cwd, reason = normalize_and_vet_cron_job(
+            arguments.command, arguments.cwd, base=context.cwd,
+        )
+        if not allowed:
+            # Refused, not pruned: a cwd is ONE location. There is nothing to
+            # filter and a partial answer would be meaningless.
+            return ToolResult(
+                output=(
+                    f"Refused: this job would run at {resolved_cwd}\n{reason}"
+                ),
+                is_error=True,
+            )
+
         upsert_cron_job(
             {
                 "name": arguments.name,
                 "schedule": cron_expr,
                 "command": arguments.command,
-                "cwd": arguments.cwd or str(context.cwd),
+                # ABSOLUTE, resolved once here. Persisting the relative string
+                # and re-resolving at execute would evaluate it under a
+                # different process cwd, so create and execute could disagree.
+                "cwd": resolved_cwd,
                 "enabled": arguments.enabled,
             }
         )

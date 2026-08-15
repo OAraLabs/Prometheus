@@ -133,25 +133,95 @@ def _get_security_gate() -> Any | None:
     return _SECURITY_GATE
 
 
-def vet_cron_command(command: str) -> tuple[bool, str]:
+def resolve_cron_cwd(cwd: str | None, *, base: Path | str | None = None) -> str:
+    """Resolve a job's working directory to an ABSOLUTE string.
+
+    ABSENT KEEPS ITS CURRENT VALUE, made explicit. Before this existed,
+    ``execute_job`` did ``Path(job.get("cwd") or ".")`` — so a job with no
+    ``cwd`` ran wherever the DAEMON's process happened to be, and that
+    location silently moved when the daemon moved to the ff-only deploy
+    clone. *base* defaults to the same ``Path.cwd()`` that ``"."`` resolved
+    to, so behaviour is unchanged; the point is that the value now has a
+    name, is written down, and passes through the gate. Whether the default
+    SHOULD be the process cwd is a separate question on separate evidence —
+    not decided here.
+
+    Resolving ONCE, at create, is what makes the create-time and execute-time
+    verdicts the same verdict. Persisting the relative string and re-resolving
+    at execute would evaluate it under a different process cwd, so the two
+    checks could disagree — a TOCTOU gap wearing a fix's clothes.
+    """
+    raw = (cwd or "").strip()
+    anchor = Path(base).expanduser() if base is not None else Path.cwd()
+    if not raw:
+        return str(anchor.resolve())
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = anchor / candidate
+    return str(candidate.resolve())
+
+
+def vet_cron_command(command: str, cwd: str | None = None) -> tuple[bool, str]:
     """Vet a cron command through SecurityGate at SYSTEM (restricted) trust.
 
     Returns ``(allowed, reason)``. Used by BOTH the create/edit API (fail fast →
     400) and execute_job (the unattended backstop covering every path that runs
     a job, including the scheduler loop). Fails CLOSED: if no gate can be built
     or evaluation raises, the command is refused rather than run ungated.
+
+    *cwd* must already be ABSOLUTE (see :func:`resolve_cron_cwd`) and is passed
+    as the gate's ``file_path``. Two things follow, both intended:
+
+    * ``denied_paths`` applies — unconditionally, and this is the whole fix. A
+      gate that only inspects the command STRING cannot see danger delivered by
+      LOCATION: ``cat id_rsa``, ``tar -cf - .`` and ``grep -r . .`` are
+      unremarkable commands that become key exfiltration when the cwd is
+      ``~/.ssh``.
+    * ``workspace_root`` does NOT apply, because the gate's workspace prompt is
+      gated on ``_APPROVE_TOOLS == {write_file, edit_file}`` and this evaluates
+      ``"bash"``. Deliberate: a workspace lock for cron cwds was measured
+      against one real sample and left unruled rather than shipped on no
+      evidence.
+
+    Note this call site hand-builds an ``evaluate("bash", ...)``, so it is NOT
+    reached by the tool-schema path declarations added in #214 — declaring
+    ``cron_create.cwd`` a path would not have gated anything here. The
+    ``file_path`` has to be passed explicitly, which is the general point: a
+    declared path param is only as good as the sites that pass it.
     """
     gate = _get_security_gate()
     if gate is None:
         return False, "SecurityGate unavailable — refusing to run a cron command ungated"
     try:
-        decision = gate.evaluate("bash", command=command, origin="system")
+        decision = gate.evaluate(
+            "bash", command=command, file_path=cwd, origin="system",
+        )
     except Exception as exc:  # never let a gate error reopen the bypass
         logger.exception("Cron: SecurityGate.evaluate raised")
         return False, f"SecurityGate error: {exc}"
     if decision.action == "ALLOW":
         return True, ""
     return False, decision.reason or f"blocked by SecurityGate ({decision.action})"
+
+
+def normalize_and_vet_cron_job(
+    command: str, cwd: str | None, *, base: Path | str | None = None,
+) -> tuple[bool, str, str]:
+    """THE CHOKE POINT. Returns ``(allowed, resolved_cwd, reason)``.
+
+    Every path that creates or edits a job calls this — the ``cron_create``
+    tool, ``POST /api/cron`` and the update route — so the resolution happens
+    ONCE and identically. Three independent resolutions would be the two-store
+    problem in a different costume: three places to fix, and drift between them
+    invisible until a job runs somewhere nobody expected.
+
+    ``execute_job`` re-vets the persisted value as the total invariant. That is
+    what covers jobs written before this existed, and the fourth creation path
+    somebody adds next year.
+    """
+    resolved = resolve_cron_cwd(cwd, base=base)
+    allowed, reason = vet_cron_command(command, cwd=resolved)
+    return allowed, resolved, reason
 
 
 # ---------------------------------------------------------------------------
@@ -273,19 +343,34 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
     """Run a single cron job and return a history entry."""
     name = job["name"]
     command = job["command"]
-    cwd = Path(job.get("cwd") or ".").expanduser()
+    # Resolved through the SAME function the create paths use. Jobs persisted
+    # before that existed carry a relative value or no key at all, and this is
+    # the line that gives them an absolute, gateable one WITHOUT rewriting
+    # their stored row — the persisted data is left exactly as the operator
+    # wrote it; only the evaluation is normalised.
+    resolved_cwd = resolve_cron_cwd(job.get("cwd"))
+    cwd = Path(resolved_cwd)
     started_at = datetime.now(timezone.utc)
 
     # SECURITY: vet the command at system (restricted) trust BEFORE spawning a
     # shell. Cron is unattended, so a non-ALLOW decision refuses execution — cron
     # is not a SecurityGate bypass. Covers the scheduler loop, run-now, and any
     # job created outside the API.
-    allowed, reason = vet_cron_command(command)
+    #
+    # THIS IS THE TOTAL INVARIANT. The create paths reject a denied cwd up
+    # front, but only this one covers jobs written before the check existed —
+    # and the next creation path somebody adds. A create-only fix looks
+    # complete and silently misses every row already on disk.
+    allowed, reason = vet_cron_command(command, cwd=resolved_cwd)
     if not allowed:
-        logger.warning("Cron job %r BLOCKED by SecurityGate: %s", name, reason)
+        logger.warning(
+            "Cron job %r BLOCKED by SecurityGate (cwd=%s): %s",
+            name, resolved_cwd, reason,
+        )
         entry = {
             "name": name,
             "command": command,
+            "cwd": resolved_cwd,
             "started_at": started_at.isoformat(),
             "ended_at": datetime.now(timezone.utc).isoformat(),
             "returncode": 126,
@@ -321,6 +406,7 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
         entry = {
             "name": name,
             "command": command,
+            "cwd": resolved_cwd,
             "started_at": started_at.isoformat(),
             "ended_at": datetime.now(timezone.utc).isoformat(),
             "returncode": -1,
@@ -336,6 +422,7 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
         entry = {
             "name": name,
             "command": command,
+            "cwd": resolved_cwd,
             "started_at": started_at.isoformat(),
             "ended_at": datetime.now(timezone.utc).isoformat(),
             "returncode": -1,
@@ -352,6 +439,7 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
     entry = {
         "name": name,
         "command": command,
+        "cwd": resolved_cwd,
         "started_at": started_at.isoformat(),
         "ended_at": datetime.now(timezone.utc).isoformat(),
         "returncode": process.returncode,
