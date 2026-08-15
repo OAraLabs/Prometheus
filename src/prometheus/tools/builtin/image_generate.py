@@ -50,6 +50,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from prometheus.security.path_guard import assert_path_under_roots
+from prometheus.permissions.path_schema import DIR_FIELD, PATH_FIELD
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -147,6 +148,7 @@ class ImageGenerateInput(BaseModel):
         ),
     )
     output_path: str | None = Field(
+        json_schema_extra=PATH_FIELD,
         default=None,
         description=(
             "Optional absolute path to save the image. When omitted, "

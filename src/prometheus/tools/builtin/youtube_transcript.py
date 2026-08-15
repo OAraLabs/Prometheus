@@ -15,6 +15,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from prometheus.permissions.path_schema import DIR_FIELD, PATH_FIELD
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -29,6 +30,7 @@ class YouTubeTranscriptInput(BaseModel):
     url: str = Field(description="YouTube URL (full, short, or bare 11-char video ID)")
     language: str = Field(default="en", description="Subtitle language code (default 'en')")
     save_to: str | None = Field(
+        json_schema_extra=PATH_FIELD,
         default=None,
         description="Optional local path to save the transcript text",
     )

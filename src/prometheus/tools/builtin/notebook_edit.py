@@ -13,13 +13,15 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from prometheus.permissions.path_schema import DIR_FIELD, PATH_FIELD
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
 class NotebookEditInput(BaseModel):
     """Arguments for editing a notebook cell."""
 
-    path: str = Field(description="Path to the .ipynb file")
+    path: str = Field(
+        json_schema_extra=PATH_FIELD,description="Path to the .ipynb file")
     cell_index: int = Field(ge=0, description="Zero-based cell index to edit")
     new_source: str = Field(description="New source content for the cell")
     cell_type: Literal["code", "markdown"] = Field(
