@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import socket
 import uuid
@@ -456,6 +457,78 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
     )
 
 
+def check_trajectory_export(config: dict[str, Any]) -> DiagnosticCheck:
+    """Is golden-trace capture actually accumulating anything?
+
+    A subsystem that is off ON PURPOSE and one that is off BY ACCIDENT look
+    identical from outside, and the only thing distinguishing them is a
+    comment in a yaml file that nobody greps. This is the row that tells
+    them apart — and it does so by reporting the CONSEQUENCE rather than the
+    flag, because the flag alone cannot: "disabled" next to 0 stranded
+    traces is a deliberate choice, "disabled" next to 1400 is a leak.
+
+    Silence here is the failure mode worth catching. Nothing breaks when
+    export is off; the traces simply never accumulate, and the cost is only
+    visible much later as an absent training corpus.
+    """
+    cfg = config.get("trajectory_export", {}) or {}
+    enabled = bool(cfg.get("enabled", True))
+    out_dir = Path(
+        str(cfg.get("output_dir", "~/.prometheus/trajectories/"))
+    ).expanduser()
+
+    # How many golden rows sit past the export cursor. Best-effort: this is
+    # a diagnostic, so a missing DB reports "unknown" rather than failing.
+    stranded: int | None = None
+    try:
+        import sqlite3
+
+        from prometheus.sentinel.golden_trace_exporter import WATERMARK_FILENAME
+
+        watermark = 0
+        wm_path = out_dir / WATERMARK_FILENAME
+        if wm_path.exists():
+            watermark = int(json.loads(wm_path.read_text())["last_rowid"])
+
+        db = Path("~/.prometheus/telemetry.db").expanduser()
+        if db.exists():
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                stranded = conn.execute(
+                    "SELECT COUNT(*) FROM tool_calls"
+                    " WHERE is_golden = 1 AND rowid > ?",
+                    (watermark,),
+                ).fetchone()[0]
+            finally:
+                conn.close()
+    except Exception:
+        stranded = None
+
+    if not enabled:
+        waiting = (
+            "an unknown number of" if stranded is None else f"{stranded}"
+        )
+        # Deliberate and harmless vs deliberate and forgotten differ only by
+        # this count, so it leads the message.
+        status = "ok" if stranded == 0 else "warning"
+        return DiagnosticCheck(
+            name="Trajectory export", category="resources", status=status,
+            message=f"DISABLED — {waiting} golden trace(s) recorded and not "
+                    f"being exported",
+            fix="Set `trajectory_export.enabled: true` to resume writing "
+                "fine-tuning JSONL. Ignore this row if you do not intend to "
+                "fine-tune — the traces stay in telemetry.db either way.",
+        )
+
+    files = len(list(out_dir.glob("*.jsonl"))) if out_dir.is_dir() else 0
+    return DiagnosticCheck(
+        name="Trajectory export", category="resources", status="ok",
+        message=f"enabled — {files} export file(s) in {out_dir}, "
+                f"{'unknown' if stranded is None else stranded} trace(s) "
+                f"awaiting the next cycle",
+    )
+
+
 def check_whisper(config: dict[str, Any]) -> DiagnosticCheck:
     """Whisper available when voice is enabled?"""
     whisper_cfg = config.get("whisper", {}) or {}
@@ -502,6 +575,7 @@ def run_extended_checks(
         check_token(config),
         *check_gateways(config),
         check_advertised_tools(config),
+        check_trajectory_export(config),
         check_whisper(config),
     ]
 
