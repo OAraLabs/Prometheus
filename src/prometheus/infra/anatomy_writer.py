@@ -95,12 +95,24 @@ class AnatomyWriter:
         """Render compact summary for system prompt injection (~200-300 tokens)."""
         parts: list[str] = ["## Infrastructure"]
 
-        # Hardware line
+        # Hardware line. Same trap as the full render: appending the
+        # INFERENCE GPU to "Running on <host>" reads as "this host has that
+        # card" — which is false whenever inference is remote. Name the local
+        # card here (that is what "running on" means) and give the remote one
+        # its own clause with the host attached.
         hw = f"Running on {state.hostname}"
-        if state.gpu_name:
-            gpu_short = state.gpu_name.replace("NVIDIA ", "")
-            hw += f" + GPU ({gpu_short})"
+        local_card = state.local_gpu_name or (
+            state.gpu_name if not state.gpu_is_remote else None
+        )
+        if local_card:
+            hw += f" + GPU ({local_card.replace('NVIDIA ', '')})"
         hw += "."
+        if state.gpu_is_remote and state.gpu_name:
+            hw += (
+                f" Inference runs REMOTELY on "
+                f"{state.gpu_inference_host or 'another host'} "
+                f"({state.gpu_name.replace('NVIDIA ', '')})."
+            )
         parts.append(hw)
 
         # Model line — "Local backend model", not "Model": this summary is read
@@ -160,16 +172,56 @@ class AnatomyWriter:
         ram_str = f"{state.ram_total_gb:.0f}GB" if state.ram_total_gb else "?"
         lines.append(f"| {state.hostname} | Host | {state.cpu[:40]} | {ram_str} |")
 
-        # GPU
+        # GPU — this box may have TWO relevant cards, and the scanner has
+        # always captured both. Rendering only `gpu_name` under a bare "GPU"
+        # heading, directly beneath the local Hardware table, read as "this
+        # machine has a 4090" when the 4090 is a SEPARATE box over Tailscale
+        # and the local card is a 3090 Ti. anatomy.py's own field comment says
+        # these exist because "without these fields the agent confidently
+        # confuses the two" — they were populated and never consumed.
+        #
+        # This section lands in every system prompt, so each card is labelled
+        # with WHICH MACHINE it is in, and a failed remote probe says so
+        # rather than silently omitting the heading.
+        gpu_lines: list[str] = []
         if state.gpu_name:
-            lines.append("")
-            lines.append("### GPU")
-            lines.append(f"- **Name:** {state.gpu_name}")
+            if state.gpu_is_remote:
+                where = f"REMOTE — {state.gpu_inference_host or 'inference host'}"
+            else:
+                where = "this machine"
+            gpu_lines.append(f"- **Inference GPU ({where}):** {state.gpu_name}")
             if state.gpu_vram_total_mb:
                 used = state.gpu_vram_used_mb or 0
                 free = state.gpu_vram_free_mb or 0
                 total = state.gpu_vram_total_mb
-                lines.append(f"- **VRAM:** {used}MB / {total}MB used ({free}MB free)")
+                gpu_lines.append(
+                    f"  - VRAM: {used}MB / {total}MB used ({free}MB free)"
+                )
+        elif state.gpu_is_remote and state.gpu_inference_host:
+            # Probe failed. Say so — an absent heading is indistinguishable
+            # from "there is no GPU", which is a different fact.
+            reason = state.gpu_probe_error or "probe failed"
+            gpu_lines.append(
+                f"- **Inference GPU (REMOTE — {state.gpu_inference_host}):** "
+                f"not detected ({reason})"
+            )
+
+        if state.local_gpu_name:
+            gpu_lines.append(
+                f"- **Local GPU (this machine):** {state.local_gpu_name}"
+            )
+            if state.local_gpu_vram_total_mb:
+                l_used = state.local_gpu_vram_used_mb or 0
+                l_free = state.local_gpu_vram_free_mb or 0
+                l_total = state.local_gpu_vram_total_mb
+                gpu_lines.append(
+                    f"  - VRAM: {l_used}MB / {l_total}MB used ({l_free}MB free)"
+                )
+
+        if gpu_lines:
+            lines.append("")
+            lines.append("### GPU")
+            lines.extend(gpu_lines)
 
         # Model — labelled "local backend" deliberately. This section lands in
         # every system prompt; a cloud model serving an overridden session
