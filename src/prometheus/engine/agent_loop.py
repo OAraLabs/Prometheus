@@ -1294,9 +1294,50 @@ async def _run_loop(
             )
             if extracted:
                 from prometheus.engine.messages import TextBlock
+                # Keep residual prose around the markup (stream already showed it);
+                # strip the tags so gateways that read result.text never see them.
+                from prometheus.adapter.formatter import strip_tool_call_markup
+                residual = strip_tool_call_markup(final_message.text).strip()
+                content_blocks: list = list(extracted)
+                if residual:
+                    content_blocks.insert(0, TextBlock(text=residual))
                 final_message = ConversationMessage(
                     role="assistant",
-                    content=extracted,
+                    content=content_blocks,
+                )
+
+        # Final-text hygiene (local tiers only): gateways that deliver
+        # result.text / AssistantTurnComplete.message.text (Telegram, Slack,
+        # Discord, CLI) never saw the stream filter. Dual-emit paths
+        # (structured tool_calls + leftover <tool_call> in content) and
+        # extract-miss leftovers would otherwise leak raw grammar tags into
+        # the chat bubble. raw_model_output_this_turn above stays unfiltered
+        # for golden-trace capture. Tier off (cloud) leaves prose alone so
+        # quoted tags in explanations are not eaten.
+        if (
+            _markup_filter is not None
+            and final_message is not None
+            and final_message.text
+            and "<tool_call" in final_message.text
+        ):
+            from prometheus.adapter.formatter import strip_tool_call_markup
+            from prometheus.engine.messages import TextBlock
+            cleaned_blocks: list = []
+            changed = False
+            for block in final_message.content:
+                if isinstance(block, TextBlock):
+                    cleaned = strip_tool_call_markup(block.text)
+                    if cleaned != block.text:
+                        changed = True
+                    if cleaned:
+                        cleaned_blocks.append(TextBlock(text=cleaned))
+                    # empty after strip → drop the block
+                else:
+                    cleaned_blocks.append(block)
+            if changed:
+                final_message = ConversationMessage(
+                    role="assistant",
+                    content=cleaned_blocks,
                 )
 
         # ── Empty-response guard ──
