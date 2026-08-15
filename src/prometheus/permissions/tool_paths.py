@@ -74,6 +74,12 @@ TOOL_PATH_PARAM: dict[str, str] = {
     # read_file, only as strict.
     "grep": "root",
     "glob": "root",
+    # A file_watch task WATCHES this directory, and the task is persisted
+    # and resumed across restarts. Read-only like grep/glob (it reports a
+    # matched filename, never file contents), so mapping it buys
+    # denied_paths and no workspace prompt — task_create is not in
+    # _APPROVE_TOOLS.
+    "task_create": "watch_dir",
 }
 
 #: Tools with a path-SHAPED parameter that is not a filesystem path, each with
