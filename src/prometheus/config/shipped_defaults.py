@@ -72,6 +72,73 @@ _SHIPPED_MEDIA_ALLOWLISTS: dict[str, tuple[str, ...]] = {
     "allowed_document_types": SHIPPED_ALLOWED_DOCUMENT_TYPES,
 }
 
+# gateway.telegram_enabled — whether the Telegram gateway starts at all.
+#
+# The behaviour site (daemon.py) defaulted this to True while the template,
+# both setup-wizard display surfaces and every sibling gateway said False.
+# Absence therefore meant "start the public gateway", and it only took a token
+# in the environment to trigger it.
+#
+# ⚠ It never failed alone. `allowed_chat_ids` is the adjacent key in the same
+# section, and empty/absent there meant "allow EVERY chat" — so the config
+# that omitted one omitted the other, and the compound outcome was a bot live
+# to anyone who found it while the status panel reported it off. They are
+# fixed together because they fail together.
+SHIPPED_TELEGRAM_ENABLED: bool = False
+
+
+def resolve_telegram_enabled(gateway_cfg: dict | None) -> bool:
+    """Whether the Telegram gateway may start.
+
+    Absent -> :data:`SHIPPED_TELEGRAM_ENABLED` (False). Every writer of a
+    config writes this key explicitly (``setup_wizard``, ``cli/init``,
+    ``web/setup_server``, ``cli/migrate``), so an absent key means a
+    hand-written or hand-trimmed config — not an operator's decision to run a
+    public gateway.
+    """
+    value = (gateway_cfg or {}).get("telegram_enabled")
+    if value is None:
+        return SHIPPED_TELEGRAM_ENABLED
+    return bool(value)
+
+
+def resolve_allowed_chat_ids(gateway_cfg: dict | None) -> list[int]:
+    """The chats permitted to drive the agent over Telegram.
+
+    Returns the configured ids, or an EMPTY list — and empty is refused by the
+    caller rather than treated as "no restriction". ``daemon`` will not start
+    the gateway on an empty result, and ``PlatformConfig.chat_allowed`` denies
+    on empty, so the two layers disagree about nothing.
+
+    ⚠ THIS DELIBERATELY DIVERGES FROM ``resolve_media_allowlist`` ABOVE, and
+    the divergence is the point. There, an explicit ``[]`` is honoured as the
+    operator's opt-out, because "accept any file type" is a coherent thing to
+    want. Here it is not: an unrestricted chat allowlist hands an agent with
+    shell access to anyone who finds the bot, and there is no configuration in
+    which that is the intent.
+
+    The second reason is sharper. The shipped template writes
+    ``allowed_chat_ids: []`` as its PLACEHOLDER. Honouring ``[]`` verbatim —
+    the #141 rule — would mean every fresh install is open to the world the
+    moment someone flips ``telegram_enabled: true``. The #141 analogy holds
+    for media types and breaks exactly here, so absent and ``[]`` are treated
+    identically and both are refused upstream.
+    """
+    value = (gateway_cfg or {}).get("allowed_chat_ids")
+    if not isinstance(value, list):
+        return []
+    out: list[int] = []
+    for v in value:
+        try:
+            out.append(int(v))
+        except (TypeError, ValueError):
+            # A malformed entry is neither an allow nor a crash: dropping it
+            # shrinks the allowlist, which is the fail-closed direction, and
+            # an allowlist that ends up empty is refused by the caller
+            # (CROSS-CUTTING §8 — a control must not fail by exception).
+            continue
+    return out
+
 
 # ---------------------------------------------------------------------------
 # Resolvers — THE single reader for each absence-hostile key.

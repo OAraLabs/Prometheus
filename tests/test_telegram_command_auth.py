@@ -88,12 +88,21 @@ class TestCommandAuthorization:
             )
 
     @pytest.mark.asyncio
-    async def test_empty_allowlist_permits_everyone(self):
-        """Unchanged semantics: an empty allowed_chat_ids means no
-        restriction (PlatformConfig.chat_allowed). This guard must not
-        silently tighten a deployment that never opted in."""
+    async def test_empty_allowlist_now_permits_NOBODY(self):
+        """SUPERSEDED, deliberately.
+
+        #202 scoped itself to "fix command auth, do not tighten a deployment
+        that never opted in", and this test pinned that decision. The decision
+        has been reversed by ruling: an empty allowlist meant "allow every
+        chat", and the adjacent gateway.telegram_enabled defaulted ON at the
+        behaviour site, so the two together made a hand-trimmed config a
+        public bot. Absence is not permission.
+
+        The rename is the point — the old NAME asserted the old semantics as
+        loudly as the body did."""
         a = _adapter([])
-        await a._authorize_update(_update(STRANGER_CHAT), MagicMock())
+        with pytest.raises(ApplicationHandlerStop):
+            await a._authorize_update(_update(STRANGER_CHAT), MagicMock())
 
     @pytest.mark.asyncio
     async def test_update_without_a_chat_passes(self):

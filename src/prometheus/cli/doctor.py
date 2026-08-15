@@ -330,14 +330,35 @@ def check_gateways(config: dict[str, Any]) -> list[DiagnosticCheck]:
     """
     gw = config.get("gateway", {}) or {}
 
-    # Telegram — flat keys; the daemon starts it when a token exists and
-    # telegram_enabled (default True) isn't switched off.
+    # Telegram — flat keys. This check is a DELIBERATE MIRROR of the daemon's
+    # construction block, not an independent opinion: doctor exists to report
+    # what the daemon would actually do, so when that default changes this one
+    # changes with it. It read `default True` for the same reason it now reads
+    # False — the daemon did.
+    #
+    # The daemon additionally REFUSES to start an enabled gateway whose
+    # allowed_chat_ids is empty, so "enabled" here means enabled AND
+    # allowlisted; reporting a gateway as up when the daemon would refuse it
+    # is the failure this mirror exists to prevent (CROSS-CUTTING §12 — fix
+    # the actor, then fix whatever writes down what it did).
+    from prometheus.config.shipped_defaults import (
+        resolve_allowed_chat_ids,
+        resolve_telegram_enabled,
+    )
+
     tg_token = gw.get("telegram_token", "") or _env_or_env_file(
         "PROMETHEUS_TELEGRAM_TOKEN")
-    tg_flag = gw.get("telegram_enabled")
+    tg_flag = resolve_telegram_enabled(gw)
+    tg_chat_ids = resolve_allowed_chat_ids(gw)
     telegram = _gateway_check(
         "Telegram gateway",
-        enabled=bool(tg_flag) or (tg_flag is None and bool(tg_token)),
+        # `enabled` is the operator's INTENT, deliberately — not "will it come
+        # up". Folding the allowlist check in here would report an enabled
+        # gateway as merely "not enabled", which is under-reporting: the
+        # operator who turned it on and gets nothing needs to be told why, and
+        # "not enabled" tells them the opposite of what they did. The
+        # allowlist refusal is its own error line below.
+        enabled=tg_flag,
         token_ok=bool(tg_token),
         token_missing_msg="enabled but no bot token (gateway.telegram_token "
                           "or PROMETHEUS_TELEGRAM_TOKEN)",
@@ -349,6 +370,23 @@ def check_gateways(config: dict[str, Any]) -> list[DiagnosticCheck]:
         library_fix="pip install python-telegram-bot (a core dependency — "
                     "reinstall with `pip install oara-prometheus`).",
     )
+
+    # The allowlist refusal, reported as its own failure rather than folded
+    # into `enabled`. The daemon will NOT start an enabled Telegram gateway
+    # whose allowed_chat_ids is empty — an empty allowlist used to mean "allow
+    # every chat", which exposed an agent with shell access to anyone who
+    # found the bot. Doctor exists to report what the daemon would actually
+    # do, so it has to name this case; a gateway that is on, tokened, and
+    # still refused is exactly the state an operator cannot diagnose alone.
+    if tg_flag and tg_token and not tg_chat_ids and telegram.status == "ok":
+        telegram = DiagnosticCheck(
+            name="Telegram gateway", category="connectivity", status="error",
+            message="enabled with a token, but gateway.allowed_chat_ids is "
+                    "empty — the daemon refuses to start an unrestricted "
+                    "Telegram gateway",
+            fix="Add your chat id to gateway.allowed_chat_ids (get it from "
+                "@userinfobot), or set gateway.telegram_enabled: false.",
+        )
 
     # Slack — flat keys win over the nested gateway.slack.* form; needs
     # BOTH tokens (bot xoxb-... + app xapp-...).

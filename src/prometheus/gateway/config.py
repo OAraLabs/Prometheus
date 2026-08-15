@@ -73,9 +73,27 @@ class PlatformConfig:
         return len(self.allowed_chat_ids) > 0
 
     def chat_allowed(self, chat_id: int) -> bool:
-        """Return True if the chat is permitted (or no restrictions set)."""
+        """Return True only if this chat is on the allowlist.
+
+        ⚠ AN EMPTY ALLOWLIST DENIES. It used to return True — "no restrictions
+        set" — which made absence mean permission on the one surface exposed to
+        the public internet by design, for an agent with shell access.
+
+        ``daemon`` refuses to start the gateway at all on an empty allowlist,
+        with a log line naming the reason. This is the second layer, so that a
+        ``PlatformConfig`` built anywhere else cannot be open either
+        (CROSS-CUTTING §5 — a property that cannot be violated beats a check
+        that must remember to run).
+
+        NOT changed here, and deliberately: ``channel_allowed`` (Slack) and
+        ``discord_inbound_allowed`` keep their empty-means-unrestricted
+        reading. Both gateways default to DISABLED at every reader, so neither
+        has this key's compound failure — and widening the change without a
+        ruling would be scope creep on a security-behaviour PR. Flagged, not
+        fixed.
+        """
         if not self.allowed_chat_ids:
-            return True
+            return False
         return chat_id in self.allowed_chat_ids
 
     def channel_allowed(self, channel_id: str) -> bool:

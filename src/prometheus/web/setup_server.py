@@ -286,6 +286,24 @@ def _string_list(value: Any) -> list[str]:
     return []
 
 
+def _int_list(value: Any) -> list[int]:
+    """Coerce an optional list-ish field to a clean list of ints.
+
+    Telegram chat ids. A non-numeric entry is DROPPED rather than raised: this
+    feeds an allowlist, so discarding an unparseable entry shrinks it, which is
+    the fail-closed direction (CROSS-CUTTING §8 — a control must not fail by
+    exception). An allowlist that ends up empty is refused by the daemon, not
+    silently treated as "allow everyone".
+    """
+    out: list[int] = []
+    for v in _string_list(value):
+        try:
+            out.append(int(v))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _apply_configure(
     body: dict[str, Any],
     *,
@@ -314,6 +332,14 @@ def _apply_configure(
     agent_name = str(body.get("agent_name") or "").strip()
     persona = str(body.get("persona") or "").strip()
     telegram_token = str(body.get("telegram_token") or "").strip()
+    # Slack has collected its channel whitelist here since SPRINT G3; Telegram
+    # never collected the equivalent, so this endpoint wrote
+    # `telegram_enabled: True` with NO allowlist — and an empty allowlist used
+    # to mean "allow every chat". Remote setup was therefore a supported path
+    # to an internet-open bot. Optional, so an existing client that omits it
+    # still works; the daemon now refuses such a config loudly instead of
+    # serving it to everyone.
+    telegram_chat_ids = _int_list(body.get("telegram_chat_ids"))
     slack_bot_token = str(body.get("slack_bot_token") or "").strip()
     slack_app_token = str(body.get("slack_app_token") or "").strip()
     slack_channels = _string_list(body.get("slack_channels"))
@@ -394,6 +420,10 @@ def _apply_configure(
         if telegram_token:
             set_env_value("PROMETHEUS_TELEGRAM_TOKEN", telegram_token)
             config["gateway"]["telegram_enabled"] = True
+            # ALWAYS written, even when empty. A key that is present and empty
+            # is a config the operator can see and fix; a key that is absent is
+            # the thing that made absence mean permission in the first place.
+            config["gateway"]["allowed_chat_ids"] = telegram_chat_ids
             gateways_enabled.append("telegram")
         if slack_bot_token and slack_app_token:
             set_env_value("PROMETHEUS_SLACK_BOT_TOKEN", slack_bot_token)

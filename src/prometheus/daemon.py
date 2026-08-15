@@ -624,7 +624,34 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Telegram adapter
     telegram: TelegramAdapter | None = None
     telegram_token = gateway_config.get("telegram_token", "") or os.environ.get("PROMETHEUS_TELEGRAM_TOKEN", "")
-    if telegram_token and gateway_config.get("telegram_enabled", True):
+    from prometheus.config.shipped_defaults import (
+        resolve_allowed_chat_ids,
+        resolve_telegram_enabled,
+    )
+
+    _tg_enabled = resolve_telegram_enabled(gateway_config)
+    _tg_chat_ids = resolve_allowed_chat_ids(gateway_config)
+
+    # ABSENCE IS NOT PERMISSION. This block used to read
+    # `gateway_config.get("telegram_enabled", True)`, so a config that merely
+    # omitted the key started the public gateway as soon as a token existed —
+    # and the adjacent `allowed_chat_ids`, omitted for the same reason, meant
+    # "allow every chat". One defect, two key names.
+    #
+    # An enabled gateway with no allowlist REFUSES TO START and says so.
+    # Starting-and-ignoring-everything was the other candidate and is worse:
+    # a silently dead bot is indistinguishable from a working control (§2c),
+    # so the operator has nothing to act on.
+    if telegram_token and _tg_enabled and not _tg_chat_ids:
+        logger.error(
+            "Telegram gateway NOT started: gateway.telegram_enabled is on and a "
+            "token is present, but gateway.allowed_chat_ids is empty or absent. "
+            "An empty allowlist used to mean 'allow every chat', which exposes "
+            "an agent with shell access to anyone who finds the bot. Add your "
+            "chat id to gateway.allowed_chat_ids (find it with @userinfobot), "
+            "or set gateway.telegram_enabled: false to silence this."
+        )
+    elif telegram_token and _tg_enabled:
         # SPRINT G3: failure-guarded like the Slack/Discord blocks below —
         # a bad token (or Telegram being unreachable) must not kill the
         # daemon; the other gateways and the web surface still come up.
@@ -640,7 +667,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
             tg_config = PlatformConfig(
                 platform=Platform.TELEGRAM,
                 token=telegram_token,
-                allowed_chat_ids=gateway_config.get("allowed_chat_ids", []),
+                allowed_chat_ids=_tg_chat_ids,
                 proxy_url=gateway_config.get("proxy_url"),
                 max_file_size_mb=_media_cfg.get("max_file_size_mb", 20),
                 media_cache_dir=_media_cfg.get("cache_dir"),
