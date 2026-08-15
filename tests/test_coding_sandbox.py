@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
@@ -176,9 +179,12 @@ class TestClone:
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import json
+
 from prometheus.coding.sandbox import (
     CONTAINER_WORKDIR,
     DockerSandbox,
+    SandboxBackendUnavailable,
     docker_available,
 )
 
@@ -319,6 +325,170 @@ class TestDockerSandbox:
 
 
 # --------------------------------------------------------------------------- #
+# Container reuse — adopting a leaked container (subprocess mocked)
+#
+# The container name is derived from the task id ALONE, so a run that dies
+# without close() leaves a RUNNING container that the next run with that task
+# id will find. Reusing it on "status == running" alone adopts a container
+# whose /workspace bind points at a clone that no longer exists, and every
+# exec into it fails with "current working directory is outside of container
+# mount namespace" — so nothing runs, no escape attempt can succeed, and a
+# containment check reports a FALSE PASS. These pin the reuse decision itself;
+# TestDockerSandboxLive proves it against a real daemon.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeDocker:
+    """Scripted `docker` CLI standing in for subprocess.run."""
+
+    def __init__(
+        self,
+        inspect_payload=None,
+        *,
+        exec_ok: bool = True,
+        inspect_stdout: str | None = None,
+    ):
+        # None = `docker inspect` reports no such container.
+        self.inspect_payload = inspect_payload
+        # Raw stdout override, for output that is not valid JSON at all.
+        self.inspect_stdout = inspect_stdout
+        self.exec_ok = exec_ok
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, *args, **kwargs):
+        self.calls.append(list(argv))
+        verb = argv[1] if len(argv) > 1 else ""
+        if verb == "inspect":
+            if self.inspect_stdout is not None:
+                return MagicMock(returncode=0, stdout=self.inspect_stdout, stderr="")
+            if self.inspect_payload is None:
+                return MagicMock(returncode=1, stdout="", stderr="No such object")
+            return MagicMock(
+                returncode=0, stdout=json.dumps(self.inspect_payload), stderr=""
+            )
+        if verb == "exec":
+            return MagicMock(
+                returncode=0 if self.exec_ok else 126,
+                stdout="",
+                stderr="" if self.exec_ok else (
+                    "OCI runtime exec failed: exec failed: unable to start "
+                    "container process: current working directory is outside "
+                    "of container mount namespace"
+                ),
+            )
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    @property
+    def verbs(self) -> list[str]:
+        return [c[1] for c in self.calls if len(c) > 1]
+
+
+def _record(source, *, status: str = "running", destination: str = CONTAINER_WORKDIR):
+    """A minimal `docker inspect` record with one bind mount."""
+    return [{
+        "State": {"Status": status},
+        "Mounts": [{
+            "Type": "bind",
+            "Source": str(source),
+            "Destination": destination,
+        }],
+    }]
+
+
+class TestDockerSandboxContainerReuse:
+
+    def _build(self, root: Path, fake: _FakeDocker, task_id: str = "reuse-task"):
+        with patch("prometheus.coding.sandbox.subprocess.run", side_effect=fake):
+            return DockerSandbox(root=root, task_id=task_id)
+
+    @pytest.fixture
+    def root(self, tmp_path: Path) -> Path:
+        d = tmp_path / "jail"
+        d.mkdir()
+        return d
+
+    def test_healthy_container_is_adopted(self, root: Path):
+        """The reuse path still exists: a running container whose workspace
+        bind is this run's root and which can exec is NOT rebuilt."""
+        fake = _FakeDocker(_record(root))
+        self._build(root, fake)
+        assert "create" not in fake.verbs
+        assert "rm" not in fake.verbs
+
+    def test_deleted_workspace_source_is_rebuilt(self, root: Path, tmp_path: Path):
+        """The leaked container is running, but its bind source was deleted
+        with the crashed run's clone.
+
+        These mount-shape cases pin the decision table going forward; they do
+        NOT by themselves demonstrate the original defect, since the mock is
+        written against the current single-inspect call shape. The live pair
+        in TestDockerSandboxLive is what fails against the old code.
+        """
+        fake = _FakeDocker(_record(tmp_path / "gone"))
+        self._build(root, fake)
+        assert "rm" in fake.verbs
+        assert "create" in fake.verbs
+
+    def test_other_runs_clone_is_rebuilt(self, root: Path, tmp_path: Path):
+        """Production shape: clone_repo_for_sandbox timestamps each clone
+        directory, so a retry of the same task id has the same container name
+        but a DIFFERENT root. The still-existing older clone must not be
+        mistaken for this run's workspace."""
+        stale = tmp_path / "jail-1700000000"
+        stale.mkdir()
+        fake = _FakeDocker(_record(stale))
+        self._build(root, fake)
+        assert "rm" in fake.verbs
+        assert "create" in fake.verbs
+
+    def test_container_without_workspace_mount_is_rebuilt(self, root: Path):
+        fake = _FakeDocker(_record(root, destination="/elsewhere"))
+        self._build(root, fake)
+        assert "rm" in fake.verbs
+        assert "create" in fake.verbs
+
+    def test_exited_container_is_rebuilt(self, root: Path):
+        fake = _FakeDocker(_record(root, status="exited"))
+        self._build(root, fake)
+        assert "rm" in fake.verbs
+        assert "create" in fake.verbs
+
+    def test_running_but_unexecable_container_is_rebuilt(self, root: Path):
+        """Path checks cannot see a re-created directory — a bind mount holds
+        the original dentry, so a deleted-then-recloned workspace leaves the
+        source present and matching while the mount inside is a corpse. The
+        probe exec is the only thing that catches it."""
+        fake = _FakeDocker(_record(root), exec_ok=False)
+        with pytest.raises(SandboxBackendUnavailable):
+            self._build(root, fake)
+        assert "rm" in fake.verbs
+        assert "create" in fake.verbs
+
+    def test_probe_uses_the_container_workdir(self, root: Path):
+        """A probe that does not enter /workspace would pass against exactly
+        the dead mount it is meant to detect."""
+        fake = _FakeDocker(_record(root))
+        self._build(root, fake)
+        probe = next(c for c in fake.calls if len(c) > 1 and c[1] == "exec")
+        assert probe[probe.index("--workdir") + 1] == CONTAINER_WORKDIR
+
+    def test_unexecable_fresh_container_raises_and_is_removed(self, root: Path):
+        """No leftover container, so this is a straight create — and it still
+        cannot exec. Returning it would present a sandbox in which every
+        command fails as one that contains everything."""
+        fake = _FakeDocker(None, exec_ok=False)
+        with pytest.raises(SandboxBackendUnavailable, match="cannot execute"):
+            self._build(root, fake)
+        assert "rm" in fake.verbs
+
+    def test_unparseable_inspect_output_rebuilds(self, root: Path):
+        """Unreadable inspect output must not be read as a healthy container."""
+        fake = _FakeDocker(inspect_stdout="not json")
+        self._build(root, fake)
+        assert "create" in fake.verbs
+
+
+# --------------------------------------------------------------------------- #
 # DockerSandbox against a REAL daemon
 #
 # The mocked class above proves argv shape; it cannot prove containment. These
@@ -413,3 +583,92 @@ class TestDockerSandboxLive:
             assert "still-alive" in follow_up.output
         finally:
             box.close()
+
+    @staticmethod
+    def _container_uuid(name: str) -> str:
+        """Docker's long id for *name* — changes on rebuild, unlike the name."""
+        out = subprocess.run(
+            ["docker", "inspect", "--format", "{{.Id}}", name],
+            capture_output=True, text=True, timeout=10,
+        )
+        return out.stdout.strip()
+
+    def test_leaked_container_with_recreated_workspace_is_rebuilt(
+        self, tmp_path: Path
+    ):
+        """REGRESSION, against a real daemon: the leak this was found by.
+
+        A run crashes without close(), leaving a RUNNING container. Its clone
+        is cleaned up and the task retried at the same path. Reuse keyed on
+        status alone adopts the corpse — and note the path checks alone would
+        NOT save us here, because the directory exists again and matches: the
+        bind mount holds the ORIGINAL dentry, so the mount inside the
+        container is dead while every host-side check passes.
+
+        The failure is silent in the worst direction. Every exec fails with
+        "current working directory is outside of container mount namespace",
+        so no command can write anywhere and a containment check reports a
+        PASS with nothing having run at all.
+        """
+        task_id = str(uuid.uuid4())
+        root = tmp_path / "jail"
+        root.mkdir()
+        (root / "app.py").write_text("x = 1\n")
+
+        leaked = DockerSandbox(root=root, task_id=task_id)
+        stale_uuid = self._container_uuid(leaked._container_id)
+        assert stale_uuid, "leaked container should exist before the retry"
+
+        try:
+            # The crash: no close(), clone removed, task retried at the path.
+            shutil.rmtree(root)
+            root.mkdir()
+            (root / "app.py").write_text("x = 2\n")
+
+            fresh = DockerSandbox(root=root, task_id=task_id)
+            try:
+                assert self._container_uuid(fresh._container_id) != stale_uuid, (
+                    "adopted the leaked container instead of rebuilding"
+                )
+                # The property that actually matters: commands RUN.
+                r = asyncio.run(fresh.run("cat app.py"))
+                assert r.exit_code == 0, f"exec failed against reused container: {r.output}"
+                assert "x = 2" in r.output
+            finally:
+                fresh.close()
+        finally:
+            subprocess.run(
+                ["docker", "rm", "-f", leaked._container_id],
+                capture_output=True, timeout=15,
+            )
+
+    def test_leaked_container_from_another_root_is_rebuilt(self, tmp_path: Path):
+        """The production shape: clone_repo_for_sandbox timestamps every clone
+        directory, so a retry of the same task id has the same container name
+        but a different root. The leaked container's workspace is the wrong
+        tree — adopting it would run the retry against stale code."""
+        task_id = str(uuid.uuid4())
+        first = tmp_path / "jail-1"
+        first.mkdir()
+        (first / "marker.txt").write_text("first\n")
+        leaked = DockerSandbox(root=first, task_id=task_id)
+
+        try:
+            second = tmp_path / "jail-2"
+            second.mkdir()
+            (second / "marker.txt").write_text("second\n")
+
+            fresh = DockerSandbox(root=second, task_id=task_id)
+            try:
+                r = asyncio.run(fresh.run("cat marker.txt"))
+                assert r.exit_code == 0
+                assert "second" in r.output, (
+                    "container is still bound to the previous run's clone"
+                )
+            finally:
+                fresh.close()
+        finally:
+            subprocess.run(
+                ["docker", "rm", "-f", leaked._container_id],
+                capture_output=True, timeout=15,
+            )

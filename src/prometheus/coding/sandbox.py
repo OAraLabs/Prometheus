@@ -38,6 +38,7 @@ Docker is unavailable.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -78,6 +79,25 @@ class SandboxConstructionError(Exception):
     setup failed first. Conflating the two would misreport "the command
     failed" for "nothing the caller asked for ever ran" — the exact shape
     Standing-Principles calls out: name what you can actually prove.
+    """
+
+
+class SandboxBackendUnavailable(RuntimeError):
+    """The requested backend cannot run here, and fallback was not permitted.
+
+    Raised rather than silently degrading, at two points:
+
+    * :func:`create_sandbox`, when the backend is not usable on this host. A
+      caller who asked for container or namespace isolation and quietly
+      received ``ProcessSandbox`` would believe a boundary exists where none
+      does — and ``ProcessSandbox``'s boundary is escapable by a one-line
+      shell redirect. ``allow_fallback=True`` is available for callers who
+      genuinely mean "best effort".
+    * :meth:`DockerSandbox._ensure_container`, when a container was built but
+      cannot execute anything. Handing that back is worse than degrading:
+      every command "fails", which a containment check reads as a PASS.
+
+    Failing loudly is the only honest option in both cases.
     """
 
 
@@ -702,30 +722,130 @@ class DockerSandbox(Sandbox):
     def backend(self) -> str:
         return "docker"
 
-    def _ensure_container(self):
-        """Create (or verify) the Docker container for this sandbox."""
-        # Check if a container with this ID already exists.
-        inspect = subprocess.run(
+    def _inspect_container(self) -> dict | None:
+        """This container's inspect record, or None if absent/unreadable.
+
+        ONE ``docker inspect``, parsed once: status and mounts then come from
+        the same snapshot and cannot disagree the way two separate inspect
+        calls could. Output that will not parse is reported as "no usable
+        record", so the caller rebuilds — the safe direction.
+        """
+        result = subprocess.run(
             ["docker", "inspect", self._container_id],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        if inspect.returncode == 0:
-            # Exists — check if it's running.
-            state = subprocess.run(
-                [
-                    "docker", "inspect",
-                    "--format", "{{.State.Status}}",
-                    self._container_id,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
+        if result.returncode != 0:
+            return None
+        try:
+            records = json.loads(result.stdout)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(records, list) or not records:
+            return None
+        record = records[0]
+        return record if isinstance(record, dict) else None
+
+    def _probe_exec_failure(self) -> str | None:
+        """Run a trivial exec at the workdir; return the failure, or None.
+
+        ``--workdir CONTAINER_WORKDIR`` is what makes this representative. A
+        dead bind mount surfaces only when the exec has to ENTER the
+        workspace — which is exactly what every real :meth:`run` does, and
+        what a probe without the flag would miss.
+        """
+        probe = subprocess.run(
+            [
+                "docker", "exec",
+                "--workdir", CONTAINER_WORKDIR,
+                self._container_id,
+                "true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if probe.returncode == 0:
+            return None
+        detail = (probe.stderr or probe.stdout or "").strip()
+        return f"a probe exec failed (exit {probe.returncode}): {detail[:500]}"
+
+    def _adoption_blocker(self, record: dict) -> str | None:
+        """Why an existing container must NOT be reused — None means adopt."""
+        state = record.get("State")
+        status = state.get("Status") if isinstance(state, dict) else None
+        if status not in ("running", "paused"):
+            return f"its status is {status!r}, not running"
+
+        source = None
+        mounts = record.get("Mounts")
+        if isinstance(mounts, list):
+            for mount in mounts:
+                if (
+                    isinstance(mount, dict)
+                    and mount.get("Destination") == CONTAINER_WORKDIR
+                ):
+                    source = mount.get("Source")
+                    break
+        if not source:
+            return f"it has no {CONTAINER_WORKDIR} bind mount"
+
+        bound = Path(source)
+        if not bound.exists():
+            return (
+                f"its {CONTAINER_WORKDIR} bind source {bound} no longer "
+                f"exists on the host"
             )
-            if state.stdout.strip() in ("running", "paused"):
-                return  # Container is live, good.
-            # Dead or exited — remove and recreate.
+        try:
+            same_root = bound.resolve() == self._root
+        except OSError:
+            same_root = False
+        if not same_root:
+            return (
+                f"its {CONTAINER_WORKDIR} bind source {bound} is another "
+                f"run's clone, not this run's root {self._root}"
+            )
+
+        # Path checks cannot see a RE-CREATED directory. A bind mount holds
+        # the original dentry, so deleting the clone and cloning again at the
+        # same path leaves the source present and matching while the mount
+        # inside the container is a corpse. Only an exec settles it.
+        return self._probe_exec_failure()
+
+    def _ensure_container(self):
+        """Create — or safely adopt — the Docker container for this sandbox.
+
+        Adoption is the dangerous half. The container name is derived from
+        the task id alone, so a run that dies without :meth:`close` leaves a
+        RUNNING container that the next run with that task id finds and
+        reuses. Its ``/workspace`` bind still points at the dead run's clone,
+        which by then is gone (``clone_repo_for_sandbox`` gives each attempt
+        a fresh timestamped directory, and refuses to reuse an existing one).
+        Every ``docker exec`` into such a container then fails with:
+
+            OCI runtime exec failed: ... current working directory is
+            outside of container mount namespace
+
+        That is worse than a crash. NOTHING executes, so a containment check
+        watches every escape attempt "fail" and reports a PASS — a false pass
+        indistinguishable from a real one, which is how this was found.
+
+        A container is therefore adopted only if it is running, its
+        ``/workspace`` bind is still THIS run's root, and it can actually
+        exec. Anything else is torn down and rebuilt, and a freshly built
+        container that still cannot exec raises rather than being handed
+        back.
+        """
+        record = self._inspect_container()
+        if record is not None:
+            blocker = self._adoption_blocker(record)
+            if blocker is None:
+                return  # Container is live and usable, good.
+            log.warning(
+                "Discarding existing Docker container %s (%s) — rebuilding.",
+                self._container_id, blocker,
+            )
             subprocess.run(
                 ["docker", "rm", "-f", self._container_id],
                 capture_output=True,
@@ -804,6 +924,23 @@ class DockerSandbox(Sandbox):
             raise RuntimeError(
                 f"Failed to start Docker container {self._container_id}: "
                 f"{start.stderr.strip()}"
+            )
+
+        # A started container is not yet a WORKING one. Prove it can execute
+        # at the workdir before handing it back, and refuse loudly if it
+        # cannot: a sandbox in which every command fails looks exactly like a
+        # sandbox that contains everything.
+        problem = self._probe_exec_failure()
+        if problem:
+            subprocess.run(
+                ["docker", "rm", "-f", self._container_id],
+                capture_output=True, timeout=15,
+            )
+            raise SandboxBackendUnavailable(
+                f"Docker container {self._container_id} started but cannot "
+                f"execute commands: {problem}. Refusing to return a sandbox "
+                f"in which nothing runs — every command would 'fail', which "
+                f"a containment check would misread as a PASS."
             )
 
     def resolve(self, path: str) -> Path:
@@ -958,18 +1095,6 @@ class DockerSandbox(Sandbox):
 
 
 SANDBOX_BACKENDS: tuple[str, ...] = ("process", "bwrap", "docker")
-
-
-class SandboxBackendUnavailable(RuntimeError):
-    """The requested backend cannot run here, and fallback was not permitted.
-
-    Raised rather than silently degrading. A caller who asked for container
-    or namespace isolation and quietly received ``ProcessSandbox`` would
-    believe a boundary exists where none does — and ``ProcessSandbox``'s
-    boundary is escapable by a one-line shell redirect. Failing loudly is the
-    only honest option; ``allow_fallback=True`` is available for callers who
-    genuinely mean "best effort".
-    """
 
 
 def create_sandbox(
