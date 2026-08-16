@@ -139,6 +139,29 @@ class _TurnRecord:
     _pending: dict[tuple[str, str], _Snapshot] = field(default_factory=dict)
 
 
+def _expand_user(path: str) -> str:
+    """Expand a leading ``~`` the way the shell already did.
+
+    The shell expands ``~/.ssh/x`` before the write lands; ``os.stat`` does
+    not. Snapshotting the unexpanded literal stats a path that can never
+    exist, so before/after is absent->absent, ``_classify`` returns
+    "missing", and a mutation that really happened is reported as nothing at
+    all. Three writes under the denied-path floor landed this way with zero
+    lines emitted.
+
+    Expanding here also matters downstream: ``landed_paths()`` is handed to
+    the permission gate by ``agent_loop._boundary_escapes``, and the floor
+    globs (``/*/.ssh``) cannot match a ``~``-prefixed literal.
+
+    Only a leading ``~`` is touched. Relative paths are deliberately left
+    alone: a bash clause can ``cd`` first, so resolving them against the
+    daemon's cwd would invent a path the command never used.
+    """
+    if not path.startswith("~"):
+        return path
+    return os.path.expanduser(path)
+
+
 def _snapshot(path: str) -> _Snapshot:
     """Cheap os.stat wrapper. Returns an absent-marker on any error."""
     try:
@@ -175,7 +198,7 @@ def _extract_paths(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
     for key in ("file_path", "path", "notebook_path"):
         val = tool_input.get(key)
         if isinstance(val, str) and val:
-            out.append(val)
+            out.append(_expand_user(val))
             break
     return out
 
@@ -196,7 +219,7 @@ def _extract_bash_paths(command: str) -> list[tuple[str, str]]:
                 # creation. False negatives < false positives.
                 target = m.group(m.lastindex or 1)
                 # Strip quotes that survive shell-style argv splitting.
-                target = target.strip("'\"")
+                target = _expand_user(target.strip("'\""))
                 if target and not _is_device_sink(target):
                     out.append((target, action))
     return out

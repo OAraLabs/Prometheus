@@ -632,11 +632,29 @@ class SecurityGate:
           ``"user"``    — request comes from a present human (Telegram, CLI,
                           Web). Bash commands skip ExfiltrationDetector and
                           network/install approve-patterns. Always-blocked
-                          patterns, denied_commands, denied_paths, and the
-                          write_file workspace gate STILL apply.
+                          patterns and denied_commands STILL refuse; the
+                          write_file workspace gate still applies, as an
+                          approval prompt rather than a refusal.
           ``"system"``  — automated/background (SENTINEL, GEPA, AutoDream,
                           smoke-tests, cron, SYMBIOTE phases). Full
                           restrictions apply. This is the safer default.
+
+        ``denied_paths`` — including the ``_ALWAYS_DENIED_PATHS`` floor — is
+        NOT in that list, and this docstring claimed for a long time that it
+        was. It is checked only when a ``file_path`` argument is passed:
+        ``_check_denied_path`` below is nested under ``if file_path:``. So it
+        covers the path-declaring tools and does NOT cover bash, at EITHER
+        origin — the gate is handed a command string and never sees the paths
+        inside it. Verified by outcome, not inferred: at ``origin="user"``
+        ``rm -rf /`` and a denied_command both DENY, while
+        ``cat /home/<user>/.gnupg/x`` and ``echo x > /home/<user>/.ssh/x`` both
+        ALLOW.
+
+        This is not an origin distinction and tightening ``origin`` does not
+        fix it. Enforcing the floor for bash needs a control below the tool
+        layer, because any check on the command string is defeated by
+        ordinary shell — ``cd ~/.ssh && cat id_*``, ``$HOME`` indirection,
+        globs, ``sh -c``.
         """
         is_user = (origin == ORIGIN_USER)
 
