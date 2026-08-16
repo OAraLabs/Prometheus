@@ -23,6 +23,9 @@ bootstrap:
   load_agents: true     # ~/.prometheus/AGENTS.md
 
 model:
+  # Env var holding this provider's API key (cloud providers only; local
+  # llama_cpp/ollama need none). Read by cli/doctor.py:112.
+  api_key_env: ""
   provider: "llama_cpp"             # llama_cpp, ollama, openai, anthropic, gemini, xai,
                                     # deepseek, kimi, glm, mimo
   base_url: "http://localhost:8080" # Inference server URL
@@ -47,6 +50,15 @@ model:
   suppress_thinking: true
 compaction:
   enabled: true
+
+  # ── Previously undocumented: read by the code, absent from this
+  #    template. Values are the CODE'S OWN FALLBACK, so writing them
+  #    changes nothing — they only make the existing behaviour visible.
+  #    Pinned equal to the readers by tests/test_config_defaults_equality.
+  max_summary_tokens: 512
+  protect_recent_turns: 8
+  reserve_tokens: 4096
+  threshold_pct: 0.75
 
 context:
   effective_limit: 24000
@@ -84,6 +96,14 @@ context:
   #     gpt-4o:
   #       effective_limit: 128000
   model_overrides: {}
+
+  # ── Previously undocumented: read by the code, absent from this
+  #    template. Values are the CODE'S OWN FALLBACK, so writing them
+  #    changes nothing — they only make the existing behaviour visible.
+  #    Pinned equal to the readers by tests/test_config_defaults_equality.
+  microcompact_on_cloud: false
+  project_file_max_chars: 12000
+  stack_project_files: true
 tools:
   deferred_loading:
     # Tri-state: true | false | auto (default). "auto" resolves at run start —
@@ -107,6 +127,12 @@ adapter:
   adaptive_strictness: false                # auto-tune per-tool strictness from telemetry
   strictness_window: 100
   strictness_threshold: 0.8
+
+  # ── Previously undocumented: read by the code, absent from this
+  #    template. Values are the CODE'S OWN FALLBACK, so writing them
+  #    changes nothing — they only make the existing behaviour visible.
+  #    Pinned equal to the readers by tests/test_config_defaults_equality.
+  unwrap_dict_args:            # required — no code default
 
 security:
   permission_mode: "default"
@@ -287,6 +313,15 @@ gateway:
     max_chars: 800
     model_path: ""
     opus_bitrate: 32k
+
+  # ── Previously undocumented: read by the code, absent from this
+  #    template. Values are the CODE'S OWN FALLBACK, so writing them
+  #    changes nothing — they only make the existing behaviour visible.
+  #    Pinned equal to the readers by tests/test_config_defaults_equality.
+  slack_app_token: ''
+  slack_bot_token: ''
+  slack_channels:            # required — no code default
+  slack_enabled: false
 whisper:
   enabled: false
   model: "base"
@@ -339,6 +374,26 @@ router:
 # to verify the wiring:
 #   journalctl --user -u prometheus.service | grep slash_commands
   fallback: []
+
+  # ── Previously undocumented: read by the code, absent from this
+  #    template. Values are the CODE'S OWN FALLBACK, so writing them
+  #    changes nothing — they only make the existing behaviour visible.
+  #    Pinned equal to the readers by tests/test_config_defaults_equality.
+  auxiliary:
+    compression:            # required — no code default
+    summarization:            # required — no code default
+    vision:            # required — no code default
+  escalation:
+    as_subagent: true
+    budget_usd: 1.0
+    enabled: false
+    provider:            # required — no code default
+  rules: []
+  smart_routing:
+    enabled: false
+    max_simple_chars: 160
+    max_simple_words: 28
+    simple_provider:            # required — no code default
 slash_commands:
   claude:
     provider: anthropic
@@ -610,6 +665,13 @@ web:
 # ComfyUI, fall back to free Pollinations. DashScope runs ONLY when the agent
 # passes backend=dashscope explicitly, or when you deliberately set
 # default_backend: dashscope below.
+
+  # ── Previously undocumented: read by the code, absent from this
+  #    template. Values are the CODE'S OWN FALLBACK, so writing them
+  #    changes nothing — they only make the existing behaviour visible.
+  #    Pinned equal to the readers by tests/test_config_defaults_equality.
+  api_token:            # required — no code default
+  dashboard_port: 3002
 image_generation:
   default_backend: auto              # auto | pollinations | comfyui | dashscope
   comfyui:
@@ -775,3 +837,22 @@ heartbeat:
   # window closes an un-restarted merge nudges normally rather than being
   # silenced forever.
   maintenance_db: ""
+
+# ── Previously undocumented section: every key below is read by the
+#    code and appeared nowhere in this file, so an operator reading the
+#    template could not learn the feature existed. Values are the code's
+#    own fallbacks — writing them changes nothing.
+documents:
+  root:            # required — no code default
+
+
+# ── Previously undocumented section: every key below is read by the
+#    code and appeared nowhere in this file, so an operator reading the
+#    template could not learn the feature existed. Values are the code's
+#    own fallbacks — writing them changes nothing.
+escalation:
+  api_key_env:            # required — no code default
+  max_per_session: 3
+  max_tokens: 4096
+  teacher_model:            # required — no code default
+  teacher_provider: anthropic
