@@ -2115,7 +2115,7 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     # wrote no grant apart from an "always" that was never invoked.
     # SPRINT-CONSENT: `widen` is the opt-in directory semantic ("always here").
     grant = (
-        derive_grant(action, widen=scope_widens(scope))
+        derive_grant(action, verb=scope)
         if action is not None and scope != "once" and gate is not None
         else None
     )
@@ -2140,7 +2140,6 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
             f"carries no specific target, so the extent of a remembered "
             f"grant could not be described, and nothing was remembered."
         )
-    grant.scope = "persistent" if scope_is_persistent(scope) else "until_restart"
     effective = gate.add_grant(grant)
     if effective.scope == "persistent":
         persisted = gate.persist_grant(effective)
