@@ -2106,7 +2106,7 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     # structured target (path/command) it carries.
     action = queue.pending.get(request_id)
     from prometheus.permissions.approval_queue import (
-        derive_grant, scope_is_persistent, scope_widens)
+        derive_grant)
 
     gate = getattr(queue, "_security_gate", None)
     # SPRINT-CONSENT Phase 3: the grant is derived BEFORE approve() so the
@@ -2115,7 +2115,7 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     # wrote no grant apart from an "always" that was never invoked.
     # SPRINT-CONSENT: `widen` is the opt-in directory semantic ("always here").
     grant = (
-        derive_grant(action, widen=scope_widens(scope))
+        derive_grant(action, verb=scope)
         if action is not None and scope != "once" and gate is not None
         else None
     )
@@ -2140,7 +2140,11 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
             f"carries no specific target, so the extent of a remembered "
             f"grant could not be described, and nothing was remembered."
         )
-    grant.scope = "persistent" if scope_is_persistent(scope) else "until_restart"
+    # The scope patch that stood here ran AFTER queue.approve() above had already
+    # written the resolution audit row from this same object — so the durable
+    # record described an `always` grant as "until the daemon restarts" while the
+    # operator-facing string below, built after the patch, read correctly.
+    # derive_grant(verb=scope) now sets it at construction; there is no window.
     effective = gate.add_grant(grant)
     if effective.scope == "persistent":
         persisted = gate.persist_grant(effective)

@@ -65,23 +65,49 @@ class PendingAction:
 
 
 def derive_grant(
-    action: PendingAction, root: str | None = None, *, widen: bool = False
+    action: PendingAction, root: str | None = None, *, verb: str | None = None
 ):
     """Build the Grant a scoped approval would remember, or None.
 
     - ``root`` given: grant writes under that path (file tools only).
-    - else a file target: grant EXACTLY that file by default; ``widen=True``
-      grants its parent directory instead (the opt-in directory semantic).
+    - else a file target: grant EXACTLY that file by default; a widening
+      ``verb`` ("… here") grants its parent directory instead.
     - else a command target: grant that exact command (single invocation).
     - else: **None** — extent is unknown, so no grant can be described and
       none is created. See the rule-4 comment below.
 
     Returns ``Grant | None``. Callers MUST handle None: it means "approve
     once, remember nothing", not "grant everything".
+
+    THE VERB IS THE ONLY INPUT, and both derived facts are set HERE.
+
+    This took ``widen: bool`` and left ``scope`` to whoever called it, which
+    produced the defect this fix exists for. ``cmd_approve`` patched
+    ``grant.scope`` on the line AFTER ``queue.approve()`` had already written
+    the resolution audit row, so an ``always`` grant was recorded as "until the
+    daemon restarts" — in the store built to make grants accountable, while the
+    two transient surfaces (prompt, confirmation) both read correctly.
+    ``prospective_extents`` patched the same field but before describing, so
+    the same function was right on one path and wrong on the other.
+
+    Taking the verb removes the possibility: there is no window between
+    construction and correction, because there is no correction.
     """
     from pathlib import Path as _Path
 
     from prometheus.permissions.checker import Grant
+
+    # Both derived from the ONE vocabulary, never passed in separately — a
+    # caller cannot supply a widen that disagrees with its scope.
+    #
+    # ``verb`` defaults to None rather than to SCOPE_ONCE because the vocabulary
+    # block is defined BELOW this function, and a default argument is evaluated
+    # at def time. Resolving the name here — at call time — keeps the one
+    # definition in one place instead of relocating 70 lines to satisfy the
+    # parser. None means "no verb supplied": the narrowest, grant-free reading.
+    verb = verb or SCOPE_ONCE
+    widened = scope_widens(verb)
+    scope = "persistent" if scope_is_persistent(verb) else "until_restart"
 
     if root:
         return Grant(
@@ -89,6 +115,10 @@ def derive_grant(
             value=str(_Path(root).expanduser().resolve()),
             tool_name=action.tool_name,
             request_id=action.request_id,
+            scope=scope,
+            # A root grant covers writes UNDER that path — a subtree by
+            # definition, whatever the verb was.
+            widened=True,
         )
     if action.grant_file_path:
         # ⚠ resolve() RAISES on a symlink loop (RuntimeError) and can raise
@@ -110,12 +140,16 @@ def derive_grant(
         # prompt showed only the one path. The directory semantic is
         # deliberate and useful; it is not defensible as a SILENT default.
         # It is now opt-in (``/approve always here``).
-        value = str(target.parent) if widen else str(target)
+        value = str(target.parent) if widened else str(target)
         return Grant(
             kind="path_prefix",
             value=value,
             tool_name=action.tool_name,
             request_id=action.request_id,
+            scope=scope,
+            # The SAME flag that chose target.parent above records that it did.
+            # One expression, one field — they cannot disagree.
+            widened=widened,
         )
     if action.grant_command:
         return Grant(
@@ -123,6 +157,9 @@ def derive_grant(
             value=action.grant_command,
             tool_name="bash",
             request_id=action.request_id,
+            scope=scope,
+            # A command grant is one exact invocation; there is no subtree.
+            widened=False,
         )
     # SPRINT-CONSENT Phase 1 — RULE 4 PRODUCES NO GRANT.
     #
@@ -235,10 +272,13 @@ def prospective_extents(action: PendingAction) -> dict[str, str]:
             continue
         if scope_widens(verb) and not action.grant_file_path:
             continue  # nothing to widen for a command-scoped request
-        g = derive_grant(action, widen=scope_widens(verb))
+        g = derive_grant(action, verb=verb)
         if g is None:
             continue
-        g.scope = "persistent" if scope_is_persistent(verb) else "until_restart"
+        # No patch here any more. derive_grant(verb=…) sets scope and widened,
+        # so this describes a grant identical to the one the approval path
+        # builds from the same verb — which is what makes the prompt string and
+        # the audit string byte-identical instead of merely similar.
         out[verb] = g.describe()
     return out
 

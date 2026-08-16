@@ -262,6 +262,21 @@ class Grant:
     grant_id: str = ""      # stable handle, survives persistence
     created_at: float = 0.0  # unix seconds
     request_id: str = ""     # the approval request that produced this grant
+    # THE CARRIED EXTENT. True when this grant came from a widening verb
+    # ("… here"), i.e. ``value`` is the target's PARENT DIRECTORY and the whole
+    # subtree under it is covered — as opposed to the exact target.
+    #
+    # ``describe()`` used to recover this by calling ``Path(value).is_dir()``, a
+    # filesystem stat. ``derive_grant(widen=True)`` sets ``value`` to
+    # ``target.parent``, which is a directory BY CONSTRUCTION — but only exists
+    # on disk if something created it. So a widening grant over a not-yet-created
+    # directory described itself as "on exactly <dir>": narrow wording over a
+    # path_prefix covering the entire subtree, which is consent obtained under a
+    # description narrower than the grant.
+    #
+    # Known at derive time, so it is carried, not re-derived. Same move as
+    # grant_id / created_at / request_id above.
+    widened: bool = False
 
     def __post_init__(self) -> None:
         # Generated here rather than at the call site so EVERY construction
@@ -303,6 +318,9 @@ class Grant:
             "id": self.grant_id,
             "created_at": self.created_at,
             "request_id": self.request_id,
+            # Persisted so a restart re-materialises the EXTENT rather than
+            # re-deriving it from the disk, which is what this fix removed.
+            "widened": self.widened,
         }
 
     @classmethod
@@ -323,6 +341,17 @@ class Grant:
             grant_id=str(d.get("id", "")),
             created_at=float(d.get("created_at") or 0.0),
             request_id=str(d.get("request_id", "")),
+            # LEGACY ROWS DEFAULT TO WIDENED, and this is a statement of fact
+            # rather than a safe guess: before #234, ``derive_grant`` returned
+            # ``target.parent`` UNCONDITIONALLY — its own comment records that
+            # approving one file in $HOME granted the tool across all of $HOME.
+            # So every path_prefix row written before this field existed IS a
+            # directory grant. Defaulting to True describes them accurately.
+            #
+            # It is also the safe direction: the only wrong answer that matters
+            # is one which describes a wide grant narrowly, and this cannot.
+            # Statting to recover it is precisely what this fix removes.
+            widened=bool(d.get("widened", True)),
         )
 
     def describe(self) -> str:
@@ -340,19 +369,26 @@ class Grant:
         if self.kind == "tool":
             what = f"EVERY use of {self.tool_name}, on any target"
         elif self.kind == "path_prefix":
-            # A path_prefix over a FILE covers exactly that file; over a
-            # DIRECTORY it covers the whole subtree. Saying "anything under
-            # <file>" for the narrow case would misdescribe a narrow grant as
-            # a wide one — the same class of error this sprint exists to
-            # remove, pointing the other way.
-            # is_dir() is a stat, and a stat can raise on a broken mount. A
-            # description must never be the reason a prompt fails to render,
-            # so an unreadable target degrades to the narrower wording.
-            try:
-                is_dir = Path(self.value).is_dir()
-            except OSError:
-                is_dir = False
-            if is_dir:
+            # CARRIED, NEVER STATTED. This branch used to ask the filesystem
+            # ``Path(self.value).is_dir()`` and infer the extent from the
+            # answer. That is the sprint's own defect in a third place: a truth
+            # known at derive time (``widen=True`` sets ``value`` to
+            # ``target.parent``) thrown away and reconstructed from a weaker
+            # source. When the parent did not exist on disk — a directory the
+            # approved write was about to create — the stat said False and a
+            # subtree grant described itself as "on exactly <dir>".
+            #
+            # The old fallback comment defended degrading to the narrower
+            # wording on OSError. That is right for a NARROW grant and exactly
+            # backwards for a widened one: it makes the description narrower
+            # than the grant, the one direction consent must never fail in.
+            # ``derive_grant`` states the opposite invariant for its own
+            # fallback — "never wider, so the failure direction is safe".
+            #
+            # No filesystem call reaches this method. A description must not
+            # depend on the disk, and ``matches()`` does not either: it uses
+            # ``Path.relative_to``, which is purely lexical.
+            if self.widened:
                 what = f"{self.tool_name} on anything under {self.value}/"
             else:
                 what = f"{self.tool_name} on exactly {self.value}"
@@ -839,6 +875,13 @@ class SecurityGate:
                     # Adopt the newer request as the provenance for the
                     # upgrade — it is the approval that widened the duration.
                     existing.request_id = grant.request_id or existing.request_id
+                if grant.widened and not existing.widened:
+                    # Same (kind, value, tool) reached by both a widening and a
+                    # narrow approval. matches() is lexical on ``value``, so the
+                    # two cover the SAME paths — the extent is identical and only
+                    # the wording differs. Take the wider description: it is the
+                    # one that cannot understate what the entry admits.
+                    existing.widened = True
                 return existing
         self._grants.append(grant)
         return grant
