@@ -33,6 +33,7 @@ from telegram.ext import (
 from prometheus.config.paths import get_wiki_root
 from prometheus.gateway.config import Platform, PlatformConfig
 from prometheus.gateway.commands import cmd_anatomy, cmd_beacon, cmd_doctor, cmd_gate, cmd_profile
+from prometheus.sentinel.signals import ActivitySignal
 from prometheus.gateway.platform_base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -1721,6 +1722,40 @@ class TelegramAdapter(BasePlatformAdapter):
             locks[session_id] = lock
         return lock
 
+    async def _emit_turn_completed(
+        self,
+        *,
+        session_id: str,
+        provenance: str,
+        model_name: str,
+        model_provider: str,
+        message_count: int,
+    ) -> None:
+        """Emit a ``turn_completed`` ActivitySignal on the SignalBus.
+
+        This is the bridge between a finished Telegram-originated agent turn
+        and Beacon's real-time WebSocket feed.  Failures are swallowed so a
+        broken bus can never break the reply path.
+        """
+        bus = self._signal_bus
+        if bus is None:
+            return
+        try:
+            await bus.emit(ActivitySignal(
+                kind="turn_completed",
+                source="telegram",
+                payload={
+                    "session_id": session_id,
+                    "provenance": provenance,
+                    "model": model_name,
+                    "model_provider": model_provider,
+                    "message_count": message_count,
+                },
+            ))
+        except Exception:
+            logger.warning(
+                "turn_completed signal emission failed", exc_info=True)
+
     async def _run_agent_turn(
         self,
         session,
@@ -1817,6 +1852,17 @@ class TelegramAdapter(BasePlatformAdapter):
             except Exception:
                 logger.exception(
                     "teacher escalation hook failed (local reply unaffected)")
+            # Emit turn_completed so Beacon sees Telegram-originated turns.
+            # The WS server's generic signal forwarder (_on_signal) picks this
+            # up and broadcasts it to all connected clients — no WS-side
+            # change needed.
+            await self._emit_turn_completed(
+                session_id=session_id,
+                provenance=provenance,
+                model_name=self._serving_model_name(session_id),
+                model_provider=self._serving_provider_name(session_id),
+                message_count=len(result.messages) - pre_len,
+            )
             return response_text
         except Exception as exc:
             logger.error("Agent error for session %s: %s", session_id, exc)
