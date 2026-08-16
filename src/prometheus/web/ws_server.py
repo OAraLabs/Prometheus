@@ -378,23 +378,53 @@ class WebSocketBridge:
         await self._handle_send_message(session_id, user_text)
 
     async def _describe_image(self, image_path: str) -> str | None:
-        """Run vision analysis on a cached image file, matching Telegram gateway flow."""
-        try:
-            from pathlib import Path
-            from prometheus.tools.base import ToolExecutionContext
-            from prometheus.tools.builtin.vision import VisionInput, VisionTool
-            tool = VisionTool()
-            ctx = ToolExecutionContext(
-                cwd=Path(self._config.workspace_root) if self._config else Path.home(),
-                metadata={"source": "beacon_upload"},
-            )
-            result = await tool.execute(VisionInput(image_path=image_path), ctx)
-            output = result.output
-            if output and not output.startswith("Error"):
-                return output
-        except Exception as exc:
-            logger.warning("Vision analysis failed for %s: %s", image_path, exc)
-        return None
+        """Run vision analysis on a cached image file.
+
+        DELEGATES to ``gateway.media_services.describe_image`` — the same
+        service Telegram (``telegram.py:2647``) and Discord already call.
+        The docstring here used to say "matching Telegram gateway flow"
+        while hand-rolling a *fourth* copy of it, and the copy was wrong in
+        four ways at once (#230):
+
+          * ``self._config`` does not exist — the attribute is ``self.config``
+            (set at ``__init__``). Evaluating it for truthiness in an
+            ``if self._config else`` guard IS the AttributeError, so the
+            guard could never save it: every upload raised.
+          * ``Path(...workspace_root)`` — ``security.workspace_root`` is a
+            LIST on any multi-root install, and ``Path(list)`` is a
+            TypeError. Masked by the AttributeError above, so fixing only
+            the first would have surfaced the second.
+          * no ``provider`` — vision needs the model handle, which
+            ``media_services`` passes as ``metadata={"provider": ...}``.
+            Without it the tool cannot reach a multimodal model at all.
+          * no ``question`` — the shared service asks "Describe this image
+            in detail."; omitting it changes what comes back.
+
+        Delegating removes the site rather than repairing it. It is also
+        the tenth ``workspace_root`` reader deleted rather than added:
+        ``resolve_workspace_root`` (``config/shipped_defaults.py``) is the
+        canonical resolver, and this was the only bypass without a
+        documented exemption. Vision does not need a workspace root — the
+        shared service uses ``Path.cwd()`` and confines nothing, because it
+        reads one already-cached absolute path.
+
+        No try/except here on purpose: ``describe_image`` owns the failure
+        policy for all three surfaces, so a bug fixed there is fixed once.
+        """
+        from prometheus.gateway.media_services import describe_image
+
+        return await describe_image(image_path, provider=self._get_provider())
+
+    def _get_provider(self):
+        """The model provider for vision analysis, off the loop context.
+
+        Mirrors ``TelegramAdapter._get_provider`` (``telegram.py:2659``),
+        which reads ``self.agent_loop._provider``; the WS bridge is handed a
+        ``LoopContext`` instead, and ``LoopContext.provider`` is the same
+        handle. ``None`` is a legitimate answer (no provider wired yet) and
+        the shared service treats it as "vision unavailable".
+        """
+        return getattr(self.loop_context, "provider", None)
 
     async def dispatch_user_message(
         self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
