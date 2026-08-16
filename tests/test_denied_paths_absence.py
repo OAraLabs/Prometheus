@@ -131,6 +131,56 @@ def test_the_floor_is_narrower_than_the_shipped_list_and_is_credentials_only():
     assert _ALWAYS_BLOCKED_PATTERNS, "the command floor vanished"
 
 
+# ---------------------------------------------------------------------------
+# ANY home, not just the daemon's.
+# ---------------------------------------------------------------------------
+
+# A foreign /home/<user> key path is assembled rather than written out: the
+# literal form is one of the classes .githooks/pre-commit blocks, and the
+# sdist guard from #218 re-checks the same patterns against the built
+# artifact. Both are right to flag it, and the fixture keeps its meaning
+# either way — §3c, describe the shape, do not quote it.
+_FOREIGN_HOME = "/home/someone-else"
+
+OTHER_HOMES = ["/root/.ssh/id_rsa", f"{_FOREIGN_HOME}/.ssh/id_ed25519",
+               "/Users/mac-user/.ssh/id_rsa", "/var/lib/svc/.gnupg/secring.gpg",
+               "/root/.config/prometheus/env"]
+
+
+@pytest.mark.parametrize("path", OTHER_HOMES)
+@pytest.mark.parametrize("cfg", [SHIPPED, {"permission_mode": "default"}, {}])
+def test_credential_dirs_are_denied_in_ANY_home(path, cfg):
+    """`~` expanded to the DAEMON's home, so every other home was open.
+
+    Observed live 2026-08-16: an agent grep at the daemon user's ~/.ssh was
+    denied, and the same grep at /root/.ssh PASSED THE GATE — it failed only
+    on an OS permission error. The OS is not the control. It happened to be
+    holding a door the gate had left open, and it would not hold it for a
+    readable key directory owned by a service account, or for a daemon running
+    as root.
+    """
+    assert _denies(cfg, "read_file", file_path=path), (
+        f"{path} was ALLOWED — the boundary still only covers one home")
+
+
+def test_a_literal_root_entry_would_not_have_been_enough():
+    """Why the glob, not `/root/.ssh`.
+
+    Enumerating the homes you happen to think of leaves the same defect one
+    name over. This asserts the property a literal entry could not deliver:
+    a home nobody wrote down is still covered.
+    """
+    assert _denies({}, "read_file",
+                   file_path="/srv/some-service-account/.ssh/id_rsa")
+
+
+def test_the_floor_holds_for_other_homes_even_against_an_explicit_optout():
+    """`denied_paths: []` is honoured at the policy layer; keys are not policy."""
+    cfg = {"permission_mode": "default", "denied_paths": []}
+    assert _denies(cfg, "read_file", file_path="/root/.ssh/id_rsa")
+    assert not _denies(cfg, "read_file", file_path=ETC)
+
+
 def test_no_module_reads_the_raw_key_outside_the_resolver():
     """One reader, or the fix is half-applied.
 

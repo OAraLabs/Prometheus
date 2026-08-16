@@ -62,9 +62,24 @@ _ALWAYS_BLOCKED_PATTERNS: list[str] = [
 # config can override. What is in the floor is credential material only: no
 # configuration should be able to hand an agent a private key, and nothing
 # legitimate needs that permission.
+#
+# ⚠ ANY HOME, NOT JUST THE DAEMON'S. These were `~/.ssh` / `~/.gnupg`, and `~`
+# expands to the home of whoever the daemon runs as — so `/root/.ssh` and
+# `/home/<anyone-else>/.ssh` were ALLOWED BY THE GATE. Observed live on
+# 2026-08-16: an agent grep at `~/.ssh` was denied, and the same grep at
+# `/root/.ssh` passed the gate and failed only on an OS permission error. The
+# OS is not the control; it happened to be holding a door the gate had left
+# open, and it would not hold it for a readable key directory owned by a
+# service account, or for a daemon running as root.
+#
+# The glob form rather than a literal `/root/.ssh`: enumerating the homes you
+# happen to think of leaves the same defect one name over, which is the
+# name-pattern trap this repo has now hit four times (`_PATH_SHAPED`, deleted
+# in #214). `fnmatch`'s `*` spans `/` here — documented below as deliberate,
+# "broader means MORE denied" — so `/*/.ssh` covers every home at any depth.
 _ALWAYS_DENIED_PATHS: tuple[str, ...] = (
-    "~/.ssh",
-    "~/.gnupg",
+    "/*/.ssh",
+    "/*/.gnupg",
 )
 
 # Tools that are always safe for read-only classification
