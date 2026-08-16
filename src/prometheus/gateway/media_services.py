@@ -23,21 +23,68 @@ async def describe_image(image_path: str, *, provider: Any = None) -> str | None
 
     Returns None on any failure (missing multimodal model, tool error) —
     callers fall back to a plain "[The user sent a photo]" injection.
+
+    ⚠ THE TRY IS DELIBERATELY NARROW (#78's broad-except shape, and the
+    reason #230 shipped). Setup — the imports, ``VisionTool()``, the
+    input and the context — is OUR code with no I/O in it. If any of that
+    raises it is a programming error, not "vision unavailable", and it
+    MUST propagate: the beacon copy of this function died on an
+    ``AttributeError`` in exactly that setup region and the broad
+    ``except`` downgraded it to a log line and a ``None``, so every image
+    upload silently produced no description and CI stayed green on two
+    Python versions.
+
+    Only ``tool.execute`` is guarded, because only it can fail for
+    legitimate environmental reasons (no mmproj, model down, unreadable
+    file). Even that is now loud: WARNING with the traceback plus a
+    ``silent_failures`` telemetry row, so a chronically-broken vision path
+    is countable instead of anecdotal.
+    """
+    from prometheus.tools.base import ToolExecutionContext
+    from prometheus.tools.builtin.vision import VisionInput, VisionTool
+
+    tool = VisionTool()
+    arguments = VisionInput(
+        image_path=image_path, question="Describe this image in detail."
+    )
+    context = ToolExecutionContext(cwd=Path.cwd(), metadata={"provider": provider})
+
+    try:
+        result = await tool.execute(arguments, context)
+    except Exception as exc:
+        logger.warning(
+            "Vision analysis failed for %s: %s", image_path, exc, exc_info=True
+        )
+        _record_media_failure("describe_image", exc, {"image_path": image_path})
+        return None
+
+    if not result.is_error and result.output:
+        return result.output
+    return None
+
+
+def _record_media_failure(
+    operation: str, exc: BaseException, ctx: dict[str, Any] | None = None
+) -> None:
+    """Best-effort ``silent_failures`` row for a swallowed media failure.
+
+    Same shape as ``agent_loop``'s circuit-breaker reporting: never raises,
+    so telemetry being unhappy can never turn a degraded image description
+    into a crashed gateway.
     """
     try:
-        from prometheus.tools.builtin.vision import VisionTool, VisionInput
-        from prometheus.tools.base import ToolExecutionContext
+        from prometheus.telemetry.tracker import get_telemetry_handle
 
-        tool = VisionTool()
-        result = await tool.execute(
-            VisionInput(image_path=image_path, question="Describe this image in detail."),
-            ToolExecutionContext(cwd=Path.cwd(), metadata={"provider": provider}),
-        )
-        if not result.is_error and result.output:
-            return result.output
-    except Exception as exc:
-        logger.debug("Vision analysis unavailable: %s", exc)
-    return None
+        tel = get_telemetry_handle()
+        if tel is not None and hasattr(tel, "record_silent_failure"):
+            tel.record_silent_failure(
+                subsystem="media_services",
+                operation=operation,
+                exc=exc,
+                context=ctx or {},
+            )
+    except Exception:  # pragma: no cover - telemetry must never mask the result
+        logger.debug("media_services: record_silent_failure failed", exc_info=True)
 
 
 async def transcribe_audio(audio_path: str) -> str | None:
