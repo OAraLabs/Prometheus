@@ -86,6 +86,52 @@ _SHIPPED_MEDIA_ALLOWLISTS: dict[str, tuple[str, ...]] = {
 # fixed together because they fail together.
 SHIPPED_TELEGRAM_ENABLED: bool = False
 
+# security.denied_paths — the file boundary every path gate resolves against.
+#
+# ⚠ THE ABSENT KEY MEANT NO BOUNDARY AT ALL. `checker.py` did
+# `[... for p in (denied_paths or [])]`, so a config omitting the key produced
+# an EMPTY list and `read_file ~/.ssh/id_rsa` was permitted. Verified by
+# outcome, not inferred: with the key present both `~/.ssh/id_rsa` and
+# `/etc/shadow` are denied; with it absent, or with an empty `security:`
+# section, both are ALLOWED.
+#
+# That mattered more than a single key normally would, because every path gate
+# merged this week — grep/glob roots (#214), cron cwd (#215), task watch_dir
+# (#216) — resolves against this list. The gating work was correct and rested
+# on a key that need not exist.
+#
+# The command side never had this problem, and the reason is the model for the
+# fix: `checker._ALWAYS_BLOCKED_PATTERNS` is a hardcoded floor applied BEFORE
+# the config list, so `rm -rf /` is refused whether or not anyone wrote
+# `denied_commands`. Paths now have both halves — this resolver for absence,
+# and `checker._ALWAYS_DENIED_PATHS` as the structural floor beneath any
+# config at all.
+SHIPPED_DENIED_PATHS: tuple[str, ...] = (
+    "/etc", "/sys", "/boot", "~/.ssh", "~/.gnupg", "~/.config/*/*env",
+)
+
+
+def resolve_denied_paths(security_cfg: dict | None) -> list[str]:
+    """The denied-path list for a security config section.
+
+    * key ABSENT (or null) -> :data:`SHIPPED_DENIED_PATHS`.
+    * key present as a LIST -> that list verbatim, **including ``[]``**.
+
+    The empty-list case is honoured deliberately, and it is safe here in a way
+    it would not have been before: `checker._ALWAYS_DENIED_PATHS` still denies
+    the credential locations regardless. So an operator who writes
+    ``denied_paths: []`` gets what they asked for — no *policy* denials — and
+    still cannot hand an agent their private keys.
+
+    Absence is NOT that statement. It is a config written before the key
+    existed, or trimmed by hand, and collapsing the two with
+    ``cfg.get(k) or []`` is exactly what made the boundary vanish.
+    """
+    value = (security_cfg or {}).get("denied_paths")
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    return list(SHIPPED_DENIED_PATHS)
+
 
 def resolve_telegram_enabled(gateway_cfg: dict | None) -> bool:
     """Whether the Telegram gateway may start.
