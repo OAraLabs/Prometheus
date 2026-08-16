@@ -123,10 +123,12 @@ def test_the_floor_is_narrower_than_the_shipped_list_and_is_credentials_only():
     """A floor that cannot be overridden must be small enough to deserve it."""
     assert set(_ALWAYS_DENIED_PATHS) < set(SHIPPED_DENIED_PATHS), (
         "the floor is not a strict subset of the shipped policy list")
-    assert all("ssh" in p or "gnupg" in p for p in _ALWAYS_DENIED_PATHS), (
-        f"{_ALWAYS_DENIED_PATHS} contains something that is policy, not "
-        f"credential material. Policy belongs in SHIPPED_DENIED_PATHS where "
-        f"an operator can override it."
+    assert all(any(m in p for m in (".ssh", ".gnupg", "env"))
+               for p in _ALWAYS_DENIED_PATHS), (
+        f"{_ALWAYS_DENIED_PATHS} contains something that is POLICY, not "
+        f"credential material. The line is not 'how small can the floor be' "
+        f"— it is whether an override could ever be legitimate. /etc and "
+        f"/boot could be; a private key or a secrets env file could not."
     )
     assert _ALWAYS_BLOCKED_PATTERNS, "the command floor vanished"
 
@@ -179,6 +181,47 @@ def test_the_floor_holds_for_other_homes_even_against_an_explicit_optout():
     cfg = {"permission_mode": "default", "denied_paths": []}
     assert _denies(cfg, "read_file", file_path="/root/.ssh/id_rsa")
     assert not _denies(cfg, "read_file", file_path=ETC)
+
+
+# ---------------------------------------------------------------------------
+# The STALE-CONFIG case that reversed the earlier call. See checker.py.
+# ---------------------------------------------------------------------------
+
+STALE_TILDE_CONFIG = {
+    "permission_mode": "default",
+    # Exactly what the deploy clone's gitignored live config carried after
+    # #226 landed: the pre-#226 ~-relative forms, unreachable by any PR.
+    "denied_paths": ["/etc", "/sys", "/boot",
+                     "~/.ssh", "~/.gnupg", "~/.config/*/*env"],
+}
+
+
+@pytest.mark.parametrize("path", [
+    "/root/.ssh/id_rsa",
+    "/root/.gnupg/secring.gpg",
+    "/root/.config/prometheus/env",
+    "/var/lib/svc/.config/oara/middleware.env",
+])
+def test_a_stale_live_config_cannot_reopen_a_credential_path(path):
+    """The floor's whole job, stated as the case that produced it.
+
+    A live config is gitignored, so it goes stale in the one place no review
+    reaches. After #226 the code shipped `/*/...` forms and the operator's
+    config still said `~/...` — and `/root/.config/prometheus/env` was ALLOWED
+    on the running box while `.ssh` and `.gnupg` were not, because those two
+    were floored and this one was not.
+    """
+    assert _denies(STALE_TILDE_CONFIG, "read_file", file_path=path), (
+        f"{path} was ALLOWED under a stale ~-relative config. That is the "
+        f"exact state the deploy clone was in, and it is what the floor "
+        f"exists to make impossible."
+    )
+
+
+def test_policy_entries_are_still_overridable_by_a_stale_or_explicit_config():
+    """The floor did NOT swallow policy. /etc stays an operator's decision."""
+    assert not _denies({"permission_mode": "default", "denied_paths": []},
+                       "read_file", file_path=ETC)
 
 
 def test_no_module_reads_the_raw_key_outside_the_resolver():
