@@ -340,17 +340,30 @@ class TelegramAdapter(BasePlatformAdapter):
             text = f"📋 Curator: {reviewed} reviewed, {prunings} archived"
         await self._send_notification(text)
 
+    def _configure_network(self, builder):
+        """Apply PlatformConfig network values to the PTB builder.
+
+        PTB's own defaults are 5s connect/read/write timeouts — too short
+        for Telegram file downloads, which timed out twice in one day
+        (photo fetches >5s). PlatformConfig carries 30s values; they were
+        dead config until wired through here.
+        """
+        builder = (
+            builder.connect_timeout(self.config.connect_timeout)
+            .read_timeout(self.config.read_timeout)
+            .write_timeout(self.config.write_timeout)
+        )
+        if self.config.proxy_url:
+            builder = builder.proxy(self.config.proxy_url)
+        return builder
+
     async def start(self) -> None:
         """Build the telegram Application and start long-polling."""
         if not self.config.token:
             raise ValueError("Telegram bot token is required")
 
         builder = Application.builder().token(self.config.token)
-
-        # Apply network config if proxy is set
-        if self.config.proxy_url:
-            builder.proxy(self.config.proxy_url)
-
+        builder = self._configure_network(builder)
         self._app = builder.build()
 
         # ------------------------------------------------------------------
