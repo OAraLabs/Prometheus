@@ -63,12 +63,124 @@ def set_cron_notifier(gateway: Any | None, chat_id: int | None) -> None:
     _NOTIFIER_CHAT_ID = chat_id
 
 
+MAX_UNDELIVERED = 100
+"""Spool cap. A notification nobody could deliver is still worth keeping, but
+not without bound — a gateway down for a week must not grow a file forever."""
+
+
+def get_undelivered_path() -> Path:
+    """Path to the spool of notifications the gateway could not deliver."""
+    return get_data_dir() / "cron_undelivered.jsonl"
+
+
+def load_undelivered() -> list[dict[str, Any]]:
+    """Read the spool, oldest first. Corrupt lines are skipped, not fatal."""
+    path = get_undelivered_path()
+    if not path.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _write_undelivered(entries: list[dict[str, Any]]) -> None:
+    """Rewrite the spool, keeping the newest MAX_UNDELIVERED."""
+    path = get_undelivered_path()
+    kept = entries[-MAX_UNDELIVERED:]
+    if not kept:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(e) + "\n" for e in kept), encoding="utf-8"
+    )
+
+
+def spool_undelivered(name: str, text: str, error: str | None) -> None:
+    """Persist a notification the gateway refused, so it survives a restart."""
+    entries = load_undelivered()
+    entries.append(
+        {"name": name, "text": text, "error": error, "queued_at": time.time()}
+    )
+    dropped = max(0, len(entries) - MAX_UNDELIVERED)
+    _write_undelivered(entries)
+    if dropped:
+        logger.warning(
+            "Undelivered cron notification spool is full — dropped %d oldest",
+            dropped,
+        )
+
+
+async def _deliver(text: str) -> tuple[bool, str | None]:
+    """Send via the wired gateway. Returns ``(delivered, error)``.
+
+    The adapter's ``send()`` does NOT raise when delivery fails — it catches
+    internally and returns ``SendResult(success=False, error=...)``. The old
+    code awaited it inside a try/except and treated "it returned" as "it
+    delivered", so a dead channel logged "notification sent". That is how a
+    45-minute Telegram outage (2026-08-15) produced a cheerful success line
+    for a message that never went anywhere.
+
+    A gateway with no ``success`` attribute (the historical stub contract,
+    and ``None``) is still treated as delivered — this hardens the failure
+    signal that exists, it does not invent one where there is none.
+    """
+    if _NOTIFIER_GATEWAY is None or _NOTIFIER_CHAT_ID is None:
+        return False, "no notifier wired"
+    try:
+        result = await _NOTIFIER_GATEWAY.send(_NOTIFIER_CHAT_ID, text)
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    if getattr(result, "success", True):
+        return True, None
+    return False, getattr(result, "error", None) or "send reported failure"
+
+
+async def flush_undelivered() -> int:
+    """Retry spooled notifications. Returns how many were delivered.
+
+    Stops at the first failure: if the channel is still down the rest will
+    fail too, and hammering a dead gateway once per tick helps nobody.
+    """
+    if _NOTIFIER_GATEWAY is None or _NOTIFIER_CHAT_ID is None:
+        return 0
+    entries = load_undelivered()
+    if not entries:
+        return 0
+    delivered = 0
+    for entry in list(entries):
+        ok, _error = await _deliver(str(entry.get("text", "")))
+        if not ok:
+            break
+        entries.pop(0)
+        delivered += 1
+    if delivered:
+        _write_undelivered(entries)
+        logger.info(
+            "Replayed %d cron failure notification(s) queued while the "
+            "gateway was down (%d still pending)",
+            delivered,
+            len(entries),
+        )
+    return delivered
+
+
 async def _maybe_notify_failure(entry: dict[str, Any]) -> None:
     """Push a failure message if a notifier is wired and the throttle allows.
 
     No-op on success, no-op when the gateway/chat are unset, and throttled per
     job name by NOTIFY_COOLDOWN_SECONDS. Send errors are logged, never raised,
     so a flaky Telegram can't kill the scheduler.
+
+    An UNDELIVERED notification is spooled and does NOT start the throttle —
+    see the comment at the failure branch.
     """
     if entry.get("status") == "success":
         return
@@ -89,12 +201,21 @@ async def _maybe_notify_failure(entry: dict[str, Any]) -> None:
         f"command: {cmd_preview}\n"
         f"stderr (last 5 lines):\n{stderr_tail}"
     )
-    try:
-        await _NOTIFIER_GATEWAY.send(_NOTIFIER_CHAT_ID, text)
+    delivered, error = await _deliver(text)
+    if delivered:
         _LAST_NOTIFY[name] = now
         logger.info("Cron failure notification sent for %r", name)
-    except Exception:
-        logger.exception("Failed to send cron failure notification for %r", name)
+        return
+    # Deliberately NOT throttled. The cooldown exists to stop a chronically
+    # broken job from spamming a working channel; applying it to a send that
+    # never landed would mean one outage costs the notification AND silently
+    # suppresses an hour of real failures behind it.
+    logger.error(
+        "Cron failure notification for %r NOT delivered (%s) — spooled for retry",
+        name,
+        error,
+    )
+    spool_undelivered(name, text, error)
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +647,12 @@ async def run_scheduler_loop(*, once: bool = False, own_signals: bool = True) ->
     try:
         while not shutdown.is_set():
             now = datetime.now(timezone.utc)
+            # Replay anything the gateway refused while it was down. Cheap
+            # no-op on the empty spool, which is the normal case.
+            try:
+                await flush_undelivered()
+            except Exception:
+                logger.exception("Undelivered-notification replay failed")
             jobs = load_cron_jobs()
             due = _jobs_due(jobs, now)
 
