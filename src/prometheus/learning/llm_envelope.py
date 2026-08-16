@@ -177,7 +177,7 @@ class LLMCallEnvelope:
                     text_parts.append(event.text)
         except BaseException as exc:  # noqa: BLE001 — we re-raise per policy
             duration_ms = (time.time() - started) * 1000.0
-            self._record_failure(operation, exc, context, duration_ms)
+            self._record_failure(operation, exc, context, duration_ms, model)
             log.exception(
                 "%s.%s: LLM call failed (on_failure=%s)",
                 self._subsystem, operation, self._on_failure,
@@ -191,7 +191,7 @@ class LLMCallEnvelope:
 
         text = "".join(text_parts)
         duration_ms = (time.time() - started) * 1000.0
-        self._record_success(operation, text, duration_ms, context)
+        self._record_success(operation, text, duration_ms, context, model)
         if self._on_failure == "log_only":
             return LLMCallResult(text=text, error=None, duration_ms=duration_ms)
         return text
@@ -457,7 +457,28 @@ class LLMCallEnvelope:
         exc: BaseException,
         context: dict[str, Any] | None,
         duration_ms: float,
+        model: str | None = None,
     ) -> None:
+        # THE ASYMMETRY, and why the fix is here and not at the call sites.
+        #
+        # This envelope has TWO telemetry paths. ``stream()`` writes the full
+        # row and passes ``model=request.model``; ``call()`` routes here, and
+        # these two helpers wrote an abbreviated row with no model at all. So
+        # ``agent_loop`` — which uses stream() — had 7,973 rows and ZERO empty
+        # labels, while the six subsystems that use call()
+        # (memory_extractor, knowledge_synth, skill_refiner, skill_creator,
+        # context_compactor, curator) had 100%% empty, ~12,900 rows.
+        #
+        # It was never the callers: every one of them already passes ``model``
+        # to call(). It simply stopped here. Threading it through is the whole
+        # fix, and it belongs at this layer because this is the layer that
+        # dropped it.
+        #
+        # NOT fixed here, deliberately, and worth its own change: these two
+        # also omit input/output tokens, round_index, session_id and thinking,
+        # which stream() records. Widening that silently would make this PR
+        # about something other than the label it claims to fix.
+
         if self._telemetry is None:
             return
         try:
@@ -473,6 +494,7 @@ class LLMCallEnvelope:
                 outcome="failed",
                 duration_ms=duration_ms,
                 summary={"exception_type": type(exc).__name__},
+                model=model,
             )
         except Exception:
             log.debug(
@@ -488,6 +510,7 @@ class LLMCallEnvelope:
         text: str,
         duration_ms: float,
         context: dict[str, Any] | None,
+        model: str | None = None,
     ) -> None:
         if self._telemetry is None:
             return
@@ -501,6 +524,7 @@ class LLMCallEnvelope:
                 outcome="success",
                 duration_ms=duration_ms,
                 summary=summary,
+                model=model,
             )
         except Exception:
             log.debug(
