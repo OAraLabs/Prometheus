@@ -209,6 +209,28 @@ if [ "$head" != "$origin" ]; then
     # ahead == 0: every commit here is on origin/main. Belt-and-braces — assert
     # the ancestry directly rather than inferring it from the count, so a
     # divergent history can never reach the permissive branch below.
+    #
+    # ⚠ WHY NO TEST CAN FAIL WHEN THIS LINE IS DELETED — and the exact
+    # condition under which that stops being true.
+    #
+    # Mutation M6 (replace this check with `if false`) SURVIVES the suite, and
+    # not because the suite is weak. `ahead` is
+    # `rev-list --count refs/remotes/origin/main..HEAD` — the count of commits
+    # reachable from HEAD but not from refs/remotes/origin/main. `ahead == 0`
+    # therefore MEANS "HEAD is an ancestor of refs/remotes/origin/main", which
+    # is the identical proposition this line asserts. No git state can satisfy
+    # one and violate the other, so the check is unreachable-as-a-refusal and
+    # no honest test can pin it.
+    #
+    # THE REDUNDANCY HOLDS ONLY BECAUSE BOTH OPERANDS NAME THE SAME REF.
+    # `refs/remotes/origin/main` appears in the rev-list above and in the
+    # merge-base here. Change either one — a configurable upstream, an
+    # @{upstream} lookup, a different remote name, a symbolic-ref indirection
+    # applied to only one site — and the two stop being restatements of one
+    # fact. At that moment this line becomes load-bearing, and the suite that
+    # legitimately could not test it will be equally silent about its absence.
+    # If you touch the ref on either side, you are on your own here: add a test
+    # that constructs ahead == 0 against a DIFFERENT ref than this one checks.
     if ! "$GIT" -C "$REPO" merge-base --is-ancestor HEAD refs/remotes/origin/main 2>/dev/null; then
         log "REFUSING: HEAD is not an ancestor of origin/main (ahead $ahead, behind $behind)."
         log "  HEAD        ${head:0:7}"
