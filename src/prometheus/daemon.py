@@ -1006,6 +1006,14 @@ async def run_daemon(args: argparse.Namespace) -> None:
         # maintenance window. Empty by default (feature off).
         maintenance_db=(config.get("heartbeat", {}) or {}).get("maintenance_db", ""),
     )
+    # Event-loop lag watchdog. Started ONCE here rather than per-turn, so it
+    # also samples while the daemon is idle — an idle stall is exactly the
+    # case a per-turn timer cannot see, and Beacon terminates the socket at
+    # 45s of silence regardless of whether a turn is running.
+    from prometheus.engine import loop_watchdog as _loop_watchdog
+    watchdog_task = asyncio.create_task(_loop_watchdog.watch(),
+                                        name="event-loop-watchdog")
+
     heartbeat_task = asyncio.create_task(heartbeat.run_forever())
     tasks.append(heartbeat_task)
 

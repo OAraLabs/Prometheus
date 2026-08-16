@@ -19,6 +19,8 @@ import logging
 import time
 from typing import Any
 
+from prometheus.engine import loop_watchdog as _loop_watchdog
+
 logger = logging.getLogger(__name__)
 
 # Close code for an unauthenticated / failed-auth WebSocket. 4000–4999 is the
@@ -719,6 +721,11 @@ class WebSocketBridge:
             "chars": 0,            # assistant characters streamed this turn
             "tool_calls": 0,
         }
+        # The watchdog samples loop lateness daemon-wide; publishing the live
+        # dict lets a lag spike name the phase it happened in. Cleared in the
+        # finally below so an idle stall reports "idle" rather than the last
+        # turn's phase, which would be a stale annotation on a fresh spike.
+        _loop_watchdog.publish_progress(progress)
         heartbeat = asyncio.create_task(
             self._emit_progress(session_id, msg_id, progress, time.time())
         )
@@ -753,6 +760,11 @@ class WebSocketBridge:
             # without awaiting: this runs on the cancellation path too, where
             # awaiting could re-raise before the frames below are sent.
             heartbeat.cancel()
+            # Stop annotating watchdog warnings with a finished turn's phase.
+            # Only if the slot still points at OUR dict: a concurrent turn may
+            # have published its own, and clearing that would blind it.
+            if _loop_watchdog.current_progress() is progress:
+                _loop_watchdog.publish_progress(None)
             # Unregister only if the slot still points at THIS task (a newer
             # concurrent turn may have overwritten it). Clearing the interrupt
             # flag here bounds any stale flag from a cancel that lost the race

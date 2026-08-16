@@ -217,11 +217,20 @@ class TestFloorHolds:
 class TestAdmissionHalf:
     """A floor that breaks the loop is not a win."""
 
-    def test_git_push_dry_run_succeeds(self):
+    def test_git_network_operation_succeeds(self):
+        """A real authenticated git network op, under the profile.
+
+        Was `push --dry-run origin main`, which fails with rc=1 whenever the
+        deploy clone is BEHIND origin — so it measured the clone's sync state
+        as much as confinement, and went red during an ordinary deploy window
+        with nothing wrong. `ls-remote` exercises the same thing that matters
+        here (git reaching the network with credentials, unprompted, inside
+        the profile) and is independent of local repo state.
+        """
         res = _confined(
-            "git -C ~/prometheus-deploy push --dry-run origin main "
-            ">/dev/null 2>&1 && echo PUSH_OK")
-        assert "PUSH_OK" in res.output
+            "git -C ~/prometheus-deploy ls-remote origin HEAD "
+            ">/dev/null 2>&1 && echo GIT_NET_OK")
+        assert "GIT_NET_OK" in res.output
         assert not res.is_error
 
     def test_package_install_succeeds(self, tmp_path):
