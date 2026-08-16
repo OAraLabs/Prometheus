@@ -219,7 +219,12 @@ class TestCheckGateways:
         monkeypatch.delenv("PROMETHEUS_TELEGRAM_TOKEN", raising=False)
         (isolated_dirs / "envfile").write_text(
             "PROMETHEUS_TELEGRAM_TOKEN=123:abc\n", encoding="utf-8")
-        c = self._by_name({"gateway": {"telegram_enabled": True}})[
+        # allowed_chat_ids is populated because this test is about TOKEN
+        # resolution from the env file. Doctor now reports an enabled+tokened
+        # gateway with an EMPTY allowlist as an error, mirroring the daemon's
+        # refusal — that case has its own test below.
+        c = self._by_name({"gateway": {"telegram_enabled": True,
+                                       "allowed_chat_ids": [42]}})[
             "Telegram gateway"]
         # python-telegram-bot is a core dependency of the test env → ok.
         assert c.status == "ok"

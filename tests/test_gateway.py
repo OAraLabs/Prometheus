@@ -92,9 +92,14 @@ class TestPlatformConfig:
         assert config.max_message_length == 4096
         assert not config.is_restricted
 
-    def test_chat_allowed_unrestricted(self):
+    def test_chat_allowed_denies_when_allowlist_is_empty(self):
+        """An empty allowlist DENIES. This test previously asserted the
+        opposite — `chat_allowed(12345)` on an empty list — which was the
+        defect, not a specification: "no restrictions set" made absence mean
+        permission on the one surface exposed to the public internet. The test
+        change IS part of the fix (§3b corollary), not churn around it."""
         config = PlatformConfig(platform=Platform.TELEGRAM)
-        assert config.chat_allowed(12345)
+        assert not config.chat_allowed(12345)
 
     def test_chat_allowed_restricted(self):
         config = PlatformConfig(
@@ -241,7 +246,10 @@ class TestTelegramAdapter:
         """Test that on_message dispatches to agent_loop.run_async."""
         from prometheus.engine.messages import ConversationMessage, TextBlock
 
-        config = PlatformConfig(platform=Platform.TELEGRAM, token="test")
+        # Allowlisted: this asserts DISPATCH, not authorization. An empty
+        # allowed_chat_ids now denies (absence is not permission).
+        config = PlatformConfig(platform=Platform.TELEGRAM, token="test",
+                                allowed_chat_ids=[123])
 
         # Mock agent loop — result must include messages for session tracking
         user_msg = ConversationMessage.from_user_text("test message")

@@ -191,7 +191,11 @@ class TestSessionManager:
 def _make_telegram_adapter(agent_loop=None, session_manager=None):
     from prometheus.gateway.telegram import TelegramAdapter
 
-    config = PlatformConfig(platform=Platform.TELEGRAM, token="test")
+    # Allowlisted explicitly: these tests exercise SESSION isolation, not
+    # authorization. An empty allowed_chat_ids used to mean "allow every
+    # chat"; it now denies, so the chat ids these tests use are named.
+    config = PlatformConfig(platform=Platform.TELEGRAM, token="test",
+                            allowed_chat_ids=[100, 200, 123])
     if agent_loop is None:
         agent_loop = AsyncMock()
     adapter = TelegramAdapter(

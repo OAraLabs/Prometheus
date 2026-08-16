@@ -1482,7 +1482,10 @@ class TestSprint16TelegramDispatchWiring:
             tool_registry=registry,
         )
 
-        config = PlatformConfig(platform=Platform.TELEGRAM, token="test")
+        # Allowlisted: this asserts session WIRING, not authorization.
+        # An empty allowed_chat_ids now denies — absence is not permission.
+        config = PlatformConfig(platform=Platform.TELEGRAM, token="test",
+                                allowed_chat_ids=[99])
         adapter = TelegramAdapter(
             config=config,
             agent_loop=loop,
