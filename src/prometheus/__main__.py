@@ -1227,6 +1227,31 @@ def main() -> None:
         help="Filter by tool name (default: all tools)",
     )
 
+    # `prometheus config --show-defaults` — print the SHIPPED TEMPLATE.
+    #
+    # Three artefacts could have gone here and only one is useful. The
+    # EFFECTIVE MERGE is disqualified by its own name: under `--show-defaults`
+    # it prints the operator's CHOICES, the opposite of a default, plus every
+    # token in their config. A hand-built table of THE CODE'S DEFAULTS would be
+    # a 364-entry drift surface whose only job is to agree with code it does
+    # not live beside, and it would throw away every comment — the comments
+    # being most of the template's value.
+    #
+    # So: print the template, and make the template TRUE rather than merely
+    # printed. tests/test_config_defaults_equality pins each documented value
+    # equal to the reader's own fallback, both sides extracted programmatically.
+    # Round-tripping is then a CONSEQUENCE — feeding this output back yields
+    # the same effective values because every value already equals what the
+    # reader would have chosen — not a property this command has to arrange.
+    config_parser = subparsers.add_parser(
+        "config", help="Inspect Prometheus configuration",
+    )
+    config_parser.add_argument(
+        "--show-defaults", action="store_true",
+        help="Print the shipped config template (every documented key, with "
+             "comments) to stdout",
+    )
+
     args = parser.parse_args()
 
     # Logging — FIRSTLIGHT GAP-3. On the CLI SURFACES (interactive chat and
@@ -1273,6 +1298,19 @@ def main() -> None:
         sys.exit(run_setup(args))
 
     # `prometheus token show|rotate` — web API token management.
+    if args.command == "config":
+        if getattr(args, "show_defaults", False):
+            from prometheus.config.template import (
+                TemplateNotFound, get_template_path, read_template_text)
+            try:
+                sys.stdout.write(read_template_text())
+            except TemplateNotFound as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+            return 0
+        config_parser.print_help()
+        return 0
+
     if args.command == "token":
         from prometheus.cli.token import run_token_command
         sys.exit(run_token_command(args, load_config(args.config)))

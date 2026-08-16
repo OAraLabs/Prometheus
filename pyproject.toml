@@ -89,6 +89,21 @@ packages = ["src/prometheus"]
 # extra checkout step.
 include = ["src/prometheus/web/static/*"]
 
+# The config template, mapped INTO the package. It is by a wide margin the
+# best documentation of what Prometheus can be configured to do, and it did
+# not ship: `packages = ["src/prometheus"]` covers the package tree and the
+# template lives at the repo root, so `pip install oara-prometheus` had no
+# copy of it — verified by rglob against a real installed wheel, not inferred
+# from this file.
+#
+# force-include rather than a move: the repo keeps ONE source file at its
+# documented path, every existing reference (tests, docs, PROMETHEUS.md) stays
+# valid, and there is no second copy in the tree to drift. The wheel gets it
+# at prometheus/config/prometheus.yaml.default, which is where
+# `config.template.get_template_path()` looks first.
+[tool.hatch.build.targets.wheel.force-include]
+"config/prometheus.yaml.default" = "prometheus/config/prometheus.yaml.default"
+
 # ---------------------------------------------------------------------------
 # SDIST — an explicit ALLOWLIST, because the default is not a decision.
 #
