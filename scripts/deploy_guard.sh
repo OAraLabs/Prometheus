@@ -18,15 +18,58 @@
 #
 # WHAT IT CHECKS, AND WHAT IT DELIBERATELY DOES NOT
 #   * HEAD is on `main`             — catches the actual incident.
-#   * HEAD == local refs/remotes/origin/main — catches a main that has drifted
-#     ahead with unpushed commits.
+#   * AHEAD of local refs/remotes/origin/main — REFUSES. Unpushed commits
+#     would deploy without ever having been reviewed. This is the original
+#     incident and the reason this file exists.
+#   * BEHIND local refs/remotes/origin/main — WARNS and starts. Every commit
+#     in the checkout IS on origin/main and was reviewed; the tree is old,
+#     not unmerged. "Behind origin" is not a security condition, and
+#     refusing there made deliberate dark-merge — merge now, deploy in a
+#     chosen window — incompatible with surviving an unrelated reboot: a
+#     power cut or kernel update would land the unit in `failed` with
+#     StartLimitBurst exhausted, unattended. Guarded by an explicit
+#     `merge-base --is-ancestor`, so a DIVERGENT history still refuses.
+#   * TRACKED working-tree changes — REFUSES (see the reversal note below).
+#     Untracked files are ignored: a stray scratch file must never be able
+#     to cause an outage.
 #   * It does NOT fetch. Boot is the wrong time for a network call: no
 #     network, a hung proxy, or a slow remote would turn a safety check into
 #     an outage. Comparing against the LOCAL origin/main ref is stale-tolerant
 #     by design — the guard's job is "never deploy an unmerged branch", not
 #     "always deploy the newest".
-#   * It does NOT look at the working tree being dirty. Uncommitted local
-#     edits to a deployed main are a different (and normal) situation.
+#
+# ⚠ THE STALE-TRACKING-REF TRAP — the cost of not fetching, stated plainly
+# ------------------------------------------------------------------------
+# Because the guard reads the LOCAL `refs/remotes/origin/main`, that ref is
+# only as fresh as the last fetch. Advance HEAD without updating it — a
+# `reset --hard <sha>`, a `merge FETCH_HEAD`, a copied or rsynced tree — and
+# HEAD reads as AHEAD of a ref that is merely stale. The guard then REFUSES a
+# perfectly correct deploy, and the message will say "unpushed commit(s)
+# would deploy without ever having been reviewed" about commits that are on
+# origin and were reviewed. The diagnosis is wrong in the most misleading
+# direction available: it accuses the operator of the original incident.
+#
+# This is accepted, not overlooked. Fetching at boot trades a rare wrong
+# refusal for a routine one — DNS down, Tailscale down, a hung proxy, and the
+# daemon does not start at all.
+#
+# The consequence for operators: **`git pull --ff-only` is the ONLY sanctioned
+# way the deploy clone advances.** It fetches, so the tracking ref moves with
+# HEAD and the two can never disagree. `reset --hard` reaches the same commit
+# and arms the false refusal. If you see an "ahead" refusal you believe is
+# wrong, `git -C <repo> fetch origin` first and re-read it before overriding.
+#
+# ⚠ REVERSAL, 2026-08-16 — the dirty-tree decision was the opposite until now
+# --------------------------------------------------------------------------
+# This file previously read: "It does NOT look at the working tree being
+# dirty. Uncommitted local edits to a deployed main are a different (and
+# normal) situation." That call is reversed. Uncommitted TRACKED edits mean
+# the running code is not any reviewed commit, and `running_sha` will name a
+# commit whose content is not what is on disk — the SHA becomes a lie. It has
+# happened here: DockerSandbox was once committed directly inside the deploy
+# clone. Untracked files stay ignored, deliberately: refusing on those would
+# be the over-refusal direction, where a boot gate that reads as "safe" is
+# really just unbootable (Standing-Principles §2c).
 #
 # FAIL DIRECTION: any uncertainty — not a git repo, git missing, detached
 # HEAD, unreadable refs — REFUSES. A guard that degrades to "boot anyway"
@@ -52,7 +95,10 @@
 #
 #   [Service]
 #   # NO leading `-`: a failure here MUST abort the start.
-#   ExecStartPre=/usr/bin/env bash %h/Prometheus/scripts/deploy_guard.sh %h/Prometheus
+#   # The argument is the DEPLOY CLONE, not the dev checkout — ~/Prometheus is
+#   # a free working tree that concurrent sessions leave on feature branches,
+#   # which is the whole reason the clone exists.
+#   ExecStartPre=/usr/bin/env bash %h/prometheus-deploy/scripts/deploy_guard.sh %h/prometheus-deploy
 #
 # The unit is NOT in this repo, so a branch cannot quietly unwire itself. A
 # branch that deletes this script fails ExecStartPre and refuses — the safe
@@ -113,6 +159,21 @@ if [ "$branch" != "main" ]; then
     exit 1
 fi
 
+# TRACKED working-tree changes only. `--quiet` exits non-zero when a tracked
+# file differs from HEAD; untracked files are invisible to diff-index by
+# design, which is exactly the scope we want (see the reversal note above).
+if ! "$GIT" -C "$REPO" diff-index --quiet HEAD -- 2>/dev/null; then
+    log "REFUSING: $REPO has uncommitted changes to TRACKED files (HEAD ${head:0:7})."
+    log "  The running code would not be any reviewed commit, and running_sha"
+    log "  would name a commit whose content is not what is on disk."
+    "$GIT" -C "$REPO" diff-index --name-only HEAD -- 2>/dev/null \
+        | sed 's/^/  modified: /' >&2
+    log "  Fix: commit them on a branch, or 'git -C $REPO checkout -- <paths>'."
+    log "  Untracked files are NOT a refusal — only tracked modifications are."
+    log "  Override (announces itself): PROMETHEUS_ALLOW_UNMERGED_DEPLOY=1"
+    exit 1
+fi
+
 if [ -z "$origin" ]; then
     log "REFUSING: no local refs/remotes/origin/main to compare against."
     log "  Fix: git -C $REPO fetch origin"
@@ -122,16 +183,52 @@ fi
 if [ "$head" != "$origin" ]; then
     ahead=$("$GIT" -C "$REPO" rev-list --count refs/remotes/origin/main..HEAD 2>/dev/null || echo '?')
     behind=$("$GIT" -C "$REPO" rev-list --count HEAD..refs/remotes/origin/main 2>/dev/null || echo '?')
-    log "REFUSING: main is not equal to origin/main (ahead $ahead, behind $behind)."
+
+    # CROSS-CUTTING §8: a detector that broke must not fall through into the
+    # permissive branch. '?' means rev-list itself failed — unknown, not zero.
+    if [ "$ahead" = "?" ] || [ "$behind" = "?" ]; then
+        log "REFUSING: cannot count commits between HEAD and origin/main (ahead $ahead, behind $behind)."
+        log "  HEAD        ${head:0:7}"
+        log "  origin/main ${origin:0:7}"
+        log "  rev-list failed — the comparison is UNKNOWN, which is not the same as equal."
+        log "  Override (announces itself): PROMETHEUS_ALLOW_UNMERGED_DEPLOY=1"
+        exit 1
+    fi
+
+    if [ "$ahead" != "0" ]; then
+        log "REFUSING: $REPO is AHEAD of origin/main (ahead $ahead, behind $behind)."
+        log "  HEAD        ${head:0:7}"
+        log "  origin/main ${origin:0:7}"
+        log "  $ahead unpushed commit(s) would deploy without ever having been reviewed."
+        log "  If you believe this is wrong, the tracking ref may be STALE:"
+        log "    git -C $REPO fetch origin   # then re-read this message"
+        log "  Override (announces itself): PROMETHEUS_ALLOW_UNMERGED_DEPLOY=1"
+        exit 1
+    fi
+
+    # ahead == 0: every commit here is on origin/main. Belt-and-braces — assert
+    # the ancestry directly rather than inferring it from the count, so a
+    # divergent history can never reach the permissive branch below.
+    if ! "$GIT" -C "$REPO" merge-base --is-ancestor HEAD refs/remotes/origin/main 2>/dev/null; then
+        log "REFUSING: HEAD is not an ancestor of origin/main (ahead $ahead, behind $behind)."
+        log "  HEAD        ${head:0:7}"
+        log "  origin/main ${origin:0:7}"
+        log "  The histories have DIVERGED — this is not a fast-forward gap."
+        log "  Override (announces itself): PROMETHEUS_ALLOW_UNMERGED_DEPLOY=1"
+        exit 1
+    fi
+
+    # Behind only, pure fast-forward: old code, not unmerged code. Start.
+    # Same "(ahead N, behind N)" shape as every refusal above, so an operator
+    # or a grep does not need to learn a second format for the one line that
+    # permits a start.
+    log "WARNING: $REPO is BEHIND origin/main (ahead $ahead, behind $behind) — starting anyway."
     log "  HEAD        ${head:0:7}"
     log "  origin/main ${origin:0:7}"
-    if [ "$ahead" != "0" ] && [ "$ahead" != "?" ]; then
-        log "  $ahead unpushed commit(s) would deploy without ever having been reviewed."
-    else
-        log "  The checkout is stale. Fix: git -C $REPO pull --ff-only"
-    fi
-    log "  Override (announces itself): PROMETHEUS_ALLOW_UNMERGED_DEPLOY=1"
-    exit 1
+    log "  Every commit here is on origin/main and was reviewed; the checkout is"
+    log "  merely old. This is what a deliberate dark-merge looks like."
+    log "  To go live with the newest: git -C $REPO pull --ff-only && restart"
+    exit 0
 fi
 
 log "OK: $REPO on main at ${head:0:7} == origin/main."
