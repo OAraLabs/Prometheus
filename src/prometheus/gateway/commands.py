@@ -1992,6 +1992,11 @@ def _short(text: str, limit: int = 70) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
+def _approve_verbs():
+    from prometheus.permissions.approval_queue import approve_verbs
+    return approve_verbs()
+
+
 async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     """Approve a pending tool request (shared /approve core).
 
@@ -2005,11 +2010,10 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     future calls but can never override a DENY-tier check (grants are
     evaluated after always-blocked / denied / exfiltration).
     """
-    usage = (
-        f"Usage: {prefix}approve [id] | "
-        f"{prefix}approve until-restart [id] | {prefix}approve always [id]\n"
-        f"Add 'here' to widen a file grant to its directory: "
-        f"{prefix}approve always here [id]"
+    # Derived, not typed: a verb added to GRANT_SCOPES appears here, in the
+    # prompt, in the parser and in the REST validator at once.
+    usage = "Usage: " + " | ".join(
+        f"{prefix}approve {v} [id]" for v in _approve_verbs()
     )
     tokens = arg_text.split()
     scope = "once"
@@ -2035,20 +2039,28 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
             + ", ".join(approved)
         )
 
-    # SPRINT-CONSENT scope verbs. "session" is kept as a silent ALIAS so a
-    # muscle-memory `/approve session` still works, but it is no longer
-    # offered: there is one gate per process and _grants is never cleared, so
-    # it never meant a session. "until-restart" states the true boundary.
-    # "here" is the opt-in directory widening that used to be the default.
-    if tokens and tokens[0] in ("session", "until-restart", "until_restart", "always"):
-        scope = "until_restart" if tokens[0] in (
-            "session", "until-restart", "until_restart"
-        ) else "always"
-        tokens = tokens[1:]
-        if tokens and tokens[0] == "here":
-            scope = f"{scope} here"
-            tokens = tokens[1:]
-    elif len(tokens) > 1 and not _is_request_id(tokens[0]):
+    # SPRINT-CONSENT scope verbs, resolved through the ONE definition in
+    # approval_queue (approve_verbs / normalise_scope). No verb list lives
+    # here: that second list is exactly what drifted from the REST validator
+    # the day #232 landed.
+    #
+    # Longest match first, so "always here" wins over "always".
+    from prometheus.permissions.approval_queue import normalise_scope
+
+    matched_scope = False
+    for take in (2, 1):
+        if len(tokens) >= take:
+            candidate = normalise_scope(" ".join(tokens[:take]))
+            if candidate and candidate != "once":
+                scope = candidate
+                tokens = tokens[take:]
+                matched_scope = True
+                break
+    if (
+        not matched_scope
+        and len(tokens) > 1
+        and not _is_request_id(tokens[0])
+    ):
         # First word is not a scope and doesn't look like an id — almost
         # certainly a mistyped scope word ("forever"). Give the usage back
         # instead of a confusing "No pending request: <word>".
@@ -2093,22 +2105,32 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     # pending dict the moment the event fires, and the grant needs the
     # structured target (path/command) it carries.
     action = queue.pending.get(request_id)
-    ok = await queue.approve(request_id)
+    from prometheus.permissions.approval_queue import (
+        derive_grant, scope_is_persistent, scope_widens)
+
+    gate = getattr(queue, "_security_gate", None)
+    # SPRINT-CONSENT Phase 3: the grant is derived BEFORE approve() so the
+    # resolution audit row can name it. `scope` and the derived grant are the
+    # two facts the record was missing — scope is what tells an "always" that
+    # wrote no grant apart from an "always" that was never invoked.
+    # SPRINT-CONSENT: `widen` is the opt-in directory semantic ("always here").
+    grant = (
+        derive_grant(action, widen=scope_widens(scope))
+        if action is not None and scope != "once" and gate is not None
+        else None
+    )
+
+    ok = await queue.approve(request_id, scope=scope, grant=grant)
     if not ok:
         return f"No pending request: {request_id}"
     if scope == "once" or action is None:
         return f"Approved: {request_id}"
 
-    gate = getattr(queue, "_security_gate", None)
     if gate is None:
         return (
             f"Approved: {request_id} — but no security gate is attached to "
             f"the approval queue, so the {scope} grant could not be recorded."
         )
-    from prometheus.permissions.approval_queue import derive_grant
-
-    # SPRINT-CONSENT: `widen` is the opt-in directory semantic ("always here").
-    grant = derive_grant(action, widen=scope.endswith(" here"))
     if grant is None:
         # Rule 4: no target, so no describable extent. Approve ONCE and say
         # why nothing was remembered — silently minting the widest grant in
@@ -2118,7 +2140,7 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
             f"carries no specific target, so the extent of a remembered "
             f"grant could not be described, and nothing was remembered."
         )
-    grant.scope = "persistent" if scope.startswith("always") else "until_restart"
+    grant.scope = "persistent" if scope_is_persistent(scope) else "until_restart"
     effective = gate.add_grant(grant)
     if effective.scope == "persistent":
         persisted = gate.persist_grant(effective)

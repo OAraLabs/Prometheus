@@ -227,10 +227,9 @@ class TestSlackApprovalHandlers:
         respond.messages.clear()
         await adapter._slash_approve(ack, _cmd("forever abc123"), respond)
         assert respond.messages == [
-            "Usage: /prometheus-approve [id] | "
-            "/prometheus-approve until-restart [id] | /prometheus-approve always [id]\n"
-            "Add 'here' to widen a file grant to its directory: "
-            "/prometheus-approve always here [id]"
+            (
+            "Usage: /prometheus-approve once [id] | /prometheus-approve until-restart [id] | /prometheus-approve always [id] | /prometheus-approve until-restart here [id] | /prometheus-approve always here [id]"
+        )
         ]
 
     @pytest.mark.asyncio
@@ -247,7 +246,11 @@ class TestSlackApprovalHandlers:
         adapter._approval_queue = queue
         await adapter._slash_approve(ack, _cmd("abc123"), respond)
         assert respond.messages == ["Approved: abc123"]
-        queue.approve.assert_awaited_once_with("abc123")
+        # SPRINT-CONSENT: approve() now carries the scope and the derived
+        # grant so the resolution audit row can name them.
+        queue.approve.assert_awaited_once_with(
+            "abc123", scope="once", grant=None
+        )
 
     @pytest.mark.asyncio
     async def test_deny_not_found(self, ack, respond):

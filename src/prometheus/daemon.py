@@ -772,7 +772,12 @@ async def run_daemon(args: argparse.Namespace) -> None:
             default_chat = (gateway_config.get("allowed_chat_ids") or [None])[0]
             approval_queue = ApprovalQueue(
                 telegram_adapter=telegram,
-                timeout_seconds=approval_cfg.get("timeout_seconds", 300),
+                # LITERAL on purpose: test_config_defaults_equality (#221) statically
+                # parses this line to compare it with the template, and a named
+                # constant reads as <no-default> and defeats the guard. Bound to
+                # DEFAULT_APPROVAL_TIMEOUT_SECONDS by
+                # test_daemon_fallback_matches_the_named_default.
+                timeout_seconds=approval_cfg.get("timeout_seconds", 1800),
                 default_chat_id=default_chat,
             )
             security_gate._approval_queue = approval_queue

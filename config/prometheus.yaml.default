@@ -198,7 +198,7 @@ security:
     enabled: true
   approval_queue:
     enabled: false
-    timeout_seconds: 300
+    timeout_seconds: 1800            # 30 min — a phone notification is not answered in 5
 
   allowed_commands: []
 infrastructure:

@@ -34,6 +34,11 @@ class AuditDecision(Enum):
     CONFIRM_PENDING = "confirm_pending"
     CONFIRM_APPROVED = "confirm_approved"
     CONFIRM_REJECTED = "confirm_rejected"
+    # SPRINT-CONSENT Phase 3/4: an expired request is an OUTCOME, not an
+    # absence. Without this row a timeout is indistinguishable from a
+    # request nobody ever answered — which is the ambiguity that cost a
+    # live probe to resolve.
+    CONFIRM_TIMEOUT = "confirm_timeout"
 
 
 @dataclass
