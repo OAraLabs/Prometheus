@@ -23,7 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from prometheus.config.shipped_defaults import resolve_workspace_root
+from prometheus.config.shipped_defaults import (
+    resolve_denied_paths, resolve_workspace_root)
 from prometheus.permissions.audit import AuditDecision, AuditLogger
 from prometheus.permissions.exfiltration import ExfiltrationDetector
 from prometheus.permissions.modes import PermissionMode, TrustLevel
@@ -44,6 +45,27 @@ _ALWAYS_BLOCKED_PATTERNS: list[str] = [
     r">\s*/dev/sda",
     r":(){ :|:& };:",  # fork bomb
 ]
+
+# ---------------------------------------------------------------------------
+# Path locations denied REGARDLESS of configuration — the structural floor.
+#
+# The exact counterpart of _ALWAYS_BLOCKED_PATTERNS above, and it exists for
+# the same reason. `denied_commands` was safe when absent because that list is
+# hardcoded and applied first; `denied_paths` was not, so an absent key meant
+# an empty list and `read_file ~/.ssh/id_rsa` succeeded. A boundary supplied
+# entirely by config is a boundary that disappears when nobody writes the
+# config (CROSS-CUTTING §5 — prefer a property that cannot be violated).
+#
+# DELIBERATELY NARROWER THAN THE SHIPPED LIST. `/etc`, `/sys` and `/boot` are
+# policy — an operator may have a real reason to let an agent read
+# /etc/hostname — and they arrive via SHIPPED_DENIED_PATHS, which an explicit
+# config can override. What is in the floor is credential material only: no
+# configuration should be able to hand an agent a private key, and nothing
+# legitimate needs that permission.
+_ALWAYS_DENIED_PATHS: tuple[str, ...] = (
+    "~/.ssh",
+    "~/.gnupg",
+)
 
 # Tools that are always safe for read-only classification
 _READONLY_TOOLS: frozenset[str] = frozenset(
@@ -310,9 +332,16 @@ class SecurityGate:
         grants: list[Grant] | None = None,
     ) -> None:
         self._denied_commands: list[str] = denied_commands or []
+        # The floor first, then the configured policy. Order is cosmetic —
+        # both are checked — but it reads the way the guarantee works: the
+        # floor is present before any config is consulted.
         self._denied_paths: list[str] = [
-            _normalise_denied_path(p) for p in (denied_paths or [])
+            _normalise_denied_path(p) for p in _ALWAYS_DENIED_PATHS
         ]
+        for p in (denied_paths or []):
+            entry = _normalise_denied_path(p)
+            if entry not in self._denied_paths:
+                self._denied_paths.append(entry)
         # The daemon's own config file is denied AUTOMATICALLY. It used to be a
         # config entry — the relative string "config/prometheus.yaml" — which
         # is the defect this whole change exists to remove: the file it
@@ -403,7 +432,7 @@ class SecurityGate:
 
         return cls(
             denied_commands=sec.get("denied_commands") or [],
-            denied_paths=sec.get("denied_paths") or [],
+            denied_paths=resolve_denied_paths(sec),
             allowed_commands=sec.get("allowed_commands") or [],
             workspace_root=resolve_workspace_root(sec),
             config_path=config_path,

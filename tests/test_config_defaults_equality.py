@@ -85,6 +85,13 @@ KNOWN_DEFAULT_MISMATCHES: dict[str, str] = {
     #    spot is visible rather than silently excluded.
     "security.workspace_root": "RESOLVER — shipped_defaults.resolve_workspace_root "
                                "supplies SHIPPED_WORKSPACE_ROOT",
+    "security.denied_paths": "RESOLVER — was ABSENCE-HOSTILE and is now fixed: "
+                             "an absent key yielded [] and the entire file "
+                             "boundary vanished, which every path gate this "
+                             "week resolved against. resolve_denied_paths now "
+                             "supplies SHIPPED_DENIED_PATHS and "
+                             "checker._ALWAYS_DENIED_PATHS is a structural "
+                             "floor beneath any config.",
     "gateway.telegram_enabled": "RESOLVER — shipped_defaults.resolve_telegram_enabled "
                                 "supplies SHIPPED_TELEGRAM_ENABLED (#219)",
     # ── template ships a real value; the reader has NO literal fallback, so
@@ -94,8 +101,15 @@ KNOWN_DEFAULT_MISMATCHES: dict[str, str] = {
     "evals.judge_base_url": "WIRE — reader has no fallback; absence yields None",
     "gateway.media.cache_dir": "WIRE — reader has no fallback; absence yields None",
     "learning.curator_interval_seconds": "WIRE — reader has no fallback",
-    "security.denied_commands": "WIRE — reader has no fallback; absence yields None",
-    "security.denied_paths": "WIRE — reader has no fallback; absence yields None",
+    # ⚠ BOTH DISPOSITIONS CORRECTED. They were registered together as one
+    #    WIRE class, and they are not the same class at all — verified by
+    #    outcome, three config shapes, not by reading the code.
+    "security.denied_commands": "RESOLVER — absence is SAFE and always was. "
+                                "checker._ALWAYS_BLOCKED_PATTERNS is a "
+                                "hardcoded floor applied BEFORE the config "
+                                "list, so `rm -rf /` is refused whether or not "
+                                "the key exists; the config list is additive. "
+                                "Never a WIRE defect.",
     "symbiote.backup.exempt_from_retention": "WIRE — reader has no fallback",
     "symbiote.harvest_model": "WIRE — reader has no fallback",
     "symbiote.scout_model": "WIRE — reader has no fallback",

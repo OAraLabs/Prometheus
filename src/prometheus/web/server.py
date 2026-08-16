@@ -1471,7 +1471,11 @@ def create_app(
             if docs_cfg.get("root")
             else get_documents_dir()
         )
-        denied = sec.get("denied_paths") or []
+        from prometheus.config.shipped_defaults import resolve_denied_paths
+
+        # Resolver, not the raw key: `or []` here meant a config omitting
+        # denied_paths gave the documents sandbox NO boundary at all.
+        denied = resolve_denied_paths(sec)
         # Defense in depth: denied paths feed BOTH the sandbox confinement and
         # the SecurityGate composed over it.
         #
