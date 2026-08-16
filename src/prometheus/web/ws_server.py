@@ -380,11 +380,18 @@ class WebSocketBridge:
     async def _describe_image(self, image_path: str) -> str | None:
         """Run vision analysis on a cached image file, matching Telegram gateway flow."""
         try:
-            from prometheus.tools.builtin.vision import VisionTool
+            from pathlib import Path
+            from prometheus.tools.base import ToolExecutionContext
+            from prometheus.tools.builtin.vision import VisionInput, VisionTool
             tool = VisionTool()
-            result = await tool.arun(image_path=image_path)
-            if result and not result.startswith("Error"):
-                return result
+            ctx = ToolExecutionContext(
+                cwd=Path(self._config.workspace_root) if self._config else Path.home(),
+                metadata={"source": "beacon_upload"},
+            )
+            result = await tool.execute(VisionInput(image_path=image_path), ctx)
+            output = result.output
+            if output and not output.startswith("Error"):
+                return output
         except Exception as exc:
             logger.warning("Vision analysis failed for %s: %s", image_path, exc)
         return None
