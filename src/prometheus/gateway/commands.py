@@ -2007,7 +2007,9 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     """
     usage = (
         f"Usage: {prefix}approve [id] | "
-        f"{prefix}approve session [id] | {prefix}approve always [id]"
+        f"{prefix}approve until-restart [id] | {prefix}approve always [id]\n"
+        f"Add 'here' to widen a file grant to its directory: "
+        f"{prefix}approve always here [id]"
     )
     tokens = arg_text.split()
     scope = "once"
@@ -2033,9 +2035,19 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
             + ", ".join(approved)
         )
 
-    if tokens and tokens[0] in ("session", "always"):
-        scope = tokens[0]
+    # SPRINT-CONSENT scope verbs. "session" is kept as a silent ALIAS so a
+    # muscle-memory `/approve session` still works, but it is no longer
+    # offered: there is one gate per process and _grants is never cleared, so
+    # it never meant a session. "until-restart" states the true boundary.
+    # "here" is the opt-in directory widening that used to be the default.
+    if tokens and tokens[0] in ("session", "until-restart", "until_restart", "always"):
+        scope = "until_restart" if tokens[0] in (
+            "session", "until-restart", "until_restart"
+        ) else "always"
         tokens = tokens[1:]
+        if tokens and tokens[0] == "here":
+            scope = f"{scope} here"
+            tokens = tokens[1:]
     elif len(tokens) > 1 and not _is_request_id(tokens[0]):
         # First word is not a scope and doesn't look like an id — almost
         # certainly a mistyped scope word ("forever"). Give the usage back
@@ -2095,15 +2107,30 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
         )
     from prometheus.permissions.approval_queue import derive_grant
 
-    grant = derive_grant(action)
-    grant.scope = "persistent" if scope == "always" else "session"
-    gate.add_grant(grant)
-    target = grant.value or grant.tool_name
-    if scope == "always":
-        persisted = gate.persist_grant(grant)
+    # SPRINT-CONSENT: `widen` is the opt-in directory semantic ("always here").
+    grant = derive_grant(action, widen=scope.endswith(" here"))
+    if grant is None:
+        # Rule 4: no target, so no describable extent. Approve ONCE and say
+        # why nothing was remembered — silently minting the widest grant in
+        # the system from the least information is what this replaced.
+        return (
+            f"Approved: {request_id} — approved ONCE only. This request "
+            f"carries no specific target, so the extent of a remembered "
+            f"grant could not be described, and nothing was remembered."
+        )
+    grant.scope = "persistent" if scope.startswith("always") else "until_restart"
+    effective = gate.add_grant(grant)
+    if effective.scope == "persistent":
+        persisted = gate.persist_grant(effective)
         note = "saved to config" if persisted else "NOT persisted (config write failed)"
-        return f"Approved and remembered permanently ({note}): {grant.kind} {target}"
-    return f"Approved and remembered for this session: {grant.kind} {target}"
+        return (
+            f"Approved and remembered ({note}). Grants {effective.describe()}\n"
+            f"Revoke with: {prefix}revoke {effective.grant_id}"
+        )
+    return (
+        f"Approved and remembered. Grants {effective.describe()}\n"
+        f"Revoke with: {prefix}revoke {effective.grant_id}"
+    )
 
 
 def cmd_grants(queue: Any, *, prefix: str = "/") -> str:

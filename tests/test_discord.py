@@ -417,8 +417,10 @@ class TestApprovalHandlers:
         await adapter._app_approve(interaction, "forever abc123")
         assert interaction.all_messages == [
             "Usage: /prometheus ops approve [id] | "
-            "/prometheus ops approve session [id] | "
-            "/prometheus ops approve always [id]"
+            "/prometheus ops approve until-restart [id] | "
+            "/prometheus ops approve always [id]\n"
+            "Add 'here' to widen a file grant to its directory: "
+            "/prometheus ops approve always here [id]"
         ]
 
     @pytest.mark.asyncio

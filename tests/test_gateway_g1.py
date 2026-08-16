@@ -228,7 +228,9 @@ class TestSlackApprovalHandlers:
         await adapter._slash_approve(ack, _cmd("forever abc123"), respond)
         assert respond.messages == [
             "Usage: /prometheus-approve [id] | "
-            "/prometheus-approve session [id] | /prometheus-approve always [id]"
+            "/prometheus-approve until-restart [id] | /prometheus-approve always [id]\n"
+            "Add 'here' to widen a file grant to its directory: "
+            "/prometheus-approve always here [id]"
         ]
 
     @pytest.mark.asyncio

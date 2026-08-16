@@ -44,15 +44,34 @@ class TestCmdApproveScopes:
         assert queue._security_gate.list_grants() == []
 
     @pytest.mark.asyncio
-    async def test_session_scope_records_session_grant(self):
+    async def test_session_alias_records_an_until_restart_grant(self):
+        """RENAMED by SPRINT-CONSENT: scope "session" -> "until_restart".
+
+        This test asserted ``scope == "session"``. It was not coupled to a
+        defect — it faithfully pinned a label, and the LABEL is what changed:
+        there is one SecurityGate per process, ``_grants`` is never cleared,
+        and ``matches()`` never reads scope, so "session" promised a boundary
+        the system does not have. The verb is kept as a silent ALIAS so
+        muscle memory still works; only the recorded value and the offered
+        vocabulary changed."""
         queue = _make_queue()
         rid = await _request(queue, grant_command="ls -la")
         text = await cmds.cmd_approve(queue, f"session {rid}")
-        assert "session" in text.lower()
+        assert "restart" in text.lower(), text
         grants = queue._security_gate.list_grants()
         assert len(grants) == 1
-        assert grants[0].scope == "session"
+        assert grants[0].scope == "until_restart"
         assert grants[0].kind == "command_prefix"
+
+    @pytest.mark.asyncio
+    async def test_until_restart_verb_is_equivalent_to_the_alias(self):
+        """The offered verb and the legacy alias must not diverge."""
+        queue = _make_queue()
+        rid = await _request(queue, grant_command="ls -la")
+        await cmds.cmd_approve(queue, f"until-restart {rid}")
+        grants = queue._security_gate.list_grants()
+        assert len(grants) == 1
+        assert grants[0].scope == "until_restart"
 
     @pytest.mark.asyncio
     async def test_always_scope_records_persistent_grant(self):
@@ -69,7 +88,9 @@ class TestCmdApproveScopes:
         queue = _make_queue()
         rid = await _request(queue)
         text = await cmds.cmd_approve(queue, f"forever {rid}")
-        assert "Usage" in text and "session" in text and "always" in text
+        # Vocabulary changed with the rename; the usage must name the
+        # verbs it actually accepts, not the retired one.
+        assert "Usage" in text and "until-restart" in text and "always" in text
         assert rid in queue.pending  # approve() never called
         await queue.deny(rid)  # clean up background task
 
