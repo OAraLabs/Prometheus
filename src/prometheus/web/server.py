@@ -1962,12 +1962,19 @@ def create_app(
         # offer and the UI must not present one.
         from prometheus.permissions.approval_queue import prospective_extents
 
+        # ``expires_at`` comes from the QUEUE, not from
+        # DEFAULT_APPROVAL_TIMEOUT_SECONDS: the constant is the default, the
+        # instance's timeout is what actually counts down. Without this field
+        # Beacon can only show a countdown by computing created_at + 1800
+        # itself — a second surface deriving a truth the daemon already
+        # holds, which is exactly what 0e above removed for extents.
         return [
             {
                 "request_id": a.request_id,
                 "tool_name": a.tool_name,
                 "description": a.description,
                 "created_at": a.created_at,
+                "expires_at": queue.expires_at(a),
                 "extents": prospective_extents(a),
             }
             for a in queue.list_pending()
@@ -1977,9 +1984,20 @@ def create_app(
     async def approve_action(request_id: str, body: dict | None = None):
         """Approve a pending request.
 
-        Body (optional): {"scope": "once"|"session"|"always"} — parity with
-        the chat-gateway verbs (/approve session|always). session/always
-        record a SecurityGate grant; always also persists it to config.
+        Body (optional): ``{"scope": <verb>}`` where <verb> is one of
+        ``approve_verbs()`` — currently "once", "until-restart", "always",
+        and the widening forms "until-restart here" / "always here". Parity
+        with the chat-gateway verbs. Non-"once" scopes record a SecurityGate
+        grant; "always" also persists it to config.
+
+        Do not restate the verb list as a literal here. This docstring went
+        on naming the pre-#232 vocabulary — once, the long-gone middle verb,
+        and always — after #232 renamed that middle verb to until-restart,
+        precisely because there is one gate per process and ``_grants`` is
+        never cleared, so it never meant a session. The code below was
+        correct and the prose was not, which is the same defect as
+        checker.py's ``evaluate`` docstring in #235: a reader auditing the
+        API learns the wrong contract from the code itself.
         """
         queue = app.state.approval_queue
         if not queue:
