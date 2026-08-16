@@ -116,12 +116,19 @@ class TestCmdGrants:
         gate.add_grant(Grant(kind="command_prefix", value="pytest",
                              tool_name="bash", scope="persistent"))
         gate.add_grant(Grant(kind="path_prefix", value="/tmp/x",
-                             tool_name="file_write", scope="session"))
+                             tool_name="file_write", scope="until_restart"))
         text = cmds.cmd_grants(queue)
         assert "pytest" in text
         assert "/tmp/x" in text
-        assert "persistent" in text
-        assert "session" in text
+        # SPRINT-CONSENT: the listing now renders each grant's EXTENT via
+        # Grant.describe() rather than printing the raw scope token, and
+        # leads with the id because that is the handle /revoke takes. The
+        # duration is still stated — in words the operator can act on.
+        assert "permanently" in text
+        assert "until the daemon restarts" in text
+        for g in gate.list_grants():
+            assert g.grant_id in text, "a listed grant showed no revocation handle"
+        assert "revoke" in text.lower()
 
 
 class TestGrantMatching:

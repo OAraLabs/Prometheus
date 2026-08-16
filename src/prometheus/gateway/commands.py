@@ -2145,9 +2145,49 @@ def cmd_grants(queue: Any, *, prefix: str = "/") -> str:
         return "No approval grants recorded."
     lines = ["Approval grants:"]
     for g in grants:
-        target = g.value or "(any target)"
-        lines.append(f"  [{g.scope}] {g.tool_name} — {g.kind}: {target}")
+        # The id leads: it is the handle /revoke takes, and a list that shows
+        # what was granted without showing how to remove it is the write-only
+        # shape this sprint exists to fix.
+        lines.append(f"  {g.grant_id}  {g.describe()}")
+    lines.append(f"Revoke one with: {prefix}revoke <id>   (all: {prefix}revoke all)")
     return "\n".join(lines)
+
+
+def cmd_revoke(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
+    """Revoke a remembered grant by id (shared /revoke core).
+
+    SPRINT-CONSENT Phase 2. Grants were write-only: ``add_grant``,
+    ``list_grants``, ``persist_grant`` and no inverse on any surface, so the
+    only way to remove one was to hand-edit the config and restart. A
+    permission you cannot withdraw is not a permission you consented to.
+
+    Clears BOTH halves — the in-memory list and the persisted config entry —
+    because either alone is undone by the next restart, or not undone until it.
+    """
+    if queue is None:
+        return "Approval queue not active."
+    gate = getattr(queue, "_security_gate", None)
+    if gate is None:
+        return "No security gate attached — no grants to revoke."
+
+    token = (arg_text or "").strip()
+    if not token:
+        return f"Usage: {prefix}revoke <id> | {prefix}revoke all"
+
+    if token == "all":
+        n = gate.clear_grants()
+        return f"Revoked {n} grant(s)." if n else "No approval grants recorded."
+
+    # Name what was removed, not just that something was: an operator who
+    # revokes the wrong id should be able to see it immediately.
+    match = next((g for g in gate.list_grants() if g.grant_id == token), None)
+    if match is None:
+        known = ", ".join(g.grant_id for g in gate.list_grants()) or "(none)"
+        return f"No grant with id {token}. Known ids: {known}"
+    described = match.describe()
+    if gate.remove_grant(token):
+        return f"Revoked {token} — no longer grants {described}"
+    return f"Failed to revoke {token}."
 
 
 async def cmd_deny(queue: Any, request_id: str, *, prefix: str = "/") -> str:

@@ -394,6 +394,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("deny", self._cmd_deny))
         self._app.add_handler(CommandHandler("pending", self._cmd_pending))
         self._app.add_handler(CommandHandler("grants", self._cmd_grants))
+        self._app.add_handler(CommandHandler("revoke", self._cmd_revoke))
         # SUNRISE Session B: GEPA skill evolution
         self._app.add_handler(CommandHandler("gepa", self._cmd_gepa))
         # GRAFT-SYMBIOTE Session A: GitHub research → graft pipeline
@@ -464,6 +465,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("deny", "Deny a pending tool request"),
                 BotCommand("pending", "List pending approval requests"),
                 BotCommand("grants", "List remembered approval grants"),
+                BotCommand("revoke", "Revoke a remembered grant by id"),
                 BotCommand("gepa", "GEPA skill evolution: status | run | history"),
                 BotCommand("symbiote", "GitHub graft pipeline: <problem> | approve | graft | morph | swap | backup | backups | restore | status | abort | history"),
                 BotCommand("audit", "Web capability audit: show last | run | web | <category>"),
@@ -2230,6 +2232,19 @@ class TelegramAdapter(BasePlatformAdapter):
 
         queue = getattr(self, "_approval_queue", None)
         text = _cmds.cmd_grants(queue)
+        await self.send(update.effective_chat.id, text, parse_mode=None)
+
+    async def _cmd_revoke(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /revoke <id> — withdraw a remembered grant (SPRINT-CONSENT)."""
+        if not update.message or not update.effective_chat:
+            return
+        from prometheus.gateway import commands as _cmds
+
+        queue = getattr(self, "_approval_queue", None)
+        arg = " ".join((update.message.text or "").split()[1:])
+        text = _cmds.cmd_revoke(queue, arg)
         await self.send(update.effective_chat.id, text, parse_mode=None)
 
     # ------------------------------------------------------------------

@@ -345,7 +345,14 @@ class Grant:
             # <file>" for the narrow case would misdescribe a narrow grant as
             # a wide one — the same class of error this sprint exists to
             # remove, pointing the other way.
-            if Path(self.value).is_dir():
+            # is_dir() is a stat, and a stat can raise on a broken mount. A
+            # description must never be the reason a prompt fails to render,
+            # so an unreadable target degrades to the narrower wording.
+            try:
+                is_dir = Path(self.value).is_dir()
+            except OSError:
+                is_dir = False
+            if is_dir:
                 what = f"{self.tool_name} on anything under {self.value}/"
             else:
                 what = f"{self.tool_name} on exactly {self.value}"

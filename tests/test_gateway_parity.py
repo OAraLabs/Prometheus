@@ -190,6 +190,10 @@ MANIFEST: tuple[Family, ...] = (
     Family("approve", ("cmd_approve",), _cmds("approve", "prometheus-approve", "approve")),
     Family("deny", ("cmd_deny",), _cmds("deny", "prometheus-deny", "deny")),
     Family("grants", ("cmd_grants",), _cmds("grants", "prometheus-grants", "grants")),
+    # SPRINT-CONSENT Phase 2: revocation reaches every surface. Wiring it to
+    # Telegram alone would reproduce the write-only asymmetry the sprint
+    # exists to remove, one level down.
+    Family("revoke", ("cmd_revoke",), _cmds("revoke", "prometheus-revoke", "revoke")),
     Family("pending", ("cmd_pending",), _cmds("pending", "prometheus-pending", "pending")),
     # -- autonomy subsystems -------------------------------------------------
     Family("gepa", ("cmd_gepa",), _cmds("gepa", "prometheus-gepa", "gepa")),

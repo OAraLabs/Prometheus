@@ -70,7 +70,19 @@ def derive_grant(
             request_id=action.request_id,
         )
     if action.grant_file_path:
-        target = _Path(action.grant_file_path).expanduser().resolve()
+        # ⚠ resolve() RAISES on a symlink loop (RuntimeError) and can raise
+        # OSError on a broken or unresponsive mount. That raise pre-dates this
+        # sprint — but derive_grant used to run only AFTER the operator
+        # answered, so it broke an approval; it now also runs at PROMPT time,
+        # where an uncaught raise means the prompt is never sent and the
+        # operator never learns a permission was requested. Failing closed to
+        # the unresolved literal keeps the request visible; the grant is then
+        # narrower than a resolved one, never wider, so the failure direction
+        # is safe.
+        try:
+            target = _Path(action.grant_file_path).expanduser().resolve()
+        except (OSError, RuntimeError):
+            target = _Path(action.grant_file_path).expanduser()
         # SPRINT-CONSENT Phase 1 — THE DEFAULT NARROWS. This returned
         # ``target.parent`` unconditionally, so approving ONE file in $HOME
         # granted write_file across ALL of $HOME, permanently, while the

@@ -930,6 +930,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._register(ops, "deny", self._app_deny, "Deny a pending tool request")
         self._register(ops, "pending", self._app_pending, "List pending approval requests")
         self._register(ops, "grants", self._app_grants, "List remembered approval grants")
+        self._register(ops, "revoke", self._app_revoke, "Revoke a remembered grant by id")
         self._register(ops, "gepa", self._app_gepa, "Skill evolution: status | run | history")
         self._register(ops, "symbiote", self._app_symbiote, "GitHub graft pipeline: status | history | …")
         self._register(ops, "audit", self._app_audit, "Web capability audit: run | <category>")
@@ -1414,6 +1415,15 @@ class DiscordAdapter(BasePlatformAdapter):
 
         await self._respond(
             interaction, _cmds.cmd_grants(getattr(self, "_approval_queue", None)),
+        )
+
+    async def _app_revoke(self, interaction: Any, args: str) -> None:
+        """Revoke a remembered grant by id (SPRINT-CONSENT Phase 2)."""
+        from prometheus.gateway import commands as _cmds
+
+        await self._respond(
+            interaction,
+            _cmds.cmd_revoke(getattr(self, "_approval_queue", None), args or ""),
         )
 
     async def _app_gepa(self, interaction: Any, args: str) -> None:

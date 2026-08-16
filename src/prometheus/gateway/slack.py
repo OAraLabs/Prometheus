@@ -435,6 +435,7 @@ class SlackAdapter(BasePlatformAdapter):
         self._app.command("/prometheus-deny")(self._slash_deny)
         self._app.command("/prometheus-pending")(self._slash_pending)
         self._app.command("/prometheus-grants")(self._slash_grants)
+        self._app.command("/prometheus-revoke")(self._slash_revoke)
         self._app.command("/prometheus-escalations")(self._slash_escalations)
         self._app.command("/prometheus-gepa")(self._slash_gepa)
         self._app.command("/prometheus-symbiote")(self._slash_symbiote)
@@ -1275,6 +1276,16 @@ class SlackAdapter(BasePlatformAdapter):
         from prometheus.gateway import commands as _cmds
 
         await respond(text=_cmds.cmd_grants(getattr(self, "_approval_queue", None)))
+
+    async def _slash_revoke(self, ack: Any, command: Any, respond: Any) -> None:
+        """Revoke a remembered grant by id (SPRINT-CONSENT Phase 2)."""
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        arg = (command or {}).get("text", "") if isinstance(command, dict) else ""
+        await respond(
+            text=_cmds.cmd_revoke(getattr(self, "_approval_queue", None), arg)
+        )
 
     async def _slash_escalations(self, ack: Any, respond: Any) -> None:
         """Teacher-escalation counters + budget state."""
