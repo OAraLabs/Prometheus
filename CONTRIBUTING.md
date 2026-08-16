@@ -100,6 +100,39 @@ Check the GitHub issues or the roadmap in README.md. Good first contributions:
 
 If your contribution changes the architecture (new subsystem, new provider, new gateway), open an issue first to discuss. The guide pages under `docs/guide/` (especially the [feature reference](docs/guide/features.md)) are the reference for the current design.
 
+## Recording findings (agent sessions)
+
+**At the end of any session that produces findings, append them to
+`~/OAra-Brain/wiki/log.md` and commit.** This is not optional bookkeeping —
+findings have been surviving only because a human relayed them by hand
+through a coordination chat, and two were nearly lost that way in a single
+night. A finding that lives only in a transcript is a finding you will pay
+for twice.
+
+Where things go:
+
+| what | where |
+|---|---|
+| Durable rules — things true beyond today | `wiki/sources/concepts/Standing-Principles.md` |
+| Dated observations — what happened, what was measured | `wiki/log.md` |
+
+Use the existing entry format: `[FINDING]`, `[PRINCIPLE]`, `[CORRECTION]`,
+`[CLOSED]`, one entry per line, newest last.
+
+Two rules that matter more than the format:
+
+1. **Check the log tail for duplicates first.** Several entries per session
+   are often written mid-session; re-logging them buries the new ones.
+2. **Where a new entry supersedes an older one, mark it `SUPERSEDES`
+   explicitly.** The log is append-only and prior entries are never edited,
+   so without this you get two statements that were each true when written,
+   sitting unordered, and a later reader cannot tell which one still holds.
+   This has already happened once, with the deploy guard's behaviour when
+   the clone is behind `origin/main`.
+
+Zones: `wiki/` is machine-owned and these appends are in-zone. **Never write
+to `raw/` or `notes/`** — see `BRAIN.md` for the full ownership table.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.

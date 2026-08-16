@@ -1984,9 +1984,20 @@ def create_app(
         queue = app.state.approval_queue
         if not queue:
             return JSONResponse(status_code=404, content={"error": "approval queue not enabled"})
-        scope = (body or {}).get("scope", "once")
-        if scope not in ("once", "session", "always"):
-            return JSONResponse(status_code=400, content={"error": 'scope must be "once", "session", or "always"'})
+        # SPRINT-CONSENT: validated through the ONE definition, not a second
+        # hand-written list. The previous literal tuple here asserted the
+        # pre-#232 verbs and 400'd "until-restart" and "always here" — the
+        # exact vocabulary the prompt was offering — so Beacon could not opt
+        # into the directory grant. Found live, by an outcome check.
+        from prometheus.permissions.approval_queue import (
+            approve_verbs, normalise_scope)
+
+        scope = normalise_scope((body or {}).get("scope", "once"))
+        if scope is None:
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"scope must be one of {list(approve_verbs())}"},
+            )
         from prometheus.gateway import commands as _cmds
 
         arg_text = request_id if scope == "once" else f"{scope} {request_id}"

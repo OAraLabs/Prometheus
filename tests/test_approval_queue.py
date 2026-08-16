@@ -102,10 +102,17 @@ class TestApprovalQueue:
             await queue.request_approval("bash", "git push")
 
         asyncio.run(_test())
-        mock_tg.send.assert_called_once()
-        call_args = mock_tg.send.call_args
-        assert call_args[0][0] == 123  # chat_id
-        assert "Permission requested" in call_args[0][1]
+        # SPRINT-CONSENT Phase 4: a request that expires now sends a SECOND
+        # message. The pin was assert_called_once, which the expiry notice
+        # correctly broke — silence on expiry was the defect, so two sends is
+        # the fix, not a regression. Pinned per-message instead.
+        assert mock_tg.send.call_count == 2, mock_tg.send.call_args_list
+        prompt = mock_tg.send.call_args_list[0]
+        assert prompt[0][0] == 123  # chat_id
+        assert "Permission requested" in prompt[0][1]
+        expiry = mock_tg.send.call_args_list[1]
+        assert "EXPIRED" in expiry[0][1]
+        assert "did NOT run" in expiry[0][1]
 
     def test_list_pending_empty(self):
         queue = ApprovalQueue()

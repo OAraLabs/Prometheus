@@ -17,6 +17,27 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 
+#: SPRINT-CONSENT Phase 4. Was 300 (5 minutes), and the field incident is the
+#: argument: a request raised at 15:52 was popped at 15:57 EXACTLY, and the
+#: operator's `/approve always` arrived after the window had closed. It read
+#: as a broken feature and cost hours to diagnose as an expiry.
+#:
+#: 5 minutes is shorter than a human's response latency to a phone
+#: notification — it assumes the operator is already looking at the chat.
+#: 30 minutes is chosen because it spans a meeting, a commute or a meal, and
+#: the cost of the longer window is bounded: a pending request holds ONE tool
+#: call open, it is visible the whole time in `/pending` and `/api/approvals`,
+#: and the loop's own iteration cap still ends the turn. An unanswered
+#: request now expires with a NOTIFICATION rather than silence, so a long
+#: window can no longer be mistaken for a lost one.
+#:
+#: MUST equal the template value (config/prometheus.yaml.default). The config
+#: drift guard compares key PRESENCE and cannot see a value divergence — that
+#: is exactly how live `max_tool_iterations: 50` sat against a template
+#: saying 25.
+DEFAULT_APPROVAL_TIMEOUT_SECONDS = 1800
+
+
 class ApprovalResult(str, Enum):
     APPROVED = "approved"
     DENIED = "denied"
@@ -116,6 +137,75 @@ def derive_grant(
     return None
 
 
+# ---------------------------------------------------------------------------
+# THE APPROVE-SCOPE VOCABULARY — one definition, every surface derives from it
+# ---------------------------------------------------------------------------
+#
+# ⚠ THIS EXISTS BECAUSE THE VOCABULARY DRIFTED THE DAY IT WAS INTRODUCED.
+# #232 added "until-restart" and "always here" to the chat parser and to the
+# prompt, and left `server.py`'s validator asserting the OLD three verbs. The
+# REST surface then 400'd the exact verbs the prompt was offering, so Beacon
+# could not opt into the directory grant at all. Found by a live outcome
+# check, not by any test — the gateway-parity guard covers command
+# REGISTRATION, not payload VOCABULARY, so it looked like it protected surface
+# parity and protected a subset of it.
+#
+# A guard asserting "these two lists match" was the obvious fix and is the
+# worse one: it keeps two lists and adds a third thing to maintain. A default
+# beats a check (Standing-Principles §13). There is now ONE definition, and
+# the parser, the REST validator and the prompt all derive from it, so they
+# cannot disagree — there is no second list to drift.
+
+SCOPE_ONCE = "once"
+
+#: Scopes that create a remembered grant. Order is the order the prompt
+#: offers them: narrowest duration first.
+GRANT_SCOPES: tuple[str, ...] = ("until-restart", "always")
+
+#: Suffix opting in to the directory-widening (was the silent default pre-#232).
+WIDEN_SUFFIX = "here"
+
+#: Retired spellings kept working so muscle memory does not break. "session"
+#: is the pre-#232 name; it never meant a session (one gate per process,
+#: _grants never cleared) which is why it is an alias and not an offer.
+_SCOPE_ALIASES: dict[str, str] = {
+    "session": "until-restart",
+    "until_restart": "until-restart",
+    "session here": "until-restart here",
+    "until_restart here": "until-restart here",
+}
+
+
+def approve_verbs() -> tuple[str, ...]:
+    """Every scope verb the system accepts, canonical spellings only."""
+    return (SCOPE_ONCE, *GRANT_SCOPES,
+            *(f"{g} {WIDEN_SUFFIX}" for g in GRANT_SCOPES))
+
+
+def normalise_scope(raw: str | None) -> str | None:
+    """Canonical scope verb, or None if it is not one.
+
+    THE single source of truth. Callers must treat None as "reject" — never
+    as a default, which is how the widest grant in the system used to be
+    produced from the least information.
+    """
+    s = " ".join((raw or "").split()).lower()
+    if not s:
+        return SCOPE_ONCE
+    s = _SCOPE_ALIASES.get(s, s)
+    return s if s in approve_verbs() else None
+
+
+def scope_is_persistent(scope: str) -> bool:
+    """Does this verb create a grant that outlives the process?"""
+    return scope.split()[0] == "always"
+
+
+def scope_widens(scope: str) -> bool:
+    """Does this verb opt in to the directory grant?"""
+    return scope.endswith(f" {WIDEN_SUFFIX}")
+
+
 def prospective_extents(action: PendingAction) -> dict[str, str]:
     """What each scope verb WOULD grant, described in operator terms.
 
@@ -135,18 +225,35 @@ def prospective_extents(action: PendingAction) -> dict[str, str]:
     Keys are the scope verbs; a verb is ABSENT when it would create no grant.
     """
     out: dict[str, str] = {}
-    exact = derive_grant(action)
-    if exact is not None:
-        exact.scope = "until_restart"
-        out["until-restart"] = exact.describe()
-        always = derive_grant(action)
-        always.scope = "persistent"
-        out["always"] = always.describe()
-        if action.grant_file_path:
-            here = derive_grant(action, widen=True)
-            here.scope = "persistent"
-            out["always here"] = here.describe()
+    if derive_grant(action) is None:
+        return out
+    # Derived from GRANT_SCOPES, never hand-listed — a verb added there is
+    # offered here, accepted by the parser, and accepted by REST, with no
+    # second list to update.
+    for verb in approve_verbs():
+        if verb == SCOPE_ONCE:
+            continue
+        if scope_widens(verb) and not action.grant_file_path:
+            continue  # nothing to widen for a command-scoped request
+        g = derive_grant(action, widen=scope_widens(verb))
+        if g is None:
+            continue
+        g.scope = "persistent" if scope_is_persistent(verb) else "until_restart"
+        out[verb] = g.describe()
     return out
+
+
+def _humanise_window(seconds) -> str:
+    """'30 min' / '45 s'. Never '0.0 min'.
+
+    ``self._timeout // 60`` renders 0.0 for any sub-minute window — which a
+    test with a short timeout surfaced, and which an operator with a 30-second
+    window would have read as "expires immediately".
+    """
+    seconds = float(seconds or 0)
+    if seconds >= 60:
+        return f"{int(seconds // 60)} min"
+    return f"{int(seconds)} s"
 
 
 class ApprovalQueue:
@@ -167,7 +274,7 @@ class ApprovalQueue:
     def __init__(
         self,
         telegram_adapter=None,
-        timeout_seconds: int = 300,
+        timeout_seconds: int = DEFAULT_APPROVAL_TIMEOUT_SECONDS,
         default_chat_id: int | None = None,
     ) -> None:
         self._telegram = telegram_adapter
@@ -233,7 +340,7 @@ class ApprovalQueue:
                 f"/approve — approve this ONCE (or /deny)\n"
                 f"{offers}"
                 f"/approve all — approve everything pending, once each\n\n"
-                f"Expires in {self._timeout // 60} min if unanswered.\n"
+                f"Expires in {_humanise_window(self._timeout)} if unanswered.\n"
                 f"id: {request_id} (only needed if several are pending)"
             )
             try:
@@ -246,27 +353,116 @@ class ApprovalQueue:
             await asyncio.wait_for(action._event.wait(), timeout=self._timeout)
         except asyncio.TimeoutError:
             action._result = ApprovalResult.TIMEOUT
+            # SPRINT-CONSENT Phase 4 — EXPIRY MUST NOTIFY.
+            #
+            # This popped the request in the `finally` below and said nothing.
+            # The operator's only clue was a later, unrelated-looking "No
+            # pending approval requests", which is why a 300-second expiry was
+            # reported as a broken `/approve always` and cost hours to
+            # diagnose. Silence on a security surface is the defect.
+            from prometheus.permissions.audit import AuditDecision
+
+            self._audit_resolution(action, AuditDecision.CONFIRM_TIMEOUT)
+            await self._notify_expiry(action, target_chat)
 
         # Clean up
         self.pending.pop(request_id, None)
         return action._result
 
-    async def approve(self, request_id: str) -> bool:
+    async def _notify_expiry(self, action: PendingAction, chat_id) -> None:
+        """Tell the operator the window closed, and what it was for."""
+        if not (self._telegram and chat_id):
+            return
+        target = action.grant_file_path or action.grant_command or "(no target)"
+        window = _humanise_window(self._timeout)
+        msg = (
+            f"Approval EXPIRED — not approved.\n"
+            f"Tool: {action.tool_name}\n"
+            f"Target: {target}\n"
+            f"Request {action.request_id} went unanswered for {window} and "
+            f"has been withdrawn. The action did NOT run.\n"
+            f"Ask again if you still want it."
+        )
+        try:
+            await self._telegram.send(chat_id, msg, parse_mode=None)
+        except Exception as exc:  # pragma: no cover - notify is best-effort
+            logger.warning("Failed to send approval-expiry notice: %s", exc)
+
+    def _audit_resolution(
+        self,
+        action: PendingAction,
+        decision,
+        *,
+        scope: str | None = None,
+        grant=None,
+    ) -> None:
+        """Write the resolution row. SPRINT-CONSENT Phase 3.
+
+        THE MISSING WRITE. ``AuditDecision.CONFIRM_APPROVED`` and
+        ``CONFIRM_REJECTED`` were defined in ``audit.py`` and referenced
+        NOWHERE in ``src/``. The request half wrote (``checker.py`` logs
+        CONFIRM_PENDING three times); the resolution half wrote nothing. So
+        the accountability record held 24,048 rows across four months —
+        23,858 allow, 79 confirm_pending, 111 deny — and **zero resolutions
+        against at least six demonstrated approvals.** It could say what was
+        asked and never what was decided.
+
+        ``scope`` is what permanently closes the "never invoked vs invoked
+        and dropped" ambiguity: an ``always`` that writes no grant is now
+        visible here instead of being indistinguishable from silence. That
+        ambiguity previously cost a live probe to resolve.
+
+        Best-effort: telemetry must never turn a resolved approval into an
+        exception. The queue reaches the logger through the gate rather than
+        holding its own, so there is one audit store, not two.
+        """
+        gate = getattr(self, "_security_gate", None)
+        audit = getattr(gate, "_audit", None) if gate is not None else None
+        if audit is None:
+            return
+        bits = [f"request={action.request_id}", f"scope={scope or 'once'}"]
+        if grant is not None:
+            bits.append(f"grant={grant.grant_id} ({grant.describe()})")
+        else:
+            bits.append("grant=none")
+        target = action.grant_file_path or action.grant_command or ""
+        try:
+            audit.log(
+                tool_name=action.tool_name,
+                decision=decision,
+                trust_level=getattr(gate, "_mode_trust_level", lambda: 0)(),
+                reason=f"{decision.value}: " + ", ".join(bits),
+                tool_input=target or None,
+            )
+        except Exception:  # pragma: no cover - audit must not mask a decision
+            logger.debug("approval audit write failed", exc_info=True)
+
+    async def approve(
+        self, request_id: str, *, scope: str | None = None, grant=None
+    ) -> bool:
         """Approve a pending action. Returns True if found and approved."""
+        from prometheus.permissions.audit import AuditDecision
+
         action = self.pending.get(request_id)
         if action is None:
             return False
         action._result = ApprovalResult.APPROVED
         action._event.set()
+        self._audit_resolution(
+            action, AuditDecision.CONFIRM_APPROVED, scope=scope, grant=grant
+        )
         return True
 
     async def deny(self, request_id: str) -> bool:
         """Deny a pending action. Returns True if found and denied."""
+        from prometheus.permissions.audit import AuditDecision
+
         action = self.pending.get(request_id)
         if action is None:
             return False
         action._result = ApprovalResult.DENIED
         action._event.set()
+        self._audit_resolution(action, AuditDecision.CONFIRM_REJECTED)
         return True
 
     def list_pending(self) -> list[PendingAction]:
