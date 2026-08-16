@@ -174,9 +174,14 @@ security:
     - "/etc"
     - "/sys"
     - "/boot"
-    - "~/.ssh"
-    - "~/.gnupg"            # GPG keys — the sibling of ~/.ssh
-    - "~/.config/*/*env"    # credential env files (…/prometheus/env, …/oara/middleware.env)
+    # ANY home, not just the daemon's. These were "~/.ssh" etc, and "~"
+    # expands to whoever the daemon runs as — so /root/.ssh and any other
+    # user's keys were ALLOWED by the gate, held back only by OS permissions.
+    # fnmatch's "*" spans "/" in denied_paths, deliberately: broader means
+    # more denied, and this is a deny list.
+    - "/*/.ssh"
+    - "/*/.gnupg"           # GPG keys — the sibling of .ssh
+    - "/*/.config/*/*env"   # credential env files (…/prometheus/env, …/oara/middleware.env)
   # Regexes auto-ALLOWed even at SYSTEM trust (background tasks / cron) so a
   # vetted long-running job can run without a human approver. Evaluated AFTER
   # the denied/always-blocked/exfiltration gates (cannot resurrect a block) and

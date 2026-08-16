@@ -106,8 +106,17 @@ SHIPPED_TELEGRAM_ENABLED: bool = False
 # `denied_commands`. Paths now have both halves — this resolver for absence,
 # and `checker._ALWAYS_DENIED_PATHS` as the structural floor beneath any
 # config at all.
+# ⚠ The three ``~``-relative entries covered ONLY the daemon user's home —
+# `~` expands to whoever the process runs as, so another user's keys and env
+# files were outside the boundary. All three are now home-agnostic globs.
+# `/etc`, `/sys` and `/boot` are absolute and never had the gap.
+#
+# `.ssh` and `.gnupg` ALSO sit in `checker._ALWAYS_DENIED_PATHS`, so they hold
+# beneath any config. `.config/*/*env` stays policy-only — env files are
+# credential-bearing but an operator may have a legitimate reason to read one,
+# and the floor should stay small enough to deserve being unoverridable.
 SHIPPED_DENIED_PATHS: tuple[str, ...] = (
-    "/etc", "/sys", "/boot", "~/.ssh", "~/.gnupg", "~/.config/*/*env",
+    "/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
 )
 
 
