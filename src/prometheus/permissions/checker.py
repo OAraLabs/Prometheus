@@ -262,6 +262,23 @@ class Grant:
     grant_id: str = ""      # stable handle, survives persistence
     created_at: float = 0.0  # unix seconds
     request_id: str = ""     # the approval request that produced this grant
+    # THE INTENT, carried rather than re-derived. ``describe()`` used to
+    # recover this with ``Path(value).is_dir()`` — a stat at RENDER time — so
+    # the description was a function of mutable filesystem state instead of a
+    # property of the grant. The same grant, unchanged, described itself
+    # narrowly before the approved write created the directory and as a
+    # subtree afterwards; and because a widening approval's target directory
+    # is usually created BY the action being approved, the wrong branch was
+    # the normal case. Proven live by Beacon's consent walk on daemon
+    # fb73b28: shown "on exactly /home/will/beacon-walk-wide", granted
+    # "on anything under /home/will/beacon-walk-wide/".
+    #
+    #   True  — created to cover a subtree (``/approve … here``, or a root).
+    #   False — created to cover exactly this target.
+    #   None  — NOT RECORDED. Config rows written before this field existed.
+    #           See describe() for how those are worded; the answer is not a
+    #           stat, and it is not a guess either.
+    covers_subtree: bool | None = None
 
     def __post_init__(self) -> None:
         # Generated here rather than at the call site so EVERY construction
@@ -303,6 +320,11 @@ class Grant:
             "id": self.grant_id,
             "created_at": self.created_at,
             "request_id": self.request_id,
+            # Persisted so a restart does not turn a recorded intent back
+            # into an unrecorded one. Written only when known, so rows keep
+            # their shape when there is nothing to say.
+            **({"covers_subtree": self.covers_subtree}
+               if self.covers_subtree is not None else {}),
         }
 
     @classmethod
@@ -323,6 +345,12 @@ class Grant:
             grant_id=str(d.get("id", "")),
             created_at=float(d.get("created_at") or 0.0),
             request_id=str(d.get("request_id", "")),
+            # ABSENT stays None — "not recorded" — and describe() words it
+            # from the matching rule. Defaulting to False here would quietly
+            # relabel every pre-existing directory grant as an exact-file one.
+            covers_subtree=(
+                bool(d["covers_subtree"]) if "covers_subtree" in d else None
+            ),
         )
 
     def describe(self) -> str:
@@ -340,22 +368,29 @@ class Grant:
         if self.kind == "tool":
             what = f"EVERY use of {self.tool_name}, on any target"
         elif self.kind == "path_prefix":
-            # A path_prefix over a FILE covers exactly that file; over a
-            # DIRECTORY it covers the whole subtree. Saying "anything under
-            # <file>" for the narrow case would misdescribe a narrow grant as
-            # a wide one — the same class of error this sprint exists to
-            # remove, pointing the other way.
-            # is_dir() is a stat, and a stat can raise on a broken mount. A
-            # description must never be the reason a prompt fails to render,
-            # so an unreadable target degrades to the narrower wording.
-            try:
-                is_dir = Path(self.value).is_dir()
-            except OSError:
-                is_dir = False
-            if is_dir:
+            # NO FILESYSTEM CALL. The wording comes from the intent recorded
+            # when the grant was built, not from what the disk looks like when
+            # someone happens to render it. See ``covers_subtree``.
+            if self.covers_subtree is True:
                 what = f"{self.tool_name} on anything under {self.value}/"
-            else:
+            elif self.covers_subtree is False:
                 what = f"{self.tool_name} on exactly {self.value}"
+            else:
+                # Intent unrecorded (a config row from before this field).
+                # Guessing either way would be wrong half the time, and the
+                # two wrong answers are not symmetric: understating a subtree
+                # grant is consent under a narrower description, which is the
+                # defect this whole line of work exists to remove.
+                #
+                # So state the MATCHING RULE instead, which is knowable from
+                # the record alone and is true whichever the intent was:
+                # ``matches()`` resolves the candidate and calls
+                # ``relative_to(value)``, so the grant covers ``value`` and
+                # everything beneath it. For a file-shaped value "everything
+                # beneath it" is empty, and the sentence stays accurate.
+                what = (
+                    f"{self.tool_name} on {self.value} and anything under it"
+                )
         elif self.kind == "command_prefix":
             what = f"any bash command starting with {self.value!r}"
         else:  # pragma: no cover - kind is validated at construction

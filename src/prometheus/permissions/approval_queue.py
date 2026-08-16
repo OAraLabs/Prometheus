@@ -89,6 +89,8 @@ def derive_grant(
             value=str(_Path(root).expanduser().resolve()),
             tool_name=action.tool_name,
             request_id=action.request_id,
+            # A root IS a subtree by construction — that is what a root means.
+            covers_subtree=True,
         )
     if action.grant_file_path:
         # ⚠ resolve() RAISES on a symlink loop (RuntimeError) and can raise
@@ -116,6 +118,12 @@ def derive_grant(
             value=value,
             tool_name=action.tool_name,
             request_id=action.request_id,
+            # The one place that KNOWS. describe() used to rediscover this
+            # with a stat and got it wrong whenever the directory did not
+            # exist yet — which, for a widening approval, is the usual case,
+            # because the directory is created by the very action being
+            # approved. Recorded here, read there, never re-derived.
+            covers_subtree=bool(widen),
         )
     if action.grant_command:
         return Grant(
