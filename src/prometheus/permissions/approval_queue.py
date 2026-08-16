@@ -282,6 +282,30 @@ class ApprovalQueue:
         self._default_chat_id = default_chat_id
         self.pending: dict[str, PendingAction] = {}
 
+    @property
+    def timeout_seconds(self) -> float:
+        """The window actually in force on THIS queue, in seconds.
+
+        Public because the alternative is a second surface reading
+        ``DEFAULT_APPROVAL_TIMEOUT_SECONDS`` and hoping it matches. It often
+        would not: the constant is only the default, while ``self._timeout``
+        is what ``asyncio.wait_for`` counts and what the Telegram prose
+        renders. A config that sets a different window would leave the
+        constant-reading surface confidently wrong.
+        """
+        return self._timeout
+
+    def expires_at(self, action: PendingAction) -> float:
+        """Epoch seconds at which this request's window closes.
+
+        The daemon holds this truth, so the daemon states it. A client that
+        computes ``created_at + 1800`` itself is a second surface deriving a
+        value the first one already has — the defect class SPRINT-CONSENT
+        removed for grant extents (Standing-Principles §17), reintroduced in
+        a new place.
+        """
+        return action.created_at + self._timeout
+
     async def request_approval(
         self,
         tool_name: str,
