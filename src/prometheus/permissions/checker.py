@@ -56,12 +56,27 @@ _ALWAYS_BLOCKED_PATTERNS: list[str] = [
 # entirely by config is a boundary that disappears when nobody writes the
 # config (CROSS-CUTTING §5 — prefer a property that cannot be violated).
 #
-# DELIBERATELY NARROWER THAN THE SHIPPED LIST. `/etc`, `/sys` and `/boot` are
-# policy — an operator may have a real reason to let an agent read
-# /etc/hostname — and they arrive via SHIPPED_DENIED_PATHS, which an explicit
-# config can override. What is in the floor is credential material only: no
-# configuration should be able to hand an agent a private key, and nothing
-# legitimate needs that permission.
+# NARROWER THAN THE SHIPPED LIST, and the line is CREDENTIAL vs POLICY —
+# not "how few entries can we get away with".
+#
+# `/etc`, `/sys` and `/boot` are policy: an operator may have a real reason to
+# let an agent read /etc/hostname, so they arrive via SHIPPED_DENIED_PATHS
+# where a config can override them. The floor holds the patterns that are
+# credential-bearing BY CONSTRUCTION — private keys, GPG secrets, and env
+# files carrying secrets. Nobody legitimately overrides "do not read the file
+# whose purpose is to hold a secret".
+#
+# ⚠ THIS REVERSES AN EARLIER CALL IN #226, and the evidence is why. There I
+# kept `.config/*/*env` OUT of the floor on the argument that a floor which
+# cannot be switched off must stay as small as possible. The argument is sound
+# in general and it lost to what happened: the deploy clone's live config —
+# gitignored, so no PR can reach it — still carried the old `~`-relative
+# entries, and `/root/.config/prometheus/env` stayed ALLOWED after #226
+# landed. The half that was overridable is exactly the half that went stale.
+# `.ssh` and `.gnupg` were immune precisely because they were floored.
+#
+# So the size of the floor is the wrong axis. The right one is whether an
+# override could ever be legitimate, and for these three it cannot be.
 #
 # ⚠ ANY HOME, NOT JUST THE DAEMON'S. These were `~/.ssh` / `~/.gnupg`, and `~`
 # expands to the home of whoever the daemon runs as — so `/root/.ssh` and
@@ -80,6 +95,7 @@ _ALWAYS_BLOCKED_PATTERNS: list[str] = [
 _ALWAYS_DENIED_PATHS: tuple[str, ...] = (
     "/*/.ssh",
     "/*/.gnupg",
+    "/*/.config/*/*env",
 )
 
 # Tools that are always safe for read-only classification
