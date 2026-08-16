@@ -17,6 +17,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from prometheus.permissions import confinement as _CONFINE
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 _DEFAULT_TIMEOUT = 30
@@ -66,6 +67,8 @@ class BashTool(BaseTool):
         self,
         workspace: str | Path | None = None,
         max_output: int = _DEFAULT_MAX_OUTPUT,
+        confinement: str = "off",
+        confinement_profile: str = _CONFINE.PROFILE,
     ) -> None:
         # Multi-root, mirroring SecurityGate: security.workspace_root may be
         # a list. A single root did not survive contact on a real box.
@@ -78,6 +81,8 @@ class BashTool(BaseTool):
                 Path(w).expanduser().resolve() for w in workspace if w)
         self._workspace = self._workspaces[0] if self._workspaces else None
         self._max_output = max_output
+        self._confinement = _CONFINE.normalise_mode(confinement)
+        self._confinement_profile = confinement_profile
 
     async def execute(self, arguments: BashToolInput, context: ToolExecutionContext) -> ToolResult:
         cwd = Path(arguments.cwd).expanduser().resolve() if arguments.cwd else context.cwd.resolve()
@@ -104,10 +109,25 @@ class BashTool(BaseTool):
         # bare process.kill() only signals /bin/bash; its children get reparented
         # to init and keep running — that is how a timed-out ``find`` orphaned
         # itself and thrashed the disk for minutes after the turn moved on.
+        argv = ["/bin/bash", "-lc", arguments.command]
+
+        # The floor, below the tool layer. The permission gate cannot see the
+        # paths inside a command string, so this is the only place a bash call
+        # can be stopped from reading a private key. When it is required and
+        # unavailable we REFUSE — never fall through to an unconfined shell,
+        # which would silently remove the floor rather than degrade it.
+        if self._confinement == _CONFINE.MODE_REQUIRED:
+            ok, detail = _CONFINE.preflight(self._confinement_profile)
+            if not ok:
+                return ToolResult(
+                    output=_CONFINE.refusal_message(
+                        self._confinement_profile, detail),
+                    is_error=True,
+                )
+            argv = _CONFINE.wrap_argv(argv, self._confinement_profile)
+
         process = await asyncio.create_subprocess_exec(
-            "/bin/bash",
-            "-lc",
-            arguments.command,
+            *argv,
             cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

@@ -1,0 +1,81 @@
+# /etc/apparmor.d/prometheus-bash
+#
+# Confines the bash subprocess Prometheus spawns at
+# src/prometheus/tools/builtin/bash.py:107 (asyncio.create_subprocess_exec).
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS IS, AND WHAT IT IS NOT
+# ---------------------------------------------------------------------------
+# This is NOT a sandbox. It does not confine what Prometheus may DO — the
+# agent loop depends on bash, and prompting on ordinary shell calls made the
+# agent unusable (fixed deliberately in 1da4dd2). rm, git push, package
+# installs, migrations and repo edits must all keep working with no prompt.
+#
+# It exists to make exactly three paths unreachable, because the permission
+# gate cannot reach them: SecurityGate._check_denied_path is nested under
+# `if file_path:`, and bash is handed a command string, so the denied-path
+# floor covers the path-declaring tools and misses bash at BOTH origins.
+# Every check on the command string is defeated by ordinary shell
+# (`cd ~/.ssh && cat id_*`, $HOME indirection, globs, sh -c), so the floor
+# has to be enforced below the tool layer, by the kernel, on the path as the
+# kernel resolves it.
+#
+# Gating (whether to ask the operator) and the floor (what is never allowed)
+# are different mechanisms. This profile touches only the second. Nothing
+# here introduces a prompt: the command runs, and open() returns EACCES.
+#
+# The three patterns mirror _ALWAYS_DENIED_PATHS in
+# src/prometheus/permissions/checker.py.
+# ---------------------------------------------------------------------------
+
+abi <abi/3.0>,
+
+include <tunables/global>
+
+profile prometheus-bash flags=(attach_disconnected) {
+  include <abstractions/base>
+
+  # --- allow everything, deliberately -------------------------------------
+  # Broad by design. The subtractive deny rules below are the entire point
+  # of the profile; anything else the agent does must behave exactly as it
+  # did unconfined, or this is a behaviour change rather than a floor.
+  capability,
+  network,
+  signal,
+  ptrace,
+  unix,
+  dbus,
+
+  # ix on the exec: children (sh -c, env, a script) stay inside this profile
+  # rather than escaping it. A floor a wrapper can step out of is not one.
+  / rwlkmix,
+  /** rwlkmix,
+
+  # --- THE FLOOR ----------------------------------------------------------
+  # Three patterns, not a category of operations. Deny in AppArmor is
+  # subtractive and unconditional: it wins over any allow above.
+  deny @{HOME}/.ssh/{,**}         rwlkmx,
+  deny @{HOME}/.gnupg/{,**}       rwlkmx,
+  deny @{HOME}/.config/*/*env     rwlkmx,
+
+  # --- NO CARVE-OUT, AND THAT IS NOT AN OVERSIGHT -------------------------
+  # There is deliberately no exception here for the second compute backend's
+  # ssh key, even though admin work on that box goes through the bash tool.
+  #
+  # An exception is not expressible. AppArmor `deny` is subtractive and
+  # unconditional — it beats any allow, regardless of order or specificity —
+  # and the `priority=` idiom that would let an allow outrank a deny is
+  # rejected by this parser (4.0.1: "syntax error, unexpected TOK_CONDID").
+  # A line like
+  #     @{HOME}/.ssh/<some-key> r,
+  # therefore PARSES AND DOES NOTHING. It was measured: with that allow
+  # present, a confined `ssh-keygen -y -f` on the key still returned
+  # "Permission denied". Do not add one back; it would read as a working
+  # exception and be inert.
+  #
+  # The supported answer is to keep the key OUTSIDE this denied subtree —
+  # ~/.ssh is a convention, and both `ssh -i` and an IdentityFile line take
+  # any path. Note that ssh also reads ~/.ssh/known_hosts, which is denied
+  # above, so UserKnownHostsFile has to move with the key or ssh fails at
+  # host-key verification rather than at the key. Both measured.
+}

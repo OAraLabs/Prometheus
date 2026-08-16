@@ -185,7 +185,16 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
     # the task manager) so a missing optional dep degrades gracefully rather than
     # breaking the whole registry build.
     from prometheus.tools.registration import try_register
-    registry.register(BashTool(workspace=workspace))
+    # security.bash_confinement gates the kernel floor for bash. Default
+    # "off": Prometheus runs on hosts without AppArmor, and defaulting to
+    # "required" would refuse every bash call on them. That means the floor
+    # is NOT in force until an operator turns it on — stated plainly here
+    # because a security control that looks default-on and isn't is the
+    # false assurance this whole line of work exists to remove.
+    registry.register(BashTool(
+        workspace=workspace,
+        confinement=security_cfg.get("bash_confinement", "off"),
+    ))
     try_register(registry, "TaskCreateTool",
                  "prometheus.tools.builtin.task_create", "TaskCreateTool")
 

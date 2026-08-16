@@ -182,6 +182,25 @@ security:
     - "/*/.ssh"
     - "/*/.gnupg"           # GPG keys — the sibling of .ssh
     - "/*/.config/*/*env"   # credential env files (…/prometheus/env, …/oara/middleware.env)
+  # THE ABOVE DOES NOT COVER bash. denied_paths is only consulted when a call
+  # passes a file_path, and bash is handed a command string — so at BOTH
+  # origins `cat ~/.ssh/id_*` is ALLOW. Measured, not inferred. Any check on
+  # the command string is defeated by ordinary shell (`cd ~/.ssh && cat id_*`,
+  # $HOME indirection, globs, sh -c), so the floor for bash is enforced by the
+  # kernel instead:
+  #
+  #   off       (default) no kernel floor for bash. The three patterns above
+  #             protect the path-declaring tools ONLY.
+  #   required  every bash call execs through `aa-exec -p prometheus-bash`.
+  #             If the profile is not loaded, or aa-exec is missing, or the
+  #             transition does not happen, bash REFUSES TO RUN and says so —
+  #             it never silently falls back to an unconfined shell.
+  #
+  # Default is off because Prometheus runs on hosts without AppArmor, where
+  # "required" would refuse every bash call. Turning it on is a deliberate act.
+  # Profile ships at deploy/apparmor/prometheus-bash; load it with:
+  #   sudo apparmor_parser -r -W /etc/apparmor.d/prometheus-bash
+  bash_confinement: "off"
   # Regexes auto-ALLOWed even at SYSTEM trust (background tasks / cron) so a
   # vetted long-running job can run without a human approver. Evaluated AFTER
   # the denied/always-blocked/exfiltration gates (cannot resurrect a block) and
