@@ -2007,7 +2007,9 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     """
     usage = (
         f"Usage: {prefix}approve [id] | "
-        f"{prefix}approve session [id] | {prefix}approve always [id]"
+        f"{prefix}approve until-restart [id] | {prefix}approve always [id]\n"
+        f"Add 'here' to widen a file grant to its directory: "
+        f"{prefix}approve always here [id]"
     )
     tokens = arg_text.split()
     scope = "once"
@@ -2033,9 +2035,19 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
             + ", ".join(approved)
         )
 
-    if tokens and tokens[0] in ("session", "always"):
-        scope = tokens[0]
+    # SPRINT-CONSENT scope verbs. "session" is kept as a silent ALIAS so a
+    # muscle-memory `/approve session` still works, but it is no longer
+    # offered: there is one gate per process and _grants is never cleared, so
+    # it never meant a session. "until-restart" states the true boundary.
+    # "here" is the opt-in directory widening that used to be the default.
+    if tokens and tokens[0] in ("session", "until-restart", "until_restart", "always"):
+        scope = "until_restart" if tokens[0] in (
+            "session", "until-restart", "until_restart"
+        ) else "always"
         tokens = tokens[1:]
+        if tokens and tokens[0] == "here":
+            scope = f"{scope} here"
+            tokens = tokens[1:]
     elif len(tokens) > 1 and not _is_request_id(tokens[0]):
         # First word is not a scope and doesn't look like an id — almost
         # certainly a mistyped scope word ("forever"). Give the usage back
@@ -2095,15 +2107,30 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
         )
     from prometheus.permissions.approval_queue import derive_grant
 
-    grant = derive_grant(action)
-    grant.scope = "persistent" if scope == "always" else "session"
-    gate.add_grant(grant)
-    target = grant.value or grant.tool_name
-    if scope == "always":
-        persisted = gate.persist_grant(grant)
+    # SPRINT-CONSENT: `widen` is the opt-in directory semantic ("always here").
+    grant = derive_grant(action, widen=scope.endswith(" here"))
+    if grant is None:
+        # Rule 4: no target, so no describable extent. Approve ONCE and say
+        # why nothing was remembered — silently minting the widest grant in
+        # the system from the least information is what this replaced.
+        return (
+            f"Approved: {request_id} — approved ONCE only. This request "
+            f"carries no specific target, so the extent of a remembered "
+            f"grant could not be described, and nothing was remembered."
+        )
+    grant.scope = "persistent" if scope.startswith("always") else "until_restart"
+    effective = gate.add_grant(grant)
+    if effective.scope == "persistent":
+        persisted = gate.persist_grant(effective)
         note = "saved to config" if persisted else "NOT persisted (config write failed)"
-        return f"Approved and remembered permanently ({note}): {grant.kind} {target}"
-    return f"Approved and remembered for this session: {grant.kind} {target}"
+        return (
+            f"Approved and remembered ({note}). Grants {effective.describe()}\n"
+            f"Revoke with: {prefix}revoke {effective.grant_id}"
+        )
+    return (
+        f"Approved and remembered. Grants {effective.describe()}\n"
+        f"Revoke with: {prefix}revoke {effective.grant_id}"
+    )
 
 
 def cmd_grants(queue: Any, *, prefix: str = "/") -> str:
@@ -2118,9 +2145,49 @@ def cmd_grants(queue: Any, *, prefix: str = "/") -> str:
         return "No approval grants recorded."
     lines = ["Approval grants:"]
     for g in grants:
-        target = g.value or "(any target)"
-        lines.append(f"  [{g.scope}] {g.tool_name} — {g.kind}: {target}")
+        # The id leads: it is the handle /revoke takes, and a list that shows
+        # what was granted without showing how to remove it is the write-only
+        # shape this sprint exists to fix.
+        lines.append(f"  {g.grant_id}  {g.describe()}")
+    lines.append(f"Revoke one with: {prefix}revoke <id>   (all: {prefix}revoke all)")
     return "\n".join(lines)
+
+
+def cmd_revoke(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
+    """Revoke a remembered grant by id (shared /revoke core).
+
+    SPRINT-CONSENT Phase 2. Grants were write-only: ``add_grant``,
+    ``list_grants``, ``persist_grant`` and no inverse on any surface, so the
+    only way to remove one was to hand-edit the config and restart. A
+    permission you cannot withdraw is not a permission you consented to.
+
+    Clears BOTH halves — the in-memory list and the persisted config entry —
+    because either alone is undone by the next restart, or not undone until it.
+    """
+    if queue is None:
+        return "Approval queue not active."
+    gate = getattr(queue, "_security_gate", None)
+    if gate is None:
+        return "No security gate attached — no grants to revoke."
+
+    token = (arg_text or "").strip()
+    if not token:
+        return f"Usage: {prefix}revoke <id> | {prefix}revoke all"
+
+    if token == "all":
+        n = gate.clear_grants()
+        return f"Revoked {n} grant(s)." if n else "No approval grants recorded."
+
+    # Name what was removed, not just that something was: an operator who
+    # revokes the wrong id should be able to see it immediately.
+    match = next((g for g in gate.list_grants() if g.grant_id == token), None)
+    if match is None:
+        known = ", ".join(g.grant_id for g in gate.list_grants()) or "(none)"
+        return f"No grant with id {token}. Known ids: {known}"
+    described = match.describe()
+    if gate.remove_grant(token):
+        return f"Revoked {token} — no longer grants {described}"
+    return f"Failed to revoke {token}."
 
 
 async def cmd_deny(queue: Any, request_id: str, *, prefix: str = "/") -> str:

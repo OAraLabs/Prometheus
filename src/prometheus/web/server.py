@@ -1950,12 +1950,25 @@ def create_app(
         queue = app.state.approval_queue
         if not queue:
             return []
+        # SPRINT-CONSENT 0e: the payload carries the COMPUTED EXTENT of each
+        # scope verb. Beacon renders this field; Telegram formats the same
+        # dict into prose. Neither re-derives it — ``prospective_extents``
+        # calls the same ``derive_grant`` the approval path will call, so the
+        # description an operator consents to and the grant they get cannot
+        # drift (Standing-Principles §17).
+        #
+        # An empty ``extents`` is meaningful, not missing: it means the
+        # request carries no describable target, so no remembered grant is on
+        # offer and the UI must not present one.
+        from prometheus.permissions.approval_queue import prospective_extents
+
         return [
             {
                 "request_id": a.request_id,
                 "tool_name": a.tool_name,
                 "description": a.description,
                 "created_at": a.created_at,
+                "extents": prospective_extents(a),
             }
             for a in queue.list_pending()
         ]
@@ -1998,9 +2011,50 @@ def create_app(
                 "value": g.value,
                 "tool": g.tool_name,
                 "scope": g.scope,
+                # The handle DELETE takes, and the same rendered extent the
+                # approval prompt showed — so a grant is identifiable and
+                # revocable from the surface that lists it.
+                "id": g.grant_id,
+                "created_at": g.created_at,
+                "request_id": g.request_id,
+                "describes": g.describe(),
             }
             for g in gate.list_grants()
         ]
+
+    @app.delete("/api/approvals/grants/{grant_id}")
+    async def revoke_grant(grant_id: str):
+        """Revoke a remembered grant — parity with the /revoke verb.
+
+        SPRINT-CONSENT Phase 2. Without this, ``remove_grant`` existed and was
+        unreachable from every surface: the write-only shape this sprint
+        exists to fix, reproduced one level up. Clears memory AND the
+        persisted config entry.
+        """
+        queue = app.state.approval_queue
+        if not queue:
+            return JSONResponse(
+                status_code=404, content={"error": "approval queue not enabled"}
+            )
+        gate = getattr(queue, "_security_gate", None)
+        if gate is None:
+            return JSONResponse(
+                status_code=404, content={"error": "no security gate attached"}
+            )
+        match = next(
+            (g for g in gate.list_grants() if g.grant_id == grant_id), None
+        )
+        if match is None:
+            return JSONResponse(
+                status_code=404,
+                content={"error": f"no grant with id {grant_id}"},
+            )
+        described = match.describe()
+        if not gate.remove_grant(grant_id):
+            return JSONResponse(
+                status_code=500, content={"error": "revoke failed"}
+            )
+        return {"ok": True, "id": grant_id, "revoked": described}
 
     @app.post("/api/approvals/{request_id}/deny")
     async def deny_action(request_id: str):

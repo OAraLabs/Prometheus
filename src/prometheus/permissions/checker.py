@@ -19,6 +19,8 @@ import fnmatch
 import logging
 import os
 import re
+import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -243,7 +245,32 @@ class Grant:
     kind: str  # "path_prefix" | "command_prefix" | "tool"
     value: str
     tool_name: str
-    scope: str = "session"  # "session" (memory-only) | "persistent" (config)
+    # SPRINT-CONSENT: "session" renamed to "until_restart".
+    #
+    # The old name was a promise the system does not keep. There is ONE
+    # SecurityGate per process (daemon.py:427), ``_grants`` is never cleared
+    # anywhere, and ``matches()`` never reads this field — so a "session"
+    # grant lived for the life of the daemon, across every session and every
+    # surface (Telegram, Beacon, web, cron). Renaming states the true
+    # boundary at consent time, which is this sprint's whole point.
+    #
+    # Real per-session scoping needs a per-session notion the gate does not
+    # have; it is logged as separate work, not faked here.
+    scope: str = "until_restart"  # "until_restart" (memory) | "persistent" (config)
+    # Provenance (SPRINT-CONSENT 0b). Revocation needs a stable handle and the
+    # audit trail needs a join key; the record carried neither.
+    grant_id: str = ""      # stable handle, survives persistence
+    created_at: float = 0.0  # unix seconds
+    request_id: str = ""     # the approval request that produced this grant
+
+    def __post_init__(self) -> None:
+        # Generated here rather than at the call site so EVERY construction
+        # path gets one — including Grant.from_config_dict re-materialising a
+        # grant written before this field existed.
+        if not self.grant_id:
+            self.grant_id = uuid.uuid4().hex[:12]
+        if not self.created_at:
+            self.created_at = time.time()
 
     def matches(self, tool_name: str, file_path: str | None, command: str | None) -> bool:
         if self.kind == "tool":
@@ -266,19 +293,74 @@ class Grant:
         return False
 
     def to_config_dict(self) -> dict:
-        return {"kind": self.kind, "value": self.value, "tool": self.tool_name}
+        # Provenance is persisted: without grant_id on disk, a revoke has
+        # nothing stable to name, and after a restart the in-memory id would
+        # differ from the one the operator was shown.
+        return {
+            "kind": self.kind,
+            "value": self.value,
+            "tool": self.tool_name,
+            "id": self.grant_id,
+            "created_at": self.created_at,
+            "request_id": self.request_id,
+        }
 
     @classmethod
     def from_config_dict(cls, d: dict) -> Grant | None:
         kind = d.get("kind")
         if kind not in ("path_prefix", "command_prefix", "tool"):
             return None
+        # scope is hardcoded, not read: anything in the config file IS
+        # persistent by definition, so a missing or stale value cannot mislabel it.
         return cls(
             kind=kind,
             value=str(d.get("value", "")),
             tool_name=str(d.get("tool", "")),
             scope="persistent",
+            # Absent on entries written before SPRINT-CONSENT — __post_init__
+            # mints one, so old config entries become revocable rather than
+            # being stranded without a handle.
+            grant_id=str(d.get("id", "")),
+            created_at=float(d.get("created_at") or 0.0),
+            request_id=str(d.get("request_id", "")),
         )
+
+    def describe(self) -> str:
+        """The grant's EXTENT, in operator terms. One computed description.
+
+        SPRINT-CONSENT Phase 1/0e: both surfaces render from this. Telegram
+        formats it into prose, Beacon ships it as a field — neither
+        re-derives it, so the two cannot drift (Standing-Principles §17).
+        """
+        duration = (
+            "permanently, until revoked"
+            if self.scope == "persistent"
+            else "until the daemon restarts"
+        )
+        if self.kind == "tool":
+            what = f"EVERY use of {self.tool_name}, on any target"
+        elif self.kind == "path_prefix":
+            # A path_prefix over a FILE covers exactly that file; over a
+            # DIRECTORY it covers the whole subtree. Saying "anything under
+            # <file>" for the narrow case would misdescribe a narrow grant as
+            # a wide one — the same class of error this sprint exists to
+            # remove, pointing the other way.
+            # is_dir() is a stat, and a stat can raise on a broken mount. A
+            # description must never be the reason a prompt fails to render,
+            # so an unreadable target degrades to the narrower wording.
+            try:
+                is_dir = Path(self.value).is_dir()
+            except OSError:
+                is_dir = False
+            if is_dir:
+                what = f"{self.tool_name} on anything under {self.value}/"
+            else:
+                what = f"{self.tool_name} on exactly {self.value}"
+        elif self.kind == "command_prefix":
+            what = f"any bash command starting with {self.value!r}"
+        else:  # pragma: no cover - kind is validated at construction
+            what = f"{self.kind} {self.value}"
+        return f"{what} — {duration}"
 
 
 
@@ -714,17 +796,77 @@ class SecurityGate:
     def approve_target_for(self, reason: str) -> dict[str, str | None]:
         return self._approve_targets.get(reason, {"file_path": None, "command": None})
 
-    def add_grant(self, grant: Grant) -> None:
-        """Register a grant (dedupes on kind+value+tool)."""
+    def add_grant(self, grant: Grant) -> Grant:
+        """Register a grant. Returns the EFFECTIVE grant (new or upgraded).
+
+        ⚠ SPRINT-CONSENT — the dedupe used to ignore ``scope``, and that made
+        memory and disk disagree. ``/approve always`` on a target already
+        covered by an ``until_restart`` grant hit this early ``return``, so
+        the in-memory entry kept ``scope="until_restart"`` while
+        ``persist_grant`` — a separate call in ``cmd_approve`` — still wrote
+        the entry to the config file. Two stores of one truth, inside the
+        permission system. Harmless only because ``matches()`` never reads
+        scope; a revoke that consulted one view would have missed the other.
+
+        Now: same identity (kind, value, tool) UPGRADES in place rather than
+        being dropped. The original ``grant_id`` is kept deliberately — the
+        operator may already have been shown it, and revocation names it.
+        """
         for existing in self._grants:
             if (existing.kind, existing.value, existing.tool_name) == (
                 grant.kind, grant.value, grant.tool_name
             ):
-                return
+                if existing.scope != "persistent" and grant.scope == "persistent":
+                    existing.scope = "persistent"
+                    # Adopt the newer request as the provenance for the
+                    # upgrade — it is the approval that widened the duration.
+                    existing.request_id = grant.request_id or existing.request_id
+                return existing
         self._grants.append(grant)
+        return grant
 
     def list_grants(self) -> list[Grant]:
         return list(self._grants)
+
+    def remove_grant(
+        self, grant_id: str, config_path: str | Path | None = None
+    ) -> bool:
+        """Revoke one grant by id. Clears memory AND the persisted entry.
+
+        BOTH HALVES, deliberately, and this is the whole point of the method:
+        a revoke that clears only memory is undone by the next restart, when
+        ``from_config`` re-materialises the grant from the file; a revoke that
+        clears only the file leaves the grant live until that restart. Either
+        alone is a revoke that does not revoke.
+
+        Returns True if a grant with that id was found in memory.
+        """
+        match = next((g for g in self._grants if g.grant_id == grant_id), None)
+        if match is None:
+            return False
+        self._grants.remove(match)
+        if match.scope == "persistent":
+            # Best-effort on the file half; the in-memory removal already
+            # happened and is reported. A failure here is logged loudly by
+            # _rewrite_config_grants rather than swallowed.
+            self._unpersist_grant(match, config_path)
+        self._audit_log(
+            match.tool_name,
+            AuditDecision.DENY,
+            f"Grant REVOKED ({match.kind} {match.value or match.tool_name}, "
+            f"{match.scope}, id={match.grant_id})",
+            match.value,
+        )
+        return True
+
+    def clear_grants(
+        self, scope: str | None = None, config_path: str | Path | None = None
+    ) -> int:
+        """Revoke every grant, or every grant of one scope. Returns the count."""
+        doomed = [g for g in self._grants if scope is None or g.scope == scope]
+        for g in doomed:
+            self.remove_grant(g.grant_id, config_path)
+        return len(doomed)
 
     def persist_grant(self, grant: Grant, config_path: str | Path | None = None) -> bool:
         """Append a grant to ``security.grants`` in the on-disk YAML.
@@ -733,6 +875,55 @@ class SecurityGate:
         pattern the deferred-loading toggle uses, so env-var secrets merged
         into the runtime config dict never get copied into the file.
         """
+        def _add(grants: list) -> bool:
+            if any(
+                g.get("id") == grant.grant_id for g in grants if isinstance(g, dict)
+            ):
+                return False
+            grants.append(grant.to_config_dict())
+            return True
+
+        return self._rewrite_config_grants(_add, config_path, grant)
+
+    def _unpersist_grant(
+        self, grant: Grant, config_path: str | Path | None = None
+    ) -> bool:
+        """Remove one grant from ``security.grants`` on disk, by id."""
+
+        def _drop(grants: list) -> bool:
+            keep = [
+                g for g in grants
+                if not (isinstance(g, dict) and g.get("id") == grant.grant_id)
+            ]
+            if len(keep) == len(grants):
+                return False
+            grants[:] = keep
+            return True
+
+        return self._rewrite_config_grants(_drop, config_path, grant)
+
+    def _rewrite_config_grants(self, mutate, config_path, grant: Grant) -> bool:
+        """Surgical, ATOMIC read-modify-write of ``security.grants``.
+
+        Surgical (fresh-load the file, touch one key, dump) so env-var secrets
+        merged into the runtime config dict never get copied into the file.
+
+        ⚠ ATOMIC via temp-file + ``os.replace``, added with revocation. The
+        previous form truncated the real file in place, so a crash mid-dump
+        left a partial ``prometheus.yaml`` — the file the daemon reads at
+        boot. Revocation makes this a SECOND writer, and this repo has
+        already lost data to a read-modify-write clobber (``cron_jobs.json``,
+        three jobs). ``os.replace`` is atomic on POSIX: a reader sees the old
+        file or the new one, never a truncated one.
+
+        ⚠ KNOWN, NOT FIXED: atomic is not LOCKED — two concurrent writers can
+        still lose an update (last writer wins). And the dump reformats, so
+        comments in a hand-written config are lost on first write. Both are
+        latent here: the live config is machine-written and already
+        comment-free, and there is one writer process.
+        """
+        import tempfile
+
         import yaml
 
         path = Path(config_path or self._config_path or "").expanduser()
@@ -742,14 +933,26 @@ class SecurityGate:
             with path.open(encoding="utf-8") as fh:
                 on_disk = yaml.safe_load(fh) or {}
             grants = on_disk.setdefault("security", {}).setdefault("grants", [])
-            entry = grant.to_config_dict()
-            if entry not in grants:
-                grants.append(entry)
-            with path.open("w", encoding="utf-8") as fh:
-                yaml.dump(on_disk, fh, default_flow_style=False, sort_keys=False)
+            if not mutate(grants):
+                return True  # already in the desired state
+            fd, tmp = tempfile.mkstemp(
+                dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    yaml.dump(on_disk, fh, default_flow_style=False, sort_keys=False)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
             return True
         except Exception:
-            log.warning("grant persist failed for %r", grant, exc_info=True)
+            log.warning("grant config rewrite failed for %r", grant, exc_info=True)
             return False
 
     def _is_always_blocked(self, command: str) -> bool:

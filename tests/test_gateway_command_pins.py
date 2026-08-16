@@ -187,8 +187,10 @@ class TestApprovalPins:
             _make_update(text="/approve forever abc123"), _make_context()
         )
         assert _sent_text(adapter) == (
-            "Usage: /approve [id] | /approve session [id] | "
-            "/approve always [id]"
+            "Usage: /approve [id] | /approve until-restart [id] | "
+            "/approve always [id]\n"
+            "Add 'here' to widen a file grant to its directory: "
+            "/approve always here [id]"
         )
 
     @pytest.mark.asyncio

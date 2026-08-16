@@ -310,6 +310,16 @@ _DIRECT_EVALUATE_TESTS: dict[str, str] = {
         "unit tests of the runtime mode toggle's effect on the decision "
         "table (APPROVE in default -> ALLOW in autonomous); the path-"
         "extraction wiring is covered here through _execute_tool_call",
+    "test_grant_floor_invariant.py":
+        "SPRINT-CONSENT: pins the ORDERING INSIDE evaluate() — the floor "
+        "check must precede the grant check, so a grant can never resurrect "
+        "a blocked path. That is a property of evaluate() itself, not of the "
+        "caller that feeds it, and the delivery half is already covered here "
+        "through _execute_tool_call. Driving a 32-cell grant-kind x "
+        "floor-target matrix through the tool layer would multiply the cost "
+        "without testing anything the matrix is for. Registered rather than "
+        "exempted: if that file ever stops calling evaluate directly, this "
+        "entry fails as a stale registration.",
 }
 
 

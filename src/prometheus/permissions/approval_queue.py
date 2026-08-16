@@ -43,14 +43,20 @@ class PendingAction:
     _result: ApprovalResult = ApprovalResult.TIMEOUT
 
 
-def derive_grant(action: PendingAction, root: str | None = None):
-    """Build the Grant a scoped approval remembers.
+def derive_grant(
+    action: PendingAction, root: str | None = None, *, widen: bool = False
+):
+    """Build the Grant a scoped approval would remember, or None.
 
     - ``root`` given: grant writes under that path (file tools only).
-    - else a file target: grant the target file's PARENT DIRECTORY ("always
-      allow writes here" — CC's directory-grant semantic).
+    - else a file target: grant EXACTLY that file by default; ``widen=True``
+      grants its parent directory instead (the opt-in directory semantic).
     - else a command target: grant that exact command (single invocation).
-    - else: grant the tool itself (strict-mode prompts carry no target).
+    - else: **None** — extent is unknown, so no grant can be described and
+      none is created. See the rule-4 comment below.
+
+    Returns ``Grant | None``. Callers MUST handle None: it means "approve
+    once, remember nothing", not "grant everything".
     """
     from pathlib import Path as _Path
 
@@ -61,13 +67,86 @@ def derive_grant(action: PendingAction, root: str | None = None):
             kind="path_prefix",
             value=str(_Path(root).expanduser().resolve()),
             tool_name=action.tool_name,
+            request_id=action.request_id,
         )
     if action.grant_file_path:
-        parent = str(_Path(action.grant_file_path).expanduser().resolve().parent)
-        return Grant(kind="path_prefix", value=parent, tool_name=action.tool_name)
+        # ⚠ resolve() RAISES on a symlink loop (RuntimeError) and can raise
+        # OSError on a broken or unresponsive mount. That raise pre-dates this
+        # sprint — but derive_grant used to run only AFTER the operator
+        # answered, so it broke an approval; it now also runs at PROMPT time,
+        # where an uncaught raise means the prompt is never sent and the
+        # operator never learns a permission was requested. Failing closed to
+        # the unresolved literal keeps the request visible; the grant is then
+        # narrower than a resolved one, never wider, so the failure direction
+        # is safe.
+        try:
+            target = _Path(action.grant_file_path).expanduser().resolve()
+        except (OSError, RuntimeError):
+            target = _Path(action.grant_file_path).expanduser()
+        # SPRINT-CONSENT Phase 1 — THE DEFAULT NARROWS. This returned
+        # ``target.parent`` unconditionally, so approving ONE file in $HOME
+        # granted write_file across ALL of $HOME, permanently, while the
+        # prompt showed only the one path. The directory semantic is
+        # deliberate and useful; it is not defensible as a SILENT default.
+        # It is now opt-in (``/approve always here``).
+        value = str(target.parent) if widen else str(target)
+        return Grant(
+            kind="path_prefix",
+            value=value,
+            tool_name=action.tool_name,
+            request_id=action.request_id,
+        )
     if action.grant_command:
-        return Grant(kind="command_prefix", value=action.grant_command, tool_name="bash")
-    return Grant(kind="tool", value="", tool_name=action.tool_name)
+        return Grant(
+            kind="command_prefix",
+            value=action.grant_command,
+            tool_name="bash",
+            request_id=action.request_id,
+        )
+    # SPRINT-CONSENT Phase 1 — RULE 4 PRODUCES NO GRANT.
+    #
+    # This used to return ``Grant(kind="tool", value="")`` — a grant whose
+    # matches() never looks at a path, i.e. the WIDEST grant in the system,
+    # produced by the case carrying the LEAST information (a strict-mode
+    # prompt whose reason names no target). That inversion should not exist.
+    #
+    # If extent cannot be determined it cannot be described, and consent that
+    # cannot be described cannot be informed. The caller approves ONCE and
+    # says why nothing was remembered.
+    return None
+
+
+def prospective_extents(action: PendingAction) -> dict[str, str]:
+    """What each scope verb WOULD grant, described in operator terms.
+
+    SPRINT-CONSENT Phase 1 / 0e — THE ONE COMPUTED EXTENT.
+
+    The prompt used to state duration ("remember permanently") and never
+    extent, while ``derive_grant`` quietly widened a single file to its whole
+    parent directory. The operator learned the true scope only afterwards, in
+    the response, by which time the grant existed and could not be revoked.
+    That is consent obtained under a false description.
+
+    Both surfaces render from THIS function — Telegram formats it into prose,
+    Beacon ships it as a field in ``/api/approvals``. Neither re-derives it,
+    and it calls the same ``derive_grant`` the approval path will call, so the
+    description and the grant cannot drift (Standing-Principles §17).
+
+    Keys are the scope verbs; a verb is ABSENT when it would create no grant.
+    """
+    out: dict[str, str] = {}
+    exact = derive_grant(action)
+    if exact is not None:
+        exact.scope = "until_restart"
+        out["until-restart"] = exact.describe()
+        always = derive_grant(action)
+        always.scope = "persistent"
+        out["always"] = always.describe()
+        if action.grant_file_path:
+            here = derive_grant(action, widen=True)
+            here.scope = "persistent"
+            out["always here"] = here.describe()
+    return out
 
 
 class ApprovalQueue:
@@ -130,14 +209,31 @@ class ApprovalQueue:
             # id is optional, and copying an 8-hex id back is precisely the
             # friction that made operators type `/approve` alone and get
             # usage text instead of an approval.
+            # Each scope verb is offered WITH the extent it would grant.
+            # "session" is gone: there is one gate per process and _grants is
+            # never cleared, so it never meant a session — "until restart" is
+            # the true boundary and states it at consent time.
+            extents = prospective_extents(action)
+            if extents:
+                offers = "".join(
+                    f"/approve {verb} — grants {what}\n"
+                    for verb, what in extents.items()
+                )
+            else:
+                offers = (
+                    "/approve until-restart, /approve always — NOT OFFERED "
+                    "here: this request carries no specific target, so the "
+                    "extent of a remembered grant cannot be described. "
+                    "Approve once or deny.\n"
+                )
             msg = (
                 f"Permission requested:\n"
                 f"Tool: {tool_name}\n"
                 f"Action: {description}\n\n"
-                f"/approve — approve this (or /deny)\n"
-                f"/approve session — also remember for this session\n"
-                f"/approve always — also remember permanently\n"
+                f"/approve — approve this ONCE (or /deny)\n"
+                f"{offers}"
                 f"/approve all — approve everything pending, once each\n\n"
+                f"Expires in {self._timeout // 60} min if unanswered.\n"
                 f"id: {request_id} (only needed if several are pending)"
             )
             try:
