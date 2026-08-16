@@ -66,7 +66,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
@@ -83,6 +83,39 @@ logger = logging.getLogger(__name__)
 #: single-threaded callers (benchmarks, evals, the CLI) — every concurrent
 #: surface mints its own via :meth:`DivergenceDetector.new_task_id`.
 DEFAULT_TASK_KEY = "default"
+
+# How many recent tool calls the SCORING terms look at. Independent of
+# checkpoint_interval on purpose: the scoring window must not be a function of
+# how often state happens to be persisted.
+SCORING_WINDOW = 10
+
+# UNPRODUCTIVE repetition is a FLOOR on the score, not one summand among four.
+#
+# As a summand it was arithmetically incapable of declaring divergence: an
+# agent visibly stuck — seven greps in a row — produced mean([0.2, 0.0, 0.5])
+# = 0.23 and read "on_track". A signal that cannot reach the threshold from
+# inside a mean is not weak, it is decorative.
+#
+# ⚠ BUT THE FLOOR MUST NOT SIT UNDER *ANY* REPETITION, and finding that out
+# cost a round. Flooring "same tool three times running" made a compliant
+# deploy proof (bash x6) and a stuck agent (grep x7) score IDENTICALLY —
+# 0.750, diverged, byte-identical components. Tool-name repetition
+# discriminates nothing: a run of `bash` is the most ordinary shape in this
+# system. Promoting a signal to decisive without asking what it separates
+# just makes a noisy term authoritative.
+#
+# So the floor sits under UNPRODUCTIVE repetition only: the same tool, N times,
+# returning nothing or returning the same thing. That is what separates the two
+# traces — the deploy proof's echoes each return a distinct non-empty value,
+# the stuck greps all return "".
+REPETITION_FLOOR = 0.75
+
+# How many same-tool calls in a row before repetition is considered at all.
+REPETITION_RUN = 3
+
+# Terms that describe what the agent DID, as opposed to how its text reads.
+# At least one must agree before a verdict of "diverged" is issued.
+BEHAVIOURAL_TERMS = ("tool_failure_rate", "repetition", "context_growth")
 
 #: Ceiling on simultaneously-tracked tasks. A task is dropped by
 #: ``end_task``; this bounds the damage when a caller never calls it.
@@ -357,10 +390,20 @@ class CheckpointStore:
 @dataclass
 class DivergenceResult:
     """Result of divergence evaluation. Observational — see the module
-    docstring on why there is no ``should_rollback``."""
+    docstring on why there is no ``should_rollback``.
+
+    ``components`` carries every sub-score that fired, by name. The first live
+    observation of this detector was a FALSE POSITIVE scoring 0.96, and the
+    mechanism had to be reconstructed by reading the arithmetic back weeks
+    later — because the only thing recorded was the total. A verdict whose
+    inputs are not written down has to be re-derived by whoever next doubts
+    it, and re-derivation is where the checkpoint-clearing interaction was
+    missed the first time.
+    """
     score: float              # 0.0 = on track, 1.0 = completely off track
     reason: str
     diverged: bool = False    # score >= threshold; a SIGNAL, not an action
+    components: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -373,7 +416,26 @@ class _TaskState:
     task_id: str
     goal_tracker: GoalTracker = field(default_factory=GoalTracker)
     step_count: int = 0
+    # Checkpoint PAYLOAD. Cleared every time a checkpoint is written — that is
+    # its job, and it is correct for that job.
     tool_calls_since_checkpoint: list[dict] = field(default_factory=list)
+    # SCORING WINDOW — deliberately separate, and never cleared by a
+    # checkpoint.
+    #
+    # ⚠ These were one list, and that is the mechanism of the 0.96 false
+    # positive. `_create_checkpoint` clears the payload, and `evaluate` runs
+    # immediately after `maybe_checkpoint` in the same block — so on EVERY
+    # checkpoint-boundary step the tool window was empty, the failure-rate and
+    # repetition terms were skipped for want of data, and the average
+    # collapsed to the goal-alignment term alone. A turn of six successful
+    # `echo` calls scored 0.96 on lexical dissimilarity and was logged as
+    # "diverged".
+    #
+    # One list serving a payload scope and a scoring scope is
+    # CROSS-CUTTING §10: over-applied for one reader and under-applied for the
+    # other, simultaneously.
+    recent_tool_calls: deque[dict] = field(
+        default_factory=lambda: deque(maxlen=SCORING_WINDOW))
 
 
 class DivergenceDetector:
@@ -492,14 +554,17 @@ class DivergenceDetector:
             if state is None:
                 return
             state.step_count += 1
-            state.tool_calls_since_checkpoint.append({
+            entry = {
                 "step": state.step_count,
                 "tool": tool_name,
                 "args": args,
                 "result": str(result)[:500],  # Truncate large results
                 "success": success,
                 "timestamp": time.time(),
-            })
+            }
+            state.tool_calls_since_checkpoint.append(entry)
+            # The scoring window survives checkpointing; see _TaskState.
+            state.recent_tool_calls.append(entry)
 
     def steps(self, task_id: str | None = None) -> int:
         """Steps recorded for a task; 0 when it has no open record.
@@ -581,13 +646,15 @@ class DivergenceDetector:
             if state is None:
                 return DivergenceResult(score=0.0, reason="no_task")
 
-            score = self._calculate_score(state, messages, tool_results)
+            components = self._components(state, messages, tool_results)
+            score = self._aggregate(components)
 
-        diverged = score >= self.threshold
+        diverged = self._is_diverged(components, score, self.threshold)
         return DivergenceResult(
             score=score,
-            reason=self._build_reason(score),
+            reason=self._build_reason(score, components, diverged),
             diverged=diverged,
+            components=components,
         )
 
     # ------------------------------------------------------------------
@@ -602,58 +669,135 @@ class DivergenceDetector:
             self._tasks.move_to_end(key)
         return state
 
+    def _components(
+        self,
+        state: _TaskState,
+        messages: list[dict],
+        tool_results: list[dict],
+    ) -> dict[str, float]:
+        """Every sub-score that FIRED, by name. No aggregation here.
+
+        Separated from the aggregation deliberately. The old function computed
+        terms and collapsed them in one breath, so the collapse could not be
+        tested and the terms could not be reported — and both of those are the
+        reasons the 0.96 false positive took weeks to explain.
+        """
+        out: dict[str, float] = {}
+
+        # 1. Goal alignment, inverted. ALWAYS present, and the weakest signal
+        #    here: it is bag-of-words overlap between the recent text and
+        #    entities regex-extracted from the original request. A turn whose
+        #    work is command output, SHAs and ports shares almost no vocabulary
+        #    with the prose that asked for it, and scores as "diverged" for
+        #    doing exactly what it was told.
+        alignment = state.goal_tracker.check_alignment(messages, tool_results)
+        out["goal_alignment"] = 1.0 - alignment
+
+        # The scoring window, NOT the checkpoint payload — see _TaskState.
+        recent = list(state.recent_tool_calls)
+
+        # 2. Tool failure rate.
+        if recent:
+            out["tool_failure_rate"] = (
+                sum(1 for c in recent if not c["success"]) / len(recent))
+
+        # 3. UNPRODUCTIVE repetition — the same tool N times running, getting
+        #    nowhere. "Getting nowhere" is the load-bearing half: same-tool
+        #    repetition ALONE fires on a run of `bash`, which is what ordinary
+        #    work looks like here.
+        #
+        #    KNOWN MISSES, recorded rather than fixed:
+        #      * strict adjacency over the last REPETITION_RUN calls, so a
+        #        seven-grep flail with anything interleaved is invisible;
+        #      * argument-similarity over a window would catch that and is
+        #        deliberately out of scope.
+        #    Hash-exact repeat detection is NOT a candidate: it is narrower
+        #    than this check and goes silent on the exact flailing shape that
+        #    motivated the round — different arguments every time.
+        if len(recent) >= REPETITION_RUN:
+            run = recent[-REPETITION_RUN:]
+            if len({c["tool"] for c in run}) == 1:
+                results = [str(c.get("result", "")).strip() for c in run]
+                unproductive = (
+                    all(not r for r in results)      # returning nothing
+                    or len(set(results)) == 1        # returning the same thing
+                )
+                if unproductive:
+                    out["repetition"] = REPETITION_FLOOR
+
+        # 4. Context growth anomaly.
+        if len(messages) > 20:
+            if len(messages) / max(state.step_count, 1) > 5:
+                out["context_growth"] = 0.3
+
+        return out
+
+    @staticmethod
+    def _aggregate(components: dict[str, float]) -> float:
+        """Collapse the sub-scores to one number.
+
+        MEAN, then FLOORED by the repetition signal. The floor is the whole
+        change: as a summand, 0.5 among three healthy terms averaged to 0.23
+        and a plainly-stuck agent read as "on_track". A signal meant to say
+        "this is going nowhere" must be able to say it alone.
+        """
+        if not components:
+            return 0.0
+        mean = sum(components.values()) / len(components)
+        return max(mean, components.get("repetition", 0.0))
+
+    @staticmethod
+    def _is_diverged(components: dict[str, float], score: float,
+                     threshold: float) -> bool:
+        """A single sub-score may never be the whole verdict.
+
+        Goal alignment is lexical and it is the term that produced 0.96 on a
+        compliant turn. It may CONTRIBUTE to a divergence verdict; it may not
+        constitute one. At least one term describing what the agent DID has to
+        agree.
+
+        This also neutralises the checkpoint-clearing interaction on its own:
+        when the tool window was emptied, goal_alignment was the only term
+        present, and a lone term can no longer declare anything.
+        """
+        if score < threshold:
+            return False
+        return any(components.get(t, 0.0) > 0.0 for t in BEHAVIOURAL_TERMS)
+
     def _calculate_score(
         self,
         state: _TaskState,
         messages: list[dict],
         tool_results: list[dict],
     ) -> float:
+        """Back-compat shim: the aggregate alone."""
+        return self._aggregate(self._components(state, messages, tool_results))
+
+    def _build_reason(self, score: float,
+                      components: dict[str, float] | None = None,
+                      diverged: bool | None = None) -> str:
+        """Human-readable reason, naming the terms that produced it.
+
+        The old text was the number and nothing else, so a WARNING line gave a
+        reader no way to tell a genuine divergence from lexical dissimilarity
+        on a compliant turn — and that is precisely the discrimination the
+        first live observation needed.
         """
-        Calculate divergence score 0.0-1.0.
-
-        Heuristic scoring (no LLM cost):
-        1. Goal alignment (inverted)
-        2. Tool failure rate
-        3. Repetition detection
-        4. Context growth anomaly
-        """
-        scores: list[float] = []
-
-        # 1. Goal alignment (inverted: low alignment = high divergence)
-        alignment = state.goal_tracker.check_alignment(messages, tool_results)
-        scores.append(1.0 - alignment)
-
-        # 2. Tool failure rate
-        recent_tools = state.tool_calls_since_checkpoint[-10:]
-        if recent_tools:
-            failures = sum(1 for t in recent_tools if not t["success"])
-            failure_rate = failures / len(recent_tools)
-            scores.append(failure_rate)
-
-        # 3. Repetition detection (same tool > 3 times in a row)
-        if len(recent_tools) >= 3:
-            last_three = [t["tool"] for t in recent_tools[-3:]]
-            if len(set(last_three)) == 1:
-                scores.append(0.5)  # Repetition penalty
-
-        # 4. Context growth anomaly
-        if len(messages) > 20:
-            growth_ratio = len(messages) / max(state.step_count, 1)
-            if growth_ratio > 5:  # More than 5 messages per step
-                scores.append(0.3)
-
-        # Average all scores
-        return sum(scores) / len(scores) if scores else 0.0
-
-    def _build_reason(self, score: float) -> str:
-        """Build human-readable divergence reason."""
+        detail = ""
+        if components:
+            detail = " [" + " ".join(
+                f"{k}={v:.2f}" for k, v in sorted(components.items())) + "]"
+        if diverged is False and score >= self.threshold:
+            return (f"high_score_but_no_behavioural_signal "
+                    f"(score={score:.2f}); goal alignment is lexical and "
+                    f"cannot declare divergence alone{detail}")
         if score < 0.3:
-            return f"on_track (score={score:.2f})"
+            return f"on_track (score={score:.2f}){detail}"
         elif score < 0.5:
-            return f"minor_drift (score={score:.2f})"
+            return f"minor_drift (score={score:.2f}){detail}"
         elif score < self.threshold:
-            return f"moderate_drift (score={score:.2f})"
-        return f"diverged (score={score:.2f})"
+            return f"moderate_drift (score={score:.2f}){detail}"
+        return f"diverged (score={score:.2f}){detail}"
 
     def end_task(self, task_id: str | None = None) -> None:
         """Drop a task's record. Idempotent — safe to call for a task that
