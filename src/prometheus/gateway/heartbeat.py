@@ -53,6 +53,10 @@ class Heartbeat:
         self.task_manager = task_manager
         self._running = False
 
+        # Last observed gateway reachability, so the loop logs TRANSITIONS
+        # rather than repeating itself every interval. None = never observed.
+        self._gateway_reachable_last: bool | None = None
+
         # SENTINEL idle detection (Sprint 9)
         self._signal_bus: SignalBus | None = signal_bus
         self._idle_threshold = idle_threshold
@@ -134,12 +138,18 @@ class Heartbeat:
         status["cron_jobs_due"] = due_count
         status["cron_jobs_total"] = len(jobs)
 
-        # Gateway health
+        # Gateway health. `running` is the adapter's self-report — it stays
+        # True through a total upstream outage. `reachable` is the answer to
+        # a real probe against the platform API, so it is the field that can
+        # actually go false when the gateway goes dark. Adapters without a
+        # probe report None (unknown), never a misleading True.
         if self.gateway:
             status["gateway_running"] = self.gateway.running
             status["gateway_platform"] = self.gateway.platform.value
+            status["gateway_reachable"] = getattr(self.gateway, "reachable", None)
         else:
             status["gateway_running"] = None
+            status["gateway_reachable"] = None
 
         # Pending tasks
         if self.task_manager:
@@ -163,6 +173,18 @@ class Heartbeat:
                     # Log warnings for noteworthy states
                     if status.get("gateway_running") is False:
                         logger.warning("Heartbeat: gateway is not running")
+                    # Transition-only, so a long outage costs two lines, not
+                    # one every `interval` seconds.
+                    reachable = status.get("gateway_reachable")
+                    if reachable != self._gateway_reachable_last:
+                        if reachable is False:
+                            logger.error(
+                                "Heartbeat: gateway is UNREACHABLE — started, "
+                                "but the platform API is not answering"
+                            )
+                        elif reachable is True and self._gateway_reachable_last is False:
+                            logger.info("Heartbeat: gateway reachable again")
+                        self._gateway_reachable_last = reachable
                     if status.get("cron_jobs_due", 0) > 0:
                         logger.info(
                             "Heartbeat: %d cron job(s) due",

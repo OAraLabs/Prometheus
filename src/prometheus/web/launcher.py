@@ -34,6 +34,7 @@ async def launch_web(
     approval_queue: Any | None = None,
     loop_context: Any | None = None,
     skill_creator: Any | None = None,
+    gateway_adapter: Any | None = None,
     static_dir: str | None = None,
     api_host: str = "0.0.0.0",
     api_port: int = 8005,
@@ -85,6 +86,10 @@ async def launch_web(
     # Sprint 2 (OAra): surface the compactor so /api/status can report the
     # compaction block — the middleware config audit probes it (config-dark law).
     app.state.compactor = getattr(loop_context, "compactor", None)
+    # Gateway liveness so /api/status can report a dark gateway. None when no
+    # gateway is wired — /api/status then reports "wired: false" rather than
+    # inventing a health verdict for something that isn't there.
+    app.state.gateway_adapter = gateway_adapter
 
     # Create WebSocket bridge. The WS uses the SAME token as the REST
     # middleware (config.web.api_token or PROMETHEUS_API_TOKEN); empty => auth

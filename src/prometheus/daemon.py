@@ -1909,6 +1909,9 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 profile_store=profile_store,
                 profile_state=profile_state,
                 skill_creator=skill_creator,
+                # None when Telegram is disabled — /api/status then reports
+                # gateway.wired=false rather than a health verdict.
+                gateway_adapter=telegram,
                 api_port=api_port,
                 ws_port=ws_port,
             ))
