@@ -278,7 +278,20 @@ class Grant:
     #   None  — NOT RECORDED. Config rows written before this field existed.
     #           See describe() for how those are worded; the answer is not a
     #           stat, and it is not a guess either.
-    covers_subtree: bool | None = None
+    #
+    # ``scope`` above has the same shape of bug and the same fix. It defaulted
+    # to "until_restart" here and callers patched it afterwards — one did,
+    # one did not — so ``_audit_resolution`` recorded a PERMANENT grant as
+    # "until the daemon restarts". Measured on the live store:
+    #
+    #   confirm_approved: request=fc12bcae, scope=always, grant=1502e24f3837
+    #     (write_file on exactly /home/will/beacon-persist/x.txt
+    #      — until the daemon restarts)
+    #
+    # while that same grant's revoke row says ``persistent``. Both fields are
+    # now set at construction by ``derive_grant``; neither is a caller's
+    # responsibility.
+    widened: bool | None = None
 
     def __post_init__(self) -> None:
         # Generated here rather than at the call site so EVERY construction
@@ -323,8 +336,8 @@ class Grant:
             # Persisted so a restart does not turn a recorded intent back
             # into an unrecorded one. Written only when known, so rows keep
             # their shape when there is nothing to say.
-            **({"covers_subtree": self.covers_subtree}
-               if self.covers_subtree is not None else {}),
+            **({"widened": self.widened}
+               if self.widened is not None else {}),
         }
 
     @classmethod
@@ -348,8 +361,8 @@ class Grant:
             # ABSENT stays None — "not recorded" — and describe() words it
             # from the matching rule. Defaulting to False here would quietly
             # relabel every pre-existing directory grant as an exact-file one.
-            covers_subtree=(
-                bool(d["covers_subtree"]) if "covers_subtree" in d else None
+            widened=(
+                bool(d["widened"]) if "widened" in d else None
             ),
         )
 
@@ -370,10 +383,10 @@ class Grant:
         elif self.kind == "path_prefix":
             # NO FILESYSTEM CALL. The wording comes from the intent recorded
             # when the grant was built, not from what the disk looks like when
-            # someone happens to render it. See ``covers_subtree``.
-            if self.covers_subtree is True:
+            # someone happens to render it. See ``widened``.
+            if self.widened is True:
                 what = f"{self.tool_name} on anything under {self.value}/"
-            elif self.covers_subtree is False:
+            elif self.widened is False:
                 what = f"{self.tool_name} on exactly {self.value}"
             else:
                 # Intent unrecorded (a config row from before this field).
@@ -870,6 +883,13 @@ class SecurityGate:
                 grant.kind, grant.value, grant.tool_name
             ):
                 if existing.scope != "persistent" and grant.scope == "persistent":
+                    # THE ONE PERMITTED MUTATION of scope after
+                    # construction, and it is a state TRANSITION rather
+                    # than a caller filling in a field derive_grant left
+                    # blank: an existing until-restart grant is being
+                    # upgraded because the operator has now said
+                    # "always". test_no_caller_patches_scope_or_widened
+                    # asserts this is the only one.
                     existing.scope = "persistent"
                     # Adopt the newer request as the provenance for the
                     # upgrade — it is the approval that widened the duration.

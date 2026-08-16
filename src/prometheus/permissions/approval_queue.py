@@ -64,106 +64,6 @@ class PendingAction:
     _result: ApprovalResult = ApprovalResult.TIMEOUT
 
 
-def derive_grant(
-    action: PendingAction, root: str | None = None, *, widen: bool = False
-):
-    """Build the Grant a scoped approval would remember, or None.
-
-    - ``root`` given: grant writes under that path (file tools only).
-    - else a file target: grant EXACTLY that file by default; ``widen=True``
-      grants its parent directory instead (the opt-in directory semantic).
-    - else a command target: grant that exact command (single invocation).
-    - else: **None** — extent is unknown, so no grant can be described and
-      none is created. See the rule-4 comment below.
-
-    Returns ``Grant | None``. Callers MUST handle None: it means "approve
-    once, remember nothing", not "grant everything".
-    """
-    from pathlib import Path as _Path
-
-    from prometheus.permissions.checker import Grant
-
-    if root:
-        return Grant(
-            kind="path_prefix",
-            value=str(_Path(root).expanduser().resolve()),
-            tool_name=action.tool_name,
-            request_id=action.request_id,
-            # A root IS a subtree by construction — that is what a root means.
-            covers_subtree=True,
-        )
-    if action.grant_file_path:
-        # ⚠ resolve() RAISES on a symlink loop (RuntimeError) and can raise
-        # OSError on a broken or unresponsive mount. That raise pre-dates this
-        # sprint — but derive_grant used to run only AFTER the operator
-        # answered, so it broke an approval; it now also runs at PROMPT time,
-        # where an uncaught raise means the prompt is never sent and the
-        # operator never learns a permission was requested. Failing closed to
-        # the unresolved literal keeps the request visible; the grant is then
-        # narrower than a resolved one, never wider, so the failure direction
-        # is safe.
-        try:
-            target = _Path(action.grant_file_path).expanduser().resolve()
-        except (OSError, RuntimeError):
-            target = _Path(action.grant_file_path).expanduser()
-        # SPRINT-CONSENT Phase 1 — THE DEFAULT NARROWS. This returned
-        # ``target.parent`` unconditionally, so approving ONE file in $HOME
-        # granted write_file across ALL of $HOME, permanently, while the
-        # prompt showed only the one path. The directory semantic is
-        # deliberate and useful; it is not defensible as a SILENT default.
-        # It is now opt-in (``/approve always here``).
-        value = str(target.parent) if widen else str(target)
-        return Grant(
-            kind="path_prefix",
-            value=value,
-            tool_name=action.tool_name,
-            request_id=action.request_id,
-            # The one place that KNOWS. describe() used to rediscover this
-            # with a stat and got it wrong whenever the directory did not
-            # exist yet — which, for a widening approval, is the usual case,
-            # because the directory is created by the very action being
-            # approved. Recorded here, read there, never re-derived.
-            covers_subtree=bool(widen),
-        )
-    if action.grant_command:
-        return Grant(
-            kind="command_prefix",
-            value=action.grant_command,
-            tool_name="bash",
-            request_id=action.request_id,
-        )
-    # SPRINT-CONSENT Phase 1 — RULE 4 PRODUCES NO GRANT.
-    #
-    # This used to return ``Grant(kind="tool", value="")`` — a grant whose
-    # matches() never looks at a path, i.e. the WIDEST grant in the system,
-    # produced by the case carrying the LEAST information (a strict-mode
-    # prompt whose reason names no target). That inversion should not exist.
-    #
-    # If extent cannot be determined it cannot be described, and consent that
-    # cannot be described cannot be informed. The caller approves ONCE and
-    # says why nothing was remembered.
-    return None
-
-
-# ---------------------------------------------------------------------------
-# THE APPROVE-SCOPE VOCABULARY — one definition, every surface derives from it
-# ---------------------------------------------------------------------------
-#
-# ⚠ THIS EXISTS BECAUSE THE VOCABULARY DRIFTED THE DAY IT WAS INTRODUCED.
-# #232 added "until-restart" and "always here" to the chat parser and to the
-# prompt, and left `server.py`'s validator asserting the OLD three verbs. The
-# REST surface then 400'd the exact verbs the prompt was offering, so Beacon
-# could not opt into the directory grant at all. Found by a live outcome
-# check, not by any test — the gateway-parity guard covers command
-# REGISTRATION, not payload VOCABULARY, so it looked like it protected surface
-# parity and protected a subset of it.
-#
-# A guard asserting "these two lists match" was the obvious fix and is the
-# worse one: it keeps two lists and adds a third thing to maintain. A default
-# beats a check (Standing-Principles §13). There is now ONE definition, and
-# the parser, the REST validator and the prompt all derive from it, so they
-# cannot disagree — there is no second list to drift.
-
 SCOPE_ONCE = "once"
 
 #: Scopes that create a remembered grant. Order is the order the prompt
@@ -214,6 +114,138 @@ def scope_widens(scope: str) -> bool:
     return scope.endswith(f" {WIDEN_SUFFIX}")
 
 
+#: How a wire verb is STORED on the Grant record. These are a different
+#: vocabulary from the verbs, not a different spelling of them: the operator
+#: types ``always``, the record carries ``persistent``. Named so the two
+#: literals stop being retyped at each site that needs them.
+SCOPE_STORED_PERSISTENT = "persistent"
+SCOPE_STORED_UNTIL_RESTART = "until_restart"
+
+
+def stored_scope_for(verb: str) -> str:
+    """The stored scope for a wire verb. ONE converter, not a literal per site.
+
+    This expression was hand-written at two call sites, and the divergence was
+    not hypothetical: ``prospective_extents`` applied it before describing and
+    the approval path did not apply it before auditing, so the prompt was right
+    and the audit row was wrong.
+    """
+    return (SCOPE_STORED_PERSISTENT if scope_is_persistent(verb)
+            else SCOPE_STORED_UNTIL_RESTART)
+
+
+def derive_grant(
+    action: PendingAction, root: str | None = None, *,
+    verb: str = SCOPE_ONCE,
+):
+    """Build the Grant a scoped approval would remember, or None.
+
+    - ``root`` given: grant writes under that path (file tools only).
+    - else a file target: grant EXACTLY that file by default; a widening
+      verb (``… here``) grants its parent directory instead.
+
+    ``verb`` is the canonical wire verb. It sets BOTH ``widened`` and
+    ``scope`` on the record. Neither is a caller's responsibility: leaving
+    ``scope`` to callers meant one patched it and one did not, and the one
+    that did not was the audit trail.
+    - else a command target: grant that exact command (single invocation).
+    - else: **None** — extent is unknown, so no grant can be described and
+      none is created. See the rule-4 comment below.
+
+    Returns ``Grant | None``. Callers MUST handle None: it means "approve
+    once, remember nothing", not "grant everything".
+    """
+    from pathlib import Path as _Path
+
+    from prometheus.permissions.checker import Grant
+
+    if root:
+        return Grant(
+            kind="path_prefix",
+            value=str(_Path(root).expanduser().resolve()),
+            tool_name=action.tool_name,
+            request_id=action.request_id,
+            # A root IS a subtree by construction — that is what a root means.
+            widened=True,
+            scope=stored_scope_for(verb),
+        )
+    if action.grant_file_path:
+        # ⚠ resolve() RAISES on a symlink loop (RuntimeError) and can raise
+        # OSError on a broken or unresponsive mount. That raise pre-dates this
+        # sprint — but derive_grant used to run only AFTER the operator
+        # answered, so it broke an approval; it now also runs at PROMPT time,
+        # where an uncaught raise means the prompt is never sent and the
+        # operator never learns a permission was requested. Failing closed to
+        # the unresolved literal keeps the request visible; the grant is then
+        # narrower than a resolved one, never wider, so the failure direction
+        # is safe.
+        try:
+            target = _Path(action.grant_file_path).expanduser().resolve()
+        except (OSError, RuntimeError):
+            target = _Path(action.grant_file_path).expanduser()
+        # SPRINT-CONSENT Phase 1 — THE DEFAULT NARROWS. This returned
+        # ``target.parent`` unconditionally, so approving ONE file in $HOME
+        # granted write_file across ALL of $HOME, permanently, while the
+        # prompt showed only the one path. The directory semantic is
+        # deliberate and useful; it is not defensible as a SILENT default.
+        # It is now opt-in (``/approve always here``).
+        widen = scope_widens(verb)
+        value = str(target.parent) if widen else str(target)
+        return Grant(
+            kind="path_prefix",
+            value=value,
+            tool_name=action.tool_name,
+            request_id=action.request_id,
+            # The one place that KNOWS. describe() used to rediscover this
+            # with a stat and got it wrong whenever the directory did not
+            # exist yet — which, for a widening approval, is the usual case,
+            # because the directory is created by the very action being
+            # approved. Recorded here, read there, never re-derived.
+            widened=bool(widen),
+            scope=stored_scope_for(verb),
+        )
+    if action.grant_command:
+        return Grant(
+            kind="command_prefix",
+            value=action.grant_command,
+            tool_name="bash",
+            request_id=action.request_id,
+            scope=stored_scope_for(verb),
+        )
+    # SPRINT-CONSENT Phase 1 — RULE 4 PRODUCES NO GRANT.
+    #
+    # This used to return ``Grant(kind="tool", value="")`` — a grant whose
+    # matches() never looks at a path, i.e. the WIDEST grant in the system,
+    # produced by the case carrying the LEAST information (a strict-mode
+    # prompt whose reason names no target). That inversion should not exist.
+    #
+    # If extent cannot be determined it cannot be described, and consent that
+    # cannot be described cannot be informed. The caller approves ONCE and
+    # says why nothing was remembered.
+    return None
+
+
+# ---------------------------------------------------------------------------
+# THE APPROVE-SCOPE VOCABULARY — one definition, every surface derives from it
+# ---------------------------------------------------------------------------
+#
+# ⚠ THIS EXISTS BECAUSE THE VOCABULARY DRIFTED THE DAY IT WAS INTRODUCED.
+# #232 added "until-restart" and "always here" to the chat parser and to the
+# prompt, and left `server.py`'s validator asserting the OLD three verbs. The
+# REST surface then 400'd the exact verbs the prompt was offering, so Beacon
+# could not opt into the directory grant at all. Found by a live outcome
+# check, not by any test — the gateway-parity guard covers command
+# REGISTRATION, not payload VOCABULARY, so it looked like it protected surface
+# parity and protected a subset of it.
+#
+# A guard asserting "these two lists match" was the obvious fix and is the
+# worse one: it keeps two lists and adds a third thing to maintain. A default
+# beats a check (Standing-Principles §13). There is now ONE definition, and
+# the parser, the REST validator and the prompt all derive from it, so they
+# cannot disagree — there is no second list to drift.
+
+
+
 def prospective_extents(action: PendingAction) -> dict[str, str]:
     """What each scope verb WOULD grant, described in operator terms.
 
@@ -243,10 +275,9 @@ def prospective_extents(action: PendingAction) -> dict[str, str]:
             continue
         if scope_widens(verb) and not action.grant_file_path:
             continue  # nothing to widen for a command-scoped request
-        g = derive_grant(action, widen=scope_widens(verb))
+        g = derive_grant(action, verb=verb)
         if g is None:
             continue
-        g.scope = "persistent" if scope_is_persistent(verb) else "until_restart"
         out[verb] = g.describe()
     return out
 

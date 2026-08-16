@@ -57,7 +57,7 @@ class TestDescriptionDoesNotVaryOverTime:
         differed, and the first was the narrower one.
         """
         target = tmp_path / "newdir" / "x.txt"
-        g = derive_grant(_action(str(target)), widen=True)
+        g = derive_grant(_action(str(target)), verb="until-restart here")
         assert g is not None
 
         before = g.describe()
@@ -81,7 +81,7 @@ class TestDescriptionDoesNotVaryOverTime:
         the subtree wording, misdescribing a file-shaped grant as a wide one.
         """
         target = tmp_path / "thing"
-        g = derive_grant(_action(str(target)), widen=False)
+        g = derive_grant(_action(str(target)), verb="until-restart")
         assert g is not None
         before = g.describe()
         Path(g.value).mkdir(parents=True)   # the value is now a real directory
@@ -100,9 +100,9 @@ class TestWordingComesFromIntent:
         target = tmp_path / "d" / "x.txt"
         if make_parent:
             target.parent.mkdir(parents=True)
-        g = derive_grant(_action(str(target)), widen=True)
+        g = derive_grant(_action(str(target)), verb="until-restart here")
         assert g is not None
-        assert g.covers_subtree is True
+        assert g.widened is True
         assert g.describe() == (
             f"write_file on anything under {tmp_path / 'd'}/ — until the daemon restarts"
         )
@@ -111,8 +111,8 @@ class TestWordingComesFromIntent:
         a = tmp_path / "one" / "x.txt"
         b = tmp_path / "two" / "x.txt"
         b.parent.mkdir(parents=True)
-        ga = derive_grant(_action(str(a)), widen=True)
-        gb = derive_grant(_action(str(b)), widen=True)
+        ga = derive_grant(_action(str(a)), verb="until-restart here")
+        gb = derive_grant(_action(str(b)), verb="until-restart here")
         assert ga is not None and gb is not None
         # Same shape of sentence; only the path differs.
         assert ga.describe().replace(str(a.parent), "P") == \
@@ -126,15 +126,15 @@ class TestWordingComesFromIntent:
         """
         d = tmp_path / "already-a-dir"
         d.mkdir()
-        g = derive_grant(_action(str(d)), widen=False)
+        g = derive_grant(_action(str(d)), verb="until-restart")
         assert g is not None
-        assert g.covers_subtree is False
+        assert g.widened is False
         assert g.describe() == f"write_file on exactly {d} — until the daemon restarts"
 
     def test_root_grants_are_subtrees_by_construction(self, tmp_path):
         g = derive_grant(_action(str(tmp_path / "x.txt")), root=str(tmp_path))
         assert g is not None
-        assert g.covers_subtree is True
+        assert g.widened is True
         assert "anything under" in g.describe()
 
 
@@ -144,7 +144,7 @@ class TestWordingComesFromIntent:
 
 
 class TestLegacyRowsWithNoRecordedIntent:
-    """Config rows written before ``covers_subtree`` existed.
+    """Config rows written before ``widened`` existed.
 
     Neither wording can be right for all of them, and the two errors are not
     symmetric: understating a subtree grant is consent under a narrower
@@ -160,7 +160,7 @@ class TestLegacyRowsWithNoRecordedIntent:
         g = Grant.from_config_dict(
             {"kind": "path_prefix", "value": "/tmp/legacy", "tool": "write_file"})
         assert g is not None
-        assert g.covers_subtree is None, (
+        assert g.widened is None, (
             "defaulting to False would silently relabel every pre-existing "
             "directory grant as an exact-file one"
         )
@@ -180,19 +180,19 @@ class TestLegacyRowsWithNoRecordedIntent:
         assert g.describe() == before
 
     def test_recorded_intent_survives_a_persistence_round_trip(self, tmp_path):
-        for widen in (True, False):
-            src = derive_grant(_action(str(tmp_path / "d" / "x.txt")), widen=widen)
+        for verb in ("until-restart here", "until-restart"):
+            src = derive_grant(_action(str(tmp_path / "d" / "x.txt")), verb=verb)
             assert src is not None
             back = Grant.from_config_dict(src.to_config_dict())
             assert back is not None
-            assert back.covers_subtree is src.covers_subtree
+            assert back.widened is src.widened
             # scope differs by design (config rows are persistent), so compare
             # the half this change owns.
             assert back.describe().split(" — ")[0] == src.describe().split(" — ")[0]
 
     def test_unknown_intent_is_not_written_to_config(self):
         g = Grant(kind="path_prefix", value="/tmp/x", tool_name="write_file")
-        assert "covers_subtree" not in g.to_config_dict()
+        assert "widened" not in g.to_config_dict()
 
 
 # --------------------------------------------------------------------------- #
@@ -233,7 +233,7 @@ class TestDescribeTouchesNoFilesystem:
         monkeypatch.setattr(builtins, "open", tripwire("open", builtins.open))
 
         g = Grant(kind="path_prefix", value=sentinel,
-                  tool_name="write_file", covers_subtree=covers)
+                  tool_name="write_file", widened=covers)
         out = g.describe()
         assert isinstance(out, str) and out
         assert called == []
@@ -267,3 +267,124 @@ class TestDescribeTouchesNoFilesystem:
             kind="tool", value="", tool_name="bash").describe()
         assert "starting with" in Grant(
             kind="command_prefix", value="git ", tool_name="bash").describe()
+
+
+# --------------------------------------------------------------------------- #
+# scope: the same bug, the same fix — and the sharper illustration
+# --------------------------------------------------------------------------- #
+
+
+class TestScopeIsCarriedNotPatched:
+    """``scope`` had the identical defect and a worse blast radius.
+
+    ``derive_grant`` left it on the dataclass default ``until_restart`` and
+    expected callers to patch it. ``prospective_extents`` did, before
+    describing; the approval path did not, before auditing. So the PROMPT was
+    right and the ACCOUNTABILITY RECORD was wrong — a permanent grant written
+    to the audit store as "until the daemon restarts". Measured on the live
+    store (daemon fb73b28) before this change:
+
+        confirm_approved: request=fc12bcae, scope=always,
+          grant=1502e24f3837 (write_file on exactly
+          /home/will/beacon-persist/x.txt — until the daemon restarts)
+
+    …while that same grant's revoke row said ``persistent``. The store
+    contradicted itself about what had been granted.
+    """
+
+    def test_always_is_persistent_at_construction(self, tmp_path):
+        g = derive_grant(_action(str(tmp_path / "x.txt")), verb="always")
+        assert g is not None
+        assert g.scope == "persistent"
+        assert "permanently, until revoked" in g.describe()
+
+    def test_until_restart_is_until_restart_at_construction(self, tmp_path):
+        g = derive_grant(_action(str(tmp_path / "x.txt")), verb="until-restart")
+        assert g is not None
+        assert g.scope == "until_restart"
+        assert "until the daemon restarts" in g.describe()
+
+    def test_stored_scope_has_one_converter(self):
+        from prometheus.permissions.approval_queue import (
+            approve_verbs, stored_scope_for)
+        for verb in approve_verbs():
+            assert stored_scope_for(verb) in ("persistent", "until_restart")
+        assert stored_scope_for("always") == "persistent"
+        assert stored_scope_for("always here") == "persistent"
+        assert stored_scope_for("until-restart") == "until_restart"
+        assert stored_scope_for("until-restart here") == "until_restart"
+
+
+class TestTheAuditRowItself:
+    """Assert from the row read back, not from the return value.
+
+    A return value is what the code believed; the audit row is what the
+    accountability store will actually hold when someone asks later.
+    """
+
+    def _resolve_and_read_row(self, tmp_path, verb):
+        from prometheus.permissions.audit import AuditLogger
+        from prometheus.permissions.checker import SecurityGate
+        from prometheus.permissions.approval_queue import ApprovalQueue
+
+        gate = SecurityGate(workspace_root=str(tmp_path / "ws"),
+                            audit_logger=AuditLogger(data_dir=tmp_path / "audit"))
+        q = ApprovalQueue()
+        q._security_gate = gate
+        action = _action(str(tmp_path / "target" / "x.txt"))
+        grant = derive_grant(action, verb=verb)
+        from prometheus.permissions.audit import AuditDecision
+        q._audit_resolution(action, AuditDecision.CONFIRM_APPROVED,
+                            scope=verb, grant=grant)
+        rows = gate._audit.query_recent(limit=20)
+        for r in rows:
+            reason = r.get("reason") if isinstance(r, dict) else getattr(r, "reason", "")
+            if action.request_id in (reason or ""):
+                return reason
+        raise AssertionError(f"no audit row found for {action.request_id}")
+
+    def test_a_persistent_grant_is_recorded_as_permanent(self, tmp_path):
+        reason = self._resolve_and_read_row(tmp_path, "always")
+        assert "permanently, until revoked" in reason, (
+            f"the audit store recorded a permanent grant as temporary: {reason}")
+        assert "until the daemon restarts" not in reason
+
+    def test_a_widening_grant_is_recorded_as_a_subtree(self, tmp_path):
+        reason = self._resolve_and_read_row(tmp_path, "until-restart here")
+        assert "anything under" in reason, (
+            f"the audit store recorded a subtree grant as exact: {reason}")
+
+    @pytest.mark.parametrize(
+        "verb", ["until-restart", "always", "until-restart here", "always here"])
+    def test_prompt_extent_and_audit_row_are_byte_identical(self, tmp_path, verb):
+        """All four verbs. The prompt and the record must agree exactly."""
+        from prometheus.permissions.approval_queue import prospective_extents
+
+        action = _action(str(tmp_path / "target" / "x.txt"))
+        shown = prospective_extents(action)[verb]
+        recorded = derive_grant(action, verb=verb).describe()
+        assert shown == recorded, (
+            f"verb {verb!r}\n  prompt:   {shown!r}\n  recorded: {recorded!r}")
+
+
+class TestNoCallerPatchesTheseFields:
+    def test_no_caller_patches_scope_or_widened(self):
+        """Both fields are set at construction. Assert nothing fills them in later.
+
+        ONE exception, named rather than pattern-matched away: the dedupe path
+        in checker.py upgrades an existing until-restart grant to persistent
+        when the operator later says "always". That is a state TRANSITION on a
+        fully-constructed record, not a caller completing one.
+        """
+        import subprocess
+        src = Path(__file__).resolve().parent.parent / "src"
+        out = subprocess.run(
+            ["grep", "-rn", r"\.scope = \|\.widened = ", str(src)],
+            capture_output=True, text=True).stdout.strip().splitlines()
+        offenders = [
+            line for line in out
+            if 'existing.scope = "persistent"' not in line
+        ]
+        assert offenders == [], (
+            "a caller is patching scope/widened after construction:\n  "
+            + "\n  ".join(offenders))
