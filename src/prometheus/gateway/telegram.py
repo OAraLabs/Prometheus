@@ -639,11 +639,19 @@ class TelegramAdapter(BasePlatformAdapter):
         }
 
     def _probe_interval_seconds(self) -> float:
-        """Probe cadence from gateway.telegram.probe_interval_seconds (0=off)."""
-        gateway_cfg = self._prometheus_config.get("gateway", {}) or {}
-        telegram_cfg = gateway_cfg.get("telegram", {}) or {}
+        """Probe cadence from gateway.telegram.probe_interval_seconds (0=off).
+
+        Read one level at a time through plainly-named locals so the config
+        extractor (tests/support/config_defaults.py) can resolve the dotted
+        key and hold it under the template pin from #221. Collapsing this
+        into a chained expression makes the key invisible to that pass, and
+        an undocumented key is the exact FL-2 class the pin exists to catch.
+        """
+        config = self._prometheus_config
+        gateway = config.get("gateway", {}) or {}
+        telegram = gateway.get("telegram", {}) or {}
         try:
-            return float(telegram_cfg.get("probe_interval_seconds", 60))
+            return float(telegram.get("probe_interval_seconds", 60))
         except (TypeError, ValueError):
             logger.warning(
                 "gateway.telegram.probe_interval_seconds is not a number — "

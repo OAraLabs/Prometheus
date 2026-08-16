@@ -257,6 +257,22 @@ gateway:
   # last active Telegram chat. Modes: off | quiet | verbose.
   # `/notifications <mode>` toggles at runtime (Stream 3).
   skill_event_notifications: quiet
+  telegram:
+    # How often to ask Telegram whether it is actually answering (0 disables).
+    #
+    # The adapter's `running` flag is SELF-REPORTED: start() sets it, stop()
+    # clears it, and nothing in between consults Telegram. On 2026-08-15 it
+    # read healthy for 45 minutes while every call returned 502 and no
+    # inbound message arrived. python-telegram-bot cannot raise the alarm
+    # either — httpx times out at 5s, Telegram's 502 took ~15.7s, and the
+    # resulting TimedOut is the one branch of its retry loop that skips the
+    # error callback and logs at DEBUG.
+    #
+    # So this probe is the only thing that can tell you the gateway is dark.
+    # Result surfaces as `gateway.reachable` on /api/status and
+    # `gateway_reachable` in the heartbeat. Transitions log; steady state is
+    # quiet, so the cost of the default is one getMe per minute.
+    probe_interval_seconds: 60
   media:
     max_file_size_mb: 20
     cache_dir: "~/.prometheus/cache/media"
