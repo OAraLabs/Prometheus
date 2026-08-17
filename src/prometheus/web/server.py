@@ -309,6 +309,15 @@ def create_app(
             "model": app.state.current_model,
             # Full config_pins detail: bearer-gated, unlike /health's counts.
             "config_pins": _config_pins_detail(),
+            # WS delivery counters. Monotonic since boot. One line an
+            # operator can read to answer "is this daemon losing frames?"
+            # without attaching a WebSocket client — which was the only way
+            # anything about this seam was established.
+            "ws_delivery": (
+                app.state.ws_bridge.delivery_stats()
+                if getattr(app.state, "ws_bridge", None)
+                and hasattr(app.state.ws_bridge, "delivery_stats") else None
+            ),
             "provider": app.state.current_provider,
             "profile": (
                 app.state.profile_state.name

@@ -44,6 +44,18 @@ AUTH_FRAME_TIMEOUT_SECONDS = 5.0
 PROGRESS_INTERVAL_SECONDS = 3.0
 
 
+def _client_label(ws: Any) -> str:
+    """Something an operator can correlate with a connection. Never raises —
+    this runs inside an error path and must not become the second failure."""
+    try:
+        addr = getattr(ws, "remote_address", None)
+        if addr:
+            return f"{addr[0]}:{addr[1]}"
+    except Exception:
+        pass
+    return f"id={id(ws):x}"
+
+
 class WebSocketBridge:
     """Bridges SignalBus events to WebSocket clients."""
 
@@ -69,6 +81,10 @@ class WebSocketBridge:
         # keep working unchanged.
         self._api_token = api_token or ""
         self._clients: set[Any] = set()
+        # Monotonic since boot — see delivery_stats(). A frame that fails to
+        # send is gone; these are the only record that it existed.
+        self._frames_dropped = 0
+        self._clients_discarded = 0
         self._server: Any = None
         # Interrupt plumbing (feat/ws-interrupt-frame): the running turn's
         # asyncio.Task per session, registered by _run_agent itself so BOTH
@@ -1032,7 +1048,30 @@ class WebSocketBridge:
         await self.broadcast(event)
 
     async def broadcast(self, event: dict[str, Any]) -> None:
-        """Send an event to all connected clients."""
+        """Send an event to all connected clients.
+
+        A send that raises means the frame is GONE — not retried, not queued.
+        This used to swallow that with a bare ``except`` and no log at any
+        level, so the daemon could drop every frame of a turn and leave no
+        record anywhere. Worse than the ``agent_progress`` emitter, which at
+        least logs its failures at debug (and that debug level is exactly why
+        42 client disconnects produced zero visible evidence).
+
+        WARNING, not debug, and counted: the counters are what let an operator
+        answer "is this daemon losing frames?" without attaching a WebSocket
+        client, which was the only way anything was established about this
+        seam.
+
+        ⚠ HONEST LIMIT — this cannot see the half-open case at the moment it
+        bites. A peer that called ``terminate()`` leaves a socket the OS still
+        accepts writes into, so ``send`` returns cleanly and nothing here
+        fires. What closes that gap is the library's own keepalive
+        (``ping_interval=20``, ``ping_timeout=20`` by default), which fails
+        the connection within roughly 20-40s; every send AFTER that raises and
+        is counted here. So the blind window is bounded at ~40s, or ~13
+        undetected frames at the 3s progress cadence — not unbounded, but not
+        zero either. See the PR body for what detecting it sooner would cost.
+        """
         if not self._clients:
             return
         raw = json.dumps(event)
@@ -1040,10 +1079,35 @@ class WebSocketBridge:
         for ws in self._clients:
             try:
                 await ws.send(raw)
-            except Exception:
+            except Exception as exc:
                 dead.append(ws)
+                self._frames_dropped += 1
+                logger.warning(
+                    "WS frame DROPPED for client %s (type=%s): %s: %s",
+                    _client_label(ws), event.get("type", "?"),
+                    type(exc).__name__, exc,
+                )
         for ws in dead:
             self._clients.discard(ws)
+            self._clients_discarded += 1
+            logger.warning(
+                "WS client DISCARDED after a failed send: %s (%d client(s) left)",
+                _client_label(ws), len(self._clients),
+            )
+
+    def delivery_stats(self) -> dict[str, int]:
+        """Monotonic since boot. Read by /api/status.
+
+        Monotonic on purpose: a gauge that resets tells an operator nothing
+        about a drop that happened ten minutes ago, and the question being
+        answered is "has this daemon EVER lost frames", not "is it losing them
+        this second".
+        """
+        return {
+            "clients": len(self._clients),
+            "frames_dropped": self._frames_dropped,
+            "clients_discarded": self._clients_discarded,
+        }
 
     async def _send_one(self, websocket: Any, event: dict[str, Any]) -> None:
         try:
