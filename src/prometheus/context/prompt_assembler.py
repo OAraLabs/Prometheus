@@ -130,7 +130,6 @@ def build_runtime_system_prompt(
     memory_content: str = "",
     skills: list | None = None,
     task_state: str = "",
-    loaded_skill_content: str = "",
     profile: object | None = None,
 ) -> str:
     """Assemble the full runtime system prompt.
@@ -170,8 +169,17 @@ def build_runtime_system_prompt(
         List of skill dicts with ``"name"`` and ``"description"`` keys.
     task_state:
         Serialised task-tracking state (e.g. todo list) to inject.
-    loaded_skill_content:
-        Content from a loaded skill that should appear in the dynamic section.
+
+        ⚠ There is deliberately no ``loaded_skill_content``. It existed from
+        the initial commit, rendered a ``# Loaded Skill`` section, and **no
+        caller ever passed it** — so that section had never appeared in the
+        product. A skill's body reaches the model as a TOOL RESULT instead
+        (``tools/builtin/skill.py`` returns ``ToolResult(output=skill.content)``),
+        which is the wired path. Keeping the parameter advertised a
+        capability the assembler did not have. If prompt-RESIDENT skill
+        loading is wanted — it is a real difference, a tool result can be
+        compacted away while a prompt section persists — it should arrive
+        with a caller and a test rather than sit here as an unwired hook.
     profile:
         An :class:`~prometheus.config.profiles.AgentProfile` controlling which
         bootstrap files to load.  If ``None``, falls back to config toggles.
@@ -331,12 +339,6 @@ def build_runtime_system_prompt(
     # Task state
     if task_state:
         dynamic_sections.append(f"# Current Task State\n\n{task_state}")
-
-    # Loaded skill content
-    if loaded_skill_content:
-        dynamic_sections.append(
-            f"# Loaded Skill\n\n{loaded_skill_content}"
-        )
 
     # ------------------------------------------------------------------
     # Assemble
