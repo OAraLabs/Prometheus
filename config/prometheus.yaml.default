@@ -47,7 +47,6 @@ model:
 # this was config-dark since birth — the compactor only exists when
 # compaction.enabled is true. Default ON; the config-dark audit alarms if
 # an expected-enabled compactor is missing from /api/status.
-  suppress_thinking: true
 compaction:
   enabled: true
 
@@ -377,26 +376,6 @@ router:
   overrides:
     enabled: true          # direct-mode commands are active
     sticky: true           # overrides persist until /local (false = one-shot)
-
-# Per-slash-command model selection.
-#
-# Each /claude /gpt /gemini /xai command in Telegram (and /grok as a /xai
-# alias) uses the provider + model below. If you omit this section, or omit
-# a specific command, the daemon falls back to the built-in default
-# (logged as WARN once at first use) — the defaults are conservative
-# (cheap/fast) and listed in src/prometheus/router/model_router.py
-# under OVERRIDE_PRESETS.
-#
-# Model field accepts either a provider alias (e.g. claude-sonnet-4-5,
-# claude-haiku-4-5) or a fully pinned snapshot ID
-# (claude-sonnet-4-5-20250929). Anthropic pre-4.6 aliases resolve
-# server-side; 4.6+ IDs are already dateless pinned snapshots. For
-# OpenAI / Gemini / xAI use the model name the provider exposes
-# (e.g. gpt-4o, gemini-2.5-pro, grok-4.5).
-#
-# After editing, restart the daemon and grep journalctl for "slash_commands"
-# to verify the wiring:
-#   journalctl --user -u prometheus.service | grep slash_commands
   fallback: []
 
   # ── Previously undocumented: read by the code, absent from this
@@ -418,6 +397,26 @@ router:
     max_simple_chars: 160
     max_simple_words: 28
     simple_provider:            # required — no code default
+
+# Per-slash-command model selection.
+#
+# Each /claude /gpt /gemini /xai command in Telegram (and /grok as a /xai
+# alias) uses the provider + model below. If you omit this section, or omit
+# a specific command, the daemon falls back to the built-in default
+# (logged as WARN once at first use) — the defaults are conservative
+# (cheap/fast) and listed in src/prometheus/router/model_router.py
+# under OVERRIDE_PRESETS.
+#
+# Model field accepts either a provider alias (e.g. claude-sonnet-4-5,
+# claude-haiku-4-5) or a fully pinned snapshot ID
+# (claude-sonnet-4-5-20250929). Anthropic pre-4.6 aliases resolve
+# server-side; 4.6+ IDs are already dateless pinned snapshots. For
+# OpenAI / Gemini / xAI use the model name the provider exposes
+# (e.g. gpt-4o, gemini-2.5-pro, grok-4.5).
+#
+# After editing, restart the daemon and grep journalctl for "slash_commands"
+# to verify the wiring:
+#   journalctl --user -u prometheus.service | grep slash_commands
 slash_commands:
   claude:
     provider: anthropic
@@ -649,6 +648,13 @@ sentinel:
   enabled: false
   idle_threshold_minutes: 15
   dream_interval_minutes: 30
+  synthesis_enabled: true
+  auto_fix_wiki: true
+  dream_budget_tokens: 2000
+  stale_threshold_days: 90
+  confidence_decay_rate: 0.05
+  digest_lookback_hours: 24
+  nudge_cooldown_minutes: 60
 
 # Passive memory recall (MEMORY-3 follow-up). At the start of every agent
 # turn the latest user message is matched (FTS5, any-token) against the
@@ -658,13 +664,6 @@ sentinel:
 # Fails open — a missing or broken memory.db never blocks a turn. Applies
 # to the chat surfaces (Telegram/Slack/Discord/web/CLI); coding mode, gym,
 # and evals never recall.
-  synthesis_enabled: true
-  auto_fix_wiki: true
-  dream_budget_tokens: 2000
-  stale_threshold_days: 90
-  confidence_decay_rate: 0.05
-  digest_lookback_hours: 24
-  nudge_cooldown_minutes: 60
 memory:
   recall:
     enabled: true
@@ -792,6 +791,8 @@ evals:
   judge_model: qwen2.5:7b-instruct
 tracing:
   enabled: false
+  service_name: prometheus
+  phoenix_endpoint: http://127.0.0.1:6006
 
 # ── Wiki ──────────────────────────────────────────────────────────────────
 # Where the compiled wiki lives. Every consumer — the compiler, the linter,
@@ -801,8 +802,6 @@ tracing:
 # PROMETHEUS_CONFIG_DIR is set). The PROMETHEUS_WIKI env var overrides the
 # default but is itself overridden by this key; scripts/install_obsidian_view.sh
 # reads that env var as the shell mirror of this setting.
-  service_name: prometheus
-  phoenix_endpoint: http://127.0.0.1:6006
 wiki:
   root: ~/.prometheus/wiki
 
