@@ -319,3 +319,97 @@ def test_upgrade_does_not_downgrade(config):
     gate.add_grant(Grant(kind="path_prefix", value="/tmp/d2",
                          tool_name="write_file", scope="until_restart"))
     assert gate.list_grants()[0].scope == "persistent"
+
+
+# ── Writing a grant must not delete the operator's documentation ───────────
+
+COMMENTED_CONFIG = """\
+# Prometheus configuration — reference defaults
+# SECRETS never belong in this file.
+
+security:
+  # ⚠ THIS IS A SPEED BUMP, NOT CONFINEMENT. It gates write_file and
+  # edit_file only. `bash` is checked on its COMMAND STRING.
+  workspace_root:
+  - ~/projects
+  # THE ABOVE DOES NOT COVER bash. denied_paths is only consulted when a
+  # call passes a file_path, and bash is handed a command string.
+  denied_paths:
+  - "/etc"
+  - "/*/.ssh"           # ANY home, not just the daemon's
+  grants: []
+
+# Assembly-time context compaction (the relief valve).
+compaction:
+  enabled: true
+"""
+
+
+@pytest.fixture
+def commented_config(tmp_path):
+    p = tmp_path / "prometheus.yaml"
+    p.write_text(COMMENTED_CONFIG)
+    return p
+
+
+def test_persisting_a_grant_preserves_config_comments(commented_config):
+    """A grant write must not strip the file's comments.
+
+    THIS IS NOT HYPOTHETICAL. ``_rewrite_config_grants`` used to
+    ``yaml.dump`` the whole file, and the live config reached 0 comment
+    lines against a shipped template carrying 430 — the blocks explaining
+    that ``denied_paths`` does not cover bash, and that this gate is a speed
+    bump rather than confinement. The file an operator opens to learn what a
+    key means had been emptied of meaning by a routine write.
+
+    The mutation this test must kill: swap the splice back for
+    ``yaml.dump(on_disk, ...)``. Every other test in this file survives that
+    change, because none of them look at anything but parsed values.
+    """
+    before = commented_config.read_text()
+    assert before.count("#") > 5, "fixture is not actually commented"
+
+    gate = SecurityGate(config_path=str(commented_config))
+    # persist_grant, not add_grant: add_grant is the MEMORY half. The disk
+    # half is a separate call (see add_grant's own docstring), and the disk
+    # half is what deletes comments.
+    gate.persist_grant(Grant(kind="path_prefix", value="/tmp/keep",
+                             tool_name="write_file", scope="persistent"))
+
+    after = commented_config.read_text()
+    assert _disk_grants(commented_config), "grant never reached the file"
+
+    for line in before.splitlines():
+        if line.lstrip().startswith("#"):
+            assert line in after, (
+                f"a grant write deleted the comment {line.strip()!r}. The "
+                f"config is the operator's documentation; a permissions "
+                f"write must not consume it."
+            )
+
+
+def test_grant_write_changes_nothing_but_grants(commented_config):
+    """Everything outside ``security.grants`` survives byte-for-byte.
+
+    Comment survival alone is too weak a claim: a rewrite could keep the
+    comments and still reorder keys, restyle quoting, or drop a value.
+    """
+    before = commented_config.read_text()
+    gate = SecurityGate(config_path=str(commented_config))
+    grant = Grant(kind="path_prefix", value="/tmp/x",
+                  tool_name="write_file", scope="persistent")
+    gate.add_grant(grant)
+    gate.persist_grant(grant)
+
+    after = commented_config.read_text()
+    expected = yaml.safe_load(before)
+    expected["security"]["grants"] = _disk_grants(commented_config)
+    assert yaml.safe_load(after) == expected, (
+        "the grant write altered a key other than security.grants"
+    )
+
+    gate.remove_grant(grant.grant_id, config_path=str(commented_config))
+    assert commented_config.read_text() == before, (
+        "add-then-revoke did not restore the file byte-for-byte; the writer "
+        "is leaving formatting drift behind on every approval"
+    )

@@ -19,6 +19,7 @@ import fnmatch
 import logging
 import os
 import re
+import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -458,6 +459,85 @@ def _normalise_denied_path(entry: str) -> str:
     if _is_glob(expanded):
         return expanded
     return str(Path(expanded).resolve())
+
+
+def _splice_grants(original: str, grants: list) -> str:
+    """Return ``original`` with only the ``security.grants`` block replaced.
+
+    Everything outside that one block — comments, key order, quoting,
+    indentation, blank lines — is carried through byte-for-byte. That is the
+    whole point: a whole-file ``yaml.dump`` is what deleted the config's 430
+    comment lines once already (see ``_rewrite_config_grants``).
+
+    Handles the three shapes the key actually takes on disk:
+      * ``grants: []``            — inline empty, one line
+      * ``grants:`` + ``- …``     — block sequence
+      * key absent entirely       — inserted under ``security:``
+    and the case where ``security:`` itself is absent (appended at the end).
+    """
+    import yaml
+
+    def render(indent: int) -> list[str]:
+        dumped = yaml.dump(
+            {"grants": grants}, default_flow_style=False, sort_keys=False
+        ).rstrip("\n")
+        return [(" " * indent + ln) if ln.strip() else ln
+                for ln in dumped.split("\n")]
+
+    lines = original.splitlines()
+
+    def content(ln: str) -> bool:
+        return bool(ln.strip()) and not ln.lstrip().startswith("#")
+
+    def indent_of(ln: str) -> int:
+        return len(ln) - len(ln.lstrip())
+
+    # Locate `security:` at top level, then its block extent.
+    sec = next((i for i, ln in enumerate(lines)
+                if content(ln) and indent_of(ln) == 0
+                and ln.split(":", 1)[0].strip() == "security"), None)
+    if sec is None:
+        tail = "" if original.endswith("\n") else "\n"
+        return original + tail + "security:\n" + "\n".join(render(2)) + "\n"
+
+    end = len(lines)
+    for i in range(sec + 1, len(lines)):
+        if content(lines[i]) and indent_of(lines[i]) == 0:
+            end = i
+            break
+
+    # Locate `grants:` inside that block.
+    key = next((i for i in range(sec + 1, end)
+                if content(lines[i])
+                and lines[i].split(":", 1)[0].strip() == "grants"), None)
+    if key is None:
+        return "\n".join(lines[:sec + 1] + render(2) + lines[sec + 1:]) + "\n"
+
+    ind = indent_of(lines[key])
+    stop = key + 1
+    if lines[key].split(":", 1)[1].strip() == "":
+        # Block sequence: consume its items and their continuation lines.
+        # Stops at a comment at or above the key's indent so documentation
+        # that belongs to the NEXT key is never swallowed.
+        # `stop` advances only over lines PROVEN to belong to the block, so a
+        # trailing blank line before the next section is left where it is. A
+        # revoke that swallowed it would drift the file's formatting on every
+        # approval cycle, which the round-trip test forbids.
+        probe = key + 1
+        while probe < end:
+            ln = lines[probe]
+            if not ln.strip():
+                probe += 1
+                continue
+            if not content(ln) and indent_of(ln) <= ind:
+                break
+            if content(ln) and indent_of(ln) <= ind \
+                    and not ln.lstrip().startswith("- "):
+                break
+            probe += 1
+            stop = probe
+
+    return "\n".join(lines[:key] + render(ind) + lines[stop:]) + "\n"
 
 
 class SecurityGate:
@@ -978,22 +1058,34 @@ class SecurityGate:
     def _rewrite_config_grants(self, mutate, config_path, grant: Grant) -> bool:
         """Surgical, ATOMIC read-modify-write of ``security.grants``.
 
-        Surgical (fresh-load the file, touch one key, dump) so env-var secrets
-        merged into the runtime config dict never get copied into the file.
+        Surgical (fresh-load the file, touch one key, splice) so env-var
+        secrets merged into the runtime config dict never get copied into the
+        file.
 
         ⚠ ATOMIC via temp-file + ``os.replace``, added with revocation. The
         previous form truncated the real file in place, so a crash mid-dump
         left a partial ``prometheus.yaml`` — the file the daemon reads at
-        boot. Revocation makes this a SECOND writer, and this repo has
-        already lost data to a read-modify-write clobber (``cron_jobs.json``,
-        three jobs). ``os.replace`` is atomic on POSIX: a reader sees the old
-        file or the new one, never a truncated one.
+        boot. ``os.replace`` is atomic on POSIX: a reader sees the old file or
+        the new one, never a truncated one.
+
+        ⚠ COMMENT-PRESERVING, and this is load-bearing now. This function
+        used to ``yaml.dump`` the WHOLE file, which drops every comment and
+        reformats everything else. That was excused on the premise that "the
+        live config is machine-written and already comment-free" — a premise
+        that held only because a *different* writer (the config-pin drift
+        auto-fix, removed in #242) had already stripped the file's 430
+        comment lines. Restoring those comments falsifies the excuse: the
+        next persistent grant would delete the operator's documentation a
+        second time, by the same mechanism, for the same reason.
+
+        So the write is now a SPLICE. Only the ``security.grants`` block is
+        re-serialised; every other byte of the file is carried through
+        untouched. Grants are machine-owned, so reformatting inside that one
+        block costs nothing.
 
         ⚠ KNOWN, NOT FIXED: atomic is not LOCKED — two concurrent writers can
-        still lose an update (last writer wins). And the dump reformats, so
-        comments in a hand-written config are lost on first write. Both are
-        latent here: the live config is machine-written and already
-        comment-free, and there is one writer process.
+        still lose an update (last writer wins). Latent while this is the
+        only writer of the file, which it is again as of #242.
         """
         import tempfile
 
@@ -1003,19 +1095,37 @@ class SecurityGate:
         if not path or not path.exists():
             return False
         try:
-            with path.open(encoding="utf-8") as fh:
-                on_disk = yaml.safe_load(fh) or {}
+            original = path.read_text(encoding="utf-8")
+            on_disk = yaml.safe_load(original) or {}
             grants = on_disk.setdefault("security", {}).setdefault("grants", [])
             if not mutate(grants):
                 return True  # already in the desired state
+
+            new_text = _splice_grants(original, grants)
+
+            # Prove the splice before it reaches the file: the parsed result
+            # must differ from the original in security.grants and NOWHERE
+            # else. A text edit that quietly changed another key would be a
+            # permissions bug wearing a formatting diff.
+            reparsed = yaml.safe_load(new_text) or {}
+            expected = yaml.safe_load(original) or {}
+            expected.setdefault("security", {})["grants"] = grants
+            if reparsed != expected:
+                log.error(
+                    "grant config splice would alter keys beyond security.grants; "
+                    "refusing to write %s", path,
+                )
+                return False
+
             fd, tmp = tempfile.mkstemp(
                 dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
             )
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    yaml.dump(on_disk, fh, default_flow_style=False, sort_keys=False)
+                    fh.write(new_text)
                     fh.flush()
                     os.fsync(fh.fileno())
+                shutil.copymode(path, tmp)
                 os.replace(tmp, path)
             except BaseException:
                 try:
