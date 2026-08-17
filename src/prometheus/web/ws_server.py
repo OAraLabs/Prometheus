@@ -811,6 +811,7 @@ class WebSocketBridge:
         accumulated = ""
         last_usage: Any = None
         original_len: int | None = None
+        messages: list | None = None
         try:
             messages = session.get_messages()
             original_len = len(messages)
@@ -913,14 +914,39 @@ class WebSocketBridge:
             return accumulated, last_usage
 
         except Exception as e:
+            # DISCARD THE FAILED TURN'S TAIL — before anything else, so no later
+            # path can observe the half-turn. run_loop appends in place, so a turn
+            # that dies has already put its assistant + tool-result rows on
+            # session.messages; this used to return without touching them. Keeping
+            # them is not neutral: the NEXT message rebuilds a prompt containing
+            # whatever killed this one. On 2026-08-17 a bash result carrying
+            # llama.cpp's per-process media marker (a curl of /props) made the
+            # backend reject the prompt, the rows stayed, and every subsequent
+            # message took the same 400 — unrecoverable, because the web surface
+            # has no /reset. Note the deliberate asymmetry with the interrupt path
+            # above, which KEEPS its tail: a user stop means "keep what you got",
+            # a failure means the opposite.
+            discarded = 0
+            if original_len is not None:
+                rollback_to = getattr(session, "rollback_to", None)
+                if rollback_to is not None:
+                    discarded = rollback_to(original_len)
+                elif messages is not None:
+                    # No session-level rollback (a bare messages-list double):
+                    # still truncate, or the discard silently does not happen.
+                    discarded = max(0, len(messages) - original_len)
+                    del messages[original_len:]
             # FAIL LOUD (#74-adjacent follow-up): this except used to emit only a WS
             # error frame — invisible in the journal unless a client happened to
             # render it. That masked the wire-contract interface drift (a TypeError
             # from a run_loop signature change surfaced as "the turn silently
             # produced nothing") for the life of #74-on-main. Log the full traceback
             # server-side and record a silent_failure telemetry row, THEN broadcast.
+            # The discard is part of that record: dropping a turn's work silently
+            # would be its own version of the bug this handler exists to prevent.
             logger.exception(
-                "_run_agent failed (session=%s, mode=%s): %s", session_id, mode, e
+                "_run_agent failed (session=%s, mode=%s, discarded=%d): %s",
+                session_id, mode, discarded, e,
             )
             try:
                 from prometheus.telemetry.tracker import get_telemetry_handle

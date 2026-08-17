@@ -463,6 +463,38 @@ class ChatSession:
             if self._lcm_persisted_len > idx:
                 self._lcm_persisted_len = idx
 
+    def rollback_to(self, length: int) -> int:
+        """Discard every message appended past ``length``. Returns the count.
+
+        The span twin of :meth:`rollback_last`, for the in-place ``run_loop``
+        contract :meth:`persist_loop_result` describes: a turn that dies
+        mid-flight has ALREADY appended its assistant and tool-result rows
+        onto ``self.messages``. Leaving them is not neutral — the next message
+        rebuilds a prompt containing whatever killed this one.
+
+        That is not hypothetical. On 2026-08-17 a ``bash`` result carrying
+        llama.cpp's per-process media marker (curl of the inference server's
+        ``/props``) made the backend reject the prompt; the rows stayed, every
+        later message re-sent the marker and took the same 400, and the web
+        surface has no ``/reset`` to clear it. Microcompaction would have
+        truncated the offending result away, but it cannot fire before round
+        ``microcompact_after_turns`` — and the turn dies on round 0.
+
+        Durable rows stay in LCM (append-only, unchanged) but the watermark
+        retreats for each freed position, so the NEXT message written there
+        persists instead of being skipped as already-written.
+        """
+        length = max(0, length)
+        discarded = len(self.messages) - length
+        if discarded <= 0:
+            return 0
+        del self.messages[length:]
+        for idx in range(length, length + discarded):
+            self._lcm_persisted_ahead.discard(idx)
+        if self._lcm_persisted_len > length:
+            self._lcm_persisted_len = length
+        return discarded
+
     def get_messages(self) -> list[ConversationMessage]:
         """Return the conversation history."""
         return self.messages
