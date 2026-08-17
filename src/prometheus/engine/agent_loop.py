@@ -84,6 +84,12 @@ class _IterationReason:
     # loop fed structured guidance back and is retrying, breaker-bounded.
     MALFORMED_DROPPED = "malformed_dropped"
     EMPTY_RESPONSE = "empty_response"
+    # Final-text hygiene stripped a tool-call envelope to nothing because the
+    # extractor could not parse what the stripper could delete. Distinct from
+    # EMPTY_RESPONSE on purpose: the model produced output, we removed it.
+    # Telling these apart in telemetry is the whole point — 13 of these were
+    # filed as empty_response and read as "the rig is broken".
+    STRIPPED_TO_EMPTY = "stripped_to_empty"
 
 
 _FAILURE_CATEGORIES = (
@@ -1108,6 +1114,16 @@ async def _run_loop(
         final_message: ConversationMessage | None = None
         usage = UsageSnapshot()
         dropped_malformed = 0
+        # Blocks that final-text hygiene stripped to nothing, and a truncated
+        # sample of what they held. A SEPARATE counter from dropped_malformed
+        # deliberately: both mean "we deleted what the model said" and both
+        # take the same breaker-bounded retry below, but they are different
+        # failures and need different corrections. dropped_malformed means
+        # "you sent a call with no name"; this means "your envelope did not
+        # parse". Sharing one integer would relabel a parse disagreement as a
+        # provider drop and hand the model the wrong instruction.
+        stripped_to_empty = 0
+        stripped_samples: list[str] = []
         served_model_this_turn: str | None = None
 
         # SPRINT-2 WS1: drain queued steers as a system-prompt addendum
@@ -1338,7 +1354,34 @@ async def _run_loop(
                         changed = True
                     if cleaned:
                         cleaned_blocks.append(TextBlock(text=cleaned))
-                    # empty after strip → drop the block
+                    else:
+                        # ⚠ A BLOCK THAT STRIPS TO NOTHING IS A DROP, AND IT
+                        # IS COUNTED. This line used to be the bare comment
+                        # "empty after strip → drop the block" — no counter,
+                        # no log, no telemetry — and it is where four turns
+                        # of Will's went on 2026-08-17.
+                        #
+                        # Reaching here means the model DID emit a tool call
+                        # and two components disagreed about it: the
+                        # enforcer's extractor could not parse the envelope
+                        # (or we would have replaced the message above), and
+                        # the stripper could, so the stripper deleted it.
+                        # The more permissive component wins by running
+                        # second, and cleaning is destructive, so the
+                        # evidence was gone before anything could count it.
+                        # #77's family — there the grammar parser rejected
+                        # what the admit-checker accepted.
+                        stripped_to_empty += 1
+                        if len(stripped_samples) < 3:
+                            stripped_samples.append(block.text[:400])
+                        log.warning(
+                            "tool-call markup stripped to nothing — the "
+                            "extractor could not parse an envelope the "
+                            "stripper could delete. This is a PARSE "
+                            "DISAGREEMENT, not an empty model response. "
+                            "pre-strip text (truncated): %r",
+                            block.text[:400],
+                        )
                 else:
                     cleaned_blocks.append(block)
             if changed:
@@ -1346,6 +1389,62 @@ async def _run_loop(
                     role="assistant",
                     content=cleaned_blocks,
                 )
+
+        # ── Parse-disagreement guard ──
+        # The model DID produce output; we deleted it. Handled BEFORE the
+        # empty-response guard because it is not an empty response, and
+        # reporting it as one is what sent Will "please rephrase and try
+        # again" for four consecutive turns while the model was emitting tool
+        # calls the whole time.
+        #
+        # RULING (asked for explicitly): this RETRIES with the text preserved
+        # rather than surfacing a failure. The model produced output, so a
+        # failure turn discards work and blames the operator for a
+        # disagreement between two of our own components. It takes the same
+        # breaker-bounded shape the dropped_malformed path already uses — the
+        # retry carries structured feedback INCLUDING what the model actually
+        # emitted, so it is an informed retry, not a blind one, and the
+        # circuit breaker bounds it exactly as it bounds the malformed case.
+        # A blind retry would risk the 66-minute-turn class; a fed-back retry
+        # is the shape this loop already proved.
+        if (
+            stripped_to_empty
+            and not (final_message.text or "").strip()
+            and not final_message.tool_uses
+        ):
+            trip_reason = circuit_breaker.record_error(
+                "_strip_disagreement",
+                "tool-call envelope stripped to nothing (extractor missed)",
+            )
+            if trip_reason is None:
+                _log_iteration(
+                    context,
+                    _IterationReason.STRIPPED_TO_EMPTY,
+                    turn,
+                    tool_iteration,
+                    f"stripped={stripped_to_empty}",
+                )
+                messages.append(
+                    ConversationMessage.from_injected(
+                        _strip_disagreement_feedback(context, stripped_samples),
+                        provenance="orchestrator",
+                        is_trusted=True,
+                    )
+                )
+                continue
+            _log_iteration(
+                context, _IterationReason.CIRCUIT_BREAKER_TRIP, turn, tool_iteration,
+                f"strip_disagreement: {trip_reason}",
+            )
+            error_msg = _make_assistant_msg(
+                "I emitted a tool call that could not be parsed, and the "
+                "cleanup step removed it. This is a parsing fault on my side, "
+                "not a problem with your message — no need to rephrase. The "
+                "raw output is in the daemon log (search: PARSE DISAGREEMENT)."
+            )
+            messages.append(error_msg)
+            yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+            return
 
         # ── Empty-response guard ──
         # A genuinely empty assistant turn — no text, no tool calls, and NOT the
@@ -1903,6 +2002,45 @@ def _maybe_periodic_nudge(context: LoopContext, turn_count: int) -> str | None:
         return None
     log.debug("PeriodicNudge: armed for the next call at round %d", turn_count)
     return str(text)
+
+
+def _strip_disagreement_feedback(
+    context: LoopContext, samples: list[str]
+) -> str:
+    """Guidance after a tool-call envelope was stripped to nothing.
+
+    ⚠ THE MODEL'S OWN TEXT GOES BACK TO IT. The failure is that we could not
+    parse what it emitted, so the one thing it needs is to see what it
+    emitted — quoting it back is the difference between "try again" and "this
+    exact string did not parse". Truncated, because a runaway envelope must
+    not be echoed whole into the next prompt.
+
+    Distinct from ``_malformed_retry_feedback``: that one means "you sent a
+    call with no name", this one means "your envelope did not parse". Same
+    accounting, different correction.
+    """
+    names = ""
+    registry = context.tool_registry
+    if registry is not None and hasattr(registry, "list_tools"):
+        try:
+            names = ", ".join(t.name for t in registry.list_tools())
+        except Exception:
+            names = ""
+    parts = [
+        "Your previous response contained tool-call markup that could not be "
+        "parsed, so it was discarded and nothing ran.",
+    ]
+    if samples:
+        quoted = " | ".join(s.replace("\n", " ")[:200] for s in samples[:2])
+        parts.append(f"What you emitted (truncated): {quoted}")
+    parts.append(
+        "Emit exactly one call as "
+        '<tool_call>{"name": "<tool_name>", "arguments": {...}}</tool_call> '
+        "with valid JSON, or answer in plain text with no <tool_call> markup."
+    )
+    if names:
+        parts.append(f"Available tools: {names}.")
+    return " ".join(parts)
 
 
 def _malformed_retry_feedback(context: LoopContext, dropped: int) -> str:
