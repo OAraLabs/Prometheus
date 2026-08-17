@@ -40,21 +40,55 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
+
+import pytest
 
 import prometheus.gateway.commands as commands_mod
+
+
+def _web_registered() -> dict[str, str]:
+    """Commands the web (Beacon) chat surface actually HANDLES.
+
+    ``web.slash_router.route_slash`` dispatches a leading-slash message through
+    exactly two shared tables; anything else is either an explicit boundary
+    reply (WEB_NATIVE_ONLY) or falls through to the agent as chat text. So the
+    tables ARE the registration, and reading them live is the web equivalent of
+    scraping an adapter's CommandHandler calls.
+    """
+    return {
+        **{name: "formatter_table" for name in commands_mod._FORMATTER_COMMANDS},
+        **{name: "session_table" for name in commands_mod._SESSION_COMMANDS},
+    }
 
 GATEWAY_DIR = Path(commands_mod.__file__).resolve().parent
 
 
 @dataclass(frozen=True)
 class PlatformSpec:
-    """How to find a platform's registered commands + handler names."""
+    """How to find a platform's registered commands + handler names.
+
+    Two discovery strategies, because the surfaces genuinely differ:
+
+    * the three chat GATEWAYS register via an adapter method call, so they are
+      scraped from source with ``registration_re`` and checked against
+      ``adapter_import``;
+    * the WEB (Beacon) surface has no adapter and no registration call — a
+      command is reachable there iff it is in one of the shared dispatch tables
+      ``gateway.commands`` exposes. That is a ``resolver`` instead.
+
+    Modelling web as a regex-over-source platform would have been modelling it
+    wrong; the variation is *how you discover what a surface handles*, so that
+    is the part that varies.
+    """
 
     name: str
-    source: Path
+    source: Path | None = None
     # Regex with two groups: (command_name, handler_attr)
-    registration_re: str
-    adapter_import: str  # "module:Class" for handler hasattr checks
+    registration_re: str = ""
+    adapter_import: str = ""  # "module:Class" for handler hasattr checks
+    # Alternative to source+regex: returns {command_name: handler_label}.
+    resolver: Callable[[], dict[str, str]] | None = None
 
 
 PLATFORMS: tuple[PlatformSpec, ...] = (
@@ -76,7 +110,37 @@ PLATFORMS: tuple[PlatformSpec, ...] = (
         registration_re=r'self\._register\(\s*\w+,\s*"([\w-]+)",\s*self\.(\w+)',
         adapter_import="prometheus.gateway.discord:DiscordAdapter",
     ),
+    # SPRINT-WEB-PARITY: the fourth surface. The chart was telegram/slack/
+    # discord only, so it went green while Beacon had no /reset at all —
+    # /reset is registered on all three chat gateways, which fully satisfied a
+    # chart that never asked about web. That blind spot is why /revoke and
+    # /remember were caught (they drift on the gateway axis) and the six below
+    # were not.
+    PlatformSpec(name="web", resolver=_web_registered),
 )
+
+
+# Deliberate, DOCUMENTED web gaps: registered on Telegram, and the web surface
+# answers with an explicit "not on web" boundary message instead of silently
+# eating the command. THE CHART'S OWN COPY, deliberately not derived from
+# ``slash_router.WEB_NATIVE_ONLY`` — deriving it would make the set unable to
+# fail, which is the exact defect this column exists to close: nothing used to
+# break when WEB_NATIVE_ONLY grew. Pinned equal to the router by
+# TestWebSurface.test_deferred_set_is_pinned_to_the_router, so the set cannot
+# grow (or shrink) without this chart changing in the same commit.
+WEB_DEFERRED: frozenset[str] = frozenset({
+    # Session/daemon state bound to the TelegramGateway instance.
+    "start", "clear", "reset", "route",
+    "benchmark", "voice", "tools", "pairs",
+    "approve", "deny", "pending",
+    "gepa", "symbiote", "audit", "press",
+    "escalations",
+    # Per-session provider overrides.
+    "claude", "gpt", "gemini", "xai", "grok", "local",
+    "deepseek", "kimi", "glm", "mimo",
+})
+
+_SAME = object()  # sentinel: web uses the same command name as Telegram
 
 
 @dataclass(frozen=True)
@@ -96,8 +160,14 @@ class Family:
 
 def _cmds(
     telegram: str | None, slack: str | None, discord: str | None,
+    web: str | None | object = _SAME,
 ) -> dict[str, str | None]:
-    return {"telegram": telegram, "slack": slack, "discord": discord}
+    """Per-platform command names. ``web`` defaults to the Telegram name —
+    the web router matches the same bare names — unless the family is a
+    documented boundary (``WEB_DEFERRED``), where it is an explicit gap."""
+    if web is _SAME:
+        web = None if telegram in WEB_DEFERRED else telegram
+    return {"telegram": telegram, "slack": slack, "discord": discord, "web": web}
 
 
 # ---------------------------------------------------------------------------
@@ -277,15 +347,52 @@ NON_COMMAND_GAPS: tuple[tuple[str, str], ...] = (
 
 
 def _registered(spec: PlatformSpec) -> dict[str, str]:
-    """Return {command_name: handler_attr} scraped from the adapter source."""
+    """Return {command_name: handler_attr} for a platform.
+
+    Resolver-based platforms (web) read their live dispatch tables; the chat
+    gateways are scraped from their adapter source.
+    """
+    if spec.resolver is not None:
+        return spec.resolver()
     src = spec.source.read_text(encoding="utf-8")
     return dict(re.findall(spec.registration_re, src))
 
 
 def _adapter_class(spec: PlatformSpec):
+    """The adapter class, or None for a platform that has no adapter (web)."""
+    if not spec.adapter_import:
+        return None
     import importlib
     mod_name, cls_name = spec.adapter_import.split(":")
     return getattr(importlib.import_module(mod_name), cls_name)
+
+
+def _registration_problems(names: set[str]) -> list[str]:
+    """(b)+(c) for the named platforms — factored out so the known-red web
+    column can be asserted separately and NOT mask a gateway regression."""
+    problems: list[str] = []
+    for spec in PLATFORMS:
+        if spec.name not in names:
+            continue
+        registered = _registered(spec)
+        adapter_cls = _adapter_class(spec)
+        for fam in MANIFEST:
+            cmd = fam.commands.get(spec.name)
+            if cmd is None:
+                continue
+            handler = registered.get(cmd)
+            if handler is None:
+                where = spec.source.name if spec.source else "the shared dispatch tables"
+                problems.append(
+                    f"{spec.name}: family {fam.name!r} expects command "
+                    f"{cmd!r} but it is not registered in {where}"
+                )
+            elif adapter_cls is not None and not hasattr(adapter_cls, handler):
+                problems.append(
+                    f"{spec.name}: {cmd!r} registers {handler!r} which "
+                    f"does not exist on {adapter_cls.__name__}"
+                )
+    return problems
 
 
 # ---------------------------------------------------------------------------
@@ -311,8 +418,21 @@ class TestManifestInternalConsistency:
             )
 
     def test_gaps_have_reasons(self):
+        """A deliberate gap must be documented.
+
+        A WEB gap is documented at ONE site — the ``WEB_DEFERRED`` block above,
+        which carries the reason for the whole class (state bound to the
+        TelegramGateway instance, or a per-session provider override) and is
+        pinned to the router. Requiring 26 copies of that same sentence on
+        individual families would be ceremony, not documentation, so a web gap
+        is reasoned by membership; every OTHER platform's gap still needs its
+        own ``gap_reason``.
+        """
         for fam in MANIFEST:
-            if any(v is None for v in fam.commands.values()):
+            gapped = {p for p, v in fam.commands.items() if v is None}
+            if gapped == {"web"} and fam.commands["telegram"] in WEB_DEFERRED:
+                continue
+            if gapped:
                 assert fam.gap_reason, (
                     f"family {fam.name!r} has a platform gap without a "
                     "gap_reason — deliberate gaps must be documented"
@@ -343,26 +463,14 @@ class TestSharedLayer:
 class TestRegistrations:
     def test_manifest_commands_are_registered(self):
         """(b)+(c): every non-gap manifest command is registered on its
-        platform and its handler method exists on the adapter class."""
-        problems: list[str] = []
-        for spec in PLATFORMS:
-            registered = _registered(spec)
-            adapter_cls = _adapter_class(spec)
-            for fam in MANIFEST:
-                cmd = fam.commands.get(spec.name)
-                if cmd is None:
-                    continue
-                handler = registered.get(cmd)
-                if handler is None:
-                    problems.append(
-                        f"{spec.name}: family {fam.name!r} expects command "
-                        f"{cmd!r} but it is not registered in {spec.source.name}"
-                    )
-                elif not hasattr(adapter_cls, handler):
-                    problems.append(
-                        f"{spec.name}: {cmd!r} registers {handler!r} which "
-                        f"does not exist on {adapter_cls.__name__}"
-                    )
+        platform and its handler method exists on the adapter class.
+
+        Scoped to the three chat GATEWAYS. The web column is asserted by
+        TestWebSurface below, which is a known red — quarantining it there
+        keeps THIS test strict, so a telegram/slack/discord regression still
+        fails loudly instead of hiding inside an xfail.
+        """
+        problems = _registration_problems({"telegram", "slack", "discord"})
         assert not problems, "\n".join(problems)
 
     def test_no_unlisted_registrations(self):
@@ -387,6 +495,76 @@ class TestRegistrations:
         assert not problems, "\n".join(problems)
 
 
+class TestWebSurface:
+    """The fourth surface. Two guarantees the chart could not make before.
+
+    KNOWN RED, deliberately landed that way: piece 2 of the web-parity arc adds
+    the measurement, piece 3 wires the six and removes the xfails. They are
+    ``strict=True`` so the day a command IS wired, the XPASS fails the build and
+    forces the marker out — a skip would have rotted silently, and folding the
+    wiring into this PR would have hidden the size of the gap behind its fix.
+    """
+
+    def test_deferred_set_is_pinned_to_the_router(self):
+        """WEB_NATIVE_ONLY may not grow (or shrink) without the chart moving.
+
+        This is the coverage half. Before it, WEB_NATIVE_ONLY was only ever
+        asserted DISJOINT from the shared tables (test_web_slash_router.py) —
+        so a command could be added to the boundary set, permanently deferring
+        it from the web surface, and nothing anywhere failed.
+        """
+        from prometheus.web.slash_router import WEB_NATIVE_ONLY
+
+        assert set(WEB_DEFERRED) == set(WEB_NATIVE_ONLY), (
+            "the chart's deliberate-web-gap list and "
+            "slash_router.WEB_NATIVE_ONLY have diverged.\n"
+            f"  only in the chart : {sorted(WEB_DEFERRED - WEB_NATIVE_ONLY)}\n"
+            f"  only in the router: {sorted(WEB_NATIVE_ONLY - WEB_DEFERRED)}\n"
+            "Deferring a command from the web surface is a charted decision — "
+            "add it to WEB_DEFERRED with the reason, or wire it."
+        )
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "KNOWN GAP, piece 3 fixes it: /ephemeral /gate /grants /qwen "
+            "/remember /revoke are registered on Telegram but are in NEITHER "
+            "the web dispatch tables NOR WEB_NATIVE_ONLY, so route_slash falls "
+            "through and the agent eats them as chat text — no reply, no "
+            "effect, no boundary message. Five already have shared "
+            "implementations (cmd_ephemeral/cmd_gate/cmd_grants/cmd_remember/"
+            "cmd_revoke); the web router simply never dispatches to them."
+        ),
+    )
+    def test_web_surface_reaches_every_manifest_command(self):
+        problems = _registration_problems({"web"})
+        assert not problems, "\n".join(problems)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="same six — every command must be handled OR explicitly refused",
+    )
+    def test_no_command_falls_through_to_the_agent(self):
+        """The defect stated directly, independent of the manifest.
+
+        Every command registered on Telegram must be either handled by the web
+        surface or explicitly refused by it. A command in neither is not
+        "missing on web" — it is WORSE than the deferred set, because the user
+        gets no boundary message at all. /revoke typing a sentence at the model
+        is the write-only asymmetry the manifest comment beside it warns about,
+        on the surface nobody added.
+        """
+        from prometheus.web.slash_router import WEB_NATIVE_ONLY
+
+        telegram = set(_registered(next(p for p in PLATFORMS if p.name == "telegram")))
+        reachable = set(_web_registered()) | set(WEB_NATIVE_ONLY)
+        fell_through = sorted(telegram - reachable)
+        assert not fell_through, (
+            "registered on Telegram, silently swallowed by the agent on web: "
+            + ", ".join("/" + c for c in fell_through)
+        )
+
+
 class TestParityReport:
     def test_print_parity_chart(self, capsys):
         """Always-green reporter: prints the chart + deliberate-gap allowlist
@@ -397,7 +575,12 @@ class TestParityReport:
         for fam in MANIFEST:
             row = f"{fam.name:<14}"
             for c in cols:
-                cell = fam.commands.get(c) or f"— ({fam.gap_reason[:18]}…)"
+                if fam.commands.get(c):
+                    cell = fam.commands[c]
+                elif c == "web" and fam.commands["telegram"] in WEB_DEFERRED:
+                    cell = "— (boundary reply)"
+                else:
+                    cell = f"— ({fam.gap_reason[:18]}…)"
                 row += f"{cell:<26}"
             row += ",".join(fam.shared) if fam.shared else f"— ({fam.shared_gap[:40]})"
             lines.append(row)
