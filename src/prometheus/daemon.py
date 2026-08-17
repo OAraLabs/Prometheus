@@ -206,6 +206,66 @@ def telegram_gateway_decision(
     return True, None
 
 
+def apply_config_pins(config: dict, pins_path: Path) -> list[str]:
+    """Apply pinned config values IN MEMORY. Returns the dotted keys that drifted.
+
+    ⚠ THIS DELIBERATELY DOES NOT WRITE THE CONFIG FILE.
+
+    It used to. Correcting one pinned key rewrote the WHOLE file via
+    ``yaml.dump``, which drops every comment and reformats everything else.
+    That already happened on the live box: the shipped template carries 430
+    comment lines and the deployed config carried 0 — including the blocks
+    explaining that ``denied_paths`` does not cover bash, and that
+    ``bash_confinement`` defaults to ``off`` so the floor is not in force
+    until switched on. The file an operator opens to learn what a key means
+    had been silently emptied of meaning by a routine correction.
+
+    The write was never load-bearing. The daemon runs on ``config``, the dict
+    mutated below; the disk write only made the file agree afterwards.
+
+    The consequence, stated rather than hidden: the file and the running
+    config now DISAGREE persistently whenever a pin is in force. That is more
+    honest than before. The file shows what the operator wrote; the pin
+    surfaces show what is enforced. Previously the file silently agreed, so
+    the disagreement was invisible — which is how a pin restored
+    ``model.model: gemma4-26b`` on every boot for six weeks while the rig
+    served Qwen, and nobody could see it in the file.
+
+    Removing this write also removes the SECOND writer of prometheus.yaml.
+    ``SecurityGate._rewrite_config_grants`` documents its atomicity argument
+    on the premise that "there is one writer process" — a premise this
+    function was quietly falsifying.
+    """
+    if not pins_path.is_file():
+        return []
+    try:
+        with pins_path.open(encoding="utf-8") as fh:
+            pins = yaml.safe_load(fh) or {}
+    except Exception:
+        pins = {}
+
+    drifted: list[str] = []
+    for dotpath, expected in pins.items():
+        if expected is None:
+            continue
+        parts = str(dotpath).split(".")
+        val = config
+        for p in parts:
+            val = val.get(p, {}) if isinstance(val, dict) else None
+        if val and str(val) != str(expected):
+            logger.warning(
+                "CONFIG DRIFT DETECTED: %s = %r (pinned: %r). "
+                "Corrected in memory; the config file is left as written.",
+                dotpath, val, expected,
+            )
+            obj = config
+            for p in parts[:-1]:
+                obj = obj.setdefault(p, {})
+            obj[parts[-1]] = expected
+            drifted.append(str(dotpath))
+    return drifted
+
+
 async def run_daemon(args: argparse.Namespace) -> None:
     """Main async entry point — start all subsystems."""
     config = load_config(args.config)
@@ -261,8 +321,9 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     # ── Config drift guard (opt-in) ─────────────────────────────────────
     # Users can create ~/.prometheus/config_pins.yaml to pin critical
-    # config values. If a pinned value drifts, the daemon auto-corrects
-    # both in-memory and on disk.
+    # config values. If a pinned value drifts, the daemon corrects it
+    # IN MEMORY. It does NOT rewrite the config file — see
+    # apply_config_pins for why.
     #
     # Example ~/.prometheus/config_pins.yaml:
     #   model.provider: llama_cpp
@@ -270,41 +331,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
     #
     # If the file doesn't exist, no checking happens — users who run
     # Ollama, Anthropic, etc. are unaffected.
-    _pins_path = get_config_dir() / "config_pins.yaml"
-    if _pins_path.is_file():
-        try:
-            with _pins_path.open(encoding="utf-8") as fh:
-                _pins = yaml.safe_load(fh) or {}
-        except Exception:
-            _pins = {}
-
-        _drifted = False
-        for dotpath, expected in _pins.items():
-            if expected is None:
-                continue
-            parts = str(dotpath).split(".")
-            val = config
-            for p in parts:
-                val = val.get(p, {}) if isinstance(val, dict) else None
-            if val and str(val) != str(expected):
-                logger.warning(
-                    "CONFIG DRIFT DETECTED: %s = %r (pinned: %r). Auto-fixing.",
-                    dotpath, val, expected,
-                )
-                obj = config
-                for p in parts[:-1]:
-                    obj = obj.setdefault(p, {})
-                obj[parts[-1]] = expected
-                _drifted = True
-
-        if _drifted:
-            config_path = Path(args.config) if args.config else Path("config/prometheus.yaml")
-            try:
-                with config_path.open("w", encoding="utf-8") as fh:
-                    yaml.dump(config, fh, default_flow_style=False, sort_keys=False)
-                logger.info("CONFIG AUTO-FIXED: wrote corrected values to %s", config_path)
-            except Exception as exc:
-                logger.error("Failed to auto-fix config file: %s", exc)
+    apply_config_pins(config, get_config_dir() / "config_pins.yaml")
 
     # Sprint 15 GRAFT: scoped daemon lock — prevent duplicate instances
     from prometheus.gateway.status import acquire_daemon_lock, release_daemon_lock
