@@ -253,6 +253,29 @@ def create_app(
     # ── Health (unauthenticated; for external monitors) ─────────────
     # Lives outside /api/ so the bearer-token middleware never blocks it.
     # Fixes the 404 flood from the host polling GET /health (audit #6).
+    def _config_pins_summary() -> dict:
+        """Counts only — safe for the unauthenticated /health."""
+        from prometheus.daemon import CONFIG_PINS_STATE
+        return {
+            "active": len(CONFIG_PINS_STATE.get("pins") or {}),
+            "drift_corrected_at_boot": len(CONFIG_PINS_STATE.get("drifted") or []),
+        }
+
+    def _config_pins_detail() -> dict:
+        """Keys, values and boot outcome. Bearer-gated callers only."""
+        from prometheus.daemon import CONFIG_PIN_EFFECT, CONFIG_PINS_STATE
+        pins = CONFIG_PINS_STATE.get("pins") or {}
+        drifted = CONFIG_PINS_STATE.get("drifted") or []
+        return {
+            "path": CONFIG_PINS_STATE.get("path"),
+            "active": len(pins),
+            "pins": dict(pins),
+            "drift_corrected_at_boot": list(drifted),
+            # The SAME sentence the boot WARNING logs. One mechanism, one
+            # description, so a log-reader and a surface-reader agree.
+            "effect": CONFIG_PIN_EFFECT,
+        }
+
     @app.get("/health")
     async def health():
         return {
@@ -262,6 +285,12 @@ def create_app(
             # Bare staleness bool for external monitors — no SHA leaked on this
             # unauthenticated endpoint (full SHAs are on bearer-gated /api/status).
             "stale": _staleness()[2],
+            # config_pins: COUNTS ONLY. This endpoint is unauthenticated, and
+            # the pinned values include a backend URL and model names — the
+            # same reason no SHA is exposed here. Keys and values are on
+            # bearer-gated /api/status. `active` answers "is anything pinned?",
+            # which was the whole gap: a pin previously had no surface at all.
+            "config_pins": _config_pins_summary(),
         }
 
     # ── Status ──────────────────────────────────────────────────────
@@ -278,6 +307,8 @@ def create_app(
         return {
             "state": app.state.agent_state,
             "model": app.state.current_model,
+            # Full config_pins detail: bearer-gated, unlike /health's counts.
+            "config_pins": _config_pins_detail(),
             "provider": app.state.current_provider,
             "profile": (
                 app.state.profile_state.name
