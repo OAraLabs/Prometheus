@@ -414,6 +414,48 @@ async def run_daemon(args: argparse.Namespace) -> None:
         model_name = config_model
         logger.info("Cloud provider: %s, model: %s", model_config.get("provider"), model_name)
 
+    # Thinking-suppression capability probe. MEASURED, never assumed.
+    #
+    # ``model.suppress_thinking`` is a chat-template kwarg, and a template
+    # that does not know the key ignores it silently — 200 OK, normal-looking
+    # completion, reasoning channel still running and still eating the output
+    # budget. Whether it works was previously unreadable from the code, the
+    # config and the logs alike, and on 2026-08-17 that produced a confident
+    # wrong root-cause report. So the daemon now measures it at boot and says
+    # so, once, whatever the answer.
+    #
+    # `off` skips it. `warn` (default) logs. `refuse` makes an unsupported
+    # model a startup failure — for operators who would rather not run than
+    # run with the reasoning channel silently live.
+    # NOTE the provider is asked whether suppression is on, not the config.
+    # A second `model_config.get("suppress_thinking", ...)` here would be a
+    # second reader of one setting — and would have demanded a real template
+    # key for it, quietly undoing #246, which left it commented-out precisely
+    # because absent already means true.
+    verify_mode = str(model_config.get("verify_thinking_suppression", "warn")).lower()
+    if verify_mode != "off" and hasattr(provider, "verify_thinking_suppression"):
+        status, detail = await provider.verify_thinking_suppression()
+        line = "thinking suppression: %s — %s (model=%s)"
+        if status == "unsupported":
+            logger.error(line, status.upper(), detail, model_name)
+            logger.error(
+                "  The reasoning channel is LIVE despite suppress_thinking. "
+                "Expect turns that spend their whole budget thinking and "
+                "return empty content. Set model.suppress_thinking: false to "
+                "stop claiming otherwise, or serve a model whose template "
+                "honours it."
+            )
+            if verify_mode == "refuse":
+                raise RuntimeError(
+                    f"thinking suppression unsupported for {model_name} and "
+                    f"model.verify_thinking_suppression is 'refuse': {detail}"
+                )
+        elif status == "unknown":
+            # Never reported as a pass — see the probe's own docstring.
+            logger.warning(line, status.upper(), detail, model_name)
+        else:
+            logger.info(line, status, detail, model_name)
+
     # Context size detection. The value is CONSUMED (passed to the compactor
     # below), not just logged — it used to be logged only, so a config
     # `effective_limit` that outlived a model swap silently won. That is how a
