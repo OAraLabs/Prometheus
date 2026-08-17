@@ -231,18 +231,25 @@ class LCMConversationStore:
         self,
         session_id: str,
         *,
-        since_turn: int | None = None,
         limit: int = 500,
     ) -> list[MessagePart]:
-        """Return messages for a session ordered by turn_index ascending."""
-        query = "SELECT * FROM lcm_messages WHERE session_id = ?"
-        params: list[object] = [session_id]
-        if since_turn is not None:
-            query += " AND turn_index >= ?"
-            params.append(since_turn)
-        query += " ORDER BY turn_index ASC LIMIT ?"
-        params.append(limit)
-        rows = self._conn.execute(query, params).fetchall()
+        """Return messages for a session ordered by turn_index ascending.
+
+        ⚠ NO ``since_turn``. It existed here from the initial commit and no
+        caller ever passed it, in ``src/`` or in ``tests/`` — so the
+        incremental branch it guarded had never executed. The incremental
+        read that the wire contract actually uses is
+        :meth:`messages_after_id`, keyed on the durable LCM **rowid** rather
+        than ``turn_index``, and that is the one the ``?since=`` query
+        parameter reaches (``web/server.py``). Two filters for one job, one
+        of them wired: the unwired one is gone rather than left as an
+        untested second way to do it.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM lcm_messages WHERE session_id = ?"
+            " ORDER BY turn_index ASC LIMIT ?",
+            (session_id, limit),
+        ).fetchall()
         return [self._row_to_message(r) for r in rows]
 
     def get_fresh_tail(self, session_id: str, count: int) -> list[MessagePart]:
