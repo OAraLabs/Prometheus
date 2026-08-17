@@ -38,6 +38,23 @@ model:
                                         # with a server-side llama.cpp --reasoning-budget in place, or
                                         # unbounded thinking can exhaust the budget. (2026-06-11 bakeoff:
                                         # the openhands arm ran thinking-on; this knob lets Prometheus match.)
+  #
+  # Both kwargs go out every turn — `thinking` (gemma's templates) AND
+  # `enable_thinking` (Qwen's) — because the key a template honours is a
+  # property of the MODEL, not of the setting.
+  verify_thinking_suppression: warn     # warn | refuse | off. Absent == "warn", so this
+                                        # line is documentation, not a behaviour change.
+                                        # The knob above is a chat-template kwarg, and a template that does
+                                        # not recognise the key IGNORES IT IN SILENCE: 200 OK, a normal-looking
+                                        # completion, and the reasoning channel still running and still eating
+                                        # the output budget. Whether it works was readable from NOTHING — not
+                                        # the code, not this file, not the logs — and on 2026-08-17 that gap
+                                        # produced a confident wrong root-cause report.
+                                        # So the daemon MEASURES it at boot: two ~30-token completions built by
+                                        # the real payload builder (one suppressed, one control), and it logs
+                                        # supported / unsupported / moot / unknown. A failed probe is "unknown",
+                                        # never a pass. "refuse" turns an unsupported model into a startup
+                                        # failure; "off" skips the probe entirely.
   max_tool_iterations: 25               # Max tool calls per user message before hard stop (local/llama)
   max_tool_iterations_cloud: 50         # Separate cap for cloud (tier=off): Claude plans multi-step sequences local models wouldn't
   fallback_provider: "ollama"

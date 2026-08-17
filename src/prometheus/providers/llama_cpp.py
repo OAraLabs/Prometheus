@@ -104,6 +104,99 @@ class LlamaCppProvider(ModelProvider):
         self._grammar_tool_schemas: list[dict[str, Any]] | None = None
         self._derived_grammars: dict[str, str] = {}  # "required" | "tool:<name>"
 
+    async def verify_thinking_suppression(self) -> tuple[str, str]:
+        """Measure whether ``suppress_thinking`` ACTUALLY suppresses thinking.
+
+        Returns ``(status, detail)`` where status is one of
+        ``supported`` / ``unsupported`` / ``moot`` / ``unknown``.
+
+        ⚠ WHY THIS EXISTS. The knob is a template kwarg, and a chat template
+        that does not recognise the key ignores it in silence — the server
+        returns 200, the completion looks normal, and the reasoning channel
+        runs anyway, eating the output budget. Nothing anywhere reported
+        that. It was not readable from the code (the payload is built three
+        call-frames from the config key), not from the config (the key is
+        just ``true``), and not from the logs (there were none). On
+        2026-08-17 that gap produced a confidently WRONG root-cause report:
+        a probe of ``{"thinking": false}`` alone — a payload this provider
+        never sends — was read as proof the flag was inert, when the real
+        payload sends ``enable_thinking`` alongside it and works.
+
+        That error is the specification for this method:
+
+        * IT SENDS THE REAL PAYLOAD. The body comes from
+          ``_build_request_payload`` — the same builder the agent loop uses —
+          so the probe can never test a payload production does not send.
+          Hand-writing the body here would rebuild the exact mistake.
+        * IT RUNS A CONTROL. Empty ``reasoning_content`` alone cannot tell
+          "suppression worked" from "this model never reasons". The control
+          call (suppression OFF) separates them, so the log line can state
+          which is true instead of implying the stronger one.
+        * A FAILED PROBE IS NOT A PASS. Network error, timeout or a server
+          that omits the field yields ``unknown`` — never ``supported``.
+          Absence of effect must not read as effect, and that applies to the
+          instrument as much as to the flag it measures.
+
+        Returns ``skipped`` when this provider is not configured to suppress
+        — the provider is asked, rather than the config re-read. A second
+        reader of one setting is how the two drift, and ``suppress_thinking``
+        is documented commented-out in the template (absent means true), so a
+        fresh ``model_config.get`` here would also have demanded a real
+        template key and quietly undone #246.
+
+        Two ~30-token completions, once per boot.
+        """
+        from prometheus.engine.messages import ConversationMessage, TextBlock
+
+        if not self._suppress_thinking:
+            return "skipped", "provider is not configured to suppress thinking"
+
+        async def _one(suppress: bool) -> str | None:
+            req = ApiMessageRequest(
+                model=self.detected_model or "",
+                messages=[ConversationMessage(
+                    role="user",
+                    content=[TextBlock(text="Reply with the single word: ready")],
+                )],
+                max_tokens=64,
+                suppress_thinking=suppress,
+            )
+            payload = self._build_request_payload(req)
+            payload["stream"] = False
+            payload.pop("stream_options", None)
+            payload.pop("grammar", None)
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{self._base_url}/v1/chat/completions", json=payload
+                )
+                resp.raise_for_status()
+                msg = (resp.json().get("choices") or [{}])[0].get("message") or {}
+            return msg.get("reasoning_content") or ""
+
+        try:
+            suppressed = await _one(True)
+            control = await _one(False)
+        except Exception as exc:
+            return "unknown", f"probe call failed ({type(exc).__name__}: {exc})"
+
+        if suppressed is None or control is None:
+            return "unknown", "server returned no message object"
+        if suppressed.strip():
+            return "unsupported", (
+                f"the served model emitted {len(suppressed)} chars of "
+                f"reasoning WITH suppression requested — the template "
+                f"ignores both 'thinking' and 'enable_thinking'"
+            )
+        if not control.strip():
+            return "moot", (
+                "the served model emits no reasoning_content either way; "
+                "the flag is harmless but is not doing anything"
+            )
+        return "supported", (
+            f"reasoning suppressed (control emitted {len(control)} chars, "
+            f"suppressed emitted 0)"
+        )
+
     async def detect_context_size(self) -> int | None:
         """Query the server's actual context size via /props.
 
