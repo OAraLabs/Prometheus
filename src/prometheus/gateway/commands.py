@@ -1326,6 +1326,14 @@ class CommandContext:
     # /queue, which fires on a quiet chat once the first turn starts).
     session: Any = None
     ensure_session: Any = None
+    # SPRINT-WEB-PARITY: the full session id (e.g. "web:abc"), needed by
+    # /ephemeral, which keys on the session id itself rather than the object.
+    # Not derivable from ``session`` — that is None on a quiet chat.
+    session_id: str = ""
+    # ApprovalQueue for /grants, /remember, /revoke; /gate reaches the
+    # SecurityGate THROUGH it (``queue._security_gate``), the same way
+    # web/server.py's consent routes already do.
+    approval_queue: Any = None
 
 
 async def _fc_help(ctx: CommandContext, args: str) -> str:
@@ -1470,6 +1478,14 @@ async def _fc_beacon(ctx: CommandContext, args: str) -> str:
     return cmd_beacon(ctx.config or {})
 
 
+async def _fc_grants(ctx: CommandContext, args: str) -> str:
+    return cmd_grants(ctx.approval_queue)
+
+
+async def _fc_remember(ctx: CommandContext, args: str) -> str:
+    return await cmd_remember(ctx.approval_queue, args)
+
+
 # command name -> async handler(ctx, args) -> str
 _FORMATTER_COMMANDS: dict[str, Any] = {
     "help": _fc_help,
@@ -1489,6 +1505,11 @@ _FORMATTER_COMMANDS: dict[str, Any] = {
     "doctor": _fc_doctor,
     "profile": _fc_profile,
     "beacon": _fc_beacon,
+    # SPRINT-WEB-PARITY: read-only consent reports. Registered on Telegram
+    # since SPRINT-CONSENT but reachable from NO shared table, so the web
+    # router fell through and the agent ate them as chat text.
+    "grants": _fc_grants,
+    "remember": _fc_remember,
 }
 
 
@@ -1614,6 +1635,37 @@ def cmd_clearsteers(session: Any) -> str:
     return f"🧹 Cleared {n} pending steer{'s' if n != 1 else ''}."
 
 
+async def _sc_revoke(ctx: CommandContext, args: str) -> str:
+    return cmd_revoke(ctx.approval_queue, args)
+
+
+async def _sc_gate(ctx: CommandContext, args: str) -> str:
+    # The gate hangs off the queue — same accessor web/server.py's consent
+    # routes use, so there is one way to reach it, not two.
+    return cmd_gate(getattr(ctx.approval_queue, "_security_gate", None), args)
+
+
+async def _sc_ephemeral(ctx: CommandContext, args: str) -> str:
+    if not ctx.session_id:
+        return "No active session."
+    return cmd_ephemeral(ctx.session_id, args)
+
+
+async def _sc_reset(ctx: CommandContext, args: str) -> str:
+    """/reset — clear this session's history, KEEP the session.
+
+    Deliberately NOT the same operation as Beacon's "Forget session"
+    (DELETE /api/sessions/{id}), which pops the entry so the thread vanishes
+    from the list. This empties the thread and leaves it where it is. Both
+    clear a poisoned in-memory history; only one of them is what a user who
+    typed /reset asked for.
+    """
+    if ctx.session is None:
+        return "No active session."
+    ctx.session.clear()
+    return "🧹 Conversation history cleared."
+
+
 async def _sc_steer(ctx: CommandContext, args: str) -> str:
     return cmd_steer(ctx.session, args)
 
@@ -1640,6 +1692,16 @@ _SESSION_COMMANDS: dict[str, Any] = {
     "queue": _sc_queue,
     "unqueue": _sc_unqueue,
     "clearsteers": _sc_clearsteers,
+    # SPRINT-WEB-PARITY. State-mutating like the four above; /revoke and /gate
+    # mutate DAEMON state rather than session state, which no existing table
+    # models — they live here rather than in the side-effect-free formatter
+    # table, which would have been the wrong half of the only distinction the
+    # two tables actually draw.
+    "reset": _sc_reset,
+    "clear": _sc_reset,   # Telegram muscle-memory alias, same handler
+    "ephemeral": _sc_ephemeral,
+    "revoke": _sc_revoke,
+    "gate": _sc_gate,
 }
 
 

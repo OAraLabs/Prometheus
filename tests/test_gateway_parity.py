@@ -130,14 +130,21 @@ PLATFORMS: tuple[PlatformSpec, ...] = (
 # grow (or shrink) without this chart changing in the same commit.
 WEB_DEFERRED: frozenset[str] = frozenset({
     # Session/daemon state bound to the TelegramGateway instance.
-    "start", "clear", "reset", "route",
+    # /clear and /reset LEFT this set in SPRINT-WEB-PARITY: they need only the
+    # session the bridge already holds, and Beacon's "Forget session"
+    # (DELETE /api/sessions/{id}) is a DIFFERENT operation — it pops the entry
+    # so the thread vanishes from the list, where /reset empties the thread and
+    # keeps it. Neither substitutes for the other.
+    "start", "route",
     "benchmark", "voice", "tools", "pairs",
     "approve", "deny", "pending",
     "gepa", "symbiote", "audit", "press",
     "escalations",
-    # Per-session provider overrides.
+    # Per-session provider overrides — /qwen JOINED this set rather than being
+    # wired: all ten of its siblings are deferred, and it was only ever absent
+    # because #183-#186 added the command without listing it here.
     "claude", "gpt", "gemini", "xai", "grok", "local",
-    "deepseek", "kimi", "glm", "mimo",
+    "deepseek", "kimi", "glm", "mimo", "qwen",
 })
 
 _SAME = object()  # sentinel: web uses the same command name as Telegram
@@ -498,11 +505,11 @@ class TestRegistrations:
 class TestWebSurface:
     """The fourth surface. Two guarantees the chart could not make before.
 
-    KNOWN RED, deliberately landed that way: piece 2 of the web-parity arc adds
-    the measurement, piece 3 wires the six and removes the xfails. They are
-    ``strict=True`` so the day a command IS wired, the XPASS fails the build and
-    forces the marker out — a skip would have rotted silently, and folding the
-    wiring into this PR would have hidden the size of the gap behind its fix.
+    Landed RED in #255 as two ``strict=True`` xfails and turned GREEN here:
+    five commands wired (/ephemeral /gate /grants /remember /revoke), one
+    deferred to its own class (/qwen). The strict marker did its job — wiring
+    them turned the xfail into an XPASS failure, which is what forced the
+    markers out in this commit rather than leaving them to rot.
     """
 
     def test_deferred_set_is_pinned_to_the_router(self):
@@ -524,26 +531,10 @@ class TestWebSurface:
             "add it to WEB_DEFERRED with the reason, or wire it."
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "KNOWN GAP, piece 3 fixes it: /ephemeral /gate /grants /qwen "
-            "/remember /revoke are registered on Telegram but are in NEITHER "
-            "the web dispatch tables NOR WEB_NATIVE_ONLY, so route_slash falls "
-            "through and the agent eats them as chat text — no reply, no "
-            "effect, no boundary message. Five already have shared "
-            "implementations (cmd_ephemeral/cmd_gate/cmd_grants/cmd_remember/"
-            "cmd_revoke); the web router simply never dispatches to them."
-        ),
-    )
     def test_web_surface_reaches_every_manifest_command(self):
         problems = _registration_problems({"web"})
         assert not problems, "\n".join(problems)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="same six — every command must be handled OR explicitly refused",
-    )
     def test_no_command_falls_through_to_the_agent(self):
         """The defect stated directly, independent of the manifest.
 
