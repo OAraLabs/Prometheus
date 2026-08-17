@@ -67,7 +67,20 @@ async def test_polling_keeps_the_pending_backlog(monkeypatch):
     """
     app = _mock_app()
     builder = MagicMock()
-    builder.token.return_value = builder
+    # ⚠ PTB's builder is FLUENT — every configuration method returns self,
+    # verified against the real class, not assumed. The double must model
+    # that for EVERY setter, not just token().
+    #
+    # It modelled only token() until #224 wired PlatformConfig timeouts in as
+    # `builder = self._configure_network(builder)`. That reassignment handed
+    # `builder` an auto-created child mock, so `build()` returned a different
+    # object than the one configured below and `await app.initialize()` blew
+    # up on a bare MagicMock — a test failure caused entirely by the double,
+    # with both production changes correct. Two PRs that merge-tree clean and
+    # still collide, through a mock.
+    for _setter in ("token", "connect_timeout", "read_timeout",
+                    "write_timeout", "proxy"):
+        getattr(builder, _setter).return_value = builder
     builder.build.return_value = app
     monkeypatch.setattr(
         "prometheus.gateway.telegram.Application.builder", lambda: builder
