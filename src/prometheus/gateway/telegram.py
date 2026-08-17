@@ -425,6 +425,19 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text)
         )
+        # ⚠ UNKNOWN-COMMAND CATCH-ALL. Registered AFTER every CommandHandler
+        # above, because PTB runs only the first matching handler per group —
+        # so this sees exactly the commands nothing else claimed.
+        #
+        # Without it a mistyped command vanished. `/appove always` matched no
+        # CommandHandler, and the text handler is `TEXT & ~COMMAND`, which
+        # excludes anything starting with "/" — so NO handler ran at all and
+        # the operator got silence, permanently. Observed live 2026-08-17
+        # alongside `/approve awlways`; that one at least answered, 66
+        # minutes late. This one would never have answered at any latency.
+        self._app.add_handler(
+            MessageHandler(filters.COMMAND, self._cmd_unknown)
+        )
         # Sprint 15 GRAFT: media handlers (additive — Hermes parity)
         self._app.add_handler(MessageHandler(filters.PHOTO, self._handle_photo))
         self._app.add_handler(MessageHandler(filters.VOICE, self._handle_voice))
@@ -2196,6 +2209,42 @@ class TelegramAdapter(BasePlatformAdapter):
         arg_text = " ".join(args[1:]) if len(args) >= 2 else ""
         queue = getattr(self, "_approval_queue", None)
         text = await _cmds.cmd_approve(queue, arg_text)
+        await self.send(update.effective_chat.id, text, parse_mode=None)
+
+    def _registered_commands(self) -> list[str]:
+        """Every command name PTB actually has a handler for.
+
+        Read from the live handler table rather than a hand-kept list. A
+        second list is what drifts: it would go stale the first time someone
+        adds a command and forgets this spot, and the near-miss suggestion
+        would then confidently omit the very command the operator wanted.
+        """
+        names: set[str] = set()
+        for group in getattr(self._app, "handlers", {}).values():
+            for h in group:
+                for c in getattr(h, "commands", None) or ():
+                    names.add(str(c))
+        return sorted(names)
+
+    async def _cmd_unknown(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Answer a command nothing else handled — immediately.
+
+        The reply is the point. A typo that does nothing is indistinguishable
+        from a daemon that is ignoring you, and the operator has no way to
+        tell which. This path does no queueing and no agent work, so it
+        answers even while a turn is in flight.
+        """
+        if not update.message or not update.effective_chat:
+            return
+        from prometheus.gateway import commands as _cmds
+
+        typed = (update.message.text or "").split()[0].lstrip("/").split("@")[0]
+        hint = _cmds._near_miss(typed, self._registered_commands(), "/", "command")
+        text = hint or (
+            f"Unknown command /{typed}. Send /help for the command list."
+        )
         await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_remember(
