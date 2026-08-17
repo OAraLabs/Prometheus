@@ -165,6 +165,29 @@ class TelegramAdapter(BasePlatformAdapter):
         self._start_time: float = 0.0
         self._prometheus_config: dict[str, Any] = prometheus_config or {}
 
+        # ------------------------------------------------------------------
+        # Gateway liveness (2026-08-15 outage).
+        #
+        # `running` (BasePlatformAdapter) is SELF-REPORTED: start() sets it
+        # True and only stop() clears it. It cannot go false when Telegram is
+        # the thing that's down, so it answered "yes, healthy" through 45
+        # minutes of total darkness while every inbound message was lost.
+        #
+        # PTB's own polling loop is no help either. Telegram was returning
+        # 502 after ~15.7s; httpx's read_timeout is 5s, so every call raised
+        # TimedOut before the 502 ever landed — and TimedOut is precisely the
+        # branch of telegram.ext._utils.networkloop.network_retry_loop that
+        # SKIPS on_err_cb and logs at DEBUG (max_retries=-1 for polling). The
+        # ERROR-level default_error_callback is only reached by the generic
+        # TelegramError branch, which a timeout never takes.
+        #
+        # So the only honest answer comes from asking Telegram directly, on
+        # an interval. None = not yet probed.
+        self._reachable: bool | None = None
+        self._last_reachable_at: float | None = None
+        self._last_probe_error: str | None = None
+        self._probe_task: asyncio.Task[None] | None = None
+
         if session_manager is None:
             from prometheus.engine.session import SessionManager as _SM
             session_manager = _SM()
@@ -447,9 +470,30 @@ class TelegramAdapter(BasePlatformAdapter):
 
         await self._app.initialize()
         await self._app.start()
-        await self._app.updater.start_polling(drop_pending_updates=True)
+        # drop_pending_updates=False: Telegram holds undelivered updates for
+        # 24h, and dropping them means every restart silently destroys any
+        # message sent while the daemon was down. That is a routine event
+        # (deploys, config changes, the SIGKILL-on-TimeoutStopSec pattern),
+        # not an exotic one — and the loss leaves no trace in any log. Keep
+        # the backlog; a burst of queued turns after an outage is strictly
+        # better than losing the user's messages.
+        await self._app.updater.start_polling(
+            drop_pending_updates=False,
+            # Surfaces the TelegramErrors that DO reach on_err_cb — most
+            # usefully Conflict (409), i.e. a second poller stealing updates.
+            # Timeouts never arrive here; that is what the probe below is for.
+            error_callback=self._on_polling_error,
+        )
         self._running = True
         self._start_time = time.monotonic()
+
+        # Liveness probe — see the __init__ note. Ask Telegram whether it is
+        # actually answering, because nothing else in this stack will.
+        probe_interval = self._probe_interval_seconds()
+        if probe_interval > 0:
+            self._probe_task = asyncio.create_task(
+                self._reachability_loop(probe_interval)
+            )
 
         # Register command menu with Telegram
         try:
@@ -572,8 +616,100 @@ class TelegramAdapter(BasePlatformAdapter):
         else:
             logger.info("No known chat ID for startup greeting (will create session on first message)")
 
+    # ------------------------------------------------------------------
+    # Liveness — is Telegram actually answering?
+    # ------------------------------------------------------------------
+
+    @property
+    def reachable(self) -> bool | None:
+        """Whether the last probe reached Telegram. None until first probe.
+
+        Distinct from ``running``, which only means "start() was called".
+        """
+        return self._reachable
+
+    def health_snapshot(self) -> dict[str, Any]:
+        """Gateway health for /api/status and the heartbeat."""
+        return {
+            "platform": self.platform.value,
+            "running": self.running,
+            "reachable": self._reachable,
+            "last_reachable_at": self._last_reachable_at,
+            "last_error": self._last_probe_error,
+        }
+
+    def _probe_interval_seconds(self) -> float:
+        """Probe cadence from gateway.telegram.probe_interval_seconds (0=off).
+
+        Read one level at a time through plainly-named locals so the config
+        extractor (tests/support/config_defaults.py) can resolve the dotted
+        key and hold it under the template pin from #221. Collapsing this
+        into a chained expression makes the key invisible to that pass, and
+        an undocumented key is the exact FL-2 class the pin exists to catch.
+        """
+        config = self._prometheus_config
+        gateway = config.get("gateway", {}) or {}
+        telegram = gateway.get("telegram", {}) or {}
+        try:
+            return float(telegram.get("probe_interval_seconds", 60))
+        except (TypeError, ValueError):
+            logger.warning(
+                "gateway.telegram.probe_interval_seconds is not a number — "
+                "falling back to 60s"
+            )
+            return 60.0
+
+    def _on_polling_error(self, exc: Exception) -> None:
+        """PTB polling error callback (generic TelegramError branch only)."""
+        logger.error("Telegram polling error: %s: %s", type(exc).__name__, exc)
+
+    async def _probe_reachability(self) -> bool:
+        """One getMe against the live API. Transitions log; steady state is quiet."""
+        app = self._app
+        if app is None:
+            return False
+
+        previous = self._reachable
+        try:
+            await app.bot.get_me()
+        except Exception as exc:
+            self._reachable = False
+            self._last_probe_error = f"{type(exc).__name__}: {exc}"
+            if previous is not False:
+                logger.error(
+                    "Telegram gateway UNREACHABLE (%s) — the bot is dark: "
+                    "inbound messages are NOT being delivered. Do not restart "
+                    "the daemon until this clears or the queued backlog is at "
+                    "risk.",
+                    self._last_probe_error,
+                )
+            return False
+
+        self._reachable = True
+        self._last_reachable_at = time.time()
+        self._last_probe_error = None
+        if previous is False:
+            logger.info("Telegram gateway reachable again — polling resumed")
+        return True
+
+    async def _reachability_loop(self, interval: float) -> None:
+        """Probe forever. Never let a probe failure kill the loop."""
+        while True:
+            try:
+                await self._probe_reachability()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Telegram reachability probe crashed")
+            await asyncio.sleep(interval)
+
     async def stop(self) -> None:
         """Graceful shutdown of the Telegram bot."""
+        if self._probe_task is not None:
+            self._probe_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._probe_task
+            self._probe_task = None
         if self._app and self._running:
             self._running = False
             if self._app.updater and self._app.updater.running:

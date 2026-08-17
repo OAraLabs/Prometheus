@@ -304,6 +304,20 @@ def create_app(
         # counters expose the durable DAG compactor's activity.
         comp = getattr(app.state, "compactor", None)
         lcm = getattr(app.state, "lcm_engine", None)
+        # Gateway liveness. `running` is self-reported and survives a total
+        # upstream outage; `reachable` is a real probe against the platform
+        # API (None = adapter has no probe / hasn't run one yet).
+        gw = getattr(app.state, "gateway_adapter", None)
+        if gw is None:
+            gateway_block: dict[str, Any] = {"wired": False}
+        elif hasattr(gw, "health_snapshot"):
+            gateway_block = {"wired": True, **gw.health_snapshot()}
+        else:
+            gateway_block = {
+                "wired": True,
+                "running": getattr(gw, "running", None),
+                "reachable": getattr(gw, "reachable", None),
+            }
         return {
             "state": app.state.agent_state,
             "model": app.state.current_model,
@@ -334,6 +348,7 @@ def create_app(
                 "lcm_total_compactions": getattr(lcm, "_total_compactions", None),
                 "lcm_last_compaction_at": getattr(lcm, "_last_compaction_at", None),
             },
+            "gateway": gateway_block,
         }
 
     # ── Sessions ────────────────────────────────────────────────────
