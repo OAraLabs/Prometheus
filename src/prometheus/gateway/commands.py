@@ -1967,6 +1967,38 @@ def _is_request_id(token: str) -> bool:
     return bool(_re.fullmatch(r"[0-9a-f]{6,16}", token))
 
 
+def _near_miss(
+    typed: str, candidates: list[str], prefix: str, kind: str
+) -> str | None:
+    """"Did you mean X?" for a mistyped scope verb or command name.
+
+    Returns None when nothing is close enough, so the caller falls back to
+    plain usage text rather than guessing wildly.
+
+    ⚠ THE POINT IS THE IMMEDIATE ANSWER, not the cleverness of the match. On
+    2026-08-17 two typos in a row — ``/approve awlways`` and ``/appove
+    always`` — did nothing at all: the first fell through a guard that only
+    fired when an id followed it, and the second matched no handler and was
+    excluded from the text handler by ``~filters.COMMAND``. The operator's
+    only signal was silence, and for the first one that silence lasted 66
+    minutes because the reply queued behind an in-flight turn. A wrong guess
+    here is cheap; saying nothing is what cost the night.
+    """
+    import difflib
+
+    typed = (typed or "").strip().lstrip("/")
+    if not typed:
+        return None
+    close = difflib.get_close_matches(typed, candidates, n=1, cutoff=0.6)
+    if not close:
+        return None
+    return (
+        f"Unknown {kind} {typed!r}. Did you mean {prefix}{close[0]}"
+        if kind == "command"
+        else f"Unknown {kind} {typed!r}. Did you mean {prefix}approve {close[0]}"
+    ) + "?"
+
+
 def _pending_actions(queue: Any) -> list:
     """Pending approval requests, oldest first.
 
@@ -2131,13 +2163,21 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
                 break
     if (
         not matched_scope
-        and len(tokens) > 1
+        and tokens
         and not _is_request_id(tokens[0])
     ):
         # First word is not a scope and doesn't look like an id — almost
-        # certainly a mistyped scope word ("forever"). Give the usage back
-        # instead of a confusing "No pending request: <word>".
-        return usage
+        # certainly a mistyped scope word. Give the usage back instead of a
+        # confusing "No pending request: <word>".
+        #
+        # ⚠ THE GUARD USED TO REQUIRE ``len(tokens) > 1``, so it only fired
+        # when an id FOLLOWED the typo — and the bare form is the common one.
+        # `/approve awlways` produced exactly one token, fell straight
+        # through, and was looked up as a request id: the operator got
+        # "No pending request: awlways". Observed live 2026-08-17 00:08.
+        # A guard against mistyped scopes that misses the commonest mistyped
+        # scope is a guard in name only.
+        return _near_miss(tokens[0], list(_approve_verbs()), prefix, "scope") or usage
     if queue is None:
         return "Approval queue not active."
 
