@@ -310,6 +310,62 @@ def apply_config_pins(config: dict, pins_path: Path) -> list[str]:
     return drifted
 
 
+async def _model_identity_loop(
+    provider: Any, config_model: str, interval: float
+) -> None:
+    """Keep asking the backend which model it is serving, and say so when it
+    disagrees with the configured name.
+
+    THE ASYMMETRY THIS CLOSES. ``budget.py`` already treats the backend as the
+    source of truth for one property: the server-reported ``n_ctx`` overrides
+    the configured ``effective_limit`` for the local model. The mechanism was
+    written, agreed with, and applied — to the context WINDOW. It was never
+    applied to the model's IDENTITY, which stayed a config string detected
+    once at boot. So the same daemon believes the backend about how big the
+    window is and believes the config about what is answering.
+
+    ⚠ THE CONFIG VALUE IS A HINT. It is used before the first successful
+    detection and whenever the backend is unreachable — never as an assertion
+    that outranks the server. A local rig is meant to be swapped freely; a
+    label that can only be corrected by a restart is model-ASSUMED, not
+    model-agnostic.
+
+    ⚠ EVERY OBSERVED DISAGREEMENT WARNS, not just the first. That is
+    deliberate and it is the whole point: a config pin held
+    ``model.model: gemma4-26b`` while the rig served Qwen for SIX WEEKS, and
+    the reason nobody noticed is that the disagreement was silent. A warning
+    that fires once at boot is a warning you scroll past; one that keeps
+    firing is one you fix. The cost is a log line per interval while a
+    disagreement persists, which is the correct price for the thing that cost
+    six weeks.
+
+    This OBSERVES and REPORTS. It does not rewrite the running label — see
+    ``run_daemon``'s note on why that is deliberately a follow-on.
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            detected = await provider.detect_loaded_model()
+            if detected is None:
+                # Unreachable. The last known name stands — detect_loaded_model
+                # already logged the failure, and inventing a fallback here
+                # would be the config silently winning again.
+                continue
+            if config_model and detected != config_model:
+                logger.warning(
+                    "MODEL LABEL DISAGREES WITH THE BACKEND: config says %r, "
+                    "the server is serving %r. The backend is authoritative; "
+                    "the config value is a hint. Anything keyed on the "
+                    "configured name (context model_overrides, the telemetry "
+                    "`model` column, /api/status) is reporting the hint, not "
+                    "the truth.", config_model, detected,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("model identity probe failed", exc_info=True)
+
+
 async def run_daemon(args: argparse.Namespace) -> None:
     """Main async entry point — start all subsystems."""
     config = load_config(args.config)
@@ -405,10 +461,31 @@ async def run_daemon(args: argparse.Namespace) -> None:
         model_name = detected or config_model
         if detected:
             model_config["model"] = detected
+            if config_model and detected != config_model:
+                # Loud from the first observation, not merely recorded.
+                logger.warning(
+                    "MODEL LABEL DISAGREES WITH THE BACKEND at boot: config "
+                    "says %r, the server is serving %r. Taking the server's "
+                    "answer — the config value is a HINT, used before "
+                    "detection and when the backend is unreachable.",
+                    config_model, detected,
+                )
         else:
             logger.warning(
-                "Model detection failed after retries; using config name %s. "
-                "Restart once the server is up to re-detect.", config_model,
+                "Model detection failed after retries; falling back to the "
+                "config HINT %s. This is the one case where the config wins, "
+                "and only because there is nothing to ask.", config_model,
+            )
+        # Keep asking. Detection used to run exactly once, so swapping the
+        # model on the backend left the label wrong indefinitely — a restart
+        # was the only way to correct it, which is model-ASSUMED rather than
+        # model-agnostic. 0 disables.
+        identity_interval = float(
+            model_config.get("identity_probe_interval_seconds", 300)
+        )
+        if identity_interval > 0:
+            asyncio.create_task(
+                _model_identity_loop(provider, config_model, identity_interval)
             )
     else:
         model_name = config_model

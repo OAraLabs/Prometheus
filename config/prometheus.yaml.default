@@ -29,7 +29,25 @@ model:
   provider: "llama_cpp"             # llama_cpp, ollama, openai, anthropic, gemini, xai,
                                     # deepseek, kimi, glm, mimo
   base_url: "http://localhost:8080" # Inference server URL
-  model: ""                         # Auto-detected from server if blank
+  model: ""                         # A HINT, not an assertion. The BACKEND is authoritative:
+                                    # whatever llama-server reports from /v1/models wins, and this
+                                    # value is used only before the first successful detection and
+                                    # when the server is unreachable. Leave blank unless you need a
+                                    # name for a backend that cannot be asked.
+                                    #
+                                    # Precedent, and the reason this is worth stating: the daemon
+                                    # ALREADY treats the backend as truth for the context WINDOW —
+                                    # the server-reported n_ctx overrides effective_limit (see
+                                    # context/budget.py). That mechanism was simply never applied to
+                                    # the model's IDENTITY, so the same daemon believed the server
+                                    # about how big the window is and the config about what was
+                                    # answering. A pin held "gemma4-26b" here while the rig served
+                                    # Qwen for six weeks, silently.
+  identity_probe_interval_seconds: 300  # Re-ask the backend which model it is serving (0 = off).
+                                    # Detection used to run ONCE at boot, so swapping the model on
+                                    # the server left the label wrong until the next restart. Every
+                                    # observed disagreement logs a WARNING — not just the first,
+                                    # deliberately: a warning that fires once is one you scroll past.
   grammar_enforcement: true             # GBNF constrained decoding for llama.cpp tool calls
   # suppress_thinking: true             # UNSET defaults to true: send chat_template_kwargs.thinking=false
                                         # every turn so the model's reasoning channel stays OFF (keeps

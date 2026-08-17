@@ -275,6 +275,14 @@ class LlamaCppProvider(ModelProvider):
 
         Returns the model id string, or None if the endpoint is unreachable.
         Caches the result in ``self.detected_model``.
+
+        ⚠ LOGS TRANSITIONS ONLY. This used to log at INFO on every call, which
+        was harmless when it ran once at boot and became noise the moment it
+        started running on an interval. First detection is a transition
+        (``None`` -> a name), so the boot line is unchanged; a re-probe that
+        agrees with the last answer drops to DEBUG. A model swap on the
+        backend is the event worth a line, and it now gets one that says both
+        sides of the change.
         """
         url = f"{self._base_url}/v1/models"
         try:
@@ -285,8 +293,20 @@ class LlamaCppProvider(ModelProvider):
                 # OpenAI-compatible: data[0].id
                 models = body.get("data", [])
                 if models:
+                    previous = self.detected_model
                     self.detected_model = models[0].get("id")
-                    log.info("Detected loaded model: %s", self.detected_model)
+                    if previous is None:
+                        log.info("Detected loaded model: %s", self.detected_model)
+                    elif previous != self.detected_model:
+                        log.warning(
+                            "SERVED MODEL CHANGED: %s -> %s. The backend is "
+                            "now serving a different model than it was; "
+                            "anything keyed on the old name (context "
+                            "overrides, telemetry labels) is stale until it "
+                            "re-reads.", previous, self.detected_model,
+                        )
+                    else:
+                        log.debug("Served model unchanged: %s", self.detected_model)
                     return self.detected_model
         except Exception as exc:
             log.warning("Could not detect model from %s: %s", url, exc)
