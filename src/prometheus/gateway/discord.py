@@ -927,6 +927,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         # -- ops -------------------------------------------------------------
         self._register(ops, "approve", self._app_approve, "Approve a pending tool request")
+        self._register(ops, "remember", self._app_remember, "Lasting-grant options for a pending request")
         self._register(ops, "deny", self._app_deny, "Deny a pending tool request")
         self._register(ops, "pending", self._app_pending, "List pending approval requests")
         self._register(ops, "grants", self._app_grants, "List remembered approval grants")
@@ -1035,7 +1036,7 @@ class DiscordAdapter(BasePlatformAdapter):
             "  steer <text> · queue <text> · unqueue · clearsteers",
             "",
             "Ops (`/prometheus ops …`):",
-            "  approve <id> · deny <id> · pending",
+            "  approve <id> · remember <id> · deny <id> · pending",
             "  gepa [status|run|history] · symbiote <…> · audit [run|<category>]",
             "  press [list|search|install|installed|update] · escalations",
             "",
@@ -1388,6 +1389,15 @@ class DiscordAdapter(BasePlatformAdapter):
 
         # Full args text — cmd_approve parses the scope verb itself.
         text = await _cmds.cmd_approve(
+            getattr(self, "_approval_queue", None), args,
+            prefix=OPS_PREFIX,
+        )
+        await self._respond(interaction, text)
+
+    async def _app_remember(self, interaction: Any, args: str) -> None:
+        from prometheus.gateway import commands as _cmds
+
+        text = await _cmds.cmd_remember(
             getattr(self, "_approval_queue", None), args,
             prefix=OPS_PREFIX,
         )

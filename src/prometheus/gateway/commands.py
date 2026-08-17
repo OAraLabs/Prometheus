@@ -1997,6 +1997,79 @@ def _approve_verbs():
     return approve_verbs()
 
 
+async def cmd_remember(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
+    """Show the lasting-grant options for one pending request.
+
+    The second half of the prompt trim. The approval prompt used to carry all
+    four verb+extent lines on every request — eleven non-blank lines, four of
+    them repeating the same two paths twice each — so the common case
+    (approve once) paid the rare case's cost every time.
+
+    ⚠ EACH LINE CARRIES ITS VERB AND ITS EXTENT TOGETHER, exactly as the
+    prompt used to render them. The trim moves WHERE they are read, never
+    whether they are read together: a menu naming the verbs and deferring
+    their extents to a further round trip would be consent under a false
+    description, which is the defect this sprint removes.
+
+    Renders from ``prospective_extents`` — the same single source the prompt
+    and ``/api/approvals`` use. Nothing is re-derived here.
+    """
+    from prometheus.permissions.approval_queue import prospective_extents
+
+    usage = (
+        f"Usage: {prefix}remember [id] — lasting-grant options for a "
+        f"pending request"
+    )
+    if queue is None:
+        return "Approval queue not active."
+
+    tokens = (arg_text or "").split()
+    if tokens and not _is_request_id(tokens[0]):
+        return usage
+
+    request_id = tokens[0] if tokens else ""
+    if not request_id:
+        # Same shortcut as /approve: the id is optional when unambiguous.
+        pending = _pending_actions(queue)
+        if not pending:
+            return "No pending approval requests."
+        if len(pending) > 1:
+            lines = [f"{len(pending)} pending requests — name one:"]
+            for act in pending:
+                lines.append(
+                    f"  {getattr(act, 'request_id', '?')}  "
+                    f"{getattr(act, 'tool_name', '?')} — "
+                    f"{_short(getattr(act, 'description', ''))}"
+                )
+            return "\n".join(lines)
+        request_id = getattr(pending[0], "request_id", "")
+
+    action = getattr(queue, "pending", {}).get(request_id)
+    if action is None:
+        return f"No pending request: {request_id}"
+
+    extents = prospective_extents(action)
+    if not extents:
+        # The prompt does not offer /remember in this case, but an operator
+        # who types it anyway is owed the reason rather than an empty menu.
+        return (
+            f"No lasting grant can be offered for {request_id}: this request "
+            f"carries no specific target, so the extent of a remembered grant "
+            f"cannot be described. Approve once ({prefix}approve) or deny."
+        )
+
+    head = (
+        f"{getattr(action, 'tool_name', '?')} — "
+        f"{_short(getattr(action, 'description', ''))}\n"
+        f"Each option below states what it would grant:\n"
+    )
+    body = "".join(
+        f"{prefix}approve {verb} — grants {what}\n"
+        for verb, what in extents.items()
+    )
+    return head + body + f"\nid: {request_id}"
+
+
 async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     """Approve a pending tool request (shared /approve core).
 

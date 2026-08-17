@@ -361,6 +361,28 @@ class ApprovalQueue:
         ``grant_file_path`` / ``grant_command`` are the structured target of
         the pending call — used to derive a remembered grant when the operator
         answers with /approve session|always.
+
+        RULING ON ``/approve all`` — it keeps an extent line; it is NOT moved
+        behind ``/remember``.
+
+        It was the only verb in the prompt whose extent went undescribed,
+        because its breadth spans REQUESTS rather than paths. Trimming the
+        four described options and leaving the one undescribed option in place
+        would have inverted the sprint: the prompt would name only the verb
+        whose reach the operator cannot see.
+
+        It does not go behind ``/remember`` because ``/remember`` is defined
+        as *options that create a lasting grant* and ``/approve all`` creates
+        none — it is once-scoped. Filing a once-scoped verb under a grant menu
+        would misdescribe it, which is the same class of error (consent under
+        a false description) that this sprint exists to remove.
+
+        So it gets its extent stated in the operator's terms — the COUNT of
+        requests it would approve, which is the thing it is actually wide
+        over — plus the explicit "creates no lasting grant". And it is shown
+        only when ``len(self.pending) > 1``: with a single request pending it
+        is identical to ``/approve`` and is pure noise carrying a multi-request
+        verb, so it is omitted rather than described.
         """
         request_id = uuid4().hex[:8]
         action = PendingAction(
@@ -383,29 +405,49 @@ class ApprovalQueue:
             # "session" is gone: there is one gate per process and _grants is
             # never cleared, so it never meant a session — "until restart" is
             # the true boundary and states it at consent time.
+            # PRESENTATION ONLY — ``prospective_extents`` is unchanged and is
+            # still the single source of the extents. What moved is WHERE they
+            # are rendered.
+            #
+            # The prompt carried all four verb+extent lines on EVERY request:
+            # eleven non-blank lines, four of them repeating the same two
+            # paths twice each. Grants are rare and approve-once is common, so
+            # the common case was paying the rare case's cost every time.
+            #
+            # The four lines now live behind ``/remember``, which reproduces
+            # them verbatim. ⚠ THE VERB AND ITS EXTENT STAY ON ONE LINE, there
+            # and here — that is the property this sprint exists to hold
+            # (consent obtained under a false description), and a menu that
+            # named the verbs while deferring their extents to a second round
+            # trip would reintroduce exactly the defect. The round trip costs
+            # a message only when a lasting grant is actually wanted.
             extents = prospective_extents(action)
+            lines = [
+                "Permission requested:",
+                f"Tool: {tool_name}",
+                f"Action: {description}",
+                "",
+                "/approve — approve this ONCE (or /deny)",
+            ]
             if extents:
-                offers = "".join(
-                    f"/approve {verb} — grants {what}\n"
-                    for verb, what in extents.items()
+                lines.append(
+                    "/remember — options that create a lasting grant"
                 )
-            else:
-                offers = (
-                    "/approve until-restart, /approve always — NOT OFFERED "
-                    "here: this request carries no specific target, so the "
-                    "extent of a remembered grant cannot be described. "
-                    "Approve once or deny.\n"
+            # ``/approve all`` is offered ONLY when it differs from
+            # ``/approve``, and never without its extent. See the module note
+            # on why it is not hidden behind /remember: it creates no grant.
+            n_pending = len(self.pending)
+            if n_pending > 1:
+                lines.append(
+                    f"/approve all — approve the {n_pending} pending requests, "
+                    f"once each; creates no lasting grant"
                 )
-            msg = (
-                f"Permission requested:\n"
-                f"Tool: {tool_name}\n"
-                f"Action: {description}\n\n"
-                f"/approve — approve this ONCE (or /deny)\n"
-                f"{offers}"
-                f"/approve all — approve everything pending, once each\n\n"
-                f"Expires in {_humanise_window(self._timeout)} if unanswered.\n"
-                f"id: {request_id} (only needed if several are pending)"
-            )
+            lines += [
+                "",
+                f"Expires in {_humanise_window(self._timeout)} if unanswered.",
+                f"id: {request_id} (only needed if several are pending)",
+            ]
+            msg = "\n".join(lines)
             try:
                 await self._telegram.send(target_chat, msg, parse_mode=None)
             except Exception as exc:

@@ -391,6 +391,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("pairs", self._cmd_pairs))
         # Sprint 15b GRAFT: approval queue commands
         self._app.add_handler(CommandHandler("approve", self._cmd_approve))
+        self._app.add_handler(CommandHandler("remember", self._cmd_remember))
         self._app.add_handler(CommandHandler("deny", self._cmd_deny))
         self._app.add_handler(CommandHandler("pending", self._cmd_pending))
         self._app.add_handler(CommandHandler("grants", self._cmd_grants))
@@ -462,6 +463,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("profile", "Show or switch agent profile"),
                 BotCommand("beacon", "Web bridge / dashboard status"),
                 BotCommand("approve", "Approve a pending tool request"),
+                BotCommand("remember", "Lasting-grant options for a pending request"),
                 BotCommand("deny", "Deny a pending tool request"),
                 BotCommand("pending", "List pending approval requests"),
                 BotCommand("grants", "List remembered approval grants"),
@@ -2194,6 +2196,20 @@ class TelegramAdapter(BasePlatformAdapter):
         arg_text = " ".join(args[1:]) if len(args) >= 2 else ""
         queue = getattr(self, "_approval_queue", None)
         text = await _cmds.cmd_approve(queue, arg_text)
+        await self.send(update.effective_chat.id, text, parse_mode=None)
+
+    async def _cmd_remember(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /remember {request_id} — lasting-grant options."""
+        if not update.message or not update.effective_chat:
+            return
+        from prometheus.gateway import commands as _cmds
+
+        args = (update.message.text or "").split()
+        arg_text = " ".join(args[1:]) if len(args) >= 2 else ""
+        queue = getattr(self, "_approval_queue", None)
+        text = await _cmds.cmd_remember(queue, arg_text)
         await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_deny(
