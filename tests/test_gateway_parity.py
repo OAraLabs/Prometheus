@@ -188,6 +188,12 @@ MANIFEST: tuple[Family, ...] = (
     Family("pairs", ("cmd_pairs",), _cmds("pairs", "prometheus-pairs", "pairs")),
     # -- approvals ----------------------------------------------------------
     Family("approve", ("cmd_approve",), _cmds("approve", "prometheus-approve", "approve")),
+    # The approval prompt was trimmed to two option lines; the four
+    # verb+extent lines moved behind /remember. Telegram-only would rebuild
+    # the write-only asymmetry the revoke entry below exists to prevent — an
+    # operator on Slack or Discord would see a prompt offering a command
+    # their surface does not have.
+    Family("remember", ("cmd_remember",), _cmds("remember", "prometheus-remember", "remember")),
     Family("deny", ("cmd_deny",), _cmds("deny", "prometheus-deny", "deny")),
     Family("grants", ("cmd_grants",), _cmds("grants", "prometheus-grants", "grants")),
     # SPRINT-CONSENT Phase 2: revocation reaches every surface. Wiring it to

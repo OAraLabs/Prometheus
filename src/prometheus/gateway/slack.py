@@ -432,6 +432,7 @@ class SlackAdapter(BasePlatformAdapter):
         self._app.command("/prometheus-note")(self._slash_note)
         self._app.command("/prometheus-pairs")(self._slash_pairs)
         self._app.command("/prometheus-approve")(self._slash_approve)
+        self._app.command("/prometheus-remember")(self._slash_remember)
         self._app.command("/prometheus-deny")(self._slash_deny)
         self._app.command("/prometheus-pending")(self._slash_pending)
         self._app.command("/prometheus-grants")(self._slash_grants)
@@ -763,6 +764,7 @@ class SlackAdapter(BasePlatformAdapter):
             "",
             "Approvals & autonomy:",
             "  /prometheus-approve <id>   — approve a pending tool request",
+            "  /prometheus-remember <id>  — lasting-grant options for a request",
             "  /prometheus-deny <id>      — deny a pending tool request",
             "  /prometheus-pending        — list pending approval requests",
             "  /prometheus-grants         — list remembered approval grants",
@@ -1246,6 +1248,17 @@ class SlackAdapter(BasePlatformAdapter):
         text_arg = self._cmd_text(command)
         text = await _cmds.cmd_approve(
             getattr(self, "_approval_queue", None), text_arg,
+            prefix=SLACK_COMMAND_PREFIX,
+        )
+        await respond(text=text)
+
+    async def _slash_remember(self, ack: Any, command: Any, respond: Any) -> None:
+        """Lasting-grant options for a pending tool request."""
+        await ack()
+        from prometheus.gateway import commands as _cmds
+
+        text = await _cmds.cmd_remember(
+            getattr(self, "_approval_queue", None), self._cmd_text(command),
             prefix=SLACK_COMMAND_PREFIX,
         )
         await respond(text=text)
