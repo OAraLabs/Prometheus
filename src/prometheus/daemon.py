@@ -206,6 +206,41 @@ def telegram_gateway_decision(
     return True, None
 
 
+#: The ONE sentence describing what a config_pin does. The boot WARNING, the
+#: doctor line and the /api/status payload all render this exact string. An
+#: operator who greps the log and an operator who reads a surface must not have
+#: to reconcile two descriptions of one mechanism.
+CONFIG_PIN_EFFECT = "Corrected in memory; the config file is left as written."
+
+#: Deliberately `config_pins`, never bare "pins". Beacon already uses "pin" for
+#: SKILL pins in the same UI, and a second unrelated meaning of the word on an
+#: adjacent screen is a name collision waiting to be misread.
+CONFIG_PINS_FILENAME = "config_pins.yaml"
+
+
+def read_config_pins(pins_path: Path) -> dict:
+    """The pinned values, or {} when no pin file exists. Read-only, no logging.
+
+    Exists so doctor and the REST surfaces can answer "is anything pinned?"
+    without importing the correction path or re-implementing the parse.
+    """
+    if not pins_path.is_file():
+        return {}
+    try:
+        with pins_path.open(encoding="utf-8") as fh:
+            return yaml.safe_load(fh) or {}
+    except Exception:
+        return {}
+
+
+#: Keys corrected at the most recent boot, and the pins in force. Populated by
+#: apply_config_pins so a surface can report drift WITHOUT re-reading the file
+#: and WITHOUT re-running the comparison — the surface must describe what
+#: actually happened at boot, not recompute a fresh opinion (CROSS-CUTTING §12:
+#: the runtime auto-detects, the record must follow).
+CONFIG_PINS_STATE: dict = {"path": None, "pins": {}, "drifted": []}
+
+
 def apply_config_pins(config: dict, pins_path: Path) -> list[str]:
     """Apply pinned config values IN MEMORY. Returns the dotted keys that drifted.
 
@@ -236,13 +271,12 @@ def apply_config_pins(config: dict, pins_path: Path) -> list[str]:
     on the premise that "there is one writer process" — a premise this
     function was quietly falsifying.
     """
+    CONFIG_PINS_STATE.update({"path": str(pins_path), "pins": {}, "drifted": []})
     if not pins_path.is_file():
+        logger.info("config_pins: none active (no %s)", pins_path)
         return []
-    try:
-        with pins_path.open(encoding="utf-8") as fh:
-            pins = yaml.safe_load(fh) or {}
-    except Exception:
-        pins = {}
+    pins = read_config_pins(pins_path)
+    CONFIG_PINS_STATE["pins"] = dict(pins)
 
     drifted: list[str] = []
     for dotpath, expected in pins.items():
@@ -254,15 +288,25 @@ def apply_config_pins(config: dict, pins_path: Path) -> list[str]:
             val = val.get(p, {}) if isinstance(val, dict) else None
         if val and str(val) != str(expected):
             logger.warning(
-                "CONFIG DRIFT DETECTED: %s = %r (pinned: %r). "
-                "Corrected in memory; the config file is left as written.",
-                dotpath, val, expected,
+                "CONFIG DRIFT DETECTED: %s = %r (pinned: %r). %s",
+                dotpath, val, expected, CONFIG_PIN_EFFECT,
             )
             obj = config
             for p in parts[:-1]:
                 obj = obj.setdefault(p, {})
             obj[parts[-1]] = expected
             drifted.append(str(dotpath))
+
+    # ALWAYS log, drift or not. Previously the only evidence a pin existed was
+    # the WARNING above, which fires only WHEN it acts — so absence of a
+    # warning was indistinguishable from absence of the mechanism, and a pin
+    # restored the wrong model on every boot for six weeks unnoticed.
+    logger.info(
+        "config_pins: %d active from %s (%s); drift corrected this boot: %s",
+        len(pins), pins_path, ", ".join(sorted(pins)) or "none",
+        ", ".join(drifted) if drifted else "none",
+    )
+    CONFIG_PINS_STATE["drifted"] = list(drifted)
     return drifted
 
 

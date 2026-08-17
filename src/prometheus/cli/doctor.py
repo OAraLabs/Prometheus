@@ -495,6 +495,72 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
     )
 
 
+def check_config_pins() -> DiagnosticCheck:
+    """Is anything pinned, and did it override the config file at boot?
+
+    This check exists because the mechanism previously had NO operator
+    surface: a pin silently restored `model.model: gemma4-26b` on every boot
+    for six weeks while the backend served Qwen, and the only evidence was one
+    WARNING in the journal. An operator asking "is anything pinned?" had to
+    know the file existed in order to look for it.
+
+    Always `config_pins`, never bare "pins" — Beacon uses "pin" for SKILL pins
+    on an adjacent screen.
+    """
+    from prometheus.config.paths import get_config_dir
+    from prometheus.daemon import (
+        CONFIG_PIN_EFFECT, CONFIG_PINS_FILENAME, read_config_pins)
+
+    pins_path = get_config_dir() / CONFIG_PINS_FILENAME
+    pins = read_config_pins(pins_path)
+    if not pins:
+        return DiagnosticCheck(
+            name="config_pins", category="platform", status="ok",
+            message=f"none active (no {pins_path})",
+        )
+
+    # Compare against the config ON DISK. A pinned key whose file value
+    # differs is the state that silently overrides an operator's edit, and it
+    # is the state worth being loud about.
+    cfg_path, _ = resolve_config_path()
+    on_disk: dict[str, Any] = {}
+    if cfg_path and cfg_path.is_file():
+        try:
+            import yaml
+            with cfg_path.open(encoding="utf-8") as fh:
+                on_disk = yaml.safe_load(fh) or {}
+        except Exception:
+            on_disk = {}
+
+    overriding = []
+    for dotted, expected in pins.items():
+        val: Any = on_disk
+        for part in str(dotted).split("."):
+            val = val.get(part, {}) if isinstance(val, dict) else None
+        if val and str(val) != str(expected):
+            overriding.append(f"{dotted}: file={val!r} pinned={expected!r}")
+
+    listing = ", ".join(sorted(pins))
+    if overriding:
+        return DiagnosticCheck(
+            name="config_pins", category="platform", status="warning",
+            message=(
+                f"{len(pins)} active ({listing}); "
+                f"{len(overriding)} overriding the config file — "
+                + "; ".join(overriding)
+                + f". {CONFIG_PIN_EFFECT}"
+            ),
+            fix=(
+                f"The running value comes from {pins_path}, not the config "
+                "file. Edit the pin, or delete it to let the config win."
+            ),
+        )
+    return DiagnosticCheck(
+        name="config_pins", category="platform", status="ok",
+        message=f"{len(pins)} active ({listing}); config file agrees",
+    )
+
+
 def check_coding_sandbox(config: dict[str, Any]) -> DiagnosticCheck:
     """Which sandbox backend coding runs use, and whether it can start.
 
@@ -695,6 +761,7 @@ def run_extended_checks(
         *check_gateways(config),
         check_advertised_tools(config),
         check_coding_sandbox(config),
+        check_config_pins(),
         check_trajectory_export(config),
         check_whisper(config),
     ]
