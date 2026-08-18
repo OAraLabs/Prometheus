@@ -215,6 +215,12 @@ CREATE INDEX IF NOT EXISTS idx_signal_events_type_time
 # Key = table name, value = list of (column_name, column_type_sql) tuples
 # that must exist. On init, any missing column gets ALTER TABLE ADD COLUMN'd.
 _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    # The SERVER's own words on a failed HTTP call. str(exc) on an httpx or
+    # requests error is the CLIENT's summary — "Client error '400 Bad Request'
+    # for url ..." — which names the status and nothing about the cause.
+    "silent_failures": [
+        ("response_body", "TEXT"),
+    ],
     "tool_calls": [
         ("raw_model_output", "TEXT"),
         ("parsed_tool_call", "TEXT"),
@@ -292,6 +298,43 @@ class GoldenExport:
     path: Path | None
     count: int
     last_rowid: int
+
+
+def _response_body(exc: BaseException) -> str | None:
+    """The server's own response body, when the exception carries one.
+
+    WHY THIS EXISTS. On 2026-08-17 a Beacon turn died on a 400 from the
+    inference server and ``silent_failures`` recorded it faithfully — twice —
+    yet the row could not diagnose it: ``exception_msg`` held only httpx's
+    "Client error '400 Bad Request' for url ...". The server's body said
+    ``Failed to tokenize prompt``, which is a MEDIA-MARKER rejection and not a
+    context overflow, and that word went only to journald. From the DB alone
+    the two are indistinguishable, and overflow is the wrong guess to leave
+    lying around — it sends you to the context budget instead of the tool
+    result that poisoned the prompt.
+
+    Duck-typed on ``exc.response`` so httpx and requests both work without
+    importing either. Never raises: ``.text`` on an httpx response whose
+    stream was never read raises ``ResponseNotRead``, and a telemetry helper
+    must not turn a recorded failure into an unrecorded one.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return None
+    for attr in ("text", "content"):
+        try:
+            val = getattr(resp, attr, None)
+        except Exception:
+            continue
+        if not val:
+            continue
+        if isinstance(val, (bytes, bytearray)):
+            try:
+                val = bytes(val).decode("utf-8", "replace")
+            except Exception:
+                continue
+        return str(val)[:4000]
+    return None
 
 
 class ToolCallTelemetry:
@@ -520,6 +563,10 @@ class ToolCallTelemetry:
             exc: the exception instance.
             context: optional JSON-serialisable dict (skill path, model
                 id, batch size, etc.). Stored as a JSON string.
+
+        When ``exc`` carries an HTTP response, its body is stored in
+        ``response_body`` — see :func:`_response_body` for why a row without it
+        could not tell a media-marker rejection from a context overflow.
         """
         try:
             ctx_json = json.dumps(context, default=str) if context else None
@@ -534,8 +581,9 @@ class ToolCallTelemetry:
                 """
                 INSERT INTO silent_failures
                   (id, timestamp, subsystem, operation,
-                   exception_type, exception_msg, traceback, context)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   exception_type, exception_msg, traceback, context,
+                   response_body)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     uuid4().hex,
@@ -546,6 +594,7 @@ class ToolCallTelemetry:
                     str(exc)[:2000],
                     tb_text[:8000],
                     ctx_json,
+                    _response_body(exc),
                 ),
             )
             self._conn.commit()
