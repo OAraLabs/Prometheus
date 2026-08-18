@@ -744,6 +744,19 @@ async def run_loop(
     # the web path ``context.session_id`` belongs to the shared context and is
     # not this turn's session.
     ephemeral = is_session_ephemeral(session_id or context.session_id)
+    # The same effective id, NAMED — because two telemetry writers used to read
+    # ``context.session_id`` raw and recorded the literal "web" for every web
+    # turn, which is the routing namespace daemon.py pins on the shared web
+    # context, not this turn's conversation. tool_calls.session_id exists to
+    # join back to lcm_messages; keyed on "web" that join matches nothing.
+    #
+    # DESCRIPTIVE READERS ONLY. Do NOT feed this to origin_from_session_id:
+    # "web" is a load-bearing member of _USER_SESSION_LITERALS while "web:" is
+    # NOT in _USER_SESSION_PREFIXES, so the real id classifies as SYSTEM where
+    # the literal classifies as USER — and that classification decides whether
+    # a human is treated as present to sanction the next tool call. Enforced by
+    # tests/test_session_id_descriptive_only.py, not by this comment.
+    effective_session_id = session_id or context.session_id
     # FL-4: the divergence detector's task scope, minted here for exactly the
     # reasons the verifier's turn_key is (one shared instance, one run_loop
     # call = one task) — and HERE rather than in ``AgentLoop.run_async``,
@@ -773,6 +786,7 @@ async def run_loop(
             fmv_turn_key=turn_key,
             ephemeral=ephemeral,
             div_task_id=div_task_id,
+            effective_session_id=effective_session_id,
         ):
             yield item
     finally:
@@ -819,6 +833,7 @@ async def _run_loop(
     fmv_turn_key: str | None = None,
     ephemeral: bool = False,
     div_task_id: str | None = None,
+    effective_session_id: str | None = None,
 ) -> AsyncIterator[tuple[StreamEvent, UsageSnapshot | None]]:
     """The loop body. See :func:`run_loop` — call that, not this.
 
@@ -1268,7 +1283,7 @@ async def _run_loop(
             ),
             operation="loop_round",
             round_index=turn,
-            session_id=context.session_id,
+            session_id=effective_session_id,
         ):
             if isinstance(event, ApiTextDeltaEvent):
                 if _markup_filter is not None:
@@ -1698,6 +1713,7 @@ async def _run_loop(
                 served_model=served_model_this_turn,
                 ephemeral=ephemeral,
                 div_task_id=div_task_id,
+                effective_session_id=effective_session_id,
             )
             if _runnable
             else []
@@ -2594,6 +2610,7 @@ async def _safe_execute(
     *,
     ephemeral: bool = False,
     div_task_id: str | None = None,
+    effective_session_id: str | None = None,
 ) -> ToolResultBlock:
     """Run one tool call, always returning a correctly-correlated
     ``ToolResultBlock`` and never raising.
@@ -2613,6 +2630,7 @@ async def _safe_execute(
             served_model=served_model,
             ephemeral=ephemeral,
             div_task_id=div_task_id,
+            effective_session_id=effective_session_id,
         )
     except Exception as exc:  # noqa: BLE001 — isolating tool failure is the point
         log.error(
@@ -2667,6 +2685,7 @@ async def _dispatch_tool_calls(
     *,
     ephemeral: bool = False,
     div_task_id: str | None = None,
+    effective_session_id: str | None = None,
 ) -> list[ToolResultBlock]:
     """Dispatch tool calls with parallel execution for read-only tools.
 
@@ -2699,6 +2718,7 @@ async def _dispatch_tool_calls(
             await _safe_execute(
                 context, tool_calls[0], raw_model_output, served_model,
                 ephemeral=ephemeral, div_task_id=div_task_id,
+                effective_session_id=effective_session_id,
             )
         ]
 
@@ -2724,6 +2744,7 @@ async def _dispatch_tool_calls(
             return idx, await _safe_execute(
                 context, tc, raw_model_output, served_model,
                 ephemeral=ephemeral, div_task_id=div_task_id,
+                effective_session_id=effective_session_id,
             )
 
         results.extend(
@@ -2737,6 +2758,7 @@ async def _dispatch_tool_calls(
             await _safe_execute(
                 context, tc, raw_model_output, served_model,
                 ephemeral=ephemeral, div_task_id=div_task_id,
+                effective_session_id=effective_session_id,
             ),
         ))
 
@@ -2835,6 +2857,7 @@ async def _execute_tool_call(
     served_model: str | None = None,
     ephemeral: bool = False,
     div_task_id: str | None = None,
+    effective_session_id: str | None = None,
 ) -> ToolResultBlock:
     """Execute a single tool call, running hooks if configured.
 
@@ -3467,7 +3490,10 @@ async def _execute_tool_call(
             # schema is stored as the model actually saw it rather than
             # re-derived from a registry that may have changed by export time.
             # Ephemeral turns null both, consistent with the content columns.
-            session_id=None if ephemeral else context.session_id,
+            session_id=None if ephemeral else (
+                effective_session_id if effective_session_id is not None
+                else context.session_id
+            ),
             tool_schema=None if ephemeral else _tool_schema_json(context, tool_name),
         )
 
