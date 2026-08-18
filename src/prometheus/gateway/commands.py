@@ -3759,8 +3759,13 @@ def cmd_gate(gate: Any, arg: str = "") -> str:
 
     ``gate`` is a SecurityGate (or anything with set_mode/current_mode).
 
-    - /gate off  -> autonomous: no approval prompts (always-blocked
-      patterns and denied_paths STILL enforced).
+    - /gate off  -> autonomous: no approval prompts. The FLOOR still
+      applies — always-blocked patterns and denied_paths — because the
+      floor is not a mode. What autonomous waives is the APPROVE tier and
+      configured policy (denied_commands), never the floor.
+      Caveat the reply text also states: denied_paths covers tools that
+      DECLARE a path. Paths inside a bash command are invisible to the
+      gate in every mode; the kernel profile is that floor.
     - /gate on   -> back to the mode from config (permission_mode).
     - /gate      -> show current mode.
 
@@ -3777,8 +3782,13 @@ def cmd_gate(gate: Any, arg: str = "") -> str:
         gate.set_mode("autonomous")
         return (
             "Permission gate OFF (autonomous).\n"
-            "Approval prompts suppressed; always-blocked commands and "
-            "denied paths still enforced.\n"
+            "Approval prompts suppressed. STILL ENFORCED: always-blocked "
+            "command patterns, and denied paths for any tool that declares "
+            "one (write_file, edit_file, read_file).\n"
+            "NOT enforced by the gate, in any mode: paths inside a bash "
+            "command \u2014 the gate is handed a command string and never sees "
+            "them. That floor is the kernel profile "
+            "(security.bash_confinement).\n"
             "/gate on to restore. A daemon restart also restores it."
         )
     if arg in ("on", "default"):

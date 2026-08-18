@@ -797,12 +797,30 @@ class SecurityGate:
                 self._audit_log(tool_name, AuditDecision.DENY, reason, command)
                 return PermissionDecision.deny(reason)
 
-        # AUTONOMOUS mode: allow everything except always-blocked patterns
+        # AUTONOMOUS mode: suppress the APPROVAL tiers — never the FLOOR.
+        #
+        # This branch returns before the denied-path check below, so until now
+        # `/gate off` allowed write_file and read_file on ~/.ssh, ~/.gnupg and
+        # the daemon env file, while its own reply text told the operator that
+        # "denied paths still enforced". Measured, not inferred: at mode
+        # autonomous, write_file and read_file on ~/.ssh/id_rsa both returned
+        # ALLOW where default and strict both returned DENY.
+        #
+        # The floor is not a mode. What autonomous drops is the APPROVE tier
+        # (workspace prompts, strict confirmations) and configured policy —
+        # deliberately still `_is_always_blocked` here, not
+        # `_check_blocked_command`, so denied_commands stays a policy the mode
+        # can waive while the always-blocked patterns cannot be.
         if self._mode == PermissionMode.AUTONOMOUS:
             if command and self._is_always_blocked(command):
                 reason = f"Blocked command pattern: {command!r}"
                 self._audit_log(tool_name, AuditDecision.DENY, reason, command)
                 return PermissionDecision.deny(reason)
+            if file_path:
+                reason = self._check_denied_path(file_path)
+                if reason:
+                    self._audit_log(tool_name, AuditDecision.DENY, reason, file_path)
+                    return PermissionDecision.deny(reason)
             self._audit_log(tool_name, AuditDecision.ALLOW, "Auto-allowed (autonomous)")
             return PermissionDecision.allow(level=TrustLevel.AUTONOMOUS)
 

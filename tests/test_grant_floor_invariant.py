@@ -46,7 +46,24 @@ FLOOR_TARGETS = [
 ORDINARY = "/home/will/ordinary-file.txt"
 
 
-def _gate(grants: list[Grant] | None = None) -> SecurityGate:
+# THE THIRD AXIS (gap 2, 2026-08-18). The floor is not a mode: it must hold
+# under `/gate off` exactly as it does under default. It did NOT — the
+# AUTONOMOUS branch of `evaluate` returned ALLOW *before* `_check_denied_path`,
+# so write_file/read_file on ~/.ssh were permitted while `/gate off`'s own reply
+# text told the operator that denied paths were still enforced. Measured before
+# the fix: default DENY, strict DENY, autonomous ALLOW.
+#
+# Adding mode here rather than writing a parallel check is deliberate — the
+# existing source-order test pins grant-vs-floor ordering, which cannot see a
+# branch that returns above BOTH.
+MODES = [
+    pytest.param("default", id="mode-default"),
+    pytest.param("strict", id="mode-strict"),
+    pytest.param("autonomous", id="mode-autonomous-GATE-OFF"),
+]
+
+
+def _gate(grants: list[Grant] | None = None, mode: str = "default") -> SecurityGate:
     """A gate carrying the SHIPPED floor, with a workspace root set.
 
     ``workspace_root`` is NOT decoration here. Without it there is no
@@ -60,6 +77,7 @@ def _gate(grants: list[Grant] | None = None) -> SecurityGate:
         denied_paths=list(SHIPPED_DENIED_PATHS),
         workspace_root=["/srv/workspace-for-this-test"],
         grants=grants or [],
+        mode=mode,
     )
 
 
@@ -82,21 +100,60 @@ GRANT_CASES = [
 ]
 
 
+@pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("grant_spec", GRANT_CASES)
 @pytest.mark.parametrize("target", FLOOR_TARGETS)
-def test_floor_holds_above_every_grant_kind(grant_spec, target):
-    """BREACH direction: no grant of any kind may reach a floor path.
+def test_floor_holds_above_every_grant_kind(grant_spec, target, mode):
+    """BREACH direction: no grant of any kind, IN ANY MODE, reaches the floor.
 
     Includes a grant aimed DIRECTLY at the floor (`path_prefix /home/will/.ssh`)
-    — the case an attacker or a careless `/approve always` would produce."""
+    — the case an attacker or a careless `/approve always` would produce — and
+    now every case again under `/gate off`."""
     grants = [_grant(*grant_spec)] if grant_spec else []
-    decision = _gate(grants).evaluate("write_file", file_path=target)
+    decision = _gate(grants, mode=mode).evaluate("write_file", file_path=target)
 
     assert decision.action == "DENY", (
-        f"FLOOR BREACHED: grant={grant_spec!r} reached {target!r} "
-        f"(got {decision.action}). The grant check has moved above "
-        f"_check_denied_path, or the floor stopped being consulted."
+        f"FLOOR BREACHED in mode={mode!r}: grant={grant_spec!r} reached "
+        f"{target!r} (got {decision.action}). Either the grant check moved "
+        f"above _check_denied_path, or a mode branch returned before the "
+        f"floor was consulted."
     )
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("target", FLOOR_TARGETS)
+@pytest.mark.parametrize("tool", ["write_file", "edit_file", "read_file"])
+def test_floor_holds_for_every_path_declaring_tool(tool, target, mode):
+    """The floor is a property of the PATH, not of the tool that names it.
+
+    read_file is the case the arc missed: it is not in _APPROVE_TOOLS, so it
+    never reaches the approval tier and its only floor is _check_denied_path.
+    """
+    decision = _gate(mode=mode).evaluate(
+        tool, file_path=target, is_read_only=(tool == "read_file"))
+    assert decision.action == "DENY", (
+        f"FLOOR BREACHED in mode={mode!r}: {tool} reached {target!r} "
+        f"(got {decision.action})"
+    )
+
+
+def test_bash_is_NOT_covered_by_this_invariant():
+    """Stated so the suite cannot be read as claiming more than it proves.
+
+    `gate.evaluate("bash", ...)` is handed a command STRING and no file_path,
+    so _check_denied_path is never reached — in ANY mode, at EITHER origin.
+    That floor is enforced below the tool layer by the kernel profile
+    (security.bash_confinement / deploy/apparmor/prometheus-bash), verified
+    separately by outcome. If this assertion ever flips, the gate grew a path
+    view for bash and this file should grow bash cases to match.
+    """
+    for mode in ("default", "strict", "autonomous"):
+        decision = _gate(mode=mode).evaluate(
+            "bash", command=f"cat {FLOOR_TARGETS[0].values[0]}", origin="user")
+        assert decision.action == "ALLOW", (
+            f"bash in mode={mode!r} now returns {decision.action} for a floor "
+            "path — the gate gained a path view; add bash to the matrix above"
+        )
 
 
 @pytest.mark.parametrize("grant_spec", GRANT_CASES)
