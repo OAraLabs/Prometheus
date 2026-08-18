@@ -105,6 +105,7 @@ async def launch_web(
         agent_state_ref=agent_state_ref,
         api_token=_api_token,
         config=config,
+        approval_queue=approval_queue,
     )
 
     # Expose the bridge on the FastAPI app so REST routes (e.g.

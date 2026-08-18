@@ -67,6 +67,7 @@ class WebSocketBridge:
         agent_state_ref: Any | None = None,
         api_token: str | None = None,
         config: dict | None = None,
+        approval_queue: Any | None = None,
     ) -> None:
         self.signal_bus = signal_bus
         self.session_mgr = session_mgr
@@ -75,6 +76,11 @@ class WebSocketBridge:
         # Full daemon config (config.web.*, etc.) — used by formatter commands
         # like /doctor and /beacon dispatched through the web slash-router.
         self.config = config or {}
+        # SPRINT-WEB-PARITY: /grants, /remember, /revoke need the queue, and
+        # /gate reaches the SecurityGate through it. The REST layer already had
+        # it (app.state.approval_queue); the bridge never did, which is one
+        # reason those commands were never dispatched here.
+        self.approval_queue = approval_queue
         # Same secret the REST middleware uses (config.web.api_token /
         # PROMETHEUS_API_TOKEN). Empty/None => auth DISABLED, exactly like
         # the REST side, so dev/no-token setups (and the tokenless static UI)
@@ -540,7 +546,7 @@ class WebSocketBridge:
         # Slash commands first — they never become conversation turns. Resolve
         # the active session (non-creating) for /steer & friends, and pass a
         # get_or_create factory for /queue (which fires on a quiet chat).
-        from prometheus.web.slash_router import build_command_context, route_slash
+        from prometheus.web.slash_router import build_command_context, parse_slash, route_slash
 
         active_session = self.session_mgr.get(session_id) if self.session_mgr else None
         ensure_session = (
@@ -555,11 +561,14 @@ class WebSocketBridge:
                 self.config,
                 session=active_session,
                 ensure_session=ensure_session,
+                session_id=session_id,
+                approval_queue=self.approval_queue,
             ),
         )
         if outcome.handled:
             await self._broadcast_command_reply(
-                session_id, content, outcome.reply or "", client_msg_id
+                session_id, content, outcome.reply or "", client_msg_id,
+                name=(parse_slash(content) or ("", ""))[0],
             )
             return
 
@@ -622,6 +631,7 @@ class WebSocketBridge:
         command_text: str,
         reply: str,
         client_msg_id: str | None = None,
+        name: str = "",
     ) -> None:
         """Broadcast a slash-command exchange as transient chat messages.
 
@@ -659,6 +669,36 @@ class WebSocketBridge:
                 "created_at": ts,
                 "transient": True,
                 "command": True,
+            },
+        })
+        # TERMINAL FRAME for the exchange (SPRINT-WEB-PARITY).
+        #
+        # A command reply is a COMPLETE exchange, and until now nothing said so:
+        # the two frames above are the whole response, and a client cannot tell
+        # them from the first frames of a turn still in flight. Beacon's reply
+        # watchdog is mechanical — any assistant-activity frame stands it down
+        # and RE-ARMS unless the frame is terminal — so a command reply restarted
+        # its 30s clock and nothing ever closed it. Every command whose entire
+        # response is a command reply therefore false-stalled with "the turn may
+        # have died": all 17 web-handled formatter commands and all 25 boundary
+        # replies, /help and /status included.
+        #
+        # DELIBERATELY NOT ``chat_done``. That frame means "the assistant turn
+        # identified by message_id has finished", and a command reply is not a
+        # turn — it has only a synthetic transient id that reconciles to no LCM
+        # row. Worse, /steer and /queue are dispatched WHILE a turn streams, so a
+        # chat_done here would stand a client's watchdog down for a turn that is
+        # still running and could still die silently — strictly worse than the
+        # defect. A distinct type is inert in clients that don't know it (no
+        # regression) and unambiguous in those that do.
+        await self.broadcast({
+            "type": "command_done",
+            "timestamp": ts,
+            "payload": {
+                "session_id": session_id,
+                "message_id": f"cmd-asst-{marker}",
+                "command": name,
+                "transient": True,
             },
         })
 

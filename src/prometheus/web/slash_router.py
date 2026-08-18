@@ -48,7 +48,7 @@ from prometheus.gateway.commands import (
 # steering group (/steer /queue /unqueue /clearsteers) IS wired — see the
 # session-command table in gateway.commands.
 WEB_NATIVE_ONLY: frozenset[str] = frozenset({
-    "start", "clear", "reset",
+    "start",
     "route",
     "benchmark", "voice", "tools", "pairs",
     "approve", "deny", "pending",
@@ -56,6 +56,12 @@ WEB_NATIVE_ONLY: frozenset[str] = frozenset({
     "claude", "gpt", "gemini", "xai", "grok", "local",
     # CLOUD EXPANSION (2026-07): mirror of the new Telegram override commands
     "deepseek", "kimi", "glm", "mimo",
+    # /qwen belongs to the provider-override class above, not to the wired set:
+    # all TEN of its siblings are deferred here. It was added later (#183-#186)
+    # and simply never listed, so it fell through to the agent instead of
+    # getting its siblings' boundary reply. Listing it is the fix; wiring it
+    # alone would have split one class across two behaviours.
+    "qwen",
     "escalations",
 })
 
@@ -131,6 +137,8 @@ def build_command_context(
     config: dict | None = None,
     session: Any = None,
     ensure_session: Any = None,
+    session_id: str = "",
+    approval_queue: Any = None,
 ) -> CommandContext:
     """Build a CommandContext from the web bridge's loop_context + config.
 
@@ -146,7 +154,8 @@ def build_command_context(
     """
     if loop_context is None:
         return CommandContext(
-            config=config, session=session, ensure_session=ensure_session
+            config=config, session=session, ensure_session=ensure_session,
+            session_id=session_id, approval_queue=approval_queue,
         )
     provider = getattr(loop_context, "provider", "")
     provider_str = getattr(provider, "value", None) or str(provider or "")
@@ -158,4 +167,6 @@ def build_command_context(
         tool_registry=getattr(loop_context, "tool_registry", None),
         session=session,
         ensure_session=ensure_session,
+        session_id=session_id,
+        approval_queue=approval_queue,
     )
