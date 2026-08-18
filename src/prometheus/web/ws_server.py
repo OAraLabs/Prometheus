@@ -691,13 +691,20 @@ class WebSocketBridge:
         # still running and could still die silently — strictly worse than the
         # defect. A distinct type is inert in clients that don't know it (no
         # regression) and unambiguous in those that do.
+        # ``command_name``, NOT ``command``. The assistant chat_message above
+        # already carries ``command: true`` — a BOOLEAN marking the frame as a
+        # command reply. Reusing the key here for the command's NAME would put
+        # two different types behind one key in adjacent frames of the same
+        # exchange, and a consumer reading payload.command without first
+        # switching on payload type would get True where it expected "help".
+        # Renamed before anything depends on it; nothing consumes it yet.
         await self.broadcast({
             "type": "command_done",
             "timestamp": ts,
             "payload": {
                 "session_id": session_id,
                 "message_id": f"cmd-asst-{marker}",
-                "command": name,
+                "command_name": name,
                 "transient": True,
             },
         })

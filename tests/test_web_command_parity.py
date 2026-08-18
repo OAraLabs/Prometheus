@@ -179,7 +179,12 @@ def test_command_reply_emits_a_terminal_frame():
 
     done = frames[-1]
     assert done["payload"]["session_id"] == "web:t"
-    assert done["payload"]["command"] == "help"
+    assert done["payload"]["command_name"] == "help"
+    # The bool lives on the assistant chat_message; the NAME lives here.
+    assert frames[1]["payload"]["command"] is True
+    assert "command" not in done["payload"], (
+        "command_done must not carry a key that is a bool one frame earlier"
+    )
     assert done["payload"]["transient"] is True
     # Ties the terminator to the assistant frame it closes.
     assert done["payload"]["message_id"] == frames[1]["payload"]["message_id"]
@@ -191,7 +196,7 @@ def test_boundary_replies_terminate_too():
     the stall was never about which commands were WIRED."""
     frames = _frames_for("/route")
     assert [f["type"] for f in frames][-1] == "command_done"
-    assert frames[-1]["payload"]["command"] == "route"
+    assert frames[-1]["payload"]["command_name"] == "route"
 
 
 def test_command_reply_never_emits_chat_done():
