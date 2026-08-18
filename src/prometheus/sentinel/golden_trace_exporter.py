@@ -31,6 +31,34 @@ WATERMARK_FILENAME = ".export_state.json"
 # corpus or blow up example length.
 CONTEXT_MESSAGE_LIMIT = 12
 
+# Session ids that name a SURFACE, not a conversation. A shared LoopContext
+# pins one of these on every turn from that surface (daemon.py pins "web"), so
+# the id is a routing namespace and the rows behind it are an accumulation of
+# unrelated conversations — 45 such rows spanning two months, as of 2026-08-18.
+# Resolving context against one produces a training example whose input half is
+# SOMEONE ELSE'S conversation.
+#
+# THIS GUARD IS FOR THE WRITER THAT HAS NOT BEEN WRITTEN YET. The 377 rows that
+# carried "web" before the writer was fixed (#258) are permanently inert and
+# stay as historical record: is_golden is computed at write time and every one
+# of them is 0, so this resolver can never be handed one. They were spared by
+# three unrelated configuration facts aligning — a local primary provider, the
+# cloud override commands being Telegram-only, and the web path routing nowhere
+# else — because is_golden requires a CLOUD provider. Move any one of those and
+# the alignment is gone. Correct output, wrong reason, and nothing that would
+# have noticed.
+#
+# Pinned equal to permissions.checker's surface literals by
+# tests/test_golden_trace_namespace_guard.py — the same values that classify as
+# ORIGIN_USER *because a human is at that surface* are unusable as conversation
+# keys *because the surface is shared*. That is one fact, not two.
+#
+# Deliberately a NARROW allowlist-of-known-namespaces, NOT a shape rule: most
+# real session ids are bare literals (UUIDs, probe names, "lcm-accept-1"), so
+# requiring a "surface:id" shape would refuse the majority of a legitimate
+# corpus.
+SHARED_SURFACE_IDS: frozenset[str] = frozenset({"web", "cli", "system"})
+
 # Roles a training example's input half may contain. Tool results are kept —
 # a call that follows one is usually a REACTION to it, and dropping them
 # would make those examples look unmotivated.
@@ -58,6 +86,17 @@ def lcm_context_resolver(store: object, *, limit: int = CONTEXT_MESSAGE_LIMIT):
         if not session_id or ts is None:
             # Rows written before session_id capture shipped. Unrecoverable
             # by construction — the conversation was never referenced.
+            return []
+        if session_id in SHARED_SURFACE_IDS:
+            # A surface, not a conversation: the rows behind it belong to many
+            # unrelated sessions, so any context resolved here would be someone
+            # else's. Skipping is the same honest failure as the branch above —
+            # export nothing rather than something wrong.
+            log.debug(
+                "golden trace references the shared surface id %r, not a "
+                "conversation — skipping rather than pairing it with "
+                "unrelated context", session_id,
+            )
             return []
         try:
             messages = store.get_messages(session_id, limit=500)
