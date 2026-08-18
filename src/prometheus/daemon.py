@@ -1872,6 +1872,25 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 microcompact_keep_chars=config.get("context", {}).get("microcompact_keep_chars", 200),
                 microcompact_keep_chars_no_lcm=config.get("context", {}).get("microcompact_keep_chars_no_lcm", 500),
                 # Phase 3.5: web bridge is its own session namespace.
+                #
+                # READ THIS BEFORE "FIXING" IT. This is a ROUTING NAMESPACE that
+                # happens to sit in a field called session_id — it is NOT this
+                # turn's conversation id, because ONE context is shared by every
+                # web session (run_async builds a per-call context; the web path
+                # cannot). Readers that want the conversation must use the
+                # per-call argument: `session_id or context.session_id`, the
+                # idiom already used for the FMV turn key, the ephemeral check
+                # and the divergence task id, and named `effective_session_id`
+                # in _run_loop.
+                #
+                # The literal is LOAD-BEARING and must not be changed to None or
+                # to a real id: "web" is a member of _USER_SESSION_LITERALS
+                # (permissions/checker.py), so origin_from_session_id("web") is
+                # USER — while "web:" is NOT in _USER_SESSION_PREFIXES, making
+                # origin_from_session_id("web:abc") SYSTEM. That classification
+                # decides whether a human counts as present to sanction the next
+                # tool call, so swapping this value silently demotes every
+                # Beacon turn to the stricter class. Descriptive readers only.
                 session_id="web",
                 # Sprint 2 (OAra): the web path was the ONLY path without the
                 # compactor — AgentLoop.run_async() threads it for telegram/CLI,
