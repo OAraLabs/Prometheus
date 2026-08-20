@@ -33,6 +33,7 @@ from prometheus.config.paths import (
 )
 from prometheus.context.environment import git_head_sha
 from prometheus.engine.agent_loop import AgentLoop
+from prometheus.config.shipped_defaults import resolve_max_tool_iterations, resolve_max_tool_iterations_cloud
 from prometheus.gateway.archive_writer import ArchiveWriter
 from prometheus.gateway.config import Platform, PlatformConfig
 from prometheus.gateway.cron_scheduler import run_scheduler_loop
@@ -800,14 +801,14 @@ async def run_daemon(args: argparse.Namespace) -> None:
         model_router=model_router,
         divergence_detector=divergence_detector,
         post_result_hooks=post_result_hooks or None,
-        max_tool_iterations=model_config.get("max_tool_iterations", 25),
+        max_tool_iterations=resolve_max_tool_iterations(model_config),
         # The DAEMON path was dropping this while __main__.py passed it, so
         # LoopContext.max_tool_iterations_cloud stayed None and
         # _effective_max_tool_iterations fell back to the LOCAL cap for every
         # provider. Live evidence: a grok-4.5 turn stopped at "26/25" with
         # max_tool_iterations_cloud: 50 sitting correctly in the config —
         # the config was right, the daemon just never received it.
-        max_tool_iterations_cloud=model_config.get("max_tool_iterations_cloud", 50),
+        max_tool_iterations_cloud=resolve_max_tool_iterations_cloud(model_config),
         tool_loader=tool_loader,
         nudge=nudge,
         file_mutation_verifier=fmv,
@@ -1918,8 +1919,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 #     effective state ("daemon loop not wired").
                 # If you add a LoopContext field that AgentLoop populates, add
                 # it HERE too or Beacon quietly won't have it.
-                max_tool_iterations=model_config.get("max_tool_iterations", 25),
-                max_tool_iterations_cloud=model_config.get("max_tool_iterations_cloud", 50),
+                max_tool_iterations=resolve_max_tool_iterations(model_config),
+                max_tool_iterations_cloud=resolve_max_tool_iterations_cloud(model_config),
                 tool_loader=tool_loader,
                 # ...and the SAME LESSON, FOURTH TIME. `lsp.enabled: true` is
                 # live, so this list holds the LSPDiagnosticsHook that appends

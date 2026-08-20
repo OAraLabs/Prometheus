@@ -44,6 +44,30 @@ SHIPPED_ALWAYS_LOADED: tuple[str, ...] = (
 # ``SecurityGate._within_workspace`` reads as "no boundary at all".
 SHIPPED_WORKSPACE_ROOT: str = "~/.prometheus/workspace"
 
+#: Tool-call ceiling per user message, local (llama.cpp) routing.
+#:
+#: RAISED 50 -> 100 (LONGHAUL-1b) once the progress-aware repeat detector
+#: shipped (#263). Round count alone cannot tell a long productive run from a
+#: stuck one, so the flat cap was killing real work: of 38 recorded
+#: ``max_iterations_hit`` events, 24 show near-total tool-signature diversity
+#: (0.93-1.00) -- agents covering ground, cut off mid-task. 22 of those 38 came
+#: AFTER the earlier 25 -> 50 raise, so 50 was still binding.
+#:
+#: The loops the cap used to contain are now contained far earlier and on the
+#: right signal: the worst recorded case, ``bash: echo "Paris"`` issued 15
+#: times, trips the detector at occurrence 3.
+#:
+#: THIS NUMBER IS NOT THE SAFETY MECHANISM. Progress is. The cap is only a
+#: backstop for the shape the detector cannot see -- a flail with DIFFERENT
+#: arguments every round (see _ProgressRepeatDetector's blind-spot note). Do
+#: not read a high value here as permission to remove it.
+SHIPPED_MAX_TOOL_ITERATIONS: int = 100
+
+#: Tool-call ceiling for cloud routing (tier=off). Cloud models plan longer
+#: multi-step sequences than local ones, so this has always been >= the local
+#: cap; both now sit at the same raised value.
+SHIPPED_MAX_TOOL_ITERATIONS_CLOUD: int = 100
+
 # gateway.media.allowed_*_types — inbound MIME allowlists on the Telegram
 # surface, the one exposed to the public internet by design. Absent from a
 # config predating PR #141, and the readers' fallback of [] means
@@ -203,6 +227,46 @@ def resolve_allowed_chat_ids(gateway_cfg: dict | None) -> list[int]:
 # "six edits and a seventh next quarter". ``tests/test_absence_hostile_keys``
 # asserts nothing outside this module reads these keys directly.
 # ---------------------------------------------------------------------------
+
+def resolve_max_tool_iterations(model_cfg: dict | None) -> int:
+    """The local tool-call ceiling for a ``model:`` config section.
+
+    ONE source of truth on purpose. This value was previously written out at
+    eight separate sites (four code defaults of 25, the LoopContext dataclass,
+    two AgentLoop signatures, the shipped template) and had ALREADY drifted --
+    live ran 50 against a template of 25, a divergence
+    ``docs/sprints/SPRINT-CONSENT.md`` names explicitly because the config
+    drift guard checks key PRESENCE and cannot see a value mismatch. Raising
+    the number by editing eight sites would have guaranteed a ninth.
+
+    Absent, blank or non-integer -> :data:`SHIPPED_MAX_TOOL_ITERATIONS`.
+    """
+    return _positive_int(
+        (model_cfg or {}).get("max_tool_iterations"), SHIPPED_MAX_TOOL_ITERATIONS
+    )
+
+
+def resolve_max_tool_iterations_cloud(model_cfg: dict | None) -> int:
+    """The cloud tool-call ceiling. See :func:`resolve_max_tool_iterations`."""
+    return _positive_int(
+        (model_cfg or {}).get("max_tool_iterations_cloud"),
+        SHIPPED_MAX_TOOL_ITERATIONS_CLOUD,
+    )
+
+
+def _positive_int(value: object, fallback: int) -> int:
+    """Coerce a config value to a POSITIVE int, else the shipped default.
+
+    A zero or negative ceiling would halt every turn on its first tool batch;
+    a string "100" is what a hand-edited YAML actually produces. Both are
+    treated as "not configured" rather than obeyed.
+    """
+    try:
+        n = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return fallback
+    return n if n > 0 else fallback
+
 
 def resolve_workspace_root(security_cfg: dict | None) -> str | list[str]:
     """The workspace root(s) for a security config section.

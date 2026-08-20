@@ -94,6 +94,15 @@ KNOWN_DEFAULT_MISMATCHES: dict[str, str] = {
                              "floor beneath any config.",
     "gateway.telegram_enabled": "RESOLVER — shipped_defaults.resolve_telegram_enabled "
                                 "supplies SHIPPED_TELEGRAM_ENABLED (#219)",
+    "model.max_tool_iterations": "RESOLVER — shipped_defaults.resolve_max_tool_iterations "
+                                 "supplies SHIPPED_MAX_TOOL_ITERATIONS (LONGHAUL-1b). The "
+                                 "literal used to sit at EIGHT sites and had already drifted "
+                                 "(live 50 vs template 25) — the very divergence this file "
+                                 "exists to catch, which it could not see because the value "
+                                 "was restated rather than resolved.",
+    "model.max_tool_iterations_cloud": "RESOLVER — shipped_defaults."
+                                       "resolve_max_tool_iterations_cloud supplies "
+                                       "SHIPPED_MAX_TOOL_ITERATIONS_CLOUD (LONGHAUL-1b).",
     # ── template ships a real value; the reader has NO literal fallback, so
     #    absence yields None and the documented value is never the effective
     #    one. Category 2 with a non-empty template value.
