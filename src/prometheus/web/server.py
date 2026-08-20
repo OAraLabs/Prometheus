@@ -295,6 +295,33 @@ def create_app(
 
     # ── Status ──────────────────────────────────────────────────────
 
+    def _iteration_ceilings() -> dict[str, Any]:
+        """Ceilings from the live web/Beacon LoopContext, or None if unwired.
+
+        ``cloud`` is deliberately NOT coerced to an int. ``None`` there is a
+        distinct, meaningful state: ``_effective_max_tool_iterations``
+        (agent_loop.py:690-691) short-circuits when the cloud ceiling is None
+        and returns the LOCAL value for every provider regardless of tier. So
+        null means "cloud requests use the local ceiling", NOT "unset" or
+        "unlimited" -- and reporting a tidy integer there would be a lie.
+
+        There is no single "effective" number to report: the guard picks between
+        these two per check, on ``adapter.tier == "off"``, because the adapter
+        can swap mid-loop via _try_model_fallback. Hence two labelled values.
+        """
+        bridge = getattr(app.state, "ws_bridge", None)
+        ctx = getattr(bridge, "loop_context", None) if bridge else None
+        if ctx is None:
+            return {"wired": False, "local": None, "cloud": None}
+        return {
+            "wired": True,
+            "local": getattr(ctx, "max_tool_iterations", None),
+            "cloud": getattr(ctx, "max_tool_iterations_cloud", None),
+            "cloud_falls_back_to_local": (
+                getattr(ctx, "max_tool_iterations_cloud", None) is None
+            ),
+        }
+
     @app.get("/api/status")
     async def get_status():
         running_sha, tree_head, stale = _staleness()
@@ -349,6 +376,18 @@ def create_app(
                 "lcm_last_compaction_at": getattr(lcm, "_last_compaction_at", None),
             },
             "gateway": gateway_block,
+            # The ceilings the loop is ACTUALLY enforcing, read off the same
+            # LoopContext object the guard reads (_effective_max_tool_iterations
+            # at agent_loop.py:1670) -- not re-resolved from config here. An
+            # endpoint that re-ran the resolver would prove the RESOLVER, while
+            # leaving "and the loop got the same number" as inference, which is
+            # the hop this field exists to close.
+            #
+            # Named for the loop it describes. This is the web/Beacon context;
+            # the telegram/CLI AgentLoop is a SEPARATE construction
+            # (daemon.py builds both), kept in step by the startup agreement
+            # check there. Calling this "effective" full stop would overclaim.
+            "iteration_ceilings": _iteration_ceilings(),
         }
 
     # ── Sessions ────────────────────────────────────────────────────

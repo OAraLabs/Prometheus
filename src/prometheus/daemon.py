@@ -367,6 +367,37 @@ async def _model_identity_loop(
             logger.warning("model identity probe failed", exc_info=True)
 
 
+def loop_ceiling_divergence(agent_loop: Any, loop_context: Any) -> list[tuple]:
+    """Fields where the two loop constructions carry different ceilings.
+
+    Returns ``[(field_name, agent_loop_value, loop_context_value), ...]`` --
+    empty when they agree. Pure and module-level so the invariant can be TESTED
+    rather than only executed at boot inside a 1600-line startup function.
+
+    Compares the AgentLoop's stored values (which it copies into the LoopContext
+    it builds per run, agent_loop.py:3944-3945) against the separately-built
+    web/Beacon LoopContext. ``getattr`` with a sentinel rather than direct
+    attribute access: a RENAMED private attribute must surface as a divergence,
+    not as an AttributeError that takes the daemon down at boot.
+    """
+    _MISSING = object()
+    pairs = (
+        ("max_tool_iterations", "_max_tool_iterations"),
+        ("max_tool_iterations_cloud", "_max_tool_iterations_cloud"),
+    )
+    out = []
+    for ctx_field, loop_attr in pairs:
+        a = getattr(agent_loop, loop_attr, _MISSING)
+        b = getattr(loop_context, ctx_field, _MISSING)
+        if a is _MISSING or b is _MISSING or a != b:
+            out.append((
+                ctx_field,
+                None if a is _MISSING else a,
+                None if b is _MISSING else b,
+            ))
+    return out
+
+
 async def run_daemon(args: argparse.Namespace) -> None:
     """Main async entry point — start all subsystems."""
     config = load_config(args.config)
@@ -1973,6 +2004,65 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 # TestSharedEngineSafety.
                 lcm_engine=lcm_engine,
             )
+
+            # ── Startup agreement check: the two loops must carry the same
+            # iteration ceilings ──────────────────────────────────────────
+            #
+            # run_daemon() builds the loop TWICE -- AgentLoop above (telegram,
+            # CLI) and this LoopContext (web, Beacon) -- and the comment on the
+            # max_tool_iterations lines above is a MANUAL instruction to keep
+            # them in step. Manual discipline is what produced the bug that
+            # comment memorialises: the daemon path once dropped
+            # max_tool_iterations_cloud entirely, so a grok-4.5 turn stopped at
+            # "26/25" while the config correctly said 50.
+            #
+            # Both objects are in hand exactly here, so the "they call the same
+            # pure function on the same input, therefore they agree" inference
+            # becomes a CHECKED INVARIANT. Unconditional -- not gated on a debug
+            # flag or a config key -- because a check that only runs when
+            # someone remembers to enable it has the same failure mode as the
+            # comment it replaces.
+            #
+            # Loud, not fatal: a mismatch means one surface silently enforces a
+            # different ceiling than the other, which is worth paging about, but
+            # refusing to boot the web layer over it would take down the daemon
+            # for a discrepancy the operator can see and fix in the log.
+            _diverged = loop_ceiling_divergence(agent_loop, loop_context)
+            if _diverged:
+                logger.error(
+                    "LOOP CEILING DIVERGENCE — the telegram/CLI loop and the "
+                    "web/Beacon loop disagree, so the same request hits a "
+                    "different limit depending on which surface it arrives on: "
+                    "%s",
+                    "; ".join(
+                        f"{n}: AgentLoop={a!r} vs LoopContext={b!r}"
+                        for n, a, b in _diverged
+                    ),
+                )
+                _tel = telemetry
+                if _tel is not None and hasattr(_tel, "record_silent_failure"):
+                    try:
+                        _tel.record_silent_failure(
+                            subsystem="daemon",
+                            operation="loop_ceiling_agreement",
+                            exc=RuntimeError("loop ceiling divergence"),
+                            context={
+                                n: {"agent_loop": a, "loop_context": b}
+                                for n, a, b in _diverged
+                            },
+                        )
+                    except Exception:
+                        logger.debug(
+                            "ceiling divergence: telemetry write failed",
+                            exc_info=True,
+                        )
+            else:
+                logger.info(
+                    "Loop ceilings agree across both constructions: "
+                    "local=%s cloud=%s",
+                    loop_context.max_tool_iterations,
+                    loop_context.max_tool_iterations_cloud,
+                )
 
             # Beacon D1 + selector survey: the store AND the active-profile
             # holder are built once, before the AgentLoop — the web layer gets
