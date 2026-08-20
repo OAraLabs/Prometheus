@@ -46,6 +46,7 @@ from pathlib import Path
 
 import pytest
 
+from prometheus.config.shipped_defaults import SHIPPED_MAX_TOOL_ITERATIONS
 from prometheus.engine.agent_loop import LoopContext
 
 DAEMON = Path(__file__).resolve().parents[1] / "src" / "prometheus" / "daemon.py"
@@ -356,7 +357,12 @@ def test_the_defaults_that_made_this_silent():
     """Documents WHY each omission was invisible: the fallback is a plausible
     value, so a misconfigured web turn looks like a working one."""
     defaults = {f.name: f.default for f in dataclasses.fields(LoopContext)}
-    assert defaults["max_tool_iterations"] == 25
+    # LONGHAUL-1b: assert the SHIPPED CONSTANT, not a literal. The point of
+    # this line is that the fallback is a PLAUSIBLE value — so a
+    # misconfigured web turn looks like a working one — and that is just as
+    # true at 100 as it was at 25. Pinning the literal here would have made
+    # this test re-break on every future change to a number it does not own.
+    assert defaults["max_tool_iterations"] == SHIPPED_MAX_TOOL_ITERATIONS
     assert defaults["max_tool_iterations_cloud"] is None
     assert defaults["tool_loader"] is None
     # None here means "LCM never ingested anything" — the microcompactor

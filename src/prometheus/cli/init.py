@@ -36,7 +36,10 @@ from typing import Any
 import yaml
 
 from prometheus.config.paths import get_config_dir
-from prometheus.config.shipped_defaults import SHIPPED_ALWAYS_LOADED
+from prometheus.config.shipped_defaults import (
+    SHIPPED_ALWAYS_LOADED,
+    SHIPPED_MAX_TOOL_ITERATIONS,
+)
 
 # ---------------------------------------------------------------------------
 # Local inference-server detection
@@ -209,7 +212,7 @@ def _default_config(server: DetectedServer | None, model: str | None) -> dict[st
             "base_url": server.url if server else "http://localhost:8080",
             "model": model or (server.models[0] if (server and server.models) else "auto"),
             "grammar_enforcement": True,
-            "max_tool_iterations": 25,
+            "max_tool_iterations": SHIPPED_MAX_TOOL_ITERATIONS,
         },
         "context": {
             "effective_limit": 24000,
@@ -332,7 +335,7 @@ def _cloud_default_config(provider: str, api_key_env: str, model: str) -> dict[s
         "provider": provider,
         "model": model,
         "api_key_env": api_key_env,
-        "max_tool_iterations": 25,
+        "max_tool_iterations": SHIPPED_MAX_TOOL_ITERATIONS,
     }
     config["context"]["effective_limit"] = _CLOUD_FAST_PROVIDERS[provider][2]
     return config

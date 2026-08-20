@@ -34,6 +34,7 @@ from prometheus.engine.stream_events import (
     ToolExecutionStarted,
 )
 from prometheus.config.ephemeral import is_session_ephemeral
+from prometheus.config.shipped_defaults import SHIPPED_MAX_TOOL_ITERATIONS
 from prometheus.engine.usage import UsageSnapshot
 from prometheus.providers.base import (
     ApiMessageCompleteEvent,
@@ -575,7 +576,7 @@ class LoopContext:
     telemetry: object | None = None           # ToolCallTelemetry — wired in Sprint 3
     cwd: Path = field(default_factory=Path.cwd)
     max_turns: int = 200
-    max_tool_iterations: int = 25
+    max_tool_iterations: int = SHIPPED_MAX_TOOL_ITERATIONS
     # SPRINT-coding-mode v2 (scope item 1): per-RUN thinking override,
     # forwarded on every model call this context makes. None = provider
     # default (the global suppress_thinking config, normally True for
@@ -3797,7 +3798,7 @@ class AgentLoop:
         model: str = "qwen3.5-32b",
         max_tokens: int = 4096,
         max_turns: int = 200,
-        max_tool_iterations: int = 25,
+        max_tool_iterations: int = SHIPPED_MAX_TOOL_ITERATIONS,
         max_tool_iterations_cloud: int | None = None,
         tool_registry=None,
         hook_executor=None,

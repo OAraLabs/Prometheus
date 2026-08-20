@@ -26,6 +26,7 @@ import yaml
 from prometheus import __version__
 from prometheus.config.paths import get_config_dir, get_data_dir, get_logs_dir, get_wiki_root
 from prometheus.engine.agent_loop import AgentLoop, RunResult, run_loop, LoopContext
+from prometheus.config.shipped_defaults import resolve_max_tool_iterations, resolve_max_tool_iterations_cloud
 from prometheus.engine.messages import ConversationMessage
 from prometheus.engine.stream_events import (
     AssistantTextDelta,
@@ -1553,8 +1554,8 @@ def main() -> None:
         telemetry=telemetry,
         model_router=model_router,
         divergence_detector=divergence_detector,
-        max_tool_iterations=config.get("model", {}).get("max_tool_iterations", 25),
-        max_tool_iterations_cloud=config.get("model", {}).get("max_tool_iterations_cloud", 50),
+        max_tool_iterations=resolve_max_tool_iterations(config.get("model", {})),
+        max_tool_iterations_cloud=resolve_max_tool_iterations_cloud(config.get("model", {})),
         tool_result_max=ctx_cfg.get("tool_result_max", 4000),
         tool_results_turn_budget=ctx_cfg.get("tool_results_turn_budget", 8000),
         microcompact_after_turns=ctx_cfg.get("microcompact_after_turns", 3),
