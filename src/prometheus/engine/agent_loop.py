@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
@@ -90,6 +91,11 @@ class _IterationReason:
     # Telling these apart in telemetry is the whole point — 13 of these were
     # filed as empty_response and read as "the rig is broken".
     STRIPPED_TO_EMPTY = "stripped_to_empty"
+    # LONGHAUL-1: the turn kept re-issuing the SAME call and kept getting the
+    # SAME thing back. Distinct from MAX_ITERATIONS_HIT: that one fires on
+    # round count alone and cannot tell a long productive run from a stuck
+    # one. This fires on lack of PROGRESS, regardless of how many rounds in.
+    UNPRODUCTIVE_REPEAT = "unproductive_repeat"
 
 
 _FAILURE_CATEGORIES = (
@@ -1096,6 +1102,12 @@ async def _run_loop(
     # executing, so further identical retries cost ~0s. A success clears it.
     failed_call_signatures: dict[str, int] = {}
     _REPEAT_FAIL_LIMIT = 2
+    # LONGHAUL-1 progress-aware repeat detector. Complements the guard above
+    # rather than replacing it: that one counts FAILURES and clears on success,
+    # so a call that keeps SUCCEEDING with identical output slips past it and
+    # burns the flat iteration cap instead. Per-turn, same as everything else
+    # here -- see the reset-scope note on tool_iteration.
+    repeat_detector = _ProgressRepeatDetector()
     tool_iteration = 0
     # Empty-response guard: at most one model-call retry per run_loop on a
     # genuinely empty assistant reply (no text, no tool calls) before surfacing.
@@ -1736,6 +1748,17 @@ async def _run_loop(
             else:
                 failed_call_signatures.pop(_sig, None)
 
+        # LONGHAUL-1: feed the progress detector BEFORE _apply_cross_result_budget
+        # crops anything -- truncation can make two different results identical
+        # and manufacture a repeat that never happened. The verdict is held and
+        # acted on further down, after the results are appended to history, so a
+        # halt never leaves tool_use blocks without matching tool_result blocks.
+        repeat_trip = None
+        for _tc, _r in zip(tool_calls, tool_results):
+            repeat_trip = repeat_detector.record(_tc, _r.content)
+            if repeat_trip is not None:
+                break
+
         # SPRINT-2 WS2: post-snapshot + diff after every tool result.
         if fmv is not None:
             for _tc, _r in zip(tool_calls, tool_results):
@@ -1864,6 +1887,51 @@ async def _run_loop(
             ), None
 
         messages.append(ConversationMessage(role="user", content=tool_results))
+
+        # LONGHAUL-1: unproductive repetition halts the turn LOUDLY. Deliberately
+        # after the append above so the model's tool_use blocks keep their
+        # matching tool_result blocks, and after the circuit breaker, whose
+        # domain is errors -- this one exists for the calls that SUCCEED and
+        # still get nowhere.
+        if repeat_trip is not None:
+            _log_iteration(
+                context,
+                _IterationReason.UNPRODUCTIVE_REPEAT,
+                turn,
+                tool_iteration,
+                f"{repeat_trip.tool_name} x{repeat_trip.count}",
+            )
+            log.warning(
+                "Unproductive repeat: %s called %d\u00d7 with identical arguments, "
+                "%s each time \u2014 halting turn.",
+                repeat_trip.tool_name,
+                repeat_trip.count,
+                "empty result" if repeat_trip.empty else "identical result",
+            )
+            _tel = getattr(context, "telemetry", None)
+            if _tel is not None and hasattr(_tel, "record_run"):
+                try:
+                    _tel.record_run(
+                        subsystem="repeat_detector",
+                        operation="trip",
+                        outcome="failed",
+                        summary={
+                            "tool_name": repeat_trip.tool_name,
+                            "repeat_count": repeat_trip.count,
+                            "empty_result": repeat_trip.empty,
+                            "tool_iteration": tool_iteration,
+                            "turn": turn,
+                        },
+                        session_id=effective_session_id or context.session_id,
+                        model=context.model,
+                    )
+                except Exception:
+                    # Telemetry must never be why a halt fails to happen.
+                    log.debug("repeat_detector: record_run failed", exc_info=True)
+            error_msg = _make_assistant_msg(_repeat_trip_text(repeat_trip))
+            messages.append(error_msg)
+            yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+            return
 
         # Sprint 10 / FL-4: checkpoint + divergence evaluation after tool
         # dispatch. Observational only — the score is REPORTED, never acted
@@ -2675,6 +2743,132 @@ def _tool_call_signature(tool_call: object) -> str:
     except Exception:
         body = repr(raw)
     return f"{name}:{body}"
+
+
+# LONGHAUL-1 tuning. The window matches coordinator/divergence.py's
+# SCORING_WINDOW (10) on purpose: two detectors disagreeing about how far back
+# "recent" reaches would be needless surface area. _REPEAT_TRIP is 3 because
+# that is where the same signature stops looking like a retry and starts
+# looking like a loop -- calibrated against 66 real tasks in the journal, where
+# divergence's equivalent predicate fired on 3 of them (4.5%).
+_REPEAT_WINDOW = 10
+_REPEAT_TRIP = 3
+
+
+def _result_fingerprint(content: object) -> str:
+    """Identity of a tool RESULT for progress purposes.
+
+    Returns ``""`` for an empty/whitespace-only result -- that is the "returned
+    nothing" half of unproductive, and it is deliberately its own value rather
+    than a hash so an empty result is unproductive from the FIRST occurrence
+    (there is no prior to compare against).
+
+    Everything else hashes the FULL stripped payload. Not a bounded prefix:
+    two long results that differ only in their tail are PROGRESS, and a prefix
+    hash would call them identical and halt a working run.
+    """
+    text = ("" if content is None else str(content)).strip()
+    if not text:
+        return ""
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+
+
+@dataclass
+class _RepeatTrip:
+    """One unproductive-repetition verdict, carried to the halt site."""
+    tool_name: str
+    tool_input: object
+    count: int
+    empty: bool
+
+
+@dataclass
+class _ProgressRepeatDetector:
+    """Halt a turn that re-issues the SAME call and gets the SAME thing back.
+
+    The gap this closes: ``failed_call_signatures`` counts only FAILURES and
+    clears on success, so a call that succeeds three times returning identical
+    bytes is invisible to it. ``max_tool_iterations`` sees that call, but only
+    as round count -- it cannot tell it from a long productive run, so both
+    halt at the same number and long legitimate work pays for the loop.
+
+    PROGRESS IS THE RESET. A repeat that returns new data is not a loop; it
+    clears the signature's history outright rather than merely failing to
+    increment, so ``read(A), read(A), read(B)`` leaves no loaded gun behind.
+    That is not a refinement -- it is what keeps the smoke test alive, whose
+    reads bracket an ``edit_file`` and legitimately return different bytes.
+
+    KNOWN BLIND SPOT, recorded rather than fixed: keyed on the exact
+    (name, input) signature, so a flail with DIFFERENT arguments every round is
+    invisible here. coordinator/divergence.py:704 makes the same observation
+    from the other side. ``max_tool_iterations`` remains the backstop for that
+    shape and must NOT be read as redundant.
+    """
+
+    window: int = _REPEAT_WINDOW
+    trip_at: int = _REPEAT_TRIP
+    _recent: list[str] = field(default_factory=list)
+    _last_fp: dict[str, str] = field(default_factory=dict)
+
+    def record(self, tool_call: object, content: object) -> "_RepeatTrip | None":
+        """Feed one executed call+result. Returns a trip verdict or None.
+
+        Must be fed the UNTRUNCATED result: ``_apply_cross_result_budget``
+        can crop two different results down to the same bytes, and a
+        fingerprint taken after that would manufacture a false repeat.
+        """
+        signature = _tool_call_signature(tool_call)
+        fp = _result_fingerprint(content)
+        prior = self._last_fp.get(signature)
+        self._last_fp[signature] = fp
+
+        # Unproductive = returned nothing, or returned exactly what it
+        # returned last time. Same predicate as divergence.py:718 --
+        # duplicated deliberately, see the PR body.
+        unproductive = (fp == "") or (prior is not None and fp == prior)
+
+        if not unproductive:
+            # Progress. Forget this signature's history entirely.
+            self._recent = [s for s in self._recent if s != signature]
+            self._recent.append(signature)
+            self._trim()
+            return None
+
+        self._recent.append(signature)
+        self._trim()
+        count = sum(1 for s in self._recent if s == signature)
+        if count >= self.trip_at:
+            return _RepeatTrip(
+                tool_name=getattr(tool_call, "name", "?"),
+                tool_input=getattr(tool_call, "input", None),
+                count=count,
+                empty=(fp == ""),
+            )
+        return None
+
+    def _trim(self) -> None:
+        if len(self._recent) > self.window:
+            self._recent = self._recent[-self.window:]
+
+
+def _repeat_trip_text(trip: "_RepeatTrip") -> str:
+    """Operator-facing halt message. Names the tool, the args and the count."""
+    import json as _json
+    try:
+        args = _json.dumps(trip.tool_input, sort_keys=True, default=str)
+    except Exception:
+        args = repr(trip.tool_input)
+    if len(args) > 500:
+        args = args[:500] + "... (truncated)"
+    got = "returned nothing" if trip.empty else "returned an identical result"
+    return (
+        f"Halted: no progress. `{trip.tool_name}` was called {trip.count} times "
+        f"with identical arguments and {got} every time.\n\n"
+        f"Arguments: {args}\n\n"
+        f"Repeating this call cannot produce new information. Change approach "
+        f"\u2014 different arguments, a different tool, or tell the user what is "
+        f"blocking you."
+    )
 
 
 async def _dispatch_tool_calls(
