@@ -194,7 +194,10 @@ class RealAppHarness:
         return resp.json()
 
 
-def build_real_app(primary: RecordingProvider | None = None) -> RealAppHarness:
+def build_real_app(
+    primary: RecordingProvider | None = None,
+    tool_config: dict | None = None,
+) -> RealAppHarness:
     """Assemble the production wiring (mirrors daemon.py:1189 + launcher.py:60-101).
 
     ``primary`` (optional) swaps in a scripted recorder (see RecordingProvider)
@@ -208,7 +211,12 @@ def build_real_app(primary: RecordingProvider | None = None) -> RealAppHarness:
         primary_adapter=None,
         primary_model="local-test-model",
     )
-    tool_registry = create_tool_registry({})
+    # ``tool_config`` is the SECURITY section create_tool_registry takes, so a test can give
+    # the real tools a workspace that actually exists. Without it they inherit
+    # the shipped default (~/.prometheus/workspace), which is present on a dev
+    # box and absent on CI -- so bash silently ERRORS there instead of running,
+    # and a test can go green against the wrong code path entirely.
+    tool_registry = create_tool_registry(tool_config or {})
     loop_context = LoopContext(
         provider=primary,
         model="local-test-model",
