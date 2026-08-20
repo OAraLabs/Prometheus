@@ -74,11 +74,17 @@ model:
                                         # never a pass. "refuse" turns an unsupported model into a startup
                                         # failure; "off" skips the probe entirely.
   # Backstop ONLY — progress, not round count, is what stops a stuck turn
-  # (the repeat detector halts unproductive repetition at 3). Raised 25->100
+  # (the repeat detector halts unproductive repetition at 3). Raised 25->500
   # with #263: of 38 recorded cap hits, 24 were productive runs cut off
   # mid-task. Must match the code default in config/shipped_defaults.py.
-  max_tool_iterations: 100              # Max tool calls per user message before hard stop (local/llama)
-  max_tool_iterations_cloud: 100        # Separate cap for cloud (tier=off): Claude plans multi-step sequences local models wouldn't
+  #
+  # NOTE the cloud cap is now BELOW the local one, reversing the old ordering.
+  # Deliberate: cloud rounds cost money per call, local rounds cost only
+  # wall-clock on hardware already paid for. See shipped_defaults.py for the
+  # recorded risk — local is also the path likeliest to produce the
+  # varied-argument flail the repeat detector cannot see.
+  max_tool_iterations: 500              # Max tool calls per user message before hard stop (local/llama)
+  max_tool_iterations_cloud: 100        # Separate, LOWER cap for cloud (tier=off): every round is billed
   fallback_provider: "ollama"
   fallback_url: "http://localhost:11434"
 

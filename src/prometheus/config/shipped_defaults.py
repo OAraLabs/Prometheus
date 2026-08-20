@@ -46,7 +46,7 @@ SHIPPED_WORKSPACE_ROOT: str = "~/.prometheus/workspace"
 
 #: Tool-call ceiling per user message, local (llama.cpp) routing.
 #:
-#: RAISED 50 -> 100 (LONGHAUL-1b) once the progress-aware repeat detector
+#: RAISED 50 -> 500 (LONGHAUL-1b) once the progress-aware repeat detector
 #: shipped (#263). Round count alone cannot tell a long productive run from a
 #: stuck one, so the flat cap was killing real work: of 38 recorded
 #: ``max_iterations_hit`` events, 24 show near-total tool-signature diversity
@@ -61,11 +61,26 @@ SHIPPED_WORKSPACE_ROOT: str = "~/.prometheus/workspace"
 #: backstop for the shape the detector cannot see -- a flail with DIFFERENT
 #: arguments every round (see _ProgressRepeatDetector's blind-spot note). Do
 #: not read a high value here as permission to remove it.
-SHIPPED_MAX_TOOL_ITERATIONS: int = 100
+SHIPPED_MAX_TOOL_ITERATIONS: int = 500
 
-#: Tool-call ceiling for cloud routing (tier=off). Cloud models plan longer
-#: multi-step sequences than local ones, so this has always been >= the local
-#: cap; both now sit at the same raised value.
+#: Tool-call ceiling for cloud routing (tier=off).
+#:
+#: ⚠ THIS IS NOW *BELOW* THE LOCAL CAP, INVERTING THE HISTORICAL ORDERING, AND
+#: THAT IS DELIBERATE (Will's call, LONGHAUL-1b). Cloud sat ABOVE local for the
+#: whole prior life of the key -- 50 vs 25 -- on the rationale that Claude plans
+#: longer multi-step sequences than local models do. The ordering flipped
+#: because the constraint that matters changed: cloud rounds cost money per
+#: call, local rounds cost only wall-clock on hardware already paid for, so the
+#: budget the operator actually wants to be generous with is the local one.
+#:
+#: ⚠ KNOWN RISK, RECORDED RATHER THAN MITIGATED: this hands the LARGEST budget
+#: to the path most prone to the one failure the progress detector cannot see.
+#: The detector keys on the exact (name, input) signature, so a flail with
+#: DIFFERENT arguments every round is invisible to it, and a weaker local model
+#: is likelier to produce exactly that shape than Claude is. A varied-argument
+#: runaway on local can now burn 500 rounds where it previously burned 50.
+#: If unattended local runs start costing hours rather than minutes, THIS
+#: number is the first thing to look at -- not the detector.
 SHIPPED_MAX_TOOL_ITERATIONS_CLOUD: int = 100
 
 # gateway.media.allowed_*_types — inbound MIME allowlists on the Telegram

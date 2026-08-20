@@ -79,8 +79,16 @@ def test_template_matches_the_code_default():
 
 
 def test_the_ceiling_actually_rose():
+    """Both ceilings clear the old value.
+
+    NOT asserted: cloud >= local. That held for the whole prior life of the key
+    (50 vs 25) and an earlier cut of this file pinned it — but the ordering is
+    now deliberately INVERTED, because cloud rounds are billed per call and
+    local rounds are not. Re-adding that assertion would re-encode a rationale
+    the operator has explicitly retired.
+    """
     assert SHIPPED_MAX_TOOL_ITERATIONS > OLD_CAP
-    assert SHIPPED_MAX_TOOL_ITERATIONS_CLOUD >= SHIPPED_MAX_TOOL_ITERATIONS
+    assert SHIPPED_MAX_TOOL_ITERATIONS_CLOUD > OLD_CAP
 
 
 def test_resolver_rejects_values_that_would_halt_every_turn():
