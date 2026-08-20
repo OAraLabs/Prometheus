@@ -1754,8 +1754,10 @@ async def _run_loop(
         # acted on further down, after the results are appended to history, so a
         # halt never leaves tool_use blocks without matching tool_result blocks.
         repeat_trip = None
-        for _tc, _r in zip(tool_calls, tool_results):
-            repeat_trip = repeat_detector.record(_tc, _r.content)
+        for _i, (_tc, _r) in enumerate(zip(tool_calls, tool_results)):
+            repeat_trip = repeat_detector.record(
+                _tc, _r.content, blocked=(_i in _blocked),
+            )
             if repeat_trip is not None:
                 break
 
@@ -1890,10 +1892,18 @@ async def _run_loop(
 
         # LONGHAUL-1: unproductive repetition halts the turn LOUDLY. Deliberately
         # after the append above so the model's tool_use blocks keep their
-        # matching tool_result blocks, and after the circuit breaker, whose
-        # domain is errors -- this one exists for the calls that SUCCEED and
-        # still get nowhere.
-        if repeat_trip is not None:
+        # matching tool_result blocks, and after the circuit breaker.
+        #
+        # ``not all_errors`` is the division of labour, and it is load-bearing:
+        # a round where EVERYTHING errored belongs to the breaker, which can
+        # still run its one-shot diagnose-and-recover and SALVAGE the turn.
+        # Halting ahead of it traded a recoverable turn for a dead one --
+        # tests/test_wiring.py::test_trip_handler_calls_diagnose_and_recover
+        # caught exactly that. A doomed call is still bounded there (the breaker
+        # trips at max_any consecutive errors); this detector exists for the
+        # calls that come back CLEAN and still get nowhere, plus mixed rounds
+        # the breaker never inspects.
+        if repeat_trip is not None and not all_errors:
             _log_iteration(
                 context,
                 _IterationReason.UNPRODUCTIVE_REPEAT,
@@ -2810,12 +2820,27 @@ class _ProgressRepeatDetector:
     _recent: list[str] = field(default_factory=list)
     _last_fp: dict[str, str] = field(default_factory=dict)
 
-    def record(self, tool_call: object, content: object) -> "_RepeatTrip | None":
+    def record(
+        self,
+        tool_call: object,
+        content: object,
+        *,
+        blocked: bool = False,
+    ) -> "_RepeatTrip | None":
         """Feed one executed call+result. Returns a trip verdict or None.
 
         Must be fed the UNTRUNCATED result: ``_apply_cross_result_budget``
         can crop two different results down to the same bytes, and a
         fingerprint taken after that would manufacture a false repeat.
+
+        ``blocked`` marks a result the per-turn repeat guard synthesised
+        WITHOUT executing the tool. Such a result is unproductive by
+        construction -- no tool ran, so no new information can exist -- and
+        must be judged on that fact rather than on its text. Its text carries
+        the running failure count, which CHANGES every round; fingerprinting it
+        would read as fresh data and reset the very counter that should be
+        climbing. CI caught this: a call failing every round rode the flat cap
+        to exhaustion instead of tripping at 3.
         """
         signature = _tool_call_signature(tool_call)
         fp = _result_fingerprint(content)
@@ -2825,7 +2850,7 @@ class _ProgressRepeatDetector:
         # Unproductive = returned nothing, or returned exactly what it
         # returned last time. Same predicate as divergence.py:718 --
         # duplicated deliberately, see the PR body.
-        unproductive = (fp == "") or (prior is not None and fp == prior)
+        unproductive = blocked or (fp == "") or (prior is not None and fp == prior)
 
         if not unproductive:
             # Progress. Forget this signature's history entirely.

@@ -34,7 +34,15 @@ def _build(tmp_path, script):
     class writing a real SQLite file — not a stub, so the row assertion is a
     real read-back."""
     rec = RecordingProvider(label="primary:local", script=script)
-    h = build_real_app(primary=rec)
+    # Point the REAL tools at a workspace that exists on every machine. The
+    # shipped default is absent on CI, and bash then returns a workspace-lock
+    # violation instead of running -- which trips the detector via the
+    # identical-ERROR path and makes a success-path test pass for the wrong
+    # reason. That is exactly what the first cut of this file did.
+    h = build_real_app(
+        primary=rec,
+        tool_config={"workspace_root": str(tmp_path)},
+    )
     tel = ToolCallTelemetry(str(tmp_path / "telemetry.db"))
     h.loop_context.telemetry = tel
     return h, rec, tel
@@ -50,6 +58,21 @@ def _repeat_rows(tel) -> list[tuple]:
         ).fetchall()
     finally:
         con.close()
+
+
+def _tool_result_texts(rec) -> list[str]:
+    """Every tool result that rode back to the model, read off the OUTBOUND
+    boundary record. This is how a test proves the real tool actually RAN and
+    what it returned — rather than trusting that it did."""
+    out = []
+    # The LAST request carries the whole history; iterating every request would
+    # count each result once per subsequent round.
+    for req in rec.requests[-1:]:
+        for msg in req.messages:
+            for block in (msg.content if isinstance(msg.content, list) else []):
+                if getattr(block, "type", None) == "tool_result":
+                    out.append(block.content)
+    return out
 
 
 def _final_text(h) -> str:
@@ -75,7 +98,11 @@ def test_unproductive_repeat_halts_the_turn(tmp_path):
     not fire, the loop consumes all of them and the assertions on request
     count and halt text both go red.
     """
-    cmd = {"command": "echo LONGHAUL_CONSTANT"}
+    # Explicit cwd: the default (~/.prometheus/workspace) does not exist on a
+    # clean machine, and bash then errors instead of running -- which is a
+    # different scenario than this test means to exercise (see
+    # test_failing_call_still_halts for that one).
+    cmd = {"command": "echo LONGHAUL_CONSTANT", "cwd": str(tmp_path)}
     script = [("tool", "bash", cmd)] * 5 + [("text", "should never be reached")]
     h, rec, tel = _build(tmp_path, script)
 
@@ -98,6 +125,18 @@ def test_unproductive_repeat_halts_the_turn(tmp_path):
             f"halt message does not carry the arguments: {text!r}"
         )
         assert "should never be reached" not in text, "loop ran past the halt"
+
+        # The tool really RAN and really returned the identical payload. Without
+        # this the test passes just as happily when bash refuses with a
+        # workspace-lock violation every round — an identical ERROR also trips
+        # the detector, and an earlier cut of this test was green for exactly
+        # that wrong reason.
+        results = _tool_result_texts(rec)
+        assert results, "no tool results reached the boundary"
+        assert all("LONGHAUL_CONSTANT" in r for r in results), (
+            f"bash did not actually execute — results were {results!r}"
+        )
+        assert not any("Workspace lock violation" in r for r in results), results
 
         # OUTCOME 3 — a real telemetry row, read back out of real SQLite.
         rows = _repeat_rows(tel)
@@ -123,7 +162,7 @@ def test_productive_repeat_does_not_halt(tmp_path):
     differing output deterministic — no clock, no randomness.
     """
     counter = tmp_path / "counter.txt"
-    cmd = {"command": f"echo x >> {counter}; wc -l < {counter}"}
+    cmd = {"command": f"echo x >> {counter}; wc -l < {counter}", "cwd": str(tmp_path)}
     script = [("tool", "bash", cmd)] * 4 + [("text", "finished counting")]
     h, rec, tel = _build(tmp_path, script)
 
@@ -141,6 +180,13 @@ def test_productive_repeat_does_not_halt(tmp_path):
             f"productive repeat was halted — FALSE POSITIVE: {text!r}"
         )
         assert "finished counting" in text, f"turn did not complete: {text!r}"
+
+        # Each round really returned NEW data — that is what makes this a
+        # productive repeat rather than a loop.
+        results = _tool_result_texts(rec)
+        assert len(set(results)) == len(results) == 4, (
+            f"expected 4 distinct real results, got {results!r}"
+        )
 
         assert _repeat_rows(tel) == [], (
             "a repeat_detector telemetry row was written for productive work"
@@ -163,7 +209,9 @@ def test_no_op_command_halts(tmp_path):
     level below instead of being asserted here: asserting "returned nothing"
     through bash would be asserting something the tool layer never produces.
     """
-    script = [("tool", "bash", {"command": "printf ''"})] * 5 + [("text", "unreached")]
+    script = [
+        ("tool", "bash", {"command": "printf ''", "cwd": str(tmp_path)})
+    ] * 5 + [("text", "unreached")]
     h, rec, tel = _build(tmp_path, script)
 
     with h.client:
@@ -239,3 +287,97 @@ def test_distinct_arguments_never_collide():
         assert det.record(_call(f"/tmp/f{i}.txt"), "") is None, (
             "distinct arguments accumulated toward a trip"
         )
+
+
+# --------------------------------------------------------------------------- #
+# 5 — regression: a call that FAILS every round must halt too
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.acceptance(allow_doubles=[BOUNDARY_DOUBLE])
+def test_all_error_rounds_are_left_to_the_circuit_breaker(tmp_path):
+    """A call that errors EVERY round must terminate the turn — but via the
+    circuit breaker, not this detector.
+
+    The division of labour matters and is not cosmetic. The breaker gets one
+    diagnose-and-recover attempt that can SALVAGE the turn (model fallback on a
+    formatting error, a tier bump); the repeat detector can only halt. An
+    earlier cut of this change tripped first and killed turns the breaker would
+    have recovered — caught by
+    tests/test_wiring.py::test_trip_handler_calls_diagnose_and_recover.
+
+    Deliberately not mocked: a cwd that does not exist makes the real bash tool
+    fail deterministically on any machine.
+    """
+    missing = tmp_path / "does-not-exist"
+    script = [
+        ("tool", "bash", {"command": "echo nope", "cwd": str(missing)})
+    ] * 8 + [("text", "unreached")]
+    h, rec, tel = _build(tmp_path, script)
+
+    with h.client:
+        h.send_turn(SESSION, "run the doomed command")
+
+        text = _final_text(h)
+        assert "unreached" not in text, "the doomed turn ran to the end of the script"
+        # The breaker owns this outcome, so no repeat_detector row is written.
+        assert _repeat_rows(tel) == [], (
+            "the repeat detector preempted the circuit breaker on an all-error "
+            "round — that trades a recoverable turn for a dead one"
+        )
+        assert "Halted: no progress" not in text, text
+
+
+def test_blocked_results_are_unproductive_by_construction():
+    """A result the repeat guard SYNTHESISED without executing the tool carries
+    no new information, whatever its text says.
+
+    Its text embeds the running failure count, so it CHANGES every round.
+    Judging it by fingerprint read as fresh data and reset the counter that
+    should have been climbing — which is how a doomed call rode the flat cap to
+    exhaustion. Unit-level because reaching a blocked result in a round that is
+    not all-errors needs a mixed parallel batch the scripted recorder cannot
+    express.
+    """
+    from prometheus.engine.agent_loop import _ProgressRepeatDetector
+
+    class _Call:
+        name = "bash"
+        input = {"command": "doomed"}
+
+    det = _ProgressRepeatDetector()
+    # Text differs every time, exactly like the real BLOCKED message.
+    assert det.record(_Call(), "BLOCKED: already failed 2 times", blocked=True) is None
+    assert det.record(_Call(), "BLOCKED: already failed 3 times", blocked=True) is None
+    trip = det.record(_Call(), "BLOCKED: already failed 4 times", blocked=True)
+    assert trip is not None and trip.count == 3, (
+        "changing BLOCKED text reset the counter — the detector is judging "
+        "synthesised results by their bytes again"
+    )
+
+
+def test_window_evicts_old_occurrences():
+    """The window is ROLLING: occurrences pushed out by other work no longer
+    count toward a trip.
+
+    Two unproductive hits on one signature, then a full window of other calls,
+    then a third hit — the first two have aged out, so this must NOT trip.
+    Without the window bound the detector would accumulate across an entire
+    turn and halt work that had long since moved on.
+    """
+    from prometheus.engine.agent_loop import _ProgressRepeatDetector
+
+    def _call(name, arg):
+        return type("C", (), {"name": name, "input": {"a": arg}})()
+
+    det = _ProgressRepeatDetector()
+    assert det.record(_call("grep", "target"), "") is None
+    assert det.record(_call("grep", "target"), "") is None  # 2 unproductive
+
+    for i in range(det.window):
+        assert det.record(_call("read_file", f"other-{i}"), f"body-{i}") is None
+
+    # The two earlier hits have aged out of the window.
+    assert det.record(_call("grep", "target"), "") is None, (
+        "an occurrence that aged out of the window still counted toward a trip"
+    )
