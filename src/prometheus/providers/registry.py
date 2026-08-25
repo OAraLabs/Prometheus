@@ -235,6 +235,28 @@ def _resolve_xai_credential(config: dict[str, Any]) -> "str | object":
     return _resolve_api_key(config, "xai")
 
 
+def provider_class_supports_vision(provider_name: str) -> bool:
+    """Can this provider's code express an image, WITHOUT building one?
+
+    Reads the class attribute, so there is exactly one source of truth for
+    "can we serialise a picture to this wire format" — the same attribute the
+    provider itself declares. Deliberately not `ProviderRegistry.create(...)`:
+    the capability question is asked at upload time, and instantiating a
+    provider to answer it would open HTTP clients and resolve credentials for a
+    turn that may never run.
+
+    Unknown provider → False. Absence-is-not-permission, same posture as the
+    catalog's `vision` flag.
+    """
+    if provider_name == "anthropic":
+        from prometheus.providers.anthropic import AnthropicProvider
+
+        return bool(AnthropicProvider.supports_vision)
+    # Every other provider serialises through the OpenAI builder, which raises
+    # on an ImageBlock until Phase 2 teaches it the `image_url` form.
+    return False
+
+
 class ProviderRegistry:
     """Create providers from prometheus.yaml config."""
 

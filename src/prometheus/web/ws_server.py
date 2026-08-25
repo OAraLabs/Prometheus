@@ -364,6 +364,32 @@ class WebSocketBridge:
             img_ext = ext if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp") else extension_from_file_path(filename)
             cached_path = cache_image_from_bytes(data, ext=img_ext)
 
+            # THE GATE. Ask the provider this turn will actually use — see
+            # _turn_supports_vision for why that is the override and not the
+            # primary. A model that can see gets the picture; one that cannot
+            # gets today's description, byte-identical.
+            if self._turn_supports_vision(session_id):
+                from prometheus.gateway.image_prep import prepare_image_block
+
+                block = prepare_image_block(cached_path)
+                if block is not None:
+                    # Marker text, not a paraphrase: cheap, honest, greppable,
+                    # and it keeps base64 out of history. The picture itself
+                    # rides the turn as a block.
+                    user_text = caption or f"[Image: {filename}]"
+                    logger.info(
+                        "upload: %s carried as an image block (session=%s)",
+                        filename, session_id,
+                    )
+                    await self._handle_send_message(session_id, user_text, blocks=[block])
+                    return
+                # prepare_image_block said no (unreadable / not an image) — fall
+                # through to the description path rather than dropping it.
+                logger.warning(
+                    "upload: %s could not be prepared as a block, describing instead",
+                    filename,
+                )
+
             desc = await self._describe_image(cached_path)
             if desc:
                 user_text = f"[Image: {desc}]"
@@ -529,9 +555,44 @@ class WebSocketBridge:
         task.cancel()
         return True
 
+    def _turn_supports_vision(self, session_id: str) -> bool:
+        """Can the provider THIS TURN will use accept an image?
+
+        THE #74 TRAP LIVES HERE. The per-session override is what decides which
+        provider serves the next turn; reading the process primary instead would
+        answer for a model that is not going to run, and the failure is silent —
+        an image prepared for a model that cannot read it, or a description
+        generated for one that could have seen the picture.
+
+        Two conditions, both required, neither inferred:
+
+          * the resolved model DECLARES vision (`vision` on the preset, absent
+            meaning False — spec Q2), and
+          * the provider's class can actually serialise an image.
+
+        No side effects. Deliberately NOT `router.route(...)`: that builds and
+        caches a provider, and under `overrides.sticky = false` it CONSUMES the
+        override — asking a question would answer it.
+        """
+        router = getattr(self.loop_context, "model_router", None)
+        if router is None:
+            return False
+        override = router.get_override_for_session(session_id)
+        if override is None:
+            # The configured primary. Phase 1 ships the image path for anthropic
+            # presets only; the primary keeps the description path unchanged.
+            return False
+        cfg = override.provider_config or {}
+        if not bool(cfg.get("vision", False)):
+            return False
+
+        from prometheus.providers.registry import provider_class_supports_vision
+
+        return provider_class_supports_vision(str(cfg.get("provider", "")))
+
     async def _handle_send_message(
         self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
-        tool_choice: object | None = None
+        tool_choice: object | None = None, blocks: list[Any] | None = None
     ) -> None:
         """Process a user message — add to session and run agent loop if context available.
 
@@ -548,24 +609,34 @@ class WebSocketBridge:
         # get_or_create factory for /queue (which fires on a quiet chat).
         from prometheus.web.slash_router import build_command_context, parse_slash, route_slash
 
-        active_session = self.session_mgr.get(session_id) if self.session_mgr else None
-        ensure_session = (
-            (lambda: self.session_mgr.get_or_create(session_id))
-            if self.session_mgr
-            else None
-        )
-        outcome = await route_slash(
-            content,
-            build_command_context(
-                self.loop_context,
-                self.config,
-                session=active_session,
-                ensure_session=ensure_session,
-                session_id=session_id,
-                approval_queue=self.approval_queue,
-            ),
-        )
-        if outcome.handled:
+        # A CAPTION IS NOT A COMMAND. Before blocks existed the caption was
+        # appended AFTER "[Image: …]", so it could never lead and could never be
+        # parsed as a slash command. Carrying the picture in a block makes the
+        # caption the whole message, so "/status" typed under a screenshot would
+        # silently become a command and the screenshot would vanish with it —
+        # a behaviour change created by a refactor that looks purely structural.
+        # An upload is never a command.
+        if blocks:
+            outcome = None
+        else:
+            active_session = self.session_mgr.get(session_id) if self.session_mgr else None
+            ensure_session = (
+                (lambda: self.session_mgr.get_or_create(session_id))
+                if self.session_mgr
+                else None
+            )
+            outcome = await route_slash(
+                content,
+                build_command_context(
+                    self.loop_context,
+                    self.config,
+                    session=active_session,
+                    ensure_session=ensure_session,
+                    session_id=session_id,
+                    approval_queue=self.approval_queue,
+                ),
+            )
+        if outcome is not None and outcome.handled:
             await self._broadcast_command_reply(
                 session_id, content, outcome.reply or "", client_msg_id,
                 name=(parse_slash(content) or ("", ""))[0],
@@ -600,6 +671,14 @@ class WebSocketBridge:
         session = self.session_mgr.get_or_create(session_id)
         turn_index = session.add_user_message(content)
         row_id = session.last_persisted_row_id()
+        if blocks:
+            # Attach AFTER add_user_message, which has already persisted the text
+            # row. The model sees the picture on this turn; LCM keeps the marker
+            # text, so history does not carry base64 and nothing regresses for a
+            # client reading it back. Making the block itself durable is Phase 3
+            # of the sprint — until then a later turn sees the marker and can
+            # re-read source_path if it needs the image again.
+            session.messages[-1].content.extend(blocks)
 
         # Broadcast the user message. message_id is the durable, restart-stable LCM rowid
         # — the SAME canonical id GET /api/sessions/{id}/messages reports — so a client can
