@@ -989,18 +989,37 @@ async def _run_loop(
                 # REST/WS turns look the override up under a stale id and silently run
                 # the primary. Fall back to context.session_id for callers (CLI, coding,
                 # gym) that don't pass one.
+                # Bound once and reused for BOTH the routing call and the log line
+                # below, so the audit record can never name a different session than
+                # the one the override was actually looked up under.
+                route_session = (
+                    session_id if session_id is not None else context.session_id
+                )
                 decision = context.model_router.route(
                     latest_user,
-                    context={"session_id": session_id if session_id is not None else context.session_id},
+                    context={"session_id": route_session},
                 )
                 reason_repr = (
                     decision.reason.value
                     if hasattr(decision.reason, "value")
                     else decision.reason
                 )
-                log.debug(
-                    "ModelRouter: %s → %s/%s (%s)",
-                    latest_user[:60],
+                # INFO, not DEBUG: which model served a turn is the first question asked
+                # when a user says "I switched models and it did not take", and at DEBUG
+                # the answer does not exist. Checked 2026-08-25 against a daemon up four
+                # days: three days of journal held ZERO of these lines, so a session's
+                # routing had to be inferred sideways from a provider-build side effect
+                # that only fires on the FIRST turn after a switch — the built provider
+                # is cached on the override, so every later turn is silent. One line per
+                # turn: this block runs once, before the tool-iteration loop.
+                #
+                # The user's message text is deliberately NOT in it. The old DEBUG line
+                # carried a 60-char excerpt of the prompt; promoting that verbatim would
+                # write conversation content into the daemon journal at the default
+                # level. The routing decision is what needs auditing, not what was said.
+                log.info(
+                    "ModelRouter: session=%s → %s/%s (%s)",
+                    route_session,
                     decision.provider_name,
                     decision.model_name,
                     reason_repr,
