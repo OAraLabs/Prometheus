@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from prometheus.config.paths import get_wiki_root
-from prometheus.context.environment import git_head_sha
+from prometheus.context.environment import booted_from as _booted_from, git_head_sha
 
 # Cap on the coding diff payload (matches the files-preview 256 KB cap).
 _CODING_DIFF_CAP = 256 * 1024
@@ -368,6 +368,13 @@ def create_app(
             "uptime_seconds": time.time() - app.state.start_time,
             "running_sha": running_sha,
             "tree_head": tree_head,
+            # WHICH CHECKOUT those two shas describe. Additive, same shape as
+            # iteration_ceilings. Without it `stale: false` cannot be
+            # distinguished from "you deployed a tree this process never reads"
+            # — both shas come from the loaded package's own checkout, so they
+            # agree perfectly while the update sits in a different clone. See
+            # environment.booted_from for the incident.
+            "checkout": _booted_from(),
             "stale": stale,
             "compaction": {
                 "enabled": comp is not None,

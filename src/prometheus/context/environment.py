@@ -103,6 +103,35 @@ def detect_git_info(cwd: str) -> tuple[bool, str | None]:
     return True, branch
 
 
+def booted_from() -> dict[str, str | bool]:
+    """Which checkout is this process actually running, on disk.
+
+    WHY THIS EXISTS. ``stale`` compares ``running_sha`` (boot) to ``tree_head``
+    (HEAD now) — and both are read from the SAME checkout, the one the loaded
+    package came from. So deploying the wrong tree returns ``stale: false``:
+    the two shas agree, because the update landed somewhere this process never
+    reads. The guard is structurally blind to that failure while appearing to
+    cover it.
+
+    Observed 2026-08-25: ``~/Prometheus`` was pulled and the service restarted,
+    ``/api/status`` reported ``stale: false``, and the daemon was still running
+    week-old code — its WorkingDirectory is ``~/prometheus-deploy``, a separate
+    clone of the same repo. Two importable copies existed on the box, and
+    nothing on the wire said which one was live.
+
+    ``package`` is the decisive field: it is the directory Python actually
+    imported, not a working directory or a config value, so a reader can
+    compare it against the tree they pushed to instead of inferring.
+    """
+    pkg = Path(__file__).resolve().parents[1]      # …/src/prometheus
+    root = Path(__file__).resolve().parents[3]     # repo root
+    return {
+        "package": str(pkg),
+        "path": str(root),
+        "is_git": (root / ".git").exists(),
+    }
+
+
 def git_head_sha(repo_dir: str | Path | None = None) -> str:
     """Return the HEAD commit SHA of the git repo containing *repo_dir*.
 
