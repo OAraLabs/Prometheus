@@ -1,9 +1,43 @@
 # Sprint — Images reach the model as images
 
 **Status:** Spec v1. Spec only, no code yet.
+**Sequence:** Beacon roadmap **item #0** — before #1, not instead of it.
 **Scope guard:** The INBOUND path only — a picture a human sends reaching the
 model that answers. Not artifact rendering, not image generation, not the
-Beacon gallery (Beacon roadmap #4), not voice.
+Beacon gallery (roadmap #4), not voice (#2).
+
+---
+
+## Why this is #0
+
+The Beacon roadmap runs 1–10 (global search, voice, approvals-over-WS,
+artifact gallery, export, projects, usage dashboard, task cockpit, memory
+explorer, multi-daemon). Much of it is meant to be **built by Prometheus
+itself**, driven from a Beacon session.
+
+That is the argument for doing this first, and it is not a technical
+dependency. It is that the roadmap is largely **UI work**, and UI work is
+specified by screenshots. Today every screenshot sent to a Beacon session
+arrives at the model as a 1,400–3,100 token paraphrase written by a *different*
+model — see §0. Asking an agent to build an artifact gallery from a prose
+description of a mockup is the worst case for this defect, and #4 is on the
+list.
+
+Concrete interactions with the ranked items:
+
+- **#1 global search** — Q4 below asks whether `[Image: …]` text stays in
+  history for turns that used the image path. That is a search-corpus decision
+  and it should be made once, with the search spec open, not twice.
+- **#4 artifact gallery** — an agent that produces a chart cannot look at its
+  own output. The gallery renders it beautifully for the human while the agent
+  stays blind. Not a blocker for shipping #4; it is the difference between a
+  viewer and a loop.
+- **Everything else (#2, #3, #5–#10)** — independent. This does not gate them,
+  and it should not be allowed to grow until it does.
+
+Phase 1 is small and reversible: every provider except anthropic stays
+byte-identical. If the capability gate turns out to be wrong in the wild, the
+description path is still the default and nothing else has moved.
 
 ---
 
