@@ -19,7 +19,12 @@ from uuid import uuid4
 
 import httpx
 
-from prometheus.engine.messages import ConversationMessage, TextBlock, ToolUseBlock
+from prometheus.engine.messages import (
+    ConversationMessage,
+    ImageBlock,
+    TextBlock,
+    ToolUseBlock,
+)
 from prometheus.engine.usage import UsageSnapshot
 from prometheus.providers.base import (
     ApiMessageCompleteEvent,
@@ -108,6 +113,11 @@ class AnthropicProvider(ModelProvider):
         provider = AnthropicProvider(api_key="sk-ant-...")
         provider = AnthropicProvider(prompt_caching=True)      # cache long system prompts
     """
+
+    # Every Claude model in the catalog accepts images as native content blocks, so
+    # this is a constant rather than a probe — unlike llama.cpp, where vision depends
+    # on whether an mmproj was loaded and is read from /props.modalities.
+    supports_vision: bool = True
 
     api_enforced_structure: bool = True
 
@@ -381,6 +391,18 @@ def _build_anthropic_messages(
                         "tool_use_id": block.tool_use_id,
                         "content": block.content,
                         "is_error": block.is_error,
+                    })
+                elif isinstance(block, ImageBlock):
+                    # Anthropic's shape. NOT interchangeable with the OpenAI
+                    # `image_url` data-URL form — that difference is exactly what
+                    # makes VisionTool's hand-built dict wrong on this provider.
+                    content_list.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": block.media_type,
+                            "data": block.data,
+                        },
                     })
             result.append({"role": "user", "content": content_list})
 

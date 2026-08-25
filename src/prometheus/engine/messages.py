@@ -58,7 +58,33 @@ class ToolResultBlock(BaseModel):
     is_error: bool = False
 
 
-ContentBlock = Annotated[TextBlock | ToolUseBlock | ToolResultBlock, Field(discriminator="type")]
+class ImageBlock(BaseModel):
+    """An image a human sent, carried to the model AS AN IMAGE.
+
+    Until this existed the conversation could only hold text, so every upload was
+    flattened at the gateway into ``[Image: <a vision model's prose>]``. Measured on a
+    live install, those descriptions ran 5,435-12,394 characters — the largest costing
+    more tokens than sending the actual screenshot would have, while being lossy, and
+    re-entering context on every later turn because it is stored as a normal message.
+    See docs/sprints/SPRINT-image-blocks.md.
+
+    ``data`` is base64 with no ``data:`` prefix and no newlines — the raw payload every
+    provider wants, differently wrapped. ``source_path`` points into the media cache so
+    history can hold a reference instead of the bytes; ``description`` is set only when
+    the fallback description path also ran, so a text-only model downstream still has
+    something to read.
+    """
+
+    type: Literal["image"] = "image"
+    media_type: str
+    data: str
+    source_path: str | None = None
+    description: str | None = None
+
+
+ContentBlock = Annotated[
+    TextBlock | ToolUseBlock | ToolResultBlock | ImageBlock, Field(discriminator="type")
+]
 
 
 class ConversationMessage(BaseModel):
