@@ -13,7 +13,13 @@ from uuid import uuid4
 
 import httpx
 
-from prometheus.engine.messages import ConversationMessage, TextBlock, ToolUseBlock
+from prometheus.engine.messages import (
+    ConversationMessage,
+    ImageBlock,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from prometheus.engine.usage import UsageSnapshot
 from prometheus.providers.base import (
     ApiMessageCompleteEvent,
@@ -30,6 +36,15 @@ MAX_RETRIES = 3
 BASE_DELAY = 1.0
 MAX_DELAY = 30.0
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503}
+
+
+class UnsupportedContentBlock(TypeError):
+    """A content block reached a provider that cannot express it.
+
+    Loud on purpose. The bare ``else`` this replaces treated every non-text,
+    non-tool_use block as a ToolResultBlock, so an ImageBlock would have been sent
+    as a tool result with garbage fields — a corrupted message, not an error.
+    """
 
 
 def _build_openai_messages(request: ApiMessageRequest) -> list[dict[str, Any]]:
@@ -61,13 +76,31 @@ def _build_openai_messages(request: ApiMessageRequest) -> list[dict[str, Any]]:
                         "arguments": json.dumps(block.input),
                     },
                 })
-            else:
-                # ToolResultBlock → separate tool message in OpenAI format
+            elif isinstance(block, ImageBlock):
+                # Phase 1 declares no vision on this path, so an ImageBlock arriving
+                # here means the capability gate let one through. RAISE — never skip
+                # the block and never fall through to text. A picture silently dropped
+                # on the way to the model is the failure shape this sprint exists to
+                # remove (see docs/sprints/SPRINT-image-blocks.md § the gate fails
+                # loud); Phase 2 replaces this with the `image_url` form.
+                raise UnsupportedContentBlock(
+                    "this provider does not accept images "
+                    f"(media_type={block.media_type!r}, "
+                    f"source_path={block.source_path!r}); the capability gate should "
+                    "have taken the description path instead"
+                )
+            elif isinstance(block, ToolResultBlock):
+                # → separate tool message in OpenAI format
                 tool_results.append({
                     "role": "tool",
                     "tool_call_id": block.tool_use_id,
                     "content": block.content,
                 })
+            else:
+                raise UnsupportedContentBlock(
+                    f"unhandled content block {type(block).__name__} — add a branch "
+                    "rather than letting it be silently mislabelled"
+                )
 
         if msg.role == "assistant":
             entry: dict[str, Any] = {"role": "assistant"}

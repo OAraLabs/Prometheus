@@ -268,10 +268,15 @@ class ProviderOverride:
 
 # -- Provider override presets for /claude, /gpt, etc. --
 
-OVERRIDE_PRESETS: dict[str, dict[str, str]] = {
+# Values are heterogeneous (str + the bool `vision`), so this is not dict[str, str].
+OVERRIDE_PRESETS: dict[str, dict[str, Any]] = {
     "claude": {
         "provider": "anthropic",
         "api_key_env": "ANTHROPIC_API_KEY",
+        # DECLARED, never inferred from the model name. A `*-vl-*` heuristic gets the
+        # next model that breaks the convention wrong, and the failure mode is a
+        # dropped picture. Absent means False everywhere that reads this.
+        "vision": True,
         # Defaulting to Haiku 4.5 for the /claude pilot: cheap + fast for
         # interactive chat. Users wanting a heavier model can set an explicit
         # slash_commands.claude block in prometheus.yaml — see

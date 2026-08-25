@@ -2280,6 +2280,11 @@ def create_app(
             "key": _LOCAL_MODEL_KEY, "label": "Local", "provider": primary_provider,
             "model": primary_model, "is_default": True, "available": True,
             "auth": None,
+            # False in Phase 1 even though the local llama.cpp endpoint may well
+            # report modalities.vision=true: this flag gates the IMAGE-BLOCK path,
+            # and Phase 1 ships that for anthropic only. The local model keeps the
+            # description path, byte-identical. Phase 2 wires the probe through.
+            "vision": False,
         }]
         for key in _OVERRIDE_PRESETS:
             # Resolve through the SAME path the /claude slash command uses, so REST and
@@ -2306,6 +2311,13 @@ def create_app(
                     "is_default": False,
                     "available": cred["mode"] is not None,
                     "auth": cred["mode"],
+                    # Declared per preset, ABSENT MEANS FALSE. A client must never
+                    # infer this from the model name: the heuristic gets the next
+                    # model that breaks the naming convention wrong, and the failure
+                    # mode is a picture silently dropped on the way to a text-only
+                    # model. Absence-is-not-permission, same posture as
+                    # telegram_enabled.
+                    "vision": bool(preset.get("vision", False)),
                 })
         return catalog
 
