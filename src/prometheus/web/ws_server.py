@@ -376,7 +376,16 @@ class WebSocketBridge:
                     # Marker text, not a paraphrase: cheap, honest, greppable,
                     # and it keeps base64 out of history. The picture itself
                     # rides the turn as a block.
-                    user_text = caption or f"[Image: {filename}]"
+                    # Marker AND caption, never one or the other. The first cut
+                    # was `caption or "[Image: …]"`, which read fine and lost the
+                    # picture from history the moment anyone typed something: the
+                    # wire test's transcript showed a bare "What is in this
+                    # screenshot?" with nothing naming a screenshot. The image is
+                    # on the turn either way — this is about the row a human (or a
+                    # later turn, or search) reads back.
+                    user_text = f"[Image: {filename}]"
+                    if caption:
+                        user_text = f"{user_text}\n{caption}"
                     logger.info(
                         "upload: %s carried as an image block (session=%s)",
                         filename, session_id,

@@ -254,3 +254,93 @@ async def test_a_send_with_no_blocks_leaves_the_turn_text_only(monkeypatch):
 
     await bridge._handle_send_message("beacon:s1", "just text")
     assert [b.type for b in session.messages[-1].content] == ["text"]
+
+
+@pytest.mark.asyncio
+async def test_the_marker_survives_a_caption(monkeypatch, tmp_path):
+    """History must still say a picture was here.
+
+    Found by the WIRE TEST, not by these tests: with a caption present the first
+    implementation persisted the caption ALONE, so the transcript read "What is
+    in this screenshot?" with nothing naming a screenshot — a later turn, or
+    search, had no idea an image was ever attached.
+
+    This drives _handle_file_upload, which is where the text is COMPOSED. The first
+    version of this test called _handle_send_message with a hand-built string
+    and asserted on the string it had just passed in — it could not fail, and
+    the mutation proved it: restoring `caption or "[Image: …]"` left it green.
+    """
+    import base64
+
+    import prometheus.gateway.media_cache as media_cache
+    import prometheus.gateway.image_prep as image_prep
+
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+        "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+    )
+    cached = tmp_path / "img_test.png"
+    cached.write_bytes(png)
+    monkeypatch.setattr(media_cache, "cache_image_from_bytes", lambda data, ext=None: str(cached))
+    monkeypatch.setattr(
+        image_prep, "prepare_image_block",
+        lambda path: ImageBlock(media_type="image/png", data="AAAA", source_path=str(path)),
+    )
+
+    router = _Router(_Override(ANTHROPIC_VISION))
+    ctx = types.SimpleNamespace(model_router=router, provider=object())
+    bridge = WebSocketBridge(session_mgr=_FakeSessionMgr(_FakeSession()), loop_context=ctx, config={})
+
+    sent: list[tuple[str, list]] = []
+
+    async def _capture(session_id, content, **kw):
+        sent.append((content, kw.get("blocks") or []))
+
+    monkeypatch.setattr(bridge, "_handle_send_message", _capture)
+
+    await bridge._handle_file_upload(
+        "beacon:s1", "shot.png", base64.b64encode(png).decode(), "image/png",
+        "what is this?",
+    )
+
+    assert sent, "the upload never dispatched"
+    content, blocks = sent[0]
+    assert "[Image: shot.png]" in content, (
+        f"the transcript lost the picture — composed text was {content!r}"
+    )
+    assert "what is this?" in content, "the caption must survive too"
+    assert len(blocks) == 1 and blocks[0].type == "image"
+
+
+@pytest.mark.asyncio
+async def test_an_uncaptioned_upload_still_names_the_file(monkeypatch, tmp_path):
+    import base64
+
+    import prometheus.gateway.media_cache as media_cache
+    import prometheus.gateway.image_prep as image_prep
+
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+        "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+    )
+    cached = tmp_path / "img_test.png"
+    cached.write_bytes(png)
+    monkeypatch.setattr(media_cache, "cache_image_from_bytes", lambda data, ext=None: str(cached))
+    monkeypatch.setattr(
+        image_prep, "prepare_image_block",
+        lambda path: ImageBlock(media_type="image/png", data="AAAA", source_path=str(path)),
+    )
+
+    router = _Router(_Override(ANTHROPIC_VISION))
+    ctx = types.SimpleNamespace(model_router=router, provider=object())
+    bridge = WebSocketBridge(session_mgr=_FakeSessionMgr(_FakeSession()), loop_context=ctx, config={})
+    sent: list[str] = []
+
+    async def _capture(session_id, content, **kw):
+        sent.append(content)
+
+    monkeypatch.setattr(bridge, "_handle_send_message", _capture)
+    await bridge._handle_file_upload(
+        "beacon:s1", "shot.png", base64.b64encode(png).decode(), "image/png", "",
+    )
+    assert sent == ["[Image: shot.png]"]
