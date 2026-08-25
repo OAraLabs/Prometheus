@@ -220,7 +220,59 @@ Each phase lands with tests that fail before it:
 - history round-trip: block → `content_json` → block, with the bytes on disk
   once and a missing file degrading rather than raising
 
-## 6. Open questions
+## 6. Open questions — ANSWERED 2026-08-25
+
+- **Q1 — no.** A description alongside the image hedges a failure not yet
+  observed and doubles the surface where the two can disagree. Measure
+  mid-conversation model switching first.
+- **Q2 — explicit `vision: true|false` per preset in `/api/models`, and
+  ABSENT MEANS FALSE.** Not derived from a name pattern (`*-vl-*`): a
+  heuristic gets the next model that breaks the naming convention wrong, and
+  the failure mode is a dropped message. Same shape as the ceilings work — a
+  resolved value the client reads rather than infers. Absence-is-not-
+  permission, as with `telegram_enabled`: a preset with no vision key is
+  text-only until proven otherwise.
+- **Q3 — downscale before send, once, in the adapter.** Hosted vision is priced
+  per token, resolution above the provider's tiling threshold buys nothing, and
+  the alternative is unbounded payload size on a WS gateway. One place, so
+  every provider gets the same treatment instead of each learning its own
+  limits. Cap the long edge, preserve aspect ratio, and LOG THE ORIGINAL
+  DIMENSIONS so "why did it not see the detail" is answerable later.
+- **Q4 — deferred to the search spec (#1), deliberately.** Lean: `[Image: …]`
+  text stays in the corpus, because a thread you cannot find is worse than one
+  whose search result is a placeholder. Not decided here.
+
+### The gate fails LOUD
+
+Hold this hardest. An image attached to a text-only model must fail at the
+boundary, not drop silently. It is the same failure shape as the routing bug
+(chip says Qwen, turn runs primary) and as `telegram_enabled` — plumbing that
+looks complete from both ends while nothing arrives. **If the gate can only be
+wrong in one direction, make it the direction that shouts:** a provider
+serialiser that meets an `ImageBlock` it cannot express RAISES. It does not
+skip the block, and it does not fall through to text.
+
+### Field note: why Q2 is explicit and not inferred
+
+Asked in a live Telegram session what vision model was in use, the daemon
+answered:
+
+> "This session's backend — Qwen3.8-Max via the qwen provider — handles vision
+> directly as a multimodal model; the 4090's live endpoint reports
+> `modalities.vision`=true (Qwen3.8-27B + mmproj), which is what the
+> vision-detection fix (PR #217) wired into the daemon."
+
+Two things are conflated. `402f16c` (#217) reads `/props.modalities.vision`
+from **`llama_cpp.py`** — it probes the local llama.cpp endpoint at
+`100.110.140.39:8080` and says nothing about any cloud provider. And the same
+session had been switched to the local model by `/local` one minute earlier
+("Back to primary (llama_cpp//…/Qwen3.8-27B-UD-Q4_K_XL.gguf)"), so the answer
+named the cloud backend while describing the local one's probe.
+
+That is the argument for Q2 in one paragraph: when capability is inferred
+rather than declared, even the daemon describing itself gets it wrong.
+
+## 7. Superseded question list
 
 - **Q1** (§3.4) description alongside the image for mid-conversation model switches
 - **Q2** where the per-preset vision flag lives — `OVERRIDE_PRESETS`, or the
