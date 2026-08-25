@@ -232,7 +232,13 @@ def _is_device_sink(target: str) -> bool:
     changes on disk, so snapshotting it yields a guaranteed "CLAIMED but
     NO CHANGE ON DISK" — a false positive that poisons the summary. The
     exception is ``/dev/shm/``: a real tmpfs where files genuinely land.
+
+    ``>&1`` / ``2>&1`` (fd duplicates) capture ``&1``-style targets here
+    too — same class: not a path, never on disk, guaranteed false
+    "CLAIMED but FILE ABSENT".
     """
+    if re.fullmatch(r"&\d+", target):
+        return True
     return target.startswith("/dev/") and not target.startswith("/dev/shm/")
 
 

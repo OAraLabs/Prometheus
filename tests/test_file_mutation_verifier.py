@@ -78,6 +78,18 @@ class TestPathExtraction:
         out = _extract_bash_paths("echo x > /dev/shm/note.txt")
         assert ("/dev/shm/note.txt", "redirect_write") in out
 
+    def test_bash_fd_redirect_is_not_a_mutation(self):
+        """>&1 / 2>&1 duplicate a file descriptor — '&1' is not a path.
+        Tracking it emits a guaranteed "CLAIMED but FILE ABSENT" false
+        positive (observed live, 2026-08-25)."""
+        assert _extract_bash_paths("echo hello >&1") == []
+        assert _extract_bash_paths("cmd 2>&1") == []
+        # A real write earlier in the same clause stays untracked (the
+        # patterns only anchor the trailing redirect) — a false NEGATIVE,
+        # the direction this module's docstring says it accepts. The point
+        # of the fix: the trailing 2>&1 must NOT be claimed as a file.
+        assert _extract_bash_paths("cmd > file.txt 2>&1") == []
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle: pre / post / post_turn
