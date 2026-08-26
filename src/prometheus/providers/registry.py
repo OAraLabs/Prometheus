@@ -252,8 +252,15 @@ def provider_class_supports_vision(provider_name: str) -> bool:
         from prometheus.providers.anthropic import AnthropicProvider
 
         return bool(AnthropicProvider.supports_vision)
-    # Every other provider serialises through the OpenAI builder, which raises
-    # on an ImageBlock until Phase 2 teaches it the `image_url` form.
+    # Phase 2: the OpenAI-compatible builder can now express an image (`image_url`),
+    # so every provider it serves is CAPABLE. Capable is not permitted — whether a
+    # particular configured model actually takes pictures is the preset's declared
+    # `vision` flag, and the gate requires both. This answers only "can our code put
+    # a picture on this wire", which is a property of the class, not of the model.
+    if provider_name in _OPENAI_COMPAT_PROVIDERS:
+        return True
+    # llama_cpp / ollama probe their own endpoint (mmproj) and are not wired into the
+    # image-block path yet; unknown providers are False by the same absence rule.
     return False
 
 
@@ -283,6 +290,10 @@ class ProviderRegistry:
                 else _resolve_api_key(config, provider_name)
             )
             return OpenAICompatProvider(
+                # The preset's DECLARED vision flag, carried from the catalog. Absent
+                # means False — a preset that says nothing is text-only until proven
+                # otherwise, the same posture /api/models serves to clients.
+                vision=bool(config.get("vision", False)),
                 base_url=_resolve_base_url(config, provider_name),
                 api_key=api_key,
                 model=config.get("model", defaults.get("model", "")),

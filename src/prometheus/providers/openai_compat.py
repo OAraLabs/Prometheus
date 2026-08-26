@@ -174,7 +174,13 @@ class OpenAICompatProvider(ModelProvider):
         default_max_tokens: int = 4096,
         timeout: float = 120.0,
         provider_name: str = "",
+        vision: bool = False,
     ) -> None:
+        # DECLARED by the catalog for the configured MODEL, never inferred here. One
+        # class serves openai, gemini, xai, deepseek, kimi, glm, mimo and qwen, and
+        # whether a given model takes pictures is a fact about that model, not about
+        # the wire format they share. Default False: absence is not permission.
+        self.supports_vision = bool(vision)
         # WHICH OpenAI-compatible service this instance talks to — openai,
         # gemini, xai, deepseek, kimi, glm, mimo, qwen. One class serves all
         # of them, so without this the only signal left is the class name,
@@ -248,7 +254,7 @@ class OpenAICompatProvider(ModelProvider):
         self, request: ApiMessageRequest
     ) -> AsyncIterator[ApiStreamEvent]:
         """Single attempt to /v1/chat/completions (or /chat/completions)."""
-        messages = _build_openai_messages(request)
+        messages = _build_openai_messages(request, allow_images=self.supports_vision)
 
         payload: dict[str, Any] = {
             "model": request.model or self._model,

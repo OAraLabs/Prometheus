@@ -37,6 +37,22 @@ log = logging.getLogger(__name__)
 # the model would have looked at, and the payload stays bounded.
 MAX_LONG_EDGE = 2576
 
+# Shrink only ABOVE this, not above the cap itself.
+#
+# WHY, measured. PyMuPDF reduces by powers of two, so shrinking anything merely
+# over the cap overshoots hard: the wire test's 2638x1646 screenshot was 62px
+# past 2576 and came out 1319x823 — HALF the resolution discarded to clear a 2%
+# overshoot. It cost real legibility: Claude read the sidebar chip "Chats 118"
+# as "Chats 115" and the status pill "LVX" as "LYX". Small UI text is exactly
+# what a screenshot is sent for.
+#
+# Between the cap and this trigger, send as captured and let the provider's own
+# resampler take it down — theirs is arbitrary-ratio, ours is not, and an image
+# in this band is already close enough that the payload is not the problem.
+# Above the trigger the payload IS the problem (a 4x-oversized image crossing a
+# WS gateway), and powers of two are the right blunt instrument.
+SHRINK_ABOVE = MAX_LONG_EDGE * 2
+
 _MAGIC: tuple[tuple[bytes, str], ...] = (
     (b"\x89PNG", "image/png"),
     (b"\xff\xd8\xff", "image/jpeg"),
@@ -106,15 +122,17 @@ def _downscale_if_needed(data: bytes, media_type: str, p: Path) -> tuple[bytes, 
         return data, media_type
 
     long_edge = max(pix.width, pix.height)
-    if long_edge <= MAX_LONG_EDGE:
+    if long_edge <= SHRINK_ABOVE:
+        # Includes everything between the cap and 2x it: as-captured beats a
+        # halving that throws away detail the provider would have kept.
         log.info(
-            "image_prep: %s %dx%d sent as captured (%d bytes)",
-            p.name, pix.width, pix.height, len(data),
+            "image_prep: %s %dx%d sent as captured (%d bytes, cap=%d, shrink above %d)",
+            p.name, pix.width, pix.height, len(data), MAX_LONG_EDGE, SHRINK_ABOVE,
         )
         return data, media_type
 
     shrink = 0
-    while long_edge > MAX_LONG_EDGE:
+    while long_edge > SHRINK_ABOVE:
         long_edge //= 2
         shrink += 1
     try:
