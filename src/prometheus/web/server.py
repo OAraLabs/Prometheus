@@ -2063,23 +2063,12 @@ def create_app(
         # offer and the UI must not present one.
         from prometheus.permissions.approval_queue import prospective_extents
 
-        # ``expires_at`` comes from the QUEUE, not from
-        # DEFAULT_APPROVAL_TIMEOUT_SECONDS: the constant is the default, the
-        # instance's timeout is what actually counts down. Without this field
-        # Beacon can only show a countdown by computing created_at + 1800
-        # itself — a second surface deriving a truth the daemon already
-        # holds, which is exactly what 0e above removed for extents.
-        return [
-            {
-                "request_id": a.request_id,
-                "tool_name": a.tool_name,
-                "description": a.description,
-                "created_at": a.created_at,
-                "expires_at": queue.expires_at(a),
-                "extents": prospective_extents(a),
-            }
-            for a in queue.list_pending()
-        ]
+        # One serializer, two transports (see ApprovalQueue.serialize_pending):
+        # the WS ``approval_pending`` signal returns the SAME dict, so the REST
+        # list and the push frame cannot drift. ``prospective_extents`` stays
+        # imported above for the comment's provenance; the serializer below is
+        # now the single shape.
+        return [queue.serialize_pending(a) for a in queue.list_pending()]
 
     @app.post("/api/approvals/{request_id}/approve")
     async def approve_action(request_id: str, body: dict | None = None):
