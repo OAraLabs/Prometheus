@@ -89,9 +89,14 @@ _BASH_FS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r'(?<![A-Za-z0-9_])cp\s+(?:-\w+\s+)*(\S+)\s+(\S+)'),    'copy'),
     (re.compile(r'(?<![A-Za-z0-9_])touch\s+(\S+)'),                     'touch'),
     (re.compile(r'(?<![A-Za-z0-9_])mkdir\s+(?:-\w+\s+)*(\S+)'),         'mkdir'),
-    # Redirects (anchored loosely — picks the LAST '>' / '>>' in the line).
-    (re.compile(r'(?<![<>])>\s*(\S+)\s*$'),                             'redirect_write'),
-    (re.compile(r'>>\s*(\S+)\s*$'),                                     'redirect_append'),
+    # Redirects. NO trailing anchor: a clause can carry more than one, and anchoring
+    # on the last meant `cmd > file.txt 2>&1` saw only the `2>&1` — so the REAL write
+    # went untracked and, once `&N` was correctly classified as not-a-file (#274), the
+    # whole turn went unaudited with no row at all (issue #275).
+    # `(?!>)` keeps the single-redirect pattern off the first char of `>>`, which the
+    # `$` anchor used to do by accident.
+    (re.compile(r'(?<![<>])>(?!>)\s*(\S+)'),                            'redirect_write'),
+    (re.compile(r'>>\s*(\S+)'),                                         'redirect_append'),
 ]
 
 
@@ -134,6 +139,10 @@ class _Mutation:
 class _TurnRecord:
     """Per-turn accumulator. Created on first touch, dropped on PostTurn."""
     mutations: list[_Mutation] = field(default_factory=list)
+    # Commands that redirected somewhere this hook could not name. Not mutations —
+    # the opposite: the places it knows it could not look. post_turn speaks up on
+    # these so silence never has to mean two different things (issue #275).
+    blind: list[str] = field(default_factory=list)
     # Map turn-scoped pre-snapshots by (tool_use_id, path) so post_tool_use
     # can pair them up even when one tool call touches multiple paths.
     _pending: dict[tuple[str, str], _Snapshot] = field(default_factory=dict)
@@ -203,14 +212,73 @@ def _extract_paths(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
     return out
 
 
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+# A shell redirect operator: at a clause start, after whitespace, or after the fd
+# digit / `&` that qualifies it. Deliberately NOT any bare '>' — `-> ` in prose and
+# `a>b` inside a grep pattern are not redirects, and treating them as one is the
+# false-positive class #198 and #274 both existed to remove.
+_REDIRECT_OP = re.compile(r"(?:(?<=\s)|(?<=^)|(?<=\d)|(?<=&))>{1,2}")
+
+
+def _dequote(clause: str) -> str:
+    """Blank out quoted spans so their contents cannot look like redirects.
+
+    `echo "a -> b" > out.txt` must yield `out.txt` and nothing else. Widening the
+    redirect patterns without this would have read the arrow inside the string as a
+    redirect and claimed `b` — trading one silent failure for a noisy wrong one.
+    Replaced with spaces rather than removed so offsets and word boundaries survive.
+    """
+    return _QUOTED.sub(lambda m: " " * len(m.group(0)), clause)
+
+
+def redirect_without_target(command: str) -> bool:
+    """Does this command redirect somewhere we could not name?
+
+    True when a clause carries a redirect operator but yields no trackable file
+    target — a quoted destination, an unusual form, or a construct the patterns do
+    not know. It is the signal that the verifier may be BLIND on this turn rather
+    than that the turn was clean, and post_turn speaks up on it (issue #275).
+
+    `2>&1` alone is not blindness: the fd duplicate is correctly not-a-file, and a
+    clause whose only redirect is one is genuinely nothing to audit.
+    """
+    for clause in re.split(r"\s*(?:;|&&|\|\|)\s*", command or ""):
+        bare = _dequote(clause)
+        if not _REDIRECT_OP.search(bare):
+            continue
+        targets = _targets_in(bare)
+        if targets and all(_is_device_sink(t) for t in targets):
+            continue  # every target was /dev/... or an fd — nothing to audit
+        if not targets:
+            return True
+    return False
+
+
+def _targets_in(clause: str) -> list[str]:
+    """Raw redirect targets in an already-dequoted clause, sinks included."""
+    found: list[str] = []
+    for pat, action in _BASH_FS_PATTERNS:
+        if not action.startswith("redirect"):
+            continue
+        for m in pat.finditer(clause):
+            t = _expand_user((m.group(m.lastindex or 1) or "").strip("'\""))
+            if t:
+                found.append(t)
+    return found
+
+
 def _extract_bash_paths(command: str) -> list[tuple[str, str]]:
     """Return ``(path, claimed_action)`` tuples extracted from a bash line.
 
     Compound commands (``a && b``, ``foo; bar``) are scanned per-clause
     so an ``mkdir foo && touch foo/x.md`` reports two tracked paths.
+
+    Quoted spans are blanked first — see _dequote.
     """
     out: list[tuple[str, str]] = []
-    for clause in re.split(r"\s*(?:;|&&|\|\|)\s*", command or ""):
+    for raw_clause in re.split(r"\s*(?:;|&&|\|\|)\s*", command or ""):
+        clause = _dequote(raw_clause)
         for pat, action in _BASH_FS_PATTERNS:
             for m in pat.finditer(clause):
                 # mv/cp: groups (src, dst) — track dst (the new home).
@@ -315,6 +383,14 @@ class FileMutationVerifier:
             return
         try:
             paths = self._paths_for(tool_name, tool_input)
+            # A bash command that redirects somewhere unnameable gets recorded even
+            # when nothing is trackable — that is EXACTLY the case that used to leave
+            # no row at all, indistinguishable from a clean turn.
+            if tool_name == "bash":
+                command = str(tool_input.get("command", ""))
+                if redirect_without_target(command):
+                    with self._lock:
+                        self._record(turn_key).blind.append(command[:200])
             if not paths:
                 # Don't materialise a record for a tool that touches nothing —
                 # otherwise every bash `ls` allocates a turn slot.
@@ -406,9 +482,9 @@ class FileMutationVerifier:
         """
         with self._lock:
             turn = self._turns.pop(self._key(turn_key), None)
-        if turn is None or not turn.mutations:
+        if turn is None or (not turn.mutations and not turn.blind):
             return None
-        return self._format_summary(turn.mutations)
+        return self._format_summary(turn.mutations, turn.blind)
 
     def discard_turn(self, *, turn_key: str | None = None) -> None:
         """Drop a turn's record without rendering. Idempotent — safe to call
@@ -472,8 +548,21 @@ class FileMutationVerifier:
             return "/".join(sorted(set(actions)))
         return tool_name
 
-    def _format_summary(self, muts: list[_Mutation]) -> str:
-        """Render the per-turn list into a single string. Truncates."""
+    def _format_summary(self, muts: list[_Mutation], blind: list[str] | None = None) -> str:
+        """Render the per-turn list into a single string. Truncates.
+
+        A turn with no mutations still renders when something was BLIND: silence used
+        to mean both "nothing was written" and "the writes were never extracted", and
+        an audit that cannot tell those apart is counted on for a guarantee it is not
+        making (issue #275).
+        """
+        blind = blind or []
+        if not muts and blind:
+            lines = ["[FILE MUTATION VERIFIER]", "Nothing trackable this turn, but NOT a clean audit:"]
+            for cmd in blind[: self._truncate_n]:
+                lines.append(f"   ? redirect with no nameable target — {cmd}")
+            lines.append("   (this turn may have written files this hook could not see)")
+            return "\n".join(lines)
         lines = ["[FILE MUTATION VERIFIER]", "Files touched this turn:"]
         shown = muts[: self._truncate_n]
         for m in shown:
@@ -496,6 +585,11 @@ class FileMutationVerifier:
                 f"   ... and {len(muts) - self._truncate_n} more "
                 f"(truncated at {self._truncate_n})"
             )
+        for cmd in blind[: self._truncate_n]:
+            # A partial audit must say it is partial. Listing what WAS seen while
+            # staying quiet about what could not be is the same misleading silence,
+            # just harder to notice because the row looks complete.
+            lines.append(f"   ? redirect with no nameable target — {cmd}")
         return "\n".join(lines)
 
     @staticmethod

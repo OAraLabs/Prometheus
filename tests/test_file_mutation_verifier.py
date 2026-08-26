@@ -84,11 +84,14 @@ class TestPathExtraction:
         positive (observed live, 2026-08-25)."""
         assert _extract_bash_paths("echo hello >&1") == []
         assert _extract_bash_paths("cmd 2>&1") == []
-        # A real write earlier in the same clause stays untracked (the
-        # patterns only anchor the trailing redirect) — a false NEGATIVE,
-        # the direction this module's docstring says it accepts. The point
-        # of the fix: the trailing 2>&1 must NOT be claimed as a file.
-        assert _extract_bash_paths("cmd > file.txt 2>&1") == []
+        # UPDATED by issue #275. This used to assert `== []` — the real write in the
+        # same clause went untracked because the patterns anchored on the TRAILING
+        # redirect, and the comment called it an accepted false negative. Live, it
+        # was worse than a missed path: the only extracted target was `&1`, correctly
+        # dropped here, so the turn produced NO verifier row at all while a file was
+        # genuinely written. Silence that means "nothing happened" and silence that
+        # means "nothing was looked at" cannot be the same signal.
+        assert _extract_bash_paths("cmd > file.txt 2>&1") == [("file.txt", "redirect_write")]
 
 
 # ---------------------------------------------------------------------------
@@ -634,3 +637,77 @@ class TestAgentLoopIntegration:
             )
 
         assert v.live_turns == 0, "run_loop leaked turn state on the way out"
+
+
+class TestSilenceIsNotAnAudit:
+    """Issue #275: the hook must not report a clean turn when it was blind.
+
+    `post_turn` returned None both when a turn touched no files and when its writes
+    were never extracted. Live, `echo hello > /tmp/fdcheck.txt 2>&1` produced NO row
+    while the file genuinely landed on disk — and the daemon had logged
+    `FileMutationVerifier: enabled (turn-end audit)` at boot. An audit that cannot
+    distinguish "nothing happened" from "nothing was looked at" is counted on for a
+    guarantee it is not making.
+
+    These drive the REAL hook — pre_tool_use then post_turn — not the predicate
+    alone, because the defect was in what the hook DID with the predicate's answer.
+    """
+
+    def _verifier(self):
+        from prometheus.hooks.file_mutation_verifier import FileMutationVerifier
+
+        return FileMutationVerifier(enabled=True)
+
+    def test_the_write_behind_a_trailing_2to1_is_now_tracked(self, tmp_path):
+        """The original defect, end to end."""
+        v = self._verifier()
+        target = tmp_path / "fdcheck.txt"
+        cmd = f"echo hello > {target} 2>&1"
+        v.pre_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        target.write_text("hello\n")
+        v.post_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        out = v.post_turn(turn_key="k")
+        assert out is not None, "a turn that wrote a file produced no row at all"
+        assert "fdcheck.txt" in out
+
+    def test_an_unnameable_redirect_speaks_up_instead_of_going_quiet(self):
+        """A quoted destination cannot be named — so say so, rather than return None
+        and let it read as a clean audit."""
+        v = self._verifier()
+        cmd = 'cmd > "some file.txt"'
+        v.pre_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        out = v.post_turn(turn_key="k")
+        assert out is not None, "blind turn stayed silent — indistinguishable from clean"
+        assert "no nameable target" in out
+        assert "may have written files this hook could not see" in out
+
+    def test_a_genuinely_clean_turn_stays_quiet(self):
+        """Only speak up when it might be blind. A turn with nothing to audit must
+        not start emitting a row in every conversation."""
+        v = self._verifier()
+        for cmd in ["ls -la", "cmd 2>&1", "echo x > /dev/null", 'grep -r "a>b" .']:
+            v.pre_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        assert v.post_turn(turn_key="k") is None
+
+    def test_a_partial_audit_says_it_is_partial(self, tmp_path):
+        """Listing what WAS seen while staying quiet about what could not be is the
+        same misleading silence, just harder to notice."""
+        v = self._verifier()
+        target = tmp_path / "seen.txt"
+        seen = f"echo a > {target}"
+        unseen = 'echo b > "un seen.txt"'
+        v.pre_tool_use("bash", {"command": seen}, "t1", turn_key="k")
+        target.write_text("a\n")
+        v.post_tool_use("bash", {"command": seen}, "t1", turn_key="k")
+        v.pre_tool_use("bash", {"command": unseen}, "t2", turn_key="k")
+        out = v.post_turn(turn_key="k")
+        assert "seen.txt" in out
+        assert "no nameable target" in out, "the partial audit claimed to be complete"
+
+    def test_a_quoted_arrow_is_not_read_as_a_redirect(self):
+        """Widening the patterns must not reintroduce the false-positive class #198
+        and #274 removed. `->` inside a string is prose, not a redirect."""
+        from prometheus.hooks.file_mutation_verifier import _extract_bash_paths
+
+        assert _extract_bash_paths('echo "a -> b" > out.txt') == [("out.txt", "redirect_write")]
+        assert _extract_bash_paths('grep -r "a>b" .') == []
