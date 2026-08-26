@@ -93,7 +93,12 @@ def test_gate_requires_the_provider_to_be_able_to_express_an_image():
     carry one — a user's slash_commands block can override `provider` while the
     preset's `vision` stays. Then the block would reach the OpenAI builder and
     raise. The gate refuses first."""
-    bridge, _ = _bridge(_Override({"provider": "qwen", "model": "qwen-vl-max", "vision": True}))
+    # The example moved in Phase 2. It used to be `qwen`, because the OpenAI builder
+    # raised on every image; that builder can now express one, so the old fixture
+    # asserted a fact that had changed. `llama_cpp` still exhibits the property:
+    # declared on the model, but not wired into the image-block path. Property kept,
+    # example moved.
+    bridge, _ = _bridge(_Override({"provider": "llama_cpp", "model": "qwen3.8-27b", "vision": True}))
     assert bridge._turn_supports_vision("beacon:s1") is False
 
 
@@ -113,7 +118,14 @@ def test_no_router_means_no():
 
 def test_provider_capability_comes_from_the_class():
     assert provider_class_supports_vision("anthropic") is True
-    assert provider_class_supports_vision("qwen") is False
+    # qwen flipped to True in Phase 2, when the OpenAI builder learned the `image_url`
+    # form. That is CAPABILITY — "can our code put a picture on this wire" — not
+    # permission; the declared per-model flag still decides (see the gate tests).
+    assert provider_class_supports_vision("qwen") is True
+    assert provider_class_supports_vision("openai") is True
+    # Not wired into the image-block path: these probe their own endpoint instead.
+    assert provider_class_supports_vision("llama_cpp") is False
+    assert provider_class_supports_vision("ollama") is False
     assert provider_class_supports_vision("nonesuch") is False
 
 

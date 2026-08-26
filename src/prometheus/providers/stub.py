@@ -47,8 +47,17 @@ class UnsupportedContentBlock(TypeError):
     """
 
 
-def _build_openai_messages(request: ApiMessageRequest) -> list[dict[str, Any]]:
-    """Convert ConversationMessages to OpenAI wire format, handling tool results."""
+def _build_openai_messages(
+    request: ApiMessageRequest, *, allow_images: bool = False
+) -> list[dict[str, Any]]:
+    """Convert ConversationMessages to OpenAI wire format, handling tool results.
+
+    ``allow_images`` is the provider's DECLARED vision capability, threaded in rather
+    than guessed here: this builder is shared by every OpenAI-compatible provider, and
+    whether a given configured MODEL takes pictures is a fact about the catalog, not
+    about the wire format. Default False, so a caller that forgets to pass it gets the
+    refusal rather than a silent send — absence is not permission.
+    """
     result: list[dict[str, Any]] = []
 
     if request.system_prompt:
@@ -61,6 +70,7 @@ def _build_openai_messages(request: ApiMessageRequest) -> list[dict[str, Any]]:
             continue
 
         text_parts: list[str] = []
+        image_parts: list[dict[str, Any]] = []
         tool_calls: list[dict[str, Any]] = []
         tool_results: list[dict[str, Any]] = []
 
@@ -77,18 +87,27 @@ def _build_openai_messages(request: ApiMessageRequest) -> list[dict[str, Any]]:
                     },
                 })
             elif isinstance(block, ImageBlock):
-                # Phase 1 declares no vision on this path, so an ImageBlock arriving
-                # here means the capability gate let one through. RAISE — never skip
-                # the block and never fall through to text. A picture silently dropped
-                # on the way to the model is the failure shape this sprint exists to
-                # remove (see docs/sprints/SPRINT-image-blocks.md § the gate fails
-                # loud); Phase 2 replaces this with the `image_url` form.
-                raise UnsupportedContentBlock(
-                    "this provider does not accept images "
-                    f"(media_type={block.media_type!r}, "
-                    f"source_path={block.source_path!r}); the capability gate should "
-                    "have taken the description path instead"
-                )
+                if not allow_images:
+                    # An ImageBlock reaching a provider that did not declare vision
+                    # means the capability gate let one through. RAISE — never skip the
+                    # block, never fall through to text. A picture silently dropped on
+                    # the way to the model is the failure shape this sprint exists to
+                    # remove (docs/sprints/SPRINT-image-blocks.md § the gate fails loud).
+                    raise UnsupportedContentBlock(
+                        "this provider does not accept images "
+                        f"(media_type={block.media_type!r}, "
+                        f"source_path={block.source_path!r}); the capability gate should "
+                        "have taken the description path instead"
+                    )
+                # The OpenAI-compatible shape: a data: URL, NOT Anthropic's
+                # source/base64 object. The two are not interchangeable — sending
+                # either one to the other's endpoint is a 400 that reads like an outage.
+                image_parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{block.media_type};base64,{block.data}"
+                    },
+                })
             elif isinstance(block, ToolResultBlock):
                 # → separate tool message in OpenAI format
                 tool_results.append({
@@ -112,12 +131,33 @@ def _build_openai_messages(request: ApiMessageRequest) -> list[dict[str, Any]]:
         elif tool_results:
             # user turn that contains tool results → emit as tool messages
             result.extend(tool_results)
-            if text_parts:
-                result.append({"role": "user", "content": " ".join(text_parts)})
+            if text_parts or image_parts:
+                result.append({"role": "user", "content": _user_content(text_parts, image_parts)})
         else:
-            result.append({"role": "user", "content": " ".join(text_parts)})
+            result.append({"role": "user", "content": _user_content(text_parts, image_parts)})
 
     return result
+
+
+def _user_content(
+    text_parts: list[str], image_parts: list[dict[str, Any]]
+) -> str | list[dict[str, Any]]:
+    """A plain string when there is no picture, the array form when there is.
+
+    Kept as the STRING for text-only turns on purpose: that is what every existing
+    request looks like on the wire, and switching every message to the array form to
+    accommodate the rare one with an image would change every byte this daemon has
+    ever sent to an OpenAI-compatible endpoint.
+    """
+    if not image_parts:
+        return " ".join(text_parts)
+    parts: list[dict[str, Any]] = []
+    if text_parts:
+        parts.append({"type": "text", "text": " ".join(text_parts)})
+    # Image after text: the same order the Anthropic path emits, and the order the
+    # vision docs recommend when a question accompanies a picture.
+    parts.extend(image_parts)
+    return parts
 
 
 def _record_malformed_entry(model: str, entry: dict[str, Any]) -> None:
