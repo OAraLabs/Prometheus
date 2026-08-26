@@ -147,6 +147,35 @@ def test_rest_and_ws_serializer_single_source():
     assert "serialize_pending(a) for a in queue.list_pending()" in src
 
 
+def test_broken_bus_warns_and_approval_still_resolves(tmp_path, caplog):
+    """If the bus breaks, push silently dies and Beacon falls back to poll —
+    silence indistinguishable from working is the defect (#277's pattern).
+    Emission failure must WARN, and must still never mask the decision."""
+    import logging
+
+    class _BrokenBus:
+        async def emit(self, signal):
+            raise RuntimeError("bus down")
+
+    q = _queue(tmp_path, bus=_BrokenBus())
+
+    async def run():
+        task = asyncio.create_task(q.request_approval("bash", "ls"))
+        await asyncio.sleep(0.05)
+        rid = next(iter(q.pending))
+        ok = await q.approve(rid)
+        await asyncio.wait_for(task, timeout=2)
+        return ok
+
+    with caplog.at_level(logging.WARNING):
+        ok = asyncio.run(run())
+    assert ok is True, "the approval must resolve even though the bus is broken"
+    assert any("emission FAILED" in r.message for r in caplog.records), (
+        "bus failure must surface as a WARNING — silent fallback to poll "
+        "reads exactly like working"
+    )
+
+
 def test_ws_bridge_maps_approval_kinds_to_frame_types():
     """_on_signal maps approval_pending/approval_resolved to first-class types."""
     import inspect

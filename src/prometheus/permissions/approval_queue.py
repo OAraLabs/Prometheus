@@ -333,6 +333,16 @@ class ApprovalQueue:
         one shape — they cannot drift, the same property SPRINT-CONSENT
         enforced for grant extents. Any new transport takes this, never
         re-derives.
+
+        PROVENANCE: ``extents`` is the COMPUTED extent of each scope verb —
+        the same dict Telegram formats into prose, from ``prospective_extents``
+        (which calls the same ``derive_grant`` the approval path will call),
+        so the description an operator consents to and the grant they get
+        cannot drift (Standing-Principles §17). An empty ``extents`` is
+        meaningful, not missing: no describable target, no remembered grant
+        on offer, the UI must not present one. ``expires_at`` comes from the
+        QUEUE's timeout (``self.expires_at``), not the module constant — the
+        constant is the default; the instance is what actually counts down.
         """
         return {
             "request_id": action.request_id,
@@ -344,7 +354,14 @@ class ApprovalQueue:
         }
 
     async def _emit(self, kind: str, payload: dict) -> None:
-        """Best-effort SignalBus emission — never masks an approval decision."""
+        """Best-effort SignalBus emission — never masks an approval decision.
+
+        A failure here logs at WARNING, not debug: if the bus breaks, push
+        silently dies and Beacon falls back to poll — silence that is
+        indistinguishable from working, the exact pattern #277 just fixed.
+        The try/except stays (an approval must not die because a signal
+        failed); the level is what makes the degradation visible.
+        """
         bus = getattr(self, "signal_bus", None)
         if bus is None:
             return
@@ -352,8 +369,8 @@ class ApprovalQueue:
             from prometheus.sentinel.signals import ActivitySignal
 
             await bus.emit(ActivitySignal(kind=kind, payload=payload, source="approval_queue"))
-        except Exception:
-            logger.debug("approval signal emission failed (%s)", kind, exc_info=True)
+        except Exception as exc:
+            logger.warning("approval signal emission FAILED (%s): %s", kind, exc)
 
     @property
     def timeout_seconds(self) -> float:

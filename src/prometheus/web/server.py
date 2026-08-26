@@ -2061,13 +2061,10 @@ def create_app(
         # An empty ``extents`` is meaningful, not missing: it means the
         # request carries no describable target, so no remembered grant is on
         # offer and the UI must not present one.
-        from prometheus.permissions.approval_queue import prospective_extents
-
         # One serializer, two transports (see ApprovalQueue.serialize_pending):
         # the WS ``approval_pending`` signal returns the SAME dict, so the REST
-        # list and the push frame cannot drift. ``prospective_extents`` stays
-        # imported above for the comment's provenance; the serializer below is
-        # now the single shape.
+        # list and the push frame cannot drift. Provenance of the fields lives
+        # on the serializer's docstring, where it is actually used.
         return [queue.serialize_pending(a) for a in queue.list_pending()]
 
     @app.post("/api/approvals/{request_id}/approve")
