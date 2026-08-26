@@ -341,6 +341,66 @@ class LCMSummaryStore:
             ).fetchall()
         return [self._row_to_node(r) for r in rows]
 
+    def search_snippets(
+        self,
+        query: str,
+        *,
+        session_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Full-text search returning FTS5 snippet() hits for the wire search API.
+
+        Returns what a compressed-history peek panel needs: summary_id, session,
+        depth, created_at, BM25 rank, a marker-snippet, the FULL summary_text
+        (summaries are small; the peek wants it whole), and the anchor UUID list
+        (``source_message_ids``) so the client can show "covers N messages".
+
+        Session-scoping mirrors :meth:`search`: the summary table's own
+        ``session_id`` column is preferred, but rows written before the
+        session-partition migration have it NULL — so the filter is
+        ``s.session_id = ? OR source_message_ids LIKE match``, never just one.
+
+        An empty or all-punctuation query returns an empty list.
+        """
+        safe_query = sanitize_fts5_query(query)
+        if not safe_query:
+            return []
+
+        where = "lcm_summaries_fts MATCH ?"
+        params: list = [safe_query]
+        if session_id is not None:
+            where += (
+                " AND (s.session_id = ? OR EXISTS ("
+                " SELECT 1 FROM lcm_messages m WHERE m.session_id = ?"
+                " AND s.source_message_ids LIKE '%\"' || m.id || '\"%'))"
+            )
+            params.extend([session_id, session_id])
+        params.append(limit)
+
+        rows = self._conn.execute(
+            "SELECT s.id, s.session_id, s.source_message_ids, s.summary_text,"
+            " s.depth, s.created_at, fts.rank AS rank,"
+            " snippet(lcm_summaries_fts, 0, '⟦', '⟧', '…', 24) AS snippet"
+            " FROM lcm_summaries s"
+            " JOIN lcm_summaries_fts fts ON s.rowid = fts.rowid"
+            f" WHERE {where}"
+            " ORDER BY fts.rank LIMIT ?",
+            params,
+        ).fetchall()
+        return [
+            {
+                "summary_id": r["id"],
+                "session_id": r["session_id"],
+                "anchor_message_ids": json.loads(r["source_message_ids"] or "[]"),
+                "depth": r["depth"],
+                "created_at": r["created_at"],
+                "score": float(r["rank"]),
+                "snippet": r["snippet"],
+                "summary_text": r["summary_text"],
+            }
+            for r in rows
+        ]
+
     # ------------------------------------------------------------------
     # Statistics
     # ------------------------------------------------------------------
