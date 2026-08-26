@@ -77,9 +77,53 @@ class ImageBlock(BaseModel):
 
     type: Literal["image"] = "image"
     media_type: str
-    data: str
+    # EMPTY when the block came back from storage. content_json omits the payload
+    # whenever source_path can bring it back, so the bytes live once on disk rather
+    # than once per turn per conversation — a 12k-char description was bad enough;
+    # a 700KB base64 blob copied into every later turn's context is worse.
+    # rehydrate() refills it. Required only at construction from a real upload.
+    data: str = ""
     source_path: str | None = None
     description: str | None = None
+
+    def for_storage(self) -> dict[str, object]:
+        """The block as it should be PERSISTED: payload dropped when recoverable.
+
+        Keeping the base64 in content_json would put the whole picture in LCM, in
+        every history fetch, and on the wire to every client, forever. Dropping it
+        is only safe because source_path can bring it back — so it is dropped ONLY
+        when that path is present.
+        """
+        out = self.model_dump(mode="json")
+        if self.source_path:
+            out["data"] = ""
+        return out
+
+    def rehydrate(self) -> "ImageBlock":
+        """Refill ``data`` from ``source_path``. Never raises.
+
+        Degrades in the order the spec sets out: the bytes if the file is still
+        there, else the description if one was generated, else a marker. A picture
+        the cache has evicted must not take a turn down — and must not silently
+        become an empty image block either, which would reach a provider as a
+        malformed request.
+        """
+        if self.data or not self.source_path:
+            return self
+        import base64
+        from pathlib import Path as _P
+
+        try:
+            raw = _P(self.source_path).read_bytes()
+        except OSError:
+            return self
+        return self.model_copy(update={"data": base64.b64encode(raw).decode("ascii")})
+
+    def placeholder_text(self) -> str:
+        """What a TEXT-only reader should see when the bytes are gone."""
+        if self.description:
+            return f"[Image: {self.description}]"
+        return "[Image: unavailable]"
 
 
 ContentBlock = Annotated[
@@ -154,7 +198,10 @@ class ConversationMessage(BaseModel):
         ``MessagePart.content_json`` so structured turns survive the LCM round-trip; round-trips
         back via ``ConversationMessage(role=..., content=json.loads(...))``.
         """
-        return json.dumps([block.model_dump(mode="json") for block in self.content])
+        return json.dumps([
+            block.for_storage() if isinstance(block, ImageBlock) else block.model_dump(mode="json")
+            for block in self.content
+        ])
 
     @property
     def tool_uses(self) -> list[ToolUseBlock]:
