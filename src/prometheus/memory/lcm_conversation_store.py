@@ -313,6 +313,58 @@ class LCMConversationStore:
 
         return [self._row_to_message(r) for r in rows]
 
+    def search_snippets(
+        self,
+        query: str,
+        *,
+        session_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Full-text search returning FTS5 snippet() hits for the wire search API.
+
+        Unlike :meth:`search` (which returns full ``MessagePart`` objects), this
+        returns only what a search-results surface needs — the rowid (the durable
+        wire message id the client jumps to), the uuid, role, time, BM25 rank, and
+        a server-generated snippet with ⟦⟧ match markers. The client never holds
+        the full message text, so offsets into it would be unapplyable — markers
+        in the snippet are the contract (see the global-search spec).
+
+        An empty or all-punctuation query returns an empty list.
+        """
+        safe_query = sanitize_fts5_query(query)
+        if not safe_query:
+            return []
+
+        where = "lcm_messages_fts MATCH ?"
+        params: list = [safe_query]
+        if session_id is not None:
+            where += " AND m.session_id = ?"
+            params.append(session_id)
+        params.append(limit)
+
+        rows = self._conn.execute(
+            "SELECT m.rowid AS row_id, m.id AS uuid, m.session_id, m.role,"
+            " m.timestamp, fts.rank AS rank,"
+            " snippet(lcm_messages_fts, 0, '⟦', '⟧', '…', 24) AS snippet"
+            " FROM lcm_messages m"
+            " JOIN lcm_messages_fts fts ON m.rowid = fts.rowid"
+            f" WHERE {where}"
+            " ORDER BY fts.rank LIMIT ?",
+            params,
+        ).fetchall()
+        return [
+            {
+                "row_id": int(r["row_id"]),
+                "uuid": r["uuid"],
+                "session_id": r["session_id"],
+                "role": r["role"],
+                "timestamp": r["timestamp"],
+                "score": float(r["rank"]),
+                "snippet": r["snippet"],
+            }
+            for r in rows
+        ]
+
     def count_uncompacted(self, session_id: str) -> int:
         """Return the number of uncompacted messages in a session."""
         row = self._conn.execute(

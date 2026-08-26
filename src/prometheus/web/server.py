@@ -11,6 +11,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -887,6 +888,127 @@ def create_app(
                 "fresh_count": 0,
                 "summary_count": 0,
             }
+
+    # ── Global conversation search (Beacon ⌘⇧F) ────────────────────
+    # Spec: beacon-search-spec.md v2 (frozen). Two independent corpora —
+    # lcm_messages and lcm_summaries — are NEVER cross-rank-merged: BM25
+    # scores across the two FTS tables are not comparable, so the response
+    # is grouped per scope and Beacon renders two buckets.
+    #
+    # GET carries q in the querystring, which lands in access logs — search
+    # terms over private conversations are sensitive. POST /api/search with a
+    # JSON body is the client path; GET stays for curl/testing.
+
+    _SEARCH_MIN_QUERY_LEN = 3
+    _SEARCH_DEFAULT_LIMIT = 20
+    _SEARCH_MAX_LIMIT = 50
+
+    def _search_params(q: str, session_id: str | None, scope: str, limit: int):
+        """Validate search inputs; raise (status, error) tuples on rejection."""
+        q = (q or "").strip()
+        if len(q) < _SEARCH_MIN_QUERY_LEN:
+            raise ValueError(
+                f"query must be at least {_SEARCH_MIN_QUERY_LEN} characters"
+            )
+        if scope not in ("messages", "summaries", "both"):
+            raise ValueError("scope must be one of messages|summaries|both")
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            raise ValueError("limit must be an integer")
+        limit = max(1, min(limit, _SEARCH_MAX_LIMIT))
+        return q, session_id or None, scope, limit
+
+    async def _do_search(q, session_id, scope, limit):
+        from datetime import datetime, timezone
+
+        try:
+            q, session_id, scope, limit = _search_params(q, session_id, scope, limit)
+        except ValueError as e:
+            return JSONResponse(status_code=400, content={"error": str(e)})
+
+        lcm = getattr(app.state, "lcm_engine", None)
+        if lcm is None:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "search unavailable — lcm_engine not wired"},
+            )
+
+        messages_out: list[dict] = []
+        summaries_out: list[dict] = []
+
+        if scope in ("messages", "both"):
+            hits = await asyncio.to_thread(
+                lcm.conversation_store.search_snippets,
+                q,
+                session_id=session_id,
+                limit=limit,
+            )
+            messages_out = [
+                {
+                    "kind": "message",
+                    "session_id": h["session_id"],
+                    "message_id": str(h["row_id"]),  # rowid — the wire cursor contract
+                    "uuid": h["uuid"],
+                    "role": h["role"],
+                    "snippet": h["snippet"],
+                    "score": h["score"],
+                    "ts": datetime.fromtimestamp(h["timestamp"], tz=timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                }
+                for h in hits
+            ]
+
+        if scope in ("summaries", "both"):
+            hits = await asyncio.to_thread(
+                lcm.summary_store.search_snippets,
+                q,
+                session_id=session_id,
+                limit=limit,
+            )
+            summaries_out = [
+                {
+                    "kind": "summary",
+                    "session_id": h["session_id"],
+                    "summary_id": h["summary_id"],
+                    "anchor_message_ids": h["anchor_message_ids"],
+                    "depth": h["depth"],
+                    "snippet": h["snippet"],
+                    "summary_text": h["summary_text"],
+                    "score": h["score"],
+                    "ts": datetime.fromtimestamp(h["created_at"], tz=timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                }
+                for h in hits
+            ]
+
+        return {
+            "query": q,
+            "returned": len(messages_out) + len(summaries_out),
+            "messages": messages_out,
+            "summaries": summaries_out,
+        }
+
+    @app.get("/api/search")
+    async def search_get(
+        q: str = "",
+        session_id: str | None = None,
+        scope: str = "both",
+        limit: int = _SEARCH_DEFAULT_LIMIT,
+    ):
+        return await _do_search(q, session_id, scope, limit)
+
+    @app.post("/api/search")
+    async def search_post(request: Request):
+        body = await request.json()
+        return await _do_search(
+            body.get("q", ""),
+            body.get("session_id"),
+            body.get("scope", "both"),
+            body.get("limit", _SEARCH_DEFAULT_LIMIT),
+        )
 
     # ── SENTINEL ────────────────────────────────────────────────────
 
