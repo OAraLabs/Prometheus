@@ -1191,6 +1191,16 @@ class WebSocketBridge:
         elif signal.kind == "skill_created":
             event["type"] = "skill_created"
             event["payload"] = signal.payload
+        # Approval lifecycle push (feat/approval-push): first-class frame
+        # types so Beacon routes them without parsing sentinel_signal. The
+        # pending payload is ApprovalQueue.serialize_pending's dict — the
+        # same shape GET /api/approvals returns.
+        elif signal.kind == "approval_pending":
+            event["type"] = "approval_pending"
+            event["payload"] = signal.payload
+        elif signal.kind == "approval_resolved":
+            event["type"] = "approval_resolved"
+            event["payload"] = signal.payload
         elif signal.kind == "skill_refined":
             event["type"] = "skill_refined"
             event["payload"] = signal.payload

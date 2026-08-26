@@ -320,6 +320,57 @@ class ApprovalQueue:
         self._timeout = timeout_seconds
         self._default_chat_id = default_chat_id
         self.pending: dict[str, PendingAction] = {}
+        # Late-wired SignalBus (daemon.py sets it after the bus exists, same
+        # pattern as extractor/skill_creator). While None, emission silently
+        # skips — behavior identical to pre-push-approval builds.
+        self.signal_bus = None
+
+    def serialize_pending(self, action: PendingAction) -> dict:
+        """The canonical wire shape of one pending request.
+
+        THE one serializer: ``GET /api/approvals`` (server.py) and the
+        ``approval_pending`` WS signal both return THIS dict. Two transports,
+        one shape — they cannot drift, the same property SPRINT-CONSENT
+        enforced for grant extents. Any new transport takes this, never
+        re-derives.
+
+        PROVENANCE: ``extents`` is the COMPUTED extent of each scope verb —
+        the same dict Telegram formats into prose, from ``prospective_extents``
+        (which calls the same ``derive_grant`` the approval path will call),
+        so the description an operator consents to and the grant they get
+        cannot drift (Standing-Principles §17). An empty ``extents`` is
+        meaningful, not missing: no describable target, no remembered grant
+        on offer, the UI must not present one. ``expires_at`` comes from the
+        QUEUE's timeout (``self.expires_at``), not the module constant — the
+        constant is the default; the instance is what actually counts down.
+        """
+        return {
+            "request_id": action.request_id,
+            "tool_name": action.tool_name,
+            "description": action.description,
+            "created_at": action.created_at,
+            "expires_at": self.expires_at(action),
+            "extents": prospective_extents(action),
+        }
+
+    async def _emit(self, kind: str, payload: dict) -> None:
+        """Best-effort SignalBus emission — never masks an approval decision.
+
+        A failure here logs at WARNING, not debug: if the bus breaks, push
+        silently dies and Beacon falls back to poll — silence that is
+        indistinguishable from working, the exact pattern #277 just fixed.
+        The try/except stays (an approval must not die because a signal
+        failed); the level is what makes the degradation visible.
+        """
+        bus = getattr(self, "signal_bus", None)
+        if bus is None:
+            return
+        try:
+            from prometheus.sentinel.signals import ActivitySignal
+
+            await bus.emit(ActivitySignal(kind=kind, payload=payload, source="approval_queue"))
+        except Exception as exc:
+            logger.warning("approval signal emission FAILED (%s): %s", kind, exc)
 
     @property
     def timeout_seconds(self) -> float:
@@ -393,6 +444,7 @@ class ApprovalQueue:
             grant_command=grant_command,
         )
         self.pending[request_id] = action
+        await self._emit("approval_pending", self.serialize_pending(action))
 
         # Send notification via Telegram
         target_chat = chat_id or self._default_chat_id
@@ -469,6 +521,9 @@ class ApprovalQueue:
 
             self._audit_resolution(action, AuditDecision.CONFIRM_TIMEOUT)
             await self._notify_expiry(action, target_chat)
+            await self._emit("approval_resolved", {
+                "request_id": request_id, "resolution": "expired",
+            })
 
         # Clean up
         self.pending.pop(request_id, None)
@@ -556,6 +611,9 @@ class ApprovalQueue:
         self._audit_resolution(
             action, AuditDecision.CONFIRM_APPROVED, scope=scope, grant=grant
         )
+        await self._emit("approval_resolved", {
+            "request_id": request_id, "resolution": "approved", "scope": scope,
+        })
         return True
 
     async def deny(self, request_id: str) -> bool:
@@ -568,6 +626,9 @@ class ApprovalQueue:
         action._result = ApprovalResult.DENIED
         action._event.set()
         self._audit_resolution(action, AuditDecision.CONFIRM_REJECTED)
+        await self._emit("approval_resolved", {
+            "request_id": request_id, "resolution": "denied",
+        })
         return True
 
     def list_pending(self) -> list[PendingAction]:

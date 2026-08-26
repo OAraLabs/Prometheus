@@ -1531,6 +1531,13 @@ async def run_daemon(args: argparse.Namespace) -> None:
             # (SkillCreator is wired earlier in the daemon, before this block).
             if skill_creator is not None:
                 skill_creator.signal_bus = signal_bus
+            # Approval lifecycle push (feat/approval-push): enqueue/approve/
+            # deny/expiry flow to the bus so the WS bridge can frame them to
+            # connected clients — Beacon learns of a pending approval the
+            # moment it exists, not on the next poll. The queue may be None
+            # (config gate) — guard like the other late wires.
+            if "approval_queue" in dir() and approval_queue is not None:
+                approval_queue.signal_bus = signal_bus
             if "skill_refiner" in dir() and skill_refiner is not None:
                 skill_refiner.signal_bus = signal_bus
             # SPRINT-TEACHER-ESCALATION: golden traces + escalation events
