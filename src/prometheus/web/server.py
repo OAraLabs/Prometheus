@@ -890,14 +890,17 @@ def create_app(
             }
 
     # ── Global conversation search (Beacon ⌘⇧F) ────────────────────
-    # Spec: beacon-search-spec.md v2 (frozen). Two independent corpora —
-    # lcm_messages and lcm_summaries — are NEVER cross-rank-merged: BM25
-    # scores across the two FTS tables are not comparable, so the response
-    # is grouped per scope and Beacon renders two buckets.
+    # Spec: beacon-search-spec.md v2 (frozen; review delta: POST-only). Two
+    # independent corpora — lcm_messages and lcm_summaries — are NEVER
+    # cross-rank-merged: BM25 scores across the two FTS tables are not
+    # comparable, so the response is grouped per scope and Beacon renders
+    # two buckets.
     #
-    # GET carries q in the querystring, which lands in access logs — search
-    # terms over private conversations are sensitive. POST /api/search with a
-    # JSON body is the client path; GET stays for curl/testing.
+    # POST-only, deliberately: a GET querystring lands in access logs, and
+    # search terms over private conversations are sensitive. An endpoint kept
+    # "for curl convenience" that carries a known privacy leak into
+    # production is the shape that gets forgotten — so there is no GET.
+    # curl -X POST -d '{"q":"…"}' is the test path.
 
     _SEARCH_MIN_QUERY_LEN = 3
     _SEARCH_DEFAULT_LIMIT = 20
@@ -991,18 +994,14 @@ def create_app(
             "summaries": summaries_out,
         }
 
-    @app.get("/api/search")
-    async def search_get(
-        q: str = "",
-        session_id: str | None = None,
-        scope: str = "both",
-        limit: int = _SEARCH_DEFAULT_LIMIT,
-    ):
-        return await _do_search(q, session_id, scope, limit)
-
     @app.post("/api/search")
     async def search_post(request: Request):
-        body = await request.json()
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "body must be valid JSON"})
+        if not isinstance(body, dict):
+            return JSONResponse(status_code=400, content={"error": "body must be a JSON object"})
         return await _do_search(
             body.get("q", ""),
             body.get("session_id"),

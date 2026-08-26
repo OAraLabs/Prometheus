@@ -50,7 +50,7 @@ def _client(tmp_path, token: str = ""):
 
 def test_both_scopes_grouped(tmp_path):
     client, _, _ = _client(tmp_path)
-    r = client.get("/api/search", params={"q": "kling"})
+    r = client.post("/api/search", json={"q": "kling"})
     assert r.status_code == 200
     body = r.json()
     assert set(body) >= {"query", "returned", "messages", "summaries"}
@@ -74,7 +74,7 @@ def test_message_id_is_the_durable_rowid(tmp_path):
     """The wire cursor contract: returned message_id must exist as a rowid in
     the SAME session — guards the silent-misnavigation bug (uuid vs rowid)."""
     client, conv, _ = _client(tmp_path)
-    body = client.get("/api/search", params={"q": "beacon"}).json()
+    body = client.post("/api/search", json={"q": "beacon"}).json()
     hit = body["messages"][0]
     rowid = int(hit["message_id"])
     rows = conv._conn.execute(
@@ -88,8 +88,8 @@ def test_message_id_is_the_durable_rowid(tmp_path):
 
 def test_session_scope(tmp_path):
     client, _, _ = _client(tmp_path)
-    body = client.get(
-        "/api/search", params={"q": "kling", "session_id": "cli:42"}
+    body = client.post(
+        "/api/search", json={"q": "kling", "session_id": "cli:42"}
     ).json()
     assert body["returned"] == 0
 
@@ -101,7 +101,7 @@ def test_scope_filter(tmp_path):
         ("summaries", 0, 1),
         ("both", 1, 1),
     ):
-        body = client.get("/api/search", params={"q": "kling", "scope": scope}).json()
+        body = client.post("/api/search", json={"q": "kling", "scope": scope}).json()
         assert len(body["messages"]) == n_msg, scope
         assert len(body["summaries"]) == n_sum, scope
 
@@ -112,25 +112,25 @@ def test_limit_clamped_and_respected(tmp_path):
         conv.insert_message(
             MessagePart(role="assistant", content=f"zephyr log line {i}", session_id="cli:42")
         )
-    body = client.get("/api/search", params={"q": "zephyr", "scope": "messages", "limit": 3}).json()
+    body = client.post("/api/search", json={"q": "zephyr", "scope": "messages", "limit": 3}).json()
     assert len(body["messages"]) == 3
     # Over-max clamps to 50, not error and not >50.
-    body = client.get(
-        "/api/search", params={"q": "zephyr", "scope": "messages", "limit": 500}
+    body = client.post(
+        "/api/search", json={"q": "zephyr", "scope": "messages", "limit": 500}
     ).json()
     assert len(body["messages"]) == 5  # only 5 exist; 500 clamped, no error
 
 
 def test_min_length_rejected(tmp_path):
     client, _, _ = _client(tmp_path)
-    assert client.get("/api/search", params={"q": "kl"}).status_code == 400
-    assert client.get("/api/search", params={"q": ""}).status_code == 400
+    assert client.post("/api/search", json={"q": "kl"}).status_code == 400
+    assert client.post("/api/search", json={"q": ""}).status_code == 400
 
 
 def test_empty_and_punctuation_query_zero_results(tmp_path):
     client, _, _ = _client(tmp_path)
     # 3+ chars of pure punctuation passes min-length but sanitizes to no-match.
-    body = client.get("/api/search", params={"q": "!!!"}).json()
+    body = client.post("/api/search", json={"q": "!!!"}).json()
     assert body["returned"] == 0
     assert body["messages"] == [] and body["summaries"] == []
 
@@ -140,31 +140,40 @@ def test_fts5_operators_never_500(tmp_path):
     endpoint must not 500 and must not leak raw operator semantics."""
     client, _, _ = _client(tmp_path)
     for q in ('"kling', "kling*", "kling AND rotation", "-kling", "kling OR beacon", 'a"b'):
-        r = client.get("/api/search", params={"q": q})
+        r = client.post("/api/search", json={"q": q})
         assert r.status_code == 200, f"query {q!r} → {r.status_code}"
 
 
 def test_invalid_scope_rejected(tmp_path):
     client, _, _ = _client(tmp_path)
-    assert client.get("/api/search", params={"q": "kling", "scope": "bogus"}).status_code == 400
+    assert client.post("/api/search", json={"q": "kling", "scope": "bogus"}).status_code == 400
 
 
 def test_auth_rejection(tmp_path):
     client, _, _ = _client(tmp_path, token="sekrit")
-    assert client.get("/api/search", params={"q": "kling"}).status_code == 401
+    assert client.post("/api/search", json={"q": "kling"}).status_code == 401
     assert (
-        client.get(
-            "/api/search", params={"q": "kling"}, headers={"Authorization": "Bearer sekrit"}
+        client.post(
+            "/api/search", json={"q": "kling"}, headers={"Authorization": "Bearer sekrit"}
         ).status_code
         == 200
     )
 
 
-def test_post_body_variant_matches_get(tmp_path):
+def test_post_is_the_only_verb(tmp_path):
+    """GET is deliberately gone — a querystring lands in access logs, and
+    search terms over private conversations are sensitive. POST-only is the
+    decision, not an oversight."""
     client, _, _ = _client(tmp_path)
-    get_body = client.get("/api/search", params={"q": "kling"}).json()
-    post_body = client.post("/api/search", json={"q": "kling"}).json()
-    assert post_body == get_body
+    assert client.get("/api/search", params={"q": "kling"}).status_code in (404, 405)
+    assert client.post("/api/search", json={"q": "kling"}).status_code == 200
+
+
+def test_malformed_json_is_400_not_500(tmp_path):
+    """The client path is POST; a malformed body must 400, not raise to a 500."""
+    client, _, _ = _client(tmp_path)
+    assert client.post("/api/search", content=b"{not json", headers={"Content-Type": "application/json"}).status_code == 400
+    assert client.post("/api/search", json=["a", "list"]).status_code == 400  # not an object
 
 
 def test_post_validates_body(tmp_path):
@@ -175,4 +184,4 @@ def test_post_validates_body(tmp_path):
 
 def test_no_lcm_engine_503(tmp_path):
     client = TestClient(create_app({}))
-    assert client.get("/api/search", params={"q": "kling"}).status_code == 503
+    assert client.post("/api/search", json={"q": "kling"}).status_code == 503
