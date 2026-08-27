@@ -84,6 +84,13 @@ EXECUTED_ERROR_TYPES: frozenset[str] = frozenset({"nonzero_exit"})
 # Everything that must be kept out of the success-rate denominator.
 NON_CALL_FAILURE_TYPES: frozenset[str] = POLICY_ERROR_TYPES | EXECUTED_ERROR_TYPES
 
+# The agent loop writes one synthetic ``tool_calls`` row per turn transition. It is NOT a tool
+# call: no inputs, no model decision, nothing a reader of tool history wants to see. It is ~48%
+# of the table on a live daemon, so every per-tool reader excludes it — and the rule lived only
+# as a repeated string literal plus prose until /api/tools/recent shipped without it and served
+# a feed that was half loop echoes. Named so a fourth reader cannot miss it.
+SYNTHETIC_TOOL_NAME = "_loop_transition"
+
 
 _SCHEMA_SQL_TABLES = """
 CREATE TABLE IF NOT EXISTS tool_calls (
@@ -869,11 +876,11 @@ class ToolCallTelemetry:
         query = (
             "SELECT id, timestamp, model, tool_name, success, retries, "
             "latency_ms, error_type, error_detail, parsed_tool_call "
-            "FROM tool_calls"
+            "FROM tool_calls WHERE tool_name != ?"
         )
-        params: list[Any] = []
+        params: list[Any] = [SYNTHETIC_TOOL_NAME]
         if tool_name is not None:
-            query += " WHERE tool_name = ?"
+            query += " AND tool_name = ?"
             params.append(tool_name)
         query += " ORDER BY timestamp DESC LIMIT ?"
         params.append(max(1, int(limit)))
@@ -1055,8 +1062,8 @@ class ToolCallTelemetry:
                 "SELECT COUNT(*), COALESCE(SUM(success), 0), "
                 f"COALESCE(SUM(error_type IN ({_ph})), 0) "
                 "FROM tool_calls WHERE timestamp >= ? "
-                "AND tool_name != '_loop_transition'",
-                (*NON_CALL_FAILURE_TYPES, since),
+                "AND tool_name != ?",
+                (*NON_CALL_FAILURE_TYPES, since, SYNTHETIC_TOOL_NAME),
             ).fetchone() or (0, 0, 0)
             t_total, t_succ, t_denied = (
                 int(t_total or 0), int(t_succ or 0), int(t_denied or 0),
@@ -1460,12 +1467,12 @@ class ToolCallTelemetry:
         # echo of every real tool call.
         query = (
             "SELECT model, tool_name, success, retries, latency_ms, error_type"
-            " FROM tool_calls WHERE tool_name != '_loop_transition'"
+            " FROM tool_calls WHERE tool_name != ?"
         )
-        params: tuple = ()
+        params: tuple = (SYNTHETIC_TOOL_NAME,)
         if since is not None:
             query += " AND timestamp >= ?"
-            params = (since,)
+            params = (SYNTHETIC_TOOL_NAME, since)  # APPEND — do not drop the exclusion bind
         rows = self._conn.execute(query, params).fetchall()
 
         if not rows:
