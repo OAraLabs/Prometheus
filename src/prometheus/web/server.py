@@ -246,7 +246,7 @@ def create_app(
                 "/api/cron", "/api/approvals", "/api/chat",
                 "/api/config", "/api/skills", "/api/profiles",
                 "/api/wiki/stats", "/api/sentinel", "/api/events/recent",
-                "/api/tools/deferred",
+                "/api/tools/deferred", "/api/tools/recent",
                 "/api/files", "/api/documents", "/api/artifacts",
             ],
         }
@@ -753,6 +753,27 @@ def create_app(
         if not telemetry:
             return {"total_calls": 0, "overall_success_rate": 0, "tools": {}}
         return telemetry.report()
+
+    @app.get("/api/tools/recent")
+    async def get_tools_recent(limit: int = 100, tool: str | None = None):
+        """Per-call tail from `tool_calls` — hydrates Beacon's Tool Feed.
+
+        `/api/telemetry` reports the lifetime AGGREGATE of this same table
+        (total_calls, success rate, per-tool rollup). The live tool_call_*
+        WS frames are never persisted, so before this route a client could
+        show the 7k-call headline but not a single call behind it.
+
+        Query params:
+          - limit (int, default 100, capped to 500): max rows.
+          - tool (str, optional): single tool_name filter.
+        """
+        from prometheus.telemetry.tracker import get_telemetry_handle
+
+        tel = get_telemetry_handle()
+        if tel is None:
+            return []
+        capped_limit = max(1, min(int(limit), 500))
+        return tel.recent_tool_calls(limit=capped_limit, tool_name=tool)
 
     @app.get("/api/pairs")
     async def get_pairs():
