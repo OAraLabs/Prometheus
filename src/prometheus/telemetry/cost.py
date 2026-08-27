@@ -6,6 +6,7 @@ pricing tables. Reports session and cumulative costs.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -72,6 +73,57 @@ PRICING: dict[str, tuple[float, float]] = {
 }
 
 
+log = logging.getLogger(__name__)
+
+# Models already warned about, so a busy loop does not print the same line thousands of times.
+# Deliberately process-lifetime and unbounded: the set is one string per DISTINCT model, and a
+# daemon that saw enough distinct unknown models to matter has a much louder problem.
+_unpriced_seen: set[str] = set()
+
+
+# ── Billing mode ─────────────────────────────────────────────────────────────────────────────
+# A zero cost has FOUR different meanings, and a dashboard that renders them identically lies by
+# omission. The distinction exists because of a concrete case: `qwen3.8-max` carried 89M tokens —
+# 57% of everything this box ever spent — through an Alibaba Token Plan, a flat subscription with
+# a credit allowance. It has no per-million price and never will, so "unpriced" was never the
+# right label for it either.
+#
+#   local        — our own hardware; there is no bill and never was
+#   subscription — a cloud model on a flat plan; the TOKENS are real, the marginal cost is not
+#                  per-token, so a dollar column is the wrong question for it
+#   metered      — priced per token; $0.00 here means genuinely no usage
+#   unknown      — we do not know, which is a gap to close rather than a zero to display
+#
+# The rule for the UI follows from this: only `metered` may render a dollar figure. The others
+# render their reason.
+
+BillingMode = str  # 'local' | 'subscription' | 'metered' | 'unknown'
+
+# Hosts that bill by subscription rather than per token. Matched against the provider's RESOLVED
+# base_url, so this reflects how the box is actually configured rather than a guess from a name.
+# (Alibaba's Token Plan and Coding Plan; both documented in providers/registry.py.)
+SUBSCRIPTION_HOST_MARKERS: tuple[str, ...] = ("token-plan.", "coding-intl.")
+
+
+def billing_for(model: str, base_url: str | None = None) -> tuple[BillingMode, str]:
+    """Classify how a model's tokens are paid for. Returns (mode, human reason).
+
+    Structural before nominal: a filesystem path is local no matter what it is called, because
+    that fact cannot be wrong. A name-based guess can be, and mislabelling local traffic as
+    metered would invent a bill that does not exist.
+    """
+    name = (model or "").strip()
+    if not name:
+        return "unknown", "no model recorded on the row"
+    if name.endswith(".gguf") or name.startswith("/") or "/" in name:
+        return "local", "served from a local model file"
+    if base_url and any(marker in base_url for marker in SUBSCRIPTION_HOST_MARKERS):
+        return "subscription", f"flat plan ({base_url.split('//')[-1].split('/')[0]})"
+    if PRICING.get(name) or any(name.startswith(k) for k in PRICING):
+        return "metered", "priced per token"
+    return "unknown", "no pricing entry and no configured plan — classify it in PRICING or BILLING"
+
+
 @dataclass
 class UsageRecord:
     """A single token usage entry."""
@@ -103,6 +155,21 @@ class CostTracker:
                     break
 
         if pricing is None:
+            # LOUD, once per model. Returning 0.0 quietly is its own defect, separate from the
+            # missing price row: `qwen3.8-max` carried 57% of every token this box ever spent and
+            # priced at $0.00 for months without a single line of output saying so. Whatever the
+            # right answer for a given model is — a price, a subscription, or "local" — silence
+            # is never it, and without this the NEXT model added repeats the same disappearance.
+            if model not in _unpriced_seen:
+                _unpriced_seen.add(model)
+                log.warning(
+                    "cost: no pricing entry for model %r — %d input + %d output tokens are being "
+                    "counted at $0.00. Add it to PRICING, or classify it in BILLING_HOSTS/LOCAL "
+                    "so the zero is a stated fact rather than a gap.",
+                    model,
+                    input_tokens,
+                    output_tokens,
+                )
             cost = 0.0
         else:
             input_price, output_price = pricing
