@@ -754,6 +754,114 @@ def create_app(
             return {"total_calls": 0, "overall_success_rate": 0, "tools": {}}
         return telemetry.report()
 
+    # ── Background tasks ─────────────────────────────────────────────────
+    # The tasks table has been durable since June and NOTHING has ever served it. The task_*
+    # WS frames are fan-out only and are not persisted to signal_events either, so a client that
+    # was not running when a task started and finished has no way to learn it happened — which is
+    # precisely the "what was it doing while I was away" question the surface exists to answer.
+
+    def _task_dict(rec: Any) -> dict:
+        """One task as the wire sees it. Timestamps stay epoch seconds (the tasks table's own
+        convention); the client formats. `duration_s` is derived here because started/ended are
+        nullable in four different combinations and every client would redo that arithmetic."""
+        started = getattr(rec, "started_at", None)
+        ended = getattr(rec, "ended_at", None)
+        status = getattr(rec, "status", "")
+        duration = None
+        if started:
+            duration = round((ended if ended else time.time()) - started, 1)
+        return {
+            "id": getattr(rec, "id", ""),
+            "type": getattr(rec, "type", ""),
+            "status": status,
+            "description": getattr(rec, "description", "") or "",
+            "command": getattr(rec, "command", None),
+            "cwd": getattr(rec, "cwd", "") or "",
+            "session_id": getattr(rec, "session_id", None),
+            "created_at": getattr(rec, "created_at", None),
+            "started_at": started,
+            "ended_at": ended,
+            # Live tasks report elapsed-so-far; finished ones report how long they took. The
+            # field means the same thing either way, which is why `running` is worth knowing.
+            "duration_s": duration,
+            "running": status in ("running", "pending"),
+            "return_code": getattr(rec, "return_code", None),
+            "error": getattr(rec, "error", None),
+            "on_complete": getattr(rec, "on_complete", "notify"),
+        }
+
+    @app.get("/api/tasks")
+    async def list_tasks(status: str | None = None, limit: int = 50):
+        """Background tasks, newest first. `?status=running` is the cockpit's live list.
+
+        Returns `{tasks, counts}`: `counts` is the full status histogram REGARDLESS of the filter,
+        so a client showing "running: 0" can also say how many finished today rather than
+        rendering an empty list that looks like a broken feature.
+        """
+        from prometheus.tasks.manager import get_task_manager
+
+        mgr = get_task_manager()
+        if mgr is None:
+            return {"tasks": [], "counts": {}}
+        try:
+            everything = mgr.list_tasks()
+        except Exception:
+            return {"tasks": [], "counts": {}}
+
+        counts: dict[str, int] = {}
+        for rec in everything:
+            key = getattr(rec, "status", "") or "unknown"
+            counts[key] = counts.get(key, 0) + 1
+
+        rows = [r for r in everything if status is None or getattr(r, "status", "") == status]
+        rows.sort(key=lambda r: (getattr(r, "created_at", 0) or 0), reverse=True)
+        capped = max(1, min(int(limit), 200))
+        return {"tasks": [_task_dict(r) for r in rows[:capped]], "counts": counts}
+
+    @app.get("/api/tasks/{task_id}")
+    async def get_task(task_id: str, tail: int = 4000):
+        """One task plus the tail of its output.
+
+        The output tail is the reason this route is separate from the list: a cockpit that shows
+        WHICH task is running without showing what it is saying answers half the question.
+        """
+        from prometheus.tasks.manager import get_task_manager
+
+        mgr = get_task_manager()
+        if mgr is None:
+            return JSONResponse(status_code=503, content={"error": "task manager not wired"})
+        rec = mgr.get_task(task_id)
+        if rec is None:
+            return JSONResponse(status_code=404, content={"error": f"no such task: {task_id}"})
+        out = ""
+        try:
+            out = mgr.read_task_output(task_id, max_bytes=max(0, min(int(tail), 64_000)))
+        except Exception as exc:
+            # An unreadable output file is a FACT about the task, not a reason to 500 the row.
+            out = f"[output unavailable: {exc}]"
+        return {**_task_dict(rec), "output": out}
+
+    @app.post("/api/tasks/{task_id}/stop")
+    async def stop_task(task_id: str):
+        """Stop a running task. Returns the task as it stands AFTER the stop.
+
+        Stopping an already-finished task is not an error — it is a no-op with the terminal record
+        returned, because the alternative is a client that must race the task to know whether its
+        own button was allowed to be pressed.
+        """
+        from prometheus.tasks.manager import get_task_manager
+
+        mgr = get_task_manager()
+        if mgr is None:
+            return JSONResponse(status_code=503, content={"error": "task manager not wired"})
+        if mgr.get_task(task_id) is None:
+            return JSONResponse(status_code=404, content={"error": f"no such task: {task_id}"})
+        try:
+            rec = await mgr.stop_task(task_id)
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": str(exc)})
+        return _task_dict(rec)
+
     @app.get("/api/usage")
     async def get_usage(days: int | None = None):
         """Token usage and cost per model — Beacon's usage view.
