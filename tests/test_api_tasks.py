@@ -148,3 +148,42 @@ def test_no_task_manager_degrades_instead_of_500(client, monkeypatch):
     c = TestClient(create_app({}))
     assert c.get("/api/tasks").json() == {"tasks": [], "counts": {}}
     assert c.get("/api/tasks/x").status_code == 503
+
+
+# ── the defect the fake-manager tests could not see ──────────────────────────────────────────
+# Every test above uses a stub manager, so none of them could catch that the REAL
+# BackgroundTaskManager.list_tasks read only this process's memory. On the live box that meant
+# /api/tasks answered "0 tasks" while tasks.db held 24 — and the agent's own task_list tool had
+# been doing the same after every restart since June. A live call caught it; these pin it.
+
+def test_manager_lists_tasks_it_did_not_create(tmp_path):
+    """The restart case: a fresh manager, an empty memory, a populated store."""
+    from prometheus.tasks.manager import BackgroundTaskManager
+    from prometheus.tasks.store import TaskStore
+    from prometheus.tasks.types import TaskRecord
+
+    store = TaskStore(db_path=tmp_path / "tasks.db")
+    mk = lambda **kw: TaskRecord(description="", cwd="/tmp", output_file=tmp_path / "out.log", **kw)
+    store.upsert(mk(id="old-1", type="local_bash", status="completed", created_at=1.0))
+    store.upsert(mk(id="old-2", type="local_agent", status="failed", created_at=2.0))
+
+    mgr = BackgroundTaskManager(store=store)
+    assert mgr._tasks == {}, "precondition: this process created nothing"
+    listed = [t.id for t in mgr.list_tasks()]
+    assert listed == ["old-2", "old-1"], f"durable tasks must be listed, newest first (got {listed})"
+    assert [t.id for t in mgr.list_tasks(status="failed")] == ["old-2"]
+
+
+def test_in_memory_record_wins_over_a_staler_stored_copy(tmp_path):
+    from prometheus.tasks.manager import BackgroundTaskManager
+    from prometheus.tasks.store import TaskStore
+    from prometheus.tasks.types import TaskRecord
+
+    store = TaskStore(db_path=tmp_path / "tasks.db")
+    mk = lambda **kw: TaskRecord(description="", cwd="/tmp", output_file=tmp_path / "out.log", **kw)
+    store.upsert(mk(id="t", type="local_bash", status="running", created_at=1.0))
+    mgr = BackgroundTaskManager(store=store)
+    # an in-flight update this process knows about and the store has not caught up on
+    mgr._tasks["t"] = mk(id="t", type="local_bash", status="completed", created_at=1.0)
+    assert mgr.list_tasks()[0].status == "completed"
+    assert mgr.list_tasks(status="running") == []
