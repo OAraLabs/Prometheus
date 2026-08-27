@@ -192,6 +192,10 @@ _SCHEMA_SQL_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_tool_calls_model ON tool_calls (model);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls (tool_name);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_golden ON tool_calls (is_golden);
+-- Beacon's Tool Feed backfill reads `ORDER BY timestamp DESC LIMIT ?`. Without
+-- this the tail is a full scan + sort of every call ever recorded, which only
+-- gets worse as the table grows.
+CREATE INDEX IF NOT EXISTS idx_tool_calls_ts ON tool_calls (timestamp DESC);
 
 CREATE INDEX IF NOT EXISTS idx_cb_diag_timestamp ON circuit_breaker_diagnostics (timestamp);
 CREATE INDEX IF NOT EXISTS idx_cb_diag_model ON circuit_breaker_diagnostics (model_id);
@@ -836,6 +840,72 @@ class ToolCallTelemetry:
                 "payload": payload_obj,
                 "source_subsystem": row[4],
                 "read_at": row[5],
+            })
+        return out
+
+    def recent_tool_calls(
+        self,
+        *,
+        limit: int = 100,
+        tool_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return ``tool_calls`` rows, newest first — Beacon's Tool Feed backfill.
+
+        The live ``tool_call_start``/``tool_call_end`` WS frames are pure
+        fan-out: ``WebSocketServer.broadcast`` never persists, and it returns
+        early when no client is attached. So a desktop client that was not
+        running (or not yet connected) has no way to learn a call happened,
+        and its Tool Feed opened empty next to a telemetry card reporting the
+        lifetime ``total_calls`` from THIS table. This reader closes that gap.
+
+        Unlike the signal tail, these rows describe COMPLETED calls only —
+        there is no start/end pairing to redo, and no pending state to model.
+
+        ``parsed_tool_call`` is the validated ``{"name", "input"}`` JSON the
+        adapter produced; the ``input`` half is what the feed shows as the
+        call's inputs. It is nullable (older rows, and calls that never got
+        far enough to parse), so it decodes defensively to ``None``.
+        """
+        query = (
+            "SELECT id, timestamp, model, tool_name, success, retries, "
+            "latency_ms, error_type, error_detail, parsed_tool_call "
+            "FROM tool_calls"
+        )
+        params: list[Any] = []
+        if tool_name is not None:
+            query += " WHERE tool_name = ?"
+            params.append(tool_name)
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+
+        try:
+            rows = self._conn.execute(query, tuple(params)).fetchall()
+        except sqlite3.DatabaseError:
+            return []
+
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            inputs: Any = None
+            if row[9]:
+                try:
+                    parsed = json.loads(row[9])
+                    if isinstance(parsed, dict):
+                        inputs = parsed.get("input")
+                except Exception:
+                    inputs = None
+            out.append({
+                "call_id": row[0],
+                # REAL epoch seconds here (this table predates the ISO-text
+                # convention signal_events uses) — clients parse both.
+                "timestamp": row[1],
+                "model": row[2],
+                "tool_name": row[3],
+                "success": bool(row[4]),
+                "retries": int(row[5] or 0),
+                "latency_ms": float(row[6] or 0.0),
+                "error_type": row[7],
+                "error_detail": row[8],
+                "inputs": inputs,
             })
         return out
 
