@@ -187,3 +187,44 @@ def test_in_memory_record_wins_over_a_staler_stored_copy(tmp_path):
     mgr._tasks["t"] = mk(id="t", type="local_bash", status="completed", created_at=1.0)
     assert mgr.list_tasks()[0].status == "completed"
     assert mgr.list_tasks(status="running") == []
+
+
+# ── the card and the agent must see the same reality ─────────────────────────────────────────
+# The Mission card reads /api/tasks; the agent reads task_list. If those ever diverge, the human
+# is looking at a different set of facts than the agent is — which is exactly the confusion the
+# in-memory/store split created in the first place. Pinned rather than assumed.
+
+@pytest.mark.asyncio
+async def test_route_and_the_agents_own_tool_return_the_same_tasks(tmp_path, monkeypatch):
+    """Uses the REAL manager and a REAL store, deliberately.
+
+    A stub cannot answer this question. The first version of this test used one and reported a
+    divergence that did not exist in production — the fake did not sort, while the real
+    list_tasks promises newest-first, so the route (which sorts) and the tool (which trusts
+    list_tasks) disagreed only inside the test. That is the same defect class as the bug this
+    file exists for: a double correct about the interface and wrong about the property.
+    """
+    from prometheus.tasks.manager import BackgroundTaskManager
+    from prometheus.tasks.store import TaskStore
+    from prometheus.tasks.types import TaskRecord
+    from prometheus.tools.builtin.task_list import TaskListTool, TaskListToolInput
+
+    store = TaskStore(db_path=tmp_path / "tasks.db")
+    mk = lambda **kw: TaskRecord(description="d", cwd="/tmp", output_file=tmp_path / "o.log", **kw)
+    store.upsert(mk(id="a", type="local_bash", status="completed", created_at=1.0))
+    store.upsert(mk(id="b", type="local_agent", status="failed", created_at=2.0))
+    store.upsert(mk(id="c", type="poll", status="running", created_at=3.0, started_at=3.0))
+    mgr = BackgroundTaskManager(store=store)
+
+    monkeypatch.setattr("prometheus.tasks.manager.get_task_manager", lambda: mgr)
+    monkeypatch.setattr("prometheus.tools.builtin.task_list.get_task_manager", lambda: mgr)
+    c = TestClient(create_app({}))
+
+    route_ids = [t["id"] for t in c.get("/api/tasks").json()["tasks"]]
+    tool_ids = [ln.split()[0] for ln in (await TaskListTool().execute(TaskListToolInput(), None)).output.splitlines()]
+    assert route_ids == tool_ids == ["c", "b", "a"], f"route {route_ids} != tool {tool_ids}"
+
+    # and under a filter, where a divergence would most plausibly creep in
+    route_running = [t["id"] for t in c.get("/api/tasks?status=running").json()["tasks"]]
+    tool_running = [ln.split()[0] for ln in (await TaskListTool().execute(TaskListToolInput(status="running"), None)).output.splitlines()]
+    assert route_running == tool_running == ["c"]
