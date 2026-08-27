@@ -754,6 +754,110 @@ def create_app(
             return {"total_calls": 0, "overall_success_rate": 0, "tools": {}}
         return telemetry.report()
 
+    @app.get("/api/usage")
+    async def get_usage(days: int | None = None):
+        """Token usage and cost per model — Beacon's usage view.
+
+        Reads ``subsystem_runs`` (where the token counts actually live; ``tool_calls`` has no
+        token columns) and applies pricing at READ time, so a corrected price table fixes history
+        instead of only affecting new rows.
+
+        THE CONTRACT THAT MATTERS: ``cost_usd`` is ``null`` for anything not metered — never
+        ``0.0``. The two are different facts and rendering them the same way is how 89M tokens on
+        a flat plan looked like $0.00 of usage for months. Only ``billing == "metered"`` carries a
+        dollar figure; everything else carries the REASON it does not.
+
+        ``coverage`` exists so a client can say what share of tokens the dollar total actually
+        accounts for. A cost headline that silently covers 12% of the traffic is worse than no
+        headline.
+        """
+        from datetime import datetime, timezone
+
+        from prometheus.telemetry.cost import PRICING, billing_for
+        from prometheus.telemetry.tracker import get_telemetry_handle
+
+        tel = get_telemetry_handle()
+        if tel is None:
+            return {"tracking_since": None, "totals": {}, "models": [], "daily": [], "coverage": {}}
+
+        capped_days = None if days is None else max(1, min(int(days), 365))
+        raw = tel.usage_rollup(days=capped_days)
+
+        # model -> resolved base_url, from the CURRENT provider configuration. This is what makes
+        # "subscription" an evidenced answer rather than a guess: the Token Plan is identified by
+        # the host the box is actually pointed at, not by the model's name.
+        base_urls: dict[str, str] = {}
+        try:
+            from prometheus.providers.registry import CLOUD_DEFAULTS, _resolve_base_url
+
+            for name, spec in CLOUD_DEFAULTS.items():
+                # _resolve_base_url takes the PROVIDER's config block, not the app config —
+                # it reads config["base_url"] directly. Passing the whole app dict looked right
+                # and worked on this box only because the URL happens to come from the
+                # environment there; a base_url set in yaml would have silently missed.
+                prov_cfg = (config.get("providers", {}) or {}).get(name, {}) or {}
+                model_name = prov_cfg.get("model") or spec.get("model")
+                if not model_name:
+                    continue
+                try:
+                    base_urls[str(model_name)] = _resolve_base_url(prov_cfg, name)
+                except Exception:
+                    continue
+        except Exception:
+            pass  # classification degrades to name-only; never break the route over it
+
+        def iso(ts: float | None) -> str | None:
+            if not ts:
+                return None
+            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        models: list[dict] = []
+        coverage: dict[str, dict] = {}
+        total_cost = 0.0
+        totals = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "runs": 0}
+
+        for m in raw["models"]:
+            mode, reason = billing_for(m["model"], base_urls.get(m["model"]))
+            cost: float | None = None
+            if mode == "metered":
+                price = PRICING.get(m["model"]) or next(
+                    (PRICING[k] for k in PRICING if m["model"].startswith(k)), None
+                )
+                if price is not None:
+                    cost = (m["input_tokens"] * price[0] + m["output_tokens"] * price[1]) / 1_000_000
+                    total_cost += cost
+            models.append({
+                **m,
+                "billing": mode,
+                "billing_reason": reason,
+                # null, NOT 0.0 — see the docstring. A client rendering this as $0.00 is a bug.
+                "cost_usd": None if cost is None else round(cost, 4),
+                "first_seen": iso(m["first_seen"]),
+                "last_seen": iso(m["last_seen"]),
+            })
+            bucket = coverage.setdefault(mode, {"models": 0, "input_tokens": 0, "output_tokens": 0})
+            bucket["models"] += 1
+            bucket["input_tokens"] += m["input_tokens"]
+            bucket["output_tokens"] += m["output_tokens"]
+            for k in ("input_tokens", "output_tokens", "cached_input_tokens", "runs"):
+                totals[k] += m[k]
+
+        metered_in = coverage.get("metered", {}).get("input_tokens", 0)
+        return {
+            "tracking_since": iso(raw["tracking_since"]),
+            "window_days": raw["window_days"],
+            "totals": {
+                **totals,
+                "cost_usd": round(total_cost, 4),
+                # What share of the tokens the dollar figure above actually covers.
+                "cost_covers_input_tokens": metered_in,
+                "cost_covers_share": (round(metered_in / totals["input_tokens"], 4) if totals["input_tokens"] else 0),
+            },
+            "coverage": coverage,
+            "models": models,
+            "daily": raw["daily"],
+        }
+
     @app.get("/api/tools/recent")
     async def get_tools_recent(limit: int = 100, tool: str | None = None):
         """Per-call tail from `tool_calls` — hydrates Beacon's Tool Feed.

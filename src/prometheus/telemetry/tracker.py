@@ -850,6 +850,76 @@ class ToolCallTelemetry:
             })
         return out
 
+    def usage_rollup(
+        self,
+        *,
+        days: int | None = None,
+    ) -> dict[str, Any]:
+        """Token usage aggregated per model, plus a daily series — the cost view's data.
+
+        Reads ``subsystem_runs``, NOT ``tool_calls``: the token counts live there (written by
+        ``LLMCallEnvelope`` through :meth:`record_run`), and ``tool_calls`` has no token columns
+        at all. A cost feature that reached for the obvious table would find nothing and conclude
+        the data did not exist.
+
+        Returns raw counts only. Pricing and billing classification are applied by the caller, so
+        this method has no opinion about money and stays correct when the pricing table changes.
+
+        ``tracking_since`` is the first row that carried tokens — a dashboard must be able to say
+        what window it is summing, because rows older than that exist and have no token data.
+        """
+        window_start: float | None = None
+        if days is not None and days > 0:
+            window_start = time.time() - (days * 86400)
+
+        where = "WHERE input_tokens IS NOT NULL"
+        params: list[Any] = []
+        if window_start is not None:
+            where += " AND timestamp >= ?"
+            params.append(window_start)
+
+        try:
+            per_model = self._conn.execute(
+                "SELECT COALESCE(model, ''), COUNT(*), "
+                "COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), "
+                "COALESCE(SUM(cached_input_tokens), 0), MIN(timestamp), MAX(timestamp) "
+                f"FROM subsystem_runs {where} GROUP BY COALESCE(model, '') "
+                "ORDER BY SUM(input_tokens) DESC",
+                tuple(params),
+            ).fetchall()
+            daily = self._conn.execute(
+                "SELECT date(timestamp, 'unixepoch'), "
+                "COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COUNT(*) "
+                f"FROM subsystem_runs {where} GROUP BY 1 ORDER BY 1",
+                tuple(params),
+            ).fetchall()
+            first_ever = self._conn.execute(
+                "SELECT MIN(timestamp) FROM subsystem_runs WHERE input_tokens IS NOT NULL"
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return {"tracking_since": None, "models": [], "daily": []}
+
+        return {
+            "tracking_since": (first_ever[0] if first_ever else None),
+            "window_days": days,
+            "models": [
+                {
+                    "model": r[0],
+                    "runs": r[1],
+                    "input_tokens": r[2],
+                    "output_tokens": r[3],
+                    "cached_input_tokens": r[4],
+                    "first_seen": r[5],
+                    "last_seen": r[6],
+                }
+                for r in per_model
+            ],
+            "daily": [
+                {"day": r[0], "input_tokens": r[1], "output_tokens": r[2], "runs": r[3]}
+                for r in daily
+            ],
+        }
+
     def recent_tool_calls(
         self,
         *,
