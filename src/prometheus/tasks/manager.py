@@ -315,8 +315,32 @@ class BackgroundTaskManager:
         return self._load_task(task_id)
 
     def list_tasks(self, *, status: TaskStatus | None = None) -> list[TaskRecord]:
-        """Return all tasks, newest first, optionally filtered by status."""
-        tasks = list(self._tasks.values())
+        """Return all tasks, newest first, optionally filtered by status.
+
+        Reads the DURABLE STORE, not just this process's memory. ``self._tasks`` only ever holds
+        tasks this process created or resumed, so before this fix the method answered "all tasks"
+        with "the ones since the last restart" — and said so to three callers that had no way to
+        tell: the agent's own ``task_list`` and ``sessions_list`` tools, and the heartbeat. On a
+        box with 24 durable task records it returned an empty list, which reads as "nothing ever
+        ran" rather than "I cannot see past the restart".
+
+        ``get_task`` already fell back to the store (``_load_task``); the singular and plural
+        forms simply disagreed about what counted as existing.
+
+        In-memory records WIN on a conflicting id: they carry in-flight updates (progress,
+        status_note) that may not have been persisted yet. The store's ``running`` set is
+        trustworthy here because :meth:`resume_running` reconciles it at startup — orphaned
+        process tasks are reaped to ``failed`` rather than left as zombie ``running`` rows.
+        """
+        records: dict[str, TaskRecord] = {}
+        if self.store is not None:
+            try:
+                for rec in self.store.list():
+                    records[rec.id] = rec
+            except Exception:
+                log.warning("list_tasks: TaskStore.list failed; falling back to memory", exc_info=True)
+        records.update(self._tasks)
+        tasks = list(records.values())
         if status is not None:
             tasks = [t for t in tasks if t.status == status]
         return sorted(tasks, key=lambda t: t.created_at, reverse=True)
