@@ -23,7 +23,10 @@ import pytest
 pytest.importorskip("fastapi")
 from starlette.testclient import TestClient  # noqa: E402
 
-from prometheus.telemetry.tracker import ToolCallTelemetry  # noqa: E402
+from prometheus.telemetry.tracker import (  # noqa: E402
+    SYNTHETIC_TOOL_NAME,
+    ToolCallTelemetry,
+)
 from prometheus.web.server import create_app  # noqa: E402
 
 
@@ -115,6 +118,36 @@ class TestApiToolsRecent:
             resp = client.get("/api/tools/recent")
             assert resp.status_code == 200
             assert all(r["inputs"] is None for r in resp.json())
+
+    def test_synthetic_loop_rows_are_excluded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`_loop_transition` is the agent loop's per-turn echo, not a tool call.
+
+        It is ~48% of `tool_calls` on a live daemon, and every other per-tool reader
+        in tracker.py drops it. The route shipped without the exclusion and served a
+        feed that was half loop echoes — this is the regression pin.
+        """
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        for _ in range(5):
+            tel.record(model="m", tool_name=SYNTHETIC_TOOL_NAME, success=True)
+        tel.record(model="m", tool_name="bash", success=True)
+        with _client(tel, monkeypatch) as client:
+            rows = client.get("/api/tools/recent?limit=100").json()
+            assert [r["tool_name"] for r in rows] == ["bash"], (
+                f"only real tool calls survive (got {[r['tool_name'] for r in rows]})"
+            )
+
+    def test_exclusion_beats_an_explicit_tool_filter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Asking for the synthetic tool by name still returns nothing — excluded means excluded."""
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        tel.record(model="m", tool_name=SYNTHETIC_TOOL_NAME, success=True)
+        tel.record(model="m", tool_name="bash", success=True)
+        with _client(tel, monkeypatch) as client:
+            assert client.get(f"/api/tools/recent?tool={SYNTHETIC_TOOL_NAME}").json() == []
+            assert len(client.get("/api/tools/recent?tool=bash").json()) == 1
 
     def test_empty_table_returns_empty_list(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
