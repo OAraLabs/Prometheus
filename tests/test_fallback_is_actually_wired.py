@@ -76,3 +76,52 @@ def test_the_local_model_config_yields_a_usable_target():
     assert target is not None, "the ordinary local config must produce a target"
     assert target.is_local_backend is True
     assert target.model == "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+
+
+def test_a_BLANK_config_model_still_yields_a_target():
+    """The recommended configuration has `model.model: ""`.
+
+    The template says so itself — "A HINT, not an assertion. The BACKEND is authoritative ...
+    Leave blank unless you need a name for a backend that cannot be asked." Requiring the config
+    field therefore returned None on the exact setup this daemon ships with, so the fallback was
+    inert a SECOND time, on a live daemon, after being wired.
+    """
+    from prometheus.engine.fallback import build_fallback_target
+
+    live_shape = {"provider": "llama_cpp", "model": "", "base_url": "http://gpu:8080"}
+    assert build_fallback_target(live_shape) is None, "blank and undetected is genuinely nothing"
+
+    target = build_fallback_target(live_shape, detected_model="Qwen3.8-27B.gguf")
+    assert target is not None, "a blank config with a DETECTED model must still give a target"
+    assert target.model == "Qwen3.8-27B.gguf"
+
+
+def test_an_explicit_config_model_outranks_the_detected_one():
+    """An operator naming a fallback model is saying so deliberately."""
+    from prometheus.engine.fallback import build_fallback_target
+
+    target = build_fallback_target(
+        {"provider": "llama_cpp", "model": "chosen.gguf", "base_url": "http://gpu:8080"},
+        detected_model="detected.gguf",
+    )
+    assert target.model == "chosen.gguf"
+
+
+def test_every_site_passes_the_detected_model_too():
+    """Passing `fallback=` is not enough — passing it a config whose model is blank yields None."""
+    import ast
+    for filename, callee in SITES:
+        tree = ast.parse((SRC / filename).read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name != callee:
+                continue
+            fb = next((k.value for k in node.keywords if k.arg == "fallback"), None)
+            assert isinstance(fb, ast.Call), f"{filename}:{node.lineno} fallback= is not a call"
+            kw = {k.arg for k in fb.keywords if k.arg}
+            assert "detected_model" in kw, (
+                f"{filename}:{node.lineno} calls build_fallback_target without detected_model — "
+                f"on the recommended blank-model config that returns None and the feature is inert"
+            )

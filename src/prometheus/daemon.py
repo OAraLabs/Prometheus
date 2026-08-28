@@ -826,7 +826,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
         model=model_name,
         # Without this the fallback is INERT: the loop reads context.fallback and nothing
         # ever set it, so every terminal provider failure ended the turn exactly as before.
-        fallback=build_fallback_target(model_config),
+        fallback=build_fallback_target(model_config, detected_model=model_name),
         profile_resolver=profile_state.get if profile_state else None,
         tool_registry=registry,
         adapter=adapter,
@@ -1890,7 +1890,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
             loop_context = LoopContext(
                 provider=provider,
                 model=model_name,
-                fallback=build_fallback_target(model_config),
+                fallback=build_fallback_target(model_config, detected_model=model_name),
                 system_prompt=system_prompt,
                 max_tokens=4096,
                 tool_registry=registry,
