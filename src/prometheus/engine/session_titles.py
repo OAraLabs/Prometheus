@@ -109,6 +109,92 @@ async def generate_title(provider, model: str, user: str, assistant: str) -> str
         return None
 
 
+class _StoredPart:
+    """Adapter for :func:`first_exchange`, which reads ``.role``/``.text`` (the
+    live hook hands it ``ConversationMessage``s). Store rows are
+    ``MessagePart``s carrying ``.content`` instead — same words, different
+    attribute."""
+
+    __slots__ = ("role", "text")
+
+    def __init__(self, role: str, text: str) -> None:
+        self.role = role
+        self.text = text
+
+
+def _adapt_store_messages(parts: list) -> list:
+    return [_StoredPart(getattr(p, "role", ""), getattr(p, "content", "") or "")
+            for p in parts]
+
+
+async def backfill_titles(store, provider, model: str, *, dry_run: bool = False,
+                          limit: int | None = None, delay_seconds: float = 0.0,
+                          log=print) -> dict:
+    """One-off backfill for sessions predating Piece 7 (GRAFT-MOBILE-BRIDGE 9).
+
+    Generation is absence-only and fires after a completed turn, so sessions
+    that predate it stay untitled unless they happen to be used again. This
+    walks ``list_sessions()`` (which already excludes tombstoned sessions) and
+    titles what qualifies — a script's engine, not a route and not a startup
+    hook.
+
+    - **Sequential, never concurrent** — the model is shared with the live
+      daemon; ``delay_seconds`` paces calls further apart.
+    - **Idempotent and resumable** — already-titled sessions are skipped, so an
+      interrupted run costs nothing and a rerun is a no-op.
+    - **Dry runs generate but never store** — "the title each would receive" is
+      a real model call; a dry run followed by a real run pays twice, by design.
+    - Real runs go through :func:`maybe_title_session`, so there is exactly one
+      definition of what a title is and how it is written.
+    - ``limit`` caps the number of GENERATION attempts (skips are free).
+
+    Returns counters: ``eligible``, ``titled``, ``would_title``,
+    ``already_titled``, ``too_short``, ``no_exchange``, ``failed``.
+    """
+    import asyncio
+
+    counts = {"eligible": 0, "titled": 0, "would_title": 0,
+              "already_titled": 0, "too_short": 0, "no_exchange": 0, "failed": 0}
+    attempts = 0
+    for row in store.list_sessions():
+        sid = row["session_id"]
+        if row.get("title"):
+            counts["already_titled"] += 1
+            continue
+        if int(row.get("message_count") or 0) < 2:
+            counts["too_short"] += 1
+            continue
+        messages = _adapt_store_messages(store.get_all_messages(sid))
+        exchange = first_exchange(messages)
+        if exchange is None:
+            counts["no_exchange"] += 1
+            continue
+        counts["eligible"] += 1
+        if limit is not None and attempts >= limit:
+            continue
+        attempts += 1
+        if delay_seconds and attempts > 1:
+            await asyncio.sleep(delay_seconds)
+        if dry_run:
+            title = await generate_title(provider, model, *exchange)
+            if title:
+                counts["would_title"] += 1
+                log(f"would title {sid}: {title!r}")
+            else:
+                counts["failed"] += 1
+                log(f"generation failed for {sid}")
+        else:
+            await maybe_title_session(store, provider, model, sid, messages)
+            title = store.get_session_title(sid)
+            if title:
+                counts["titled"] += 1
+                log(f"titled {sid}: {title!r}")
+            else:
+                counts["failed"] += 1
+                log(f"generation failed for {sid}")
+    return counts
+
+
 async def maybe_title_session(store, provider, model: str,
                               session_id: str, messages: list) -> None:
     """Generate-and-store, iff the session has no title yet.
