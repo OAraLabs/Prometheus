@@ -127,6 +127,7 @@ class TestWSBridgeTurnCompleted:
         bridge._clients = set()
         bridge._subscribers = {}
         bridge._subscriptions = {}
+        bridge._ws_filters = {}  # broadcast() consults the Piece-4 filter
         bridge._last_ids = {}
         bridge._log = MagicMock()
         return bridge
