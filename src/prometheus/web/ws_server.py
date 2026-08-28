@@ -1032,6 +1032,7 @@ class WebSocketBridge:
                 "timestamp": time.time(),
                 "payload": done_payload,
             })
+            self._schedule_session_title(session_id, session)
             return accumulated, last_usage
 
         except asyncio.CancelledError:
@@ -1244,6 +1245,34 @@ class WebSocketBridge:
             event["payload"] = signal.payload
 
         await self.broadcast(event)
+
+    def _schedule_session_title(self, session_id: str, session: Any) -> None:
+        """GRAFT-MOBILE-BRIDGE 7: name the session from its first exchange.
+
+        Fire-and-forget after ``chat_done`` — the turn is already delivered, a
+        title is a nicety, and every failure path inside degrades to "no
+        title" (clients fall back to their first-user-message snippet).
+        Generation fills ABSENCE only, so a manual rename or an earlier
+        generation is never overwritten. The messages list is snapshotted so a
+        concurrent next turn cannot mutate it mid-read.
+        """
+        try:
+            from prometheus.engine import session_titles as _titles
+
+            store = getattr(getattr(session, "lcm_engine", None),
+                            "conversation_store", None)
+            provider = getattr(self.loop_context, "provider", None)
+            model = getattr(self.loop_context, "model", "default")
+            if store is None or provider is None:
+                return
+            asyncio.get_running_loop().create_task(
+                _titles.maybe_title_session(
+                    store, provider, model, session_id,
+                    list(getattr(session, "messages", []) or []),
+                )
+            )
+        except Exception:
+            logger.debug("session title scheduling failed", exc_info=True)
 
     async def broadcast(self, event: dict[str, Any]) -> None:
         """Send an event to all connected clients.

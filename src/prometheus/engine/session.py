@@ -567,6 +567,13 @@ class ChatSession:
         """
         self._lcm_engine = engine
 
+    @property
+    def lcm_engine(self) -> object | None:
+        """The wired LCM engine, or None for an ephemeral session. Read-only
+        public access for callers (e.g. the session-title hook) that need the
+        engine's stores without reaching into a private field."""
+        return self._lcm_engine
+
     def trim(self, max_messages: int = MAX_SESSION_MESSAGES) -> None:
         """Truncate from the front if history exceeds *max_messages*.
 

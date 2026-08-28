@@ -450,6 +450,10 @@ def create_app(
                     "last_active": row["last_timestamp"],
                     "message_count": row["message_count"],
                     "watermark": row["watermark"],
+                    # GRAFT-MOBILE-BRIDGE 7: generated after the first exchange
+                    # or set via PUT …/title; null until either happens, and a
+                    # client falls back to its own snippet.
+                    "title": row.get("title"),
                     "live": False,
                 }
         if session_mgr:
@@ -464,6 +468,7 @@ def create_app(
                     "last_active": store.max_timestamp(sid) if store is not None else 0.0,
                     "message_count": len(session.messages),
                     "watermark": store.max_rowid(sid) if store is not None else 0,
+                    "title": store.get_session_title(sid) if store is not None else None,
                     "live": True,
                 }
         return sorted(
@@ -762,6 +767,36 @@ def create_app(
         if store is not None:
             store.tombstone_session(session_id)
         return {"ok": True}
+
+    @app.put("/api/sessions/{session_id}/title")
+    async def set_session_title(session_id: str, request: Request):
+        """Manual rename (GRAFT-MOBILE-BRIDGE 7). Body: ``{"title": str}``.
+
+        Writes the same ``session_titles`` row auto-generation fills, and wins
+        over it permanently: generation only ever fills absence. An empty or
+        whitespace title CLEARS the stored title (the next first-exchange turn
+        may regenerate one), so a client can offer "reset to automatic".
+        Clipped server-side to the same ≤48-char contract generation obeys —
+        one limit, one place, both writers.
+        """
+        from prometheus.engine.session_titles import clip_title
+
+        lcm = getattr(app.state, "lcm_engine", None)
+        store = lcm.conversation_store if lcm is not None else None
+        if store is None:
+            return JSONResponse(
+                {"error": "no durable store — titles unavailable"}, status_code=503
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        raw = body.get("title") if isinstance(body, dict) else None
+        if raw is not None and not isinstance(raw, str):
+            return JSONResponse({"error": "title must be a string"}, status_code=400)
+        title = clip_title(raw or "")
+        store.set_session_title(session_id, title)
+        return {"ok": True, "session_id": session_id, "title": title or None}
 
     # ── Telemetry ───────────────────────────────────────────────────
 
