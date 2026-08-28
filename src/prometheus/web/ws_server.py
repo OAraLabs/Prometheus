@@ -106,6 +106,12 @@ class WebSocketBridge:
         # map is only the fallback for bridges wired without a real manager
         # (tests construct WebSocketBridge with session_mgr=None or a stub).
         self._turn_locks: dict[str, asyncio.Lock] = {}
+        # Strong refs to fire-and-forget background tasks (session titling).
+        # The event loop holds tasks only WEAKLY — a create_task result nobody
+        # keeps can be garbage-collected mid-flight, which is the standard
+        # asyncio fire-and-forget trap. Done-callbacks discard, so the set
+        # stays O(in-flight).
+        self._bg_tasks: set[asyncio.Task] = set()
 
     @property
     def auth_required(self) -> bool:
@@ -983,6 +989,13 @@ class WebSocketBridge:
                         "type": "tool_call_start",
                         "timestamp": time.time(),
                         "payload": {
+                            # session_id so a client can attribute the tool call
+                            # to a conversation. broadcast() fans out to every
+                            # client and _run_agent serializes per session, so
+                            # without this a tool frame cannot be scoped
+                            # (GRAFT-MOBILE-BRIDGE 3a). Additive — existing
+                            # clients ignore the new field.
+                            "session_id": session_id,
                             "call_id": event.tool_use_id,
                             "tool_name": event.tool_name,
                             "inputs": event.tool_input,
@@ -997,6 +1010,9 @@ class WebSocketBridge:
                         "type": "tool_call_end",
                         "timestamp": time.time(),
                         "payload": {
+                            # session_id: same attribution fix as tool_call_start
+                            # (GRAFT-MOBILE-BRIDGE 3a).
+                            "session_id": session_id,
                             "call_id": event.tool_use_id,
                             "tool_name": event.tool_name,
                             "success": not event.is_error,
@@ -1007,14 +1023,22 @@ class WebSocketBridge:
             # Persist the assistant turn that run_loop appended in place onto
             # session.messages (parity with the Telegram/Slack gateways). Without
             # this the web/Beacon assistant half never reaches LCM/memory.
-            session.persist_loop_result(original_len)
+            row_id = session.persist_loop_result(original_len)
 
-            # Stream done
+            # Stream done. row_id is the assistant turn's durable rowid
+            # (GRAFT-MOBILE-BRIDGE 3b) — with it a client re-keys its streamed
+            # bubble to the durable id without a ?since= re-read. Omitted, not
+            # null, when persistence surfaced none, so older clients and the
+            # decode contract are unchanged.
+            done_payload = {"session_id": session_id, "message_id": msg_id}
+            if row_id is not None:
+                done_payload["row_id"] = row_id
             await self.broadcast({
                 "type": "chat_done",
                 "timestamp": time.time(),
-                "payload": {"session_id": session_id, "message_id": msg_id},
+                "payload": done_payload,
             })
+            self._schedule_session_title(session_id, session)
             return accumulated, last_usage
 
         except asyncio.CancelledError:
@@ -1032,19 +1056,26 @@ class WebSocketBridge:
             # assistant turn so the visible bubble survives a reload. A stop
             # mid-round-N>1 drops only round N's in-flight tail — the
             # completed rounds carry the substance.
+            interrupted_row_id: int | None = None
             if original_len is not None:
                 if len(session.messages) == original_len and accumulated:
                     from prometheus.engine.agent_loop import _make_assistant_msg
                     session.messages.append(_make_assistant_msg(accumulated))
-                session.persist_loop_result(original_len)
+                interrupted_row_id = session.persist_loop_result(original_len)
+            done_payload = {
+                "session_id": session_id,
+                "message_id": msg_id,
+                "interrupted": True,
+            }
+            # The partial assistant turn is still durable and still worth a
+            # cursor (3b) — a client reloading after an interrupt reconciles to
+            # the same row the stream left it on.
+            if interrupted_row_id is not None:
+                done_payload["row_id"] = interrupted_row_id
             await self.broadcast({
                 "type": "chat_done",
                 "timestamp": time.time(),
-                "payload": {
-                    "session_id": session_id,
-                    "message_id": msg_id,
-                    "interrupted": True,
-                },
+                "payload": done_payload,
             })
             return accumulated, last_usage
 
@@ -1220,6 +1251,38 @@ class WebSocketBridge:
             event["payload"] = signal.payload
 
         await self.broadcast(event)
+
+    def _schedule_session_title(self, session_id: str, session: Any) -> None:
+        """GRAFT-MOBILE-BRIDGE 7: name the session from its first exchange.
+
+        Fire-and-forget after ``chat_done`` — the turn is already delivered, a
+        title is a nicety, and every failure path inside degrades to "no
+        title" (clients fall back to their first-user-message snippet).
+        Generation fills ABSENCE only, so a manual rename or an earlier
+        generation is never overwritten. The messages list is snapshotted so a
+        concurrent next turn cannot mutate it mid-read.
+        """
+        try:
+            from prometheus.engine import session_titles as _titles
+
+            store = getattr(getattr(session, "lcm_engine", None),
+                            "conversation_store", None)
+            provider = getattr(self.loop_context, "provider", None)
+            model = getattr(self.loop_context, "model", "default")
+            if store is None or provider is None:
+                return
+            task = asyncio.get_running_loop().create_task(
+                _titles.maybe_title_session(
+                    store, provider, model, session_id,
+                    list(getattr(session, "messages", []) or []),
+                )
+            )
+            # Keep a strong reference or the loop's weak ref is the only one
+            # and the task can be GC'd before it runs (see _bg_tasks).
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+        except Exception:
+            logger.debug("session title scheduling failed", exc_info=True)
 
     async def broadcast(self, event: dict[str, Any]) -> None:
         """Send an event to all connected clients.

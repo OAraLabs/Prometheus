@@ -248,3 +248,90 @@ async def test_error_frame_is_session_scoped_and_actionable(monkeypatch):
     assert ("idle", "desktop:boom") in [
         (f["payload"]["state"], f["payload"].get("session_id")) for f in rec.of("agent_state")
     ]
+
+
+# ---------------------------------------------------------------------------
+# GRAFT-MOBILE-BRIDGE 3a — session_id on tool frames
+#
+# broadcast() fans out to every client and _run_agent serializes per session,
+# so a tool frame carrying no session_id cannot be attributed to a conversation
+# by any client. These assert the id is now present on both tool frames.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tool_frames_carry_session_id(monkeypatch):
+    _fast_progress(monkeypatch)
+    bridge, rec = _bridge()
+
+    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None):
+        yield ToolExecutionStarted("c1", "bash", {"cmd": "ls"}), None
+        yield ToolExecutionCompleted("c1", "bash", False, "ok"), None
+
+    _patch_loop(monkeypatch, run_loop)
+    await bridge._run_agent("desktop:tools", _FakeSession())
+
+    start = rec.of("tool_call_start")[0]["payload"]
+    end = rec.of("tool_call_end")[0]["payload"]
+    assert start["session_id"] == "desktop:tools"
+    assert end["session_id"] == "desktop:tools"
+    # The existing fields are untouched (additive change).
+    assert start["call_id"] == "c1" and start["tool_name"] == "bash"
+    assert end["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# GRAFT-MOBILE-BRIDGE 3b — row_id on chat_done
+#
+# The assistant turn's durable rowid was never broadcast; every client
+# reinvented a ?since= reconciliation to learn it. persist_loop_result now
+# returns it and _run_agent forwards it on chat_done — present when persistence
+# yielded one, OMITTED (never null) otherwise, so older clients are unaffected.
+# ---------------------------------------------------------------------------
+
+
+class _RowIdSession(_FakeSession):
+    """A session whose persist reports a durable assistant rowid (like the real
+    ChatSession.persist_loop_result after this change)."""
+
+    def __init__(self, row_id):
+        super().__init__()
+        self._row_id = row_id
+
+    def persist_loop_result(self, original_len: int):
+        return self._row_id
+
+
+@pytest.mark.asyncio
+async def test_chat_done_carries_row_id_when_persist_reports_one(monkeypatch):
+    _fast_progress(monkeypatch)
+    bridge, rec = _bridge()
+
+    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None):
+        yield AssistantTextDelta(text="done"), None
+
+    _patch_loop(monkeypatch, run_loop)
+    await bridge._run_agent("desktop:rk", _RowIdSession(4271))
+
+    done = rec.of("chat_done")[0]["payload"]
+    assert done["row_id"] == 4271
+    assert done["session_id"] == "desktop:rk"
+    assert done["message_id"].startswith("asst-")  # handle still present
+
+
+@pytest.mark.asyncio
+async def test_chat_done_omits_row_id_when_persist_reports_none(monkeypatch):
+    # The default _FakeSession.persist_loop_result returns None (older daemon /
+    # a turn that persisted no assistant row). The key must be ABSENT, not null:
+    # the client's MessageID decoder treats an explicit null as a handle.
+    _fast_progress(monkeypatch)
+    bridge, rec = _bridge()
+
+    async def run_loop(context, messages, mode="agent", session_id=None, tool_choice=None):
+        yield AssistantTextDelta(text="done"), None
+
+    _patch_loop(monkeypatch, run_loop)
+    await bridge._run_agent("desktop:nr", _FakeSession())
+
+    done = rec.of("chat_done")[0]["payload"]
+    assert "row_id" not in done
