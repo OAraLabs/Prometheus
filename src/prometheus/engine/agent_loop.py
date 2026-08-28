@@ -1055,8 +1055,6 @@ async def _run_loop(
                     # model the local backend", which is what the old `!= "primary"` gate
                     # actually meant. See rewrite_model_identity's docstring — the fallback is a
                     # caller where route-reason and local-backend stop agreeing.
-                    from prometheus.context.system_prompt import rewrite_model_identity
-
                     context.system_prompt = rewrite_model_identity(
                         context.system_prompt,
                         model_name=decision.model_name or "unknown",
@@ -1171,6 +1169,9 @@ async def _run_loop(
         stripped_to_empty = 0
         stripped_samples: list[str] = []
         served_model_this_turn: str | None = None
+        # Per-TURN, like served_model above. A list rather than a plain name because the
+        # on_degrade callback below is a closure, and rebinding through it would need nonlocal.
+        degrade_notice_this_turn: list[str] = []
 
         # SPRINT-2 WS1: drain queued steers as a system-prompt addendum
         # for THIS model call only. Steers arrive from the gateway's
@@ -1335,6 +1336,7 @@ async def _run_loop(
             )
 
         def _on_degrade(_decision) -> None:
+            degrade_notice_this_turn.append(_decision.message)
             log.warning(
                 "provider fallback: %s -> %s (%s) session=%r",
                 context.model, _decision.model, _decision.message, context.session_id,
@@ -1611,6 +1613,30 @@ async def _run_loop(
             and not (final_message.text or "").strip()
         )
         if not turn_is_empty:
+            if degrade_notice_this_turn:
+                # Local import: this function binds TextBlock locally in two other branches, so
+                # a module-level name would be an unbound local here whenever those did not run.
+                from prometheus.engine.messages import TextBlock
+
+                # The notice reaches the live stream as a delta from the fallback wrapper; this
+                # puts the SAME text into the message that becomes history, so a re-read shows
+                # why the answer came from a different model. Without it the degrade is loud
+                # once and silent forever after, which is the failure this sprint exists to
+                # prevent.
+                #
+                # Injected HERE and nowhere earlier, deliberately. `raw_model_output_this_turn`
+                # is captured above as "what we would want to train a local model to emit", and
+                # `extract_tool_calls` parses the same text. Prepending before either would
+                # teach a local model to emit our outage banner and hand the tool parser a
+                # prefix the model never wrote.
+                final_message = final_message.model_copy(
+                    update={
+                        "content": [
+                            TextBlock(text=f"⚠ {degrade_notice_this_turn[0]}\n\n"),
+                            *final_message.content,
+                        ]
+                    }
+                )
             messages.append(final_message)
             yield AssistantTurnComplete(message=final_message, usage=usage), usage
             # SUNRISE PeriodicNudge: one completed assistant round. Ask the
