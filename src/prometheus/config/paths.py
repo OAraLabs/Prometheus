@@ -57,6 +57,13 @@ def get_data_dir() -> Path:
     return data_dir
 
 
+def get_devices_db_path() -> Path:
+    """Enrolled API devices (GRAFT-MOBILE-BRIDGE 1). Its own small file, NOT
+    lcm.db — auth material and conversation memory have different lifecycles
+    and different backup/wipe expectations."""
+    return get_data_dir() / "devices.db"
+
+
 def get_logs_dir() -> Path:
     """Return the logs directory.
 
