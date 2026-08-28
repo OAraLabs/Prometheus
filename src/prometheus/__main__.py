@@ -36,6 +36,7 @@ from prometheus.engine.stream_events import (
 )
 from prometheus.engine.usage import UsageSnapshot
 from prometheus.providers.base import ModelProvider
+from prometheus.engine.fallback import build_fallback_target
 
 log = logging.getLogger("prometheus")
 
@@ -1543,6 +1544,7 @@ def main() -> None:
         log.warning("profile store unavailable — advertisement unfiltered", exc_info=True)
 
     context = LoopContext(
+        fallback=build_fallback_target(model_cfg),
         provider=provider,
         model=model_name,
         system_prompt=system_prompt,

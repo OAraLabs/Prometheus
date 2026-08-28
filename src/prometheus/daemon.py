@@ -51,6 +51,7 @@ from prometheus.__main__ import (
 )
 from prometheus.telemetry.tracker import ToolCallTelemetry
 from prometheus.tools.base import ToolRegistry
+from prometheus.engine.fallback import build_fallback_target
 
 logger = logging.getLogger("prometheus.daemon")
 
@@ -823,6 +824,9 @@ async def run_daemon(args: argparse.Namespace) -> None:
     agent_loop = AgentLoop(
         provider=provider,
         model=model_name,
+        # Without this the fallback is INERT: the loop reads context.fallback and nothing
+        # ever set it, so every terminal provider failure ended the turn exactly as before.
+        fallback=build_fallback_target(model_config),
         profile_resolver=profile_state.get if profile_state else None,
         tool_registry=registry,
         adapter=adapter,
@@ -1886,6 +1890,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
             loop_context = LoopContext(
                 provider=provider,
                 model=model_name,
+                fallback=build_fallback_target(model_config),
                 system_prompt=system_prompt,
                 max_tokens=4096,
                 tool_registry=registry,
