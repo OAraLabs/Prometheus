@@ -246,6 +246,15 @@ class WebSocketBridge:
         elif cmd_type == "send_message":
             session_id = payload.get("session_id", "")
             content = payload.get("content", "")
+            # GRAFT-MOBILE-BRIDGE 8: the correlation handle for the sender's
+            # optimistic row. _handle_send_message has echoed it on the user
+            # chat_message frame all along (the REST path passes it through);
+            # this handler simply never read it, so a socket send always echoed
+            # null and the client's re-key could never match. Non-string →
+            # None: an arbitrary object must not reach the broadcast payload.
+            client_msg_id = payload.get("client_msg_id")
+            if not isinstance(client_msg_id, str):
+                client_msg_id = None
             mode = payload.get("mode") or "agent"  # absent → agent default (never an error)
             if mode not in ("agent", "chat"):
                 await self._send_one(websocket, {
@@ -279,7 +288,8 @@ class WebSocketBridge:
                 })
                 return
             if session_id and content:
-                await self._handle_send_message(session_id, content, mode=mode, tool_choice=tool_choice)
+                await self._handle_send_message(session_id, content, client_msg_id=client_msg_id,
+                                                mode=mode, tool_choice=tool_choice)
 
         elif cmd_type == "chat_upload":
             # File upload from Beacon: { type: "chat_upload", payload: {
