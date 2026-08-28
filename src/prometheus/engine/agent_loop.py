@@ -28,6 +28,7 @@ from prometheus.engine.messages import (
 )
 from prometheus.engine.stream_events import (
     AssistantTextDelta,
+    ProviderDegraded,
     AssistantTurnComplete,
     StreamEvent,
     ToolExecutionCompleted,
@@ -1336,7 +1337,7 @@ async def _run_loop(
             )
 
         def _on_degrade(_decision) -> None:
-            degrade_notice_this_turn.append(_decision.message)
+            degrade_notice_this_turn.append(_decision)
             log.warning(
                 "provider fallback: %s -> %s (%s) session=%r",
                 context.model, _decision.model, _decision.message, context.session_id,
@@ -1353,6 +1354,7 @@ async def _run_loop(
                 ),
             )
 
+        _degrade_announced = False
         async for event in stream_round_with_fallback(
             envelope=loop_envelope,
             provider=context.provider,
@@ -1367,6 +1369,18 @@ async def _run_loop(
             round_index=turn,
             session_id=effective_session_id,
         ):
+            if degrade_notice_this_turn and not _degrade_announced:
+                # First event after the swap. on_degrade fires before the fallback streams, so
+                # by now the decision is recorded and the announcement precedes its output.
+                _degrade_announced = True
+                _d = degrade_notice_this_turn[0]
+                yield ProviderDegraded(
+                    requested_model=context.model,
+                    served_model=_d.model or "unknown",
+                    provider_name=_d.provider_name or "unknown",
+                    reason=_d.message,
+                ), None
+
             if isinstance(event, ApiTextDeltaEvent):
                 if _markup_filter is not None:
                     visible = _markup_filter.feed(event.text)
@@ -1632,7 +1646,7 @@ async def _run_loop(
                 final_message = final_message.model_copy(
                     update={
                         "content": [
-                            TextBlock(text=f"⚠ {degrade_notice_this_turn[0]}\n\n"),
+                            TextBlock(text=f"⚠ {degrade_notice_this_turn[0].message}\n\n"),
                             *final_message.content,
                         ]
                     }

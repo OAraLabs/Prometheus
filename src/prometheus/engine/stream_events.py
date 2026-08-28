@@ -30,6 +30,26 @@ class AssistantTurnComplete:
 
 
 @dataclass(frozen=True)
+class ProviderDegraded:
+    """A terminal provider failure was served by the fallback instead (SPRINT-provider-fallback).
+
+    Yielded so NON-CHAT clients learn the fact too. The chat surface already sees the degrade as
+    text — the wrapper emits a notice delta and it lands in stored history — but a client that
+    renders tool activity or status without reading reply prose would otherwise show a normal
+    answer from a model nobody chose.
+
+    `requested_model` is what the caller asked for and `served_model` is what actually answered;
+    they are separate fields on purpose. Collapsing them is what made "why did my model change?"
+    unanswerable and is the reason fallback was kept out of the router's decision path.
+    """
+
+    requested_model: str
+    served_model: str
+    provider_name: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class ToolExecutionStarted:
     """The engine is about to execute a tool."""
 
