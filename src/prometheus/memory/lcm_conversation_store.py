@@ -405,6 +405,11 @@ class LCMConversationStore:
         caps at ``limit=500``), this returns the full session — used by
         ``LCMAssembler`` to compute total token counts before deciding
         what fits in the assembly budget.
+
+        NOTE: ``row_id`` on the returned parts is 0 — ``SELECT *`` does not
+        include SQLite's implicit rowid. If you need durable wire ids, read
+        through :meth:`messages_after_id` (which SELECTs ``rowid AS row_id``);
+        do not "fix" this by keying anything on the zeros.
         """
         rows = self._conn.execute(
             "SELECT * FROM lcm_messages WHERE session_id = ? "

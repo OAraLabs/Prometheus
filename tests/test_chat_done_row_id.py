@@ -83,3 +83,36 @@ def test_returns_none_without_an_engine(tmp_path):
     s = ChatSession("desktop:noengine", lcm_engine=None)
     s.messages.append(_asst("hi"))
     assert s.persist_loop_result(0) is None
+
+
+def test_rowid_capture_has_no_suspension_point(tmp_path):
+    """The shared last_ingested_row_id slot is safe ONLY because writer and
+    reader share one synchronous frame (see the invariant comment on the slot).
+    Pin the property mechanically: the reader (_persist_to_lcm) is not a
+    coroutine, and neither is ingest_sync — so under asyncio nothing can
+    interleave between the slot write and the read two statements later. If
+    someone makes either async, this fails and points at the fix: thread the
+    rowid through the call chain instead of parking it on the engine."""
+    import inspect
+
+    assert not inspect.iscoroutinefunction(ChatSession._persist_to_lcm)
+    assert not inspect.iscoroutinefunction(LCMEngine.ingest_sync)
+
+
+def test_two_sessions_on_one_engine_each_get_their_own_rowid(tmp_path):
+    """The slot lives on a SHARED engine; per-session correctness must not
+    depend on which session persisted last."""
+    eng = _engine(tmp_path)
+    a = ChatSession("desktop:a", lcm_engine=eng)
+    b = ChatSession("desktop:b", lcm_engine=eng)
+    a.messages.append(_asst("reply in a"))
+    b.messages.append(_asst("reply in b"))
+
+    row_a = a.persist_loop_result(0)
+    row_b = b.persist_loop_result(0)
+
+    assert row_a != row_b
+    rows_a = eng._conv_store.messages_after_id(0, session_id="desktop:a")
+    rows_b = eng._conv_store.messages_after_id(0, session_id="desktop:b")
+    assert [r.row_id for r in rows_a] == [row_a]
+    assert [r.row_id for r in rows_b] == [row_b]

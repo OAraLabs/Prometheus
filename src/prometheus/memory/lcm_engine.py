@@ -135,6 +135,14 @@ class LCMEngine:
         # (uuid) and rebuild the part, so the rowid would otherwise be lost at
         # the persist boundary. Kept here rather than changing those methods'
         # return type, which several call sites and test fakes rely on.
+        #
+        # SHARED-SLOT INVARIANT: one slot on a shared engine is safe ONLY
+        # because writer and reader run in one synchronous frame — ingest_sync
+        # contains no await (the async ingest is async in signature only), and
+        # _persist_to_lcm reads the slot on the statement after the write, so
+        # under asyncio nothing can interleave. If either side ever grows a
+        # real await, this must become a value threaded through the call chain
+        # (tests/test_chat_done_row_id.py pins the no-coroutine property).
         self._last_ingested_row_id: int | None = None
 
         # Stats tracking.

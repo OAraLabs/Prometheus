@@ -106,6 +106,12 @@ class WebSocketBridge:
         # map is only the fallback for bridges wired without a real manager
         # (tests construct WebSocketBridge with session_mgr=None or a stub).
         self._turn_locks: dict[str, asyncio.Lock] = {}
+        # Strong refs to fire-and-forget background tasks (session titling).
+        # The event loop holds tasks only WEAKLY — a create_task result nobody
+        # keeps can be garbage-collected mid-flight, which is the standard
+        # asyncio fire-and-forget trap. Done-callbacks discard, so the set
+        # stays O(in-flight).
+        self._bg_tasks: set[asyncio.Task] = set()
 
     @property
     def auth_required(self) -> bool:
@@ -1265,12 +1271,16 @@ class WebSocketBridge:
             model = getattr(self.loop_context, "model", "default")
             if store is None or provider is None:
                 return
-            asyncio.get_running_loop().create_task(
+            task = asyncio.get_running_loop().create_task(
                 _titles.maybe_title_session(
                     store, provider, model, session_id,
                     list(getattr(session, "messages", []) or []),
                 )
             )
+            # Keep a strong reference or the loop's weak ref is the only one
+            # and the task can be GC'd before it runs (see _bg_tasks).
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
         except Exception:
             logger.debug("session title scheduling failed", exc_info=True)
 

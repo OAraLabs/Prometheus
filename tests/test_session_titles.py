@@ -220,3 +220,55 @@ def test_generation_skips_sessions_with_no_exchange(tmp_path):
     _run(maybe_title_session(store, _FakeProvider("nope"), "m", "s1",
                              [_Msg("user", "only me")]))
     assert store.get_session_title("s1") is None
+
+
+# --------------------------------------------------------------------------- #
+# The bridge hook: fire-and-forget that actually survives
+# --------------------------------------------------------------------------- #
+
+
+def test_bridge_schedules_title_task_with_a_strong_ref(tmp_path):
+    """create_task results the loop holds only weakly can be GC'd mid-flight —
+    the standard fire-and-forget trap. The bridge must retain the task until
+    it completes (and then let it go), and the task must run detached from the
+    turn: it is scheduled after chat_done, so the turn never waits on it."""
+    from types import SimpleNamespace
+
+    from prometheus.web.ws_server import WebSocketBridge
+
+    store = _store(tmp_path)
+
+    class _Lcm:
+        conversation_store = store
+
+    session = SimpleNamespace(
+        lcm_engine=_Lcm(),
+        messages=[_Msg("user", "plan my week"), _Msg("assistant", "Here is a plan.")],
+    )
+    bridge = WebSocketBridge(
+        loop_context=SimpleNamespace(provider=_FakeProvider("Weekly planning"), model="m")
+    )
+
+    async def _drive():
+        bridge._schedule_session_title("s1", session)
+        assert bridge._bg_tasks, "task must be strongly referenced while in flight"
+        await asyncio.gather(*bridge._bg_tasks)
+
+    asyncio.run(_drive())
+    assert store.get_session_title("s1") == "Weekly planning"
+    assert not bridge._bg_tasks, "done-callback must release the reference"
+
+
+def test_bridge_hook_is_a_noop_without_provider_or_store(tmp_path):
+    from types import SimpleNamespace
+
+    from prometheus.web.ws_server import WebSocketBridge
+
+    session = SimpleNamespace(lcm_engine=None, messages=[])
+    bridge = WebSocketBridge(loop_context=object())
+
+    async def _drive():
+        bridge._schedule_session_title("s1", session)
+        assert not bridge._bg_tasks
+
+    asyncio.run(_drive())
