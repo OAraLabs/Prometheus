@@ -170,13 +170,23 @@ class FallbackTarget:
     is_local_backend: bool
 
 
-def build_fallback_target(model_config: dict | None) -> FallbackTarget | None:
+def build_fallback_target(
+    model_config: dict | None,
+    detected_model: str | None = None,
+) -> FallbackTarget | None:
     """Construct the fallback target from the LOCAL model configuration, or None.
 
     Configured, not hardcoded (Phase 4). `model.fallback` may name a different section; absent,
     the local model config is the target, which is what `GET /api/models` already reports as
     `is_default`. Returns None when nothing usable is configured — the caller then passes the
     provider's own error through, which beats a message about a fallback that does not exist.
+
+    `detected_model` is what the caller resolved as the live model name, and it is REQUIRED in
+    practice rather than a nicety: `model.model` is blank on the recommended configuration. The
+    template says so in its own words — "A HINT, not an assertion. The BACKEND is authoritative
+    ... Leave blank unless you need a name for a backend that cannot be asked." Requiring the
+    config field therefore returned None on the very setup this daemon ships with, leaving the
+    fallback inert for the second time.
     """
     if not model_config:
         return None
@@ -184,7 +194,9 @@ def build_fallback_target(model_config: dict | None) -> FallbackTarget | None:
     if cfg.get("enabled") is False:
         return None
     provider_name = str(cfg.get("provider") or "llama_cpp")
-    model = str(cfg.get("model") or "")
+    # Config first (an explicit `model.fallback.model` is an operator saying so), then what the
+    # backend actually reports. Blank config is the NORMAL case here, not a misconfiguration.
+    model = str(cfg.get("model") or detected_model or "")
     if not model:
         return None
     try:

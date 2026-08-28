@@ -1544,7 +1544,7 @@ def main() -> None:
         log.warning("profile store unavailable — advertisement unfiltered", exc_info=True)
 
     context = LoopContext(
-        fallback=build_fallback_target(model_cfg),
+        fallback=build_fallback_target(model_cfg, detected_model=model_name),
         provider=provider,
         model=model_name,
         system_prompt=system_prompt,
