@@ -30,6 +30,10 @@ dependencies = [
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
+# GRAFT-MOBILE-BRIDGE 2: APNs push. ES256 JWT is hand-rolled on cryptography
+# (no APNs library, per the spec); h2 gives httpx its HTTP/2. push.enabled
+# with these missing fails the boot loudly.
+push = ["cryptography>=42", "h2>=4"]
 browser = ["playwright>=1.40"]
 # Onboarding Phase 0 papercut: whisper STT was used for voice input but
 # never declared anywhere. The faster-whisper python API is the pip-

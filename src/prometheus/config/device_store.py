@@ -40,6 +40,18 @@ class DeviceRow:
     revoked_at: float | None
 
 
+@dataclass(frozen=True)
+class PushTarget:
+    """What the APNs sender needs about one device — separate from DeviceRow
+    on purpose: the REST device listing must never carry the APNs token."""
+
+    id: str
+    apns_token: str
+    environment: str
+    bundle_id: str
+    push_failures: int
+
+
 class DeviceStore:
     """SQLite-backed device registry. Safe for cross-thread use the same way
     the LCM stores are (``check_same_thread=False``; callers serialize)."""
@@ -60,8 +72,37 @@ class DeviceStore:
             );
         """)
         self._conn.commit()
+        self._migrate_push_columns()
         # Throttle memory: device_id -> monotonic-ish wall time of last stamp.
         self._last_touch: dict[str, float] = {}
+
+    def _migrate_push_columns(self) -> None:
+        """GRAFT Piece 2: push registration lives on the device row. ALTER is
+        additive and idempotent-by-check — a Piece-1 devices.db gains the
+        columns on first open, a fresh db already has them from here."""
+        have = {r["name"] for r in self._conn.execute("PRAGMA table_info(api_devices)")}
+        for column, decl in (
+            ("apns_token", "TEXT"),
+            ("apns_environment", "TEXT"),
+            ("apns_bundle_id", "TEXT"),
+            ("push_failures", "INTEGER DEFAULT 0"),
+        ):
+            if column not in have:
+                self._conn.execute(f"ALTER TABLE api_devices ADD COLUMN {column} {decl}")
+        # Live Activity per-activity push tokens (device × session). Its own
+        # table: a device runs at most a handful of live activities, each with
+        # a token ActivityKit rotates, and a stale row must be droppable
+        # without touching the device row.
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS activity_tokens (
+              device_id      TEXT NOT NULL,
+              session_id     TEXT NOT NULL,
+              activity_token TEXT NOT NULL,
+              updated_at     REAL NOT NULL,
+              PRIMARY KEY (device_id, session_id)
+            );
+        """)
+        self._conn.commit()
 
     # ------------------------------------------------------------------
 
@@ -122,6 +163,102 @@ class DeviceStore:
             )
             self._conn.commit()
         return True
+
+    # ------------------------------------------------------------------
+    # Push registration (GRAFT Piece 2)
+    # ------------------------------------------------------------------
+
+    def set_push(self, device_id: str, apns_token: str, environment: str,
+                 bundle_id: str) -> bool:
+        """Register (or replace) a device's APNs token. False for an unknown
+        or revoked device — a tombstone must not be re-armable for push."""
+        cur = self._conn.execute(
+            "UPDATE api_devices SET apns_token = ?, apns_environment = ?,"
+            " apns_bundle_id = ?, push_failures = 0"
+            " WHERE id = ? AND revoked_at IS NULL",
+            (apns_token, environment, bundle_id, device_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def clear_push(self, device_id: str) -> bool:
+        """Drop a device's push registration (user disabled notifications, or
+        Apple said 410 Unregistered). True if the device exists at all."""
+        cur = self._conn.execute(
+            "UPDATE api_devices SET apns_token = NULL, apns_environment = NULL,"
+            " apns_bundle_id = NULL, push_failures = 0 WHERE id = ?",
+            (device_id,),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def record_push_failure(self, device_id: str) -> int:
+        """Increment and return the device's consecutive push failure count."""
+        self._conn.execute(
+            "UPDATE api_devices SET push_failures = COALESCE(push_failures, 0) + 1"
+            " WHERE id = ?", (device_id,),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT push_failures FROM api_devices WHERE id = ?", (device_id,)
+        ).fetchone()
+        return int(row["push_failures"]) if row else 0
+
+    def reset_push_failures(self, device_id: str) -> None:
+        self._conn.execute(
+            "UPDATE api_devices SET push_failures = 0 WHERE id = ?", (device_id,)
+        )
+        self._conn.commit()
+
+    def push_targets(self) -> list[PushTarget]:
+        """Live (non-revoked) devices with a push registration. The APNs token
+        is deliberately NOT on DeviceRow: GET /api/devices must never leak it."""
+        rows = self._conn.execute(
+            "SELECT id, apns_token, apns_environment, apns_bundle_id, push_failures"
+            " FROM api_devices"
+            " WHERE revoked_at IS NULL AND apns_token IS NOT NULL"
+        ).fetchall()
+        return [PushTarget(id=r["id"], apns_token=r["apns_token"],
+                           environment=r["apns_environment"] or "production",
+                           bundle_id=r["apns_bundle_id"] or "",
+                           push_failures=int(r["push_failures"] or 0))
+                for r in rows]
+
+    # ------------------------------------------------------------------
+    # Live Activity tokens (GRAFT Piece 2)
+    # ------------------------------------------------------------------
+
+    def set_activity_token(self, device_id: str, session_id: str, token: str) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO activity_tokens"
+            " (device_id, session_id, activity_token, updated_at) VALUES (?, ?, ?, ?)",
+            (device_id, session_id, token, time.time()),
+        )
+        self._conn.commit()
+
+    def clear_activity_token(self, device_id: str, session_id: str) -> None:
+        self._conn.execute(
+            "DELETE FROM activity_tokens WHERE device_id = ? AND session_id = ?",
+            (device_id, session_id),
+        )
+        self._conn.commit()
+
+    def activity_targets(self, session_id: str) -> list[tuple[PushTarget, str]]:
+        """(push target, activity_token) pairs for a session's live activities.
+        Joined on live push-registered devices: a revoked or push-cleared
+        device's activity token is unreachable and simply drops out."""
+        rows = self._conn.execute(
+            "SELECT d.id, d.apns_token, d.apns_environment, d.apns_bundle_id,"
+            "       d.push_failures, a.activity_token"
+            "  FROM activity_tokens a JOIN api_devices d ON d.id = a.device_id"
+            " WHERE a.session_id = ? AND d.revoked_at IS NULL AND d.apns_token IS NOT NULL",
+            (session_id,),
+        ).fetchall()
+        return [(PushTarget(id=r["id"], apns_token=r["apns_token"],
+                            environment=r["apns_environment"] or "production",
+                            bundle_id=r["apns_bundle_id"] or "",
+                            push_failures=int(r["push_failures"] or 0)),
+                 r["activity_token"]) for r in rows]
 
     # ------------------------------------------------------------------
 

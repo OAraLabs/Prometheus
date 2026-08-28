@@ -95,6 +95,10 @@ class WebSocketBridge:
         # can only ask "is ANY client connected", and a desktop being open
         # would silently suppress the phone's push.
         self._ws_identity: dict[Any, Any] = {}
+        # GRAFT Piece 2: set by the launcher when push.enabled. The bridge
+        # feeds it agent_progress pulses and chat_done (Live Activity source);
+        # bus signals reach it via its own subscription.
+        self.push_dispatcher: Any | None = None
         self._clients: set[Any] = set()
         # Monotonic since boot — see delivery_stats(). A frame that fails to
         # send is gone; these are the only record that it existed.
@@ -1088,6 +1092,7 @@ class WebSocketBridge:
                 "timestamp": time.time(),
                 "payload": done_payload,
             })
+            await self._end_live_activity(session_id, done_payload)
             self._schedule_session_title(session_id, session)
             return accumulated, last_usage
 
@@ -1127,6 +1132,7 @@ class WebSocketBridge:
                 "timestamp": time.time(),
                 "payload": done_payload,
             })
+            await self._end_live_activity(session_id, done_payload)
             return accumulated, last_usage
 
         except Exception as e:
@@ -1222,24 +1228,43 @@ class WebSocketBridge:
         while True:
             try:
                 await asyncio.sleep(interval)
+                pulse_payload = {
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "phase": progress["phase"],
+                    "tool_name": progress["tool_name"],
+                    "round": progress["round"],
+                    "chars": progress["chars"],
+                    "tool_calls": progress["tool_calls"],
+                    "elapsed_s": round(time.time() - started_at, 1),
+                }
                 await self.broadcast({
                     "type": "agent_progress",
                     "timestamp": time.time(),
-                    "payload": {
-                        "session_id": session_id,
-                        "message_id": message_id,
-                        "phase": progress["phase"],
-                        "tool_name": progress["tool_name"],
-                        "round": progress["round"],
-                        "chars": progress["chars"],
-                        "tool_calls": progress["tool_calls"],
-                        "elapsed_s": round(time.time() - started_at, 1),
-                    },
+                    "payload": pulse_payload,
                 })
+                # GRAFT Piece 2: the pulse is also the Live Activity update
+                # source; the dispatcher throttles (Apple rate-limits
+                # liveactivity pushes — the 3s cadence is for live sockets).
+                dispatcher = getattr(self, "push_dispatcher", None)
+                if dispatcher is not None:
+                    await dispatcher.on_agent_progress(session_id, pulse_payload)
             except asyncio.CancelledError:
                 raise  # normal teardown — the turn ended
             except Exception:
                 logger.debug("agent_progress emit failed", exc_info=True)
+
+    async def _end_live_activity(self, session_id: str, done_payload: dict) -> None:
+        """GRAFT Piece 2: a turn's end ends its Live Activity — one final push,
+        then the token row drops. Never raises; a push failure must not touch
+        the turn's own completion path."""
+        dispatcher = getattr(self, "push_dispatcher", None)
+        if dispatcher is None:
+            return
+        try:
+            await dispatcher.on_chat_done(session_id, done_payload)
+        except Exception:
+            logger.debug("live activity end push failed", exc_info=True)
 
     async def _on_signal(self, signal: Any) -> None:
         """Forward a SignalBus event to all connected clients."""
