@@ -13,7 +13,6 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import logging
 import time
@@ -68,6 +67,7 @@ class WebSocketBridge:
         api_token: str | None = None,
         config: dict | None = None,
         approval_queue: Any | None = None,
+        device_store: Any | None = None,
     ) -> None:
         self.signal_bus = signal_bus
         self.session_mgr = session_mgr
@@ -86,6 +86,15 @@ class WebSocketBridge:
         # the REST side, so dev/no-token setups (and the tokenless static UI)
         # keep working unchanged.
         self._api_token = api_token or ""
+        # GRAFT-MOBILE-BRIDGE 1: enrolled device tokens (shared instance with
+        # the REST middleware, so revocation and last_seen agree). None =>
+        # only the global token authenticates, exactly as before.
+        self._device_store = device_store
+        # websocket -> DeviceIdentity, recorded at auth. Piece 2's per-device
+        # "has a live WS client" check reads this; without it a push fan-out
+        # can only ask "is ANY client connected", and a desktop being open
+        # would silently suppress the phone's push.
+        self._ws_identity: dict[Any, Any] = {}
         self._clients: set[Any] = set()
         # Monotonic since boot — see delivery_stats(). A frame that fails to
         # send is gone; these are the only record that it existed.
@@ -118,23 +127,32 @@ class WebSocketBridge:
         """True when a non-empty token is configured (parity with REST)."""
         return bool(self._api_token)
 
-    def _token_ok(self, raw: str) -> bool:
-        """Validate a first-frame auth message: {"type":"auth","token":...}.
+    def _auth_identity(self, raw: str):
+        """Resolve a first-frame auth message to a DeviceIdentity, or None.
 
-        Constant-time token comparison (``hmac.compare_digest``) so a timing
-        side-channel can't probe the secret. Any parse error, wrong type, or
-        missing/incorrect token is a clean False — the caller closes 4401.
+        {"type":"auth","token":...} — the token may be the global secret or an
+        enrolled device token (GRAFT-MOBILE-BRIDGE 1). verify_token compares
+        constant-time and consults the device registry; a revoked device is
+        None, so its next connect closes 4401. Any parse error, wrong type, or
+        missing/incorrect token is a clean None.
         """
         try:
             msg = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            return False
+            return None
         if not isinstance(msg, dict) or msg.get("type") != "auth":
-            return False
+            return None
         token = msg.get("token")
         if not isinstance(token, str):
-            return False
-        return hmac.compare_digest(token, self._api_token)
+            return None
+        from prometheus.config.api_token import verify_token
+
+        return verify_token(token, self._api_token, self._device_store)
+
+    def _token_ok(self, raw: str) -> bool:
+        """Boolean form of :meth:`_auth_identity` (kept for callers and tests
+        that only need pass/fail)."""
+        return self._auth_identity(raw) is not None
 
     async def start(self, host: str = "0.0.0.0", port: int = 8010) -> None:
         """Start the WebSocket server."""
@@ -190,6 +208,7 @@ class WebSocketBridge:
             pass
         finally:
             self._clients.discard(websocket)
+            self._ws_identity.pop(websocket, None)
             logger.info("Client disconnected (%d remain)", len(self._clients))
 
     async def _authenticate(self, websocket: Any) -> bool:
@@ -211,7 +230,11 @@ class WebSocketBridge:
             # Connection dropped/closed before sending anything.
             return False
 
-        if self._token_ok(raw):
+        identity = self._auth_identity(raw)
+        if identity is not None:
+            # Recorded for per-device liveness (Piece 2 reads this); cleaned
+            # up in _handler's finally alongside _clients.
+            self._ws_identity[websocket] = identity
             return True
         await self._close_unauthorized(websocket, "invalid or missing auth token")
         return False

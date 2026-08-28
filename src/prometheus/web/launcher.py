@@ -63,6 +63,14 @@ async def launch_web(
     # Shared mutable state ref for agent state
     agent_state_ref = {"state": "idle"}
 
+    # GRAFT-MOBILE-BRIDGE 1: ONE DeviceStore shared by the REST middleware and
+    # the WS bridge, so a revocation or last_seen stamp is immediately visible
+    # to both. Created unconditionally — on an open (token-less) daemon device
+    # tokens are simply never consulted.
+    from prometheus.config.device_store import DeviceStore
+
+    device_store = DeviceStore()
+
     # Create FastAPI app
     app = create_app(
         config=config,
@@ -79,6 +87,7 @@ async def launch_web(
         model_router=getattr(loop_context, "model_router", None),
         static_dir=static_dir,
         skill_creator=skill_creator,
+        device_store=device_store,
     )
 
     # Wire agent state ref into the app
@@ -106,6 +115,7 @@ async def launch_web(
         api_token=_api_token,
         config=config,
         approval_queue=approval_queue,
+        device_store=device_store,
     )
 
     # Expose the bridge on the FastAPI app so REST routes (e.g.

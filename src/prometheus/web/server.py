@@ -134,6 +134,7 @@ def create_app(
     static_dir: str | Path | None = None,
     boot_sha: str = "unknown",
     skill_creator: Any | None = None,
+    device_store: Any | None = None,
 ) -> FastAPI:
     """Create the FastAPI application with all routes."""
 
@@ -159,6 +160,25 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # ── Device registry (GRAFT-MOBILE-BRIDGE 1) ─────────────────────
+    # The launcher passes a shared DeviceStore (same instance as the WS
+    # bridge, so revocation and last_seen agree). Bare create_app() leaves it
+    # None: the middleware then simply rejects device tokens (verify_token
+    # treats store=None as "no registry"), and only the /api/devices routes
+    # create one on demand — a unit-test construction never touches the
+    # filesystem unless it exercises the device surface itself.
+    _device_store_holder: list[Any] = [device_store]
+
+    def _devices() -> Any:
+        return _device_store_holder[0]
+
+    def _devices_or_create() -> Any:
+        if _device_store_holder[0] is None:
+            from prometheus.config.device_store import DeviceStore
+
+            _device_store_holder[0] = DeviceStore()
+        return _device_store_holder[0]
 
     # ── Bearer token auth + body-size guard on /api/* routes ────────
 
@@ -187,10 +207,65 @@ def create_app(
             except ValueError:
                 return JSONResponse(status_code=400, content={"error": "invalid Content-Length"})
         if _api_token and request.url.path.startswith("/api/"):
+            # GRAFT-MOBILE-BRIDGE 1: the bearer may be the global token or an
+            # enrolled device token. verify_token compares constant-time (the
+            # old `!=` here was the timing side-channel the graft spec flags)
+            # and resolves who presented it; routes that care (POST
+            # /api/devices is global-only, GET marks is_self) read the
+            # identity off request.state.
+            from prometheus.config.api_token import verify_token as _verify_token
+
             auth = request.headers.get("authorization", "")
-            if auth != f"Bearer {_api_token}":
+            presented = auth[7:] if auth.startswith("Bearer ") else ""
+            identity = _verify_token(presented, _api_token, _devices())
+            if identity is None:
                 return JSONResponse(status_code=401, content={"error": "unauthorized — set Authorization: Bearer <token>"})
+            request.state.device_identity = identity
         return await call_next(request)
+
+    # ── /api/devices — enrolment, listing, revocation (GRAFT 1) ─────
+
+    @app.post("/api/devices", status_code=201)
+    async def create_device(request: Request):
+        identity = getattr(request.state, "device_identity", None)
+        if _api_token and (identity is None or not identity.is_global):
+            # Global-only BY DESIGN: a stolen phone must not be able to enrol
+            # a second attacker device. 401, not 403 — a device token is the
+            # wrong credential for this route, not a lesser one.
+            return JSONResponse(status_code=401, content={
+                "error": "minting a device token requires the global token"})
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "body must be JSON"})
+        name = str(body.get("name") or "").strip()
+        if not name:
+            return JSONResponse(status_code=400, content={"error": "name is required"})
+        platform = str(body.get("platform") or "").strip().lower()
+        if platform not in ("ios", "macos"):
+            platform = "other"
+        # The response is the ONLY copy of the plaintext token that will ever
+        # exist — the store keeps a SHA-256.
+        return _devices_or_create().mint(name, platform)
+
+    @app.get("/api/devices")
+    async def list_devices(request: Request):
+        identity = getattr(request.state, "device_identity", None)
+        self_id = identity.id if identity is not None else ""
+        return [{
+            "id": d.id, "name": d.name, "platform": d.platform,
+            "created_at": d.created_at, "last_seen_at": d.last_seen_at,
+            "revoked_at": d.revoked_at, "is_self": d.id == self_id,
+        } for d in _devices_or_create().list_devices()]
+
+    @app.delete("/api/devices/{device_id}")
+    async def revoke_device(device_id: str):
+        # Deliberately open to ANY valid token: a phone revokes itself on
+        # "Sign out". Revocation is a tombstone; the next request or WS
+        # connect with that device's token fails auth.
+        if not _devices_or_create().revoke(device_id):
+            return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
+        return {"ok": True, "id": device_id}
 
     # Store references for route handlers
     app.state.config = config
