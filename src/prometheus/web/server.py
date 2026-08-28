@@ -1057,6 +1057,156 @@ def create_app(
 
     # ── Wiki Stats ──────────────────────────────────────────────────
 
+    # ── Wiki read surface ────────────────────────────────────────────────
+    # /api/wiki/stats has counted 317 pages for months without offering a way to read one, so
+    # "what does the agent know about X" could only be asked by asking the agent. These routes
+    # answer it directly.
+    #
+    # Confinement is DELEGATED, not reimplemented: DocumentsService is root-parameterised and
+    # wraps ProcessSandbox, which resolves symlinks before testing containment (a "starts with"
+    # check is the classic wrong answer here). Rooting a second instance at the wiki gives the
+    # already-audited guard rather than a second hand-written one.
+    #
+    # READ-ONLY on purpose. The service can save and edit; none of that is wired. The wiki is
+    # agent-authored, and a human editing it underneath the compiler is a different feature with
+    # a different set of questions.
+
+    _wiki_service_cache: dict[str, Any] = {}
+
+    def _wiki_service():
+        from prometheus.documents.service import DocumentsService
+
+        root = str(get_wiki_root())
+        if _wiki_service_cache.get("root") != root:
+            _wiki_service_cache["root"] = root
+            _wiki_service_cache["svc"] = DocumentsService(root=root)
+        return _wiki_service_cache["svc"]
+
+    def _wiki_read(rel: str) -> str | None:
+        """One page's text, or None when the path does not resolve INSIDE the wiki root.
+
+        EVERY disk read in these routes goes through here, because "the path came from a
+        server-side walk" is NOT the same as "the path is inside the root". `rglob` yields
+        symlinked FILES (it declines to recurse into symlinked *directories*, which is a
+        different guarantee) and `iterdir` lists them, so a walk can hand you a path that
+        resolves anywhere on the box. Reading it directly leaked an out-of-root heading into a
+        listing title and an out-of-root body into a search snippet.
+
+        The service resolves before it reads — the same audited guard /api/wiki/page uses — so
+        an escape raises here and the caller skips the page instead of serving it.
+        """
+        from prometheus.documents import DocumentsError
+
+        try:
+            doc = _wiki_service().read(rel)
+        except DocumentsError:
+            return None
+        except OSError:
+            # An unreadable page (permissions, a dangling link) is skipped, not a 500 for the
+            # whole listing. The service does not wrap this one — read() opens directly.
+            return None
+        # Content is capped by the service (256 KB); a page past that searches its head only.
+        return None if doc.get("binary") else doc.get("content", "")
+
+    def _wiki_title(text: str, stem: str) -> str:
+        """First markdown heading, else the filename. Pages are agent-authored and normally lead
+        with an H1, but a page that does not must still be nameable in a list."""
+        for line in text.split("\n", 12)[:12]:
+            if line.startswith("#"):
+                return line.lstrip("#").strip() or stem
+        return stem
+
+    @app.get("/api/wiki/pages")
+    async def list_wiki_pages(path: str = ""):
+        """List a wiki directory. Empty path = the sections (topics/, projects/, …)."""
+        from prometheus.documents import DocumentsError
+
+        try:
+            rel, entries = _wiki_service().list_dir(path)
+        except DocumentsError as exc:
+            return _documents_error(exc)
+        out = []
+        for e in entries:
+            item = {"name": e.name, "type": e.type, "size": e.size, "mtime": e.mtime}
+            if e.type == "file" and e.name.endswith(".md"):
+                text = _wiki_read(f"{rel}/{e.name}" if rel else e.name)
+                if text is None:
+                    # Resolves outside the root (or is unreadable): /api/wiki/page would refuse
+                    # it, so listing it would only offer a row that 403s on click.
+                    continue
+                item["title"] = _wiki_title(text, Path(e.name).stem)
+            out.append(item)
+        return {"path": rel, "entries": out}
+
+    @app.get("/api/wiki/page")
+    async def read_wiki_page(path: str):
+        """One page's markdown. The path is client-supplied and therefore confined by the service."""
+        from prometheus.documents import DocumentsError
+
+        if not path.endswith(".md"):
+            return JSONResponse(status_code=400, content={"error": "wiki pages are .md files"})
+        try:
+            doc = _wiki_service().read(path)
+        except DocumentsError as exc:
+            return _documents_error(exc)
+        return doc
+
+    @app.get("/api/wiki/search")
+    async def search_wiki(q: str, limit: int = 20):
+        """Substring search over page titles and bodies — "what does it know about X".
+
+        DELIBERATELY not the FTS path /api/search uses: that indexes conversations, this walks a
+        few hundred agent-authored markdown files. A grep is honest at this size and needs no
+        index to fall out of date. No client string ever reaches the filesystem — but a
+        server-generated path is not automatically an in-root path, so each page is still read
+        through _wiki_read's guard.
+        """
+        needle = (q or "").strip().lower()
+        if len(needle) < 2:
+            return {"query": q, "returned": 0, "results": []}
+        root = get_wiki_root()
+        if not root.exists():
+            return {"query": q, "returned": 0, "results": []}
+        capped = max(1, min(int(limit), 100))
+        results: list[dict] = []
+        truncated = False
+        for page in sorted(root.rglob("*.md")):
+            rel = str(page.relative_to(root))
+            body = _wiki_read(rel)
+            if body is None:
+                continue
+            title = _wiki_title(body, page.stem)
+            in_title = needle in title.lower()
+            in_path = needle in rel.lower()
+            idx = body.lower().find(needle)
+            if not (in_title or in_path or idx >= 0):
+                continue
+            # Counted only once the page is known to MATCH, so `truncated` means "there were
+            # more hits", not "the walk stopped somewhere".
+            if len(results) >= capped:
+                truncated = True
+                break
+            snippet = ""
+            if idx >= 0:
+                start = max(0, idx - 60)
+                snippet = body[start : idx + 140].replace("\n", " ").strip()
+            results.append({
+                "path": rel,
+                "section": rel.split("/")[0] if "/" in rel else "",
+                "title": title,
+                "snippet": snippet,
+                # Where the match was: a title hit, a path hit and a body hit are different
+                # answers to "does it know about X". These stay SEPARATE — folding the path into
+                # in_title made topics/vault-runbook.md titled "Daily Notes" claim "runbook" was
+                # in its title, which is what a client renders a name-match badge from.
+                "in_title": in_title,
+                "in_path": in_path,
+                "mtime": page.stat().st_mtime,
+            })
+        # `returned` alone cannot distinguish "that is all of them" from "that is the first 20
+        # in path order", and this walk is not relevance-ranked.
+        return {"query": q, "returned": len(results), "truncated": truncated, "results": results}
+
     @app.get("/api/wiki/stats")
     async def get_wiki_stats():
         wiki_dir = get_wiki_root()
