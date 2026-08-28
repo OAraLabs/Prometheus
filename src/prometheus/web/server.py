@@ -1057,6 +1057,123 @@ def create_app(
 
     # ── Wiki Stats ──────────────────────────────────────────────────
 
+    # ── Wiki read surface ────────────────────────────────────────────────
+    # /api/wiki/stats has counted 317 pages for months without offering a way to read one, so
+    # "what does the agent know about X" could only be asked by asking the agent. These routes
+    # answer it directly.
+    #
+    # Confinement is DELEGATED, not reimplemented: DocumentsService is root-parameterised and
+    # wraps ProcessSandbox, which resolves symlinks before testing containment (a "starts with"
+    # check is the classic wrong answer here). Rooting a second instance at the wiki gives the
+    # already-audited guard rather than a second hand-written one.
+    #
+    # READ-ONLY on purpose. The service can save and edit; none of that is wired. The wiki is
+    # agent-authored, and a human editing it underneath the compiler is a different feature with
+    # a different set of questions.
+
+    _wiki_service_cache: dict[str, Any] = {}
+
+    def _wiki_service():
+        from prometheus.documents.service import DocumentsService
+
+        root = str(get_wiki_root())
+        if _wiki_service_cache.get("root") != root:
+            _wiki_service_cache["root"] = root
+            _wiki_service_cache["svc"] = DocumentsService(root=root)
+        return _wiki_service_cache["svc"]
+
+    def _wiki_title(path: Path) -> str:
+        """First markdown heading, else the filename. Pages are agent-authored and normally lead
+        with an H1, but a page that does not must still be nameable in a list."""
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                for _ in range(12):
+                    line = fh.readline()
+                    if not line:
+                        break
+                    if line.startswith("#"):
+                        return line.lstrip("#").strip() or path.stem
+        except OSError:
+            pass
+        return path.stem
+
+    @app.get("/api/wiki/pages")
+    async def list_wiki_pages(path: str = ""):
+        """List a wiki directory. Empty path = the sections (topics/, projects/, …)."""
+        from prometheus.documents import DocumentsError
+
+        try:
+            rel, entries = _wiki_service().list_dir(path)
+        except DocumentsError as exc:
+            return _documents_error(exc)
+        root = get_wiki_root()
+        out = []
+        for e in entries:
+            item = {"name": e.name, "type": e.type, "size": e.size, "mtime": e.mtime}
+            if e.type == "file" and e.name.endswith(".md"):
+                item["title"] = _wiki_title(root / rel / e.name if rel else root / e.name)
+            out.append(item)
+        return {"path": rel, "entries": out}
+
+    @app.get("/api/wiki/page")
+    async def read_wiki_page(path: str):
+        """One page's markdown. The path is client-supplied and therefore confined by the service."""
+        from prometheus.documents import DocumentsError
+
+        if not path.endswith(".md"):
+            return JSONResponse(status_code=400, content={"error": "wiki pages are .md files"})
+        try:
+            doc = _wiki_service().read(path)
+        except DocumentsError as exc:
+            return _documents_error(exc)
+        return doc
+
+    @app.get("/api/wiki/search")
+    async def search_wiki(q: str, limit: int = 20):
+        """Substring search over page titles and bodies — "what does it know about X".
+
+        DELIBERATELY not the FTS path /api/search uses: that indexes conversations, this walks a
+        few hundred agent-authored markdown files. A grep is honest at this size and needs no
+        index to fall out of date. Paths here are SERVER-generated (a walk of the root), so no
+        client string ever reaches the filesystem.
+        """
+        needle = (q or "").strip().lower()
+        if len(needle) < 2:
+            return {"query": q, "returned": 0, "results": []}
+        root = get_wiki_root()
+        if not root.exists():
+            return {"query": q, "returned": 0, "results": []}
+        capped = max(1, min(int(limit), 100))
+        results: list[dict] = []
+        for page in sorted(root.rglob("*.md")):
+            if len(results) >= capped:
+                break
+            try:
+                body = page.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            title = _wiki_title(page)
+            rel = str(page.relative_to(root))
+            hay = f"{rel}\n{title}\n{body}".lower()
+            if needle not in hay:
+                continue
+            idx = body.lower().find(needle)
+            snippet = ""
+            if idx >= 0:
+                start = max(0, idx - 60)
+                snippet = body[start : idx + 140].replace("\n", " ").strip()
+            results.append({
+                "path": rel,
+                "section": rel.split("/")[0] if "/" in rel else "",
+                "title": title,
+                "snippet": snippet,
+                # Where the match was: a title-only hit and a body hit are different answers to
+                # "does it know about X", and the client should be able to say which.
+                "in_title": needle in title.lower() or needle in rel.lower(),
+                "mtime": page.stat().st_mtime,
+            })
+        return {"query": q, "returned": len(results), "results": results}
+
     @app.get("/api/wiki/stats")
     async def get_wiki_stats():
         wiki_dir = get_wiki_root()
