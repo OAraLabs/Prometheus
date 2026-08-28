@@ -123,6 +123,31 @@ async def launch_web(
     # the WebSocket uses, without duplicating the session+agent plumbing.
     app.state.ws_bridge = bridge
 
+    # GRAFT Piece 2: APNs push. Enabled-but-broken fails the BOOT, loudly —
+    # a missing key or missing deps must not degrade to silent no-pushes
+    # (config-dark law, same stance as the Paperclip gateway below).
+    push_cfg = (config.get("push") or {})
+    if isinstance(push_cfg, dict) and push_cfg.get("enabled", False):
+        try:
+            import cryptography  # noqa: F401
+            import h2  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "push.enabled is true but the push deps are missing — "
+                "pip install 'oara-prometheus[push]' (cryptography + h2)"
+            ) from exc
+        from prometheus.push.apns import APNsSender, ApnsConfig
+        from prometheus.push.dispatcher import PushDispatcher
+
+        apns_config = ApnsConfig.from_config(push_cfg)  # raises on bad config
+        sender = APNsSender(apns_config)
+        dispatcher = PushDispatcher(device_store, sender, bridge)
+        bridge.push_dispatcher = dispatcher
+        if signal_bus:
+            signal_bus.subscribe("*", dispatcher.on_signal)
+        logger.info("APNs push enabled — topic %s, key %s",
+                    apns_config.topic, apns_config.key_id)
+
     # Paperclip fleet orchestration: when gateway.paperclip.enabled, mount the
     # heartbeat client behind POST /api/paperclip/wake. Runs work turns through
     # the SAME bridge flow as Beacon chat (sessions paperclip:issue:{id}).

@@ -774,6 +774,19 @@ web:
   #    Pinned equal to the readers by tests/test_config_defaults_equality.
   api_token:            # required — no code default
   dashboard_port: 3002
+
+# APNs push to enrolled devices (GRAFT-MOBILE-BRIDGE 2). Disabled by default:
+# enabling requires the `push` extra (pip install 'oara-prometheus[push]')
+# and an Apple p8 signing key — an enabled-but-broken block FAILS THE BOOT
+# loudly rather than silently pushing nothing. approval_pending pushes
+# always; turn/task completions push only to devices with no live WS client.
+push:
+  enabled: false
+  apns:
+    key_path:           # e.g. ~/.config/prometheus/AuthKey_XXXXXXXXXX.p8
+    key_id:             # the 10-char key id from the Apple developer portal
+    team_id:            # e.g. 53JM8W47RL
+    topic:              # the app's bundle id, e.g. com.oaralabs.beacon
 image_generation:
   default_backend: auto              # auto | pollinations | comfyui | dashscope
   comfyui:

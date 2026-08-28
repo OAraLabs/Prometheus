@@ -258,6 +258,73 @@ def create_app(
             "revoked_at": d.revoked_at, "is_self": d.id == self_id,
         } for d in _devices_or_create().list_devices()]
 
+    def _may_manage_push(request: Request, device_id: str):
+        """Push/activity registration is the device's own business (or the
+        global operator's): device A must not re-point device B's pushes.
+        Returns an error response, or None when allowed."""
+        identity = getattr(request.state, "device_identity", None)
+        if _api_token and not (identity is not None and
+                               (identity.is_global or identity.id == device_id)):
+            return JSONResponse(status_code=401, content={
+                "error": "a device may only manage its own push registration"})
+        return None
+
+    @app.put("/api/devices/{device_id}/push")
+    async def register_push(device_id: str, request: Request):
+        if (err := _may_manage_push(request, device_id)) is not None:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "body must be JSON"})
+        apns_token = str(body.get("apns_token") or "").strip()
+        environment = str(body.get("environment") or "").strip()
+        bundle_id = str(body.get("bundle_id") or "").strip()
+        if not apns_token or environment not in ("sandbox", "production") or not bundle_id:
+            return JSONResponse(status_code=400, content={
+                "error": "need apns_token, environment (sandbox|production), bundle_id"})
+        if not _devices_or_create().set_push(device_id, apns_token, environment, bundle_id):
+            return JSONResponse(status_code=404, content={"error": f"unknown or revoked device {device_id}"})
+        return {"ok": True}
+
+    @app.delete("/api/devices/{device_id}/push")
+    async def unregister_push(device_id: str, request: Request):
+        if (err := _may_manage_push(request, device_id)) is not None:
+            return err
+        if not _devices_or_create().clear_push(device_id):
+            return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
+        return {"ok": True}
+
+    @app.post("/api/devices/{device_id}/activity")
+    async def register_activity(device_id: str, request: Request):
+        if (err := _may_manage_push(request, device_id)) is not None:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "body must be JSON"})
+        session_id = str(body.get("session_id") or "").strip()
+        activity_token = str(body.get("activity_token") or "").strip()
+        if not session_id or not activity_token:
+            return JSONResponse(status_code=400, content={
+                "error": "need session_id and activity_token"})
+        _devices_or_create().set_activity_token(device_id, session_id, activity_token)
+        return {"ok": True}
+
+    @app.delete("/api/devices/{device_id}/activity")
+    async def unregister_activity(device_id: str, request: Request):
+        if (err := _may_manage_push(request, device_id)) is not None:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        session_id = str(body.get("session_id") or "").strip()
+        if not session_id:
+            return JSONResponse(status_code=400, content={"error": "need session_id"})
+        _devices_or_create().clear_activity_token(device_id, session_id)
+        return {"ok": True}
+
     @app.delete("/api/devices/{device_id}")
     async def revoke_device(device_id: str):
         # Deliberately open to ANY valid token: a phone revokes itself on
