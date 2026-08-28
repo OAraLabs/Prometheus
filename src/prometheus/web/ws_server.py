@@ -981,6 +981,23 @@ class WebSocketBridge:
                         },
                     })
 
+                elif event_type == "ProviderDegraded":
+                    # A non-chat client renders frames, not reply prose, so without this it would
+                    # show a normal answer from a model nobody chose. requested vs served stay
+                    # SEPARATE on the wire — collapsing them is what made "why did my model
+                    # change?" unanswerable.
+                    await self.broadcast({
+                        "type": "provider_degraded",
+                        "timestamp": time.time(),
+                        "payload": {
+                            "session_id": session_id,
+                            "requested_model": event.requested_model,
+                            "served_model": event.served_model,
+                            "provider": event.provider_name,
+                            "reason": event.reason,
+                        },
+                    })
+
                 elif event_type == "ToolExecutionStarted":
                     progress["phase"] = "tool"
                     progress["tool_name"] = event.tool_name

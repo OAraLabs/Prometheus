@@ -199,3 +199,74 @@ def test_extraction_sees_the_MODEL_s_text_not_our_notice():
     # ...and the notice still reached history, so this is the ordering being right, not the
     # injection being absent.
     assert "⚠" in turns[0].message.text
+
+
+# ── the WS frame: non-chat clients learn about the degrade too ───────────────────────────────
+
+def _run_collecting_all_events(adapter=None):
+    from prometheus.engine.fallback import FallbackTarget
+
+    local = _WorkingLocal()
+    context = LoopContext(
+        provider=_ExpiredKey(), model="qwen3.8-max",
+        system_prompt="- Model: qwen3.8-max (provider: qwen)",
+        max_tokens=512, session_id="ws1", adapter=adapter,
+        fallback=FallbackTarget(model="Qwen3.8-27B", provider_name="llama_cpp",
+                                provider=local, is_local_backend=True),
+    )
+    events = []
+
+    async def go():
+        async for event, _u in run_loop(context, [ConversationMessage.from_user_text("2+2?")]):
+            events.append(event)
+
+    asyncio.run(go())
+    return events
+
+
+def test_a_degrade_yields_a_ProviderDegraded_event():
+    from prometheus.engine.stream_events import ProviderDegraded
+
+    events = _run_collecting_all_events()
+    degrades = [e for e in events if isinstance(e, ProviderDegraded)]
+    assert len(degrades) == 1, f"expected exactly one degrade event, got {len(degrades)}"
+    d = degrades[0]
+    assert d.requested_model == "qwen3.8-max", "what the caller asked for"
+    assert d.served_model == "Qwen3.8-27B", "what actually answered"
+    assert d.provider_name == "llama_cpp"
+    assert "unavailable" in d.reason
+
+
+def test_the_event_precedes_the_fallbacks_output():
+    """A client that renders it after the answer has already shown an unexplained reply."""
+    from prometheus.engine.stream_events import AssistantTurnComplete, ProviderDegraded
+
+    events = _run_collecting_all_events()
+    first_degrade = next(i for i, e in enumerate(events) if isinstance(e, ProviderDegraded))
+    first_turn = next(i for i, e in enumerate(events) if isinstance(e, AssistantTurnComplete))
+    assert first_degrade < first_turn, "the degrade must be announced before the turn completes"
+
+
+def test_requested_and_served_are_SEPARATE_fields():
+    """Collapsing them is what made "why did my model change?" unanswerable, and is why fallback
+    was kept out of the router's decision path."""
+    from prometheus.engine.stream_events import ProviderDegraded
+
+    d = next(e for e in _run_collecting_all_events() if isinstance(e, ProviderDegraded))
+    assert d.requested_model != d.served_model
+
+
+def test_a_healthy_turn_yields_no_degrade_event():
+    from prometheus.engine.stream_events import ProviderDegraded
+
+    local = _WorkingLocal()
+    context = LoopContext(provider=local, model="Qwen3.8-27B", system_prompt="s",
+                          max_tokens=512, session_id="ws2")
+    events = []
+
+    async def go():
+        async for event, _u in run_loop(context, [ConversationMessage.from_user_text("hi")]):
+            events.append(event)
+
+    asyncio.run(go())
+    assert not any(isinstance(e, ProviderDegraded) for e in events)
