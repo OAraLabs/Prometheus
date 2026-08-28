@@ -42,6 +42,8 @@ from prometheus.providers.base import (
     ApiTextDeltaEvent,
     ModelProvider,
 )
+from prometheus.context.system_prompt import rewrite_model_identity
+from prometheus.engine.fallback import stream_round_with_fallback
 
 from typing import TYPE_CHECKING
 
@@ -607,6 +609,10 @@ class LoopContext:
     # Tool Calling Middle Layer sprint
     tool_loader: object | None = None     # DynamicToolLoader for deferred loading
     compactor: object | None = None       # ContextCompactor (compaction.enabled)
+    # SPRINT-provider-fallback: where a turn goes when the provider fails TERMINALLY (auth /
+    # billing — never a 429, which is already retried a layer down). None disables it, which is
+    # also the Phase 4 opt-out coding mode relies on to keep its pinned-provider guarantee.
+    fallback: object | None = None        # FallbackTarget
     # H1: per-result cap (tokens) applied to EACH tool result before injection,
     # via ToolResultTruncator's per-tool strategies. 0 disables (back-compat for
     # tests/benchmarks). Runs before the cross-result turn budget below, and
@@ -1041,28 +1047,21 @@ async def _run_loop(
                 # prompt to avoid pulling environment detection into the hot
                 # path of every request.
                 if decision.provider_name or decision.model_name:
-                    import re as _re
-                    provider_name = decision.provider_name or "unknown"
-                    model_name = decision.model_name or "unknown"
-                    new_line = f"- Model: {model_name} (provider: {provider_name})"
-                    # On non-primary routes, a trailing clause out-ranks the
-                    # Infrastructure/ANATOMY section: without it, an overridden
-                    # cloud model reads the local GPU node's "Loaded:" entry
-                    # and answers "what model is this?" with the local GGUF
-                    # filename. Primary routes skip it — there the serving
-                    # model IS the local backend and the clause would be false.
-                    if reason_repr != "primary":
-                        new_line += (
-                            " — the ACTIVE model serving this conversation;"
-                            " any model in the Infrastructure section is a"
-                            " separate local backend, not you"
-                        )
-                    context.system_prompt = _re.sub(
-                        r"^- Model: .*$",
-                        new_line,
+                    # Shared with the fallback handler rather than copied: a second copy is how
+                    # a swapped-in model ends up claiming to be the primary, which is the bug
+                    # this rewrite exists to prevent.
+                    #
+                    # `reason_repr == "primary"` is passed as the ANSWER to "is the serving
+                    # model the local backend", which is what the old `!= "primary"` gate
+                    # actually meant. See rewrite_model_identity's docstring — the fallback is a
+                    # caller where route-reason and local-backend stop agreeing.
+                    from prometheus.context.system_prompt import rewrite_model_identity
+
+                    context.system_prompt = rewrite_model_identity(
                         context.system_prompt,
-                        count=1,
-                        flags=_re.MULTILINE,
+                        model_name=decision.model_name or "unknown",
+                        provider_name=decision.provider_name or "unknown",
+                        serving_is_local_backend=(reason_repr == "primary"),
                     )
             except Exception:
                 # Phase 4: elevated from DEBUG → WARNING. A silent DEBUG here
@@ -1297,10 +1296,13 @@ async def _run_loop(
                     "ContextCompactor.apply raised — sending uncompacted")
                 render_source = messages
 
-        async for event in loop_envelope.stream(
-            provider=context.provider,
-            request=ApiMessageRequest(
-                model=context.model,
+        # One round, degrading to context.fallback on a terminal provider failure. The envelope
+        # still observes and re-raises; this is the recovery its docstring says the loop owns.
+        def _build_request(_model: str) -> ApiMessageRequest:
+            # Rebuilt per attempt: the model name is part of the payload, so reusing the failed
+            # request would ask the local backend to serve the cloud model's name.
+            return ApiMessageRequest(
+                model=_model,
                 # Context-assembly: fence any untrusted injected turns (task
                 # output, watched-file contents, cron data) with the derived
                 # banner before the provider serializes them. The session/LCM
@@ -1312,7 +1314,53 @@ async def _run_loop(
                 suppress_thinking=context.suppress_thinking,
                 suppress_tools=not tools_enabled,
                 tool_choice=round_tool_choice,
-            ),
+            )
+
+        def _window_for(_model: str) -> tuple[int, bool]:
+            if context.compactor is None:
+                return 0, False
+            # Measured only for a local backend — llama.cpp publishes n_ctx at /props. Cloud
+            # APIs do not publish context length at all, so that side is a configured floor and
+            # the refusal message must say which it had.
+            measured = bool(getattr(context.fallback, "is_local_backend", False))
+            return context.compactor.limit_for(_model), measured
+
+        def _estimate_tokens() -> int:
+            if context.compactor is None:
+                return 0
+            return context.compactor.estimate_total(
+                per_call_system_prompt,
+                render_source,
+                len(str(_payload_tools)) if _payload_tools else 0,
+            )
+
+        def _on_degrade(_decision) -> None:
+            log.warning(
+                "provider fallback: %s -> %s (%s) session=%r",
+                context.model, _decision.model, _decision.message, context.session_id,
+            )
+            # The serving model is the fallback from here on, so the prompt's identity line has
+            # to follow — shared with the router rather than copied, and keyed on whether the
+            # SERVING model is the local backend (not on why it changed).
+            context.system_prompt = rewrite_model_identity(
+                context.system_prompt,
+                model_name=_decision.model or "unknown",
+                provider_name=_decision.provider_name or "unknown",
+                serving_is_local_backend=bool(
+                    getattr(context.fallback, "is_local_backend", False)
+                ),
+            )
+
+        async for event in stream_round_with_fallback(
+            envelope=loop_envelope,
+            provider=context.provider,
+            model=context.model,
+            build_request=_build_request,
+            target=context.fallback,
+            enabled=context.fallback is not None,
+            window_for=_window_for,
+            estimate_tokens=_estimate_tokens,
+            on_degrade=_on_degrade,
             operation="loop_round",
             round_index=turn,
             session_id=effective_session_id,
