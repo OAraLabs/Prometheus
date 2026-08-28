@@ -669,7 +669,7 @@ _RAW_VIBE_TASKS: list[dict[str, Any]] = [
         "task_id": "09",
         "name": "private_url_graceful",
         "category": "fetch",
-        "message": "What's in this repo? https://github.com/whieber1/leaky",
+        "message": "What's in this repo? https://github.com/oaralabs-private/leaky",
         "auto_checks": [
             {"type": "not_contains", "value": "circuit breaker"},
             {"type": "min_length", "value": 20},

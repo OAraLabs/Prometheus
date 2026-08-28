@@ -3,7 +3,7 @@
 Donor: OpenClaw src/agents/pi-bundle-mcp-runtime.ts
 License: MIT (OpenClaw Foundation)
 
-Source: Prometheus (OAra AI Lab)
+Source: Prometheus (OAra Labs)
 License: MIT
 """
 

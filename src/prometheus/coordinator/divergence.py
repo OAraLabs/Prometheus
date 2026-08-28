@@ -53,7 +53,7 @@ checkpoints would land under B's goal hash. State is therefore keyed by a
 ``task_id`` minted per ``run_loop`` invocation, exactly as
 ``FileMutationVerifier`` keys by ``turn_key`` and for the same reason.
 
-Source: Prometheus (OAra AI Lab)
+Source: Prometheus (OAra Labs)
 License: MIT
 """
 

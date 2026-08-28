@@ -10,7 +10,7 @@ lands outside the allow-list is rejected even when the literal input
 string starts with an allowed prefix. This mirrors the GraftEngine pattern
 documented in PROMETHEUS.md ("Path Traversal Defense").
 
-Source: Prometheus (OAra AI Lab)
+Source: Prometheus (OAra Labs)
 License: MIT
 """
 

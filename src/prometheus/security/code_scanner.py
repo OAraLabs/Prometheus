@@ -1,6 +1,6 @@
 """DangerousCodeScanner — shared AST-based static-analysis pass.
 
-Source: Prometheus (OAra AI Lab)
+Source: Prometheus (OAra Labs)
 License: MIT
 Provenance: Extracted from prometheus/symbiote/code_scanner.py
             (sprint GRAFT-SYMBIOTE Session A) and promoted to a shared

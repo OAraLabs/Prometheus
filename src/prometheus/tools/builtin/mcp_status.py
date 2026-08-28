@@ -1,6 +1,6 @@
 """MCP Status Tool — check MCP server connections from within Prometheus.
 
-Source: Prometheus (OAra AI Lab)
+Source: Prometheus (OAra Labs)
 License: MIT
 """
 

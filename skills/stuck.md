@@ -2,7 +2,7 @@
 name: stuck
 description: "Help recover when you're stuck, going in circles, or not making progress. Use when repeated attempts fail, when you keep getting the same error, or when you've lost track of what you were doing."
 ---
-<!-- Provenance: whieber1/Prometheus | src/reference_data/subsystems/skills.json (stuck.ts reference) | MIT -->
+<!-- Provenance: OAraLabs/Prometheus | src/reference_data/subsystems/skills.json (stuck.ts reference) | MIT -->
 
 # Stuck
 
