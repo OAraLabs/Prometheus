@@ -134,11 +134,37 @@ class ToolDashboard:
         return [{"tool_name": r["tool_name"], "calls": r["calls"]} for r in rows]
 
     def _avg_latency_by_tool(self, cutoff: float) -> dict[str, float]:
-        # Latency measures execution; loop echoes and never-executed policy
-        # denials (latency 0) would both drag the averages toward zero.
+        """Mean execution time per tool, over rows that were actually MEASURED.
+
+        `latency_ms` is `REAL NOT NULL DEFAULT 0.0`, so "nobody measured this" and "measured as
+        zero" are the same stored value. Real execution is timed with `time.monotonic()`, which
+        does not return an exact 0.0 — so a 0.0 is always the placeholder, written by the record
+        sites for calls that never ran.
+
+        `NULLIF(latency_ms, 0)` is the load-bearing guard: AVG skips NULL, so every never-ran row
+        drops out WITHOUT anyone maintaining a list of the ways a call can fail to execute. The
+        previous enumeration had already fallen out of sync — `validation_failed`, `unknown_tool`
+        and `input_validation` all mean "never ran" and none were in POLICY_ERROR_TYPES, so they
+        were being averaged in as zero-duration executions (measured: lcm_grep 0.64 -> 0.85ms).
+
+        Both filters below are, TODAY, redundant with NULLIF: every `_loop_transition` row and
+        every policy-denial row is unmeasured, so NULLIF already drops them (measured: 7,000 and
+        147 rows respectively, all 0.0). Mutation testing proved it — deleting either one changed
+        no observable behaviour on realistic data.
+
+        They are kept anyway, and the distinction matters if one ever stops being unmeasured:
+          * `tool_name != '_loop_transition'` — loop bookkeeping is not a tool, so it must not be
+            a row in a per-TOOL table even if something starts timing it.
+          * the POLICY_ERROR_TYPES clause — a denial that somehow carried a duration still did not
+            execute.
+        Neither is load-bearing for the bug this method had; NULLIF is.
+
+        A tool with NO measured rows is OMITTED rather than reported as 0.0 — "we never timed
+        this" is not "this is instant", which is the whole point of the change.
+        """
         rows = self._conn.execute(
             f"""
-            SELECT tool_name, AVG(latency_ms) AS avg_lat
+            SELECT tool_name, AVG(NULLIF(latency_ms, 0)) AS avg_lat
               FROM tool_calls
              WHERE timestamp >= ?
                AND tool_name != '_loop_transition'
@@ -147,7 +173,9 @@ class ToolDashboard:
             """,
             (cutoff, *_POLICY_PARAMS),
         ).fetchall()
-        return {r["tool_name"]: r["avg_lat"] for r in rows}
+        # AVG over an all-NULL group is NULL. Dropping the key keeps the declared dict[str, float]
+        # honest instead of smuggling a None through it.
+        return {r["tool_name"]: r["avg_lat"] for r in rows if r["avg_lat"] is not None}
 
     def _count_circuit_breaker_trips(self, cutoff: float) -> int:
         row = self._conn.execute(
