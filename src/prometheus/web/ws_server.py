@@ -99,6 +99,10 @@ class WebSocketBridge:
         # feeds it agent_progress pulses and chat_done (Live Activity source);
         # bus signals reach it via its own subscription.
         self.push_dispatcher: Any | None = None
+        # GRAFT Piece 4: per-socket session filter. Absent / empty set = the
+        # firehose (today's behaviour); a set = turn frames for those sessions
+        # only. Replaced whole on every subscribe, cleaned up with the socket.
+        self._ws_filters: dict[Any, set[str]] = {}
         self._clients: set[Any] = set()
         # Monotonic since boot — see delivery_stats(). A frame that fails to
         # send is gone; these are the only record that it existed.
@@ -213,6 +217,7 @@ class WebSocketBridge:
         finally:
             self._clients.discard(websocket)
             self._ws_identity.pop(websocket, None)
+            self._ws_filters.pop(websocket, None)
             logger.info("Client disconnected (%d remain)", len(self._clients))
 
     async def _authenticate(self, websocket: Any) -> bool:
@@ -263,11 +268,27 @@ class WebSocketBridge:
         payload = msg.get("payload", {})
 
         if cmd_type == "subscribe":
-            # Acknowledgement only — all events are broadcast
+            # GRAFT Piece 4: a REAL filter now. `sessions` absent or [] → the
+            # firehose (every existing client unchanged, including those still
+            # sending the legacy ack-only `channels` shape). A list REPLACES
+            # any previous filter — re-subscribing narrows or widens, never
+            # appends. Non-string entries are dropped, not errored: a filter
+            # is a preference, and the safe failure is over-delivery.
+            raw_sessions = payload.get("sessions")
+            sessions = {s for s in raw_sessions if isinstance(s, str) and s} \
+                if isinstance(raw_sessions, list) else set()
+            if sessions:
+                self._ws_filters[websocket] = sessions
+            else:
+                self._ws_filters.pop(websocket, None)
             await self._send_one(websocket, {
                 "type": "subscribed",
                 "timestamp": time.time(),
-                "payload": {"channels": payload.get("channels", [])},
+                "payload": {
+                    "sessions": sorted(sessions),
+                    # Legacy echo — the old ack-only shape some clients read.
+                    "channels": payload.get("channels", []),
+                },
             })
 
         elif cmd_type == "send_message":
@@ -1359,6 +1380,34 @@ class WebSocketBridge:
         except Exception:
             logger.debug("session title scheduling failed", exc_info=True)
 
+    # GRAFT-MOBILE-BRIDGE 4: the frame types a subscribe filter applies to.
+    # TURN frames only — session-scoped by construction (Piece 3 put
+    # session_id on the tool frames, which is why this lands after it: without
+    # that, tool frames silently escape the filter). Signal-bus frames
+    # (approval_pending, sentinel_signal, dream_*) are NEVER filtered: they
+    # are not session-scoped and the phone wants them all.
+    _SESSION_SCOPED_TYPES = frozenset({
+        "chat_message", "chat_delta", "chat_done", "command_done",
+        "agent_progress", "tool_call_start", "tool_call_end",
+        "provider_degraded", "error",
+    })
+
+    def _wants(self, ws: Any, event: dict[str, Any]) -> bool:
+        """Does this socket's subscribe filter admit this event?
+
+        No filter (the default, and `sessions: []`) → everything, today's
+        firehose. A frame outside _SESSION_SCOPED_TYPES, or one carrying no
+        session_id, is always delivered."""
+        sessions = self._ws_filters.get(ws)
+        if not sessions:
+            return True
+        if event.get("type") not in self._SESSION_SCOPED_TYPES:
+            return True
+        sid = (event.get("payload") or {}).get("session_id")
+        if not sid:
+            return True
+        return sid in sessions
+
     async def broadcast(self, event: dict[str, Any]) -> None:
         """Send an event to all connected clients.
 
@@ -1389,6 +1438,8 @@ class WebSocketBridge:
         raw = json.dumps(event)
         dead: list[Any] = []
         for ws in self._clients:
+            if not self._wants(ws, event):
+                continue  # subscribed elsewhere — a skip, never a drop
             try:
                 await ws.send(raw)
             except Exception as exc:
