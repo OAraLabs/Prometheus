@@ -3916,8 +3916,11 @@ class AgentLoop:
         microcompact_keep_chars_no_lcm: int = 500,
         lcm_engine: object | None = None,
         profile_resolver: object | None = None,
+        fallback: object | None = None,
     ) -> None:
         self._provider = provider
+        # SPRINT-provider-fallback: where a terminal provider failure degrades to.
+        self._fallback = fallback
         self._model = model
         self._tool_result_max = tool_result_max
         self._compactor = compactor
@@ -4031,6 +4034,7 @@ class AgentLoop:
         context = LoopContext(
             provider=self._provider,
             model=self._model,
+            fallback=self._fallback,
             system_prompt=system_prompt,
             max_tokens=self._max_tokens,
             max_turns=self._max_turns,
