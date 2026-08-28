@@ -265,8 +265,11 @@ class StubProvider(ModelProvider):
         last_error: Exception | None = None
 
         for attempt in range(MAX_RETRIES + 1):
+            # Whether this attempt has handed anything to the consumer yet.
+            emitted = False
             try:
                 async for event in self._call_once(request):
+                    emitted = True
                     yield event
                 return
             except Exception as exc:
@@ -279,7 +282,12 @@ class StubProvider(ModelProvider):
                 retryable = status in RETRYABLE_STATUS_CODES if status else isinstance(
                     exc, (httpx.ConnectError, httpx.TimeoutException, ConnectionError)
                 )
-                if attempt >= MAX_RETRIES or not retryable:
+                # A retry re-runs the request from scratch. Anything already yielded is
+                # already on the consumer's screen, so replaying over it appends a SECOND,
+                # possibly contradictory answer to the first (issue #293). Once output has
+                # left, the only honest move is to fail. Retries stay fully available for
+                # the common case: a failure before the first event.
+                if emitted or attempt >= MAX_RETRIES or not retryable:
                     raise
                 delay = min(BASE_DELAY * (2 ** attempt), MAX_DELAY)
                 delay += random.uniform(0, delay * 0.25)
