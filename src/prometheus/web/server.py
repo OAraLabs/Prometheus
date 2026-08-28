@@ -824,7 +824,8 @@ def create_app(
         return {"status": "accepted", "run_id": wake.run_id}
 
     @app.get("/api/sessions/{session_id}/messages")
-    async def get_messages(session_id: str, since: str | None = None):
+    async def get_messages(session_id: str, since: str | None = None,
+                           limit: str | None = None, before: str | None = None):
         """Durable conversation history from the LCM store.
 
         Response: ``{ "messages": [...], "watermark": <int> }``. Each message is
@@ -849,6 +850,17 @@ def create_app(
 
         ``?since=<message_id>`` returns only messages with ``rowid > since`` (incremental
         sync). FAIL LOUD: an unparseable ``since`` is a 400 — never silently ignored.
+
+        Pagination (GRAFT-MOBILE-BRIDGE 5), without touching ``?since=`` semantics:
+
+        * ``?limit=<int>`` (clamped 1..500) — alone: the NEWEST ``limit`` rows,
+          ascending. With ``since``: bounds the forward read.
+        * ``?before=<row_id>`` — rows with ``rowid < before``, walking backwards;
+          ``limit`` defaults to 500 here (a backwards walk is always a page).
+        * ``since`` + ``before`` together → 400. Different questions.
+        * The response gains ``has_more`` on every path — including the no-param
+          full read, whose old internal 10,000-row cap used to truncate
+          SILENTLY; now the cap still applies but ``has_more: true`` says so.
         """
         lcm = getattr(app.state, "lcm_engine", None)
         if lcm is None:
@@ -868,7 +880,46 @@ def create_app(
                     content={"error": f"invalid 'since' cursor {since!r}: expected an integer message_id"},
                 )
 
-        parts = store.messages_after_id(since_id, session_id=session_id, include_compacted=True)
+        limit_val: int | None = None
+        if limit is not None:
+            try:
+                limit_val = max(1, min(500, int(limit)))  # clamp, per the spec
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"invalid 'limit' {limit!r}: expected an integer"},
+                )
+        before_val: int | None = None
+        if before is not None:
+            try:
+                before_val = int(before)
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"invalid 'before' cursor {before!r}: expected an integer message_id"},
+                )
+        if since is not None and before is not None:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "'since' and 'before' are different questions — pass one"},
+            )
+
+        if before_val is not None or (limit_val is not None and since is None):
+            # Newest-anchored page: the mobile cold open and its scroll-back.
+            parts, has_more = store.messages_page(
+                limit=limit_val if limit_val is not None else 500,
+                before=before_val, session_id=session_id, include_compacted=True,
+            )
+        else:
+            # The forward read, unchanged — except the old internal 10,000-row
+            # cap used to truncate SILENTLY; fetching cap+1 makes has_more say
+            # so instead.
+            cap = limit_val if limit_val is not None else 10_000
+            parts = store.messages_after_id(since_id, limit=cap + 1,
+                                            session_id=session_id, include_compacted=True)
+            has_more = len(parts) > cap
+            if has_more:
+                parts = parts[:cap]
         messages = [
             {
                 "message_id": p.row_id,
@@ -889,7 +940,8 @@ def create_app(
             }
             for p in parts
         ]
-        return {"messages": messages, "watermark": store.max_rowid(session_id)}
+        return {"messages": messages, "watermark": store.max_rowid(session_id),
+                "has_more": has_more}
 
     @app.delete("/api/sessions/{session_id}")
     async def clear_session(session_id: str):

@@ -93,4 +93,4 @@ def test_max_rowid_empty_session_is_zero(tmp_path):
     store = LCMConversationStore(tmp_path / "lcm.db")
     assert store.max_rowid("nonexistent") == 0
     body = _client(store).get("/api/sessions/nonexistent/messages").json()
-    assert body == {"messages": [], "watermark": 0}
+    assert body == {"messages": [], "watermark": 0, "has_more": False}  # has_more: GRAFT 5
