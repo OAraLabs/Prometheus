@@ -25,6 +25,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from prometheus.web.strict_query import StrictQueryRoute
+
 from prometheus.config.paths import get_wiki_root
 from prometheus.context.environment import booted_from as _booted_from, git_head_sha
 
@@ -143,6 +145,11 @@ def create_app(
         redoc_url=None if _api_token else "/redoc",
         openapi_url=None if _api_token else "/openapi.json",
     )
+    # A mistyped query parameter must be an error, not a right-looking answer to a question
+    # nobody asked. Set BEFORE any route is registered; /docs and the StaticFiles mount are
+    # already in place and are deliberately untouched. See web/strict_query.py.
+    app.router.route_class = StrictQueryRoute
+
     _start_time = time.time()
 
     # CORS for dev (next dev on different port)
