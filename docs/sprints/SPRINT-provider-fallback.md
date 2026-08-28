@@ -52,10 +52,26 @@ Cite file:line:
 
 1. Every call site that invokes a provider's `stream_message` on the chat path, and where an
    exception from it is currently caught. Name the layer that owns "this turn failed".
-2. `api/turn_errors.py` — the full `KIND_*` set and where `classify_turn_error()` is called today. This
-   is the intended trigger surface: the fallback must branch on an already-classified `kind`,
-   NOT re-parse exceptions at a second site. If classification happens too late in the stack
-   to act on, say so — that is a real finding and changes the design.
+2. `api/turn_errors.py` — the full `KIND_*` set. **This one is already answered; confirm it and
+   move on rather than re-deriving it.** `classify_turn_error()` is called in exactly ONE place
+   in the whole source:
+
+   ```python
+   # web/ws_server.py:1100 — inside _run_agent's failure handler
+   detail = classify_turn_error(e)
+   await self.broadcast({"type": "error", ...})
+   ```
+
+   That is a TERMINAL REPORTING path. By the time a `kind` exists the turn has unwound and the
+   exception has reached the broadcast, so there is no existing classification a fallback could
+   branch on — "reuse the classified kind, do not parse twice" has no first site to reuse.
+
+   The decision this forces, and it should be made deliberately rather than discovered: either
+   call `classify_turn_error()` at the PROVIDER BOUNDARY as well (cheap, duck-typed, no new
+   parsing logic — the same function at a second call site is not a second implementation), or
+   move classification down the stack so the WS handler consumes it instead of producing it.
+   Prefer the first unless the survey turns up a reason not to; the second is a bigger change
+   than this sprint needs.
 3. `context/compactor.py` `limit_for()` / `_detected_limit` / `_model_overrides` — how a
    per-model window is resolved per call, and whether a caller can ask "what window would
    model X get?" WITHOUT running a turn. The pre-flight check in Phase 2 depends on it.
@@ -67,9 +83,14 @@ Cite file:line:
 6. Whether any streaming call site can have **already yielded tokens** before the error
    surfaces. Cite the code path. This decides Phase 2's hardest rule.
 
-**HALT CHECKPOINT 1** — findings + a one-paragraph plan. If `turn_errors.classify_turn_error()` runs
-below the layer that could switch providers, HALT: that is a restructuring question, not an
-implementation detail.
+**HALT CHECKPOINT 1** — findings + a one-paragraph plan. HALT if classification cannot be made
+to happen at a layer that can STILL ACT.
+
+Note the condition is "cannot still act", not "runs below". An earlier draft of this line tested
+only for classification being too deep in the stack, and the real case is the opposite — it runs
+too far OUT, after the turn has unwound (item 2). A one-directional check would not have fired on
+the actual failure, which is worth remembering as a shape: a guard phrased around the direction
+you happened to imagine catches only that direction.
 
 ---
 
@@ -101,6 +122,17 @@ Before routing a turn to the fallback model, compute whether it fits.
 1. Resolve the fallback's real window (detected `n_ctx`, not a configured constant — a config
    number that outlived a model swap is how a 32768-token server came to be budgeted at
    72000; `compactor.py:~170` records that incident).
+
+   `limit_for(model)` already does this and takes an optional model name, so the pre-flight can
+   ask "what window would model X get" WITHOUT running a turn. Phase 2 is implementable as
+   written; that much the survey confirms.
+
+   **But the two sides of the comparison are not equally solid, and the refusal message must not
+   imply they are.** The local number is MEASURED — llama.cpp publishes `n_ctx` at `/props`. The
+   cloud number is `cloud_default_limit`, a CONFIGURED FLOOR: `limit_for`'s own docstring records
+   that cloud APIs do not publish context length at all (Alibaba's `/v1/models` returns only
+   id/object/created/owned_by). So "this turn needs ~118k" is estimated against a window nobody
+   verified. Say the measured number as a fact and the configured one as a configured value.
 2. Estimate the turn against that window using the compactor's existing estimator.
 3. **If it does not fit, do not truncate and do not compact harder to force it.** Fail the
    turn with a message that names the numbers:
