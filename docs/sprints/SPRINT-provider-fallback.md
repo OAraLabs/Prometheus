@@ -94,6 +94,44 @@ you happened to imagine catches only that direction.
 
 ---
 
+## Decided: a separate handler, not a router decision
+
+The survey found the loop ALREADY swaps providers mid-turn — `agent_loop.py:~1027` sets
+`context.provider = decision.provider` from a `ModelRouter` decision. State that plainly here so
+the next reader does not find two swap paths and assume one is redundant. **They answer different
+questions:**
+
+- **Routing is policy.** The user picked a model, a session override applies, a config pin holds.
+- **Fallback is recovery.** Something broke and we are degrading.
+
+Once they share a decision path, "why did my model change?" has two possible answers and nothing
+outside can tell them apart — which undercuts the very `requested_model` vs `served_model`
+telemetry Phase 3 adds to distinguish them. The Phase 4 opt-out settles it independently: a
+separate handler can be disabled without touching routing, whereas a coupled one means carving a
+case out of the router that someone later reads as dead code.
+
+### The cost of the separate path, and how to pay it
+
+The router's swap does one thing the fallback MUST also do, and it is easy to forget: it rewrites
+the system prompt's identity line, `- Model: <name> (provider: <p>)`. Without it a
+"primary-baked" prompt makes the serving model impersonate the primary when the user asks what
+model this is — a real production bug the router comment records.
+
+**Extract that rewrite and call it from both.** Do not reimplement it; a second copy is how the
+fallback ends up confidently claiming to be the primary.
+
+⚠ **The extraction is not a straight lift.** The rewrite appends a trailing clause — *"the ACTIVE
+model serving this conversation; any model in the Infrastructure section is a separate local
+backend, not you"* — gated on `reason_repr != "primary"`. The comment explains the gate: on
+primary routes "the serving model IS the local backend and the clause would be false."
+
+A fallback to the LOCAL model lands in exactly that case. The default fallback target IS the
+local backend, so the clause would be false for it too — and the existing predicate, which keys
+on *"is this a router decision"*, gets it wrong. The extracted helper must key on **"is the
+serving model the local backend"**, which is what the gate always meant. The fallback is the
+third caller that reveals the predicate was named after its first caller rather than its
+condition.
+
 ## Phase 1 — Decide, don't retry
 
 A terminal failure is a *different event* from a retryable one and must not reuse the retry
