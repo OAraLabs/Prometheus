@@ -77,6 +77,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from prometheus.web.strict_query import StrictQueryRoute
+
 logger = logging.getLogger("prometheus.setup_mode")
 
 # fastapi is the optional [web] extra. Imported at module level (not inside
@@ -523,6 +525,9 @@ def create_setup_app(
         title="Prometheus (setup mode)",
         docs_url=None, redoc_url=None, openapi_url=None,
     )
+    # Same fail-closed rule as the main app: a mistyped query parameter is an error, not a
+    # right-looking answer. Set before any route is registered. See web/strict_query.py.
+    app.router.route_class = StrictQueryRoute
 
     @app.get("/api/setup/status")
     async def setup_status() -> dict[str, Any]:
