@@ -23,6 +23,7 @@ Three things shape this module, all of them survey findings rather than assumpti
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from prometheus.api.turn_errors import KIND_AUTH, KIND_BILLING
@@ -30,6 +31,8 @@ from prometheus.api.turn_errors import KIND_AUTH, KIND_BILLING
 # Kinds where trying again with this credential cannot help. Deliberately NOT including
 # KIND_RATE_LIMIT (retried with backoff already), KIND_TIMEOUT or KIND_UNREACHABLE (transient by
 # nature): degrading on those would abandon a provider that was about to recover.
+log = logging.getLogger(__name__)
+
 TERMINAL_KINDS: frozenset[str] = frozenset({KIND_AUTH, KIND_BILLING})
 
 
@@ -273,6 +276,8 @@ async def stream_round_with_fallback(
 
         detail = classify_turn_error(exc)
         window, measured = window_for(target.model) if target is not None else (0, False)
+        needed = estimate_tokens()
+        decision_inputs = {"needed": needed, "window": window}
         decision = decide(
             kind=detail.get("kind"),
             # The MODEL name, not classify_turn_error's provider: that field falls back to
@@ -285,11 +290,20 @@ async def stream_round_with_fallback(
             fallback_provider=target.provider_name if target is not None else None,
             enabled=enabled,
             emitted_output=emitted,
-            needed_tokens=estimate_tokens(),
+            needed_tokens=needed,
             fallback_window=window,
             window_is_measured=measured,
         )
         if decision.passes_through:
+            # A fallback that declines silently is the same failure this sprint removes, one
+            # level up: the turn dies and nothing says whether the mechanism considered it.
+            log.warning(
+                "fallback DECLINED for %s: kind=%r terminal=%s enabled=%s target=%r "
+                "emitted=%s needed=%s window=%s",
+                model, detail.get("kind"), is_terminal(detail.get("kind")), enabled,
+                getattr(target, "model", None), emitted,
+                decision_inputs.get("needed"), decision_inputs.get("window"),
+            )
             raise
         if decision.refuse:
             raise FallbackRefused(decision.message) from exc
