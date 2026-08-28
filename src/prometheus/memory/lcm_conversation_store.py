@@ -508,6 +508,44 @@ class LCMConversationStore:
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_message(r) for r in rows]
 
+    def messages_page(
+        self,
+        *,
+        limit: int,
+        before: int | None = None,
+        session_id: str | None = None,
+        include_compacted: bool = True,
+    ) -> tuple[list[MessagePart], bool]:
+        """One page of history, NEWEST-ANCHORED (GRAFT-MOBILE-BRIDGE 5).
+
+        ``before=None`` starts at the newest row; ``before=<rowid>`` returns
+        rows with ``rowid < before``. Selected ``rowid`` DESC (that is what
+        makes it a newest-first page), then REVERSED so the returned list is
+        ascending like every other read — callers never see the reversal.
+
+        Fetches ``limit + 1`` to answer ``has_more`` honestly instead of
+        guessing from a full page. Distinct from :meth:`messages_after_id`
+        (the forward ``?since=`` cursor): a forward cursor cannot page
+        backwards from the present, which is exactly the mobile cold-open.
+        """
+        sql = "SELECT rowid AS row_id, * FROM lcm_messages WHERE 1=1"
+        params: list[object] = []
+        if before is not None:
+            sql += " AND rowid < ?"
+            params.append(before)
+        if session_id is not None:
+            sql += " AND session_id = ?"
+            params.append(session_id)
+        if not include_compacted:
+            sql += " AND compacted = 0"
+        sql += " ORDER BY rowid DESC LIMIT ?"
+        params.append(limit + 1)
+        rows = self._conn.execute(sql, params).fetchall()
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        page.reverse()
+        return [self._row_to_message(r) for r in page], has_more
+
     def max_rowid_all(self) -> int:
         """Highest rowid in the table, across EVERY session — or 0 if empty.
 
