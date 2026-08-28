@@ -129,6 +129,14 @@ class LCMEngine:
             self._config,
         )
 
+        # The durable rowid the most recent ingest wrote — the wire cursor id
+        # (GRAFT-MOBILE-BRIDGE 3b). insert_message stamps it onto its own
+        # MessagePart in place, but ingest_sync/ingest return the message_id
+        # (uuid) and rebuild the part, so the rowid would otherwise be lost at
+        # the persist boundary. Kept here rather than changing those methods'
+        # return type, which several call sites and test fakes rely on.
+        self._last_ingested_row_id: int | None = None
+
         # Stats tracking.
         self._total_compactions: int = 0
         self._last_compaction_at: float | None = None
@@ -215,6 +223,7 @@ class LCMEngine:
             is_trusted=is_trusted,
         )
         self._conv_store.add_message(session_id, msg)
+        self._last_ingested_row_id = msg.row_id or None
         return msg.message_id
 
     def ingest_sync(
@@ -257,7 +266,18 @@ class LCMEngine:
             is_trusted=is_trusted,
         )
         self._conv_store.add_message(session_id, msg)
+        self._last_ingested_row_id = msg.row_id or None
         return msg.message_id
+
+    @property
+    def last_ingested_row_id(self) -> int | None:
+        """The durable rowid of the most recent ingest, or None before any.
+
+        Additive read-only surface for the row-cursor contract: a caller that
+        just ingested a row can learn its wire id without a read-back. Reset by
+        nothing — it always reflects the last write this engine performed.
+        """
+        return self._last_ingested_row_id
 
     def is_ingested(self, message_id: str) -> bool:
         """Return ``True`` iff this message_id is durably persisted.

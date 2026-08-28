@@ -353,8 +353,18 @@ def create_app(
                 "running": getattr(gw, "running", None),
                 "reachable": getattr(gw, "reachable", None),
             }
+        # `state` reflects the LIVE turn state (GRAFT-MOBILE-BRIDGE 6). The
+        # bridge drives app.state.agent_state_ref["state"] to thinking/idle per
+        # turn; app.state.agent_state is a boot-time string set once and never
+        # updated, so reading it made this field permanently "idle". Prefer the
+        # live ref, fall back to the string when no bridge is wired (the `web`
+        # entrypoint, which runs no agent).
+        _state_ref = getattr(app.state, "agent_state_ref", None)
+        _live_state = (
+            _state_ref.get("state") if isinstance(_state_ref, dict) else None
+        ) or getattr(app.state, "agent_state", "idle")
         return {
-            "state": app.state.agent_state,
+            "state": _live_state,
             "model": app.state.current_model,
             # Full config_pins detail: bearer-gated, unlike /health's counts.
             "config_pins": _config_pins_detail(),
