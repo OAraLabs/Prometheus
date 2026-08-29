@@ -922,6 +922,15 @@ wiki:
 # called, naming the resolved path and this key.
 vault:
   root: ~/brain-vault
+  # Startup handling of the vault's .prometheus-vault format marker when the
+  # vault EXISTS but carries no marker yet (a vault from before markers):
+  # off = skip the check entirely; warn = log and continue, naming
+  # `prometheus vault adopt`; refuse = do not start until adopted. The
+  # default is warn for this release so existing vaults keep booting; it
+  # will become refuse once adoption is routine. A marker whose format is
+  # NEWER than this build refuses regardless of this setting — that is the
+  # silent-misread case the marker exists for, and it is not configurable.
+  format_check: warn
 
 
 # ── Doctor ────────────────────────────────────────────────────────────────
