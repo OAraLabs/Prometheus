@@ -42,6 +42,18 @@ AUTH_FRAME_TIMEOUT_SECONDS = 5.0
 # traffic next to token deltas.
 PROGRESS_INTERVAL_SECONDS = 3.0
 
+# Largest inbound WS frame the library will accept. The websockets default is
+# 1 MiB, which silently killed chat_upload: a ~1.4 MB base64 image never
+# reached _handle_client_message — the library closed the socket 1009 before
+# the handler saw a byte, Beacon auto-reconnected, and nothing surfaced
+# anywhere (measured live from beacon-desktop, 2026-08-28). 32 MiB sits above
+# the app-level 20 MB decoded guard in _handle_file_upload (~26.7 MB as
+# base64 + JSON envelope), so every oversize upload now reaches OUR guard and
+# gets a visible "File too large" frame instead of a wordless close. Anything
+# beyond even this is closed 1009 by the library — see _handler, which logs
+# that close instead of swallowing it.
+WS_MAX_FRAME_BYTES = 32 * 1024 * 1024
+
 
 def _client_label(ws: Any) -> str:
     """Something an operator can correlate with a connection. Never raises —
@@ -178,6 +190,7 @@ class WebSocketBridge:
             self._handler,
             host,
             port,
+            max_size=WS_MAX_FRAME_BYTES,
         )
         logger.info("WebSocket bridge listening on ws://%s:%d", host, port)
 
@@ -212,8 +225,23 @@ class WebSocketBridge:
         try:
             async for raw in websocket:
                 await self._handle_client_message(websocket, raw)
-        except Exception:
-            pass
+        except Exception as exc:
+            # A frame past WS_MAX_FRAME_BYTES never reaches the loop body: the
+            # library closes 1009 and the iterator raises. Swallowing that
+            # bare was how oversized chat_uploads vanished without a trace —
+            # at minimum the operator log must say what happened and to whom.
+            # The 1009 lives on `sent` (we initiated the close); `rcvd` is
+            # checked too for a peer that echoes it back first. (Not the bare
+            # `.code` property — deprecated since websockets 13.1.)
+            if 1009 in {
+                getattr(getattr(exc, "sent", None), "code", None),
+                getattr(getattr(exc, "rcvd", None), "code", None),
+            }:
+                logger.warning(
+                    "Client %s sent a frame over the %d-byte limit — closed 1009 "
+                    "(message too big); the frame was never processed",
+                    _client_label(websocket), WS_MAX_FRAME_BYTES,
+                )
         finally:
             self._clients.discard(websocket)
             self._ws_identity.pop(websocket, None)
