@@ -592,16 +592,22 @@ class LCMConversationStore:
         The rowid is the wire cursor identity (``?since=``, ``messages_after_id``);
         a UUID is not a scroll position. Ids with no persisted row are simply
         absent from the result — callers decide how to handle the gap.
+
+        Deduplicates and chunks the IN-clause so an unbounded caller-side id
+        list (e.g. anchors flattened across many search hits) can never exceed
+        SQLITE_MAX_VARIABLE_NUMBER (999 on SQLite < 3.32).
         """
-        ids = [i for i in message_ids if i]
-        if not ids:
-            return {}
-        placeholders = ",".join("?" * len(ids))
-        rows = self._conn.execute(
-            f"SELECT rowid, id FROM lcm_messages WHERE id IN ({placeholders})",
-            ids,
-        ).fetchall()
-        return {r["id"]: int(r["rowid"]) for r in rows}
+        ids = list(dict.fromkeys(i for i in message_ids if i))
+        out: dict[str, int] = {}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start : start + 500]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._conn.execute(
+                f"SELECT rowid, id FROM lcm_messages WHERE id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            out.update({r["id"]: int(r["rowid"]) for r in rows})
+        return out
 
     # ------------------------------------------------------------------
     # Session index (feat/durable-session-index)

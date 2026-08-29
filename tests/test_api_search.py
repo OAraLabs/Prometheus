@@ -45,11 +45,11 @@ def _client(tmp_path, token: str = ""):
     cfg = {"web": {"api_token": token}} if token else {}
     client = TestClient(create_app(cfg, lcm_engine=_Engine(conv, summ)))
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    return client, conv, headers
+    return client, conv, summ, headers
 
 
 def test_both_scopes_grouped(tmp_path):
-    client, _, _ = _client(tmp_path)
+    client, _, _, _ = _client(tmp_path)
     r = client.post("/api/search", json={"q": "kling"})
     assert r.status_code == 200
     body = r.json()
@@ -73,7 +73,7 @@ def test_both_scopes_grouped(tmp_path):
 def test_message_id_is_the_durable_rowid(tmp_path):
     """The wire cursor contract: returned message_id must exist as a rowid in
     the SAME session — guards the silent-misnavigation bug (uuid vs rowid)."""
-    client, conv, _ = _client(tmp_path)
+    client, conv, _, _ = _client(tmp_path)
     body = client.post("/api/search", json={"q": "beacon"}).json()
     hit = body["messages"][0]
     rowid = int(hit["message_id"])
@@ -95,7 +95,7 @@ def test_anchor_row_ids_match_history_read(tmp_path):
     Shape: a {uuid: rowid} MAP, so the correspondence is explicit rather than
     positional; rowids serialize as STRINGS, the same representation message
     hits use for message_id — one id space, one representation."""
-    client, conv, _ = _client(tmp_path)
+    client, conv, _, _ = _client(tmp_path)
     body = client.post("/api/search", json={"q": "kling", "scope": "summaries"}).json()
     hit = body["summaries"][0]
 
@@ -121,8 +121,7 @@ def test_anchor_row_ids_omit_missing_anchors(tmp_path):
     """An anchor whose message no longer exists is simply ABSENT from the
     anchor_row_ids map — no index ambiguity, each surviving rowid stays paired
     to its UUID; anchor_message_ids still carries the full original list."""
-    client, conv, _ = _client(tmp_path)
-    summ = LCMSummaryStore(tmp_path / "lcm.db")  # same DB the client's stores use
+    client, conv, summ, _ = _client(tmp_path)
     m = MessagePart(role="user", content="quorum drift analysis", session_id="cli:42")
     conv.insert_message(m)
     node = SummaryNode(
@@ -140,8 +139,26 @@ def test_anchor_row_ids_omit_missing_anchors(tmp_path):
     assert hit["anchor_row_ids"] == {m.message_id: str(m.row_id)}
 
 
+def test_rowid_lookup_dedups_and_chunks(tmp_path):
+    """The UUID→rowid lookup must survive an id list past SQLite's legacy
+    999-variable ceiling: ids are deduplicated and the IN-clause is chunked,
+    so an unbounded caller-side anchor list can never blow the query up."""
+    conv = LCMConversationStore(tmp_path / "lcm.db")
+    parts = [
+        MessagePart(role="user", content=f"filler {i}", session_id="cli:bulk")
+        for i in range(501)  # crosses the 500-id chunk boundary
+    ]
+    for p in parts:
+        conv.insert_message(p)
+
+    ids = [p.message_id for p in parts]
+    # Duplicates and misses ride along: dedup collapses, misses are absent.
+    got = conv.rowids_for_message_ids(ids + ids[:5] + ["not-a-real-uuid", ""])
+    assert got == {p.message_id: p.row_id for p in parts}
+
+
 def test_session_scope(tmp_path):
-    client, _, _ = _client(tmp_path)
+    client, _, _, _ = _client(tmp_path)
     body = client.post(
         "/api/search", json={"q": "kling", "session_id": "cli:42"}
     ).json()
@@ -149,7 +166,7 @@ def test_session_scope(tmp_path):
 
 
 def test_scope_filter(tmp_path):
-    client, _, _ = _client(tmp_path)
+    client, _, _, _ = _client(tmp_path)
     for scope, n_msg, n_sum in (
         ("messages", 1, 0),
         ("summaries", 0, 1),
@@ -161,7 +178,7 @@ def test_scope_filter(tmp_path):
 
 
 def test_limit_clamped_and_respected(tmp_path):
-    client, conv, _ = _client(tmp_path)
+    client, conv, _, _ = _client(tmp_path)
     for i in range(5):
         conv.insert_message(
             MessagePart(role="assistant", content=f"zephyr log line {i}", session_id="cli:42")
@@ -176,13 +193,13 @@ def test_limit_clamped_and_respected(tmp_path):
 
 
 def test_min_length_rejected(tmp_path):
-    client, _, _ = _client(tmp_path)
+    client, _, _, _ = _client(tmp_path)
     assert client.post("/api/search", json={"q": "kl"}).status_code == 400
     assert client.post("/api/search", json={"q": ""}).status_code == 400
 
 
 def test_empty_and_punctuation_query_zero_results(tmp_path):
-    client, _, _ = _client(tmp_path)
+    client, _, _, _ = _client(tmp_path)
     # 3+ chars of pure punctuation passes min-length but sanitizes to no-match.
     body = client.post("/api/search", json={"q": "!!!"}).json()
     assert body["returned"] == 0
@@ -192,19 +209,19 @@ def test_empty_and_punctuation_query_zero_results(tmp_path):
 def test_fts5_operators_never_500(tmp_path):
     """Users type quotes, stars, AND, dashes — that is the contract. The
     endpoint must not 500 and must not leak raw operator semantics."""
-    client, _, _ = _client(tmp_path)
+    client, _, _, _ = _client(tmp_path)
     for q in ('"kling', "kling*", "kling AND rotation", "-kling", "kling OR beacon", 'a"b'):
         r = client.post("/api/search", json={"q": q})
         assert r.status_code == 200, f"query {q!r} → {r.status_code}"
 
 
 def test_invalid_scope_rejected(tmp_path):
-    client, _, _ = _client(tmp_path)
+    client, _, _, _ = _client(tmp_path)
     assert client.post("/api/search", json={"q": "kling", "scope": "bogus"}).status_code == 400
 
 
 def test_auth_rejection(tmp_path):
-    client, _, _ = _client(tmp_path, token="sekrit")
+    client, _, _, _ = _client(tmp_path, token="sekrit")
     assert client.post("/api/search", json={"q": "kling"}).status_code == 401
     assert (
         client.post(
@@ -218,20 +235,20 @@ def test_post_is_the_only_verb(tmp_path):
     """GET is deliberately gone — a querystring lands in access logs, and
     search terms over private conversations are sensitive. POST-only is the
     decision, not an oversight."""
-    client, _, _ = _client(tmp_path)
+    client, _, _, _ = _client(tmp_path)
     assert client.get("/api/search", params={"q": "kling"}).status_code in (404, 405)
     assert client.post("/api/search", json={"q": "kling"}).status_code == 200
 
 
 def test_malformed_json_is_400_not_500(tmp_path):
     """The client path is POST; a malformed body must 400, not raise to a 500."""
-    client, _, _ = _client(tmp_path)
+    client, _, _, _ = _client(tmp_path)
     assert client.post("/api/search", content=b"{not json", headers={"Content-Type": "application/json"}).status_code == 400
     assert client.post("/api/search", json=["a", "list"]).status_code == 400  # not an object
 
 
 def test_post_validates_body(tmp_path):
-    client, _, _ = _client(tmp_path)
+    client, _, _, _ = _client(tmp_path)
     assert client.post("/api/search", json={"q": "kl"}).status_code == 400
     assert client.post("/api/search", json={"q": "kling", "limit": "nope"}).status_code == 400
 

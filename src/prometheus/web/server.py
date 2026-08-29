@@ -1632,12 +1632,8 @@ def create_app(
             # the durable scroll cursor (same id space as ?since= / message_id above),
             # which is what lets a client jump to the exact anchored message.
             all_anchor_ids = [a for h in hits for a in h["anchor_message_ids"]]
-            rowid_by_uuid = (
-                await asyncio.to_thread(
-                    lcm.conversation_store.rowids_for_message_ids, all_anchor_ids
-                )
-                if all_anchor_ids
-                else {}
+            rowid_by_uuid = await asyncio.to_thread(
+                lcm.conversation_store.rowids_for_message_ids, all_anchor_ids
             )
             summaries_out = [
                 {
