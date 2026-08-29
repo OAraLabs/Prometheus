@@ -980,6 +980,12 @@ def _reset_data() -> None:
     for label, path in dir_targets:
         status = "(exists)" if path.exists() else "(not found)"
         print(f"  {label}: {path} {status}")
+    # FOUNDATION 3.4: the node keypair is identity, not data — a reset
+    # produces a fresh deployment on the SAME machine, and the machine has
+    # not changed. Named here (honest-listing convention) rather than
+    # silently skipped, so its absence from the delete list reads as a
+    # decision instead of an oversight.
+    print("  node identity: preserved (~/.prometheus/node — identity, not data)")
 
     confirm = input("\nDelete all listed data? [y/N] ").strip().lower()
     if confirm != "y":
@@ -1092,6 +1098,14 @@ def main() -> None:
         help="Regenerate SOUL.md and AGENTS.md interactively",
     )
 
+    vault_parser = subparsers.add_parser(
+        "vault", help="Inspect or adopt the brain vault's format marker",
+    )
+    vault_parser.add_argument(
+        "vault_action", choices=["status", "adopt"],
+        help="status: show marker/instance state; adopt: mint the marker "
+             "for an existing un-markered vault (explicit, one-time)",
+    )
     migrate_parser = subparsers.add_parser(
         "migrate", help="Import data from Hermes Agent or OpenClaw",
     )
@@ -1371,6 +1385,57 @@ def main() -> None:
             print("Usage: python -m prometheus identity [--show | --regenerate]")
         sys.exit(0)
 
+    # Vault marker subcommand — runs pre-agent, no model needed
+    if args.command == "vault":
+        from prometheus.config.paths import resolve_vault_root
+        from prometheus.config.vault_marker import (
+            MARKER_FILENAME,
+            VAULT_FORMAT_CURRENT,
+            VaultMarkerError,
+            create_marker,
+            read_marker,
+        )
+        config = load_config(args.config)
+        vault_root = resolve_vault_root(config)
+        if args.vault_action == "status":
+            print(f"Vault root:    {vault_root}")
+            if not vault_root.is_dir():
+                print("Vault:         ABSENT (no directory at that path)")
+                sys.exit(1)
+            try:
+                marker = read_marker(vault_root)
+            except VaultMarkerError as exc:
+                print(f"Marker:        CORRUPT — {exc}")
+                sys.exit(1)
+            if marker is None:
+                print(f"Marker:        absent (no {MARKER_FILENAME})")
+                print(f"This build:    vault_format {VAULT_FORMAT_CURRENT}")
+                print("Adopt with:    prometheus vault adopt")
+                sys.exit(1)
+            verdict = (
+                "OK" if marker.vault_format == VAULT_FORMAT_CURRENT
+                else f"MISMATCH (this build reads {VAULT_FORMAT_CURRENT})"
+            )
+            print(f"Marker:        vault_format {marker.vault_format} — {verdict}")
+            print(f"Instance:      {marker.instance_id}")
+            print(f"Created:       {marker.created} by {marker.created_by}")
+            print(f"Enrolled:      {len(marker.enrolled_nodes)} node(s)")
+            for node in marker.enrolled_nodes:
+                print(f"  - {node.get('label', '?')}  ({node.get('enrolled', '?')})")
+            sys.exit(0 if marker.vault_format == VAULT_FORMAT_CURRENT else 1)
+        if args.vault_action == "adopt":
+            try:
+                marker = create_marker(
+                    vault_root, created_by=f"prometheus {__version__}"
+                )
+            except VaultMarkerError as exc:
+                print(f"Refused: {exc}")
+                sys.exit(1)
+            print(f"Adopted vault at {vault_root}")
+            print(f"  vault_format {marker.vault_format}")
+            print(f"  instance_id  {marker.instance_id}")
+            sys.exit(0)
+
     # Migration subcommand — runs pre-agent, no model needed
     if args.command == "migrate":
         from prometheus.cli.migrate import run_migration
@@ -1574,6 +1639,13 @@ def main() -> None:
     )
 
     async def _async_main() -> None:
+        # FOUNDATION Part 3: node identity is minted at first run — the CLI
+        # is a first run as much as the daemon is. Idempotent afterwards.
+        # This runs BEFORE telemetry writes so a first CLI session's traces
+        # carry the node they were produced on rather than NULL.
+        from prometheus.config.node_identity import ensure_node_identity
+        ensure_node_identity()
+
         # Sprint 12: MCP servers (must live in same async context as agent loop)
         mcp_runtime = None
         if config.get("mcp_servers"):
