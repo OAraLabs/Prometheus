@@ -66,6 +66,10 @@ class ToolSearchTool(BaseTool):
     def __init__(self) -> None:
         self._registry: ToolRegistry | None = None
         self._skill_registry: Any | None = None
+        # tools.deferred_loading.search_mcp — set by mcp.bootstrap at boot
+        # (the config and this instance never meet anywhere else). True =
+        # MCP tools appear in search results like any other tool.
+        self.include_mcp: bool = True
 
     def set_registry(self, registry: ToolRegistry) -> None:
         """Inject the tool registry (called after construction)."""
@@ -134,6 +138,13 @@ class ToolSearchTool(BaseTool):
         """Fuzzy search across tool names, descriptions, AND skill names/descriptions."""
         assert self._registry is not None
         tools = self._registry.list_tools()
+        # tools.deferred_loading.search_mcp (reader wired by mcp.bootstrap,
+        # which is the only place the tools config and this instance meet):
+        # false hides MCP tools from search results — select-by-exact-name
+        # still works, because an operator naming a tool is explicit in a
+        # way a fuzzy match is not.
+        if not self.include_mcp:
+            tools = [t for t in tools if not t.name.startswith("mcp__")]
 
         # Empty query: return all tool + skill names
         if not query.strip():

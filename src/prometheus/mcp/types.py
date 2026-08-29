@@ -28,6 +28,11 @@ class McpServerCatalog:
     server_name: str
     launch_summary: str
     tool_count: int
+    # FOUNDATION 2.3a: how many of the offered tools survived the server's
+    # allowed_tools allowlist. Equal to tool_count when no allowlist is
+    # configured. tool_count stays the OFFERED count — the catalog is the
+    # honest record of what the server advertises, not of what we accepted.
+    allowed_count: int | None = None
 
 
 @dataclass
@@ -39,6 +44,12 @@ class McpCatalogTool:
     tool_name: str
     description: str
     input_schema: dict[str, Any]
+    # The server's ToolAnnotations.readOnlyHint, when it declares one.
+    # None = undeclared. Consumed by McpToolAdapter.is_read_only(), where
+    # the trust decision (a hint from a third-party server, honoured for
+    # confirmation-skipping inside an operator-allowlisted server) is
+    # documented.
+    read_only_hint: bool | None = None
 
 
 @dataclass

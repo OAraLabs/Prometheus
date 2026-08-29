@@ -857,6 +857,26 @@ class SecurityGate:
                 )
                 return PermissionDecision.allow(level=TrustLevel.AUTO)
 
+        # --- LEVEL 1: third-party MCP tools (FOUNDATION 2.3a) → APPROVE
+        # unless the server declares the tool read-only. Both origins: a
+        # present human asked for the TASK, not for whatever a third-party
+        # server does with it. Placed after grants, so the operator's
+        # "/approve always <id>" (a "tool"-kind grant) silences the prompt
+        # for exactly that tool; AUTONOMOUS mode returned above and waives
+        # this tier like every other APPROVE. Before this rule, every MCP
+        # call fell through to auto-allow: the adapter hardcoded
+        # is_read_only=True, declared no path params the gate could see,
+        # and carried no command — three misses that compose to "the
+        # sanctioned third-party surface is the ungated one".
+        if tool_name.startswith("mcp__") and not is_read_only:
+            reason = (
+                f"Third-party MCP tool {tool_name} is not declared "
+                "read-only by its server"
+            )
+            self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason)
+            self._remember_approve_target(reason, file_path=file_path, command=command)
+            return PermissionDecision.approve(reason)
+
         # --- LEVEL 1: write_file / edit_file outside workspace → APPROVE
         # (both origins — this is the path-traversal guarantee) ---
         if tool_name in _APPROVE_TOOLS:

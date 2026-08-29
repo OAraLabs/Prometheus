@@ -135,6 +135,25 @@ class DynamicToolLoader:
             SHIPPED_ALWAYS_LOADED if configured is None else configured
         )
 
+    def add_always_loaded(self, names: list[str] | set[str]) -> None:
+        """Extend the advertised baseline with runtime-registered tools.
+
+        For DYNAMIC tools (MCP today, packs tomorrow) whose names cannot
+        appear in the static ``always_loaded`` YAML list because they only
+        exist once a server is connected. FOUNDATION 2.3a: dynamic tools
+        must get an explicit advertise-or-defer decision instead of
+        silently landing on the invisible side — this is the advertise
+        branch, called by mcp.bootstrap when
+        ``tools.deferred_loading.mcp_always_deferred`` is false.
+
+        BOOT-TIME ONLY, before any run starts. The set stays frozen for
+        the life of the process afterwards — mutating it between runs of a
+        live session is the #120 prefix-mutation bug class this module's
+        docstrings keep warning about, and resolve_deferred/schemas_for_run
+        already freeze per-run on top of that.
+        """
+        self._always_loaded = frozenset(self._always_loaded | set(names))
+
     @property
     def _deferred_enabled(self) -> bool:
         """Legacy view of the tri-state: True only when EXPLICITLY enabled.
