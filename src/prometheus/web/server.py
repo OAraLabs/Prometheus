@@ -1645,15 +1645,16 @@ def create_app(
                     "session_id": h["session_id"],
                     "summary_id": h["summary_id"],
                     "anchor_message_ids": h["anchor_message_ids"],
-                    # Additive: rowids for the anchors above, same order. An anchor
-                    # whose message no longer exists is OMITTED (no null padding), so
-                    # positions need not line up with anchor_message_ids — resolve by
-                    # value, not index.
-                    "anchor_row_ids": [
-                        rowid_by_uuid[a]
+                    # Additive: anchor UUID → rowid, as a map so the correspondence is
+                    # explicit rather than positional — an anchor whose message no
+                    # longer exists is simply absent, with no index ambiguity. Rowids
+                    # are serialized as strings, matching message_id above: one
+                    # representation for the rowid space across the whole contract.
+                    "anchor_row_ids": {
+                        a: str(rowid_by_uuid[a])
                         for a in h["anchor_message_ids"]
                         if a in rowid_by_uuid
-                    ],
+                    },
                     "depth": h["depth"],
                     "snippet": h["snippet"],
                     "summary_text": h["summary_text"],
