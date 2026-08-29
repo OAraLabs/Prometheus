@@ -100,6 +100,7 @@ class _IterationReason:
     # round count alone and cannot tell a long productive run from a stuck
     # one. This fires on lack of PROGRESS, regardless of how many rounds in.
     UNPRODUCTIVE_REPEAT = "unproductive_repeat"
+    DIVERGENCE_HALT = "divergence_halt"
 
 
 _FAILURE_CATEGORIES = (
@@ -1126,6 +1127,11 @@ async def _run_loop(
     # burns the flat iteration cap instead. Per-turn, same as everything else
     # here -- see the reset-scope note on tool_iteration.
     repeat_detector = _ProgressRepeatDetector()
+    # LONGHAUL-2: consecutive divergence evaluations whose repetition floor
+    # fired. The halt requires _DIVERGENCE_HALT_AFTER in a ROW — live
+    # calibration showed healthy turns blip the floor for exactly one
+    # evaluation; only the stuck shape sustains it.
+    consecutive_divergence_repetition = 0
     tool_iteration = 0
     # Empty-response guard: at most one model-call retry per run_loop on a
     # genuinely empty assistant reply (no text, no tool calls) before surfacing.
@@ -1862,9 +1868,29 @@ async def _run_loop(
         # acted on further down, after the results are appended to history, so a
         # halt never leaves tool_use blocks without matching tool_result blocks.
         repeat_trip = None
+        _ro_cache: dict[str, bool] = {}
         for _i, (_tc, _r) in enumerate(zip(tool_calls, tool_results)):
+            # LONGHAUL-2: the varied-args track is gated on the tool's own
+            # read-only declaration. Resolved here (the dispatch helper owns
+            # the parsed input, this site owns the verdict) and fail-closed:
+            # a tool the registry can't produce, or whose is_read_only
+            # raises on a None argument, is treated as NOT read-only — the
+            # varied track then simply doesn't apply, which is the old
+            # behaviour, never a spurious halt.
+            _name = getattr(_tc, "name", "?")
+            if _name not in _ro_cache:
+                _ro = False
+                _reg = getattr(context, "tool_registry", None)
+                _tool_obj = _reg.get(_name) if _reg is not None else None
+                if _tool_obj is not None:
+                    try:
+                        _ro = bool(_tool_obj.is_read_only(None))
+                    except Exception:
+                        _ro = False
+                _ro_cache[_name] = _ro
             repeat_trip = repeat_detector.record(
                 _tc, _r.content, blocked=(_i in _blocked),
+                read_only=_ro_cache[_name],
             )
             if repeat_trip is not None:
                 break
@@ -2020,10 +2046,11 @@ async def _run_loop(
                 f"{repeat_trip.tool_name} x{repeat_trip.count}",
             )
             log.warning(
-                "Unproductive repeat: %s called %d\u00d7 with identical arguments, "
+                "Unproductive repeat: %s called %d\u00d7 with %s arguments, "
                 "%s each time \u2014 halting turn.",
                 repeat_trip.tool_name,
                 repeat_trip.count,
+                "varying" if repeat_trip.varied else "identical",
                 "empty result" if repeat_trip.empty else "identical result",
             )
             _tel = getattr(context, "telemetry", None)
@@ -2037,6 +2064,7 @@ async def _run_loop(
                             "tool_name": repeat_trip.tool_name,
                             "repeat_count": repeat_trip.count,
                             "empty_result": repeat_trip.empty,
+                            "varied_args": repeat_trip.varied,
                             "tool_iteration": tool_iteration,
                             "turn": turn,
                         },
@@ -2051,10 +2079,21 @@ async def _run_loop(
             yield AssistantTurnComplete(message=error_msg, usage=usage), usage
             return
 
-        # Sprint 10 / FL-4: checkpoint + divergence evaluation after tool
-        # dispatch. Observational only — the score is REPORTED, never acted
-        # on. See coordinator/divergence.py's module docstring for why the
-        # rollback half was retired rather than finished.
+        # Sprint 10 / FL-4 / LONGHAUL-2: checkpoint + divergence evaluation
+        # after tool dispatch. The SCORE is still only reported — but the
+        # repetition floor, held for _DIVERGENCE_HALT_AFTER consecutive
+        # evaluations, now HALTS the turn (divergence.halt_on_repetition,
+        # default on). This is not the retired FL-4 rollback: nothing is
+        # rewound — the turn ends FORWARD with every completed round kept,
+        # exactly like the repeat-detector halt above. The 2026-08-17
+        # reproduction warned on every iteration of a 30-step flail and was
+        # stopped only by a manual interrupt; "a detector that only warns
+        # trains everyone to read its warning as weather."
+        #
+        # EVALUATION stays fail-open (an exception must never break a
+        # turn); the halt decision is computed inside the guard and acted
+        # on outside it, so a raise can only ever mean "no halt".
+        _div_repetition_fired = False
         if context.divergence_detector is not None and div_task_id is not None:
             dd = context.divergence_detector
             try:
@@ -2075,16 +2114,73 @@ async def _run_loop(
                         msg_dicts, tool_result_dicts, task_id=div_task_id,
                     )
                     if div_result.diverged:
-                        # The signal's only consumer. WARNING because the
-                        # point of the feature is that someone reading the
-                        # journal can see the agent going in circles.
+                        # WARNING because the point of the feature is that
+                        # someone reading the journal can see the agent
+                        # going in circles.
                         log.warning(
                             "Divergence: task=%s %s", div_task_id, div_result.reason,
                         )
+                        # The floor is only ever set to REPETITION_FLOOR, so
+                        # presence is the test — no threshold arithmetic to
+                        # drift out of sync with the detector's constants.
+                        _div_repetition_fired = (
+                            div_result.components.get("repetition", 0.0) > 0.0
+                        )
             except Exception:
-                # Fail-open, same posture as start_task/end_task: an
-                # observational subsystem must never break a turn.
+                # Fail-open, same posture as start_task/end_task: this
+                # subsystem must never break a turn by RAISING. Halting is
+                # a decision, not a breakage, and it is taken below only
+                # on a successfully computed signal.
                 log.debug("Divergence evaluation raised", exc_info=True)
+
+            # `not all_errors` for the same reason as the repeat halt: an
+            # all-errors round belongs to the circuit breaker, which can
+            # still salvage the turn.
+            if _div_repetition_fired and not all_errors:
+                consecutive_divergence_repetition += 1
+            else:
+                consecutive_divergence_repetition = 0
+            if (
+                consecutive_divergence_repetition >= _DIVERGENCE_HALT_AFTER
+                and getattr(dd, "halt_on_repetition", False)
+            ):
+                _log_iteration(
+                    context,
+                    _IterationReason.DIVERGENCE_HALT,
+                    turn,
+                    tool_iteration,
+                    f"repetition floor x{consecutive_divergence_repetition}",
+                )
+                log.warning(
+                    "Divergence halt: task=%s repetition floor held for %d "
+                    "consecutive evaluations — halting turn.",
+                    div_task_id, consecutive_divergence_repetition,
+                )
+                _tel = getattr(context, "telemetry", None)
+                if _tel is not None and hasattr(_tel, "record_run"):
+                    try:
+                        _tel.record_run(
+                            subsystem="divergence",
+                            operation="halt",
+                            outcome="failed",
+                            summary={
+                                "consecutive_evaluations":
+                                    consecutive_divergence_repetition,
+                                "tool_iteration": tool_iteration,
+                                "turn": turn,
+                                "task_id": div_task_id,
+                            },
+                            session_id=effective_session_id or context.session_id,
+                            model=context.model,
+                        )
+                    except Exception:
+                        log.debug("divergence halt: record_run failed", exc_info=True)
+                _halt_msg = _make_assistant_msg(_divergence_halt_text(
+                    consecutive_divergence_repetition,
+                ))
+                messages.append(_halt_msg)
+                yield AssistantTurnComplete(message=_halt_msg, usage=usage), usage
+                return
 
     raise RuntimeError(f"Exceeded maximum turn limit ({context.max_turns})")
 
@@ -2872,6 +2968,19 @@ def _tool_call_signature(tool_call: object) -> str:
 _REPEAT_WINDOW = 10
 _REPEAT_TRIP = 3
 
+# LONGHAUL-2 (self-halt): the varied-args track trips later than the
+# identical-args one — 6 adjacent calls, not 3 — because varied arguments
+# have more legitimate surface. Calibrated against 7 days of live traffic:
+# healthy turns' same-tool unproductive runs broke before 5; the 2026-08-17
+# incident ran 30 adjacent and would trip here at 6 (~5 seconds in).
+_VARIED_REPEAT_TRIP = 6
+
+# How many CONSECUTIVE diverged-with-repetition evaluations before the loop
+# halts the turn (divergence.halt_on_repetition). One-evaluation blips are
+# what healthy live traffic produces (4 in the calibration week, every one
+# exactly one evaluation long); the incident diverged on every iteration.
+_DIVERGENCE_HALT_AFTER = 3
+
 
 def _result_fingerprint(content: object) -> str:
     """Identity of a tool RESULT for progress purposes.
@@ -2898,6 +3007,11 @@ class _RepeatTrip:
     tool_input: object
     count: int
     empty: bool
+    # LONGHAUL-2: True = the varied-args track fired (same READ-ONLY tool,
+    # different arguments, no new bytes); False = the original identical-
+    # signature track. The halt is the same; the operator message is not —
+    # "change arguments" is exactly the wrong advice for a varied flail.
+    varied: bool = False
 
 
 @dataclass
@@ -2916,17 +3030,39 @@ class _ProgressRepeatDetector:
     That is not a refinement -- it is what keeps the smoke test alive, whose
     reads bracket an ``edit_file`` and legitimately return different bytes.
 
-    KNOWN BLIND SPOT, recorded rather than fixed: keyed on the exact
-    (name, input) signature, so a flail with DIFFERENT arguments every round is
-    invisible here. coordinator/divergence.py:704 makes the same observation
-    from the other side. ``max_tool_iterations`` remains the backstop for that
-    shape and must NOT be read as redundant.
+    LONGHAUL-2 narrowed the blind spot the first version recorded here. The
+    varied-args track: the last ``_VARIED_REPEAT_TRIP`` adjacent calls all
+    name the same tool, every call was READ-ONLY, and the results carry no
+    new information (all empty/blocked, or all byte-identical). Read-only is
+    the load-bearing gate, chosen from the false-positive shapes measured
+    before this shipped: a run of quiet-but-effective bash mutations
+    (``mkdir``, ``cp`` — legitimately empty every time) and a multi-part
+    ``message`` broadcast (constant ack, varied text) are both real
+    workflows, and both come from tools that declare themselves NOT
+    read-only. A read-only tool that returns no new bytes six times has
+    definitionally made no progress — ``grep`` flail returning
+    ``(no matches)`` each round is the motivating trace.
+
+    STILL BLIND, recorded rather than fixed: varied-args flail on
+    NON-read-only tools (bash probing, most notably). The divergence
+    detector's repetition floor sees that shape and, since LONGHAUL-2,
+    HALTS on it after ``_DIVERGENCE_HALT_AFTER`` consecutive diverged
+    evaluations — but only where ``divergence.enabled`` is true.
+    ``max_tool_iterations`` remains the last backstop and must NOT be read
+    as redundant.
     """
 
     window: int = _REPEAT_WINDOW
     trip_at: int = _REPEAT_TRIP
+    varied_trip_at: int = _VARIED_REPEAT_TRIP
     _recent: list[str] = field(default_factory=list)
     _last_fp: dict[str, str] = field(default_factory=dict)
+    # Adjacency list for the varied-args track: (tool_name, fingerprint,
+    # read_only) per executed call, newest last. Separate from _recent,
+    # which is signature-keyed and progress-pruned — this track needs raw
+    # adjacency, and a "progress" event on one signature must not erase
+    # the neighbouring calls' history.
+    _tool_recent: list[tuple[str, str, bool]] = field(default_factory=list)
 
     def record(
         self,
@@ -2934,6 +3070,7 @@ class _ProgressRepeatDetector:
         content: object,
         *,
         blocked: bool = False,
+        read_only: bool = False,
     ) -> "_RepeatTrip | None":
         """Feed one executed call+result. Returns a trip verdict or None.
 
@@ -2955,6 +3092,21 @@ class _ProgressRepeatDetector:
         prior = self._last_fp.get(signature)
         self._last_fp[signature] = fp
 
+        # LONGHAUL-2 varied-args adjacency track — fed on EVERY call and
+        # judged regardless of the signature-track verdict below: a fresh
+        # signature's first result counts as "progress" to the signature
+        # track even when it is the same "(no matches)" bytes the previous
+        # five signatures returned, and that cross-signature sameness is
+        # precisely the flail this track exists to see. Blocked results get
+        # a sentinel fingerprint for the same reason the signature track
+        # ignores their text: it changes every round by construction.
+        fp_eff = "<blocked>" if blocked else fp
+        self._tool_recent.append(
+            (getattr(tool_call, "name", "?"), fp_eff, read_only)
+        )
+        if len(self._tool_recent) > self.window:
+            self._tool_recent = self._tool_recent[-self.window:]
+
         # Unproductive = returned nothing, or returned exactly what it
         # returned last time. Same predicate as divergence.py:718 --
         # duplicated deliberately, see the PR body.
@@ -2965,7 +3117,7 @@ class _ProgressRepeatDetector:
             self._recent = [s for s in self._recent if s != signature]
             self._recent.append(signature)
             self._trim()
-            return None
+            return self._varied_trip(tool_call)
 
         self._recent.append(signature)
         self._trim()
@@ -2977,15 +3129,59 @@ class _ProgressRepeatDetector:
                 count=count,
                 empty=(fp == ""),
             )
-        return None
+        return self._varied_trip(tool_call)
+
+    def _varied_trip(self, tool_call: object) -> "_RepeatTrip | None":
+        """The varied-args verdict: same READ-ONLY tool for the last
+        ``varied_trip_at`` adjacent calls, and no new bytes across the run
+        (all empty/blocked, or all byte-identical). Adjacency is the reset:
+        a differing result or a different tool inside the window breaks the
+        run with no bookkeeping."""
+        if len(self._tool_recent) < self.varied_trip_at:
+            return None
+        run = self._tool_recent[-self.varied_trip_at:]
+        if len({name for name, _, _ in run}) != 1:
+            return None
+        if not all(ro for _, _, ro in run):
+            return None
+        fps = [f for _, f, _ in run]
+        all_empty = all(f in ("", "<blocked>") for f in fps)
+        if not (all_empty or len(set(fps)) == 1):
+            return None
+        return _RepeatTrip(
+            tool_name=getattr(tool_call, "name", "?"),
+            tool_input=getattr(tool_call, "input", None),
+            count=self.varied_trip_at,
+            empty=all_empty,
+            varied=True,
+        )
 
     def _trim(self) -> None:
         if len(self._recent) > self.window:
             self._recent = self._recent[-self.window:]
 
 
+def _divergence_halt_text(consecutive: int) -> str:
+    """Operator-facing halt message for the sustained-divergence halt."""
+    return (
+        f"Halted: the same tool has been running repeatedly without "
+        f"producing new information, and the divergence detector's "
+        f"repetition signal held for {consecutive} consecutive checks. "
+        f"This turn is stopped; everything completed so far is kept.\n\n"
+        f"Step back from this approach entirely — a different tool, a "
+        f"different framing of the task, or ask the user for direction. "
+        f"(Operators: divergence.halt_on_repetition governs this halt; "
+        f"the observational warnings remain either way.)"
+    )
+
+
 def _repeat_trip_text(trip: "_RepeatTrip") -> str:
-    """Operator-facing halt message. Names the tool, the args and the count."""
+    """Operator-facing halt message. Names the tool, the args and the count.
+
+    The two tracks get DIFFERENT advice deliberately: after an identical-
+    args trip, "different arguments" is a way out; after a varied-args trip
+    it is exactly what just failed six times.
+    """
     import json as _json
     try:
         args = _json.dumps(trip.tool_input, sort_keys=True, default=str)
@@ -2994,6 +3190,16 @@ def _repeat_trip_text(trip: "_RepeatTrip") -> str:
     if len(args) > 500:
         args = args[:500] + "... (truncated)"
     got = "returned nothing" if trip.empty else "returned an identical result"
+    if trip.varied:
+        return (
+            f"Halted: no progress. `{trip.tool_name}` was called "
+            f"{trip.count} times in a row with varying arguments and {got} "
+            f"every time.\n\nLast arguments: {args}\n\n"
+            f"Varying the arguments is not working \u2014 this line of "
+            f"inquiry is exhausted. Step back: use a different tool, "
+            f"question the assumption that made this search look right, or "
+            f"tell the user what is blocking you."
+        )
     return (
         f"Halted: no progress. `{trip.tool_name}` was called {trip.count} times "
         f"with identical arguments and {got} every time.\n\n"

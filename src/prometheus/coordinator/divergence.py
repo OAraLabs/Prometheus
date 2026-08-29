@@ -468,6 +468,20 @@ class DivergenceDetector:
         self.enabled = div_config.get("enabled", False)
         self.checkpoint_interval = div_config.get("checkpoint_interval", 5)
         self.threshold = div_config.get("threshold", 0.7)
+        # Self-halt (post-FL-4): whether the LOOP may act on a sustained
+        # repetition verdict. FL-4 retired the ROLLBACK half — rewinding a
+        # conversation on a score was the dangerous action, and this is not
+        # that: the loop ends the turn FORWARD, keeping every completed
+        # round, after the repetition floor holds for consecutive
+        # evaluations (agent_loop._DIVERGENCE_HALT_AFTER). The 2026-08-17
+        # reproduction warned on every iteration of a 30-step flail and
+        # changed nothing — "a detector that only warns trains everyone to
+        # read its warning as weather." Live-traffic calibration (7 days):
+        # healthy turns blip the floor for exactly ONE evaluation, so the
+        # consecutive requirement is what separates them from the incident.
+        self.halt_on_repetition = bool(
+            div_config.get("halt_on_repetition", True)
+        )
         # ``use_llm_eval`` / ``llm_eval_budget`` were read here into attributes
         # nothing consumed — a config key promising an LLM-backed evaluator
         # that was never built, kept plausible by the assignment itself (the
@@ -714,6 +728,14 @@ class DivergenceDetector:
         #    Hash-exact repeat detection is NOT a candidate: it is narrower
         #    than this check and goes silent on the exact flailing shape that
         #    motivated the round — different arguments every time.
+        #
+        #    This signal is no longer warn-only: when it holds for
+        #    consecutive evaluations the loop HALTS the turn (see
+        #    halt_on_repetition above, and agent_loop's divergence block).
+        #    The loop also carries its own always-on varied-args trip for
+        #    READ-ONLY tools (_ProgressRepeatDetector) — the two overlap on
+        #    read-only flail on purpose; belt and braces have different
+        #    failure modes.
         if len(recent) >= REPETITION_RUN:
             run = recent[-REPETITION_RUN:]
             if len({c["tool"] for c in run}) == 1:
