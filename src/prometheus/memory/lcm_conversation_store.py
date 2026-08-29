@@ -586,6 +586,23 @@ class LCMConversationStore:
         ).fetchone()
         return row is not None
 
+    def rowids_for_message_ids(self, message_ids: list[str]) -> dict[str, int]:
+        """Map message UUIDs (``lcm_messages.id``) to their durable rowids.
+
+        The rowid is the wire cursor identity (``?since=``, ``messages_after_id``);
+        a UUID is not a scroll position. Ids with no persisted row are simply
+        absent from the result — callers decide how to handle the gap.
+        """
+        ids = [i for i in message_ids if i]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        rows = self._conn.execute(
+            f"SELECT rowid, id FROM lcm_messages WHERE id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        return {r["id"]: int(r["rowid"]) for r in rows}
+
     # ------------------------------------------------------------------
     # Session index (feat/durable-session-index)
     # ------------------------------------------------------------------

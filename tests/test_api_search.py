@@ -86,6 +86,50 @@ def test_message_id_is_the_durable_rowid(tmp_path):
     assert hit["message_id"] != hit["uuid"]
 
 
+def test_anchor_row_ids_match_history_read(tmp_path):
+    """Acceptance criterion (same pattern as chat_done.row_id): the rowids a
+    summary hit carries EQUAL the rowids a history read (messages_after_id)
+    returns for the same anchor messages — that is what lets a client jump to
+    the exact anchored message without a UUID→rowid lookup of its own."""
+    client, conv, _ = _client(tmp_path)
+    body = client.post("/api/search", json={"q": "kling", "scope": "summaries"}).json()
+    hit = body["summaries"][0]
+
+    # Additive: the UUID list is untouched, and the new field is present.
+    assert hit["anchor_message_ids"]
+    assert hit["anchor_row_ids"]
+    assert len(hit["anchor_row_ids"]) == len(hit["anchor_message_ids"])
+
+    rows = conv.messages_after_id(0, session_id=hit["session_id"])
+    rowid_by_uuid = {r.message_id: r.row_id for r in rows}
+    assert hit["anchor_row_ids"] == [
+        rowid_by_uuid[u] for u in hit["anchor_message_ids"]
+    ]
+    # Different id spaces: rowids are ints, never the UUID strings.
+    assert all(isinstance(r, int) for r in hit["anchor_row_ids"])
+
+
+def test_anchor_row_ids_omit_missing_anchors(tmp_path):
+    """An anchor whose message no longer exists is OMITTED from anchor_row_ids
+    (no null padding — resolve by value, not index); anchor_message_ids still
+    carries the full original list."""
+    client, conv, _ = _client(tmp_path)
+    summ = LCMSummaryStore(tmp_path / "lcm.db")  # same DB the client's stores use
+    m = MessagePart(role="user", content="quorum drift analysis", session_id="cli:42")
+    conv.insert_message(m)
+    node = SummaryNode(
+        source_message_ids=[m.message_id, "00000000-dead-beef-0000-000000000000"],
+        summary_text="summary covering quorum drift",
+        depth=0,
+    )
+    summ.insert_summary(node, session_id="cli:42")
+
+    body = client.post("/api/search", json={"q": "quorum", "scope": "summaries"}).json()
+    hit = body["summaries"][0]
+    assert len(hit["anchor_message_ids"]) == 2  # untouched
+    assert hit["anchor_row_ids"] == [m.row_id]  # only the live anchor
+
+
 def test_session_scope(tmp_path):
     client, _, _ = _client(tmp_path)
     body = client.post(

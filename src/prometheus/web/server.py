@@ -1628,12 +1628,32 @@ def create_app(
                 session_id=session_id,
                 limit=limit,
             )
+            # One batched UUID→rowid lookup across every hit's anchors: the rowid is
+            # the durable scroll cursor (same id space as ?since= / message_id above),
+            # which is what lets a client jump to the exact anchored message.
+            all_anchor_ids = [a for h in hits for a in h["anchor_message_ids"]]
+            rowid_by_uuid = (
+                await asyncio.to_thread(
+                    lcm.conversation_store.rowids_for_message_ids, all_anchor_ids
+                )
+                if all_anchor_ids
+                else {}
+            )
             summaries_out = [
                 {
                     "kind": "summary",
                     "session_id": h["session_id"],
                     "summary_id": h["summary_id"],
                     "anchor_message_ids": h["anchor_message_ids"],
+                    # Additive: rowids for the anchors above, same order. An anchor
+                    # whose message no longer exists is OMITTED (no null padding), so
+                    # positions need not line up with anchor_message_ids — resolve by
+                    # value, not index.
+                    "anchor_row_ids": [
+                        rowid_by_uuid[a]
+                        for a in h["anchor_message_ids"]
+                        if a in rowid_by_uuid
+                    ],
                     "depth": h["depth"],
                     "snippet": h["snippet"],
                     "summary_text": h["summary_text"],
