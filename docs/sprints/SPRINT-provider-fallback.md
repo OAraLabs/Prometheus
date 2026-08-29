@@ -1,7 +1,17 @@
 # SPRINT: Loud Degrade on Terminal Provider Failure
 
 **Branch:** `feat/provider-fallback`
-**Status:** Spec. Not started. Independent of the Token Plan renewal — see Origin.
+**Status: IMPLEMENTED AND DEPLOYED (2026-08-28).** Kept as the design record, not as a to-do —
+an earlier copy of this file reached main saying "Not started" while the work was already
+shipping, which is worse than no document.
+
+Landed as: #296 (Phases 1-4), #297 (the degrade reaches history), #299 (wiring — #296 shipped
+INERT), #300 (blank `model.model` made it inert a second time), #302 (say why a fallback
+declined), #306 (the `provider_degraded` WS frame). Prerequisite: #294 (a retry must not replay
+over output already sent) — that invariant is Phase 2's, and it did not hold until then.
+
+Read the Phase 0 survey answers and the hazards below; skip the phase instructions, which are
+done. What the implementation learned that this spec did not predict is recorded at the end.
 **Origin:** Review of #288 turned into a routing audit on 2026-08-28. Three findings, in
 order of how much they should shape the design:
 
@@ -203,3 +213,30 @@ conversation refuses with the numbers rather than truncating.
 A green mutation sweep on this sprint proves only that the guards written are load-bearing.
 Enumerate the call sites from Phase 0 item 1 and confirm each is covered — a path with no
 fallback wired produces no failing mutation, because there is nothing there to break.
+
+---
+
+## What implementing it taught, that this spec did not predict
+
+Recorded because the spec was right about the design and wrong about where the difficulty was.
+
+- **Writing it was not the hard part; making it RUN was.** It shipped inert twice. First
+  `build_fallback_target()` was never called from anywhere (#299) — 31 tests passed because each
+  constructed a `FallbackTarget` by hand, proving the consumer worked and saying nothing about
+  whether anything produced one. Then it required `model.model`, which the shipped config
+  template explicitly tells operators to leave blank (#300) — inert on the recommended setup.
+- **The classifier it depends on was itself broken** (#303). `classify_turn_error` returned
+  `unknown` for EVERY streaming failure, because `.text` on an unread httpx response raises
+  `ResponseNotRead` and `getattr(response, "text", "")` does not absorb it. Since `is_terminal`
+  keys on the kind, the fallback could never fire regardless of its own correctness. Three deploy
+  cycles were spent eliminating causes before adding the declined-reason log (#302) that named it
+  in one line.
+- **A fallback that declines silently is the same failure this sprint removes, one level up.**
+  That log line should have been in the original design, not added after it cost three cycles.
+- **The identity-line predicate hazard (recorded above) was real**, and the extraction is what
+  surfaced it. `reason_repr != "primary"` was named after its first caller rather than its
+  condition.
+
+Verified live, not only in tests: a session pointed at a provider returning a genuine 401
+degraded to the local model, the reply named the serving model, and the notice survived a re-read
+of stored history.
