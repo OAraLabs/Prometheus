@@ -75,10 +75,10 @@ KNOWN_DEFAULT_MISMATCHES: dict[str, str] = {
                           "the template says it is on",
     "web.enabled": "CODE-SUSPECT — template true, doctor.py:185 falls back "
                    "False, so doctor skips the port check when the key is absent",
-    # ── documented value differs from the fallback by a large factor.
-    "coding.max_iterations": "DECIDE — template 50, __main__.py:842 falls back 30",
-    "coding.max_task_duration_minutes": "DECIDE — template 120, __main__.py:847 "
-                                        "falls back 20 (a 6x difference)",
+    # (coding.max_iterations / coding.max_task_duration_minutes left the
+    # register 2026-08-28: PR-B shape-C ruling aligned the fallbacks to the
+    # shipped template — the register only shrinks. The pair is now pinned
+    # both-ways by tests/test_config_absence_rulings.py.)
     # ── RESOLVER: the read the pass sees is INSIDE a resolver that supplies
     #    the shipped value. Behaviour is correct; the extractor sees the inner
     #    `.get(k)` and not the function wrapping it. Registered so the blind

@@ -848,12 +848,17 @@ def run_coding_task(args) -> int:
         max_rounds=(
             args.max_rounds
             if args.max_rounds is not None
-            else int(coding_cfg.get("max_iterations", 30))
+            # PR-B shape-C ruling: fallbacks match the SHIPPED template
+            # (50 / 120), which is the operator-visible contract — the old
+            # 30 / 20 made the documented numbers fiction whenever the key
+            # was absent, which the live config (keys commented out) made
+            # the NORMAL state.
+            else int(coding_cfg.get("max_iterations", 50))
         ),
         max_wall_seconds=float(
             args.max_wall_seconds
             if args.max_wall_seconds is not None
-            else float(coding_cfg.get("max_task_duration_minutes", 20)) * 60.0
+            else float(coding_cfg.get("max_task_duration_minutes", 120)) * 60.0
         ),
         suppress_thinking=True if args.suppress_thinking else False,
         control_dir=args.control_dir,
@@ -1161,7 +1166,7 @@ def main() -> None:
     code_parser.add_argument(
         "--max-wall-seconds", type=int, default=None,
         help="Wall-clock cap for the run "
-             "(default: coding.max_task_duration_minutes, else 1200)",
+             "(default: coding.max_task_duration_minutes, else 7200)",
     )
     code_parser.add_argument(
         "--sandbox-parent", default=None,
