@@ -459,29 +459,19 @@ def create_adapter(model_cfg: dict[str, Any], adapter_cfg: dict[str, Any] | None
     return ModelAdapter(formatter=formatter, strictness="MEDIUM", tier="full", **adaptive_kwargs)
 
 
-async def create_mcp_runtime(config: dict[str, Any], registry: Any) -> Any:
-    """Create MCP runtime, connect servers, register tools (Sprint 12)."""
-    mcp_servers = config.get("mcp_servers", {})
-    if not mcp_servers:
-        log.debug("MCP: no servers configured")
-        return None
+async def create_mcp_runtime(
+    config: dict[str, Any], registry: Any, tool_loader: Any | None = None
+) -> Any:
+    """Delegate to prometheus.mcp.bootstrap (FOUNDATION 2.3a) — the one
+    construction path the daemon now shares, so MCP can never again be
+    wired for one entry point and dark on the other.
 
-    try:
-        from prometheus.mcp.runtime import McpRuntime
-        from prometheus.mcp.adapter import register_mcp_tools
-        from prometheus.tools.builtin.mcp_status import McpStatusTool
-
-        runtime = McpRuntime(mcp_servers)
-        await runtime.connect_all()
-
-        count = register_mcp_tools(registry, runtime)
-        registry.register(McpStatusTool(runtime))
-        log.info("MCP: registered %d tools + mcp_status", count)
-
-        return runtime
-    except Exception as exc:
-        log.warning("MCP runtime not available: %s", exc)
-        return None
+    The import stays inside the function: prometheus.mcp's package
+    __init__ eagerly pulls the optional ``mcp`` SDK, and this module (home
+    of create_tool_registry) must import cleanly without it.
+    """
+    from prometheus.mcp.bootstrap import create_mcp_runtime as _impl
+    return await _impl(config, registry, tool_loader=tool_loader)
 
 
 def create_model_router(
@@ -1577,7 +1567,9 @@ def main() -> None:
         # Sprint 12: MCP servers (must live in same async context as agent loop)
         mcp_runtime = None
         if config.get("mcp_servers"):
-            mcp_runtime = await create_mcp_runtime(config, registry)
+            mcp_runtime = await create_mcp_runtime(
+                config, registry, tool_loader=tool_loader
+            )
 
         # Wire GBNF grammar for llama.cpp constrained decoding
         model_cfg = config.get("model", {})

@@ -53,8 +53,20 @@ class McpToolAdapter(BaseTool):
         self.description = tool_info.description
 
     def is_read_only(self, arguments: BaseModel) -> bool:
-        # MCP tools are treated as read-only by default (external service calls)
-        return True
+        # FOUNDATION 2.3a: honest, not hopeful. The old hardcoded True made
+        # every MCP call fall through the SecurityGate as auto-allow — a
+        # third-party tool that writes files or sends money was "read-only"
+        # by assertion. Now: only an explicit readOnlyHint=True from the
+        # server counts; undeclared means NOT read-only, and the gate
+        # requires confirmation for it (checker.evaluate's mcp__ rule).
+        #
+        # Trust decision, stated: the hint is the server's own claim. It is
+        # honoured for confirmation-skipping because the operator already
+        # opted into the server (and can scope it with allowed_tools) —
+        # a server that lies about read-onlyness has the same power as any
+        # tool the operator allowlisted. The floor (denied paths, blocked
+        # commands) never keyed off this flag.
+        return self._tool_info.read_only_hint is True
 
     def to_api_schema(self) -> dict[str, Any]:
         """Return the MCP-provided schema (not pydantic introspection)."""

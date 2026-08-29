@@ -851,6 +851,19 @@ anatomy:
   # in the live config only — the pre-commit hook blocks real hosts/IPs here.
   ssh_user: ""
   ssh_key: ""
+# Third-party tools arrive here (FOUNDATION 2.3a) — an MCP server per key.
+# Per-server keys: command/args/env/cwd (stdio), connectionTimeoutMs, and
+# allowed_tools — an optional allowlist naming the tools to accept from the
+# server; everything else it offers is excluded at discovery AND refused at
+# call time. Without it every offered tool loads. NOTE: this is an open map
+# the config-drift ratchet cannot see into, so a key here is only real if
+# code reads it — allowed_tools is read in mcp/runtime.py.
+# Example:
+#   mcp_servers:
+#     context7:
+#       command: npx
+#       args: [-y, '@upstash/context7-mcp']
+#       allowed_tools: [resolve-library-id, get-library-docs]
 mcp_servers: {}
 
 # H3: lifecycle hooks. Empty by default (no hooks run). Each event maps to a

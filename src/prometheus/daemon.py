@@ -623,6 +623,22 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # DynamicToolLoader — deferred loading support
     from prometheus.context.dynamic_tools import DynamicToolLoader
     tool_loader = DynamicToolLoader(registry, config.get("tools", {}).get("deferred_loading"))
+
+    # ── MCP servers (FOUNDATION 2.3a) ───────────────────────────────────
+    # The sanctioned third-party tool path, constructed for the DAEMON for
+    # the first time — create_mcp_runtime lived only on the CLI path before
+    # this, so Telegram/Beacon/cron had never seen an MCP tool. Registered
+    # BEFORE the advertisement-baseline log below so its counts stay
+    # honest, and before both loop constructions so the two agent loops
+    # (daemon.py builds TWO — web/Beacon and telegram/CLI) share one
+    # registry state. Import lazy + guarded: prometheus.mcp's __init__
+    # eagerly pulls the optional `mcp` SDK.
+    mcp_runtime = None
+    if config.get("mcp_servers"):
+        from prometheus.mcp.bootstrap import create_mcp_runtime
+        mcp_runtime = await create_mcp_runtime(
+            config, registry, tool_loader=tool_loader
+        )
     # FIRSTLIGHT FL-2b: the advertised baseline gets ONE visible line at
     # boot. Before this, a config with no tools: section advertised zero
     # tools and nothing anywhere said so — the only traces were telemetry
@@ -2139,6 +2155,9 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     if lsp_orchestrator:
         await lsp_orchestrator.shutdown_all()
+
+    if mcp_runtime is not None:
+        await mcp_runtime.close()
 
     if telegram:
         await telegram.stop()
