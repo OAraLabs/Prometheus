@@ -204,6 +204,9 @@ class TelegramAdapter(BasePlatformAdapter):
         # map is only the fallback for adapters wired without a real manager
         # (``__new__``-built or stub-managed test instances).
         self._turn_locks: dict[str, asyncio.Lock] = {}
+        # Strong refs for fire-and-forget background tasks (session titling) —
+        # retention semantics live in engine.session_titles.schedule.
+        self._bg_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------
     # Sprint S1 Stream 2: SignalBus subscription for user-visible events
@@ -1994,6 +1997,28 @@ class TelegramAdapter(BasePlatformAdapter):
             # Append assistant response (and any tool call/result pairs) to session
             session.add_result_messages(result.messages, pre_len)
             session.trim(self.session_manager.MAX_SESSION_MESSAGES)
+            # GRAFT-MOBILE-BRIDGE 7 follow-up: telegram turns auto-title too.
+            # Same absence-only, fire-and-forget contract as the WS bridge —
+            # the reply is already on its way, and every failure inside
+            # degrades to "no title" (Beacon falls back to its snippet).
+            from prometheus.engine import session_titles as _titles
+
+            # getattr fallback for __new__-built / stub-wired test instances,
+            # same resilience contract as _turn_lock_for above.
+            bg_tasks = getattr(self, "_bg_tasks", None)
+            if bg_tasks is None:
+                bg_tasks = set()
+                self._bg_tasks = bg_tasks
+            _titles.schedule(
+                bg_tasks,
+                store=getattr(getattr(session, "lcm_engine", None),
+                              "conversation_store", None),
+                provider=self._get_provider(),
+                model=getattr(getattr(self, "agent_loop", None), "_model", "default")
+                    or "default",
+                session_id=session_id,
+                messages=session.get_messages(),
+            )
             logger.debug(
                 "THREAD after: session=%s total_messages=%d result_messages=%d",
                 session_id, len(session.get_messages()), len(result.messages),

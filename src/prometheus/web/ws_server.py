@@ -1389,22 +1389,17 @@ class WebSocketBridge:
         try:
             from prometheus.engine import session_titles as _titles
 
-            store = getattr(getattr(session, "lcm_engine", None),
-                            "conversation_store", None)
-            provider = getattr(self.loop_context, "provider", None)
-            model = getattr(self.loop_context, "model", "default")
-            if store is None or provider is None:
-                return
-            task = asyncio.get_running_loop().create_task(
-                _titles.maybe_title_session(
-                    store, provider, model, session_id,
-                    list(getattr(session, "messages", []) or []),
-                )
+            # Retention + GC-trap handling live in _titles.schedule — one
+            # implementation shared with the Telegram gateway.
+            _titles.schedule(
+                self._bg_tasks,
+                store=getattr(getattr(session, "lcm_engine", None),
+                              "conversation_store", None),
+                provider=getattr(self.loop_context, "provider", None),
+                model=getattr(self.loop_context, "model", "default"),
+                session_id=session_id,
+                messages=getattr(session, "messages", []) or [],
             )
-            # Keep a strong reference or the loop's weak ref is the only one
-            # and the task can be GC'd before it runs (see _bg_tasks).
-            self._bg_tasks.add(task)
-            task.add_done_callback(self._bg_tasks.discard)
         except Exception:
             logger.debug("session title scheduling failed", exc_info=True)
 
