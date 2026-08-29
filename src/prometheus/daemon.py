@@ -406,6 +406,22 @@ async def run_daemon(args: argparse.Namespace) -> None:
     gateway_config = config.get("gateway", {})
     security_config = config.get("security", {})
 
+    # ── Env file (Onboarding Phase 0) ───────────────────────────────────
+    # Under systemd the unit's EnvironmentFile= already populated these;
+    # run bare, `prometheus daemon` loads the same file so tokens/keys
+    # behave identically either way (setdefault — real env always wins).
+    # This MUST run before the wiki/vault roots are resolved below: both
+    # resolvers consult environment variables (PROMETHEUS_VAULT among them),
+    # and loading the file after resolution meant a bare `prometheus daemon`
+    # pinned the default roots while systemd pinned the configured ones —
+    # two boots of the same config disagreeing about where the vault is.
+    from prometheus.config.env_file import get_env_file_path, load_env_file
+    _env_loaded = load_env_file()
+    if _env_loaded:
+        logger.info(
+            "Loaded %d variable(s) from %s", _env_loaded, get_env_file_path()
+        )
+
     # ── Wiki root ───────────────────────────────────────────────────────
     # Resolved ONCE here and pinned process-wide; every consumer reads it back
     # through get_wiki_root() and none keeps a fallback. Before this, nine
@@ -433,16 +449,33 @@ async def run_daemon(args: argparse.Namespace) -> None:
             "vault.root / wiki.root", vault_root,
         )
 
-    # ── Env file (Onboarding Phase 0) ───────────────────────────────────
-    # Under systemd the unit's EnvironmentFile= already populated these;
-    # run bare, `prometheus daemon` loads the same file so tokens/keys
-    # behave identically either way (setdefault — real env always wins).
-    from prometheus.config.env_file import get_env_file_path, load_env_file
-    _env_loaded = load_env_file()
-    if _env_loaded:
-        logger.info(
-            "Loaded %d variable(s) from %s", _env_loaded, get_env_file_path()
-        )
+    # ── Vault format marker (Foundation Spec 1.1) ───────────────────────
+    # A vault written by a newer format than this build reads refuses the
+    # boot outright; a vault from before markers existed follows
+    # vault.format_check (off | warn | refuse, default warn) and is adopted
+    # only by an explicit `prometheus vault adopt`, never silently. An
+    # absent vault stays a non-error, same stance as the tools.
+    from prometheus.config.vault_marker import check_vault_marker, enroll_node
+    _format_check = (config.get("vault") or {}).get("format_check", "warn")
+    _vault_marker = check_vault_marker(vault_root, mode=_format_check)
+
+    # ── Node + instance identity (Foundation Spec Part 3) ───────────────
+    # The node keypair is minted at first run and inert until something
+    # opts into using it (spec rule 4); the instance UUID rides the vault
+    # marker and is pinned here so /api/status answers without re-reading
+    # the vault per poll. Against an adopted vault the local node
+    # self-enrolls — the human who ran `vault adopt` is the approval until
+    # the fleet's explicit enrollment step exists (spec 3.6).
+    from prometheus.config.node_identity import (
+        ensure_node_identity,
+        set_instance_id,
+    )
+    _node = ensure_node_identity()
+    logger.info("Node identity: %s…", _node.pubkey[:12])
+    set_instance_id(_vault_marker.instance_id if _vault_marker else None)
+    if _vault_marker is not None:
+        import platform as _platform
+        enroll_node(vault_root, _node.pubkey, label=_platform.node() or "node")
 
     # ── Boot-SHA staleness signal ───────────────────────────────────────
     # The repo HEAD at process start is the identity of the code THIS process

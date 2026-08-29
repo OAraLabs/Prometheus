@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 from prometheus.web.strict_query import StrictQueryRoute
 
+from prometheus.config.node_identity import get_instance_id, get_node_pubkey
 from prometheus.config.paths import get_wiki_root
 from prometheus.context.environment import booted_from as _booted_from, git_head_sha
 
@@ -555,6 +556,15 @@ def create_app(
             # (daemon.py builds both), kept in step by the startup agreement
             # check there. Calling this "effective" full stop would overclaim.
             "iteration_ceilings": _iteration_ceilings(),
+            # FOUNDATION Part 3: node + instance identity. Wire names are a
+            # contract with the Beacon iOS client, which decodes both
+            # optionally — do not rename. node_pub is the base64 Ed25519
+            # public key (the node ID), read from disk state minted at
+            # daemon start; instance_id is pinned from the vault marker at
+            # boot. Both null until the respective identity exists.
+            # Bearer-gated deliberately: neither belongs on /health.
+            "node_pub": get_node_pubkey(),
+            "instance_id": get_instance_id(),
         }
 
     # ── Sessions ────────────────────────────────────────────────────
