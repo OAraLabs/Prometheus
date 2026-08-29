@@ -99,8 +99,12 @@ model:
   # NOTE the cloud cap is now BELOW the local one, reversing the old ordering.
   # Deliberate: cloud rounds cost money per call, local rounds cost only
   # wall-clock on hardware already paid for. See shipped_defaults.py for the
-  # recorded risk — local is also the path likeliest to produce the
-  # varied-argument flail the repeat detector cannot see.
+  # recorded risk — local is also the path likeliest to produce
+  # varied-argument flail. Since LONGHAUL-2 that shape has two dedicated
+  # stops short of this cap: read-only tools halt after 6 adjacent calls
+  # with no new bytes (always on), and divergence.halt_on_repetition halts
+  # any tool whose repetition signal sustains (when divergence is enabled).
+  # Non-read-only flail with divergence disabled still rides to this cap.
   max_tool_iterations: 500              # Max tool calls per user message before hard stop (local/llama)
   max_tool_iterations_cloud: 100        # Separate, LOWER cap for cloud (tier=off): every round is billed
   fallback_provider: "ollama"
@@ -573,6 +577,13 @@ divergence:
 
   threshold: 0.7
   checkpoint_interval: 5
+  # LONGHAUL-2 self-halt: when the repetition signal (same tool, no new
+  # information) holds for 3 consecutive evaluations, END the turn forward,
+  # keeping all completed work — nothing is rewound. false restores the old
+  # warn-only behaviour; the warnings log either way. Only meaningful with
+  # enabled: true above. Calibrated against live traffic: healthy turns blip
+  # the signal for one evaluation, the reproducible stuck shape sustains it.
+  halt_on_repetition: true
 learning:
   # PeriodicNudge — self-reflection prompt every N agent turns.
   nudge_enabled: true
