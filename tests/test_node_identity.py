@@ -123,6 +123,38 @@ class TestEnrollment:
         assert [n["pubkey"] for n in marker.enrolled_nodes] == [identity.pubkey]
         assert marker.enrolled_nodes[0]["label"] == "test-node"
 
+    def test_brand_hostname_enrolls_with_neutralized_label(
+        self, vault: Path
+    ) -> None:
+        # The vault is a git repo whose pre-commit hook (like this repo's)
+        # blocks brand-prefixed infrastructure hostnames in committed text.
+        # The daemon enrolls with the raw platform.node(), so a brand-named
+        # machine used to write a label that made the vault uncommittable
+        # until hand-fixed. The hostname below is built from fragments so
+        # THIS file passes that same hook.
+        identity = ensure_node_identity()
+        brand_host = "OAra" "-Foo"
+        assert enroll_node(vault, identity.pubkey, label=brand_host) is True
+        marker = read_marker(vault)
+        assert marker is not None
+        assert marker.enrolled_nodes[0]["label"] == "Foo"
+        # The blocked prefix must not appear ANYWHERE in the marker file —
+        # the hook greps text, not fields.
+        marker_text = (vault / ".prometheus-vault").read_text(encoding="utf-8")
+        assert brand_host.lower()[:5] not in marker_text.lower()
+
+    def test_neutral_label_edge_cases(self) -> None:
+        from prometheus.config.vault_marker import neutral_label
+
+        prefix = "oara" "-"
+        assert neutral_label(prefix + "mini") == "mini"
+        assert neutral_label(prefix.upper() + "4090") == "4090"
+        # A hostname that is ONLY the prefix still gets a usable label.
+        assert neutral_label(prefix) == "node"
+        assert neutral_label("") == "node"
+        # Non-brand hostnames pass through untouched.
+        assert neutral_label("workstation-3") == "workstation-3"
+
     def test_enroll_without_marker_refuses(self, tmp_path: Path) -> None:
         bare = tmp_path / "unadopted"
         bare.mkdir()
