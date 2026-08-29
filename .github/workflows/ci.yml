@@ -9,7 +9,7 @@ name: CI
 # because the gh token lacked `workflow` scope), folded into the branch and
 # modernized for Onboarding Phase 3: uv-based install/test invocation matching
 # the project's canonical dev loop (`uv sync --extra web --extra anthropic
-# --group dev` + `PYTHONPATH=$PWD/src uv run pytest`).
+# --extra mcp --group dev` + `PYTHONPATH=$PWD/src uv run pytest`).
 
 on:
   push:
@@ -78,8 +78,14 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install uv (from PyPI — deliberately not astral-sh/setup-uv)
         run: python -m pip install --upgrade uv
-      - name: Sync dependencies (web + anthropic extras, dev group)
-        run: uv sync --python ${{ matrix.python-version }} --extra web --extra anthropic --group dev
+      - name: Sync dependencies (web + anthropic + mcp extras, dev group)
+        # mcp added 2026-08-28 (handoff item 3): the MCP subsystem had NEVER
+        # run in CI — every MCP test file importorskips on the SDK, and this
+        # sync excluded it, so ~50 tests across the client, the allowlist,
+        # and the bootstrap silently skipped on every run while the daemon
+        # gained MCP as its sanctioned third-party tool path (#315). A
+        # subsystem's tests skipping is not the same as passing.
+        run: uv sync --python ${{ matrix.python-version }} --extra web --extra anthropic --extra mcp --group dev
       - name: Assert the environment is the interpreter this matrix leg asked for
         # setup-uv took `python-version` directly, so the leg was self-evidently
         # right. Now that selection is uv's, a wrong-but-working interpreter would
