@@ -195,6 +195,33 @@ async def backfill_titles(store, provider, model: str, *, dry_run: bool = False,
     return counts
 
 
+def schedule(tasks: set, *, store, provider, model: str,
+             session_id: str, messages: list) -> None:
+    """Fire-and-forget `maybe_title_session`, done SAFELY: the event loop holds
+    tasks only weakly, so a bare `create_task` nobody keeps can be
+    garbage-collected mid-flight — the standard asyncio fire-and-forget trap.
+    The caller passes its retention set; the done-callback releases, so the set
+    stays O(in-flight). One implementation for every surface that titles
+    (the WS bridge, the Telegram gateway) — two copies of this footgun is how
+    one of them quietly loses it again.
+
+    No-op (schedules nothing) without a store AND a provider, or off the event
+    loop — a title is a nicety and must never be the thing that raises.
+    """
+    import asyncio
+
+    try:
+        if store is None or provider is None:
+            return
+        task = asyncio.get_running_loop().create_task(
+            maybe_title_session(store, provider, model, session_id, list(messages))
+        )
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+    except Exception:
+        logger.debug("session title scheduling failed", exc_info=True)
+
+
 async def maybe_title_session(store, provider, model: str,
                               session_id: str, messages: list) -> None:
     """Generate-and-store, iff the session has no title yet.

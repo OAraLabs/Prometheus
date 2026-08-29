@@ -272,3 +272,147 @@ def test_bridge_hook_is_a_noop_without_provider_or_store(tmp_path):
         assert not bridge._bg_tasks
 
     asyncio.run(_drive())
+
+
+# --------------------------------------------------------------------------- #
+# The shared scheduler (one implementation for bridge + telegram)
+# --------------------------------------------------------------------------- #
+
+
+def test_schedule_retains_then_releases(tmp_path):
+    from prometheus.engine.session_titles import schedule
+
+    store = _store(tmp_path)
+    tasks: set = set()
+
+    async def _drive():
+        schedule(tasks, store=store, provider=_FakeProvider("Named"), model="m",
+                 session_id="s1",
+                 messages=[_Msg("user", "hi"), _Msg("assistant", "hello")])
+        assert tasks, "task must be strongly referenced while in flight"
+        await asyncio.gather(*tasks)
+
+    asyncio.run(_drive())
+    assert store.get_session_title("s1") == "Named"
+    assert not tasks, "done-callback must release the reference"
+
+
+def test_schedule_is_a_noop_without_store_or_provider(tmp_path):
+    from prometheus.engine.session_titles import schedule
+
+    tasks: set = set()
+
+    async def _drive():
+        schedule(tasks, store=None, provider=_FakeProvider("x"), model="m",
+                 session_id="s1", messages=[])
+        schedule(tasks, store=_store(tmp_path), provider=None, model="m",
+                 session_id="s1", messages=[])
+        assert not tasks
+
+    asyncio.run(_drive())
+
+
+def test_schedule_off_the_loop_never_raises(tmp_path):
+    from prometheus.engine.session_titles import schedule
+
+    tasks: set = set()
+    # No running event loop here — a title is a nicety; this must not raise.
+    schedule(tasks, store=_store(tmp_path), provider=_FakeProvider("x"),
+             model="m", session_id="s1", messages=[])
+    assert not tasks
+
+
+# --------------------------------------------------------------------------- #
+# Telegram turns auto-title (GRAFT 7 follow-up)
+# --------------------------------------------------------------------------- #
+
+
+def test_telegram_turn_titles_the_session(tmp_path):
+    from types import SimpleNamespace
+
+    from prometheus.engine.session import ChatSession, SessionManager
+    from prometheus.gateway.config import Platform, PlatformConfig
+    from prometheus.gateway.telegram import TelegramAdapter
+    from prometheus.tools.base import ToolRegistry
+
+    store = _store(tmp_path)
+
+    class _Lcm:
+        conversation_store = store
+
+    class _Loop:
+        _provider = _FakeProvider("Weekly planning")
+        _model = "m"
+
+        async def run_async(self, **kw):  # noqa: ANN003
+            from prometheus.engine.messages import ConversationMessage, TextBlock
+
+            return SimpleNamespace(
+                text="Here is a plan.",
+                messages=list(kw["messages"]) + [
+                    ConversationMessage(role="assistant",
+                                        content=[TextBlock(text="Here is a plan.")])
+                ],
+            )
+
+    adapter = TelegramAdapter(
+        config=PlatformConfig(platform=Platform.TELEGRAM, token="test"),
+        agent_loop=_Loop(),
+        tool_registry=ToolRegistry(),
+        session_manager=SessionManager(),
+    )
+    session = ChatSession("telegram:42", lcm_engine=_Lcm())
+
+    async def _drive():
+        await adapter._run_agent_turn(session, "plan my week",
+                                      session_id="telegram:42")
+        # The title task is fire-and-forget; drain it before asserting.
+        await asyncio.gather(*adapter._bg_tasks)
+
+    asyncio.run(_drive())
+    assert store.get_session_title("telegram:42") == "Weekly planning"
+
+
+def test_telegram_turn_never_overwrites_a_manual_title(tmp_path):
+    from types import SimpleNamespace
+
+    from prometheus.engine.session import ChatSession, SessionManager
+    from prometheus.gateway.config import Platform, PlatformConfig
+    from prometheus.gateway.telegram import TelegramAdapter
+    from prometheus.tools.base import ToolRegistry
+
+    store = _store(tmp_path)
+    store.set_session_title("telegram:42", "My chosen name")
+
+    class _Lcm:
+        conversation_store = store
+
+    class _Loop:
+        _provider = _FakeProvider("Machine name")
+        _model = "m"
+
+        async def run_async(self, **kw):  # noqa: ANN003
+            from prometheus.engine.messages import ConversationMessage, TextBlock
+
+            return SimpleNamespace(
+                text="ok",
+                messages=list(kw["messages"]) + [
+                    ConversationMessage(role="assistant",
+                                        content=[TextBlock(text="ok")])
+                ],
+            )
+
+    adapter = TelegramAdapter(
+        config=PlatformConfig(platform=Platform.TELEGRAM, token="test"),
+        agent_loop=_Loop(),
+        tool_registry=ToolRegistry(),
+        session_manager=SessionManager(),
+    )
+    session = ChatSession("telegram:42", lcm_engine=_Lcm())
+
+    async def _drive():
+        await adapter._run_agent_turn(session, "x", session_id="telegram:42")
+        await asyncio.gather(*adapter._bg_tasks)
+
+    asyncio.run(_drive())
+    assert store.get_session_title("telegram:42") == "My chosen name"
