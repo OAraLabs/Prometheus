@@ -21,6 +21,7 @@ from prometheus.engine.messages import (
     ToolUseBlock,
 )
 from prometheus.engine.usage import UsageSnapshot
+from prometheus.providers.retry import stream_with_retry
 from prometheus.providers.base import (
     ApiMessageCompleteEvent,
     ApiMessageRequest,
@@ -259,46 +260,14 @@ class StubProvider(ModelProvider):
         self, request: ApiMessageRequest
     ) -> AsyncIterator[ApiStreamEvent]:
         """Send request to llama.cpp, yield text deltas then complete event."""
-        import asyncio
-        import random
 
-        last_error: Exception | None = None
-
-        for attempt in range(MAX_RETRIES + 1):
-            # Whether this attempt has handed anything to the consumer yet.
-            emitted = False
-            try:
-                async for event in self._call_once(request):
-                    emitted = True
-                    yield event
-                return
-            except Exception as exc:
-                last_error = exc
-                status = getattr(exc, "status_code", None) or (
-                    exc.response.status_code
-                    if hasattr(exc, "response")
-                    else None
-                )
-                retryable = status in RETRYABLE_STATUS_CODES if status else isinstance(
-                    exc, (httpx.ConnectError, httpx.TimeoutException, ConnectionError)
-                )
-                # A retry re-runs the request from scratch. Anything already yielded is
-                # already on the consumer's screen, so replaying over it appends a SECOND,
-                # possibly contradictory answer to the first (issue #293). Once output has
-                # left, the only honest move is to fail. Retries stay fully available for
-                # the common case: a failure before the first event.
-                if emitted or attempt >= MAX_RETRIES or not retryable:
-                    raise
-                delay = min(BASE_DELAY * (2 ** attempt), MAX_DELAY)
-                delay += random.uniform(0, delay * 0.25)
-                log.warning(
-                    "Provider request failed (attempt %d/%d), retrying in %.1fs: %s",
-                    attempt + 1, MAX_RETRIES + 1, delay, exc,
-                )
-                await asyncio.sleep(delay)
-
-        if last_error is not None:
-            raise last_error
+        async for event in stream_with_retry(
+            lambda: self._call_once(request),
+            retryable_status=RETRYABLE_STATUS_CODES,
+            label="Provider",
+            max_retries=MAX_RETRIES,
+        ):
+            yield event
 
     async def _call_once(
         self, request: ApiMessageRequest
