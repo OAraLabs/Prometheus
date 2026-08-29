@@ -183,8 +183,9 @@ Why this only works here: a screen recording of you doing your job is among the 
 
 ### MCP Integration
 
-- Dynamic tool discovery from any MCP server
+- Dynamic tool discovery from any MCP server, in the daemon and the CLI alike
 - Collision-free naming (`mcp__{server}__{tool}`), stdio transport today (HTTP/SSE planned), config fingerprinting
+- Scoped and gated: per-server `allowed_tools` allowlists (enforced at discovery *and* at call time), and tools a server doesn't declare read-only require confirmation before they run
 - Context7 is a two-line config away for up-to-date library documentation
 
 ### Identity System
@@ -194,6 +195,7 @@ Why this only works here: a screen recording of you doing your job is among the 
 - **ANATOMY.md** — live infrastructure snapshot with Mermaid diagrams (hardware, VRAM, model + quant, Tailscale peers), queryable via the `anatomy` tool
 - **MEMORY.md + USER.md** — the agent learns who you are over time (bounded: 12K + 8K chars)
 - **Agent Profiles** — `full`, `coder`, `research`, `assistant`, `minimal` via `/profile` to trade tool breadth for context budget
+- **Node & instance identity** — a local Ed25519 node keypair plus a vault-resident instance UUID (`prometheus vault adopt` / `vault status`); see [Identity, and what does not phone home](#identity-and-what-does-not-phone-home) and [docs/FOUNDATION.md](docs/FOUNDATION.md)
 
 ### Security
 
