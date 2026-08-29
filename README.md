@@ -406,6 +406,23 @@ Connect via Tailscale, WireGuard, or any network — Beacon pairs over the same 
 └──────────────────────────────────────────────────────────┘
 ```
 
+## Identity, and what does not phone home
+
+At first run Prometheus generates a **node keypair** under `~/.prometheus/node/`
+(Ed25519; the private key is mode `0600` and never leaves the machine). This is
+an identity, nothing more:
+
+- **Nothing is transmitted anywhere.** The key exists locally and is inert
+  until you deliberately turn on something that uses it. There is no
+  telemetry-home, no registration, no callback. The public half is shown on
+  your own daemon's `/api/status` and that is all.
+- **It never encrypts your data.** Losing the key can never make local files
+  unreadable.
+- Your **vault** carries a separate `instance_id` (a UUID in
+  `.prometheus-vault`) that travels *with the data* when you move machines;
+  the node key deliberately does not. Every file Prometheus writes stays
+  plain markdown or plain SQLite — leaving takes your data with you.
+
 ## Configuration
 
 ```yaml
