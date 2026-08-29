@@ -1276,6 +1276,25 @@ def create_app(
             for s in skill_registry.list_skills()
         ]
 
+    # ── Packs (FOUNDATION Part 2) ───────────────────────────────────
+    # Read-only discovery: what packs the daemon found at boot, loaded or
+    # refused (with the refusal reason), plus their panel DECLARATIONS —
+    # Beacon renders availability from this; nothing here executes pack
+    # content. `wired: false` = the pack loader never ran this boot (the
+    # bare `web` entrypoint), honestly distinct from "no packs installed".
+    @app.get("/api/packs")
+    async def get_packs():
+        from prometheus.packs.loader import PACK_API_CURRENT, get_pack_registry
+
+        reg = get_pack_registry()
+        if reg is None:
+            return {"wired": False, "pack_api": PACK_API_CURRENT, "packs": []}
+        return {
+            "wired": True,
+            "pack_api": PACK_API_CURRENT,
+            "packs": reg.to_status(),
+        }
+
     # ── Profiles ────────────────────────────────────────────────────
 
     @app.get("/api/profiles")

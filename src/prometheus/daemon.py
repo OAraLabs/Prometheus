@@ -650,6 +650,22 @@ async def run_daemon(args: argparse.Namespace) -> None:
     from prometheus.learning.pair_capture import configure as configure_pair_capture
     configure_pair_capture(config.get("training", {}))
 
+    # ── Packs (Foundation Spec Part 2) ──────────────────────────────────
+    # Third-party pack discovery: manifests enforced (pack_api mismatch
+    # table, provides-vs-disk integrity), skills QUARANTINED into the
+    # SkillDraftStore — unreachable until a human accepts them — and
+    # panels recorded for /api/packs (declaration only; Beacon-side
+    # loading is deferred). Refusals are per-pack and loud; the daemon
+    # boots regardless — third-party content must never keep it down.
+    from prometheus.learning.skill_drafts import SkillDraftStore
+    from prometheus.packs.loader import load_packs, set_pack_registry
+    try:
+        set_pack_registry(load_packs(draft_store=SkillDraftStore()))
+    except Exception:
+        logger.warning(
+            "Pack discovery failed — continuing without packs", exc_info=True
+        )
+
     # Tool registry — same tools as CLI mode
     registry = build_tool_registry(security_cfg=security_config)
 
