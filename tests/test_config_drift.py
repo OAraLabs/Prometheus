@@ -173,8 +173,9 @@ KNOWN_UNREAD: dict[str, str] = {
     "sentinel.idle_threshold_minutes": "DECIDE — observer uses its own constant",
     "security.audit.retention_days": "DECIDE — no pruner exists",
     "evals.skip_network_tasks": "DECIDE — runner does not branch on it",
-    "tools.deferred_loading.search_mcp": "DECIDE — deferred loading is off",
-    "tools.deferred_loading.mcp_always_deferred": "DECIDE — deferred loading is off",
+    # (tools.deferred_loading.search_mcp and .mcp_always_deferred left the
+    # register 2026-08-28: mcp.bootstrap reads both — the register only
+    # shrinks.)
     "gateway.heartbeat_interval": "DECIDE — heartbeat uses its own interval",
     "infrastructure.archive_enabled": "DECIDE — the archive lives in the voice stack, not here",
     # ── DOCUMENTED-ONLY: recorded so the topology is not lost. Values live

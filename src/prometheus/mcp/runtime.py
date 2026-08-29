@@ -99,6 +99,20 @@ class McpRuntime:
             name: McpConnectionStatus(name=name, state="pending")
             for name in server_configs
         }
+        # FOUNDATION 2.3a: per-server allowlist. None = no allowlist (every
+        # offered tool loads). Parsed once here so call_tool() can enforce
+        # the same set the discovery filter applied — a catalog-only filter
+        # is bypassable by the registry's "lucky guess" execution path.
+        self._allowed_tools: dict[str, set[str] | None] = {
+            name: (
+                {str(t) for t in raw["allowed_tools"]}
+                if isinstance(raw, dict) and isinstance(
+                    raw.get("allowed_tools"), (list, tuple, set)
+                )
+                else None
+            )
+            for name, raw in server_configs.items()
+        }
 
     @property
     def config_fingerprint(self) -> str:
@@ -143,10 +157,16 @@ class McpRuntime:
                 # Discover tools
                 listed_tools = await _list_all_tools(mcp_session.session)
 
+                allowed = self._allowed_tools.get(server_name)
+                excluded = 0
                 for tool in listed_tools:
                     tool_name = tool.name.strip()
                     if not tool_name:
                         continue
+                    if allowed is not None and tool_name not in allowed:
+                        excluded += 1
+                        continue
+                    annotations = getattr(tool, "annotations", None)
                     tools.append(McpCatalogTool(
                         server_name=server_name,
                         safe_server_name=safe_name,
@@ -155,12 +175,23 @@ class McpRuntime:
                         input_schema=dict(tool.inputSchema) if tool.inputSchema else {
                             "type": "object", "properties": {},
                         },
+                        read_only_hint=getattr(
+                            annotations, "readOnlyHint", None
+                        ),
                     ))
+                if excluded:
+                    # No silent caps: a filtered offering must be visible in
+                    # the boot log, or "covered everything" is inferred.
+                    logger.info(
+                        "MCP %s: allowed_tools excluded %d of %d offered "
+                        "tool(s)", server_name, excluded, len(listed_tools),
+                    )
 
                 servers[server_name] = McpServerCatalog(
                     server_name=server_name,
                     launch_summary=resolved.description,
                     tool_count=len(listed_tools),
+                    allowed_count=len(listed_tools) - excluded,
                 )
 
                 self._sessions[server_name] = mcp_session
@@ -250,6 +281,18 @@ class McpRuntime:
         """Call an MCP tool and return stringified result."""
         if server_name not in self._sessions:
             raise ValueError(f"MCP server not connected: {server_name}")
+
+        # FOUNDATION 2.3a: the allowlist is enforced at the CALL, not only
+        # at discovery. Discovery filtering keeps excluded tools out of the
+        # catalog and registry, but the registry executes lucky-guess names
+        # and adapters outlive config edits — the call seam is the one
+        # every path funnels through.
+        allowed = self._allowed_tools.get(server_name)
+        if allowed is not None and tool_name not in allowed:
+            raise PermissionError(
+                f"MCP tool {tool_name!r} is not in allowed_tools for "
+                f"server {server_name!r}"
+            )
 
         session = self._sessions[server_name]
         logger.debug("MCP call: %s/%s", server_name, tool_name)

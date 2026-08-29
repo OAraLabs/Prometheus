@@ -53,8 +53,13 @@ class TestMcpToolAdapter:
         assert adapter.description == "Resolve a library ID"
 
     def test_is_read_only(self):
+        # FOUNDATION 2.3a flipped this: undeclared is NOT read-only. The
+        # old hardcoded True made every MCP call bypass the SecurityGate
+        # as auto-allow. Only an explicit readOnlyHint=True from the
+        # server counts now — see tests/test_mcp_allowlist.py for the
+        # hint-capture cases and tests/test_mcp_gating.py for the gate.
         adapter, _ = self._make_adapter()
-        assert adapter.is_read_only(MagicMock()) is True
+        assert adapter.is_read_only(MagicMock()) is False
 
     def test_api_schema_uses_mcp_schema(self):
         adapter, _ = self._make_adapter()
