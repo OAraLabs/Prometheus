@@ -78,6 +78,54 @@ def load_config(config_path: str | None = None) -> dict[str, Any]:
         return yaml.safe_load(fh) or {}
 
 
+def _sentinel_enabled(sentinel_config: dict[str, Any]) -> bool:
+    """PR-B ruling, shape A (absence → permissive): an ABSENT
+    ``sentinel.enabled`` no longer STARTS the subsystem.
+
+    The old read was ``.get("enabled", True)`` — deleting the key launched
+    an autonomous background subsystem, the exact ``allowed_chat_ids``
+    empty-means-allow-all shape #219 fixed at the gateway. An autonomous
+    subsystem is opted INTO, never inherited from a missing line. The
+    shipped template says ``enabled: true``, so fresh installs are
+    unchanged; only a hand-written config that omits the key changes
+    behaviour, and it gets a WARNING naming the line to write.
+    """
+    if "enabled" not in sentinel_config:
+        logger.warning(
+            "sentinel.enabled is ABSENT from config — SENTINEL stays OFF. "
+            "Write `sentinel.enabled: true` (the shipped template's value) "
+            "to start it. Before this ruling an absent key STARTED the "
+            "subsystem."
+        )
+        return False
+    return bool(sentinel_config.get("enabled"))
+
+
+# PR-B ruling, shape B (absence → silently disabled): gates the shipped
+# template turns ON but whose readers fail closed. Fail-closed is kept — a
+# missing line must not start a web server or an exporter — but the
+# operator who believes the template's value is in force gets told at boot
+# instead of discovering it from an absent subsystem weeks later
+# (compaction.enabled already bit exactly this way: config-dark since
+# birth). Entries: (section, key, effective-when-absent).
+_ABSENT_GATE_WARNINGS: tuple[tuple[str, str, str], ...] = (
+    ("web", "enabled", "the web API does not start"),
+    ("trajectory_export", "enabled", "no trajectory export runs"),
+    ("compaction", "enabled", "no compactor is constructed"),
+)
+
+
+def _warn_absent_gating_keys(config: dict[str, Any]) -> None:
+    for section, key, effect in _ABSENT_GATE_WARNINGS:
+        if key not in (config.get(section) or {}):
+            logger.warning(
+                "%s.%s is ABSENT from config — it fails CLOSED: %s. The "
+                "shipped template sets it true; if you believe it is on, "
+                "write the key.",
+                section, key, effect,
+            )
+
+
 def build_tool_registry(security_cfg: dict[str, Any] | None = None) -> ToolRegistry:
     """Create the tool registry with all builtin tools (same as CLI).
 
@@ -498,6 +546,9 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # If the file doesn't exist, no checking happens — users who run
     # Ollama, Anthropic, etc. are unaffected.
     apply_config_pins(config, get_config_dir() / "config_pins.yaml")
+
+    # PR-B shape-B ruling: absent gates that fail closed say so at boot.
+    _warn_absent_gating_keys(config)
 
     # Sprint 15 GRAFT: scoped daemon lock — prevent duplicate instances
     from prometheus.gateway.status import acquire_daemon_lock, release_daemon_lock
@@ -1521,7 +1572,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     # SENTINEL proactive subsystem (Sprint 9)
     sentinel_config = config.get("sentinel", {})
-    if sentinel_config.get("enabled", True):
+    if _sentinel_enabled(sentinel_config):
         try:
             from prometheus.sentinel.signals import SignalBus
             from prometheus.sentinel.autodream import AutoDreamEngine
