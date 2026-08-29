@@ -459,8 +459,34 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(
             CommandHandler("escalations", self._cmd_escalations)
         )
+        # ⚠ CONTROL-PLANE SEPARATION (2026-08-17 finding). PTB's default is
+        # max_concurrent_updates=1: the update fetcher AWAITS each update to
+        # completion before dequeuing the next — and the agent turn runs
+        # inline inside this handler. So a 66-minute turn blocked every
+        # subsequent update BOT-WIDE, including a correctly-typed /approve
+        # whose reply then landed 36 minutes after the request had expired,
+        # contradicting the (correct) expiry notice. Sharpest form: an
+        # approval raised BY the current turn waited on an event that only a
+        # /approve update could set — and that update could not be dequeued
+        # until the turn holding the fetcher returned. Timeout was the only
+        # possible outcome, by construction.
+        #
+        # block=False detaches the DATA-plane handlers: PTB create_task's
+        # the coroutine and the fetcher moves on, so control-plane commands
+        # (/approve, /deny, /status — all millisecond state operations that
+        # never take the turn lock) answer mid-turn. Marking the COMMANDS
+        # non-blocking would accomplish nothing — the handler that holds the
+        # fetcher is the one that has to let go. Per-session turn
+        # serialization is unchanged: _run_agent_turn still takes
+        # SessionManager's turn lock (M6), so two texts on one chat queue on
+        # the lock instead of in the transport, and different chats now
+        # interleave. The group -1 auth TypeHandler still runs to completion
+        # BEFORE the detached task is spawned — block=False is per-handler,
+        # and process_update walks groups in order.
         self._app.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text)
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND, self._handle_text, block=False,
+            )
         )
         # ⚠ UNKNOWN-COMMAND CATCH-ALL. Registered AFTER every CommandHandler
         # above, because PTB runs only the first matching handler per group —
@@ -475,11 +501,14 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(
             MessageHandler(filters.COMMAND, self._cmd_unknown)
         )
-        # Sprint 15 GRAFT: media handlers (additive — Hermes parity)
-        self._app.add_handler(MessageHandler(filters.PHOTO, self._handle_photo))
-        self._app.add_handler(MessageHandler(filters.VOICE, self._handle_voice))
-        self._app.add_handler(MessageHandler(filters.Document.ALL, self._handle_document))
-        self._app.add_handler(MessageHandler(filters.Sticker.ALL, self._handle_sticker))
+        # Sprint 15 GRAFT: media handlers (additive — Hermes parity).
+        # block=False for the same reason as the text handler above: a voice
+        # note is transcription + a full agent turn, and it must not hold
+        # the fetcher shut against /approve.
+        self._app.add_handler(MessageHandler(filters.PHOTO, self._handle_photo, block=False))
+        self._app.add_handler(MessageHandler(filters.VOICE, self._handle_voice, block=False))
+        self._app.add_handler(MessageHandler(filters.Document.ALL, self._handle_document, block=False))
+        self._app.add_handler(MessageHandler(filters.Sticker.ALL, self._handle_sticker, block=False))
 
         await self._app.initialize()
         await self._app.start()
@@ -2428,8 +2457,16 @@ class TelegramAdapter(BasePlatformAdapter):
 
         The reply is the point. A typo that does nothing is indistinguishable
         from a daemon that is ignoring you, and the operator has no way to
-        tell which. This path does no queueing and no agent work, so it
-        answers even while a turn is in flight.
+        tell which. This path does no queueing and no agent work.
+
+        "Answers even while a turn is in flight" is TRUE ONLY because the
+        data-plane handlers register block=False (see start()). This
+        docstring claimed it unconditionally while PTB's single-slot
+        fetcher made every handler wait behind an inline turn — the claim
+        was false at the transport for as long as it existed, and the tests
+        couldn't see that because they called the command layer directly.
+        The dispatch-level tests in test_control_plane_dispatch.py are the
+        ones that exercise it for real.
         """
         if not update.message or not update.effective_chat:
             return
