@@ -43,6 +43,24 @@ model:
                                     # about how big the window is and the config about what was
                                     # answering. A pin held "gemma4-26b" here while the rig served
                                     # Qwen for six weeks, silently.
+  # Where a turn goes when THIS provider fails terminally — an expired key, a revoked
+  # credential, a billing lapse. Never on a 429: rate limits are already retried with backoff
+  # a layer down, and degrading on one would abandon a provider that was about to succeed.
+  #
+  # Omit the section and the local model config above IS the target. Set `enabled: false` to
+  # turn the whole mechanism off and let a terminal failure end the turn — which is what coding
+  # mode wants, since it pins its provider so the acceptance metric is not confounded.
+  #
+  # The degrade is LOUD: the reply says which model served it and why. And a turn that will not
+  # fit the fallback's context window is REFUSED with both numbers rather than quietly
+  # truncated — the local backend publishes ~32k while a cloud model may be an order of
+  # magnitude larger, so a silent swap makes answers worse with no stated cause.
+  fallback:
+    enabled: true
+    # provider: "llama_cpp"          # defaults to the model config above
+    # model: ""                      # defaults to the model config above
+    # base_url: "http://localhost:8080"
+
   identity_probe_interval_seconds: 300  # Re-ask the backend which model it is serving (0 = off).
                                     # Detection used to run ONCE at boot, so swapping the model on
                                     # the server left the label wrong until the next restart. Every
@@ -756,6 +774,19 @@ web:
   #    Pinned equal to the readers by tests/test_config_defaults_equality.
   api_token:            # required — no code default
   dashboard_port: 3002
+
+# APNs push to enrolled devices (GRAFT-MOBILE-BRIDGE 2). Disabled by default:
+# enabling requires the `push` extra (pip install 'oara-prometheus[push]')
+# and an Apple p8 signing key — an enabled-but-broken block FAILS THE BOOT
+# loudly rather than silently pushing nothing. approval_pending pushes
+# always; turn/task completions push only to devices with no live WS client.
+push:
+  enabled: false
+  apns:
+    key_path:           # e.g. ~/.config/prometheus/AuthKey_XXXXXXXXXX.p8
+    key_id:             # the 10-char key id from the Apple developer portal
+    team_id:            # e.g. 53JM8W47RL
+    topic:              # the app's bundle id, e.g. com.oaralabs.beacon
 image_generation:
   default_backend: auto              # auto | pollinations | comfyui | dashscope
   comfyui:

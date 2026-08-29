@@ -13,7 +13,6 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import logging
 import time
@@ -68,6 +67,7 @@ class WebSocketBridge:
         api_token: str | None = None,
         config: dict | None = None,
         approval_queue: Any | None = None,
+        device_store: Any | None = None,
     ) -> None:
         self.signal_bus = signal_bus
         self.session_mgr = session_mgr
@@ -86,6 +86,23 @@ class WebSocketBridge:
         # the REST side, so dev/no-token setups (and the tokenless static UI)
         # keep working unchanged.
         self._api_token = api_token or ""
+        # GRAFT-MOBILE-BRIDGE 1: enrolled device tokens (shared instance with
+        # the REST middleware, so revocation and last_seen agree). None =>
+        # only the global token authenticates, exactly as before.
+        self._device_store = device_store
+        # websocket -> DeviceIdentity, recorded at auth. Piece 2's per-device
+        # "has a live WS client" check reads this; without it a push fan-out
+        # can only ask "is ANY client connected", and a desktop being open
+        # would silently suppress the phone's push.
+        self._ws_identity: dict[Any, Any] = {}
+        # GRAFT Piece 2: set by the launcher when push.enabled. The bridge
+        # feeds it agent_progress pulses and chat_done (Live Activity source);
+        # bus signals reach it via its own subscription.
+        self.push_dispatcher: Any | None = None
+        # GRAFT Piece 4: per-socket session filter. Absent / empty set = the
+        # firehose (today's behaviour); a set = turn frames for those sessions
+        # only. Replaced whole on every subscribe, cleaned up with the socket.
+        self._ws_filters: dict[Any, set[str]] = {}
         self._clients: set[Any] = set()
         # Monotonic since boot — see delivery_stats(). A frame that fails to
         # send is gone; these are the only record that it existed.
@@ -106,29 +123,44 @@ class WebSocketBridge:
         # map is only the fallback for bridges wired without a real manager
         # (tests construct WebSocketBridge with session_mgr=None or a stub).
         self._turn_locks: dict[str, asyncio.Lock] = {}
+        # Strong refs to fire-and-forget background tasks (session titling).
+        # The event loop holds tasks only WEAKLY — a create_task result nobody
+        # keeps can be garbage-collected mid-flight, which is the standard
+        # asyncio fire-and-forget trap. Done-callbacks discard, so the set
+        # stays O(in-flight).
+        self._bg_tasks: set[asyncio.Task] = set()
 
     @property
     def auth_required(self) -> bool:
         """True when a non-empty token is configured (parity with REST)."""
         return bool(self._api_token)
 
-    def _token_ok(self, raw: str) -> bool:
-        """Validate a first-frame auth message: {"type":"auth","token":...}.
+    def _auth_identity(self, raw: str):
+        """Resolve a first-frame auth message to a DeviceIdentity, or None.
 
-        Constant-time token comparison (``hmac.compare_digest``) so a timing
-        side-channel can't probe the secret. Any parse error, wrong type, or
-        missing/incorrect token is a clean False — the caller closes 4401.
+        {"type":"auth","token":...} — the token may be the global secret or an
+        enrolled device token (GRAFT-MOBILE-BRIDGE 1). verify_token compares
+        constant-time and consults the device registry; a revoked device is
+        None, so its next connect closes 4401. Any parse error, wrong type, or
+        missing/incorrect token is a clean None.
         """
         try:
             msg = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            return False
+            return None
         if not isinstance(msg, dict) or msg.get("type") != "auth":
-            return False
+            return None
         token = msg.get("token")
         if not isinstance(token, str):
-            return False
-        return hmac.compare_digest(token, self._api_token)
+            return None
+        from prometheus.config.api_token import verify_token
+
+        return verify_token(token, self._api_token, self._device_store)
+
+    def _token_ok(self, raw: str) -> bool:
+        """Boolean form of :meth:`_auth_identity` (kept for callers and tests
+        that only need pass/fail)."""
+        return self._auth_identity(raw) is not None
 
     async def start(self, host: str = "0.0.0.0", port: int = 8010) -> None:
         """Start the WebSocket server."""
@@ -184,6 +216,8 @@ class WebSocketBridge:
             pass
         finally:
             self._clients.discard(websocket)
+            self._ws_identity.pop(websocket, None)
+            self._ws_filters.pop(websocket, None)
             logger.info("Client disconnected (%d remain)", len(self._clients))
 
     async def _authenticate(self, websocket: Any) -> bool:
@@ -205,7 +239,11 @@ class WebSocketBridge:
             # Connection dropped/closed before sending anything.
             return False
 
-        if self._token_ok(raw):
+        identity = self._auth_identity(raw)
+        if identity is not None:
+            # Recorded for per-device liveness (Piece 2 reads this); cleaned
+            # up in _handler's finally alongside _clients.
+            self._ws_identity[websocket] = identity
             return True
         await self._close_unauthorized(websocket, "invalid or missing auth token")
         return False
@@ -230,16 +268,41 @@ class WebSocketBridge:
         payload = msg.get("payload", {})
 
         if cmd_type == "subscribe":
-            # Acknowledgement only — all events are broadcast
+            # GRAFT Piece 4: a REAL filter now. `sessions` absent or [] → the
+            # firehose (every existing client unchanged, including those still
+            # sending the legacy ack-only `channels` shape). A list REPLACES
+            # any previous filter — re-subscribing narrows or widens, never
+            # appends. Non-string entries are dropped, not errored: a filter
+            # is a preference, and the safe failure is over-delivery.
+            raw_sessions = payload.get("sessions")
+            sessions = {s for s in raw_sessions if isinstance(s, str) and s} \
+                if isinstance(raw_sessions, list) else set()
+            if sessions:
+                self._ws_filters[websocket] = sessions
+            else:
+                self._ws_filters.pop(websocket, None)
             await self._send_one(websocket, {
                 "type": "subscribed",
                 "timestamp": time.time(),
-                "payload": {"channels": payload.get("channels", [])},
+                "payload": {
+                    "sessions": sorted(sessions),
+                    # Legacy echo — the old ack-only shape some clients read.
+                    "channels": payload.get("channels", []),
+                },
             })
 
         elif cmd_type == "send_message":
             session_id = payload.get("session_id", "")
             content = payload.get("content", "")
+            # GRAFT-MOBILE-BRIDGE 8: the correlation handle for the sender's
+            # optimistic row. _handle_send_message has echoed it on the user
+            # chat_message frame all along (the REST path passes it through);
+            # this handler simply never read it, so a socket send always echoed
+            # null and the client's re-key could never match. Non-string →
+            # None: an arbitrary object must not reach the broadcast payload.
+            client_msg_id = payload.get("client_msg_id")
+            if not isinstance(client_msg_id, str):
+                client_msg_id = None
             mode = payload.get("mode") or "agent"  # absent → agent default (never an error)
             if mode not in ("agent", "chat"):
                 await self._send_one(websocket, {
@@ -273,7 +336,8 @@ class WebSocketBridge:
                 })
                 return
             if session_id and content:
-                await self._handle_send_message(session_id, content, mode=mode, tool_choice=tool_choice)
+                await self._handle_send_message(session_id, content, client_msg_id=client_msg_id,
+                                                mode=mode, tool_choice=tool_choice)
 
         elif cmd_type == "chat_upload":
             # File upload from Beacon: { type: "chat_upload", payload: {
@@ -975,6 +1039,23 @@ class WebSocketBridge:
                         },
                     })
 
+                elif event_type == "ProviderDegraded":
+                    # A non-chat client renders frames, not reply prose, so without this it would
+                    # show a normal answer from a model nobody chose. requested vs served stay
+                    # SEPARATE on the wire — collapsing them is what made "why did my model
+                    # change?" unanswerable.
+                    await self.broadcast({
+                        "type": "provider_degraded",
+                        "timestamp": time.time(),
+                        "payload": {
+                            "session_id": session_id,
+                            "requested_model": event.requested_model,
+                            "served_model": event.served_model,
+                            "provider": event.provider_name,
+                            "reason": event.reason,
+                        },
+                    })
+
                 elif event_type == "ToolExecutionStarted":
                     progress["phase"] = "tool"
                     progress["tool_name"] = event.tool_name
@@ -983,6 +1064,13 @@ class WebSocketBridge:
                         "type": "tool_call_start",
                         "timestamp": time.time(),
                         "payload": {
+                            # session_id so a client can attribute the tool call
+                            # to a conversation. broadcast() fans out to every
+                            # client and _run_agent serializes per session, so
+                            # without this a tool frame cannot be scoped
+                            # (GRAFT-MOBILE-BRIDGE 3a). Additive — existing
+                            # clients ignore the new field.
+                            "session_id": session_id,
                             "call_id": event.tool_use_id,
                             "tool_name": event.tool_name,
                             "inputs": event.tool_input,
@@ -997,6 +1085,9 @@ class WebSocketBridge:
                         "type": "tool_call_end",
                         "timestamp": time.time(),
                         "payload": {
+                            # session_id: same attribution fix as tool_call_start
+                            # (GRAFT-MOBILE-BRIDGE 3a).
+                            "session_id": session_id,
                             "call_id": event.tool_use_id,
                             "tool_name": event.tool_name,
                             "success": not event.is_error,
@@ -1007,14 +1098,23 @@ class WebSocketBridge:
             # Persist the assistant turn that run_loop appended in place onto
             # session.messages (parity with the Telegram/Slack gateways). Without
             # this the web/Beacon assistant half never reaches LCM/memory.
-            session.persist_loop_result(original_len)
+            row_id = session.persist_loop_result(original_len)
 
-            # Stream done
+            # Stream done. row_id is the assistant turn's durable rowid
+            # (GRAFT-MOBILE-BRIDGE 3b) — with it a client re-keys its streamed
+            # bubble to the durable id without a ?since= re-read. Omitted, not
+            # null, when persistence surfaced none, so older clients and the
+            # decode contract are unchanged.
+            done_payload = {"session_id": session_id, "message_id": msg_id}
+            if row_id is not None:
+                done_payload["row_id"] = row_id
             await self.broadcast({
                 "type": "chat_done",
                 "timestamp": time.time(),
-                "payload": {"session_id": session_id, "message_id": msg_id},
+                "payload": done_payload,
             })
+            await self._end_live_activity(session_id, done_payload)
+            self._schedule_session_title(session_id, session)
             return accumulated, last_usage
 
         except asyncio.CancelledError:
@@ -1032,20 +1132,28 @@ class WebSocketBridge:
             # assistant turn so the visible bubble survives a reload. A stop
             # mid-round-N>1 drops only round N's in-flight tail — the
             # completed rounds carry the substance.
+            interrupted_row_id: int | None = None
             if original_len is not None:
                 if len(session.messages) == original_len and accumulated:
                     from prometheus.engine.agent_loop import _make_assistant_msg
                     session.messages.append(_make_assistant_msg(accumulated))
-                session.persist_loop_result(original_len)
+                interrupted_row_id = session.persist_loop_result(original_len)
+            done_payload = {
+                "session_id": session_id,
+                "message_id": msg_id,
+                "interrupted": True,
+            }
+            # The partial assistant turn is still durable and still worth a
+            # cursor (3b) — a client reloading after an interrupt reconciles to
+            # the same row the stream left it on.
+            if interrupted_row_id is not None:
+                done_payload["row_id"] = interrupted_row_id
             await self.broadcast({
                 "type": "chat_done",
                 "timestamp": time.time(),
-                "payload": {
-                    "session_id": session_id,
-                    "message_id": msg_id,
-                    "interrupted": True,
-                },
+                "payload": done_payload,
             })
+            await self._end_live_activity(session_id, done_payload)
             return accumulated, last_usage
 
         except Exception as e:
@@ -1141,24 +1249,43 @@ class WebSocketBridge:
         while True:
             try:
                 await asyncio.sleep(interval)
+                pulse_payload = {
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "phase": progress["phase"],
+                    "tool_name": progress["tool_name"],
+                    "round": progress["round"],
+                    "chars": progress["chars"],
+                    "tool_calls": progress["tool_calls"],
+                    "elapsed_s": round(time.time() - started_at, 1),
+                }
                 await self.broadcast({
                     "type": "agent_progress",
                     "timestamp": time.time(),
-                    "payload": {
-                        "session_id": session_id,
-                        "message_id": message_id,
-                        "phase": progress["phase"],
-                        "tool_name": progress["tool_name"],
-                        "round": progress["round"],
-                        "chars": progress["chars"],
-                        "tool_calls": progress["tool_calls"],
-                        "elapsed_s": round(time.time() - started_at, 1),
-                    },
+                    "payload": pulse_payload,
                 })
+                # GRAFT Piece 2: the pulse is also the Live Activity update
+                # source; the dispatcher throttles (Apple rate-limits
+                # liveactivity pushes — the 3s cadence is for live sockets).
+                dispatcher = getattr(self, "push_dispatcher", None)
+                if dispatcher is not None:
+                    await dispatcher.on_agent_progress(session_id, pulse_payload)
             except asyncio.CancelledError:
                 raise  # normal teardown — the turn ended
             except Exception:
                 logger.debug("agent_progress emit failed", exc_info=True)
+
+    async def _end_live_activity(self, session_id: str, done_payload: dict) -> None:
+        """GRAFT Piece 2: a turn's end ends its Live Activity — one final push,
+        then the token row drops. Never raises; a push failure must not touch
+        the turn's own completion path."""
+        dispatcher = getattr(self, "push_dispatcher", None)
+        if dispatcher is None:
+            return
+        try:
+            await dispatcher.on_chat_done(session_id, done_payload)
+        except Exception:
+            logger.debug("live activity end push failed", exc_info=True)
 
     async def _on_signal(self, signal: Any) -> None:
         """Forward a SignalBus event to all connected clients."""
@@ -1221,6 +1348,66 @@ class WebSocketBridge:
 
         await self.broadcast(event)
 
+    def _schedule_session_title(self, session_id: str, session: Any) -> None:
+        """GRAFT-MOBILE-BRIDGE 7: name the session from its first exchange.
+
+        Fire-and-forget after ``chat_done`` — the turn is already delivered, a
+        title is a nicety, and every failure path inside degrades to "no
+        title" (clients fall back to their first-user-message snippet).
+        Generation fills ABSENCE only, so a manual rename or an earlier
+        generation is never overwritten. The messages list is snapshotted so a
+        concurrent next turn cannot mutate it mid-read.
+        """
+        try:
+            from prometheus.engine import session_titles as _titles
+
+            store = getattr(getattr(session, "lcm_engine", None),
+                            "conversation_store", None)
+            provider = getattr(self.loop_context, "provider", None)
+            model = getattr(self.loop_context, "model", "default")
+            if store is None or provider is None:
+                return
+            task = asyncio.get_running_loop().create_task(
+                _titles.maybe_title_session(
+                    store, provider, model, session_id,
+                    list(getattr(session, "messages", []) or []),
+                )
+            )
+            # Keep a strong reference or the loop's weak ref is the only one
+            # and the task can be GC'd before it runs (see _bg_tasks).
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+        except Exception:
+            logger.debug("session title scheduling failed", exc_info=True)
+
+    # GRAFT-MOBILE-BRIDGE 4: the frame types a subscribe filter applies to.
+    # TURN frames only — session-scoped by construction (Piece 3 put
+    # session_id on the tool frames, which is why this lands after it: without
+    # that, tool frames silently escape the filter). Signal-bus frames
+    # (approval_pending, sentinel_signal, dream_*) are NEVER filtered: they
+    # are not session-scoped and the phone wants them all.
+    _SESSION_SCOPED_TYPES = frozenset({
+        "chat_message", "chat_delta", "chat_done", "command_done",
+        "agent_progress", "tool_call_start", "tool_call_end",
+        "provider_degraded", "error",
+    })
+
+    def _wants(self, ws: Any, event: dict[str, Any]) -> bool:
+        """Does this socket's subscribe filter admit this event?
+
+        No filter (the default, and `sessions: []`) → everything, today's
+        firehose. A frame outside _SESSION_SCOPED_TYPES, or one carrying no
+        session_id, is always delivered."""
+        sessions = self._ws_filters.get(ws)
+        if not sessions:
+            return True
+        if event.get("type") not in self._SESSION_SCOPED_TYPES:
+            return True
+        sid = (event.get("payload") or {}).get("session_id")
+        if not sid:
+            return True
+        return sid in sessions
+
     async def broadcast(self, event: dict[str, Any]) -> None:
         """Send an event to all connected clients.
 
@@ -1251,6 +1438,8 @@ class WebSocketBridge:
         raw = json.dumps(event)
         dead: list[Any] = []
         for ws in self._clients:
+            if not self._wants(ws, event):
+                continue  # subscribed elsewhere — a skip, never a drop
             try:
                 await ws.send(raw)
             except Exception as exc:

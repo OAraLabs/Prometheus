@@ -1,7 +1,17 @@
 # SPRINT: Loud Degrade on Terminal Provider Failure
 
 **Branch:** `feat/provider-fallback`
-**Status:** Spec. Not started. Independent of the Token Plan renewal — see Origin.
+**Status: IMPLEMENTED AND DEPLOYED (2026-08-28).** Kept as the design record, not as a to-do —
+an earlier copy of this file reached main saying "Not started" while the work was already
+shipping, which is worse than no document.
+
+Landed as: #296 (Phases 1-4), #297 (the degrade reaches history), #299 (wiring — #296 shipped
+INERT), #300 (blank `model.model` made it inert a second time), #302 (say why a fallback
+declined), #306 (the `provider_degraded` WS frame). Prerequisite: #294 (a retry must not replay
+over output already sent) — that invariant is Phase 2's, and it did not hold until then.
+
+Read the Phase 0 survey answers and the hazards below; skip the phase instructions, which are
+done. What the implementation learned that this spec did not predict is recorded at the end.
 **Origin:** Review of #288 turned into a routing audit on 2026-08-28. Three findings, in
 order of how much they should shape the design:
 
@@ -93,44 +103,6 @@ the actual failure, which is worth remembering as a shape: a guard phrased aroun
 you happened to imagine catches only that direction.
 
 ---
-
-## Decided: a separate handler, not a router decision
-
-The survey found the loop ALREADY swaps providers mid-turn — `agent_loop.py:~1027` sets
-`context.provider = decision.provider` from a `ModelRouter` decision. State that plainly here so
-the next reader does not find two swap paths and assume one is redundant. **They answer different
-questions:**
-
-- **Routing is policy.** The user picked a model, a session override applies, a config pin holds.
-- **Fallback is recovery.** Something broke and we are degrading.
-
-Once they share a decision path, "why did my model change?" has two possible answers and nothing
-outside can tell them apart — which undercuts the very `requested_model` vs `served_model`
-telemetry Phase 3 adds to distinguish them. The Phase 4 opt-out settles it independently: a
-separate handler can be disabled without touching routing, whereas a coupled one means carving a
-case out of the router that someone later reads as dead code.
-
-### The cost of the separate path, and how to pay it
-
-The router's swap does one thing the fallback MUST also do, and it is easy to forget: it rewrites
-the system prompt's identity line, `- Model: <name> (provider: <p>)`. Without it a
-"primary-baked" prompt makes the serving model impersonate the primary when the user asks what
-model this is — a real production bug the router comment records.
-
-**Extract that rewrite and call it from both.** Do not reimplement it; a second copy is how the
-fallback ends up confidently claiming to be the primary.
-
-⚠ **The extraction is not a straight lift.** The rewrite appends a trailing clause — *"the ACTIVE
-model serving this conversation; any model in the Infrastructure section is a separate local
-backend, not you"* — gated on `reason_repr != "primary"`. The comment explains the gate: on
-primary routes "the serving model IS the local backend and the clause would be false."
-
-A fallback to the LOCAL model lands in exactly that case. The default fallback target IS the
-local backend, so the clause would be false for it too — and the existing predicate, which keys
-on *"is this a router decision"*, gets it wrong. The extracted helper must key on **"is the
-serving model the local backend"**, which is what the gate always meant. The fallback is the
-third caller that reveals the predicate was named after its first caller rather than its
-condition.
 
 ## Phase 1 — Decide, don't retry
 
@@ -241,3 +213,30 @@ conversation refuses with the numbers rather than truncating.
 A green mutation sweep on this sprint proves only that the guards written are load-bearing.
 Enumerate the call sites from Phase 0 item 1 and confirm each is covered — a path with no
 fallback wired produces no failing mutation, because there is nothing there to break.
+
+---
+
+## What implementing it taught, that this spec did not predict
+
+Recorded because the spec was right about the design and wrong about where the difficulty was.
+
+- **Writing it was not the hard part; making it RUN was.** It shipped inert twice. First
+  `build_fallback_target()` was never called from anywhere (#299) — 31 tests passed because each
+  constructed a `FallbackTarget` by hand, proving the consumer worked and saying nothing about
+  whether anything produced one. Then it required `model.model`, which the shipped config
+  template explicitly tells operators to leave blank (#300) — inert on the recommended setup.
+- **The classifier it depends on was itself broken** (#303). `classify_turn_error` returned
+  `unknown` for EVERY streaming failure, because `.text` on an unread httpx response raises
+  `ResponseNotRead` and `getattr(response, "text", "")` does not absorb it. Since `is_terminal`
+  keys on the kind, the fallback could never fire regardless of its own correctness. Three deploy
+  cycles were spent eliminating causes before adding the declined-reason log (#302) that named it
+  in one line.
+- **A fallback that declines silently is the same failure this sprint removes, one level up.**
+  That log line should have been in the original design, not added after it cost three cycles.
+- **The identity-line predicate hazard (recorded above) was real**, and the extraction is what
+  surfaced it. `reason_repr != "primary"` was named after its first caller rather than its
+  condition.
+
+Verified live, not only in tests: a session pointed at a provider returning a genuine 401
+degraded to the local model, the reply named the serving model, and the notice survived a re-read
+of stored history.

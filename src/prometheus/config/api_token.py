@@ -173,3 +173,56 @@ def format_connect_client_block(
         f"{token_lines}"
         f"{bar}\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# Token verification (GRAFT-MOBILE-BRIDGE 1: per-device tokens)
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass as _dataclass
+
+
+@_dataclass(frozen=True)
+class DeviceIdentity:
+    """Who a presented bearer token belongs to. ``id == "global"`` is the
+    shared daemon token (and the identity used when auth is disabled)."""
+
+    id: str
+    name: str = ""
+    platform: str = ""
+
+    @property
+    def is_global(self) -> bool:
+        return self.id == "global"
+
+
+GLOBAL_IDENTITY = DeviceIdentity(id="global", name="global", platform="")
+
+
+def verify_token(presented: str, global_token: str, store=None) -> DeviceIdentity | None:
+    """Resolve a presented bearer token to an identity, or None.
+
+    Constant-time compare against the global token first (both REST and WS
+    route through here, which is what fixed the REST side's ``!=`` compare).
+    Then the device registry: SHA-256 the presented token and look up a live
+    row; a hit stamps ``last_seen_at`` (throttled inside the store). A miss —
+    including a revoked device — is None.
+
+    ``auth_required`` stays the caller's ``bool(global_token)``: with no
+    global token the daemon is deliberately open and device tokens are simply
+    unused. This function is only meaningful when a token was presented.
+    """
+    import hmac as _hmac
+
+    if not isinstance(presented, str) or not presented:
+        return None
+    if global_token and _hmac.compare_digest(presented, global_token):
+        return GLOBAL_IDENTITY
+    if store is not None:
+        from prometheus.config.device_store import token_digest
+
+        row = store.lookup(token_digest(presented))
+        if row is not None:
+            store.touch(row.id)
+            return DeviceIdentity(id=row.id, name=row.name, platform=row.platform)
+    return None

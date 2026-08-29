@@ -28,6 +28,7 @@ from prometheus.engine.messages import (
 )
 from prometheus.engine.stream_events import (
     AssistantTextDelta,
+    ProviderDegraded,
     AssistantTurnComplete,
     StreamEvent,
     ToolExecutionCompleted,
@@ -42,6 +43,8 @@ from prometheus.providers.base import (
     ApiTextDeltaEvent,
     ModelProvider,
 )
+from prometheus.context.system_prompt import rewrite_model_identity
+from prometheus.engine.fallback import stream_round_with_fallback
 
 from typing import TYPE_CHECKING
 
@@ -607,6 +610,10 @@ class LoopContext:
     # Tool Calling Middle Layer sprint
     tool_loader: object | None = None     # DynamicToolLoader for deferred loading
     compactor: object | None = None       # ContextCompactor (compaction.enabled)
+    # SPRINT-provider-fallback: where a turn goes when the provider fails TERMINALLY (auth /
+    # billing — never a 429, which is already retried a layer down). None disables it, which is
+    # also the Phase 4 opt-out coding mode relies on to keep its pinned-provider guarantee.
+    fallback: object | None = None        # FallbackTarget
     # H1: per-result cap (tokens) applied to EACH tool result before injection,
     # via ToolResultTruncator's per-tool strategies. 0 disables (back-compat for
     # tests/benchmarks). Runs before the cross-result turn budget below, and
@@ -1041,28 +1048,19 @@ async def _run_loop(
                 # prompt to avoid pulling environment detection into the hot
                 # path of every request.
                 if decision.provider_name or decision.model_name:
-                    import re as _re
-                    provider_name = decision.provider_name or "unknown"
-                    model_name = decision.model_name or "unknown"
-                    new_line = f"- Model: {model_name} (provider: {provider_name})"
-                    # On non-primary routes, a trailing clause out-ranks the
-                    # Infrastructure/ANATOMY section: without it, an overridden
-                    # cloud model reads the local GPU node's "Loaded:" entry
-                    # and answers "what model is this?" with the local GGUF
-                    # filename. Primary routes skip it — there the serving
-                    # model IS the local backend and the clause would be false.
-                    if reason_repr != "primary":
-                        new_line += (
-                            " — the ACTIVE model serving this conversation;"
-                            " any model in the Infrastructure section is a"
-                            " separate local backend, not you"
-                        )
-                    context.system_prompt = _re.sub(
-                        r"^- Model: .*$",
-                        new_line,
+                    # Shared with the fallback handler rather than copied: a second copy is how
+                    # a swapped-in model ends up claiming to be the primary, which is the bug
+                    # this rewrite exists to prevent.
+                    #
+                    # `reason_repr == "primary"` is passed as the ANSWER to "is the serving
+                    # model the local backend", which is what the old `!= "primary"` gate
+                    # actually meant. See rewrite_model_identity's docstring — the fallback is a
+                    # caller where route-reason and local-backend stop agreeing.
+                    context.system_prompt = rewrite_model_identity(
                         context.system_prompt,
-                        count=1,
-                        flags=_re.MULTILINE,
+                        model_name=decision.model_name or "unknown",
+                        provider_name=decision.provider_name or "unknown",
+                        serving_is_local_backend=(reason_repr == "primary"),
                     )
             except Exception:
                 # Phase 4: elevated from DEBUG → WARNING. A silent DEBUG here
@@ -1172,6 +1170,9 @@ async def _run_loop(
         stripped_to_empty = 0
         stripped_samples: list[str] = []
         served_model_this_turn: str | None = None
+        # Per-TURN, like served_model above. A list rather than a plain name because the
+        # on_degrade callback below is a closure, and rebinding through it would need nonlocal.
+        degrade_notice_this_turn: list[str] = []
 
         # SPRINT-2 WS1: drain queued steers as a system-prompt addendum
         # for THIS model call only. Steers arrive from the gateway's
@@ -1297,10 +1298,13 @@ async def _run_loop(
                     "ContextCompactor.apply raised — sending uncompacted")
                 render_source = messages
 
-        async for event in loop_envelope.stream(
-            provider=context.provider,
-            request=ApiMessageRequest(
-                model=context.model,
+        # One round, degrading to context.fallback on a terminal provider failure. The envelope
+        # still observes and re-raises; this is the recovery its docstring says the loop owns.
+        def _build_request(_model: str) -> ApiMessageRequest:
+            # Rebuilt per attempt: the model name is part of the payload, so reusing the failed
+            # request would ask the local backend to serve the cloud model's name.
+            return ApiMessageRequest(
+                model=_model,
                 # Context-assembly: fence any untrusted injected turns (task
                 # output, watched-file contents, cron data) with the derived
                 # banner before the provider serializes them. The session/LCM
@@ -1312,11 +1316,71 @@ async def _run_loop(
                 suppress_thinking=context.suppress_thinking,
                 suppress_tools=not tools_enabled,
                 tool_choice=round_tool_choice,
-            ),
+            )
+
+        def _window_for(_model: str) -> tuple[int, bool]:
+            if context.compactor is None:
+                return 0, False
+            # Measured only for a local backend — llama.cpp publishes n_ctx at /props. Cloud
+            # APIs do not publish context length at all, so that side is a configured floor and
+            # the refusal message must say which it had.
+            measured = bool(getattr(context.fallback, "is_local_backend", False))
+            return context.compactor.limit_for(_model), measured
+
+        def _estimate_tokens() -> int:
+            if context.compactor is None:
+                return 0
+            return context.compactor.estimate_total(
+                per_call_system_prompt,
+                render_source,
+                len(str(_payload_tools)) if _payload_tools else 0,
+            )
+
+        def _on_degrade(_decision) -> None:
+            degrade_notice_this_turn.append(_decision)
+            log.warning(
+                "provider fallback: %s -> %s (%s) session=%r",
+                context.model, _decision.model, _decision.message, context.session_id,
+            )
+            # The serving model is the fallback from here on, so the prompt's identity line has
+            # to follow — shared with the router rather than copied, and keyed on whether the
+            # SERVING model is the local backend (not on why it changed).
+            context.system_prompt = rewrite_model_identity(
+                context.system_prompt,
+                model_name=_decision.model or "unknown",
+                provider_name=_decision.provider_name or "unknown",
+                serving_is_local_backend=bool(
+                    getattr(context.fallback, "is_local_backend", False)
+                ),
+            )
+
+        _degrade_announced = False
+        async for event in stream_round_with_fallback(
+            envelope=loop_envelope,
+            provider=context.provider,
+            model=context.model,
+            build_request=_build_request,
+            target=context.fallback,
+            enabled=context.fallback is not None,
+            window_for=_window_for,
+            estimate_tokens=_estimate_tokens,
+            on_degrade=_on_degrade,
             operation="loop_round",
             round_index=turn,
             session_id=effective_session_id,
         ):
+            if degrade_notice_this_turn and not _degrade_announced:
+                # First event after the swap. on_degrade fires before the fallback streams, so
+                # by now the decision is recorded and the announcement precedes its output.
+                _degrade_announced = True
+                _d = degrade_notice_this_turn[0]
+                yield ProviderDegraded(
+                    requested_model=context.model,
+                    served_model=_d.model or "unknown",
+                    provider_name=_d.provider_name or "unknown",
+                    reason=_d.message,
+                ), None
+
             if isinstance(event, ApiTextDeltaEvent):
                 if _markup_filter is not None:
                     visible = _markup_filter.feed(event.text)
@@ -1563,6 +1627,30 @@ async def _run_loop(
             and not (final_message.text or "").strip()
         )
         if not turn_is_empty:
+            if degrade_notice_this_turn:
+                # Local import: this function binds TextBlock locally in two other branches, so
+                # a module-level name would be an unbound local here whenever those did not run.
+                from prometheus.engine.messages import TextBlock
+
+                # The notice reaches the live stream as a delta from the fallback wrapper; this
+                # puts the SAME text into the message that becomes history, so a re-read shows
+                # why the answer came from a different model. Without it the degrade is loud
+                # once and silent forever after, which is the failure this sprint exists to
+                # prevent.
+                #
+                # Injected HERE and nowhere earlier, deliberately. `raw_model_output_this_turn`
+                # is captured above as "what we would want to train a local model to emit", and
+                # `extract_tool_calls` parses the same text. Prepending before either would
+                # teach a local model to emit our outage banner and hand the tool parser a
+                # prefix the model never wrote.
+                final_message = final_message.model_copy(
+                    update={
+                        "content": [
+                            TextBlock(text=f"⚠ {degrade_notice_this_turn[0].message}\n\n"),
+                            *final_message.content,
+                        ]
+                    }
+                )
             messages.append(final_message)
             yield AssistantTurnComplete(message=final_message, usage=usage), usage
             # SUNRISE PeriodicNudge: one completed assistant round. Ask the
@@ -3842,8 +3930,11 @@ class AgentLoop:
         microcompact_keep_chars_no_lcm: int = 500,
         lcm_engine: object | None = None,
         profile_resolver: object | None = None,
+        fallback: object | None = None,
     ) -> None:
         self._provider = provider
+        # SPRINT-provider-fallback: where a terminal provider failure degrades to.
+        self._fallback = fallback
         self._model = model
         self._tool_result_max = tool_result_max
         self._compactor = compactor
@@ -3957,6 +4048,7 @@ class AgentLoop:
         context = LoopContext(
             provider=self._provider,
             model=self._model,
+            fallback=self._fallback,
             system_prompt=system_prompt,
             max_tokens=self._max_tokens,
             max_turns=self._max_turns,

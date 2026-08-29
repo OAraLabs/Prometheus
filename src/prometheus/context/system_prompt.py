@@ -14,6 +14,8 @@ section assembled by :mod:`prometheus.context.prompt_assembler`.
 
 from __future__ import annotations
 
+import re
+
 from prometheus.config.paths import get_documents_dir
 from prometheus.context.environment import EnvironmentInfo, get_environment_info
 
@@ -109,6 +111,54 @@ preamble.
  - Focus text output on: decisions needing user input, status updates at \
 milestones, errors that change the plan.
  - If you can say it in one sentence, don't use three."""
+
+
+# ── Identity line rewriting ──────────────────────────────────────────────────────────────────
+# Lives HERE, beside _format_environment_section, because that function WRITES the line this one
+# rewrites. A rewriter that lives away from its producer drifts from the format it is matching,
+# and this one matches with a regex.
+#
+# Two callers, and they arrive for different reasons: the ModelRouter swapping models mid-turn
+# (policy), and the fallback handler degrading after a terminal provider failure (recovery).
+# Shared rather than copied because a second copy is how a degraded model ends up confidently
+# claiming to be the primary — the exact production bug the router's own comment records.
+
+_MODEL_LINE_RE = re.compile(r"^- Model: .*$", re.MULTILINE)
+
+# Appended when the model serving this turn is NOT the local backend. Without it, an overridden
+# cloud model reads the local GPU node's "Loaded:" entry out of the Infrastructure/ANATOMY
+# section and answers "what model is this?" with the local GGUF filename.
+_NOT_THE_LOCAL_BACKEND = (
+    " — the ACTIVE model serving this conversation; any model in the"
+    " Infrastructure section is a separate local backend, not you"
+)
+
+
+def rewrite_model_identity(
+    system_prompt: str,
+    *,
+    model_name: str,
+    provider_name: str,
+    serving_is_local_backend: bool,
+) -> str:
+    """Point the prompt's ``- Model:`` line at the model actually serving this turn.
+
+    ``serving_is_local_backend`` is named for the CONDITION, deliberately, and that is not a
+    cosmetic choice. The router originally gated the trailing clause on ``reason != "primary"``,
+    which was correct for the only caller that existed — on a primary route the serving model IS
+    the local backend, so the clause would be false. But the gate was named after that caller's
+    context rather than after what it tests, and the fallback is a second caller where the two
+    diverge: a fallback to the LOCAL model is not a primary route, yet the serving model IS the
+    local backend. Lifting the old expression unchanged would have made the degraded model assert
+    that the local backend is not it, while being it.
+
+    So callers must answer the real question — "is the model serving this turn the local
+    backend?" — rather than one that happened to correlate with it.
+    """
+    line = f"- Model: {model_name} (provider: {provider_name})"
+    if not serving_is_local_backend:
+        line += _NOT_THE_LOCAL_BACKEND
+    return _MODEL_LINE_RE.sub(line, system_prompt, count=1)
 
 
 def _format_environment_section(env: EnvironmentInfo) -> str:

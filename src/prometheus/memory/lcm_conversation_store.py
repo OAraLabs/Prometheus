@@ -95,6 +95,18 @@ class LCMConversationStore:
                 session_id TEXT PRIMARY KEY,
                 deleted_at REAL NOT NULL
             );
+
+            -- Session display titles (GRAFT-MOBILE-BRIDGE 7). A session id is
+            -- <gateway>:<uuid> and carries no name; a phone list of those is
+            -- unreadable. Generated from the first exchange (or set manually
+            -- via PUT), kept OUT of the append-only lcm_messages rows so a
+            -- rename never rewrites history. One row per session, last write
+            -- wins.
+            CREATE TABLE IF NOT EXISTS session_titles (
+                session_id TEXT PRIMARY KEY,
+                title      TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
         """)
         self._conn.commit()
         self._migrate_add_content_json()
@@ -393,6 +405,11 @@ class LCMConversationStore:
         caps at ``limit=500``), this returns the full session — used by
         ``LCMAssembler`` to compute total token counts before deciding
         what fits in the assembly budget.
+
+        NOTE: ``row_id`` on the returned parts is 0 — ``SELECT *`` does not
+        include SQLite's implicit rowid. If you need durable wire ids, read
+        through :meth:`messages_after_id` (which SELECTs ``rowid AS row_id``);
+        do not "fix" this by keying anything on the zeros.
         """
         rows = self._conn.execute(
             "SELECT * FROM lcm_messages WHERE session_id = ? "
@@ -491,6 +508,44 @@ class LCMConversationStore:
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_message(r) for r in rows]
 
+    def messages_page(
+        self,
+        *,
+        limit: int,
+        before: int | None = None,
+        session_id: str | None = None,
+        include_compacted: bool = True,
+    ) -> tuple[list[MessagePart], bool]:
+        """One page of history, NEWEST-ANCHORED (GRAFT-MOBILE-BRIDGE 5).
+
+        ``before=None`` starts at the newest row; ``before=<rowid>`` returns
+        rows with ``rowid < before``. Selected ``rowid`` DESC (that is what
+        makes it a newest-first page), then REVERSED so the returned list is
+        ascending like every other read — callers never see the reversal.
+
+        Fetches ``limit + 1`` to answer ``has_more`` honestly instead of
+        guessing from a full page. Distinct from :meth:`messages_after_id`
+        (the forward ``?since=`` cursor): a forward cursor cannot page
+        backwards from the present, which is exactly the mobile cold-open.
+        """
+        sql = "SELECT rowid AS row_id, * FROM lcm_messages WHERE 1=1"
+        params: list[object] = []
+        if before is not None:
+            sql += " AND rowid < ?"
+            params.append(before)
+        if session_id is not None:
+            sql += " AND session_id = ?"
+            params.append(session_id)
+        if not include_compacted:
+            sql += " AND compacted = 0"
+        sql += " ORDER BY rowid DESC LIMIT ?"
+        params.append(limit + 1)
+        rows = self._conn.execute(sql, params).fetchall()
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        page.reverse()
+        return [self._row_to_message(r) for r in page], has_more
+
     def max_rowid_all(self) -> int:
         """Highest rowid in the table, across EVERY session — or 0 if empty.
 
@@ -554,9 +609,11 @@ class LCMConversationStore:
                    COUNT(*)                AS message_count,
                    MIN(m.timestamp)        AS first_timestamp,
                    MAX(m.timestamp)        AS last_timestamp,
-                   MAX(m.rowid)            AS watermark
+                   MAX(m.rowid)            AS watermark,
+                   ti.title                AS title
             FROM lcm_messages m
             LEFT JOIN session_tombstones t ON t.session_id = m.session_id
+            LEFT JOIN session_titles ti ON ti.session_id = m.session_id
             GROUP BY m.session_id
             HAVING t.deleted_at IS NULL OR MAX(m.timestamp) > t.deleted_at
             ORDER BY MAX(m.timestamp) DESC
@@ -577,6 +634,36 @@ class LCMConversationStore:
             (session_id, time.time()),
         )
         self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Session titles (GRAFT-MOBILE-BRIDGE 7)
+    # ------------------------------------------------------------------
+
+    def set_session_title(self, session_id: str, title: str) -> None:
+        """Set (or replace) a session's display title. Last write wins.
+
+        A blank title clears the row rather than storing an empty string, so
+        ``get_session_title`` stays a clean present/absent signal.
+        """
+        clean = (title or "").strip()
+        if not clean:
+            self._conn.execute(
+                "DELETE FROM session_titles WHERE session_id = ?", (session_id,)
+            )
+        else:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO session_titles (session_id, title, updated_at)"
+                " VALUES (?, ?, ?)",
+                (session_id, clean, time.time()),
+            )
+        self._conn.commit()
+
+    def get_session_title(self, session_id: str) -> str | None:
+        """The session's title, or None if it has none."""
+        row = self._conn.execute(
+            "SELECT title FROM session_titles WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return row["title"] if row else None
 
     # ------------------------------------------------------------------
     # Lifecycle

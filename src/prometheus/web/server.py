@@ -25,6 +25,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from prometheus.web.strict_query import StrictQueryRoute
+
 from prometheus.config.paths import get_wiki_root
 from prometheus.context.environment import booted_from as _booted_from, git_head_sha
 
@@ -132,6 +134,7 @@ def create_app(
     static_dir: str | Path | None = None,
     boot_sha: str = "unknown",
     skill_creator: Any | None = None,
+    device_store: Any | None = None,
 ) -> FastAPI:
     """Create the FastAPI application with all routes."""
 
@@ -143,6 +146,11 @@ def create_app(
         redoc_url=None if _api_token else "/redoc",
         openapi_url=None if _api_token else "/openapi.json",
     )
+    # A mistyped query parameter must be an error, not a right-looking answer to a question
+    # nobody asked. Set BEFORE any route is registered; /docs and the StaticFiles mount are
+    # already in place and are deliberately untouched. See web/strict_query.py.
+    app.router.route_class = StrictQueryRoute
+
     _start_time = time.time()
 
     # CORS for dev (next dev on different port)
@@ -152,6 +160,25 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # ── Device registry (GRAFT-MOBILE-BRIDGE 1) ─────────────────────
+    # The launcher passes a shared DeviceStore (same instance as the WS
+    # bridge, so revocation and last_seen agree). Bare create_app() leaves it
+    # None: the middleware then simply rejects device tokens (verify_token
+    # treats store=None as "no registry"), and only the /api/devices routes
+    # create one on demand — a unit-test construction never touches the
+    # filesystem unless it exercises the device surface itself.
+    _device_store_holder: list[Any] = [device_store]
+
+    def _devices() -> Any:
+        return _device_store_holder[0]
+
+    def _devices_or_create() -> Any:
+        if _device_store_holder[0] is None:
+            from prometheus.config.device_store import DeviceStore
+
+            _device_store_holder[0] = DeviceStore()
+        return _device_store_holder[0]
 
     # ── Bearer token auth + body-size guard on /api/* routes ────────
 
@@ -180,10 +207,132 @@ def create_app(
             except ValueError:
                 return JSONResponse(status_code=400, content={"error": "invalid Content-Length"})
         if _api_token and request.url.path.startswith("/api/"):
+            # GRAFT-MOBILE-BRIDGE 1: the bearer may be the global token or an
+            # enrolled device token. verify_token compares constant-time (the
+            # old `!=` here was the timing side-channel the graft spec flags)
+            # and resolves who presented it; routes that care (POST
+            # /api/devices is global-only, GET marks is_self) read the
+            # identity off request.state.
+            from prometheus.config.api_token import verify_token as _verify_token
+
             auth = request.headers.get("authorization", "")
-            if auth != f"Bearer {_api_token}":
+            presented = auth[7:] if auth.startswith("Bearer ") else ""
+            identity = _verify_token(presented, _api_token, _devices())
+            if identity is None:
                 return JSONResponse(status_code=401, content={"error": "unauthorized — set Authorization: Bearer <token>"})
+            request.state.device_identity = identity
         return await call_next(request)
+
+    # ── /api/devices — enrolment, listing, revocation (GRAFT 1) ─────
+
+    @app.post("/api/devices", status_code=201)
+    async def create_device(request: Request):
+        identity = getattr(request.state, "device_identity", None)
+        if _api_token and (identity is None or not identity.is_global):
+            # Global-only BY DESIGN: a stolen phone must not be able to enrol
+            # a second attacker device. 401, not 403 — a device token is the
+            # wrong credential for this route, not a lesser one.
+            return JSONResponse(status_code=401, content={
+                "error": "minting a device token requires the global token"})
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "body must be JSON"})
+        name = str(body.get("name") or "").strip()
+        if not name:
+            return JSONResponse(status_code=400, content={"error": "name is required"})
+        platform = str(body.get("platform") or "").strip().lower()
+        if platform not in ("ios", "macos"):
+            platform = "other"
+        # The response is the ONLY copy of the plaintext token that will ever
+        # exist — the store keeps a SHA-256.
+        return _devices_or_create().mint(name, platform)
+
+    @app.get("/api/devices")
+    async def list_devices(request: Request):
+        identity = getattr(request.state, "device_identity", None)
+        self_id = identity.id if identity is not None else ""
+        return [{
+            "id": d.id, "name": d.name, "platform": d.platform,
+            "created_at": d.created_at, "last_seen_at": d.last_seen_at,
+            "revoked_at": d.revoked_at, "is_self": d.id == self_id,
+        } for d in _devices_or_create().list_devices()]
+
+    def _may_manage_push(request: Request, device_id: str):
+        """Push/activity registration is the device's own business (or the
+        global operator's): device A must not re-point device B's pushes.
+        Returns an error response, or None when allowed."""
+        identity = getattr(request.state, "device_identity", None)
+        if _api_token and not (identity is not None and
+                               (identity.is_global or identity.id == device_id)):
+            return JSONResponse(status_code=401, content={
+                "error": "a device may only manage its own push registration"})
+        return None
+
+    @app.put("/api/devices/{device_id}/push")
+    async def register_push(device_id: str, request: Request):
+        if (err := _may_manage_push(request, device_id)) is not None:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "body must be JSON"})
+        apns_token = str(body.get("apns_token") or "").strip()
+        environment = str(body.get("environment") or "").strip()
+        bundle_id = str(body.get("bundle_id") or "").strip()
+        if not apns_token or environment not in ("sandbox", "production") or not bundle_id:
+            return JSONResponse(status_code=400, content={
+                "error": "need apns_token, environment (sandbox|production), bundle_id"})
+        if not _devices_or_create().set_push(device_id, apns_token, environment, bundle_id):
+            return JSONResponse(status_code=404, content={"error": f"unknown or revoked device {device_id}"})
+        return {"ok": True}
+
+    @app.delete("/api/devices/{device_id}/push")
+    async def unregister_push(device_id: str, request: Request):
+        if (err := _may_manage_push(request, device_id)) is not None:
+            return err
+        if not _devices_or_create().clear_push(device_id):
+            return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
+        return {"ok": True}
+
+    @app.post("/api/devices/{device_id}/activity")
+    async def register_activity(device_id: str, request: Request):
+        if (err := _may_manage_push(request, device_id)) is not None:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "body must be JSON"})
+        session_id = str(body.get("session_id") or "").strip()
+        activity_token = str(body.get("activity_token") or "").strip()
+        if not session_id or not activity_token:
+            return JSONResponse(status_code=400, content={
+                "error": "need session_id and activity_token"})
+        _devices_or_create().set_activity_token(device_id, session_id, activity_token)
+        return {"ok": True}
+
+    @app.delete("/api/devices/{device_id}/activity")
+    async def unregister_activity(device_id: str, request: Request):
+        if (err := _may_manage_push(request, device_id)) is not None:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        session_id = str(body.get("session_id") or "").strip()
+        if not session_id:
+            return JSONResponse(status_code=400, content={"error": "need session_id"})
+        _devices_or_create().clear_activity_token(device_id, session_id)
+        return {"ok": True}
+
+    @app.delete("/api/devices/{device_id}")
+    async def revoke_device(device_id: str):
+        # Deliberately open to ANY valid token: a phone revokes itself on
+        # "Sign out". Revocation is a tombstone; the next request or WS
+        # connect with that device's token fails auth.
+        if not _devices_or_create().revoke(device_id):
+            return JSONResponse(status_code=404, content={"error": f"unknown device {device_id}"})
+        return {"ok": True, "id": device_id}
 
     # Store references for route handlers
     app.state.config = config
@@ -346,8 +495,18 @@ def create_app(
                 "running": getattr(gw, "running", None),
                 "reachable": getattr(gw, "reachable", None),
             }
+        # `state` reflects the LIVE turn state (GRAFT-MOBILE-BRIDGE 6). The
+        # bridge drives app.state.agent_state_ref["state"] to thinking/idle per
+        # turn; app.state.agent_state is a boot-time string set once and never
+        # updated, so reading it made this field permanently "idle". Prefer the
+        # live ref, fall back to the string when no bridge is wired (the `web`
+        # entrypoint, which runs no agent).
+        _state_ref = getattr(app.state, "agent_state_ref", None)
+        _live_state = (
+            _state_ref.get("state") if isinstance(_state_ref, dict) else None
+        ) or getattr(app.state, "agent_state", "idle")
         return {
-            "state": app.state.agent_state,
+            "state": _live_state,
             "model": app.state.current_model,
             # Full config_pins detail: bearer-gated, unlike /health's counts.
             "config_pins": _config_pins_detail(),
@@ -433,6 +592,10 @@ def create_app(
                     "last_active": row["last_timestamp"],
                     "message_count": row["message_count"],
                     "watermark": row["watermark"],
+                    # GRAFT-MOBILE-BRIDGE 7: generated after the first exchange
+                    # or set via PUT …/title; null until either happens, and a
+                    # client falls back to its own snippet.
+                    "title": row.get("title"),
                     "live": False,
                 }
         if session_mgr:
@@ -447,6 +610,7 @@ def create_app(
                     "last_active": store.max_timestamp(sid) if store is not None else 0.0,
                     "message_count": len(session.messages),
                     "watermark": store.max_rowid(sid) if store is not None else 0,
+                    "title": store.get_session_title(sid) if store is not None else None,
                     "live": True,
                 }
         return sorted(
@@ -660,7 +824,8 @@ def create_app(
         return {"status": "accepted", "run_id": wake.run_id}
 
     @app.get("/api/sessions/{session_id}/messages")
-    async def get_messages(session_id: str, since: str | None = None):
+    async def get_messages(session_id: str, since: str | None = None,
+                           limit: str | None = None, before: str | None = None):
         """Durable conversation history from the LCM store.
 
         Response: ``{ "messages": [...], "watermark": <int> }``. Each message is
@@ -685,6 +850,17 @@ def create_app(
 
         ``?since=<message_id>`` returns only messages with ``rowid > since`` (incremental
         sync). FAIL LOUD: an unparseable ``since`` is a 400 — never silently ignored.
+
+        Pagination (GRAFT-MOBILE-BRIDGE 5), without touching ``?since=`` semantics:
+
+        * ``?limit=<int>`` (clamped 1..500) — alone: the NEWEST ``limit`` rows,
+          ascending. With ``since``: bounds the forward read.
+        * ``?before=<row_id>`` — rows with ``rowid < before``, walking backwards;
+          ``limit`` defaults to 500 here (a backwards walk is always a page).
+        * ``since`` + ``before`` together → 400. Different questions.
+        * The response gains ``has_more`` on every path — including the no-param
+          full read, whose old internal 10,000-row cap used to truncate
+          SILENTLY; now the cap still applies but ``has_more: true`` says so.
         """
         lcm = getattr(app.state, "lcm_engine", None)
         if lcm is None:
@@ -704,7 +880,46 @@ def create_app(
                     content={"error": f"invalid 'since' cursor {since!r}: expected an integer message_id"},
                 )
 
-        parts = store.messages_after_id(since_id, session_id=session_id, include_compacted=True)
+        limit_val: int | None = None
+        if limit is not None:
+            try:
+                limit_val = max(1, min(500, int(limit)))  # clamp, per the spec
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"invalid 'limit' {limit!r}: expected an integer"},
+                )
+        before_val: int | None = None
+        if before is not None:
+            try:
+                before_val = int(before)
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"invalid 'before' cursor {before!r}: expected an integer message_id"},
+                )
+        if since is not None and before is not None:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "'since' and 'before' are different questions — pass one"},
+            )
+
+        if before_val is not None or (limit_val is not None and since is None):
+            # Newest-anchored page: the mobile cold open and its scroll-back.
+            parts, has_more = store.messages_page(
+                limit=limit_val if limit_val is not None else 500,
+                before=before_val, session_id=session_id, include_compacted=True,
+            )
+        else:
+            # The forward read, unchanged — except the old internal 10,000-row
+            # cap used to truncate SILENTLY; fetching cap+1 makes has_more say
+            # so instead.
+            cap = limit_val if limit_val is not None else 10_000
+            parts = store.messages_after_id(since_id, limit=cap + 1,
+                                            session_id=session_id, include_compacted=True)
+            has_more = len(parts) > cap
+            if has_more:
+                parts = parts[:cap]
         messages = [
             {
                 "message_id": p.row_id,
@@ -725,7 +940,8 @@ def create_app(
             }
             for p in parts
         ]
-        return {"messages": messages, "watermark": store.max_rowid(session_id)}
+        return {"messages": messages, "watermark": store.max_rowid(session_id),
+                "has_more": has_more}
 
     @app.delete("/api/sessions/{session_id}")
     async def clear_session(session_id: str):
@@ -745,6 +961,36 @@ def create_app(
         if store is not None:
             store.tombstone_session(session_id)
         return {"ok": True}
+
+    @app.put("/api/sessions/{session_id}/title")
+    async def set_session_title(session_id: str, request: Request):
+        """Manual rename (GRAFT-MOBILE-BRIDGE 7). Body: ``{"title": str}``.
+
+        Writes the same ``session_titles`` row auto-generation fills, and wins
+        over it permanently: generation only ever fills absence. An empty or
+        whitespace title CLEARS the stored title (the next first-exchange turn
+        may regenerate one), so a client can offer "reset to automatic".
+        Clipped server-side to the same ≤48-char contract generation obeys —
+        one limit, one place, both writers.
+        """
+        from prometheus.engine.session_titles import clip_title
+
+        lcm = getattr(app.state, "lcm_engine", None)
+        store = lcm.conversation_store if lcm is not None else None
+        if store is None:
+            return JSONResponse(
+                {"error": "no durable store — titles unavailable"}, status_code=503
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        raw = body.get("title") if isinstance(body, dict) else None
+        if raw is not None and not isinstance(raw, str):
+            return JSONResponse({"error": "title must be a string"}, status_code=400)
+        title = clip_title(raw or "")
+        store.set_session_title(session_id, title)
+        return {"ok": True, "session_id": session_id, "title": title or None}
 
     # ── Telemetry ───────────────────────────────────────────────────
 

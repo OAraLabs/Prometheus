@@ -303,7 +303,7 @@ class ChatSession:
             except Exception:
                 log.warning("telemetry unavailable for lcm_compaction failure")
 
-    def persist_loop_result(self, original_len: int) -> None:
+    def persist_loop_result(self, original_len: int) -> int | None:
         """Persist messages that ``run_loop`` appended IN PLACE to LCM.
 
         The streaming WS path (``web/ws_server.py:_run_agent``) passes
@@ -327,8 +327,12 @@ class ChatSession:
         ``original_len`` re-writes nothing. This is what stops the N-way
         row fan the 2026-08-11 survey found in the ``desktop:s4-*``
         sessions (rowids 461/466/481/496 — one copy per in-flight turn).
+
+        Returns the durable rowid of the assistant turn just persisted (or
+        None) — the wire cursor id the streaming path forwards on ``chat_done``
+        (GRAFT-MOBILE-BRIDGE 3b). Callers that only persist ignore it.
         """
-        self._persist_to_lcm(original_len, seal=True)
+        return self._persist_to_lcm(original_len, seal=True)
 
     def _note_persisted(self, idx: int) -> None:
         """Record that ``self.messages[idx]`` is durably written.
@@ -346,9 +350,16 @@ class ChatSession:
         elif idx > self._lcm_persisted_len:
             self._lcm_persisted_ahead.add(idx)
 
-    def _persist_to_lcm(self, start: int, *, seal: bool) -> None:
+    def _persist_to_lcm(self, start: int, *, seal: bool) -> int | None:
         """Persist the not-yet-persisted rows of ``self.messages[start:]``
         to LCM. Best-effort — never raises. No-op when no engine is wired.
+
+        Returns the durable rowid of the LAST assistant-role row written in
+        this span, or None when the span wrote no assistant row (or the engine
+        exposes no rowid — an older engine or a test fake). This is the wire
+        cursor id the streaming path puts on ``chat_done`` so a client learns
+        the assistant turn's durable id without a REST re-read
+        (GRAFT-MOBILE-BRIDGE 3b). It never affects persistence itself.
 
         ``turn_index`` for each row is its index in ``self.messages`` —
         unchanged from the original contract, but now computed per row so a
@@ -372,8 +383,9 @@ class ChatSession:
         tail, and sealing would silently drop that tail from the store.
         """
         if self._lcm_engine is None:
-            return
+            return None
         wrote_any = False
+        last_assistant_row_id: int | None = None
         try:
             end = len(self.messages)
             pending = [
@@ -396,6 +408,13 @@ class ChatSession:
                     is_trusted=msg.is_trusted,
                 )
                 wrote_any = True
+                if msg.role == "assistant":
+                    # The row the client's streamed bubble reconciles to. Take
+                    # the LAST one: a tool-using turn persists several assistant
+                    # rows, and the final text is where the reply settles.
+                    row_id = getattr(self._lcm_engine, "last_ingested_row_id", None)
+                    if row_id:
+                        last_assistant_row_id = row_id
                 self._note_persisted(i)
             if seal:
                 if end > self._lcm_persisted_len:
@@ -413,6 +432,7 @@ class ChatSession:
             # compact.
             if wrote_any:
                 self._schedule_lcm_compaction()
+            return last_assistant_row_id
         except Exception as exc:
             # Memory persistence MUST NOT be in the agent's critical
             # path. Surface to silent_failures and continue. The
@@ -546,6 +566,13 @@ class ChatSession:
         the next turn.
         """
         self._lcm_engine = engine
+
+    @property
+    def lcm_engine(self) -> object | None:
+        """The wired LCM engine, or None for an ephemeral session. Read-only
+        public access for callers (e.g. the session-title hook) that need the
+        engine's stores without reaching into a private field."""
+        return self._lcm_engine
 
     def trim(self, max_messages: int = MAX_SESSION_MESSAGES) -> None:
         """Truncate from the front if history exceeds *max_messages*.

@@ -82,7 +82,9 @@ def test_shape_is_consistent_and_keeps_count_and_created_at(tmp_path):
     row = _row(client.get("/api/sessions").json(), "telegram:1")
     # "live" joined the shape with feat/durable-session-index: True = the
     # in-memory working set exists; False = durable-only (restored) session.
-    assert set(row.keys()) == {"session_id", "gateway", "created_at", "last_active", "message_count", "watermark", "live"}
+    # "title" joined with GRAFT-MOBILE-BRIDGE 7: null until generated from the
+    # first exchange or set via PUT /api/sessions/{id}/title.
+    assert set(row.keys()) == {"session_id", "gateway", "created_at", "last_active", "message_count", "watermark", "live", "title"}
     assert row["live"] is True
     assert isinstance(row["watermark"], int)
     assert isinstance(row["last_active"], (int, float))

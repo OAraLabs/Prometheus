@@ -189,7 +189,20 @@ def classify_turn_error(exc: BaseException) -> dict[str, Any]:
         status = int(status) if isinstance(status, int) else None
         body = ""
         if response is not None:
-            raw = getattr(response, "text", "")
+            # `.text` on a STREAMED response that was never read raises httpx.ResponseNotRead,
+            # and getattr's default does not help: it only covers AttributeError. That exception
+            # escaped to the defensive handler at the bottom of this function, which returns
+            # KIND_UNKNOWN — so every provider failure in this daemon classified as "unknown",
+            # because every provider call is a streaming call (`stream_message` ->
+            # `raise_for_status()` on an unread response).
+            #
+            # The body is optional: it only sharpens BILLING detection. The status alone already
+            # decides auth / rate-limit / provider-error, so losing the body must degrade the
+            # answer, never discard it.
+            try:
+                raw = response.text
+            except Exception:  # noqa: BLE001 — an unreadable body is not a classification failure
+                raw = ""
             if isinstance(raw, str):
                 body = raw
 

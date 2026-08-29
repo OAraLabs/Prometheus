@@ -63,6 +63,14 @@ async def launch_web(
     # Shared mutable state ref for agent state
     agent_state_ref = {"state": "idle"}
 
+    # GRAFT-MOBILE-BRIDGE 1: ONE DeviceStore shared by the REST middleware and
+    # the WS bridge, so a revocation or last_seen stamp is immediately visible
+    # to both. Created unconditionally — on an open (token-less) daemon device
+    # tokens are simply never consulted.
+    from prometheus.config.device_store import DeviceStore
+
+    device_store = DeviceStore()
+
     # Create FastAPI app
     app = create_app(
         config=config,
@@ -79,6 +87,7 @@ async def launch_web(
         model_router=getattr(loop_context, "model_router", None),
         static_dir=static_dir,
         skill_creator=skill_creator,
+        device_store=device_store,
     )
 
     # Wire agent state ref into the app
@@ -106,12 +115,38 @@ async def launch_web(
         api_token=_api_token,
         config=config,
         approval_queue=approval_queue,
+        device_store=device_store,
     )
 
     # Expose the bridge on the FastAPI app so REST routes (e.g.
     # POST /api/chat/send) can dispatch user messages through the same flow
     # the WebSocket uses, without duplicating the session+agent plumbing.
     app.state.ws_bridge = bridge
+
+    # GRAFT Piece 2: APNs push. Enabled-but-broken fails the BOOT, loudly —
+    # a missing key or missing deps must not degrade to silent no-pushes
+    # (config-dark law, same stance as the Paperclip gateway below).
+    push_cfg = (config.get("push") or {})
+    if isinstance(push_cfg, dict) and push_cfg.get("enabled", False):
+        try:
+            import cryptography  # noqa: F401
+            import h2  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "push.enabled is true but the push deps are missing — "
+                "pip install 'oara-prometheus[push]' (cryptography + h2)"
+            ) from exc
+        from prometheus.push.apns import APNsSender, ApnsConfig
+        from prometheus.push.dispatcher import PushDispatcher
+
+        apns_config = ApnsConfig.from_config(push_cfg)  # raises on bad config
+        sender = APNsSender(apns_config)
+        dispatcher = PushDispatcher(device_store, sender, bridge)
+        bridge.push_dispatcher = dispatcher
+        if signal_bus:
+            signal_bus.subscribe("*", dispatcher.on_signal)
+        logger.info("APNs push enabled — topic %s, key %s",
+                    apns_config.topic, apns_config.key_id)
 
     # Paperclip fleet orchestration: when gateway.paperclip.enabled, mount the
     # heartbeat client behind POST /api/paperclip/wake. Runs work turns through
