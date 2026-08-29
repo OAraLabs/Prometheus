@@ -18,6 +18,9 @@ from prometheus.tools.denied_prune import (
     withheld_note,
 )
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
+# The one owner of absolute-glob splitting (#134) — imported rather than
+# copied, so the two sibling tools cannot drift apart again.
+from prometheus.tools.builtin.grep import _split_absolute_glob
 
 
 class GlobToolInput(BaseModel):
@@ -49,7 +52,14 @@ class GlobTool(BaseTool):
 
     async def execute(self, arguments: GlobToolInput, context: ToolExecutionContext) -> ToolResult:
         root = _resolve_path(context.cwd, arguments.root) if arguments.root else context.cwd
-        found = list(root.glob(arguments.pattern))
+        # Same defect grep fixed in #134, unfixed in this sibling until the
+        # 2026-08-18 handoff sweep: models frequently pass an ABSOLUTE
+        # pattern ("/tmp/x/*.py"), and pathlib raises NotImplementedError on
+        # non-relative patterns — killing the call and teaching the model to
+        # re-encode. Split it into (anchor dir, relative pattern) with the
+        # one helper that already owns this logic.
+        root, pattern = _split_absolute_glob(root, arguments.pattern)
+        found = list(root.glob(pattern))
         allowed = [p for p in found if not is_denied(p, self._denied)]
         withheld = len(found) - len(allowed)
         matches = sorted(str(p.relative_to(root)) for p in allowed)
