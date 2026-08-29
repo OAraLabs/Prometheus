@@ -26,6 +26,11 @@ dependencies = [
     "sounddevice>=0.5.5",
     "scipy>=1.17.1",
     "watchdog>=4.0",
+    # FOUNDATION Part 3.2: node identity is Ed25519, and identity must not
+    # inherit the optional-extra fragility the push stack has (enabled-but-
+    # missing-deps as a boot failure). Already in the lock via authlib; this
+    # makes it a declared base need. The push extra keeps its own pin.
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]

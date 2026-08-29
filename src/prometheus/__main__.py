@@ -980,6 +980,12 @@ def _reset_data() -> None:
     for label, path in dir_targets:
         status = "(exists)" if path.exists() else "(not found)"
         print(f"  {label}: {path} {status}")
+    # FOUNDATION 3.4: the node keypair is identity, not data — a reset
+    # produces a fresh deployment on the SAME machine, and the machine has
+    # not changed. Named here (honest-listing convention) rather than
+    # silently skipped, so its absence from the delete list reads as a
+    # decision instead of an oversight.
+    print("  node identity: preserved (~/.prometheus/node — identity, not data)")
 
     confirm = input("\nDelete all listed data? [y/N] ").strip().lower()
     if confirm != "y":
@@ -1633,6 +1639,13 @@ def main() -> None:
     )
 
     async def _async_main() -> None:
+        # FOUNDATION Part 3: node identity is minted at first run — the CLI
+        # is a first run as much as the daemon is. Idempotent afterwards.
+        # This runs BEFORE telemetry writes so a first CLI session's traces
+        # carry the node they were produced on rather than NULL.
+        from prometheus.config.node_identity import ensure_node_identity
+        ensure_node_identity()
+
         # Sprint 12: MCP servers (must live in same async context as agent loop)
         mcp_runtime = None
         if config.get("mcp_servers"):

@@ -217,6 +217,30 @@ def get_workspace_dir() -> Path:
     return workspace_dir
 
 
+def get_node_dir() -> Path:
+    """Return the node-identity directory (~/.prometheus/node), mode 0700.
+
+    NODE-owned state (FOUNDATION Part 3.4): the Ed25519 keypair that names
+    this machine. Never copied to another machine — that is the entire
+    reason it has its own directory instead of sitting beside the
+    instance-owned files. ``prometheus reset-data`` deliberately does not
+    touch it: it is identity, not data.
+
+    0700 because it holds private-key material; the mode is enforced only
+    at creation (a deliberate later chmod by the operator is theirs to own).
+    """
+    env_dir = os.environ.get("PROMETHEUS_NODE_DIR")
+    if env_dir:
+        node_dir = Path(env_dir)
+    else:
+        node_dir = get_config_dir() / "node"
+
+    if not node_dir.exists():
+        node_dir.mkdir(parents=True)
+        node_dir.chmod(0o700)
+    return node_dir
+
+
 def get_documents_dir() -> Path:
     """Return the confined documents-editor root (~/.prometheus/documents).
 

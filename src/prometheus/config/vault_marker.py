@@ -162,6 +162,38 @@ def create_marker(vault_root: Path, created_by: str) -> VaultMarker:
     return marker
 
 
+def enroll_node(vault_root: Path, pubkey: str, label: str) -> bool:
+    """Add a node's public key to the marker's ``enrolled_nodes``.
+
+    Returns True when the node was newly enrolled, False when it was
+    already present (the every-boot case). Spec 3.5/3.6: in this version
+    the local node self-enrolls on startup against an adopted vault — the
+    human who ran ``prometheus vault adopt`` is the approval. The explicit
+    approve-before-enroll step arrives with the fleet and replaces this.
+
+    ``label`` is display only (a hostname, typically). It is never
+    identity — the pubkey is.
+    """
+    marker = read_marker(vault_root)
+    if marker is None:
+        raise VaultMarkerError(
+            f"Cannot enroll a node at {vault_root}: no marker. Adopt first."
+        )
+    if any(node.get("pubkey") == pubkey for node in marker.enrolled_nodes):
+        return False
+    marker.enrolled_nodes.append({
+        "pubkey": pubkey,
+        "label": label,
+        "enrolled": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    })
+    write_marker(vault_root, marker)
+    logger.info(
+        "Node %s… enrolled into instance %s as %r",
+        pubkey[:12], marker.instance_id, label,
+    )
+    return True
+
+
 def check_vault_marker(vault_root: Path, mode: str = "warn") -> VaultMarker | None:
     """The startup gate. Called once from ``run_daemon`` after the vault
     root is pinned.

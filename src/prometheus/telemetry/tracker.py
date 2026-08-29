@@ -92,7 +92,25 @@ NON_CALL_FAILURE_TYPES: frozenset[str] = POLICY_ERROR_TYPES | EXECUTED_ERROR_TYP
 SYNTHETIC_TOOL_NAME = "_loop_transition"
 
 
+# FOUNDATION 1.3: the telemetry schema version. The first real version
+# number this DB has ever had — before it, the only mechanism was the
+# additive _EXPECTED_COLUMNS map, which silently tolerates a rollback
+# reading a newer DB. Version 1 = schema_meta exists + node_id columns.
+# Bumping this requires a migration step in __init__ and a changelog row
+# in docs/FOUNDATION.md.
+TELEMETRY_SCHEMA_VERSION = 1
+
+
+class TelemetrySchemaError(RuntimeError):
+    """The DB was written by a newer schema than this build knows."""
+
+
 _SCHEMA_SQL_TABLES = """
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tool_calls (
     id                TEXT PRIMARY KEY,
     timestamp         REAL NOT NULL,
@@ -245,6 +263,15 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # recoverable and are skipped by the export.
         ("session_id", "TEXT"),      # joins to lcm_messages for the context
         ("tool_schema", "TEXT"),     # JSON: the schema the model actually saw
+        # FOUNDATION 1.3: which machine produced this trace — the node's
+        # public key (config/node_identity.py). A latency number without
+        # its hardware is not comparable across machines. NULL on rows
+        # from before node identity existed (honest: there was no node to
+        # name) and on writers running before first identity generation.
+        # NOTE: "node_id" also names a summary-DAG concept in
+        # memory/lcm_summary_store.py — different database; the telemetry
+        # name is the fleet-facing one from the spec.
+        ("node_id", "TEXT"),
     ],
     "circuit_breaker_diagnostics": [
         ("golden_reference", "TEXT"),
@@ -269,6 +296,8 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # deliberately distinct from 0 ("cache was cold this round").
         ("cached_input_tokens", "INTEGER"),
         ("cache_write_tokens", "INTEGER"),
+        # FOUNDATION 1.3 — same column, same meaning as on tool_calls.
+        ("node_id", "TEXT"),
     ],
 }
 
@@ -364,7 +393,15 @@ class ToolCallTelemetry:
         # {"models": {"qwen2.5-coder-32b": {"bash": {"calls": 1, "success_rate": 1.0, ...}}}}
     """
 
-    def __init__(self, db_path: str | Path = "~/.prometheus/telemetry.db") -> None:
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        if db_path is None:
+            # Resolve through get_config_dir() like every other store. The
+            # old default was a hardcoded "~/.prometheus/telemetry.db",
+            # which ignored PROMETHEUS_CONFIG_DIR while `prometheus
+            # reset-data` honoured it — the writer and the eraser
+            # disagreeing about where the DB lives.
+            from prometheus.config.paths import get_config_dir
+            db_path = get_config_dir() / "telemetry.db"
         self._db_path = Path(db_path).expanduser().resolve()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         # Shared WAL + busy_timeout setup (see telemetry.db) so the daemon
@@ -372,6 +409,20 @@ class ToolCallTelemetry:
         # readers share one concurrency-safe substrate. Write/commit logic
         # below is unchanged.
         self._conn = connect_telemetry_db(self._db_path)
+        # FOUNDATION 1.3: refuse a DB written by a NEWER schema before
+        # touching it. Unlike _migrate_schema below (best-effort, never
+        # raises), this raise is deliberate: the newer-DB-older-binary case
+        # is a rollback, and additively "migrating" it would misread rows
+        # whose meaning this build predates.
+        stored = self._read_stored_schema_version()
+        if stored is not None and stored > TELEMETRY_SCHEMA_VERSION:
+            self._conn.close()
+            raise TelemetrySchemaError(
+                f"{self._db_path} has telemetry schema_version {stored}; "
+                f"this build reads schema_version {TELEMETRY_SCHEMA_VERSION}. "
+                "Newer DB, older binary — refusing rather than misreading. "
+                "Upgrade Prometheus, or move the DB aside."
+            )
         # Three-phase init:
         # 1. Create tables IF NOT EXISTS (fresh DBs get the full schema here)
         # 2. Migrate any existing DB that predates later column additions
@@ -380,7 +431,58 @@ class ToolCallTelemetry:
         self._conn.executescript(_SCHEMA_SQL_TABLES)
         self._migrate_schema()
         self._conn.executescript(_SCHEMA_SQL_INDEXES)
+        # A DB at or below the current version is stamped current — the
+        # additive migration above IS the upgrade path. A legacy DB (no
+        # schema_meta) adopts silently: unlike the vault, this store is
+        # machine-owned with a single writer, so adoption is not a policy
+        # decision, it is bookkeeping.
+        self._conn.execute(
+            "INSERT OR IGNORE INTO schema_meta (key, value) VALUES "
+            "('created_at', datetime('now'))"
+        )
+        self._conn.execute(
+            "INSERT OR IGNORE INTO schema_meta (key, value) VALUES "
+            "('created_by', ?)", (f"prometheus telemetry v{TELEMETRY_SCHEMA_VERSION}",)
+        )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES "
+            "('schema_version', ?)", (str(TELEMETRY_SCHEMA_VERSION),)
+        )
         self._conn.commit()
+        # FOUNDATION 1.3: every trace row names the machine that produced
+        # it. Resolved lazily in _current_node_id() — a read of node.pub,
+        # never a mint: telemetry asking for identity must not create one
+        # (the entry points do that, at first run). NULL honestly until
+        # an identity exists.
+        self._node_id: str | None = None
+
+    def _current_node_id(self) -> str | None:
+        """The node ID to stamp on rows. Cached once found.
+
+        Lazy rather than snapshotted at __init__ because construction order
+        is not guaranteed: the CLI builds its telemetry before the entry
+        point mints first-run identity, and a snapshot would stamp NULL for
+        that entire first session.
+        """
+        if self._node_id is None:
+            from prometheus.config.node_identity import get_node_pubkey
+            self._node_id = get_node_pubkey()
+        return self._node_id
+
+    def _read_stored_schema_version(self) -> int | None:
+        """The schema_meta version, or None for a legacy/fresh DB."""
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return None
+        if row is None:
+            return None
+        try:
+            return int(row[0])
+        except (TypeError, ValueError):
+            return None
 
     # ------------------------------------------------------------------
     # Schema migration (Golden Trace Capture sprint)
@@ -471,8 +573,8 @@ class ToolCallTelemetry:
               (id, timestamp, model, tool_name, success, retries, latency_ms,
                error_type, error_detail,
                raw_model_output, parsed_tool_call, is_golden, repairs,
-               served_model, session_id, tool_schema)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               served_model, session_id, tool_schema, node_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 uuid4().hex,
@@ -491,6 +593,7 @@ class ToolCallTelemetry:
                 served_model,
                 session_id,
                 tool_schema,
+                self._current_node_id(),
             ),
         )
         self._conn.commit()
@@ -668,8 +771,8 @@ class ToolCallTelemetry:
                    duration_ms, outcome, summary_json,
                    input_tokens, output_tokens, round_index,
                    session_id, model, thinking,
-                   cached_input_tokens, cache_write_tokens)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   cached_input_tokens, cache_write_tokens, node_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     uuid4().hex,
@@ -687,6 +790,7 @@ class ToolCallTelemetry:
                     None if thinking is None else int(thinking),
                     cached_input_tokens,
                     cache_write_tokens,
+                    self._current_node_id(),
                 ),
             )
             self._conn.commit()
