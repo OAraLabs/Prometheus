@@ -3,7 +3,7 @@
 Donor: OpenClaw src/agents/mcp-transport-config.ts, mcp-stdio.ts, mcp-http.ts
 License: MIT (OpenClaw Foundation)
 
-Source: Prometheus (OAra AI Lab)
+Source: Prometheus (OAra Labs)
 License: MIT
 """
 

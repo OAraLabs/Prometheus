@@ -1,30 +1,90 @@
-Prometheus — Copyright (c) 2026 Will Hieber / OAra AI Lab. MIT License.
+Prometheus — Copyright (c) 2026 OAra Labs. MIT License.
 
-This project includes code adapted from the following MIT-licensed projects.
-The original copyright and permission notices apply to the adapted portions.
+This project includes code adapted from the MIT-licensed projects listed
+below. Each project's original copyright and permission notice is reproduced
+in full and applies to the adapted portions. Individual adapted files carry a
+provenance header naming their upstream source.
 
---- OpenHarness (https://github.com/HKUDS/OpenHarness) ---
-Copyright (c) 2025 OpenHarness Contributors. MIT License.
-Adapted files (35): src/prometheus/config/paths.py; context/environment.py,
-prometheusmd.py, prompt_assembler.py, system_prompt.py; coordinator/__init__.py,
-agent_definitions.py, coordinator_mode.py; engine/__init__.py, agent_loop.py,
-cost_tracker.py, messages.py, stream_events.py, usage.py; hooks/events.py,
-executor.py, schemas.py, types.py; gateway/cron_scheduler.py, cron_service.py;
-tools/base.py; tools/builtin/agent.py, ask_user.py, bash.py, cron_create.py,
-cron_delete.py, cron_list.py, file_edit.py, file_read.py, file_write.py,
-glob.py, grep.py, notebook_edit.py, web_fetch.py, web_search.py.
 
---- Hermes Agent (https://github.com/NousResearch/hermes-agent) ---
-Copyright (c) Nous Research. MIT License.
-Adapted files (5): src/prometheus/providers/xai_oauth.py;
-memory/hermes_memory_tool.py; tools/builtin/browser.py, tts.py, message.py.
+================================================================================
+OpenHarness — https://github.com/HKUDS/OpenHarness
+================================================================================
 
---- OpenClaw (https://github.com/openclaw/openclaw) ---
-Copyright (c) 2026 OpenClaw Foundation. MIT License.
-Adapted files (9): src/prometheus/mcp/adapter.py, names.py, runtime.py,
-transport.py, types.py; memory/extractor.py; tools/builtin/sessions_list.py,
-sessions_send.py, sessions_spawn.py.
+Copyright (c) 2025 OpenHarness Contributors
 
-Additional design influences (no code copied): OpenCode and Claude Code
-(LSP integration patterns), Odysseus (teacher-escalation design),
-anthropics/skills (dashboard patterns), Karpathy's LLM Wiki concept.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+Hermes Agent — https://github.com/NousResearch/hermes-agent
+================================================================================
+
+Copyright (c) 2025 Nous Research
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+OpenClaw — https://github.com/openclaw/openclaw
+================================================================================
+
+Copyright (c) 2026 OpenClaw Foundation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+Design influences (no code copied)
+================================================================================
+
+OpenCode and Claude Code (LSP integration patterns), Odysseus (teacher-
+escalation design), anthropics/skills (dashboard patterns), and Andrej
+Karpathy's LLM Wiki concept.

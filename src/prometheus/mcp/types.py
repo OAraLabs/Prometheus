@@ -4,7 +4,7 @@ Donor: OpenClaw src/agents/pi-bundle-mcp-types.ts + mcp-transport-config.ts
 License: MIT (OpenClaw Foundation)
 Ported to Python with Pydantic models.
 
-Source: Prometheus (OAra AI Lab)
+Source: Prometheus (OAra Labs)
 License: MIT
 """
 

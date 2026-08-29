@@ -77,7 +77,7 @@ The last one is there because its absence shipped: a control suite whose every c
 
 ### Provenance
 
-**Provenance.** Prometheus is an original codebase, not a fork: 264 of its 313 Python modules were written from scratch — the other 49 are the adapted files named one-by-one in [NOTICE](NOTICE) — including everything that makes it interesting: the Model Adapter Layer, SENTINEL, SYMBIOTE, the Wiki Knowledge System, the coding engine, and the fine-tuning gym. Like most real software, it started on the shoulders of open source: early scaffolding (base file tools, cron, the engine skeleton) was adapted from MIT-licensed projects — chiefly [OpenHarness](https://github.com/HKUDS/OpenHarness), with smaller pieces from the [Hermes Agent](https://github.com/NousResearch/hermes-agent) and [OpenClaw](https://github.com/openclaw/openclaw) — and the engine has since diverged to under 4% code similarity with its starting point. Every adapted file names its source in a header comment; full notices are in [NOTICE](NOTICE). Several other subsystems (the gateways, LSP integration, teacher escalation) were designed by studying prior art and implemented clean-room.
+**Provenance.** Like most software, Prometheus started on the shoulders of open source: early scaffolding — base file tools, cron, the engine skeleton — was adapted from MIT-licensed projects, chiefly [OpenHarness](https://github.com/HKUDS/OpenHarness), with smaller pieces from the [Hermes Agent](https://github.com/NousResearch/hermes-agent) and [OpenClaw](https://github.com/openclaw/openclaw). Every adapted file names its source in a header comment; upstream notices are in [NOTICE](NOTICE). Several subsystems — the gateways, LSP integration, teacher escalation — were designed by studying prior art and implemented clean-room.
 
 ---
 
@@ -541,7 +541,7 @@ prometheus/
 
 ## Stats
 
-- ~83,000 lines of production Python across 313 modules
+- ~83,000 lines of production Python
 - 4,000+ tests across 239 test files
 - 49 builtin tools registered by default (plus config-gated LSP, MCP, and vision/STT tools) + dynamic MCP tools
 - 102-file skill library + self-authored skills
@@ -576,4 +576,4 @@ MIT — see [LICENSE](LICENSE). Upstream copyright notices for adapted code are 
 
 ## Credits
 
-Built by [Will Hieber](https://github.com/OAraLabs) / OAra Labs. Its design was informed by Andrej Karpathy's [LLM Wiki concept](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), [Lossless-Claw](https://github.com/Martian-Engineering/lossless-claw), and [Sigrid Jin's](https://github.com/instructkr) analysis of Claude Code's agent-loop patterns. Code lineage and upstream notices: see [Provenance](#provenance) above and [NOTICE](NOTICE).
+Built by [OAra Labs](https://github.com/OAraLabs). Its design was informed by Andrej Karpathy's [LLM Wiki concept](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), [Lossless-Claw](https://github.com/Martian-Engineering/lossless-claw), and [Sigrid Jin's](https://github.com/instructkr) analysis of Claude Code's agent-loop patterns. Code lineage and upstream notices: see [Provenance](#provenance) above and [NOTICE](NOTICE).

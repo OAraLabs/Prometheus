@@ -2,7 +2,7 @@
 name: simplify
 description: "Review changed code for reuse opportunities, quality issues, and efficiency improvements, then fix any issues found. Use after writing or modifying code to ensure it's clean, DRY, and follows project conventions."
 ---
-<!-- Provenance: whieber1/Prometheus | src/reference_data/subsystems/skills.json (simplify.ts reference) | MIT -->
+<!-- Provenance: OAraLabs/Prometheus | src/reference_data/subsystems/skills.json (simplify.ts reference) | MIT -->
 
 # Simplify
 

@@ -8,7 +8,7 @@ Every ALLOW/DENY/CONFIRM decision is logged to:
 Donor patterns:
 - OpenClaw bash-tools.exec-approval-request.ts: structured approval tracking
 
-Source: Prometheus (OAra AI Lab)
+Source: Prometheus (OAra Labs)
 License: MIT
 """
 

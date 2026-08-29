@@ -9,7 +9,7 @@ Precedence (highest to lowest):
 Donor patterns:
 - OpenClaw src/infra/secret-file.ts: safe secret file loading with symlink rejection
 
-Source: Prometheus (OAra AI Lab)
+Source: Prometheus (OAra Labs)
 License: MIT
 """
 

@@ -2,7 +2,7 @@
 name: verify
 description: "Verify that code changes work correctly by running tests, type checks, linters, and build steps. Use after making changes and before committing to ensure nothing is broken."
 ---
-<!-- Provenance: whieber1/Prometheus | src/reference_data/subsystems/skills.json (verify.ts reference) | MIT -->
+<!-- Provenance: OAraLabs/Prometheus | src/reference_data/subsystems/skills.json (verify.ts reference) | MIT -->
 
 # Verify
 

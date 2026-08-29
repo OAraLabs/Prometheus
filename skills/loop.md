@@ -2,7 +2,7 @@
 name: loop
 description: "Run a prompt or skill on a recurring interval (e.g., every 5 minutes). Use when you need to poll for status, monitor a deploy, check build results, or run any recurring check. Default interval is 10 minutes."
 ---
-<!-- Provenance: whieber1/Prometheus | src/reference_data/subsystems/skills.json (loop.ts reference) | MIT -->
+<!-- Provenance: OAraLabs/Prometheus | src/reference_data/subsystems/skills.json (loop.ts reference) | MIT -->
 
 # Loop
 

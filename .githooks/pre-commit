@@ -194,7 +194,7 @@ check_pattern "API key (sk-live/sk-test/sk_live/sk_test)" \
 check_pattern "Hardcoded user SSH key path" \
     '/home/[^/]+/\.ssh/id_'
 
-# 6. OAra machine hostnames (Brain-Node, GPU-Node, etc. — not "OAra AI Lab"
+# 6. OAra machine hostnames (Brain-Node, GPU-Node, etc. — not "OAra Labs"
 #    attribution). The "oara-prometheus" distribution name is exempted via
 #    ALLOWLIST_REGEX above (a package name, not a host).
 check_pattern "Infrastructure hostname (OAra-*)" \

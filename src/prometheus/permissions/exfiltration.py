@@ -12,7 +12,7 @@ What this detector does NOT block:
   authenticating against their own service. Only sensitive *files* on
   disk being read into network commands trip this detector.
 
-Source: Prometheus (OAra AI Lab)
+Source: Prometheus (OAra Labs)
 License: MIT
 """
 
