@@ -709,8 +709,21 @@ def check_bash_floors(config: dict[str, Any]) -> list[DiagnosticCheck]:
                 fix=fix_when_missing,
             )
         if state == C.STATE_DARK:
+            # WARNING, not error, and the distinction is the mode's own
+            # promise rather than the outcome. `auto` is documented as
+            # "confine where the mechanism exists, run where it does not" —
+            # a host that cannot provide it is that mode working as written,
+            # not a broken install. `required` is the mode that promises
+            # enforcement, and it fails loudly above.
+            #
+            # Erroring here made `doctor` exit nonzero on every host without
+            # bubblewrap — macOS has no equivalent at all, and CI caught it
+            # on a config that had opted into nothing: the SHIPPED default
+            # asked for the floor, not the operator. A permanent red row
+            # nobody can clear is how a report gets ignored, which costs
+            # more than this row is worth.
             return DiagnosticCheck(
-                name=name, category="platform", status="error",
+                name=name, category="platform", status="warning",
                 message=f"mode {mode!r} but UNAVAILABLE — {detail}. "
                         "bash is running WITHOUT this floor.",
                 fix=fix_when_missing,

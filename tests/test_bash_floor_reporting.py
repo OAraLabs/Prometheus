@@ -144,13 +144,33 @@ def _rows(config: dict):
 
 
 class TestDoctorReportsTheFloors:
-    def test_a_dark_write_floor_is_an_ERROR_row_with_a_fix(self, no_bwrap):
+    def test_a_dark_write_floor_is_a_WARNING_row_with_a_fix(self, no_bwrap):
+        """Severity tracks the mode's PROMISE, not the outcome.
+
+        `auto` is documented as "confine where the mechanism exists, run
+        where it does not". A host without bubblewrap — every macOS box, and
+        CI — is that mode working as written, so this must not fail doctor.
+        It must still be SAID: the floor was asked for and is not there.
+        """
         rows = _rows({"security": {"bash_write_confinement": "auto"}})
         row = rows["Bash write floor"]
-        assert row.status == "error"
+        assert row.status == "warning"
         assert "UNAVAILABLE" in row.message
         assert "WITHOUT this floor" in row.message
         assert row.fix and "bubblewrap" in row.fix
+
+    def test_a_default_config_on_a_host_without_bwrap_still_exits_zero(self, no_bwrap):
+        """The regression CI caught, pinned.
+
+        A config that opted into NOTHING got an error row, because the
+        shipped default asked for the floor on the operator's behalf. Only
+        `error` gates doctor's exit code (doctor.py:973), so this is the
+        assertion that keeps a fresh install green.
+        """
+        rows = _rows({"security": {}})
+        assert all(r.status != "error" for r in rows.values()), (
+            f"a default config fails doctor: "
+            f"{[(r.name, r.message) for r in rows.values() if r.status == 'error']}")
 
     def test_refusing_says_that_bash_calls_are_failing(self, no_bwrap):
         row = _rows({"security": {"bash_write_confinement": "required"}})["Bash write floor"]
