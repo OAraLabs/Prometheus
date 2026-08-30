@@ -126,8 +126,36 @@ class ImageBlock(BaseModel):
         return "[Image: unavailable]"
 
 
+class ThinkingBlock(BaseModel):
+    """A model's extended-thinking span (#333, Beacon B2).
+
+    The Anthropic wire shape, adopted as THE one vocabulary for every
+    provider: OpenAI-style ``reasoning_content`` is normalized into this
+    block daemon-side, so clients parse one shape. ``signature`` is
+    Anthropic's integrity tag — required when a thinking block is sent BACK
+    to Anthropic in a multi-turn tool-use exchange, absent for providers
+    that have no such concept. Excluded from ``ConversationMessage.text``
+    on purpose: thinking is not the reply.
+    """
+
+    type: Literal["thinking"] = "thinking"
+    thinking: str
+    signature: str | None = None
+
+
+class RedactedThinkingBlock(BaseModel):
+    """Thinking the provider withheld — opaque ``data``, never rendered as
+    content (Beacon shows "withheld by the provider"). Preserved because
+    Anthropic requires it round-tripped in later requests."""
+
+    type: Literal["redacted_thinking"] = "redacted_thinking"
+    data: str = ""
+
+
 ContentBlock = Annotated[
-    TextBlock | ToolUseBlock | ToolResultBlock | ImageBlock, Field(discriminator="type")
+    TextBlock | ToolUseBlock | ToolResultBlock | ImageBlock
+    | ThinkingBlock | RedactedThinkingBlock,
+    Field(discriminator="type"),
 ]
 
 # One adapter for the discriminated union — how from_stored() parses a

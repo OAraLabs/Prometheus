@@ -16,7 +16,9 @@ import httpx
 from prometheus.engine.messages import (
     ConversationMessage,
     ImageBlock,
+    RedactedThinkingBlock,
     TextBlock,
+    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
 )
@@ -115,6 +117,13 @@ def _build_openai_messages(
                     "tool_call_id": block.tool_use_id,
                     "content": block.content,
                 })
+            elif isinstance(block, (ThinkingBlock, RedactedThinkingBlock)):
+                # #333: thinking never rides the OpenAI wire — this path has
+                # no request shape for it, and resending reasoning would just
+                # burn the window. A DELIBERATE skip, listed explicitly so
+                # the loud else below keeps meaning "unknown block", not
+                # "block someone forgot".
+                continue
             else:
                 raise UnsupportedContentBlock(
                     f"unhandled content block {type(block).__name__} — add a branch "
@@ -211,6 +220,17 @@ def _parse_assistant_message(
     content_blocks: list[Any] = []
     dropped = 0
     message = choice.get("message", {})
+
+    # #333: OpenAI-style reasoning normalized into the ONE wire vocabulary
+    # (the Anthropic thinking-block shape) so every client parses one
+    # thing. No signature — that is an Anthropic integrity concept, and
+    # the anthropic request builder skips unsigned blocks on the way back.
+    # Empty/whitespace bodies are omitted per #333: absent and empty must
+    # be indistinguishable.
+    reasoning = message.get("reasoning_content") or ""
+    if reasoning.strip():
+        from prometheus.engine.messages import ThinkingBlock
+        content_blocks.append(ThinkingBlock(thinking=reasoning))
 
     raw_content = message.get("content") or ""
     if raw_content:
@@ -338,6 +358,7 @@ class StubProvider(ModelProvider):
 
         accumulated_text = ""
         accumulated_tool_calls: dict[int, dict[str, Any]] = {}
+        accumulated_reasoning = ""  # #333: the reasoning channel, kept apart
         finish_reason: str | None = None
         input_tokens = 0
         output_tokens = 0
@@ -377,6 +398,13 @@ class StubProvider(ModelProvider):
                             accumulated_text += text
                             yield ApiTextDeltaEvent(text=text)
 
+                        # #333: llama.cpp/DeepSeek-style reasoning channel.
+                        # Accumulated, never yielded as a text delta —
+                        # thinking is not the reply.
+                        reasoning_delta = delta.get("reasoning_content") or ""
+                        if reasoning_delta:
+                            accumulated_reasoning += reasoning_delta
+
                         for tc in delta.get("tool_calls") or []:
                             idx = tc.get("index", 0)
                             if idx not in accumulated_tool_calls:
@@ -395,6 +423,7 @@ class StubProvider(ModelProvider):
         final_choice: dict[str, Any] = {
             "message": {
                 "content": accumulated_text or None,
+                "reasoning_content": accumulated_reasoning or None,
                 "tool_calls": list(accumulated_tool_calls.values()) if accumulated_tool_calls else None,
             }
         }
