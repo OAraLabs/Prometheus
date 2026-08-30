@@ -473,6 +473,51 @@ def create_app(
             ),
         }
 
+    async def _floor_state() -> dict:
+        """Probe both bash floors off the event loop.
+
+        The probes fork a process each (aa-exec, bwrap) and are memoised for
+        the life of the process, so this costs two subprocesses once and a
+        dict lookup thereafter — but that once must not block the loop, and
+        the aa-exec probe carries a 15s timeout it could in principle reach.
+
+        Falls back to the cache-only view rather than failing the whole
+        status payload: a broken probe must not take /api/status down with
+        it.
+        """
+        from prometheus.config.shipped_defaults import resolve_workspace_root
+        from prometheus.permissions import confinement as _confinement
+
+        cfg = app.state.config if isinstance(app.state.config, dict) else {}
+        sec = cfg.get("security", {}) or {}
+        # The SAME resolver __main__.py:169 hands BashTool, so this reports
+        # the roots the floor is actually bounded by rather than re-deriving
+        # a second answer from the raw key. It never returns empty, so
+        # has_workspace is True on every real config; passed rather than
+        # hardcoded so this cannot drift if that ever changes.
+        roots = resolve_workspace_root(sec)
+        kwargs = {
+            "read_mode": sec.get("bash_confinement", "off"),
+            "write_mode": sec.get("bash_write_confinement", "auto"),
+            "has_workspace": bool(roots),
+        }
+        try:
+            return await asyncio.to_thread(
+                lambda: _confinement.floor_report(**kwargs))
+        except Exception as exc:  # noqa: BLE001 — status must still render
+            logger.warning("floor state could not be probed: %s", exc)
+        try:
+            # Cache-only second attempt: the probe may be what broke, not the
+            # report. A `return` inside the handler above would have retried
+            # the same failing call and taken the endpoint down with it.
+            return _confinement.floor_report(**kwargs, probe=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("floor state unavailable entirely: %s", exc)
+            # dark is None, never False. Status is what an operator reaches
+            # for when something is wrong, and "we could not tell" must not
+            # render as "nothing is wrong".
+            return {"error": f"floor state unavailable: {exc}", "dark": None}
+
     @app.get("/api/status")
     async def get_status():
         running_sha, tree_head, stale = _staleness()
@@ -543,6 +588,17 @@ def create_app(
                 "lcm_total_compactions": getattr(lcm, "_total_compactions", None),
                 "lcm_last_compaction_at": getattr(lcm, "_last_compaction_at", None),
             },
+            # THE FLOORS AROUND BASH, probed rather than read back from
+            # config. Same law as `compaction` above: a key saying a control
+            # is on is not evidence it is on, and both floors depend on
+            # things config cannot see — a root-loaded AppArmor profile and a
+            # kernel that will grant an unprivileged namespace. Before this,
+            # neither floor appeared on any surface, so "is bash confined"
+            # was answered by reading the config and inferring.
+            #
+            # `dark` is the field to alert on: asked for, not happening, and
+            # bash running anyway.
+            "security": await _floor_state(),
             "gateway": gateway_block,
             # The ceilings the loop is ACTUALLY enforcing, read off the same
             # LoopContext object the guard reads (_effective_max_tool_iterations

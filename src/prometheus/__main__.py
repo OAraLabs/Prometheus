@@ -193,9 +193,18 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
     # is NOT in force until an operator turns it on — stated plainly here
     # because a security control that looks default-on and isn't is the
     # false assurance this whole line of work exists to remove.
+    # security.bash_write_confinement gates the kernel WRITE floor. Default
+    # "auto" — unlike the read floor above, this one is attempted by default,
+    # because bubblewrap needs no root and the hole it closes is live: the
+    # outside-workspace approval reads a tool's file_path, and bash has none.
+    # "auto" cannot brick a host that has no bubblewrap (macOS has none); it
+    # degrades to the previous behaviour and says so, at ERROR, once per
+    # process and in each call's result metadata. "required" refuses instead.
     registry.register(BashTool(
         workspace=workspace,
         confinement=security_cfg.get("bash_confinement", "off"),
+        write_confinement=security_cfg.get("bash_write_confinement", "auto"),
+        write_allow=security_cfg.get("bash_write_allow") or (),
     ))
     try_register(registry, "TaskCreateTool",
                  "prometheus.tools.builtin.task_create", "TaskCreateTool")

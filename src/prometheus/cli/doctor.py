@@ -642,6 +642,128 @@ def check_coding_sandbox(config: dict[str, Any]) -> DiagnosticCheck:
     )
 
 
+def check_bash_floors(config: dict[str, Any]) -> list[DiagnosticCheck]:
+    """The two kernel floors around bash: asked for, and actually happening.
+
+    ``check_coding_sandbox`` above reports the sandbox around CODING RUNS.
+    Nothing reported the floor around the bash TOOL — the surface the model
+    reaches on every turn — so an operator could read a clean doctor run and
+    a config saying ``required`` while bash ran with no floor at all.
+
+    Two rows rather than one, because they fail independently and the fixes
+    are different: the read floor needs a root-loaded AppArmor profile, the
+    write floor needs bubblewrap and a kernel that grants an unprivileged
+    namespace.
+
+    ``dark`` is the row that matters. "required but unavailable" announces
+    itself — every bash call fails — but the write floor's ``auto`` running
+    unconfined is silent by design, and this is where that gets said.
+    """
+    from prometheus.config.shipped_defaults import resolve_workspace_root
+    from prometheus.permissions import confinement as C
+
+    sec = config.get("security", {}) or {}
+    # resolve_workspace_root NEVER returns empty — it falls back to the
+    # shipped root — so has_workspace is True on every real config and the
+    # no-workspace row below is defensive, not expected. Passed anyway so
+    # this does not silently become wrong if that resolver ever grows a
+    # None path, which is the defect it was written to close.
+    roots = resolve_workspace_root(sec)
+    rep = C.floor_report(
+        read_mode=sec.get("bash_confinement", "off"),
+        write_mode=sec.get("bash_write_confinement", "auto"),
+        has_workspace=bool(roots),
+    )
+
+    def _row(name: str, block: dict, off_message: str, fix_when_missing: str
+             ) -> DiagnosticCheck:
+        state = block["state"]
+        mode = block["mode"]
+        detail = block["detail"]
+        if state == C.STATE_OFF:
+            # Not an error: off is a legitimate, documented choice. It is
+            # still worth a line, because "no row" and "no floor" look
+            # identical on a report and only one of them is true.
+            return DiagnosticCheck(
+                name=name, category="platform", status="info",
+                message=f"mode 'off' — {off_message}",
+            )
+        if state == C.STATE_NO_WORKSPACE:
+            return DiagnosticCheck(
+                name=name, category="platform", status="warning",
+                message=f"mode {mode!r} but no workspace root is configured — "
+                        "there is no boundary to enforce",
+                fix="Set security.workspace_root, or set the floor to 'off' "
+                    "so the config stops implying a boundary that is absent.",
+            )
+        if state == C.STATE_ACTIVE:
+            return DiagnosticCheck(
+                name=name, category="platform", status="ok",
+                message=f"mode {mode!r} — ACTIVE ({detail})",
+            )
+        if state == C.STATE_REFUSING:
+            return DiagnosticCheck(
+                name=name, category="platform", status="error",
+                message=f"mode 'required' but UNAVAILABLE — {detail}. "
+                        "Every bash call is being refused.",
+                fix=fix_when_missing,
+            )
+        if state == C.STATE_DARK:
+            # WARNING, not error, and the distinction is the mode's own
+            # promise rather than the outcome. `auto` is documented as
+            # "confine where the mechanism exists, run where it does not" —
+            # a host that cannot provide it is that mode working as written,
+            # not a broken install. `required` is the mode that promises
+            # enforcement, and it fails loudly above.
+            #
+            # Erroring here made `doctor` exit nonzero on every host without
+            # bubblewrap — macOS has no equivalent at all, and CI caught it
+            # on a config that had opted into nothing: the SHIPPED default
+            # asked for the floor, not the operator. A permanent red row
+            # nobody can clear is how a report gets ignored, which costs
+            # more than this row is worth.
+            return DiagnosticCheck(
+                name=name, category="platform", status="warning",
+                message=f"mode {mode!r} but UNAVAILABLE — {detail}. "
+                        "bash is running WITHOUT this floor.",
+                fix=fix_when_missing,
+            )
+        return DiagnosticCheck(
+            name=name, category="platform", status="warning",
+            message=f"mode {mode!r} — state could not be determined ({detail})",
+        )
+
+    read_row = _row(
+        "Bash read floor", rep["bash_read_floor"],
+        "bash may read ~/.ssh, ~/.gnupg and credential env files; the "
+        "denied_paths list covers the path-declaring tools only",
+        f"Load the profile: sudo apparmor_parser -r -W "
+        f"/etc/apparmor.d/{C.PROFILE} — or set security.bash_confinement: "
+        f"off to run without it knowingly.",
+    )
+    write_row = _row(
+        "Bash write floor", rep["bash_write_floor"],
+        "bash may write anywhere on the filesystem with no approval — the "
+        "outside-workspace check reads a tool's file_path, and bash has none",
+        "Install bubblewrap (sudo apt install bubblewrap) — or set "
+        "security.bash_write_confinement: off to run without it knowingly.",
+    )
+
+    rows = [read_row, write_row]
+    # Said once, on its own row, because it is the limit most likely to be
+    # over-read from two green lines above: cron jobs, background tasks,
+    # watch_dir predicates and command hooks each spawn /bin/bash at their
+    # own call sites, and NEITHER floor reaches them.
+    if any(r.status == "ok" for r in rows):
+        rows.append(DiagnosticCheck(
+            name="Bash floor scope", category="platform", status="info",
+            message="the floors wrap the bash TOOL only — cron jobs, "
+                    "background tasks, watch_dir predicates and command "
+                    "hooks spawn their own shells and are not covered",
+        ))
+    return rows
+
+
 def check_trajectory_export(config: dict[str, Any]) -> DiagnosticCheck:
     """Is golden-trace capture actually accumulating anything?
 
@@ -761,6 +883,7 @@ def run_extended_checks(
         *check_gateways(config),
         check_advertised_tools(config),
         check_coding_sandbox(config),
+        *check_bash_floors(config),
         check_config_pins(),
         check_trajectory_export(config),
         check_whisper(config),
