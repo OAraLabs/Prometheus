@@ -57,6 +57,27 @@ log = logging.getLogger(__name__)
 
 #: tool name -> the parameter carrying a real filesystem path.
 #: Derived by reading every registered tool's schema, not by name matching.
+# FILE params on READ-ONLY tools whose relative paths resolve against the
+# tool's own base, exactly as directory roots already do.
+#
+# WHY THIS IS SAFE HERE AND NOT FOR WRITES. The relative→UNKNOWN rule exists so
+# that "where the process happens to be running" cannot decide whether a WRITE
+# is allowed. A read decides no such thing: the tool resolves the same relative
+# path against the same cwd whatever the gate says, so declining to resolve
+# makes the gate rule on a DIFFERENT path than the one that will be read —
+# the identical unsoundness already rejected for grep/glob roots.
+#
+# WHAT IT DOES NOT WEAKEN. The resolved path still passes through
+# denied_paths and the _ALWAYS_DENIED floor, so a relative path that lands in
+# ~/.ssh is denied on the resolved target rather than merely prompted about.
+#
+# WHY IT MATTERS. An unknown target can describe no extent, so
+# prospective_extents returns {} and the approval card offers NO remembered
+# grant — the operator is asked about every relative read forever, with no
+# answer that stops it (measured on a live daemon, 2026-08-30: two pending
+# read_file approvals, both with zero extents, on every surface at once).
+READ_ONLY_FILE_TARGETS: frozenset[str] = frozenset({"read_file"})
+
 TOOL_PATH_PARAM: dict[str, str] = {
     "write_file": "path",
     "edit_file": "path",
@@ -124,13 +145,18 @@ def gate_path_for(
       absolute one. The caller MUST treat this as requiring approval; it must
       never fall through to "allowed".
 
-    A relative FILE path is UNKNOWN, DELIBERATELY — not resolved against the
-    process's working directory. That is the same defect fixed in
-    ``denied_paths`` on 2026-08-13 — a control whose target is chosen by where
-    the process happens to be running — and reinstating it on the input side
-    would be worse, because here it decides whether a write is allowed rather
-    than merely which file is protected. A relative file path therefore
-    prompts.
+    A relative FILE path on a WRITE tool is UNKNOWN, DELIBERATELY — not
+    resolved against the process's working directory. That is the same defect
+    fixed in ``denied_paths`` on 2026-08-13 — a control whose target is chosen
+    by where the process happens to be running — and reinstating it on the
+    input side would be worse, because there it decides whether a write is
+    allowed rather than merely which file is protected. A relative write path
+    therefore prompts.
+
+    A relative FILE path on a READ-ONLY tool (``READ_ONLY_FILE_TARGETS``)
+    resolves against *base*, like a directory root and for the same reason:
+    the tool will read that resolved path regardless, so refusing to resolve
+    rules on a path nobody touches. The floor still applies to the result.
 
     A relative DIRECTORY path resolves against *base* instead. See the
     asymmetry note at the resolution site: for a read-root, declining to
@@ -198,7 +224,9 @@ def gate_path_for(
         #   124 real grep/glob roots in telemetry are relative, so UNKNOWN
         #   here would prompt on ~81% of rooted calls and train the model to
         #   route around the tool.
-        if declared.get(param) == PATH_KIND_DIR and base is not None:
+        resolvable = (declared.get(param) == PATH_KIND_DIR
+                      or tool_name in READ_ONLY_FILE_TARGETS)
+        if resolvable and base is not None:
             candidate = (Path(base).expanduser() / candidate)
         else:
             return None, (
