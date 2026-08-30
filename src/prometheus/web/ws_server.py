@@ -783,8 +783,12 @@ class WebSocketBridge:
         # only — for_storage keeps base64 out of history), so the stored row
         # carries the image and GET /api/media can serve its bytes back.
         # Before this they were attached AFTER the persist, so the durable
-        # row never knew an image existed.
-        turn_index = session.add_user_message(content, blocks=blocks or None)
+        # row never knew an image existed. The kwarg rides only when blocks
+        # exist — duck-typed session fakes predate it.
+        if blocks:
+            turn_index = session.add_user_message(content, blocks=blocks)
+        else:
+            turn_index = session.add_user_message(content)
         row_id = session.last_persisted_row_id()
 
         # Broadcast the user message. message_id is the durable, restart-stable LCM rowid
@@ -805,7 +809,15 @@ class WebSocketBridge:
                 # The REAL persisted shape (a media block rides as a
                 # reference) — not a hand-built text-only fiction: this
                 # frame must match what a later history fetch shows.
-                "content_json": session.messages[-1].content_json,
+                # getattr-guarded because duck-typed session fakes keep
+                # plain strings in .messages; they get the old text shape.
+                "content_json": (
+                    getattr(
+                        session.messages[-1] if session.messages else None,
+                        "content_json", None,
+                    )
+                    or json.dumps([{"type": "text", "text": content}])
+                ),
                 "message_id": row_id,
                 "ordinal": turn_index,
                 "client_msg_id": client_msg_id,

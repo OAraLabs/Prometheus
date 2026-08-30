@@ -132,5 +132,5 @@ class TestUploadTurnPersistsItsBlock:
         from prometheus.web.ws_server import WebSocketBridge
 
         src = inspect.getsource(WebSocketBridge._handle_send_message)
-        assert "add_user_message(content, blocks=blocks or None)" in src
+        assert "add_user_message(content, blocks=blocks)" in src
         assert "session.messages[-1].content.extend(blocks)" not in src
