@@ -270,7 +270,9 @@ class TestWiringRunsEverywhere:
 
     def test_required_refuses_when_the_floor_is_unavailable(self, workspace, monkeypatch):
         """Never fall through to an unconfined shell — the #237 bargain."""
-        monkeypatch.setattr(C.shutil, "which", lambda name: None)
+        # Value swap, not a callable one: this exercises the real
+        # shutil.which lookup against a name that is genuinely not on PATH.
+        monkeypatch.setattr(C, "BWRAP_BIN", "bwrap-not-installed-probe")
         C.reset_write_cache()
         tool = BashTool(workspace=workspace, write_confinement="required")
         res = _run(tool, "echo I_RAN_UNCONFINED", workspace)
@@ -284,7 +286,7 @@ class TestWiringRunsEverywhere:
         """macOS has no bubblewrap. Refusing every bash call there would be
         worse than the hole, so auto runs — and says, per call, that it did.
         """
-        monkeypatch.setattr(C.shutil, "which", lambda name: None)
+        monkeypatch.setattr(C, "BWRAP_BIN", "bwrap-not-installed-probe")
         C.reset_write_cache()
         tool = BashTool(workspace=workspace, write_confinement="auto")
         res = _run(tool, f"printf 'x' > {outside}", workspace)

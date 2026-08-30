@@ -469,3 +469,136 @@ def write_refusal_message(detail: str) -> str:
         "or set security.bash_write_confinement: auto to run without the "
         "floor where it is unavailable, knowingly."
     )
+
+
+# =========================================================================== #
+# REPORTING — the enforced state, not the configured one
+# =========================================================================== #
+#
+# Both floors were invisible: /api/status carried nothing about either, and
+# `doctor` reported the CODING sandbox backend while saying nothing about the
+# floor around bash. The only evidence a floor was in force was a log line at
+# preflight, so "is bash confined right now" was answered by reading config
+# and inferring — which is the inference the config-dark law exists to remove
+# (the same reason /api/status grew its `compaction` block).
+#
+# A configured mode is NOT a state. The five states below are what an operator
+# actually needs to tell apart, and only two of them are visible from config:
+#
+#   off       no floor asked for.
+#   active    asked for AND verified working, by outcome.
+#   dark      asked for, NOT working, and bash runs anyway. Only the write
+#             floor's "auto" can reach this — it is the documented
+#             degradation, and it is the state that most needs saying out
+#             loud, because nothing else about it is visible.
+#   refusing  asked for as "required", NOT working, so every bash call now
+#             fails. Loud by construction, but an operator staring at a wall
+#             of refusals should find the reason here.
+#   no-workspace  a floor was asked for with no workspace root to bound. The
+#             write floor has no boundary to enforce and does nothing.
+
+STATE_OFF: Final[str] = "off"
+STATE_ACTIVE: Final[str] = "active"
+STATE_DARK: Final[str] = "dark"
+STATE_REFUSING: Final[str] = "refusing"
+STATE_NO_WORKSPACE: Final[str] = "no-workspace"
+
+
+def floor_report(
+    *,
+    read_mode: object = MODE_OFF,
+    write_mode: object = WRITE_MODE_AUTO,
+    has_workspace: bool = True,
+    probe: bool = True,
+) -> dict[str, object]:
+    """What both bash floors are configured to do, and what they actually do.
+
+    Deliberately probes rather than reporting config back. Both probes are
+    memoised per process, so the cost is paid once and every later call is a
+    dict lookup — and ``probe=False`` reports from the cache alone (``None``
+    availability where nothing has probed yet) for callers that must not
+    spawn a subprocess.
+
+    The write floor is probed through the SAME composition the bash tool
+    builds — read floor inside, write floor outside — so a stack that does
+    not compose reports the state the next bash call will actually get,
+    rather than a bare probe's optimism.
+
+    Config knowledge stays out of here on purpose: callers resolve their own
+    modes and workspace roots, and this stays a permissions primitive.
+    """
+    read = normalise_mode(read_mode)
+    write = normalise_write_mode(write_mode)
+
+    read_ok: bool | None = None
+    read_detail = "not probed"
+    inner_prefix: list[str] = []
+    if read == MODE_REQUIRED:
+        if probe:
+            read_ok, read_detail = preflight()
+        elif PROFILE in _preflight_cache:
+            read_ok, read_detail = _preflight_cache[PROFILE]
+        # The tool wraps with aa-exec whenever the read floor is required, so
+        # the write probe must carry it whether or not it verified — that is
+        # the argv the next call gets.
+        inner_prefix = wrap_argv([], PROFILE)
+
+    write_ok: bool | None = None
+    write_detail = "not probed"
+    if write != WRITE_MODE_OFF and has_workspace:
+        key = tuple(inner_prefix)
+        if probe:
+            write_ok, write_detail = write_preflight(inner_prefix=inner_prefix)
+        elif key in _write_preflight_cache:
+            write_ok, write_detail = _write_preflight_cache[key]
+
+    def _state(mode: str, ok: bool | None, *, refusing_mode: str) -> str:
+        # has_workspace is NOT consulted here. It bounds the write floor only
+        # (the read floor's boundary is the profile, not a root), and the
+        # write caller handles it before reaching this.
+        if mode == MODE_OFF:
+            return STATE_OFF
+        if ok is None:
+            return "unknown"
+        if ok:
+            return STATE_ACTIVE
+        return STATE_REFUSING if mode == refusing_mode else STATE_DARK
+
+    read_state = _state(read, read_ok, refusing_mode=MODE_REQUIRED)
+    if write == WRITE_MODE_OFF:
+        write_state = STATE_OFF
+    elif not has_workspace:
+        write_state = STATE_NO_WORKSPACE
+    else:
+        write_state = _state(write, write_ok, refusing_mode=WRITE_MODE_REQUIRED)
+
+    return {
+        "bash_read_floor": {
+            "mode": read,
+            "state": read_state,
+            "available": read_ok,
+            "detail": read_detail,
+            "mechanism": f"apparmor:{PROFILE}",
+            "covers": "reads of ~/.ssh, ~/.gnupg, ~/.config/*/*env",
+        },
+        "bash_write_floor": {
+            "mode": write,
+            "state": write_state,
+            "available": write_ok,
+            "detail": write_detail,
+            "mechanism": "bwrap",
+            "covers": "writes outside the workspace roots",
+            "composed_with_read_floor": bool(inner_prefix),
+        },
+        # THE ONE FIELD A MONITOR SHOULD ALERT ON. True when something was
+        # asked for and is not happening while bash runs anyway — the state
+        # that is invisible everywhere else.
+        "dark": read_state == STATE_DARK or write_state == STATE_DARK,
+        # SEPARATE from dark on purpose: this is loud (every bash call fails),
+        # so it needs an explanation, not an alert.
+        "refusing": read_state == STATE_REFUSING or write_state == STATE_REFUSING,
+        # Only bash. Named so a reader does not generalise it: cron jobs,
+        # background tasks, watch_dir predicates and command hooks each spawn
+        # /bin/bash at their own call sites and NEITHER floor reaches them.
+        "scope": "bash tool only",
+    }
