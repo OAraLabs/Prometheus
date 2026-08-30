@@ -22,7 +22,7 @@ prometheus daemon         # always-on: web API + gateways + cron + background la
 Running the tests from a uv-managed venv? Sync it with the same extras CI uses first:
 
 ```bash
-uv sync --extra web --extra anthropic --group dev
+uv sync --extra web --extra anthropic --extra mcp --group dev
 ```
 
 Without this, `import fastapi` fails inside `.venv` and three test files won't even collect (the daemon itself doesn't need it — `pip install -e '.[full]'` above already covers everything).
