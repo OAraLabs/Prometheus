@@ -286,7 +286,7 @@ SignalBus fan-out (broadcast to all authed clients; payloads carry `session_id` 
 | `skill_created` / `skill_refined` | Learning-system skill events |
 | `memory_updated` | Memory file changes |
 | `curator_report` | Weekly curator consolidation report |
-| `coding_round` / `coding_complete` / `coding_stream_error` | Coding-run live stream: per-round progress, terminal verdict, non-fatal stream interruption |
+| `coding_round` / `coding_tool` / `coding_acceptance` / `coding_complete` / `coding_stream_error` | Coding-run live stream: per-round progress (with a run-unique `seq` — `round_index` restarts per episode), per-tool-call detail attributed to its round, the ground-truth acceptance verdict per episode, terminal verdict, non-fatal stream interruption |
 
 Skill-draft lifecycle events (`skill_draft_created` / `skill_draft_accepted` / `skill_draft_rejected` / `video_ingest_failed`) ride the `sentinel_signal` channel — watch its `kind` field.
 
