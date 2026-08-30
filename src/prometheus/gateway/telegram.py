@@ -2257,6 +2257,10 @@ class TelegramAdapter(BasePlatformAdapter):
 
     async def _dispatch_to_agent(self, event: MessageEvent) -> None:
         """Route a message through AgentLoop and send the response."""
+        # feat/session-rehydrate — cold-start restore before the turn, same
+        # gate as the web path (no-op when disabled/warm/ephemeral/tombstoned).
+        if hasattr(self.session_manager, "rehydrate_if_cold"):
+            self.session_manager.rehydrate_if_cold(event.session_key())
         session = self.session_manager.get_or_create(event.session_key())
         # Telegram inbound is a real human: provenance="user", trusted. Routes
         # through the same shared core as inject_turn (the re-engagement path).

@@ -981,6 +981,13 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Shared session manager for all gateways
     from prometheus.engine.session import SessionManager
     session_manager = SessionManager()
+    # feat/session-rehydrate: opt-in cold-start restore of a session's
+    # recent durable history into the live working set (sessions.rehydrate,
+    # default false — the compaction.enabled precedent for a new
+    # context-shaping behaviour).
+    session_manager.rehydrate_enabled = bool(
+        (config.get("sessions") or {}).get("rehydrate", False)
+    )
 
     # Collect async tasks to run
     tasks: list[asyncio.Task] = []

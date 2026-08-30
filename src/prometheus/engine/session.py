@@ -50,6 +50,14 @@ log = logging.getLogger(__name__)
 
 MAX_SESSION_MESSAGES = 50
 
+# feat/session-rehydrate: the cold-start restore window. Rows first (one
+# newest-anchored page), then an estimated-token cap applied newest-first —
+# the compactor's relief valve is single-pass and off by default, so the
+# restored set must arrive already inside a sane budget rather than rely on
+# being rescued.
+_REHYDRATE_WINDOW = 40
+_REHYDRATE_TOKEN_BUDGET = 8_000
+
 
 class ChatSession:
     """Per-chat conversation state.
@@ -70,6 +78,7 @@ class ChatSession:
         "queued_steers", "queued_prompts",
         "_lcm_engine", "_compaction_tasks",
         "_lcm_persisted_len", "_lcm_persisted_ahead",
+        "_turn_index_offset",
     )
 
     def __init__(
@@ -100,6 +109,14 @@ class ChatSession:
         # appending its unpersisted tail below it.
         self._lcm_persisted_len: int = 0
         self._lcm_persisted_ahead: set[int] = set()
+        # feat/session-rehydrate: added to each row's list index when
+        # stamping turn_index at persist time. Zero for a cold session
+        # (unchanged contract); set by restore() so rows written AFTER a
+        # rehydrate continue the durable numbering instead of colliding
+        # with the historical rows the restored tail came from — the
+        # ORDER BY turn_index readers (LCM compactor/assembler) would
+        # otherwise interleave new rows into old history.
+        self._turn_index_offset: int = 0
 
     # ------------------------------------------------------------------
     # SPRINT-2 WS1 — /steer and /queue plumbing
@@ -334,6 +351,41 @@ class ChatSession:
         """
         return self._persist_to_lcm(original_len, seal=True)
 
+    def restore(
+        self,
+        messages: list["ConversationMessage"],
+        *,
+        next_turn_index: int,
+    ) -> None:
+        """Seed a COLD session with already-durable history (rehydrate).
+
+        Cold-start only, and the refusals are the contract: a session that
+        has messages, or has persisted anything, must not be restored over —
+        that is how double-rehydrate and history clobbering become
+        structurally impossible rather than merely unlikely.
+
+        The three assignments after the guard are the entire double-ingest
+        defence (2026-08-11 mapping survey's shape): the watermark is seeded
+        to the restored length so every restored row reads as SETTLED — the
+        next turn's persists write only genuinely new rows — and the
+        turn-index offset makes those new rows continue the durable
+        numbering from ``next_turn_index`` instead of colliding with the
+        history the tail was loaded from.
+
+        Deliberately does NOT persist (the rows are already durable) and
+        does NOT schedule compaction (nothing new was written).
+        """
+        if self.messages or self._lcm_persisted_len:
+            raise RuntimeError(
+                f"restore() on a non-cold session {self.session_id!r} "
+                f"({len(self.messages)} messages, watermark "
+                f"{self._lcm_persisted_len}) — refusing to clobber"
+            )
+        self.messages = list(messages)
+        self._lcm_persisted_len = len(self.messages)
+        self._lcm_persisted_ahead = set()
+        self._turn_index_offset = next_turn_index - len(self.messages)
+
     def _note_persisted(self, idx: int) -> None:
         """Record that ``self.messages[idx]`` is durably written.
 
@@ -400,7 +452,7 @@ class ChatSession:
                     role=msg.role,
                     content=msg.text,
                     content_json=msg.content_json,
-                    turn_index=i,
+                    turn_index=i + self._turn_index_offset,
                     # Persist the turn's trust tag so an injected (untrusted)
                     # task result survives the LCM round-trip rather than being
                     # silently dropped to the trusted default.
@@ -604,6 +656,10 @@ class SessionManager:
         # method) keeps the wire site terse: ``session_manager.lcm_engine
         # = lcm_engine``.
         self.lcm_engine: object | None = None
+        # feat/session-rehydrate: gate for rehydrate_if_cold(). Default OFF
+        # (matching the compaction.enabled precedent for a new context-
+        # shaping behaviour); the daemon wires it from sessions.rehydrate.
+        self.rehydrate_enabled: bool = False
         # One lock per session id — THE cross-surface turn serializer.
         # Every surface that runs agent turns (telegram gateway, web/WS
         # bridge) resolves its per-session lock here via turn_lock_for(),
@@ -641,6 +697,118 @@ class SessionManager:
         else:
             session.set_lcm_engine(self._effective_lcm_engine(session_id))
         return session
+
+    def rehydrate_if_cold(self, session_id: str) -> int:
+        """Restore a cold session's recent durable history into the live
+        working set. Returns how many messages were restored (0 = nothing to
+        do, not eligible, or disabled).
+
+        Closes the two-stores/no-rehydrate gap: after a daemon restart a
+        session's full history was servable to CLIENTS over REST while the
+        MODEL started blind. Called from the send paths (not get_or_create,
+        so switch_session and POST /api/sessions stay structural no-ops).
+
+        Eligibility and boundaries, each load-bearing:
+
+        - ``list_sessions()`` is the gate because it is the ONLY
+          tombstone-aware read in the store — every other reader would
+          resurrect a forgotten chat on its next message, turning DELETE
+          into "forget it for one round trip".
+        - the ephemeral reader is consulted the same way persistence
+          consults it: an ephemeral session reads nothing back, or
+          ``/ephemeral on`` would write nothing while silently restoring
+          everything.
+        - the restored tail STARTS at a clean human turn (role user,
+          provenance user, text-only). Cutting at a count or rowid can
+          orphan a ToolResultBlock from its tool_use — a hard 400 from
+          every provider. No clean turn in the window → restore nothing
+          (fail closed: exactly today's behaviour).
+        - the window is capped by rows AND estimated tokens, so the loop
+          is never handed an initial set the compactor structurally cannot
+          rescue (single-pass, and off by default).
+        """
+        if not self.rehydrate_enabled:
+            return 0
+        existing = self._sessions.get(session_id)
+        if existing is not None and existing.messages:
+            return 0  # warm — the live set is authoritative
+        engine = self._effective_lcm_engine(session_id)
+        store = getattr(engine, "conversation_store", None)
+        if store is None:
+            return 0
+        try:
+            if not any(
+                row.get("session_id") == session_id
+                for row in store.list_sessions()
+            ):
+                return 0  # no durable history, or tombstoned
+            parts, _more = store.messages_page(
+                limit=_REHYDRATE_WINDOW, session_id=session_id
+            )
+        except Exception:
+            log.warning(
+                "rehydrate_if_cold: durable read failed for %s — starting "
+                "cold, exactly as before the feature", session_id,
+                exc_info=True,
+            )
+            return 0
+        if not parts:
+            return 0
+
+        # Token budget, newest-first: keep the most recent rows that fit.
+        kept: list = []
+        budget = _REHYDRATE_TOKEN_BUDGET
+        for part in reversed(parts):
+            cost = max(1, len(part.content_json or part.content or "") // 4)
+            if kept and budget - cost < 0:
+                break
+            budget -= cost
+            kept.append(part)
+        kept.reverse()
+
+        converted = [
+            ConversationMessage.from_stored(
+                role=p.role,
+                content=p.content,
+                content_json=p.content_json,
+                provenance=getattr(p, "provenance", "user"),
+                is_trusted=getattr(p, "is_trusted", True),
+            )
+            for p in kept
+        ]
+        start = next(
+            (
+                i for i, m in enumerate(converted)
+                if m.role == "user"
+                and m.provenance == "user"
+                and all(type(b).__name__ == "TextBlock" for b in m.content)
+            ),
+            None,
+        )
+        if start is None:
+            return 0
+        converted = converted[start:]
+        kept = kept[start:]
+
+        session = self.get_or_create(session_id)
+        try:
+            session.restore(
+                converted,
+                # +1 past the LARGEST historical turn_index in the tail, not
+                # the last row's: turn_index restarts per daemon lifetime,
+                # so the last row's value is not necessarily the max.
+                next_turn_index=max(p.turn_index for p in kept) + 1,
+            )
+        except RuntimeError:
+            # Raced by a concurrent turn that warmed the session between
+            # the cold check and here — its live set wins.
+            return 0
+        log.info(
+            "rehydrate: %s restored %d message(s) (window %d rows, "
+            "boundary trimmed %d)",
+            session_id, len(converted), len(parts), start,
+        )
+        return len(converted)
 
     def get(self, session_id: str) -> "ChatSession | None":
         """Return the existing session for ``session_id``, or None.
