@@ -390,7 +390,7 @@ class CodingSession:
             self._telemetry.record_run(
                 subsystem="coding_control",
                 operation=kind,
-                outcome="ok",
+                outcome="success",
                 duration_ms=0.0,
                 summary={"task_id": self._task.task_id, **detail},
                 session_id=f"coding:{self._task.task_id}",

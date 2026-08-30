@@ -226,6 +226,27 @@ def test_inject_correction_reaches_next_episode_trust_tagged(tmp_path):
     assert _has_control_row(tel, "inject")
 
 
+def test_control_event_rows_read_back_as_success(tmp_path):
+    """Regression: _emit_control_event passed outcome="ok", which record_run's defensive
+    coercion (anything outside success/partial/failed/skipped) rewrote to "failed" — so every
+    clean pause/inject/resume landed in subsystem_runs as a failure and /health rendered
+    coding_control as all-failed."""
+    repo = _make_repo(tmp_path, buggy=False)
+    cdir = tmp_path / "control"
+    cdir.mkdir()
+    tel = ToolCallTelemetry(db_path=tmp_path / "tel.db")
+    write_state(control_path(cdir), with_injection(EMPTY, Injection(id="i1", text="steer")))
+
+    report = asyncio.run(_session(repo, ScriptedModel(_completing_turns()), control_dir=cdir, telemetry=tel).run())
+    assert report.status == "success"
+
+    rows = tel._conn.execute(
+        "SELECT operation, outcome FROM subsystem_runs WHERE subsystem='coding_control'",
+    ).fetchall()
+    assert rows, "the inject must have written a coding_control row"
+    assert all(outcome == "success" for _, outcome in rows), rows
+
+
 async def test_inject_supervisor_steer_is_not_mined_into_memory(tmp_path):
     """(b) NOTHING in a coding: session is mined by the REAL MemoryExtractor — the steer does
     not poison the fact store. Since the 2026-07 extraction-hygiene change, coding: sessions

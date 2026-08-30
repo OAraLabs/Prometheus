@@ -22,7 +22,9 @@ import httpx
 from prometheus.engine.messages import (
     ConversationMessage,
     ImageBlock,
+    RedactedThinkingBlock,
     TextBlock,
+    ThinkingBlock,
     ToolUseBlock,
 )
 from prometheus.engine.usage import UsageSnapshot
@@ -296,6 +298,18 @@ class AnthropicProvider(ModelProvider):
                             if current_block is not None:
                                 current_block.setdefault("partial_json", "")
                                 current_block["partial_json"] += partial
+                        # #333: extended-thinking deltas. Accumulated into
+                        # the block, deliberately NOT yielded as text deltas
+                        # — thinking is not the reply, and live streaming of
+                        # thinking is a separate frame kind if ever wanted.
+                        elif dtype == "thinking_delta":
+                            if current_block is not None:
+                                current_block.setdefault("thinking", "")
+                                current_block["thinking"] += delta.get("thinking", "")
+                        elif dtype == "signature_delta":
+                            if current_block is not None:
+                                current_block.setdefault("signature", "")
+                                current_block["signature"] += delta.get("signature", "")
 
                     elif etype == "content_block_stop":
                         if current_block:
@@ -312,7 +326,20 @@ class AnthropicProvider(ModelProvider):
         msg_content: list[Any] = []
         for block in content_blocks:
             btype = block.get("type", "")
-            if btype == "text":
+            if btype == "thinking":
+                # #333: persist the span (content_json carries it to every
+                # client). Empty bodies are omitted per the issue — absent
+                # and empty must be indistinguishable.
+                if (block.get("thinking") or "").strip():
+                    msg_content.append(ThinkingBlock(
+                        thinking=block["thinking"],
+                        signature=block.get("signature") or None,
+                    ))
+            elif btype == "redacted_thinking":
+                msg_content.append(RedactedThinkingBlock(
+                    data=block.get("data", ""),
+                ))
+            elif btype == "text":
                 text = block.get("text", "")
                 if text:
                     msg_content.append(TextBlock(text=text))
@@ -385,6 +412,24 @@ def _build_anthropic_messages(
                         "id": block.id,
                         "name": block.name,
                         "input": block.input,
+                    })
+                elif isinstance(block, ThinkingBlock):
+                    # #333: Anthropic REQUIRES prior thinking blocks back in
+                    # a multi-turn tool-use exchange, signature intact. A
+                    # block without a signature (a normalized non-Anthropic
+                    # span, or a legacy row) is NOT sent — the API rejects
+                    # unsigned thinking, and dropping it from the request
+                    # loses nothing the model needs.
+                    if block.signature:
+                        content_list.append({
+                            "type": "thinking",
+                            "thinking": block.thinking,
+                            "signature": block.signature,
+                        })
+                elif isinstance(block, RedactedThinkingBlock):
+                    content_list.append({
+                        "type": "redacted_thinking",
+                        "data": block.data,
                     })
             result.append({"role": "assistant", "content": content_list})
 

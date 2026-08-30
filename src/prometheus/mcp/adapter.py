@@ -113,10 +113,31 @@ def register_mcp_tools(registry: Any, runtime: McpRuntime) -> int:
 
     Returns the number of tools registered.
     """
-    reserved_names: set[str] = {t.name.lower() for t in registry.list_tools()}
-    count = 0
+    return len(_register(registry, runtime, runtime.list_tools()))
 
-    for tool_info in runtime.list_tools():
+
+def register_server_tools(
+    registry: Any, runtime: McpRuntime, server_name: str
+) -> list[str]:
+    """Register ONE server's discovered tools; returns the registered names
+    (#332 — the REST lifecycle registers per server and must know the exact
+    names to unregister later, including any collision suffixes)."""
+    return _register(
+        registry, runtime,
+        [t for t in runtime.list_tools() if t.server_name == server_name],
+    )
+
+
+def unregister_tools(registry: Any, names: list[str]) -> int:
+    """Remove previously registered MCP tool names. Returns how many were
+    actually present — a caller logging this catches double-removal bugs."""
+    return sum(1 for name in names if registry.unregister(name))
+
+
+def _register(registry: Any, runtime: McpRuntime, tool_infos: list) -> list[str]:
+    reserved_names: set[str] = {t.name.lower() for t in registry.list_tools()}
+    names: list[str] = []
+    for tool_info in tool_infos:
         safe_name = build_safe_tool_name(
             tool_info.safe_server_name,
             tool_info.tool_name,
@@ -125,6 +146,17 @@ def register_mcp_tools(registry: Any, runtime: McpRuntime) -> int:
         adapter = McpToolAdapter(runtime, tool_info, safe_name)
         registry.register(adapter)
         logger.info("Registered MCP tool: %s", adapter.name)
-        count += 1
-
-    return count
+        names.append(safe_name)
+        # Bookkeeping for the REST lifecycle: which registry names belong
+        # to which server. Lives on the runtime because the runtime is the
+        # long-lived object the routes hold.
+        registered = getattr(runtime, "registered_tool_names", None)
+        if registered is None:
+            registered = {}
+            try:
+                runtime.registered_tool_names = registered  # type: ignore[attr-defined]
+            except Exception:
+                registered = None
+        if registered is not None:
+            registered.setdefault(tool_info.server_name, []).append(safe_name)
+    return names

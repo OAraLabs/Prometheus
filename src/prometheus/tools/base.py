@@ -85,6 +85,15 @@ class ToolRegistry:
         """Register a tool instance."""
         self._tools[tool.name] = tool
 
+    def unregister(self, name: str) -> bool:
+        """Remove a tool by name; True if it was present.
+
+        #332: exists for the MCP REST lifecycle — a disabled/deleted
+        server's tools must become structurally absent, not
+        registered-then-hidden. Builtin registration never calls this.
+        """
+        return self._tools.pop(name, None) is not None
+
     def get(self, name: str) -> BaseTool | None:
         """Return a registered tool by name."""
         return self._tools.get(name)

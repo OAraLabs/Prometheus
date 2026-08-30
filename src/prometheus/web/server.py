@@ -1331,6 +1331,193 @@ def create_app(
             "packs": reg.to_status(),
         }
 
+    # ── MCP servers (#332 — Beacon Connectors, FOUNDATION 2.3a) ─────
+    # Management surface over the two server sources: the operator's yaml
+    # map (read-only here — the daemon never writes prometheus.yaml; the
+    # grant-writer incident is the standing reason) and the REST-managed
+    # store (mcp/store.py). Secrets follow the provider-keys stance:
+    # env VALUES are write-only, readers get names + nothing.
+
+    def _mcp_registry() -> Any | None:
+        bridge = getattr(app.state, "ws_bridge", None)
+        ctx = getattr(bridge, "loop_context", None)
+        return getattr(ctx, "tool_registry", None)
+
+    def _mcp_yaml_servers() -> dict:
+        servers = config.get("mcp_servers") or {}
+        return servers if isinstance(servers, dict) else {}
+
+    def _mcp_store():
+        from prometheus.mcp.store import McpServerStore
+        return McpServerStore()
+
+    async def _mcp_server_card(name: str, definition: dict, source: str,
+                               *, probe: bool = False) -> dict:
+        from prometheus.mcp.store import McpServerStore
+
+        runtime = getattr(app.state, "mcp_runtime", None)
+        card: dict[str, Any] = {
+            "name": name,
+            "source": source,  # "config" (yaml, read-only) | "store"
+            "enabled": bool(definition.get("enabled", True)),
+            **McpServerStore.public_view(
+                {k: v for k, v in definition.items() if k != "enabled"}
+            ),
+        }
+        if runtime is None:
+            # Honest absence: the runtime was never constructed this boot
+            # (no servers configured at start) — not a health verdict.
+            card["health"] = {"state": "not_running",
+                              "detail": "MCP runtime not constructed this boot"}
+            card["tools"] = []
+            return card
+        status = next(
+            (s for s in runtime.list_statuses() if s.name == name), None
+        )
+        if probe and status is not None and status.state == "connected":
+            # A PROBED answer, not a config echo — a dead subprocess must
+            # read unhealthy on the card, never as an empty success.
+            await runtime.probe(name)
+            status = next(
+                (s for s in runtime.list_statuses() if s.name == name), status
+            )
+        card["health"] = (
+            {"state": status.state, "transport": status.transport,
+             "detail": status.detail}
+            if status is not None else {"state": "unknown", "detail": ""}
+        )
+        card["tools"] = [
+            {"tool_name": t.tool_name, "description": t.description,
+             "read_only_hint": t.read_only_hint,
+             "registered_as": f"mcp__{t.safe_server_name}__{t.tool_name}"}
+            for t in runtime.list_tools() if t.server_name == name
+        ]
+        return card
+
+    def _mcp_all_definitions() -> list[tuple[str, dict, str]]:
+        out: list[tuple[str, dict, str]] = []
+        yaml_servers = _mcp_yaml_servers()
+        for name, definition in yaml_servers.items():
+            if isinstance(definition, dict):
+                out.append((name, definition, "config"))
+        for name, definition in _mcp_store().load().items():
+            if name not in yaml_servers:
+                out.append((name, definition, "store"))
+        return out
+
+    async def _mcp_apply_live(name: str, definition: dict | None) -> str:
+        """Drive the live runtime toward the stored state. Returns the
+        'applies' verdict for the response: 'live' or a stated reason it
+        is not — never a silent success for a change that changed nothing.
+        ``definition=None`` means remove/disable."""
+        from prometheus.mcp.adapter import register_server_tools, unregister_tools
+
+        runtime = getattr(app.state, "mcp_runtime", None)
+        registry = _mcp_registry()
+        if runtime is None or registry is None:
+            return ("next daemon restart — the MCP runtime is not "
+                    "constructed this boot")
+        names = getattr(runtime, "registered_tool_names", {}) or {}
+        removed = unregister_tools(registry, names.pop(name, []))
+        if removed:
+            logger.info("MCP REST: unregistered %d tool(s) for %r", removed, name)
+        if definition is None:
+            await runtime.disconnect_server(name, forget=True)
+            return "live"
+        await runtime.disconnect_server(name)
+        entry = await runtime.connect_server(
+            name, {k: v for k, v in definition.items() if k != "enabled"}
+        )
+        if entry is None:
+            return "stored, but the server failed to connect — see health"
+        registered = register_server_tools(registry, runtime, name)
+        logger.info("MCP REST: %r connected, %d tool(s) registered",
+                 name, len(registered))
+        return "live"
+
+    @app.get("/api/mcp/servers")
+    async def get_mcp_servers():
+        cards = [
+            await _mcp_server_card(name, definition, source, probe=True)
+            for name, definition, source in _mcp_all_definitions()
+        ]
+        return {
+            "wired": getattr(app.state, "mcp_runtime", None) is not None,
+            "servers": cards,
+        }
+
+    @app.post("/api/mcp/servers")
+    async def post_mcp_server(body: dict):
+        from prometheus.mcp.store import McpStoreError
+
+        name = body.get("name")
+        definition = {k: v for k, v in body.items() if k != "name"}
+        if not isinstance(name, str) or not name:
+            return JSONResponse(status_code=400,
+                                content={"error": "body needs a server name"})
+        if name in _mcp_yaml_servers():
+            return JSONResponse(status_code=409, content={
+                "error": f"{name!r} is config-managed (prometheus.yaml) — "
+                         "edit it there"})
+        if name in _mcp_store().load():
+            return JSONResponse(status_code=409, content={
+                "error": f"{name!r} already exists — PATCH it instead"})
+        try:
+            _mcp_store().upsert(name, definition)
+        except McpStoreError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        applies = "live"
+        if definition.get("enabled", True):
+            applies = await _mcp_apply_live(name, definition)
+        card = await _mcp_server_card(
+            name, definition, "store", probe=False
+        )
+        return {"ok": True, "applies": applies, "server": card}
+
+    @app.patch("/api/mcp/servers/{name}")
+    async def patch_mcp_server(name: str, body: dict):
+        from prometheus.mcp.store import McpStoreError
+
+        if name in _mcp_yaml_servers():
+            return JSONResponse(status_code=409, content={
+                "error": f"{name!r} is config-managed (prometheus.yaml) — "
+                         "edit it there"})
+        try:
+            merged = _mcp_store().patch(name, body)
+        except KeyError:
+            return JSONResponse(status_code=404,
+                                content={"error": f"unknown server {name!r}"})
+        except McpStoreError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
+        if merged.get("enabled", True):
+            applies = await _mcp_apply_live(name, merged)
+        else:
+            applies = await _mcp_apply_live(name, None)
+            # Disable keeps the stored definition; only the live half goes.
+            if applies == "live":
+                runtime = getattr(app.state, "mcp_runtime", None)
+                if runtime is not None:
+                    # disconnect_server(forget=True) above dropped status;
+                    # record the deliberate state so the card says so.
+                    from prometheus.mcp.types import McpConnectionStatus
+                    runtime._statuses[name] = McpConnectionStatus(
+                        name=name, state="disabled",
+                    )
+        card = await _mcp_server_card(name, merged, "store", probe=False)
+        return {"ok": True, "applies": applies, "server": card}
+
+    @app.delete("/api/mcp/servers/{name}")
+    async def delete_mcp_server(name: str):
+        if name in _mcp_yaml_servers():
+            return JSONResponse(status_code=409, content={
+                "error": f"{name!r} is config-managed (prometheus.yaml) — "
+                         "edit it there"})
+        if not _mcp_store().delete(name):
+            return JSONResponse(status_code=404,
+                                content={"error": f"unknown server {name!r}"})
+        applies = await _mcp_apply_live(name, None)
+        return {"ok": True, "applies": applies}
+
     # ── Profiles ────────────────────────────────────────────────────
 
     @app.get("/api/profiles")

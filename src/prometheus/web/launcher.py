@@ -35,6 +35,7 @@ async def launch_web(
     loop_context: Any | None = None,
     skill_creator: Any | None = None,
     gateway_adapter: Any | None = None,
+    mcp_runtime: Any | None = None,
     static_dir: str | None = None,
     api_host: str = "0.0.0.0",
     api_port: int = 8005,
@@ -99,6 +100,10 @@ async def launch_web(
     # gateway is wired — /api/status then reports "wired: false" rather than
     # inventing a health verdict for something that isn't there.
     app.state.gateway_adapter = gateway_adapter
+    # #332: the live MCP runtime (None = MCP unconfigured this boot). The
+    # /api/mcp routes drive connect/disconnect/probe through this handle and
+    # reach the tool registry via loop_context, same as _deferred_status.
+    app.state.mcp_runtime = mcp_runtime
 
     # Create WebSocket bridge. The WS uses the SAME token as the REST
     # middleware (config.web.api_token or PROMETHEUS_API_TOKEN); empty => auth

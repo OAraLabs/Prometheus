@@ -311,6 +311,7 @@ class OpenAICompatProvider(ModelProvider):
 
         accumulated_text = ""
         accumulated_tool_calls: dict[int, dict[str, Any]] = {}
+        accumulated_reasoning = ""  # #333: the reasoning channel, kept apart
         finish_reason: str | None = None
         cached_input: int | None = None
         cache_write: int | None = None
@@ -349,6 +350,12 @@ class OpenAICompatProvider(ModelProvider):
                             accumulated_text += text
                             yield ApiTextDeltaEvent(text=text)
 
+                        # #333: reasoning channel — accumulated, never a
+                        # text delta; thinking is not the reply.
+                        reasoning_delta = delta.get("reasoning_content") or ""
+                        if reasoning_delta:
+                            accumulated_reasoning += reasoning_delta
+
                         for tc in delta.get("tool_calls") or []:
                             idx = tc.get("index", 0)
                             if idx not in accumulated_tool_calls:
@@ -366,6 +373,7 @@ class OpenAICompatProvider(ModelProvider):
         final_choice: dict[str, Any] = {
             "message": {
                 "content": accumulated_text or None,
+                "reasoning_content": accumulated_reasoning or None,
                 "tool_calls": list(accumulated_tool_calls.values()) if accumulated_tool_calls else None,
             }
         }

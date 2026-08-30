@@ -39,7 +39,12 @@ async def create_mcp_runtime(
     not take the daemon down — the failure is logged and the boot
     continues without third-party tools, which is the pre-MCP baseline.
     """
-    mcp_servers = config.get("mcp_servers", {})
+    # #332: servers come from TWO sources — the operator's yaml map and the
+    # REST-managed store (yaml wins on collision; disabled store entries are
+    # structurally absent). See mcp/store.py for why the yaml is never
+    # written.
+    from prometheus.mcp.store import McpServerStore, merged_server_configs
+    mcp_servers = merged_server_configs(config, McpServerStore())
     if not mcp_servers:
         logger.debug("MCP: no servers configured")
         return None
