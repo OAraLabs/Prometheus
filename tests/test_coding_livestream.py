@@ -209,3 +209,176 @@ async def test_tail_error_emits_stream_error(tmp_path: Path) -> None:
     assert len(completes) == 1
     assert completes[0].payload["outcome"] == "failed"
     assert stream.active_sessions == []
+
+
+# ---------------------------------------------------------------------------
+# Enrichment (the closed v1 deferral): filters, seq, tools, acceptance
+# ---------------------------------------------------------------------------
+
+
+def _tool(tel: ToolCallTelemetry, sid: str | None, name: str, *, success: bool = True,
+          error_type: str | None = None) -> None:
+    tel.record(
+        model="gemma4-26b", tool_name=name, success=success,
+        latency_ms=42.0, error_type=error_type, session_id=sid,
+    )
+
+
+def _acceptance(tel: ToolCallTelemetry, sid: str, *, exit_code: int | None) -> None:
+    tel.record_run(
+        subsystem="coding_mode", operation="acceptance",
+        outcome="success" if exit_code == 0 else "failed",
+        summary={"exit_code": exit_code, "timed_out": exit_code is None,
+                 "output_tail": "2 passed" if exit_code == 0 else "1 failed"},
+        session_id=sid, model="gemma4-26b",
+    )
+
+
+async def test_non_round_agent_loop_operations_are_filtered(tmp_path: Path) -> None:
+    """The latent bug the enrichment survey found: agent_loop also writes
+    tool_advertisement (round_index NULL, once per episode) and microcompact
+    rows under the same subsystem+session_id — both would have emitted as
+    bogus coding_round frames. Unexercised in prod only because both
+    instrumentations postdate the last coding run in the live DB."""
+    db = tmp_path / "telemetry.db"
+    tel = ToolCallTelemetry(db_path=str(db))
+    bus = FakeBus()
+    stream = CodingLiveStream(bus, db_path=str(db), poll_interval_s=0.01)
+    sid = "coding:filter"
+    stream.start_tail(sid)
+
+    tel.record_run(subsystem="agent_loop", operation="tool_advertisement",
+                   outcome="success", summary={}, session_id=sid)
+    tel.record_run(subsystem="agent_loop", operation="microcompact",
+                   outcome="success", summary={}, round_index=3, session_id=sid)
+    _round(tel, sid, 0)
+    assert await _wait_until(lambda: len(bus.kinds("coding_round")) >= 1)
+    await asyncio.sleep(0.05)
+    rounds = bus.kinds("coding_round")
+    assert len(rounds) == 1
+    assert rounds[0].payload["round_index"] == 0
+    await stream.stop_all()
+
+
+async def test_round_frames_carry_monotonic_seq(tmp_path: Path) -> None:
+    """round_index restarts at 0 every episode; seq (the rowid) must not —
+    it is the only per-run-unique key a client can hang a round card on."""
+    db = tmp_path / "telemetry.db"
+    tel = ToolCallTelemetry(db_path=str(db))
+    bus = FakeBus()
+    stream = CodingLiveStream(bus, db_path=str(db), poll_interval_s=0.01)
+    sid = "coding:episodes"
+    stream.start_tail(sid)
+
+    _round(tel, sid, 0)  # episode 1
+    _round(tel, sid, 1)
+    _round(tel, sid, 0)  # episode 2 restarts the index
+    assert await _wait_until(lambda: len(bus.kinds("coding_round")) >= 3)
+    seqs = [s.payload["seq"] for s in bus.kinds("coding_round")]
+    assert seqs == sorted(seqs) and len(set(seqs)) == 3, seqs
+    idxs = [s.payload["round_index"] for s in bus.kinds("coding_round")]
+    assert idxs == [0, 1, 0]
+    await stream.stop_all()
+
+
+async def test_tool_frames_attributed_to_the_last_round(tmp_path: Path) -> None:
+    """Round attribution without a join: the loop commits round N's row
+    before round N's tools run, so a tool row belongs to the last round the
+    tail saw. Other sessions' tool rows and session-less rows are excluded."""
+    db = tmp_path / "telemetry.db"
+    tel = ToolCallTelemetry(db_path=str(db))
+    bus = FakeBus()
+    stream = CodingLiveStream(bus, db_path=str(db), poll_interval_s=0.01)
+    sid = "coding:tools"
+    stream.start_tail(sid)
+
+    _round(tel, sid, 0)
+    _tool(tel, sid, "bash")
+    _tool(tel, sid, "grep", success=False, error_type="timeout")
+    _tool(tel, "telegram:999", "bash")   # someone else's turn
+    _tool(tel, None, "bash")             # session-less writer
+    _round(tel, sid, 1)
+    _tool(tel, sid, "read_file")
+
+    assert await _wait_until(lambda: len(bus.kinds("coding_tool")) >= 3)
+    await asyncio.sleep(0.05)
+    tools = [(s.payload["tool_name"], s.payload["round_index"],
+              s.payload["success"], s.payload["error_type"])
+             for s in bus.kinds("coding_tool")]
+    assert tools == [
+        ("bash", 0, True, None),
+        ("grep", 0, False, "timeout"),
+        ("read_file", 1, True, None),
+    ], tools
+    await stream.stop_all()
+
+
+async def test_acceptance_rows_emit_ground_truth_frames(tmp_path: Path) -> None:
+    """coding_mode/acceptance rows become coding_acceptance frames; the
+    terminal coding_mode/run row stays excluded as before."""
+    db = tmp_path / "telemetry.db"
+    tel = ToolCallTelemetry(db_path=str(db))
+    bus = FakeBus()
+    stream = CodingLiveStream(bus, db_path=str(db), poll_interval_s=0.01)
+    sid = "coding:accept"
+    stream.start_tail(sid)
+
+    _round(tel, sid, 0)
+    _acceptance(tel, sid, exit_code=1)
+    _round(tel, sid, 1)
+    _acceptance(tel, sid, exit_code=0)
+    _round(tel, sid, 0, subsystem="coding_mode")  # terminal 'run' row — excluded
+
+    assert await _wait_until(lambda: len(bus.kinds("coding_acceptance")) >= 2)
+    await asyncio.sleep(0.05)
+    frames = bus.kinds("coding_acceptance")
+    assert [(f.payload["outcome"], f.payload["exit_code"]) for f in frames] == [
+        ("failed", 1), ("success", 0),
+    ]
+    assert all("output_tail" in f.payload for f in frames)
+    assert len(bus.kinds("coding_round")) == 2
+    await stream.stop_all()
+
+
+async def test_run_acceptance_persists_the_verdict(tmp_path: Path) -> None:
+    """The write side: _run_acceptance records a ground-truth row per
+    invocation — the fact that was previously computed and discarded."""
+    from prometheus.coding.session import CodingSession, CodingTask
+
+    class _Result:
+        def __init__(self, exit_code: int | None, timed_out: bool) -> None:
+            self.exit_code = exit_code
+            self.timed_out = timed_out
+            self.output = "collected 3 items\n1 failed, 2 passed"
+
+    class _Sandbox:
+        def __init__(self, results: list[_Result]) -> None:
+            self._results = results
+
+        async def run(self, command: str, timeout_seconds: float = 0) -> _Result:
+            return self._results.pop(0)
+
+    tel = ToolCallTelemetry(db_path=str(tmp_path / "telemetry.db"))
+    session = CodingSession(
+        provider=object(),
+        model="scripted",
+        sandbox=_Sandbox([_Result(1, False), _Result(0, False), _Result(None, True)]),
+        task=CodingTask(task_id="tv", description="d", acceptance_command="pytest -q"),
+        telemetry=tel,
+    )
+    for _ in range(3):
+        await session._run_acceptance()
+
+    con = sqlite3.connect(str(tmp_path / "telemetry.db"))
+    rows = con.execute(
+        "SELECT outcome, summary_json FROM subsystem_runs "
+        "WHERE subsystem='coding_mode' AND operation='acceptance' "
+        "AND session_id='coding:tv' ORDER BY rowid"
+    ).fetchall()
+    con.close()
+    assert [r[0] for r in rows] == ["failed", "success", "failed"]
+    import json as _json
+    summaries = [_json.loads(r[1]) for r in rows]
+    assert [s["exit_code"] for s in summaries] == [1, 0, None]
+    assert summaries[2]["timed_out"] is True
+    assert "passed" in summaries[0]["output_tail"]

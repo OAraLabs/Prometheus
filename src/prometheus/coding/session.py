@@ -179,6 +179,34 @@ class CodingSession:
             timeout_seconds=self._acceptance_timeout,
         )
         exit_code = None if result.timed_out else result.exit_code
+        # Livestream enrichment: persist every ground-truth verdict, not just
+        # the terminal one. Until this row existed, per-episode pass/fail was
+        # computed and DISCARDED (policy.record_ground_truth_* hold it in
+        # memory only), so the live view could show rounds but never whether
+        # the acceptance command was going green — the single fact the whole
+        # iterate-to-green design turns on. Deliberately recorded HERE, at
+        # the one seam that knows the verdict, rather than derived from the
+        # model's own code_run rows: those return is_error=False on failing
+        # commands by design (tools.py — flipping that would drag in the
+        # circuit breaker), so telemetry cannot see pass/fail through them.
+        if self._telemetry is not None and hasattr(self._telemetry, "record_run"):
+            try:
+                self._telemetry.record_run(
+                    subsystem="coding_mode",
+                    operation="acceptance",
+                    outcome="success" if exit_code == 0 else "failed",
+                    summary={
+                        "exit_code": exit_code,  # None = timed out
+                        "timed_out": result.timed_out,
+                        "output_tail": result.output[-500:],
+                    },
+                    session_id=f"coding:{self._task.task_id}",
+                    model=self._model,
+                )
+            except Exception:
+                # Observation must never break the run — same posture as the
+                # terminal record_run below.
+                log.exception("coding_mode: acceptance telemetry write failed")
         return exit_code, result.output
 
     # ------------------------------------------------------------------

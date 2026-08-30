@@ -97,7 +97,7 @@ The Board panel manages projects and stories (`/api/projects`, `/api/stories`), 
 
 ## Watching it live
 
-While a run is going, per-round telemetry streams over the daemon's authenticated WebSocket as `coding_round` events (with a final `coding_complete`). Each round carries its **outcome, tokens in → out, duration, thinking flag, and stop reason**; Beacon renders them as a live progression with an elapsed clock and a **Stop run** button.
+While a run is going, per-round telemetry streams over the daemon's authenticated WebSocket as `coding_round` events (with a final `coding_complete`). Each round carries its **outcome, tokens in → out, duration, thinking flag, and stop reason** — plus a run-unique `seq`, since `round_index` restarts each episode. Alongside the rounds ride `coding_tool` events (**which tool ran, success, latency**, attributed to their round) and `coding_acceptance` events — the **ground-truth pass/fail of the acceptance command** at each episode seam, straight from the sandbox run, never the model's claim. Beacon renders them as a live progression with an elapsed clock and a **Stop run** button.
 
 ![Live rounds streaming during a run](../assets/shots/loop-2-live.png)
 

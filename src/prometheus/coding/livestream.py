@@ -43,13 +43,39 @@ _CODING_SESSION_PREFIX = "coding:"
 
 # The per-round columns a Live view renders. round_index/outcome/tokens/thinking/
 # duration come straight from the row; stop_reason is parsed out of summary_json.
-# (Per-round tool name and test pass/fail are NOT here — tool_calls has no
-# session_id; that enrichment is a documented follow-up, not v1.)
+#
+# ENRICHMENT (the v1 deferral is closed): the old excuse — "tool_calls has no
+# session_id" — went stale when the fine-tuning capture added the column, and
+# the coding LoopContext carries coding:<task_id> end-to-end. Two more streams
+# ride the same tail now:
+#   * coding_tool       — one frame per tool_calls row (second cursor below)
+#   * coding_acceptance — the GROUND-TRUTH verdict rows _run_acceptance
+#                         writes (subsystem='coding_mode', operation='acceptance')
+#
+# operation='loop_round' is load-bearing, not decorative: agent_loop also
+# writes 'tool_advertisement' (round_index NULL, once per episode) and
+# 'microcompact' rows under the same subsystem+session_id — without the
+# filter both would emit as bogus coding_round frames.
 _ROUND_SQL = (
     "SELECT rowid, round_index, outcome, input_tokens, output_tokens, "
-    "thinking, duration_ms, summary_json, timestamp "
+    "thinking, duration_ms, summary_json, timestamp, operation "
     "FROM subsystem_runs "
-    "WHERE subsystem='agent_loop' AND session_id=? AND rowid > ? "
+    "WHERE session_id=? AND rowid > ? AND ("
+    "(subsystem='agent_loop' AND operation='loop_round') OR "
+    "(subsystem='coding_mode' AND operation='acceptance')"
+    ") ORDER BY rowid ASC"
+)
+
+# Tool executions for the run. Round attribution needs no SQL join: the loop
+# commits round N's subsystem_runs row at model-stream completion, BEFORE
+# round N's tools execute (verified in the enrichment survey against live
+# data — a strict ROUND n → tools → ROUND n+1 interleave), so a tool row
+# belongs to the last round the tail has seen. Rows are merged with the
+# round stream by timestamp (ties → round first, same reason).
+_TOOL_SQL = (
+    "SELECT rowid, tool_name, success, error_type, latency_ms, timestamp "
+    "FROM tool_calls "
+    "WHERE session_id=? AND rowid > ? "
     "ORDER BY rowid ASC"
 )
 
@@ -71,6 +97,10 @@ class CodingLiveStream:
         self._pollers: dict[str, asyncio.Task] = {}
         self._stops: dict[str, asyncio.Event] = {}
         self._last_rowid: dict[str, int] = {}
+        # Enrichment state: the tool_calls cursor, and the last round_index
+        # emitted (the attribution target for tool frames that follow it).
+        self._last_tool_rowid: dict[str, int] = {}
+        self._last_round_index: dict[str, int | None] = {}
 
     # ------------------------------------------------------------------
     # Wiring
@@ -110,6 +140,8 @@ class CodingLiveStream:
         stop = asyncio.Event()
         self._stops[session_id] = stop
         self._last_rowid[session_id] = 0
+        self._last_tool_rowid[session_id] = 0
+        self._last_round_index[session_id] = None
         self._pollers[session_id] = asyncio.create_task(
             self._poll_loop(session_id, stop), name=f"coding-tail:{session_id}"
         )
@@ -146,21 +178,52 @@ class CodingLiveStream:
                 conn.close()
 
     async def _drain(self, session_id: str, conn: Any) -> None:
-        """Emit a ``coding_round`` for every new row, advancing the cursor AFTER
-        each successful emit so a mid-drain failure never skips a row (the next
-        read re-sees it) and never duplicates one (the cursor already passed the
-        emitted rows)."""
-        rows = conn.execute(
+        """Emit a frame for every new row across BOTH tables, advancing each
+        table's cursor AFTER its row's successful emit — a mid-drain failure
+        never skips a row (the next read re-sees it) and never duplicates one
+        (the cursor already passed the emitted rows).
+
+        The two streams are merged by timestamp (ties: run row first) so a
+        tool frame is always processed after the round that spawned it —
+        which is what makes ``_last_round_index`` correct attribution rather
+        than a guess."""
+        run_rows = conn.execute(
             _ROUND_SQL, (session_id, self._last_rowid.get(session_id, 0))
         ).fetchall()
-        for row in rows:
-            await self._emit("coding_round", self._round_payload(session_id, row))
-            self._last_rowid[session_id] = row[0]  # rowid — advance only post-emit
+        tool_rows = conn.execute(
+            _TOOL_SQL, (session_id, self._last_tool_rowid.get(session_id, 0))
+        ).fetchall()
+        merged = (
+            [(row[8], 0, "run", row) for row in run_rows]     # timestamp at [8]
+            + [(row[5], 1, "tool", row) for row in tool_rows]  # timestamp at [5]
+        )
+        merged.sort(key=lambda item: (item[0], item[1]))
+        for _ts, _prio, kind, row in merged:
+            if kind == "run":
+                if row[9] == "acceptance":  # operation at [9]
+                    await self._emit(
+                        "coding_acceptance",
+                        self._acceptance_payload(session_id, row),
+                    )
+                else:
+                    await self._emit(
+                        "coding_round", self._round_payload(session_id, row)
+                    )
+                    self._last_round_index[session_id] = row[1]
+                self._last_rowid[session_id] = row[0]
+            else:
+                await self._emit(
+                    "coding_tool",
+                    self._tool_payload(
+                        session_id, row, self._last_round_index.get(session_id)
+                    ),
+                )
+                self._last_tool_rowid[session_id] = row[0]
 
     @staticmethod
     def _round_payload(session_id: str, row: Any) -> dict[str, Any]:
-        (_rowid, round_index, outcome, in_tok, out_tok,
-         thinking, duration_ms, summary_json, timestamp) = row
+        (rowid, round_index, outcome, in_tok, out_tok,
+         thinking, duration_ms, summary_json, timestamp, _operation) = row
         stop_reason = None
         if summary_json:
             try:
@@ -170,12 +233,57 @@ class CodingLiveStream:
         return {
             "session_id": session_id,
             "round_index": round_index,
+            # round_index restarts at 0 every EPISODE (run_loop is invoked
+            # once per episode), so it is NOT unique within a run. seq is
+            # the rowid: monotonic across the whole run — the key a client
+            # can safely use for a round card.
+            "seq": rowid,
             "outcome": outcome,
             "input_tokens": in_tok,
             "output_tokens": out_tok,
             "thinking": None if thinking is None else bool(thinking),
             "duration_ms": duration_ms,
             "stop_reason": stop_reason,
+            "timestamp": timestamp,
+        }
+
+    @staticmethod
+    def _acceptance_payload(session_id: str, row: Any) -> dict[str, Any]:
+        (rowid, _ri, outcome, _it, _ot, _th, _dur,
+         summary_json, timestamp, _operation) = row
+        summary: dict[str, Any] = {}
+        if summary_json:
+            try:
+                summary = json.loads(summary_json) or {}
+            except Exception:
+                summary = {}
+        return {
+            "session_id": session_id,
+            "seq": rowid,
+            # Ground truth from _run_acceptance, never the model's claim.
+            "outcome": outcome,
+            "exit_code": summary.get("exit_code"),
+            "timed_out": summary.get("timed_out"),
+            "output_tail": summary.get("output_tail"),
+            "timestamp": timestamp,
+        }
+
+    @staticmethod
+    def _tool_payload(
+        session_id: str, row: Any, round_index: int | None
+    ) -> dict[str, Any]:
+        (rowid, tool_name, success, error_type, latency_ms, timestamp) = row
+        return {
+            "session_id": session_id,
+            "seq": rowid,
+            # The last coding_round emitted before this tool row — exact,
+            # because the loop commits the round row before its tools run.
+            # None only for a row that somehow precedes every round.
+            "round_index": round_index,
+            "tool_name": tool_name,
+            "success": bool(success),
+            "error_type": error_type,
+            "latency_ms": latency_ms,
             "timestamp": timestamp,
         }
 
@@ -215,6 +323,8 @@ class CodingLiveStream:
         self._pollers.pop(session_id, None)
         self._stops.pop(session_id, None)
         self._last_rowid.pop(session_id, None)
+        self._last_tool_rowid.pop(session_id, None)
+        self._last_round_index.pop(session_id, None)
 
     async def stop_all(self) -> None:
         """Tear down every poller (daemon shutdown). No coding_complete emitted."""
@@ -228,6 +338,8 @@ class CodingLiveStream:
         self._pollers.clear()
         self._stops.clear()
         self._last_rowid.clear()
+        self._last_tool_rowid.clear()
+        self._last_round_index.clear()
 
     @property
     def active_sessions(self) -> list[str]:
