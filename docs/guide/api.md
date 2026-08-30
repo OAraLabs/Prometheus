@@ -36,6 +36,8 @@ All paths below are served on `:8005`. `{id}` placeholders are path parameters.
 | GET | `/health` | Unauthenticated liveness/staleness probe |
 | GET | `/api/status` | Model, uptime, tools, memory, subsystem states — plus `node_pub` (the node's Ed25519 public key) and `instance_id` (the vault's UUID), both `null` until identity exists. Bearer-gated deliberately; `/health` never carries identity |
 | GET | `/api/packs` | Discovered packs with load/refuse state, refusal reasons, quarantined-draft ids, and panel declarations. `wired: false` means the pack loader didn't run this boot (the bare `web` entrypoint), distinct from "no packs installed" |
+| GET | `/api/mcp/servers` | MCP server cards: transport summary, **probed** health (a dead subprocess reads unhealthy, never as empty success), tool inventory, `allowed_tools`, `env_names`. Credential values never appear — write-only, the provider-keys stance |
+| POST / PATCH / DELETE | `/api/mcp/servers[/{name}]` | Manage REST-owned servers (persisted in `data/mcp_servers.json`, applied to the live runtime — the response's `applies` says `live` or names why not). Servers from `prometheus.yaml` are read-only here (409): the daemon never writes the operator's config file |
 | GET | `/api/sessions` | List sessions — durable-first, so the list **survives daemon restarts** |
 | POST | `/api/sessions` | Create a session (optional `{"gateway": ...}` body) |
 | GET | `/api/sessions/{session_id}/messages` | Message history (`?since=<message_id>` for incremental sync) |

@@ -734,7 +734,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # registry state. Import lazy + guarded: prometheus.mcp's __init__
     # eagerly pulls the optional `mcp` SDK.
     mcp_runtime = None
-    if config.get("mcp_servers"):
+    from prometheus.mcp.store import McpServerStore, merged_server_configs
+    if merged_server_configs(config, McpServerStore()):
+        # (store.py is SDK-free — this guard still avoids importing the
+        # optional mcp package on unconfigured installs.)
         from prometheus.mcp.bootstrap import create_mcp_runtime
         mcp_runtime = await create_mcp_runtime(
             config, registry, tool_loader=tool_loader
@@ -2234,6 +2237,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 # None when Telegram is disabled — /api/status then reports
                 # gateway.wired=false rather than a health verdict.
                 gateway_adapter=telegram,
+                # #332: the MCP REST surface manages the LIVE runtime — None
+                # when no servers configured, and the routes then answer
+                # honestly instead of inventing state.
+                mcp_runtime=mcp_runtime,
                 api_port=api_port,
                 ws_port=ws_port,
             ))
