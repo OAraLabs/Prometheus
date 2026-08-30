@@ -36,6 +36,7 @@ All paths below are served on `:8005`. `{id}` placeholders are path parameters.
 | GET | `/health` | Unauthenticated liveness/staleness probe |
 | GET | `/api/status` | Model, uptime, tools, memory, subsystem states — plus `node_pub` (the node's Ed25519 public key) and `instance_id` (the vault's UUID), both `null` until identity exists. Bearer-gated deliberately; `/health` never carries identity |
 | GET | `/api/packs` | Discovered packs with load/refuse state, refusal reasons, quarantined-draft ids, and panel declarations. `wired: false` means the pack loader didn't run this boot (the bare `web` entrypoint), distinct from "no packs installed" |
+| GET | `/api/media?path=` | Stored image bytes by reference (the `source_path` in an image block). Path must RESOLVE under the image cache root — symlinks and `..` included; anything else is a 403. 404 for an evicted file, so clients fall back to the description placeholder |
 | GET | `/api/sessions` | List sessions — durable-first, so the list **survives daemon restarts** |
 | POST | `/api/sessions` | Create a session (optional `{"gateway": ...}` body) |
 | GET | `/api/sessions/{session_id}/messages` | Message history (`?since=<message_id>` for incremental sync) |

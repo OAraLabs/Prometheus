@@ -179,6 +179,7 @@ class ChatSession:
         *,
         provenance: str = "user",
         is_trusted: bool = True,
+        blocks: list | None = None,
     ) -> int:
         """Append a user-role message to the conversation. Returns its ``turn_index``.
 
@@ -201,7 +202,20 @@ class ChatSession:
         # AFTER the append (matches what add_result_messages will use
         # for downstream turns).
         new_turn_index = len(self.messages)
-        if provenance == "user" and is_trusted:
+        if blocks and provenance == "user" and is_trusted:
+            # #339 (image history, Phase 3b): media blocks ride the SAME
+            # message and are persisted WITH it — content_json stores the
+            # reference-only form (for_storage drops bytes when source_path
+            # can bring them back), so history stays light while the stored
+            # turn finally carries the block instead of only a text marker.
+            # Before this the ws upload path attached blocks AFTER the
+            # persist, so the durable row never knew an image existed.
+            from prometheus.engine.messages import TextBlock
+            message = ConversationMessage(
+                role="user",
+                content=[TextBlock(text=text), *blocks],
+            )
+        elif provenance == "user" and is_trusted:
             message = ConversationMessage.from_user_text(text)
         else:
             message = ConversationMessage.from_injected(

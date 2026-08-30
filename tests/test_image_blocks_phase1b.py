@@ -197,11 +197,19 @@ class _FakeSession:
         self.messages: list = []
         self.persisted: list[str] = []
 
-    def add_user_message(self, text, **kw):
-        from prometheus.engine.messages import ConversationMessage
+    def add_user_message(self, text, *, blocks=None, **kw):
+        from prometheus.engine.messages import ConversationMessage, TextBlock
 
-        self.persisted.append(text)          # what LCM would store
-        self.messages.append(ConversationMessage.from_user_text(text))
+        self.persisted.append(text)          # the flat text LCM stores
+        # #339 Phase 3b: blocks arrive WITH the message now (the real
+        # ChatSession persists their reference form in content_json; the
+        # flat-text column stays the marker). Mirror that contract.
+        if blocks:
+            self.messages.append(ConversationMessage(
+                role="user", content=[TextBlock(text=text), *blocks],
+            ))
+        else:
+            self.messages.append(ConversationMessage.from_user_text(text))
         return len(self.messages) - 1
 
     def last_persisted_row_id(self):

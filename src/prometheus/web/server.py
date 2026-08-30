@@ -20,7 +20,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -1003,6 +1003,40 @@ def create_app(
         title = clip_title(raw or "")
         store.set_session_title(session_id, title)
         return {"ok": True, "session_id": session_id, "title": title or None}
+
+    # ── Media (#339, Phase 3b — Beacon B3) ──────────────────────────
+    # Serve stored image bytes by reference: history carries image blocks
+    # as {source_path, description} with the base64 dropped (Phase 3a);
+    # this is the read-back. Confinement is the point of the route: a
+    # source_path is history-supplied data, and history must not be able
+    # to read arbitrary disk — the path must RESOLVE (symlinks and ..
+    # included) under the image cache root, the same resolve-then-compare
+    # doctrine as security/path_guard.py. 404 for an evicted file, so the
+    # client falls back to the description placeholder — the same
+    # degradation order as ImageBlock.rehydrate().
+    @app.get("/api/media")
+    async def get_media(path: str):
+        from prometheus.gateway.media_cache import image_cache_dir
+        from prometheus.gateway.image_prep import sniff_media_type
+
+        root = image_cache_dir().resolve()
+        try:
+            resolved = Path(path).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            return JSONResponse(status_code=404,
+                                content={"error": "no such media file"})
+        if root != resolved and root not in resolved.parents:
+            logger.warning(
+                "media: refused path outside the image cache root: %r", path,
+            )
+            return JSONResponse(status_code=403, content={
+                "error": "path is outside the media root"})
+        if not resolved.is_file():
+            return JSONResponse(status_code=404,
+                                content={"error": "no such media file"})
+        data = resolved.read_bytes()
+        media_type = sniff_media_type(data) or "application/octet-stream"
+        return Response(content=data, media_type=media_type)
 
     # ── Telemetry ───────────────────────────────────────────────────
 
