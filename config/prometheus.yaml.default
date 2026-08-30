@@ -267,6 +267,52 @@ security:
   # Profile ships at deploy/apparmor/prometheus-bash; load it with:
   #   sudo apparmor_parser -r -W /etc/apparmor.d/prometheus-bash
   bash_confinement: "off"
+  # THE ABOVE IS A READ FLOOR. It says nothing about WRITES, and the
+  # outside-workspace approval does not cover bash either: SecurityGate
+  # raises it by reading a tool's file_path, and bash has a command string.
+  # So `printf x > ~/outside.txt` was ALLOW at both origins — the same shape
+  # of miss, one door over. Parsing the command cannot close it (`>`, `>>`,
+  # `>|`, tee, dd, sed -i, cp, mv, python -c, heredocs, $(…), sh -c of any of
+  # them), so the write boundary is enforced by the kernel too: bubblewrap
+  # mounts the whole filesystem READ-ONLY and binds the workspace roots back
+  # read-write on top. A write anywhere else fails EROFS inside open(2).
+  #
+  #   off       no write floor. bash may write anywhere, unprompted.
+  #   auto      (default) confine when bubblewrap can verifiably contain —
+  #             checked by outcome, not by exit code. Where it cannot (no
+  #             bubblewrap; macOS has no equivalent) the command runs as it
+  #             did before and the reason is logged at ERROR and recorded in
+  #             the call's result metadata. Best-effort, and it says so.
+  #   required  confine or REFUSE. Never runs unconfined.
+  #
+  # Default is auto rather than required because bubblewrap needs no root and
+  # the hole is live, but refusing every bash call on a host that has no
+  # bubblewrap would be worse than the hole. Default is auto rather than off
+  # because a security key that defaults to doing nothing protects nobody.
+  #
+  # ALSO WRITABLE, always: /tmp, /var/tmp and the XDG cache dir (~/.cache).
+  # Without them uv, pip, git and pytest fail. They are scratch and cache,
+  # not credentials or config — stated here rather than discovered later.
+  # Reads are UNCHANGED: the filesystem is mounted readable. Keeping bash out
+  # of ~/.ssh is bash_confinement's job, above.
+  #
+  # WHAT ELSE CHANGES WHEN THIS IS ACTIVE, measured on the host, so none of it
+  # arrives as a mystery:
+  #   * ~/.prometheus is read-only to bash. The daemon writes its own
+  #     telemetry and session state; a shell command no longer can, which also
+  #     means it cannot edit its own audit trail. Add it to bash_write_allow
+  #     if some workflow genuinely needs it.
+  #   * sudo cannot escalate (the namespace sets no_new_privs, so setuid
+  #     binaries are inert). Deliberate, and a second thing this buys.
+  #   * ~4 ms per bash call.
+  bash_write_confinement: "auto"
+  # Extra paths the write floor leaves writable, beyond the workspace roots
+  # and the scratch/cache set. For a build that must write to a shared cache
+  # or an output dir outside the workspace. Each entry widens the boundary.
+  # Empty = the workspace roots plus scratch/cache, nothing more.
+  #   bash_write_allow:
+  #     - "~/models"
+  bash_write_allow: []
   # Regexes auto-ALLOWed even at SYSTEM trust (background tasks / cron) so a
   # vetted long-running job can run without a human approver. Evaluated AFTER
   # the denied/always-blocked/exfiltration gates (cannot resurrect a block) and

@@ -31,13 +31,31 @@ is removed whether the test passes or fails.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from pathlib import Path
 
 import pytest
 
+from prometheus.permissions import confinement as C
 from prometheus.tools.base import ToolExecutionContext
 from prometheus.tools.builtin.bash import BashTool, BashToolInput
+
+
+def _floor_available() -> bool:
+    ok, _ = C.write_preflight(force=True)
+    C.reset_write_cache()
+    return ok
+
+
+needs_floor = pytest.mark.skipif(
+    not _floor_available(),
+    reason=(
+        "bubblewrap cannot contain on this host (no bwrap, or the namespace "
+        "is refused). SKIPPED IS NOT PASSED: on this machine bash can write "
+        "anywhere and these eight cases are live holes, not covered ground."
+    ),
+)
 
 
 @pytest.fixture()
@@ -71,9 +89,10 @@ def outside_seed() -> Path:
         pass
 
 
-def _run(tool: BashTool, command: str, cwd: Path):
+def _run(tool: BashTool, command: str, cwd: Path, timeout: int = 30):
     ctx = ToolExecutionContext(cwd=cwd)
-    return asyncio.run(tool.execute(BashToolInput(command=command), ctx))
+    return asyncio.run(tool.execute(
+        BashToolInput(command=command, timeout_seconds=timeout), ctx))
 
 
 def _bash(workspace: Path) -> BashTool:
@@ -85,6 +104,7 @@ def _bash(workspace: Path) -> BashTool:
     return BashTool(workspace=workspace)
 
 
+@needs_floor
 class TestWriteOutsideWorkspaceIsRefused:
     """Seven syntaxes, one effect. Every one of them must fail to land."""
 
@@ -142,3 +162,154 @@ class TestWriteInsideWorkspaceStillWorks:
         res = _run(_bash(workspace), "sed -i 's/inside/edited/' seed.txt", workspace)
         assert not res.is_error, res.output
         assert (workspace / "seed.txt").read_text() == "edited\n"
+
+
+@needs_floor
+class TestTheBoundaryIsTheEffectNotTheSyntax:
+    """Cases no command-string parser could have caught."""
+
+    def test_symlink_out_of_the_workspace_does_not_escape(self, workspace, outside):
+        """A path that LOOKS inside the workspace and resolves outside it.
+
+        The command names ``link``, a relative path under the workspace root.
+        Every syntactic check passes. The kernel resolves it to $HOME and the
+        write lands on the read-only mount.
+        """
+        (workspace / "link").symlink_to(outside)
+        _run(_bash(workspace), "printf 'x' > link", workspace)
+        assert not outside.exists(), f"a symlink escaped the workspace: {outside}"
+
+    def test_indirection_through_a_variable_does_not_escape(self, workspace, outside):
+        """The target never appears as a literal path in the command."""
+        _run(
+            _bash(workspace),
+            f"T=$(printf '%s' '{outside}'); printf 'x' > \"$T\"",
+            workspace,
+        )
+        assert not outside.exists(), f"$VAR indirection escaped: {outside}"
+
+    def test_nested_shell_does_not_escape(self, workspace, outside):
+        """``sh -c`` of the write — a second parser the first never sees."""
+        _run(_bash(workspace), f"sh -c \"echo x > {outside}\"", workspace)
+        assert not outside.exists(), f"a nested shell escaped: {outside}"
+
+
+@needs_floor
+class TestWhatTheFloorDeliberatelyDoesNotChange:
+    """A floor that broke ordinary work would be switched off within a day."""
+
+    def test_reads_outside_the_workspace_still_work(self, workspace):
+        """The write floor is not a read floor, and must not be read as one.
+
+        ``--ro-bind / /`` mounts the host readable. Keeping bash out of
+        ~/.ssh is ``bash_confinement``'s job; conflating them would let this
+        suite's green be read as protection it does not provide.
+        """
+        res = _run(_bash(workspace), "head -1 /etc/hostname", workspace)
+        assert not res.is_error, res.output
+
+    def test_scratch_and_cache_are_writable(self, workspace):
+        res = _run(
+            _bash(workspace),
+            'printf x > /tmp/prom-floor-scratch.$$ && rm -f /tmp/prom-floor-scratch.$$ '
+            '&& mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/prom-floor" && echo SCRATCH_OK',
+            workspace,
+        )
+        assert "SCRATCH_OK" in res.output, res.output
+
+    def test_network_is_not_isolated(self, workspace):
+        """This is a write boundary, not a sandbox — no --unshare-net."""
+        res = _run(_bash(workspace), "getent hosts localhost", workspace)
+        assert not res.is_error, res.output
+
+    def test_the_result_records_that_the_floor_was_on(self, workspace):
+        res = _run(_bash(workspace), "true", workspace)
+        assert res.metadata.get("write_floor") == "active", res.metadata
+
+    def test_a_timed_out_command_still_dies_with_its_children(self, workspace):
+        """--new-session would orphan the inner shell; it is not passed.
+
+        bwrap's own process is what ``_kill_process_group`` addresses. If the
+        inner shell were in a session of its own, killing the outer group
+        would leave the real work running and reparented to init — the
+        orphaned-``find`` bug, re-introduced invisibly.
+        """
+        marker = workspace / "still-running.txt"
+        res = _run(
+            _bash(workspace),
+            f"(sleep 12; printf x > {marker}) & wait",
+            workspace,
+            timeout=2,
+        )
+        assert res.is_error and "timed out" in res.output.lower(), res.output
+        # Long enough for the orphan to have written if the kill missed it,
+        # and far short of the sleep's own end so a natural exit cannot be
+        # mistaken for a successful kill.
+        time.sleep(4)
+        assert not marker.exists(), "the inner command outlived the timeout kill"
+
+
+class TestWiringRunsEverywhere:
+    """No bubblewrap needed — these hold on every host, including macOS."""
+
+    def test_no_workspace_means_no_boundary_to_enforce(self):
+        """Unchanged behaviour, and it must be legible as such.
+
+        With no workspace root there is nothing to be outside OF. The floor
+        does not silently invent a boundary; it records that there is none.
+        """
+        tool = BashTool(write_confinement="required")
+        res = _run(tool, "true", Path("/tmp"))
+        assert res.metadata.get("write_floor") == "no-workspace", res.metadata
+
+    def test_off_is_off(self, workspace, outside):
+        tool = BashTool(workspace=workspace, write_confinement="off")
+        res = _run(tool, f"printf 'x' > {outside}", workspace)
+        assert res.metadata.get("write_floor") == "off"
+        assert outside.exists(), "write_confinement=off must not confine"
+
+    def test_required_refuses_when_the_floor_is_unavailable(self, workspace, monkeypatch):
+        """Never fall through to an unconfined shell — the #237 bargain."""
+        monkeypatch.setattr(C.shutil, "which", lambda name: None)
+        C.reset_write_cache()
+        tool = BashTool(workspace=workspace, write_confinement="required")
+        res = _run(tool, "echo I_RAN_UNCONFINED", workspace)
+        C.reset_write_cache()
+        assert res.is_error
+        assert "I_RAN_UNCONFINED" not in res.output, "the command RAN"
+        assert "REFUSED" in res.output
+        assert res.metadata.get("write_floor") == "refused"
+
+    def test_auto_degrades_loudly_rather_than_refusing(self, workspace, outside, monkeypatch):
+        """macOS has no bubblewrap. Refusing every bash call there would be
+        worse than the hole, so auto runs — and says, per call, that it did.
+        """
+        monkeypatch.setattr(C.shutil, "which", lambda name: None)
+        C.reset_write_cache()
+        tool = BashTool(workspace=workspace, write_confinement="auto")
+        res = _run(tool, f"printf 'x' > {outside}", workspace)
+        C.reset_write_cache()
+        assert not res.is_error, res.output
+        assert res.metadata.get("write_floor") == "unavailable", res.metadata
+
+    def test_unknown_mode_fails_safe_and_loud(self, caplog):
+        assert C.normalise_write_mode("enforce-ish") == C.WRITE_MODE_AUTO
+        assert "not one of" in caplog.text
+
+    def test_write_file_is_untouched(self, tmp_path):
+        """The path-declaring tools keep their own gate, unchanged.
+
+        write_file has a file_path, so SecurityGate already sees it and
+        already raises the outside-workspace approval. This work adds nothing
+        to that path and must subtract nothing either.
+        """
+        from prometheus.tools.builtin.file_write import FileWriteTool
+
+        tool = FileWriteTool()
+        target = tmp_path / "written.txt"
+        res = asyncio.run(tool.execute(
+            tool.input_model(path=str(target), content="hello"),
+            ToolExecutionContext(cwd=tmp_path),
+        ))
+        assert not res.is_error, res.output
+        assert target.read_text() == "hello"
