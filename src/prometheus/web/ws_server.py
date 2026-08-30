@@ -620,6 +620,12 @@ class WebSocketBridge:
                 "bridge not fully wired (session_mgr/loop_context missing) — "
                 "cannot run an awaited turn"
             )
+        # feat/session-rehydrate: a cold session (daemon restarted since it
+        # last spoke) gets its recent durable tail restored before the turn
+        # runs, so the model resumes with context instead of amnesia. No-op
+        # when disabled, warm, ephemeral, or tombstoned.
+        if hasattr(self.session_mgr, "rehydrate_if_cold"):
+            self.session_mgr.rehydrate_if_cold(session_id)
         session = self.session_mgr.get_or_create(session_id)
         turn_index = session.add_user_message(content)
         row_id = session.last_persisted_row_id()
@@ -769,6 +775,9 @@ class WebSocketBridge:
                 processed = processed.replace(f"[Image: {match}]", replacement, 1)
             content = processed
 
+        # feat/session-rehydrate — same cold-start restore as run_turn_awaited.
+        if hasattr(self.session_mgr, "rehydrate_if_cold"):
+            self.session_mgr.rehydrate_if_cold(session_id)
         session = self.session_mgr.get_or_create(session_id)
         turn_index = session.add_user_message(content)
         row_id = session.last_persisted_row_id()

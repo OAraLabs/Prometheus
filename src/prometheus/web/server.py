@@ -577,8 +577,10 @@ def create_app(
         then overlays the in-memory working set, which wins on collision (its
         fields keep their pre-existing live semantics). A durable-only row is a
         restored session (``live: false``): its history is fully servable via
-        GET /api/sessions/{id}/messages, but the in-memory working set starts
-        fresh on the next message — the known two-stores/no-rehydrate gap.
+        GET /api/sessions/{id}/messages. With ``sessions.rehydrate: true``
+        (feat/session-rehydrate, default off) the next message restores its
+        recent durable tail into the live working set too; otherwise the
+        model starts fresh — the historical two-stores/no-rehydrate gap.
         Tombstoned ("forgotten") sessions stay hidden until newer activity.
         """
         lcm = getattr(app.state, "lcm_engine", None)

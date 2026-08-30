@@ -12,7 +12,7 @@ import json
 from typing import Any, Annotated, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
 
 # Closed set of turn origins. "user" = a real human; everything else is a
@@ -130,6 +130,10 @@ ContentBlock = Annotated[
     TextBlock | ToolUseBlock | ToolResultBlock | ImageBlock, Field(discriminator="type")
 ]
 
+# One adapter for the discriminated union — how from_stored() parses a
+# content_json entry back into the right block class.
+_CONTENT_ADAPTER = TypeAdapter(ContentBlock)
+
 
 class ConversationMessage(BaseModel):
     """A single assistant or user message.
@@ -207,6 +211,70 @@ class ConversationMessage(BaseModel):
     def tool_uses(self) -> list[ToolUseBlock]:
         """Return all tool calls contained in the message."""
         return [block for block in self.content if isinstance(block, ToolUseBlock)]
+
+    @classmethod
+    def from_stored(
+        cls,
+        *,
+        role: str,
+        content: str,
+        content_json: str | None,
+        provenance: str = "user",
+        is_trusted: bool = True,
+    ) -> "ConversationMessage":
+        """The inverse of :attr:`content_json` — rebuild a live message from
+        its durable LCM columns (feat/session-rehydrate).
+
+        This function is what makes rehydrate possible: content_json has
+        always been written as "lossless … round-trips back", but nothing in
+        the codebase performed the round trip until now. Degradations are
+        deliberate and conservative:
+
+        - ``content_json`` NULL (legacy pre-migration rows) or unparseable →
+          a single :class:`TextBlock` of the flat text. A pre-migration
+          tool-result row therefore reconstructs as an empty user message —
+          detectable upstream, unrecoverable here.
+        - a stored ``provenance`` outside the :data:`Provenance` literal →
+          ``"user"`` and ``is_trusted=False``. Failing the whole rehydrate on
+          one unknown tag would be an over-refusal; trusting an unknown tag
+          would be worse.
+        - an :class:`ImageBlock` is re-inflated via :meth:`ImageBlock.rehydrate`;
+          if the cached bytes are gone it becomes a ``TextBlock`` of
+          :meth:`ImageBlock.placeholder_text` — never an empty image block,
+          which providers reject as a malformed request.
+        """
+        from typing import get_args
+
+        blocks: list[ContentBlock] = []
+        if content_json:
+            try:
+                blocks = [
+                    _CONTENT_ADAPTER.validate_python(raw)
+                    for raw in json.loads(content_json)
+                ]
+            except Exception:
+                blocks = []
+        if not blocks:
+            blocks = [TextBlock(text=content or "")]
+
+        inflated: list[ContentBlock] = []
+        for block in blocks:
+            if isinstance(block, ImageBlock):
+                block = block.rehydrate()
+                if not block.data:
+                    inflated.append(TextBlock(text=block.placeholder_text()))
+                    continue
+            inflated.append(block)
+
+        if provenance not in get_args(Provenance):
+            provenance = "user"
+            is_trusted = False
+        return cls(
+            role="assistant" if role == "assistant" else "user",
+            content=inflated,
+            provenance=provenance,  # type: ignore[arg-type]
+            is_trusted=is_trusted,
+        )
 
     def to_openai_param(self) -> dict[str, Any]:
         """Convert the message into OpenAI-compatible message params."""

@@ -126,6 +126,19 @@ compaction:
   reserve_tokens: 4096
   threshold_pct: 0.75
 
+# Session working-set behaviour.
+sessions:
+  # Cold-start rehydrate (feat/session-rehydrate). After a daemon restart, a
+  # session's history was fully servable to CLIENTS over REST while the MODEL
+  # started blind — the two-stores/no-rehydrate gap. true = on the next
+  # message to a cold session, restore its recent durable tail into the live
+  # working set (bounded: one page of rows, ~8k estimated tokens, and the
+  # restored span always STARTS at a clean human turn so a tool result can
+  # never arrive orphaned from its call). Tombstoned (forgotten) and
+  # ephemeral sessions are never rehydrated. Off by default: it changes what
+  # rides every prompt of a restored session.
+  rehydrate: false
+
 context:
   effective_limit: 24000
   compression_trigger: 0.75
