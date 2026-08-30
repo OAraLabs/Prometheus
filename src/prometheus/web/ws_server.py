@@ -779,16 +779,17 @@ class WebSocketBridge:
         if hasattr(self.session_mgr, "rehydrate_if_cold"):
             self.session_mgr.rehydrate_if_cold(session_id)
         session = self.session_mgr.get_or_create(session_id)
-        turn_index = session.add_user_message(content)
-        row_id = session.last_persisted_row_id()
+        # #339 Phase 3b: blocks are persisted WITH the user turn (reference
+        # only — for_storage keeps base64 out of history), so the stored row
+        # carries the image and GET /api/media can serve its bytes back.
+        # Before this they were attached AFTER the persist, so the durable
+        # row never knew an image existed. The kwarg rides only when blocks
+        # exist — duck-typed session fakes predate it.
         if blocks:
-            # Attach AFTER add_user_message, which has already persisted the text
-            # row. The model sees the picture on this turn; LCM keeps the marker
-            # text, so history does not carry base64 and nothing regresses for a
-            # client reading it back. Making the block itself durable is Phase 3
-            # of the sprint — until then a later turn sees the marker and can
-            # re-read source_path if it needs the image again.
-            session.messages[-1].content.extend(blocks)
+            turn_index = session.add_user_message(content, blocks=blocks)
+        else:
+            turn_index = session.add_user_message(content)
+        row_id = session.last_persisted_row_id()
 
         # Broadcast the user message. message_id is the durable, restart-stable LCM rowid
         # — the SAME canonical id GET /api/sessions/{id}/messages reports — so a client can
@@ -802,7 +803,21 @@ class WebSocketBridge:
                 "session_id": session_id,
                 "role": "user",
                 "content": content,
-                "content_json": json.dumps([{"type": "text", "text": content}]),
+
+                # not a hand-built text-only fiction — this frame must match what a
+                # later history fetch shows.
+                # The REAL persisted shape (a media block rides as a
+                # reference) — not a hand-built text-only fiction: this
+                # frame must match what a later history fetch shows.
+                # getattr-guarded because duck-typed session fakes keep
+                # plain strings in .messages; they get the old text shape.
+                "content_json": (
+                    getattr(
+                        session.messages[-1] if session.messages else None,
+                        "content_json", None,
+                    )
+                    or json.dumps([{"type": "text", "text": content}])
+                ),
                 "message_id": row_id,
                 "ordinal": turn_index,
                 "client_msg_id": client_msg_id,
