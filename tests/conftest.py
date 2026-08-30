@@ -58,6 +58,11 @@ def _isolated_state_dirs(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path / "prom-config"))
     monkeypatch.setenv("PROMETHEUS_ENV_FILE", str(tmp_path / "prom-env"))
+    # #332 closed a member of the same leak class this fixture was built
+    # for: get_data_dir() defaults to the REAL ~/.prometheus/data and was
+    # never pointed at tmp, so any data-dir-backed store written by a test
+    # (mcp_servers.json being the first heavy one) landed on the live box.
+    monkeypatch.setenv("PROMETHEUS_DATA_DIR", str(tmp_path / "prom-data"))
 
 
 def _validated_allowance(marker: pytest.Mark) -> set[str]:
