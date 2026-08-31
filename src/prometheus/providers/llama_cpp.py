@@ -56,6 +56,93 @@ class EmptyCompletionError(RuntimeError):
     """
 
 
+# ---------------------------------------------------------------------------
+# TEMPORARY DIAGNOSTIC - Prometheus#355. Remove when that issue is closed.
+#
+# A local-model turn died with llama.cpp's generic 400 "Failed to tokenize prompt".
+# The backend's own log gave the real reason:
+#
+#     mtmd_tokenize: error: number of media markers in text (1) exceeds number of bitmaps (0)
+#
+# i.e. the prompt carried one image marker and zero images. Three attempts to reproduce it from
+# outside failed (marker in a plain string: 200; marker in an array text part: 200; undecodable
+# image: a DIFFERENT 400), so the failing request itself is the missing evidence.
+#
+# This logs the payload's SHAPE, not the conversation: roles, content kinds, part types, lengths.
+# The only raw text it emits is a bounded window either side of a media marker, because "what
+# produced this marker" is the entire question. Nothing is logged unless the request already failed.
+_MEDIA_MARKER = "<__media__>"
+
+
+def _describe_payload_for_diagnosis(payload: dict) -> str:
+    """Structural summary of a failed request. Shapes and counts, not content."""
+    messages = payload.get("messages") or []
+    markers = 0
+    media_parts = 0
+    windows: list[str] = []
+    rows: list[str] = []
+
+    def _scan_text(txt: str, where: str) -> int:
+        n = txt.count(_MEDIA_MARKER)
+        rest = txt
+        for _ in range(min(n, 2)):
+            i = rest.find(_MEDIA_MARKER)
+            if i < 0:
+                break
+            windows.append("%s: ...%r..." % (where, rest[max(0, i - 120):i + 120]))
+            rest = rest[i + len(_MEDIA_MARKER):]
+        return n
+
+    for idx, m in enumerate(messages):
+        if not isinstance(m, dict):
+            rows.append("#%d <%s>" % (idx, type(m).__name__))
+            continue
+        role = m.get("role")
+        content = m.get("content")
+        if isinstance(content, str):
+            n = _scan_text(content, "msg#%d/%s" % (idx, role))
+            markers += n
+            desc = "str(%dch%s)" % (len(content), (", %d MARKER" % n) if n else "")
+        elif isinstance(content, list):
+            parts = []
+            for pi, p in enumerate(content):
+                if not isinstance(p, dict):
+                    parts.append(type(p).__name__)
+                    continue
+                ptype = p.get("type")
+                if ptype == "text":
+                    txt = p.get("text") or ""
+                    n = _scan_text(txt, "msg#%d/%s/part%d" % (idx, role, pi))
+                    markers += n
+                    parts.append("text(%dch%s)" % (len(txt), (", %d MARKER" % n) if n else ""))
+                else:
+                    media_parts += 1
+                    url = ""
+                    if isinstance(p.get("image_url"), dict):
+                        raw = str(p["image_url"].get("url") or "")
+                        url = ("[%s...%dch]" % (raw[:24], len(raw))) if raw else "[EMPTY URL]"
+                    parts.append("%s%s" % (ptype, url))
+            desc = "[" + ", ".join(parts) + "]"
+        elif content is None:
+            desc = "None"
+        else:
+            desc = type(content).__name__
+        extra = ""
+        if m.get("tool_calls"):
+            extra += " tool_calls=%d" % len(m["tool_calls"])
+        if m.get("tool_call_id"):
+            extra += " IS_TOOL_RESULT"
+        rows.append("#%d %s %s%s" % (idx, role, desc, extra))
+
+    head = "messages=%d media_markers_in_text=%d media_parts=%d tools=%d" % (
+        len(messages), markers, media_parts, len(payload.get("tools") or []))
+    body = " | ".join(rows)
+    tail = ""
+    if windows:
+        tail = "\n  marker context: " + "\n  marker context: ".join(windows)
+    return "%s\n  %s%s" % (head, body, tail)
+
+
 class LlamaCppProvider(ModelProvider):
     """OpenAI-compatible provider targeting llama-server.
 
@@ -661,6 +748,14 @@ class LlamaCppProvider(ModelProvider):
                     await response.aread()
                     log.error("HTTP %d from %s: %s",
                               response.status_code, url, response.text[:500])
+                    # TEMPORARY - Prometheus#355. The response body says "Failed to tokenize
+                    # prompt" without saying what about the prompt was wrong; the request is the
+                    # only place that answers it. Never allowed to mask the original failure.
+                    try:
+                        log.error("PAYLOAD SHAPE (Prometheus#355): %s",
+                                  _describe_payload_for_diagnosis(payload))
+                    except Exception:
+                        log.exception("payload diagnosis failed (does not affect the request)")
                     response.raise_for_status()
 
                 async for line in response.aiter_lines():
