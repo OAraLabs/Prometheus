@@ -683,6 +683,123 @@ class LCMConversationStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def purge_session(self, session_id: str) -> dict[str, int]:
+        """IRREVERSIBLY remove a session's content. The opposite of a tombstone.
+
+        tombstone_session() hides a session; this deletes it. Both exist because
+        they answer different questions — "take this out of my list" and "this
+        must not be on the disk any more" — and only one of them can be given as
+        an answer to someone who pasted a secret into a chat.
+
+        Three things make this more than a DELETE:
+
+        1. ``lcm_messages_fts`` is an EXTERNAL-CONTENT fts5 table with no
+           triggers, so it does not follow the base table. Dropping the row
+           alone leaves the words in the index while search stops returning them
+           (its JOIN drops the orphan) — invisible AND still there, the worst of
+           both. The index must be told, with the original text, BEFORE the row
+           goes.
+        2. Summaries are derived content: a purged conversation whose summary
+           still quotes it has not been purged. They live in the same database
+           file, with their own external-content index and the same problem.
+        3. SQLite leaves deleted bytes in freed pages until they are reused.
+           ``secure_delete`` overwrites them instead, which is the difference
+           between "unreachable through the API" and "not in the file".
+
+        Returns per-table row counts, because a purge that reports only "ok" is
+        indistinguishable from a purge that matched nothing.
+
+        Forks are NOT followed: a branch holds its own copies (fork_session
+        inserts new rows), so purging an origin leaves them standing. That is
+        defensible — they are separate conversations — but astonishing if
+        unsaid, so the route reports them via the existing
+        :meth:`list_session_forks`.
+        """
+        counts: dict[str, int] = {}
+        prior = self._conn.execute("PRAGMA secure_delete").fetchone()[0]
+        self._conn.execute("PRAGMA secure_delete = ON")
+        try:
+            # 1. the messages, and their index entries (index first — the delete
+            #    command needs the text that is about to be destroyed).
+            rows = self._conn.execute(
+                "SELECT rowid AS rid, content FROM lcm_messages WHERE session_id = ?",
+                (session_id,),
+            ).fetchall()
+            for r in rows:
+                self._conn.execute(
+                    "INSERT INTO lcm_messages_fts (lcm_messages_fts, rowid, content)"
+                    " VALUES ('delete', ?, ?)",
+                    (r["rid"], r["content"]),
+                )
+            counts["messages"] = self._conn.execute(
+                "DELETE FROM lcm_messages WHERE session_id = ?", (session_id,)
+            ).rowcount
+
+            # 2. summaries — same file, same external-content trap.
+            if self._table_exists("lcm_summaries"):
+                srows = self._conn.execute(
+                    "SELECT rowid AS rid, summary_text FROM lcm_summaries WHERE session_id = ?",
+                    (session_id,),
+                ).fetchall()
+                if self._table_exists("lcm_summaries_fts"):
+                    for r in srows:
+                        self._conn.execute(
+                            "INSERT INTO lcm_summaries_fts (lcm_summaries_fts, rowid, summary_text)"
+                            " VALUES ('delete', ?, ?)",
+                            (r["rid"], r["summary_text"]),
+                        )
+                counts["summaries"] = self._conn.execute(
+                    "DELETE FROM lcm_summaries WHERE session_id = ?", (session_id,)
+                ).rowcount
+            else:
+                counts["summaries"] = 0
+
+            # 3. the per-session metadata. Enumerated rather than looped over a
+            #    list so a NEW side table is a compile-time-visible omission
+            #    here, not a silent survivor.
+            for table in ("session_titles", "session_profiles", "session_pins",
+                          "session_tombstones", "session_forks"):
+                counts[table] = self._conn.execute(
+                    f"DELETE FROM {table} WHERE session_id = ?", (session_id,)
+                ).rowcount if self._table_exists(table) else 0
+
+            # fts5's 'delete' unlinks a document but leaves the TERM in the
+            # index b-tree with an empty doclist, and VACUUM preserves that —
+            # measured: the token was still readable in the file afterwards.
+            # 'optimize' merges the segments and drops it for real. It costs a
+            # pass over the index, which is the right trade for an explicit,
+            # rare, irreversible operation.
+            self._conn.execute(
+                "INSERT INTO lcm_messages_fts (lcm_messages_fts) VALUES ('optimize')"
+            )
+            if self._table_exists("lcm_summaries_fts"):
+                self._conn.execute(
+                    "INSERT INTO lcm_summaries_fts (lcm_summaries_fts) VALUES ('optimize')"
+                )
+            self._conn.commit()
+        finally:
+            self._conn.execute(f"PRAGMA secure_delete = {'ON' if prior else 'OFF'}")
+        # Reclaim the freed pages. Without this the overwritten space is still
+        # inside the file; with it, the file itself shrinks.
+        #
+        # The WAL checkpoint is not optional housekeeping: in WAL mode the rows
+        # live in the -wal sidecar until it is checkpointed, so a purge that
+        # only VACUUMs the main file leaves the purged text sitting in a file
+        # next to it. TRUNCATE empties the sidecar rather than merely folding it
+        # in. (Found by the test's PRECONDITION, which could not find a freshly
+        # written secret in the .db file at all.)
+        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self._conn.execute("VACUUM")
+        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return counts
+
+    def _table_exists(self, name: str) -> bool:
+        return bool(
+            self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ?", (name,)
+            ).fetchone()
+        )
+
     def tombstone_session(self, session_id: str) -> None:
         """Durably forget a session: hide it from :meth:`list_sessions`.
 
