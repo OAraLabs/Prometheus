@@ -662,6 +662,23 @@ async def run_daemon(args: argparse.Namespace) -> None:
         if detected_ctx_size:
             logger.info("Server context size: %d tokens", detected_ctx_size)
 
+    # KV cache type. RECORDED, never set: Prometheus does not launch
+    # llama-server, so claiming to govern the cache type would be a lie about
+    # what this harness controls — hence no config key for it. Recording it is
+    # what makes a gym A/B comparing q8_0 against f16 KV attributable after
+    # the fact. Never inferred and never defaulted to f16: an unrecorded run
+    # must stay distinguishable from a confirmed-f16 one.
+    detected_kv_cache: dict[str, Any] | None = None
+    if hasattr(provider, "detect_kv_cache_types"):
+        detected_kv_cache = await provider.detect_kv_cache_types()
+        logger.info(
+            "Server KV cache: k=%s v=%s (%s — %s)",
+            detected_kv_cache.get("k") or "unknown",
+            detected_kv_cache.get("v") or "unknown",
+            detected_kv_cache.get("source"),
+            detected_kv_cache.get("detail"),
+        )
+
     # Vision detection
     if hasattr(provider, "detect_vision"):
         has_vision = await provider.detect_vision()
@@ -2256,6 +2273,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 # answers with one number.
                 detected_context_size=detected_ctx_size,
                 local_model=model_name,
+                detected_kv_cache=detected_kv_cache,
                 api_port=api_port,
                 ws_port=ws_port,
             ))

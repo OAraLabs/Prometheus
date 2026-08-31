@@ -120,6 +120,30 @@ def preflight_endpoint(config: dict) -> None:
     log.info("gym preflight OK: %s (provider=%s) HTTP 200", url, provider)
 
 
+async def _probe_kv_cache(provider: Any) -> dict[str, Any]:
+    """K/V cache quantisation of the serving backend, or an explicit unknown.
+
+    Cloud providers have no such concept and llama.cpp builds that predate the
+    field do not publish one; both come back ``source="unavailable"`` /
+    ``"unreported"`` rather than a plausible default. Recording the absence is
+    the point — see GymStore's schema comment.
+    """
+    probe = getattr(provider, "detect_kv_cache_types", None)
+    if probe is None:
+        return {
+            "k": None, "v": None, "source": "unavailable",
+            "detail": f"{type(provider).__name__} does not expose a KV cache probe",
+        }
+    try:
+        return await probe()
+    except Exception as exc:  # noqa: BLE001 — a probe must never fail a run
+        log.warning("gym KV cache probe failed: %s", exc)
+        return {
+            "k": None, "v": None, "source": "unreachable",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def build_registry(workspace: Path, stub_tools: list[str]) -> ToolRegistry:
     """Real builtin tools; stub_tools get side-effect-free execute()."""
     from prometheus.tools.builtin import (
@@ -469,6 +493,18 @@ async def run_experiment(
         db_path=Path(os.path.expanduser("~/.prometheus/data/gym-telemetry.db"))
     )
 
+    # Backend K/V cache quantisation, probed ONCE per experiment and stamped
+    # on every row. Prometheus does not launch llama-server, so this is
+    # recorded, never set — and never guessed. An arm whose cache type is
+    # unrecorded must not be silently readable as f16, or a q8_0-vs-f16
+    # comparison quietly grades two arms it cannot actually tell apart.
+    kv_cache = await _probe_kv_cache(pipeline["provider"])
+    log.info(
+        "gym KV cache: k=%s v=%s (%s)",
+        kv_cache["k"] or "unknown", kv_cache["v"] or "unknown",
+        kv_cache["source"],
+    )
+
     workspace = Path(taskset.workspace)
     if workspace.exists():
         shutil.rmtree(workspace)
@@ -504,6 +540,9 @@ async def run_experiment(
                 error=result.error or None,
                 manifest_sha=manifest.sha256,
                 taskset_sha=taskset.sha256,
+                kv_cache_k=kv_cache["k"],
+                kv_cache_v=kv_cache["v"],
+                kv_cache_source=kv_cache["source"],
             )
             if progress:
                 # E/X = emission/execution; only when they differ does the

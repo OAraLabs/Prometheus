@@ -138,6 +138,7 @@ def create_app(
     device_store: Any | None = None,
     detected_context_size: int | None = None,
     local_model: str | None = None,
+    detected_kv_cache: dict[str, Any] | None = None,
 ) -> FastAPI:
     """Create the FastAPI application with all routes.
 
@@ -388,6 +389,7 @@ def create_app(
     # not a second copy of the rules.
     app.state.detected_context_size = detected_context_size
     app.state.local_model = local_model
+    app.state.detected_kv_cache = detected_kv_cache
 
     def _resolved_context_limit(
         model: str | None = None,
@@ -434,6 +436,14 @@ def create_app(
             "configured_limit": (config.get("context") or {}).get(
                 "effective_limit"
             ),
+            # The server's K/V cache quantisation — RECORDED, not governed.
+            # Prometheus does not launch llama-server, so there is deliberately
+            # no config key for this; a key here would misdescribe what the
+            # harness controls. None = never probed; a dict with
+            # source="unreported" = the server was asked and has no such
+            # field, which is different from "we did not look" and different
+            # again from a confirmed f16.
+            "kv_cache": getattr(app.state, "detected_kv_cache", None),
         }
     app.state.active_profile = (
         profile_state.name if profile_state is not None

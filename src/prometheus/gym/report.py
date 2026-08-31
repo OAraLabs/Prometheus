@@ -67,6 +67,41 @@ def _aggregate(rows: list[sqlite3.Row]) -> dict[str, Any]:
     return {"total": total, "by_category": dict(by_cat), "by_task": dict(by_task)}
 
 
+def _kv_cache(rows: list[sqlite3.Row]) -> str:
+    """One line describing the K/V cache the arm's runs actually ran on.
+
+    Rendered even — especially — when it is unknown. A q8_0-vs-f16 comparison
+    whose arms cannot be told apart afterwards is not a comparison, and the
+    only thing that makes that visible is printing the absence rather than
+    omitting the line. Rows predating the columns show as "not recorded",
+    which is distinct from a server that was asked and does not publish it.
+    """
+    seen: set[tuple[str | None, str | None, str | None]] = set()
+    for r in rows:
+        keys = r.keys()
+        if "kv_cache_source" not in keys:
+            seen.add((None, None, None))
+            continue
+        seen.add((r["kv_cache_k"], r["kv_cache_v"], r["kv_cache_source"]))
+
+    def _one(entry: tuple[str | None, str | None, str | None]) -> str:
+        k, v, source = entry
+        if source is None:
+            return "not recorded (run predates KV provenance)"
+        if source == "props":
+            return f"k={k} v={v} (reported by the server)"
+        return f"unknown — {source}; NOT inferred"
+
+    if not seen:
+        return "no runs"
+    if len(seen) > 1:
+        # Mixed cache types inside one arm invalidate it as an arm.
+        return "⚠️ MIXED within this arm: " + " · ".join(
+            sorted(_one(e) for e in seen)
+        )
+    return _one(next(iter(seen)))
+
+
 def _rate(passed: int, runs: int) -> str:
     return f"{passed}/{runs} ({passed / runs:.0%})" if runs else "0/0 (—)"
 
@@ -108,7 +143,11 @@ def render_report(
         f"({t['execution'] - t['emission']} run(s) saved by repair/unwrap)",
         f"- Adapter repairs: {t['repairs']} · malformed drops: {t['dropped']} · "
         f"breaker trips: {t['breaker_trips']} · loop feedback retries: {t['feedback_retries']}",
+        # Recorded, not governed — Prometheus does not launch llama-server.
+        f"- KV cache: {_kv_cache(rows)}",
     ]
+    if baseline_rows:
+        lines.append(f"- KV cache (baseline arm): {_kv_cache(baseline_rows)}")
     if t["harness_errors"]:
         lines.append(f"- ⚠️ harness-level errors (timeouts/crashes): {t['harness_errors']}")
     lines.append("")

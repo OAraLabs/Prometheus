@@ -39,6 +39,7 @@ async def launch_web(
     static_dir: str | None = None,
     detected_context_size: int | None = None,
     local_model: str | None = None,
+    detected_kv_cache: dict[str, Any] | None = None,
     api_host: str = "0.0.0.0",
     api_port: int = 8005,
     ws_host: str = "0.0.0.0",
@@ -95,6 +96,7 @@ async def launch_web(
         # window in scope, which is how /api/lcm came to publish a literal.
         detected_context_size=detected_context_size,
         local_model=local_model,
+        detected_kv_cache=detected_kv_cache,
     )
 
     # Wire agent state ref into the app
