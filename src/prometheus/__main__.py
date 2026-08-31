@@ -1373,6 +1373,11 @@ def main() -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         handlers=handlers,
     )
+    # `prometheus setup` verifies a Telegram token with a getMe call, and
+    # httpx logs that URL — token and all — at INFO. Arm redaction before
+    # any subcommand can make an outbound call.
+    from prometheus.security import install_log_redaction
+    install_log_redaction()
 
     # `oara setup` — the ONE canonical wizard (Onboarding Phase 0).
     # `--setup` / `--setup-gateway-only` are thin forwarding aliases.

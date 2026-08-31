@@ -2541,6 +2541,8 @@ def main() -> None:
 
     log_level = logging.DEBUG if args.debug else logging.INFO
 
+    from prometheus.security import install_log_redaction
+
     # ── Setup mode (Onboarding Phase 1) ─────────────────────────────────
     # No config anywhere → don't half-start on defaults (the old dead
     # end): boot the minimal pairing-only web server instead, so a client
@@ -2565,6 +2567,7 @@ def main() -> None:
             format="%(asctime)s %(name)s %(levelname)s %(message)s",
             handlers=[logging.StreamHandler(sys.stdout)],
         )
+        install_log_redaction()
         result = run_setup_mode()
         # Phase 2: POST /api/setup/complete exits the serve loop with a
         # restart sentinel. RE-CHECK for config — present now → fall
@@ -2599,11 +2602,15 @@ def main() -> None:
         ],
         force=True,
     )
-    # SPRINT G3: httpx logs every request URL at INFO — and the Telegram
-    # Bot API puts the bot TOKEN in the URL path (…/bot<token>/getMe), so
-    # httpx-at-INFO leaks the token into the daemon log on every Telegram
-    # API call. WARNING keeps real failures visible without the URLs.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # SPRINT G3 (#95): httpx logs every request URL at INFO — and the
+    # Telegram Bot API puts the bot TOKEN in the URL path
+    # (…/bot<token>/getMe), so httpx-at-INFO writes the token into the
+    # journal and daemon.log on every Telegram API call. The level gate
+    # lives inside install_log_redaction() now, alongside handler-level
+    # redaction that also covers the ERROR/traceback paths the gate sits
+    # above (httpx puts the URL in HTTPStatusError; telegram.py logs
+    # exception strings at ERROR).
+    install_log_redaction()
 
     # A config that exists and does not parse refuses the boot (load_config).
     # Caught here so the operator gets the same one-line refusal the two
