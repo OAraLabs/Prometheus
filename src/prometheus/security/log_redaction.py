@@ -44,21 +44,26 @@ REDACTED = "<redacted>"
 
 # Ordered; each is applied in turn.
 #
-# 1. Telegram token in an API URL path. Anchoring on the "/bot" segment
-#    rather than on the token's shape means a token that does not match
-#    the documented "<digits>:<35 chars>" form is still redacted, and it
-#    covers a custom API base_url (gateway/telegram_network.py allows
-#    one) as well as api.telegram.org.
-# 2. A bare Telegram token. Note this does NOT double-match case 1:
-#    there is no word boundary between the "t" of "/bot" and the leading
-#    digit, so the URL form needs its own pattern.
-#    The {30,} secret length keeps timestamps ("23:42:01") and
-#    "host:port" out of the blast radius.
+# 1. Telegram token behind a "bot" prefix. Anchored on the prefix rather
+#    than on the token's shape, so a token that does not match the
+#    documented "<digits>:<35 chars>" form is still redacted, and a
+#    custom API base_url (gateway/telegram_network.py allows one) is
+#    covered as well as api.telegram.org.
+#
+#    The prefix is "bot", NOT "/bot". Real logged data carries the token
+#    with no slash in front of it — a captured shell command reads
+#    TOK="bot<token>"; curl "https://api.telegram.org/$TOK/..." — and an
+#    URL-only pattern walks straight past it. That form also defeats
+#    pattern 2 below, because there is no word boundary between the "t"
+#    of "bot" and the leading digit. Between them the two patterns cover
+#    the token whether it is prefixed, embedded in a URL, or bare.
+# 2. A bare Telegram token. The {30,} secret length keeps timestamps
+#    ("23:42:01") and "host:port" out of the blast radius.
 # 3. Slack bot/app/user tokens (xoxb-/xoxp-/… and the app-level
 #    xapp-), which travel in headers and exception strings rather
 #    than URLs.
 _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"(/bot)(\d{5,}:[^/\s\"']+)"), r"\1" + REDACTED),
+    (re.compile(r"(bot)(\d{5,}:[^/\s\"'\\]+)"), r"\1" + REDACTED),
     (re.compile(r"\b\d{5,}:[A-Za-z0-9_-]{30,}\b"), REDACTED),
     (re.compile(r"\b(?:xox[abprs]|xapp)-[A-Za-z0-9-]{10,}"), REDACTED),
 )

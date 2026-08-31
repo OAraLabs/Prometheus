@@ -70,6 +70,27 @@ def test_redacts_the_exact_incident_line():
     assert "getUpdates" in out and "200 OK" in out
 
 
+def test_redacts_the_slashless_bot_prefix_form():
+    """The shape that actually appears in captured tool output.
+
+    A stored shell command reads TOK="bot<token>"; curl ".../$TOK/getMe".
+    The token has no slash in front of it, so a "/bot"-anchored pattern
+    walks straight past it — and the bare-token pattern cannot catch it
+    either, because there is no word boundary between the "t" of "bot"
+    and the leading digit. Found in telemetry.db, training.db and a
+    trajectories/ export, i.e. in fine-tune capture data.
+    """
+    line = (
+        '{"name": "bash", "input": {"command": "TOK=\\"bot'
+        + FAKE_TOKEN
+        + '\\"; curl -s https://api.telegram.org/$TOK/getMe"}}'
+    )
+    assert FAKE_TOKEN in line, "fixture no longer contains the token"
+    out = redact_secrets(line)
+    assert FAKE_TOKEN not in out
+    assert REDACTED in out
+
+
 def test_redacts_bare_token_and_custom_api_base():
     assert FAKE_TOKEN not in redact_secrets(f"token={FAKE_TOKEN}")
     # gateway/telegram_network.py allows overriding the API base URL —
