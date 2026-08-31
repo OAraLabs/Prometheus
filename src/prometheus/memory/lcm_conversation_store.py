@@ -107,6 +107,19 @@ class LCMConversationStore:
                 title      TEXT NOT NULL,
                 updated_at REAL NOT NULL
             );
+
+            -- Per-session agent profile. DURABLE on purpose: the model router's
+            -- per-session overrides live in a plain dict on the router instance and
+            -- vanish on restart, which is the whole class of defect where a setting
+            -- silently reverts and nobody can tell it did. A profile chosen for a
+            -- conversation is a property OF the conversation, so it outlives the
+            -- process. Absence means "use the daemon-wide active profile" — the row
+            -- is only ever written when someone chose something.
+            CREATE TABLE IF NOT EXISTS session_profiles (
+                session_id TEXT PRIMARY KEY,
+                profile    TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
         """)
         self._conn.commit()
         self._migrate_add_content_json()
@@ -680,6 +693,39 @@ class LCMConversationStore:
                 (session_id, clean, time.time()),
             )
         self._conn.commit()
+
+    def set_session_profile(self, session_id: str, profile: str) -> None:
+        """Bind a session to an agent profile. Blank CLEARS the binding.
+
+        Mirrors :meth:`set_session_title` deliberately, including the clear-on-blank
+        rule: absence has to stay a clean present/absent signal, because absence is
+        what means "follow the daemon-wide active profile". Storing an empty string
+        would make "no choice" and "chose nothing" indistinguishable.
+
+        The NAME is not validated here — the store does not know what profiles exist.
+        Validation belongs at the write surface, where a bad name can be refused with
+        a reason instead of silently binding a session to a profile that will never
+        resolve.
+        """
+        clean = (profile or "").strip()
+        if not clean:
+            self._conn.execute(
+                "DELETE FROM session_profiles WHERE session_id = ?", (session_id,)
+            )
+        else:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO session_profiles (session_id, profile, updated_at)"
+                " VALUES (?, ?, ?)",
+                (session_id, clean, time.time()),
+            )
+        self._conn.commit()
+
+    def get_session_profile(self, session_id: str) -> str | None:
+        """The profile bound to this session, or None to follow the global default."""
+        row = self._conn.execute(
+            "SELECT profile FROM session_profiles WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return row[0] if row else None
 
     def get_session_title(self, session_id: str) -> str | None:
         """The session's title, or None if it has none."""

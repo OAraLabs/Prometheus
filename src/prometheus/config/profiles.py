@@ -8,6 +8,8 @@ builtin override it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -181,9 +183,22 @@ class ActiveProfileState:
     whichever name was current when its advertisement froze.
     """
 
-    def __init__(self, store: ProfileStore, default_name: str = "full") -> None:
+    def __init__(
+        self,
+        store: ProfileStore,
+        default_name: str = "full",
+        session_lookup: "Callable[[str], str | None] | None" = None,
+    ) -> None:
         self._store = store
+        # Optional per-session binding, injected rather than imported: this module is
+        # config and must not reach into memory/. PUBLIC and settable because the daemon
+        # constructs this state hundreds of lines before the LCM store exists, so the
+        # lookup is attached late — the same shape as session_manager.lcm_engine.
+        # Without it every session follows the global name: exactly the old behaviour.
+        self.session_lookup = session_lookup
         self._name = default_name if store.get(default_name) else "full"
+        # Names already warned about, so a bound-but-deleted profile logs once, not per turn.
+        self._warned_missing: set[str] = set()
         if self._name != default_name:
             log.warning(
                 "profiles.default names unknown profile %r — using 'full'",
@@ -202,9 +217,36 @@ class ActiveProfileState:
             self._name = profile.name
         return profile
 
-    def get(self) -> AgentProfile | None:
-        """The active profile, resolved fresh so custom-profile edits and
-        store reloads are honored."""
+    def get(self, session_id: str | None = None) -> AgentProfile | None:
+        """The profile for this run, resolved fresh so custom-profile edits and
+        store reloads are honored.
+
+        A session's OWN binding wins over the daemon-wide name. The argument is
+        optional so every existing caller — three gateways and both loop
+        constructions — keeps working unchanged and simply gets the global answer.
+
+        An unknown bound name falls back to the global profile and says so once:
+        a profile can be deleted or renamed after a session was bound to it, and
+        the alternatives are both worse than falling back. Advertising NO tools
+        would break the session silently; trusting the dangling name would filter
+        the catalog against a profile that no longer exists.
+        """
+        if session_id and self.session_lookup is not None:
+            try:
+                bound = self.session_lookup(session_id)
+            except Exception:
+                log.warning("session profile lookup failed for %s", session_id, exc_info=True)
+                bound = None
+            if bound:
+                profile = self._store.get(bound)
+                if profile is not None:
+                    return profile
+                if bound not in self._warned_missing:
+                    self._warned_missing.add(bound)
+                    log.warning(
+                        "session %s is bound to unknown profile %r — falling back to %r",
+                        session_id, bound, self._name,
+                    )
         return self._store.get(self._name)
 
 

@@ -922,7 +922,17 @@ async def _run_loop(
     active_profile = None
     if tools_enabled and tool_schema and context.profile_resolver is not None:
         try:
-            active_profile = context.profile_resolver()
+            # Pass the run's session so a session-bound profile wins over the global
+            # one. BOTH ARITIES are supported deliberately: a resolver written before
+            # per-session binding takes no argument, and letting that raise would be
+            # caught below and silently advertise the UNFILTERED catalog — a profile
+            # mechanism disabled by a signature mismatch, which is precisely how the
+            # 2026-08-11 survey found this whole feature was a label. Narrow TypeError
+            # only, so a real error inside the resolver still surfaces.
+            try:
+                active_profile = context.profile_resolver(context.session_id)
+            except TypeError:
+                active_profile = context.profile_resolver()
         except Exception:
             log.warning("profile resolver failed — advertising unfiltered", exc_info=True)
         if active_profile is not None:
