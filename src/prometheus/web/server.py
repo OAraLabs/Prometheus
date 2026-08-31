@@ -256,6 +256,10 @@ def create_app(
         return [{
             "id": d.id, "name": d.name, "platform": d.platform,
             "created_at": d.created_at, "last_seen_at": d.last_seen_at,
+            # #348. last_seen_at is the DEVICE reaching us; these are us reaching the DEVICE.
+            # A phone can be seen every minute and have received nothing for a week, and before
+            # this there was no way to tell that from a working push path.
+            "last_push_at": d.last_push_at, "last_push_status": d.last_push_status,
             "revoked_at": d.revoked_at, "is_self": d.id == self_id,
         } for d in _devices_or_create().list_devices()]
 

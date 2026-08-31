@@ -193,6 +193,22 @@ class PushDispatcher:
         identities = getattr(self._bridge, "_ws_identity", {}) or {}
         return {i.id for i in identities.values() if getattr(i, "id", "") != "global"}
 
+    def _record(self, method: str, device_id: str, status: Any, outcome: str | None = None) -> None:
+        """Recording is bookkeeping, never a reason to fail a delivery.
+
+        Takes the method NAME, not a bound method: `self._store.record_push_success` is resolved
+        when the ARGUMENT is built, so an older store without it raised before this function was
+        ever entered and no try block here could have caught it. Looked up explicitly instead —
+        a missing method is a known state, not an exception to absorb.
+        """
+        fn = getattr(self._store, method, None)
+        if fn is None:
+            return  # a store predating #348 — skip the bookkeeping, keep the push
+        try:
+            fn(device_id, status) if outcome is None else fn(device_id, outcome, status)
+        except Exception:
+            logger.warning("push accounting failed for device %s", device_id, exc_info=True)
+
     async def _deliver(self, target: Any, body: dict) -> None:
         if target.push_failures >= FAILURE_MUTE_THRESHOLD:
             return  # muted until a success resets the count — no storm
@@ -203,19 +219,31 @@ class PushDispatcher:
         )
         self._account(target, result)
 
-    def _account(self, target: Any, result: Any) -> None:
+    def _account(self, target: Any, result: Any, kind: str = "push") -> None:
+        # ONE line per send, whatever happens (#348). Before this, apns.py logged nothing at all
+        # and only failures were recorded, so a successful push left no trace anywhere and
+        # `push_failures == 0` meant "delivered" and "never attempted" equally. The device id is
+        # safe to log; the APNs token is never touched here.
+        logger.info(
+            "push %s → device %s: %s%s",
+            kind, target.id, result.outcome,
+            f" (status {result.status})" if getattr(result, "status", None) is not None else "",
+        )
         if result.outcome == "ok":
             if target.push_failures:
                 self._store.reset_push_failures(target.id)
             self._unregistered_logged.discard(target.id)
+            self._record("record_push_success", target.id, getattr(result, "status", None))
         elif result.outcome == "unregistered":
             # Permanent, and logged ONCE.
             self._store.clear_push(target.id)
+            self._record("record_push_attempt", target.id, getattr(result, "status", None), "unregistered")
             if target.id not in self._unregistered_logged:
                 self._unregistered_logged.add(target.id)
                 logger.info("APNs says device %s is unregistered — push cleared",
                             target.id)
         else:
+            self._record("record_push_attempt", target.id, getattr(result, "status", None), "failed")
             count = self._store.record_push_failure(target.id)
             if count == FAILURE_MUTE_THRESHOLD:
                 logger.warning("device %s muted after %d consecutive push failures",
