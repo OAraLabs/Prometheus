@@ -108,6 +108,19 @@ class LCMConversationStore:
                 updated_at REAL NOT NULL
             );
 
+            -- Pinned sessions. A pin is a property OF the conversation, not of
+            -- the client that set it: Beacon Desktop already pins, but stores it
+            -- in its own local settings, so a pin never reached the phone and two
+            -- surfaces disagreed about the same session. Kept here, beside the
+            -- title, for the same reason — outside the append-only rows, so a pin
+            -- or unpin never rewrites history. Presence IS the pin; unpinning
+            -- deletes the row rather than storing false, so the column stays a
+            -- clean present/absent signal (same discipline as a blank title).
+            CREATE TABLE IF NOT EXISTS session_pins (
+                session_id TEXT PRIMARY KEY,
+                pinned_at  REAL NOT NULL
+            );
+
             -- Per-session agent profile. DURABLE on purpose: the model router's
             -- per-session overrides live in a plain dict on the router instance and
             -- vanish on restart, which is the whole class of defect where a setting
@@ -646,10 +659,12 @@ class LCMConversationStore:
                    MIN(m.timestamp)        AS first_timestamp,
                    MAX(m.timestamp)        AS last_timestamp,
                    MAX(m.rowid)            AS watermark,
-                   ti.title                AS title
+                   ti.title                AS title,
+                   pi.pinned_at            AS pinned_at
             FROM lcm_messages m
             LEFT JOIN session_tombstones t ON t.session_id = m.session_id
             LEFT JOIN session_titles ti ON ti.session_id = m.session_id
+            LEFT JOIN session_pins pi ON pi.session_id = m.session_id
             GROUP BY m.session_id
             HAVING t.deleted_at IS NULL OR MAX(m.timestamp) > t.deleted_at
             ORDER BY MAX(m.timestamp) DESC
@@ -693,6 +708,32 @@ class LCMConversationStore:
                 (session_id, clean, time.time()),
             )
         self._conn.commit()
+
+    def set_session_pinned(self, session_id: str, pinned: bool) -> None:
+        """Pin or unpin a session. Unpinning DELETES the row.
+
+        Presence is the pin — storing ``false`` would make "never pinned" and
+        "unpinned" indistinguishable in the column, and every reader would have
+        to know which falsy value it was looking at.
+        """
+        if pinned:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO session_pins (session_id, pinned_at)"
+                " VALUES (?, ?)",
+                (session_id, time.time()),
+            )
+        else:
+            self._conn.execute(
+                "DELETE FROM session_pins WHERE session_id = ?", (session_id,)
+            )
+        self._conn.commit()
+
+    def is_session_pinned(self, session_id: str) -> bool:
+        """True when a pin row exists for this session."""
+        row = self._conn.execute(
+            "SELECT 1 FROM session_pins WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return row is not None
 
     def set_session_profile(self, session_id: str, profile: str) -> None:
         """Bind a session to an agent profile. Blank CLEARS the binding.
