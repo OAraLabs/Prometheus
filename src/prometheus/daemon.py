@@ -2250,6 +2250,12 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 # when no servers configured, and the routes then answer
                 # honestly instead of inventing state.
                 mcp_runtime=mcp_runtime,
+                # The window the server actually reported, and the model it
+                # reported it for. Same two values the compactor and the
+                # Telegram /context command are built from, so every surface
+                # answers with one number.
+                detected_context_size=detected_ctx_size,
+                local_model=model_name,
                 api_port=api_port,
                 ws_port=ws_port,
             ))

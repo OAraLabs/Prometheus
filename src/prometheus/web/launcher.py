@@ -37,6 +37,8 @@ async def launch_web(
     gateway_adapter: Any | None = None,
     mcp_runtime: Any | None = None,
     static_dir: str | None = None,
+    detected_context_size: int | None = None,
+    local_model: str | None = None,
     api_host: str = "0.0.0.0",
     api_port: int = 8005,
     ws_host: str = "0.0.0.0",
@@ -89,6 +91,10 @@ async def launch_web(
         static_dir=static_dir,
         skill_creator=skill_creator,
         device_store=device_store,
+        # The resolved-budget inputs. Without these the web app has no context
+        # window in scope, which is how /api/lcm came to publish a literal.
+        detected_context_size=detected_context_size,
+        local_model=local_model,
     )
 
     # Wire agent state ref into the app
