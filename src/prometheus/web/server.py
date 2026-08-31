@@ -1042,6 +1042,46 @@ def create_app(
             store.tombstone_session(session_id)
         return {"ok": True}
 
+    @app.post("/api/sessions/{session_id}/purge")
+    async def purge_session(session_id: str, request: Request):
+        """IRREVERSIBLY delete a session's content (#353). Body: {"confirm": "<session_id>"}.
+
+        DELETE /api/sessions/{id} is a tombstone: it hides a session and leaves
+        the rows. That is the right answer to "clear my list" and the wrong one
+        to "I pasted a customer's details in there" — and the second question is
+        the one a self-hosted user expects a local database to be able to answer.
+
+        The confirm field is friction on purpose. Naming the session twice is
+        cheap for a deliberate purge and impossible for an accidental one; there
+        is no undo behind this.
+
+        Forks are NOT followed. A branch holds its own copies, so it survives —
+        reported as `branches` so the caller can purge those too rather than
+        discover them later.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict) or body.get("confirm") != session_id:
+            return JSONResponse(status_code=400, content={
+                "error": "purge requires {\"confirm\": \"<session_id>\"} matching the path",
+                "session_id": session_id,
+            })
+        lcm = getattr(app.state, "lcm_engine", None)
+        store = lcm.conversation_store if lcm is not None else None
+        if store is None:
+            # NOT {"ok": true}: with no store nothing was purged, and saying
+            # otherwise is the failure #349 was about.
+            return JSONResponse(status_code=503, content={
+                "error": "no LCM store; nothing was purged", "session_id": session_id})
+        branches = [f["session_id"] for f in store.list_session_forks(session_id)]
+        counts = store.purge_session(session_id)
+        if session_mgr:
+            session_mgr.remove(session_id)
+        return {"ok": True, "session_id": session_id, "purged": counts,
+                "branches": branches, "reversible": False}
+
     @app.put("/api/sessions/{session_id}/title")
     async def set_session_title(session_id: str, request: Request):
         """Manual rename (GRAFT-MOBILE-BRIDGE 7). Body: ``{"title": str}``.
