@@ -1103,6 +1103,71 @@ def create_app(
         store.set_session_pinned(session_id, raw)
         return {"ok": True, "session_id": session_id, "pinned": raw}
 
+    @app.post("/api/sessions/{session_id}/fork")
+    async def fork_session(session_id: str, request: Request):
+        """Fork a conversation at a point (B4). Body: ``{"at_rowid": int, "session_id"?: str}``.
+
+        A fork is a NEW SESSION holding copies of history up to and including ``at_rowid``. That
+        is the whole design (see #340): every consumer — `?since=` cursors, LCM assembly, FTS,
+        the linear gateways — keeps working unchanged, because a fork is not a new shape, it is
+        another session.
+
+        Edit-and-retry composes from this and needs no daemon support of its own: fork at the
+        message BEFORE the one being edited, then send the edited text into the fork. The daemon
+        never has to know an edit happened.
+
+        The new id inherits the origin's gateway prefix so it lands in the same surface the
+        original belongs to; a caller may supply its own instead.
+        """
+        import uuid as _uuid
+
+        lcm = getattr(app.state, "lcm_engine", None)
+        store = lcm.conversation_store if lcm is not None else None
+        if store is None:
+            return JSONResponse({"error": "no durable store — fork unavailable"}, status_code=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+        raw = body.get("at_rowid")
+        try:
+            at_rowid = int(raw)
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "at_rowid must be an integer"}, status_code=400)
+
+        new_id = body.get("session_id")
+        if new_id is not None and (not isinstance(new_id, str) or not new_id.strip()):
+            return JSONResponse({"error": "session_id must be a non-empty string"}, status_code=400)
+        if not new_id:
+            prefix = session_id.split(":", 1)[0] if ":" in session_id else "session"
+            new_id = f"{prefix}:{_uuid.uuid4().hex}"
+        if new_id == session_id:
+            # Forking onto itself would interleave copies with the original's own history.
+            return JSONResponse({"error": "a fork cannot target its own origin"}, status_code=400)
+
+        try:
+            record = store.fork_session(session_id, at_rowid, new_id)
+        except ValueError as exc:
+            # Nothing at or before that point — a caller error, not an empty fork. Returning an
+            # empty session would look like success and behave like a lost conversation.
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        return record
+
+    @app.get("/api/sessions/{session_id}/fork")
+    async def get_session_fork(session_id: str):
+        """Both directions of the link: where this session came FROM, and what was forked from it."""
+        lcm = getattr(app.state, "lcm_engine", None)
+        store = lcm.conversation_store if lcm is not None else None
+        if store is None:
+            return {"session_id": session_id, "origin": None, "forks": []}
+        return {
+            "session_id": session_id,
+            "origin": store.get_session_fork(session_id),
+            "forks": store.list_session_forks(session_id),
+        }
+
     @app.get("/api/sessions/{session_id}/profile")
     async def get_session_profile(session_id: str):
         """Which profile this session runs under, and WHY.

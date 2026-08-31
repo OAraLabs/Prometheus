@@ -128,6 +128,17 @@ class LCMConversationStore:
             -- conversation is a property OF the conversation, so it outlives the
             -- process. Absence means "use the daemon-wide active profile" — the row
             -- is only ever written when someone chose something.
+            -- Edit/branch (B4). A fork is a NEW SESSION holding copies of history up to a
+            -- point, so every consumer stays linear; this table is the only thing that
+            -- remembers the relationship. Keyed by the CHILD: a session has at most one
+            -- origin, while an origin may be forked many times.
+            CREATE TABLE IF NOT EXISTS session_forks (
+                session_id     TEXT PRIMARY KEY,
+                origin_session TEXT NOT NULL,
+                origin_rowid   INTEGER NOT NULL,
+                created_at     REAL NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS session_profiles (
                 session_id TEXT PRIMARY KEY,
                 profile    TEXT NOT NULL,
@@ -734,6 +745,87 @@ class LCMConversationStore:
             "SELECT 1 FROM session_pins WHERE session_id = ?", (session_id,)
         ).fetchone()
         return row is not None
+
+    def fork_session(self, origin_session: str, at_rowid: int, new_session_id: str) -> dict:
+        """Copy `origin_session`'s history up to and including `at_rowid` into a new session.
+
+        The copies get FRESH uuids and therefore fresh rowids, which is what keeps every other
+        consumer linear: the original's rows are untouched, its `?since=` cursors do not move,
+        and its summaries stay bound to its own message ids (summaries reference uuids, so the
+        fork simply starts without any and compacts on its own schedule).
+
+        `turn_index`, `timestamp`, `provenance` and `is_trusted` are copied verbatim — a fork is
+        the same conversation up to the branch point, and rewriting its timestamps would make it
+        look like it happened now. `compacted` resets to 0 because insert_message hardcodes it;
+        the fork therefore carries fuller raw context until it compacts itself.
+
+        Returns the provenance record. Raises ValueError if the origin has nothing at or before
+        `at_rowid` — forking from a point that does not exist is a caller error, not an empty fork.
+        """
+        rows = self._conn.execute(
+            "SELECT rowid AS row_id, id, turn_index, role, content, content_json,"
+            " token_count, timestamp, provenance, is_trusted"
+            " FROM lcm_messages WHERE session_id = ? AND rowid <= ?"
+            " ORDER BY rowid",
+            (origin_session, int(at_rowid)),
+        ).fetchall()
+        if not rows:
+            raise ValueError(
+                f"no messages in {origin_session!r} at or before rowid {at_rowid}"
+            )
+
+        from prometheus.memory.lcm_types import MessagePart
+
+        for r in rows:
+            self.insert_message(MessagePart(
+                session_id=new_session_id,
+                turn_index=r["turn_index"],
+                role=r["role"],
+                content=r["content"],
+                content_json=r["content_json"],
+                token_count=r["token_count"],
+                timestamp=r["timestamp"],
+                provenance=r["provenance"],
+                is_trusted=bool(r["is_trusted"]),
+            ))
+
+        created = time.time()
+        self._conn.execute(
+            "INSERT OR REPLACE INTO session_forks"
+            " (session_id, origin_session, origin_rowid, created_at) VALUES (?, ?, ?, ?)",
+            (new_session_id, origin_session, int(at_rowid), created),
+        )
+        self._conn.commit()
+        return {
+            "session_id": new_session_id,
+            "origin_session": origin_session,
+            "origin_rowid": int(at_rowid),
+            "copied": len(rows),
+            "created_at": created,
+        }
+
+    def get_session_fork(self, session_id: str) -> dict | None:
+        """Where this session came from, or None if it was not forked."""
+        row = self._conn.execute(
+            "SELECT origin_session, origin_rowid, created_at FROM session_forks"
+            " WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "origin_session": row["origin_session"],
+            "origin_rowid": row["origin_rowid"],
+            "created_at": row["created_at"],
+        }
+
+    def list_session_forks(self, origin_session: str) -> list[dict]:
+        """Every fork taken FROM this session, oldest first — the other direction of the link."""
+        rows = self._conn.execute(
+            "SELECT session_id, origin_rowid, created_at FROM session_forks"
+            " WHERE origin_session = ? ORDER BY created_at", (origin_session,)
+        ).fetchall()
+        return [{"session_id": r["session_id"], "origin_rowid": r["origin_rowid"],
+                 "created_at": r["created_at"]} for r in rows]
 
     def set_session_profile(self, session_id: str, profile: str) -> None:
         """Bind a session to an agent profile. Blank CLEARS the binding.
