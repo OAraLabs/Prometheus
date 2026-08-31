@@ -84,8 +84,11 @@ def test_shape_is_consistent_and_keeps_count_and_created_at(tmp_path):
     # in-memory working set exists; False = durable-only (restored) session.
     # "title" joined with GRAFT-MOBILE-BRIDGE 7: null until generated from the
     # first exchange or set via PUT /api/sessions/{id}/title.
-    assert set(row.keys()) == {"session_id", "gateway", "created_at", "last_active", "message_count", "watermark", "live", "title"}
+    # "pinned" joined with feat/session-pinning: a bool, false unless someone
+    # pinned the session — daemon-side so every client agrees (tests/test_session_pins.py).
+    assert set(row.keys()) == {"session_id", "gateway", "created_at", "last_active", "message_count", "watermark", "live", "title", "pinned"}
     assert row["live"] is True
+    assert row["pinned"] is False
     assert isinstance(row["watermark"], int)
     assert isinstance(row["last_active"], (int, float))
     assert row["message_count"] == 1  # kept

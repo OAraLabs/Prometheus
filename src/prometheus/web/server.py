@@ -668,6 +668,10 @@ def create_app(
                     # or set via PUT …/title; null until either happens, and a
                     # client falls back to its own snippet.
                     "title": row.get("title"),
+                    # Daemon-side so a pin set on one client shows on every
+                    # other. Reported as a bool — the store keeps a timestamp,
+                    # but no client should have to read presence out of a time.
+                    "pinned": row.get("pinned_at") is not None,
                     "live": False,
                 }
         if session_mgr:
@@ -683,6 +687,10 @@ def create_app(
                     "message_count": len(session.messages),
                     "watermark": store.max_rowid(sid) if store is not None else 0,
                     "title": store.get_session_title(sid) if store is not None else None,
+                    # This branch REPLACES the durable dict above, so it must
+                    # restate pinned — dropping it would make a pin vanish the
+                    # moment its session went live.
+                    "pinned": store.is_session_pinned(sid) if store is not None else False,
                     "live": True,
                 }
         return sorted(
@@ -1063,6 +1071,37 @@ def create_app(
         title = clip_title(raw or "")
         store.set_session_title(session_id, title)
         return {"ok": True, "session_id": session_id, "title": title or None}
+
+    @app.put("/api/sessions/{session_id}/pin")
+    async def set_session_pin(session_id: str, request: Request):
+        """Pin or unpin a session. Body: ``{"pinned": bool}``.
+
+        DAEMON-SIDE ON PURPOSE. Beacon Desktop already pins, in its own local
+        settings, so a pin set at the desk never reached the phone and the two
+        surfaces disagreed about the same conversation. A pin is a property of
+        the CONVERSATION, like its title — so it lives with the conversation and
+        every client sees the same answer.
+
+        Unpinning deletes the row; ``GET /api/sessions`` reports ``pinned`` as a
+        plain bool so a client never has to interpret a timestamp.
+        """
+        lcm = getattr(app.state, "lcm_engine", None)
+        store = lcm.conversation_store if lcm is not None else None
+        if store is None:
+            return JSONResponse(
+                {"error": "no durable store — pins unavailable"}, status_code=503
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        raw = body.get("pinned") if isinstance(body, dict) else None
+        if not isinstance(raw, bool):
+            return JSONResponse(
+                {"error": "pinned must be true or false"}, status_code=400
+            )
+        store.set_session_pinned(session_id, raw)
+        return {"ok": True, "session_id": session_id, "pinned": raw}
 
     @app.get("/api/sessions/{session_id}/profile")
     async def get_session_profile(session_id: str):
