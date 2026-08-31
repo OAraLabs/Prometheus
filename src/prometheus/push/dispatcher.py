@@ -185,7 +185,7 @@ class PushDispatcher:
                 payload=body, push_type="liveactivity", priority=5,
                 topic=f"{target.bundle_id or self._sender.config.topic}.push-type.liveactivity",
             )
-            self._account(target, result)
+            self._account(target, result, "liveactivity")
 
     # ------------------------------------------------------------------
 
@@ -217,7 +217,8 @@ class PushDispatcher:
             payload=body, push_type="alert", priority=10,
             topic=target.bundle_id or None,
         )
-        self._account(target, result)
+        # The category, so the log reads "push APPROVAL → device …" rather than "push push → …".
+        self._account(target, result, str(((body.get("aps") or {}).get("category")) or "alert"))
 
     def _account(self, target: Any, result: Any, kind: str = "push") -> None:
         # ONE line per send, whatever happens (#348). Before this, apns.py logged nothing at all
