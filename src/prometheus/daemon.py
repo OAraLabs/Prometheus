@@ -1416,6 +1416,15 @@ async def run_daemon(args: argparse.Namespace) -> None:
         # into its LoopContext and the microcompactor's is_ingested check has
         # a real engine instead of the always-None dead branch.
         agent_loop.lcm_engine = lcm_engine
+        # Per-session profile binding: attach the durable lookup now that the store
+        # exists. Constructed above, long before this point — without this line the
+        # binding is stored and never read, which is the inert-feature shape.
+        if profile_state is not None:
+            try:
+                profile_state.session_lookup = lcm_engine.conversation_store.get_session_profile
+                logger.info("Per-session profile binding wired")
+            except Exception as exc:
+                logger.warning("per-session profile binding unavailable: %s", exc)
 
     # Memory extractor (optional, from Sprint 5)
     memory_recall = None  # set below when the store comes up; web path reads it

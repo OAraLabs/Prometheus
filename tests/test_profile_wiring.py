@@ -103,7 +103,7 @@ def test_the_provider_sees_the_research_catalog_not_the_full_one():
     profile advertises exactly its (registered) names — a strict subset."""
     research = _BUILTINS["research"]
     provider = _RecordingProvider()
-    _drive(_context(provider, resolver=lambda: research))
+    _drive(_context(provider, resolver=lambda session_id=None: research))
 
     advertised = _advertised(provider)
     registry_names = {t.name for t in create_tool_registry({}).list_tools()}
@@ -124,7 +124,7 @@ def test_no_resolver_and_full_profile_both_advertise_everything():
     assert _advertised(bare) == registry_names
 
     full = _RecordingProvider()
-    _drive(_context(full, resolver=lambda: _BUILTINS["full"]))
+    _drive(_context(full, resolver=lambda session_id=None: _BUILTINS["full"]))
     assert _advertised(full) == registry_names
 
 
@@ -155,7 +155,7 @@ def test_a_profile_that_filters_everything_falls_back_loud(caplog):
     broken = AgentProfile(name="broken", tools=["no_such_tool_anywhere"])
     provider = _RecordingProvider()
     with caplog.at_level("ERROR"):
-        _drive(_context(provider, resolver=lambda: broken))
+        _drive(_context(provider, resolver=lambda session_id=None: broken))
 
     registry_names = {t.name for t in create_tool_registry({}).list_tools()}
     assert _advertised(provider) == registry_names, "fallback must be unfiltered"
@@ -184,7 +184,7 @@ def test_advertisement_telemetry_records_the_profile():
     telemetry = MagicMock()
     provider = _RecordingProvider()
     _drive(_context(
-        provider, resolver=lambda: _BUILTINS["research"], telemetry=telemetry,
+        provider, resolver=lambda session_id=None: _BUILTINS["research"], telemetry=telemetry,
     ))
     runs = [
         kw for _, kw in [

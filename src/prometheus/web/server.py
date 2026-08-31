@@ -1060,6 +1060,63 @@ def create_app(
         store.set_session_title(session_id, title)
         return {"ok": True, "session_id": session_id, "title": title or None}
 
+    @app.get("/api/sessions/{session_id}/profile")
+    async def get_session_profile(session_id: str):
+        """Which profile this session runs under, and WHY.
+
+        `source` is the point: `session` means someone chose it for this conversation,
+        `global` means it follows the daemon-wide active profile. Returning only the
+        effective name would make "chosen" and "inherited" indistinguishable — and a
+        client cannot offer "reset to automatic" for a value it cannot tell apart from
+        a default.
+        """
+        lcm = getattr(app.state, "lcm_engine", None)
+        store = lcm.conversation_store if lcm is not None else None
+        bound = store.get_session_profile(session_id) if store is not None else None
+        global_name = getattr(profile_state, "name", None) if profile_state else None
+        known = bound is not None and profile_state is not None and profile_state._store.get(bound) is not None
+        return {
+            "session_id": session_id,
+            "profile": bound,
+            "effective": bound if known else global_name,
+            "source": "session" if known else "global",
+            # A binding whose profile no longer exists is reported, not hidden: the
+            # session silently runs on the global profile and the client should say so.
+            "dangling": bool(bound) and not known,
+        }
+
+    @app.put("/api/sessions/{session_id}/profile")
+    async def set_session_profile(session_id: str, request: Request):
+        """Bind this session to a profile. Body: ``{"profile": str}``; blank CLEARS it.
+
+        The name is validated against the real profile store and an unknown one is a
+        400 with the valid names listed. Storing it unchecked would bind a session to
+        something that can never resolve, and the failure would surface later as
+        "why is this conversation not using my profile" with nothing to point at.
+        """
+        lcm = getattr(app.state, "lcm_engine", None)
+        store = lcm.conversation_store if lcm is not None else None
+        if store is None:
+            return JSONResponse({"error": "no durable store — session profiles unavailable"}, status_code=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        raw = body.get("profile") if isinstance(body, dict) else None
+        if raw is not None and not isinstance(raw, str):
+            return JSONResponse({"error": "profile must be a string"}, status_code=400)
+        name = (raw or "").strip()
+        if name:
+            if profile_state is None:
+                return JSONResponse({"error": "profile store unavailable"}, status_code=503)
+            if profile_state._store.get(name) is None:
+                known = profile_state._store.names()
+                return JSONResponse(
+                    {"error": f"unknown profile {name!r}", "known": known}, status_code=400
+                )
+        store.set_session_profile(session_id, name)
+        return {"ok": True, "session_id": session_id, "profile": name or None}
+
     # ── Media (#339, Phase 3b — Beacon B3) ──────────────────────────
     # Serve stored image bytes by reference: history carries image blocks
     # as {source_path, description} with the base64 dropped (Phase 3a);
