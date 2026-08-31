@@ -1166,6 +1166,7 @@ class WebSocketBridge:
                 "payload": done_payload,
             })
             await self._end_live_activity(session_id, done_payload)
+            await self._emit_turn_completed(session_id, accumulated)
             self._schedule_session_title(session_id, session)
             return accumulated, last_usage
 
@@ -1206,6 +1207,11 @@ class WebSocketBridge:
                 "payload": done_payload,
             })
             await self._end_live_activity(session_id, done_payload)
+            # NO turn_completed here, deliberately (#346). This is the INTERRUPT path: the Live
+            # Activity must still end, but "Turn complete" is false for a turn the user stopped,
+            # and whoever pressed stop is by definition at a live client. The asymmetry is the
+            # point — emitting here would push a completion notice for something that did not
+            # complete.
             return accumulated, last_usage
 
         except Exception as e:
@@ -1338,6 +1344,40 @@ class WebSocketBridge:
             await dispatcher.on_chat_done(session_id, done_payload)
         except Exception:
             logger.debug("live activity end push failed", exc_info=True)
+
+    async def _emit_turn_completed(self, session_id: str, summary: str) -> None:
+        """Emit ``turn_completed`` for a turn that finished HERE (#346).
+
+        Before this it was emitted in exactly one place — ``gateway/telegram.py`` — so a turn
+        started from Beacon, the REST endpoint, or any WS client completed and raised nothing.
+        The push dispatcher maps ``turn_completed → TURN`` and delivers it to devices with no
+        live socket, which is precisely the backgrounded-phone case; with no signal it had
+        nothing to deliver, and there was no error anywhere because nothing had failed. A user
+        with a correctly paired phone got silence from every desktop turn.
+
+        ``summary`` is the reply's first line. The push body prefers it over the session id
+        (``_push_quiet``), so the phone can say what finished rather than which row it was.
+
+        Never raises: a broken bus must not break the reply path — the same rule the Telegram
+        emitter follows.
+        """
+        bus = getattr(self, "signal_bus", None)
+        if bus is None:
+            return
+        try:
+            from prometheus.sentinel.signals import ActivitySignal
+
+            await bus.emit(ActivitySignal(
+                kind="turn_completed",
+                source="web",
+                payload={
+                    "session_id": session_id,
+                    "summary": (summary or "").strip().splitlines()[0][:200] if (summary or "").strip() else "",
+                    "provenance": "web",
+                },
+            ))
+        except Exception:
+            logger.debug("turn_completed emit failed", exc_info=True)
 
     async def _on_signal(self, signal: Any) -> None:
         """Forward a SignalBus event to all connected clients."""
