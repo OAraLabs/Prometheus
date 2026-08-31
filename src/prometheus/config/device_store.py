@@ -38,6 +38,10 @@ class DeviceRow:
     created_at: float
     last_seen_at: float | None
     revoked_at: float | None
+    # #348. last_seen_at is the DEVICE talking to us; these are us reaching the device — a
+    # phone can be seen every minute and have received nothing for a week.
+    last_push_at: float | None = None
+    last_push_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +90,11 @@ class DeviceStore:
             ("apns_environment", "TEXT"),
             ("apns_bundle_id", "TEXT"),
             ("push_failures", "INTEGER DEFAULT 0"),
+            # #348: a FAILED push was recorded (push_failures) and a SUCCESSFUL one was not,
+            # so push_failures == 0 meant "delivered" and "never attempted" equally. These are
+            # the positive half; they do not replace the counter.
+            ("last_push_at", "REAL"),
+            ("last_push_status", "TEXT"),
         ):
             if column not in have:
                 self._conn.execute(f"ALTER TABLE api_devices ADD COLUMN {column} {decl}")
@@ -204,6 +213,24 @@ class DeviceStore:
         ).fetchone()
         return int(row["push_failures"]) if row else 0
 
+    def record_push_success(self, device_id: str, status: int | None = None) -> None:
+        """Stamp a DELIVERED push. The whole point of #348: without this, silence after a send
+        is ambiguous between 'fine' and 'never happened', and a regression looks like health."""
+        self._conn.execute(
+            "UPDATE api_devices SET last_push_at = ?, last_push_status = ? WHERE id = ?",
+            (time.time(), f"ok:{status}" if status is not None else "ok", device_id),
+        )
+        self._conn.commit()
+
+    def record_push_attempt(self, device_id: str, outcome: str, status: int | None = None) -> None:
+        """Stamp a NON-delivered attempt (failed / unregistered), so the row distinguishes
+        'we tried and it did not land' from 'we never tried'."""
+        self._conn.execute(
+            "UPDATE api_devices SET last_push_at = ?, last_push_status = ? WHERE id = ?",
+            (time.time(), f"{outcome}:{status}" if status is not None else outcome, device_id),
+        )
+        self._conn.commit()
+
     def reset_push_failures(self, device_id: str) -> None:
         self._conn.execute(
             "UPDATE api_devices SET push_failures = 0 WHERE id = ?", (device_id,)
@@ -264,10 +291,15 @@ class DeviceStore:
 
     @staticmethod
     def _row(row: sqlite3.Row) -> DeviceRow:
+        keys = row.keys()
         return DeviceRow(
             id=row["id"], name=row["name"], platform=row["platform"],
             created_at=row["created_at"], last_seen_at=row["last_seen_at"],
             revoked_at=row["revoked_at"],
+            # Tolerate a SELECT that predates the #348 columns rather than requiring every
+            # query to be updated in lockstep.
+            last_push_at=row["last_push_at"] if "last_push_at" in keys else None,
+            last_push_status=row["last_push_status"] if "last_push_status" in keys else None,
         )
 
     def close(self) -> None:
