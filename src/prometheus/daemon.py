@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import logging.handlers
 import os
 import signal
 import sys
@@ -2523,6 +2524,14 @@ async def run_daemon(args: argparse.Namespace) -> None:
     logger.info("Prometheus daemon stopped")
 
 
+# Log rotation. Deliberately constants rather than config keys: there is no
+# `logging:` section in the template, and a knob nobody sets is not worth the
+# documented-key surface (tests/support/config_defaults.py pins every config
+# read against the shipped default).
+_LOG_MAX_BYTES = 64 * 1024 * 1024
+_LOG_BACKUPS = 5
+
+
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description="Prometheus daemon")
@@ -2598,7 +2607,18 @@ def main() -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_dir / "daemon.log"),
+            # Rotating, not plain: an unrotated daemon.log grows without
+            # bound (it reached 1.4 GB on a long-lived install), which
+            # turns any line the daemon should not have written into
+            # permanent on-disk residue rather than something that ages
+            # out. 64 MB x 5 caps the directory at ~320 MB while still
+            # holding weeks of INFO.
+            logging.handlers.RotatingFileHandler(
+                log_dir / "daemon.log",
+                maxBytes=_LOG_MAX_BYTES,
+                backupCount=_LOG_BACKUPS,
+                encoding="utf-8",
+            ),
         ],
         force=True,
     )
