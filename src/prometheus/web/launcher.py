@@ -36,6 +36,7 @@ async def launch_web(
     skill_creator: Any | None = None,
     gateway_adapter: Any | None = None,
     mcp_runtime: Any | None = None,
+    on_tools_changed: Any | None = None,
     static_dir: str | None = None,
     detected_context_size: int | None = None,
     local_model: str | None = None,
@@ -112,6 +113,11 @@ async def launch_web(
     # /api/mcp routes drive connect/disconnect/probe through this handle and
     # reach the tool registry via loop_context, same as _deferred_status.
     app.state.mcp_runtime = mcp_runtime
+    # #370: the daemon's grammar refresh. Anything that registers or
+    # unregisters tools in the shared registry AFTER boot must call it,
+    # or the model keeps decoding against the boot-time tool set — the
+    # registry says a tool exists and the grammar cannot produce it.
+    app.state.on_tools_changed = on_tools_changed
 
     # Create WebSocket bridge. The WS uses the SAME token as the REST
     # middleware (config.web.api_token or PROMETHEUS_API_TOKEN); empty => auth

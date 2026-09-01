@@ -79,6 +79,22 @@ def rig(monkeypatch):
     return TestClient(app), runtime, registry
 
 
+class _PlainTool:
+    """Minimal registry citizen for the grammar test's boot set."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.description = f"{name} desc"
+
+    def to_api_schema(self) -> dict:
+        return {"name": self.name, "description": self.description,
+                "input_schema": {"type": "object", "properties": {
+                    "path": {"type": "string"}}, "required": ["path"]}}
+
+    def is_read_only(self, arguments) -> bool:  # noqa: ANN001
+        return True
+
+
 def _post_server(client, name: str = "docs", **extra):
     body = {"name": name, "command": "npx", "args": ["-y", "docs-mcp"],
             "env": {"DOCS_TOKEN": SECRET}, **extra}
@@ -239,6 +255,106 @@ class TestRoutes:
                  for s in client.get("/api/mcp/servers").json()["servers"]]
         assert "docs" not in names
         assert client.delete("/api/mcp/servers/docs").status_code == 404
+
+    # ------------------------------------------------------------------ #
+    # #370 — a tool registered after boot must reach the model's grammar
+    # ------------------------------------------------------------------ #
+
+    def test_every_live_change_calls_the_grammar_refresh(self, rig) -> None:
+        """The daemon hands the routes its grammar refresh; add, allowlist
+        change, disable and delete each fire it. Before #370 nothing did."""
+        client, runtime, registry = rig
+        calls: list[str] = []
+        client.app.state.on_tools_changed = lambda: calls.append("refresh")
+
+        assert _post_server(client).status_code == 200
+        assert calls == ["refresh"]                       # register
+        client.patch("/api/mcp/servers/docs", json={"allowed_tools": ["lookup"]})
+        assert calls == ["refresh"] * 3                   # unregister + register
+        client.patch("/api/mcp/servers/docs", json={"enabled": False})
+        assert calls == ["refresh"] * 4                   # unregister
+        client.patch("/api/mcp/servers/docs", json={"enabled": True})
+        assert calls == ["refresh"] * 5                   # register (nothing to unregister)
+        assert client.delete("/api/mcp/servers/docs").status_code == 200
+        assert calls == ["refresh"] * 6                   # unregister
+
+    def test_rest_added_tool_is_producible_by_a_real_llama_grammar(self, rig) -> None:
+        """End to end through the real enforcer and the real provider,
+        wired exactly as daemon._update_grammar wires them: before the
+        server is added a forced turn on its tool cannot even derive a
+        grammar; after, the boot grammar admits the tool and the derived
+        one is llama-valid; after delete, the boot grammar drops it."""
+        from prometheus.adapter.enforcer import StructuredOutputEnforcer
+        from prometheus.providers.llama_cpp import LlamaCppProvider
+
+        client, runtime, registry = rig
+        registry.register(_PlainTool("read_file"))        # something in the boot set
+        enforcer = StructuredOutputEnforcer()
+        provider = LlamaCppProvider()
+
+        def _update_grammar() -> None:                    # mirror of daemon.py:949-966
+            schemas = registry.to_api_schema()
+            provider.set_grammar(enforcer.generate_grammar(schemas))
+            provider.set_grammar_source(enforcer, schemas)
+
+        _update_grammar()                                  # boot
+        client.app.state.on_tools_changed = _update_grammar
+        tool = "mcp__docs__lookup"
+
+        assert not StructuredOutputEnforcer.grammar_admits_tool(provider._grammar, tool)
+        with pytest.raises(Exception, match="not among the provided tool schemas"):
+            provider._derived_grammar(tool, only_tool=tool)   # the #370 failure, verbatim
+
+        assert _post_server(client).status_code == 200
+        assert registry.get(tool) is not None
+        assert StructuredOutputEnforcer.grammar_admits_tool(provider._grammar, tool)
+        derived = provider._derived_grammar(tool, only_tool=tool)
+        assert StructuredOutputEnforcer.grammar_admits_tool(derived, tool)
+        # #77: llama.cpp silently rejects continuation-line alternates and
+        # then decodes unconstrained. Whatever a refresh emits must pass the
+        # same lint the boot grammar does.
+        for g in (provider._grammar, derived):
+            bad = [ln for ln in g.splitlines() if ln.lstrip().startswith("|")]
+            assert not bad, f"llama-invalid continuation lines: {bad[:2]}"
+
+        assert client.delete("/api/mcp/servers/docs").status_code == 200
+        assert registry.get(tool) is None
+        assert not StructuredOutputEnforcer.grammar_admits_tool(provider._grammar, tool)
+
+    def test_a_failed_refresh_is_a_500_and_rolls_the_registration_back(self, rig) -> None:
+        """Loud, not stale: the response says it, the log says it, and the
+        registry does not hold a tool the grammar cannot produce. The stored
+        definition survives so the operator can see and retry it."""
+        client, runtime, registry = rig
+
+        def _broken_refresh() -> None:
+            raise RuntimeError("enforcer exploded")
+
+        client.app.state.on_tools_changed = _broken_refresh
+        resp = _post_server(client)
+        assert resp.status_code == 500, resp.text
+        body = resp.json()
+        assert body["error"] == "grammar_refresh_failed"
+        assert "enforcer exploded" in body["detail"]
+        assert "rolled back" in body["applies"]
+        assert registry.get("mcp__docs__lookup") is None
+        assert registry.get("mcp__docs__search") is None
+        # Stored, honestly: the card is there, source=store, and a later
+        # PATCH can retry the live half.
+        cards = {s["name"]: s for s in client.get("/api/mcp/servers").json()["servers"]}
+        assert cards["docs"]["source"] == "store"
+
+        client.app.state.on_tools_changed = lambda: None   # refresh works again
+        assert client.patch("/api/mcp/servers/docs", json={"enabled": True}).status_code == 200
+        assert registry.get("mcp__docs__lookup") is not None
+
+    def test_without_a_hook_the_routes_still_apply(self, rig) -> None:
+        """No daemon grammar (cloud provider, grammar off, this rig): the
+        absence of a hook is not an error."""
+        client, runtime, registry = rig
+        assert not hasattr(client.app.state, "on_tools_changed")
+        assert _post_server(client).status_code == 200
+        assert registry.get("mcp__docs__lookup") is not None
 
     def test_yaml_managed_servers_are_read_only(self, rig) -> None:
         client, _runtime, _registry = rig

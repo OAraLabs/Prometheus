@@ -1766,11 +1766,41 @@ def create_app(
                 out.append((name, definition, "store"))
         return out
 
+    class _GrammarRefreshError(RuntimeError):
+        """The tool registry changed and the model's grammar did not follow.
+
+        #370: the GBNF grammar is generated from the registry at boot (and
+        after SENTINEL registers its tools). A tool the registry holds but
+        the grammar cannot produce is invisible to a local model under
+        `auto` and kills a forced turn ("only_tool=… is not among the
+        provided tool schemas") — while the REST surface reports
+        `applies: live`. So a refresh that fails is a 500, never a 200
+        with a stale grammar behind it.
+        """
+
+    def _notify_tools_changed(what: str) -> None:
+        hook = getattr(app.state, "on_tools_changed", None)
+        if hook is None:
+            return  # no daemon grammar (tests, cloud-only, or grammar off)
+        try:
+            hook()
+        except Exception as exc:
+            logger.error(
+                "MCP REST: tool registry changed (%s) but the grammar "
+                "refresh FAILED — %s", what, exc, exc_info=True,
+            )
+            raise _GrammarRefreshError(f"{what}: grammar refresh failed: {exc}") from exc
+
     async def _mcp_apply_live(name: str, definition: dict | None) -> str:
         """Drive the live runtime toward the stored state. Returns the
         'applies' verdict for the response: 'live' or a stated reason it
         is not — never a silent success for a change that changed nothing.
-        ``definition=None`` means remove/disable."""
+        ``definition=None`` means remove/disable.
+
+        Raises ``_GrammarRefreshError`` when tools changed but the model's
+        grammar could not be regenerated; on the register side the tools
+        are unregistered again first, so the registry never advertises a
+        tool the grammar cannot produce."""
         from prometheus.mcp.adapter import register_server_tools, unregister_tools
 
         runtime = getattr(app.state, "mcp_runtime", None)
@@ -1782,6 +1812,9 @@ def create_app(
         removed = unregister_tools(registry, names.pop(name, []))
         if removed:
             logger.info("MCP REST: unregistered %d tool(s) for %r", removed, name)
+            # A removed tool must leave the grammar too, or the model can
+            # still emit a call the registry will refuse as unknown.
+            _notify_tools_changed(f"unregistered {removed} tool(s) for {name!r}")
         if definition is None:
             await runtime.disconnect_server(name, forget=True)
             return "live"
@@ -1792,9 +1825,26 @@ def create_app(
         if entry is None:
             return "stored, but the server failed to connect — see health"
         registered = register_server_tools(registry, runtime, name)
-        logger.info("MCP REST: %r connected, %d tool(s) registered",
+        try:
+            _notify_tools_changed(f"registered {len(registered)} tool(s) for {name!r}")
+        except _GrammarRefreshError:
+            # Registered-but-unproducible is the exact state this guards
+            # against: roll the registration back and let the 500 say why.
+            unregister_tools(registry, registered)
+            names.pop(name, None)
+            raise
+        logger.info("MCP REST: %r connected, %d tool(s) registered, grammar refreshed",
                  name, len(registered))
         return "live"
+
+    def _grammar_refresh_failed(exc: _GrammarRefreshError) -> JSONResponse:
+        return JSONResponse(status_code=500, content={
+            "error": "grammar_refresh_failed",
+            "detail": str(exc),
+            "applies": "not live — the change was rolled back from the "
+                       "registry so the model is never offered a tool its "
+                       "grammar cannot produce; the stored definition is kept",
+        })
 
     @app.get("/api/mcp/servers")
     async def get_mcp_servers():
@@ -1829,7 +1879,10 @@ def create_app(
             return JSONResponse(status_code=400, content={"error": str(exc)})
         applies = "live"
         if definition.get("enabled", True):
-            applies = await _mcp_apply_live(name, definition)
+            try:
+                applies = await _mcp_apply_live(name, definition)
+            except _GrammarRefreshError as exc:
+                return _grammar_refresh_failed(exc)
         card = await _mcp_server_card(
             name, definition, "store", probe=False
         )
@@ -1850,10 +1903,14 @@ def create_app(
                                 content={"error": f"unknown server {name!r}"})
         except McpStoreError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
-        if merged.get("enabled", True):
-            applies = await _mcp_apply_live(name, merged)
-        else:
-            applies = await _mcp_apply_live(name, None)
+        try:
+            if merged.get("enabled", True):
+                applies = await _mcp_apply_live(name, merged)
+            else:
+                applies = await _mcp_apply_live(name, None)
+        except _GrammarRefreshError as exc:
+            return _grammar_refresh_failed(exc)
+        if not merged.get("enabled", True):
             # Disable keeps the stored definition; only the live half goes.
             if applies == "live":
                 runtime = getattr(app.state, "mcp_runtime", None)
@@ -1876,7 +1933,10 @@ def create_app(
         if not _mcp_store().delete(name):
             return JSONResponse(status_code=404,
                                 content={"error": f"unknown server {name!r}"})
-        applies = await _mcp_apply_live(name, None)
+        try:
+            applies = await _mcp_apply_live(name, None)
+        except _GrammarRefreshError as exc:
+            return _grammar_refresh_failed(exc)
         return {"ok": True, "applies": applies}
 
     # ── Profiles ────────────────────────────────────────────────────
