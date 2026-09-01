@@ -282,13 +282,31 @@ def cmd_context(
     daemon.py documents as the one that "outlived a model swap and silently
     won". They are threaded from the daemon, never re-detected here.
 
-    *config* is the daemon's ALREADY-LOADED prometheus.yaml. Pass it: the
-    disk-reading fallback resolves ``DEFAULTS_PATH``, which points one
-    directory ABOVE the repo root and therefore does not exist on this
-    checkout or on the deploy — so ``from_config()`` silently swallows the
-    OSError and every /context reply is built on an empty config. Threading
-    the loaded dict is both "one detection, one resolution" and the only way
-    this reply reflects the file the daemon is actually running.
+    *config* is the daemon's ALREADY-LOADED prometheus.yaml. Pass it — but
+    the reason is no longer the one this docstring used to give. It said the
+    disk fallback resolved ``DEFAULTS_PATH``, a path one directory ABOVE the
+    repo root that existed on no checkout, so every /context reply was built
+    on an empty config. True when written; #361 replaced that constant with
+    ``config.defaults.resolve_config_path()`` and both routes now run through
+    :func:`resolve_effective_limit` over the same ``context`` section, so for
+    the SAME FILE they cannot disagree — measured across all four branches
+    (detected, per-model override, cloud default, configured global).
+
+    Two reasons survive that fix, and they are why the parameter stays:
+
+    * WHICH FILE. Threading uses the file the daemon was started with
+      (``args.config``); the fallback uses the documented search order. The
+      same file on a normal install, and NOT the same for any ``--config``
+      naming something outside that order.
+    * ONE READ, NOT TWO. prometheus.yaml is mutated at runtime —
+      ``SecurityGate.persist_grant`` splices ``security.grants`` into it — so
+      a re-read is a second, independently-loaded opinion of the config being
+      enforced, and can be a NEWER one. That is the "one detection, one
+      resolution" this command is named for.
+
+    The fallback is now a working fallback rather than a trapdoor: every call
+    site guards with ``getattr(..., None) or None``, so the ``config is None``
+    branch is reachable, and it resolves real values instead of nothing.
 
     An unresolvable window is reported as unknown rather than as a confident
     figure — the same state /api/lcm reports as ``limit: null``.

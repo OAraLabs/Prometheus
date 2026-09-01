@@ -1,6 +1,8 @@
 # Silent-failure audit — config reads
 
-**Status:** config-read leg CLOSED 2026-08-31. Superset tracking continues below.
+**Status:** config-read leg CLOSED. Two halves, in the order the sequencing
+below argues for: the reads made honest 2026-08-31 (#360), the path they read
+fixed 2026-09-01 (#361). Superset tracking continues below.
 
 This document is cited by `learning/skill_creator.py`, `learning/nudge.py`,
 `learning/skill_refiner.py` and `learning/gepa.py` — all four say "see
@@ -143,29 +145,66 @@ body, which excludes them by construction rather than by allowlist.
 
 ---
 
+## Closed 2026-09-01 — `DEFAULTS_PATH` (#361)
+
+This section read "Still open: `DEFAULTS_PATH` itself is untouched", and the
+sequencing it argued for is what happened. The sites had to fail honestly
+first (#360, above) so that changing *what* they load could not land blind;
+#361 then changed it.
+
+What shipped, against what this section asked for:
+
+* **The resolver.** `DEFAULTS_PATH` is gone — not repointed. A constant cannot
+  express this, and that is the finding this audit had missed: the wheel
+  packages `src/prometheus` only, so `config/prometheus.yaml` does not exist
+  under `site-packages` at all. A repo-relative path is structurally wrong for
+  pip installs, not merely off by one. `config.defaults.config_search_paths()`
+  / `resolve_config_path()` carry the search order `__main__.load_config`
+  always had — explicit, repo-local, `$PROMETHEUS_CONFIG_DIR` — and
+  `cli/doctor` and `__main__` delegate to it rather than keeping a third and
+  fourth `parents[N]`. Doctor's copy was CORRECT; two independent hop counts
+  is exactly what let one of them be wrong.
+
+* **The per-subsystem enumeration.** `tests/test_config_fallback_callers.py`
+  is that work for all eight, not just the `denied_commands` table above.
+  Each is covered three ways: reads the config, honours the opposite setting,
+  and **absence still yields the pre-fix default** — so the "switches eight
+  subsystems simultaneously" risk is bounded by assertion rather than by
+  reading. Five are inert on the live config (their keys already equal the
+  hardcoded defaults); `skill_refiner` and `budget` change; `permissions/
+  checker.py` changes in BOTH directions, and its four gate deltas are
+  enumerated in the PR.
+
+* **The hop count is now checked against the filesystem**, not restated:
+  `tests/test_config_path_resolution.py` anchors it on `pyproject.toml` and
+  pins it equal to `config/template.py`. Falsified by re-breaking the source
+  to `parents[1]`, `[2]` and `[4]`.
+
+**On the "safer end state" this section proposed** — removing the module-level
+default and requiring an explicit path so a forgetful caller fails loudly:
+NOT taken, and the reason is worth recording. Four of the eight catch only
+`(OSError, yaml.YAMLError)`, so "fails at the call site" would have meant a
+`TypeError` out of `SkillRefiner.from_config` during the daemon's boot. The
+resolver therefore always returns a Path, and an absent config raises
+`FileNotFoundError` — an `OSError`, which all eight already handle. Loudness
+came from #360's `config/load.py` instead, which is the right layer for it:
+one honest read, four named states, a ledger row for the two that are errors.
+
+### One consequence, recorded
+
+The fix made the developer's own gitignored `config/prometheus.yaml` reachable
+from tests for the first time — it exists in a checkout and NOT in a worktree
+or on CI, the shape that passes here and fails there. `REPO_CONFIG_PATH` is
+public and module-level so `conftest._isolated_state_dirs` can neutralise it,
+alongside the `~/.prometheus` redirection that fixture already documents.
+
 ## Still open
 
-**`DEFAULTS_PATH` itself is untouched.** `config/defaults.py` uses five
-`.parent` hops where four reach the repo root, so it names a file that exists
-on no checkout. It is deliberately NOT fixed here: the sites that read it had
-to fail honestly *before* what they load is changed, or the change lands blind.
-Correcting it would switch eight subsystems from hardcoded defaults to a real
-43 KB config simultaneously, in the opposite direction, with no test asserting
-what any of them should load.
-
-That is its own change. It needs, per subsystem, the before/after config values
-enumerated — the `denied_commands` table above is that work for exactly one of
-the eight. A stranded worktree from an earlier attempt
-(`claude/trusting-booth-bcfa04`, never pushed) contains a designed
-`resolve_config_path()` search-order resolver and one finding this audit
-missed: the wheel packages `src/prometheus` only, so `config/prometheus.yaml`
-does not exist under `site-packages` at all — a repo-relative path is
-structurally wrong for pip installs, not merely off by one. Worth reading
-before redoing that work.
-
-The safer end state may be removing the module-level default entirely and
-requiring an explicit path, so a caller that forgot one fails at the call site
-rather than resolving to a phantom file.
+Nothing on the config-read leg. `daemon.load_config` resolves
+`Path("config/prometheus.yaml")` relative to the process CWD rather than the
+source tree — the same class, deliberately left for its own change, since it
+is the one path where a wrong answer means booting with the wrong gate.
+systemd pins `WorkingDirectory` and passes `--config`, so it is not live.
 
 ## The guard
 
