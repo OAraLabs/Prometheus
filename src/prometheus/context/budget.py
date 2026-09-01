@@ -19,6 +19,90 @@ from typing import Any
 
 from prometheus.context.token_estimation import estimate_tokens
 
+# Last-resort figure for callers that must have *a* number. It is deliberately
+# NOT reachable from resolve_effective_limit(): a caller that cannot resolve a
+# real window is told so ("unknown") and decides for itself whether a made-up
+# denominator is acceptable. /api/lcm decided it is not — see web/server.py.
+LEGACY_FALLBACK_LIMIT = 24000
+DEFAULT_RESERVED_OUTPUT = 2000
+
+# Source labels returned alongside a resolved limit. A number without one is
+# not interpretable: 32768 from the server and 32768 from a config file that
+# happens to agree are different facts, and only the first survives a model
+# swap.
+LIMIT_SOURCES = ("model_override", "detected", "cloud_default", "config", "unknown")
+
+
+def _model_overrides(ctx: dict[str, Any]) -> dict[str, int]:
+    """Flatten ``context.model_overrides.<model>.effective_limit``."""
+    out: dict[str, int] = {}
+    for name, entry in (ctx.get("model_overrides") or {}).items():
+        if isinstance(entry, dict) and "effective_limit" in entry:
+            try:
+                out[str(name)] = int(entry["effective_limit"])
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def resolve_effective_limit(
+    ctx: dict[str, Any],
+    *,
+    model: str | None = None,
+    local_model: str | None = None,
+    detected_limit: int | None = None,
+) -> tuple[int | None, str]:
+    """Resolve the context window IN FORCE, and say where it came from.
+
+    This is the one implementation of the precedence rules. Everything that
+    reports or enforces a context budget resolves through here, so a reported
+    number and an enforced number cannot drift — the drift is the bug this
+    exists to prevent, and it has shipped twice: once as a config
+    ``effective_limit`` that outlived a model swap (daemon.py), and once as a
+    literal ``24000`` typed into a web route that had no budget in scope
+    (/api/lcm, which then ASSEMBLED against the fabricated number).
+
+    Precedence, most specific first — the same order
+    :meth:`ContextCompactor.limit_for` enforces:
+
+      1. an explicit per-model override — an operator said so
+      2. the window the local server REPORTED, when *model* is the local one
+      3. ``cloud_default_limit`` for a session routed to a cloud provider
+      4. the configured global, which is a HINT: it is the right answer only
+         while the backend is unreachable, and the wrong answer the moment
+         the served model changes underneath it
+
+    Returns ``(None, "unknown")`` when none of the four yields a number.
+    That is a real state, not a defect: nothing has been detected and nothing
+    configured, and substituting a plausible integer there is what produced a
+    confidently-wrong 41% utilisation reading on a window that did not exist.
+    """
+    overrides = _model_overrides(ctx)
+
+    if model and model in overrides:
+        return overrides[model], "model_override"
+
+    if model and local_model and model == local_model and detected_limit:
+        return int(detected_limit), "detected"
+
+    if model and local_model and model != local_model:
+        from prometheus.context.compactor import DEFAULT_CLOUD_LIMIT
+
+        configured_cloud = ctx.get("cloud_default_limit", DEFAULT_CLOUD_LIMIT)
+        try:
+            return int(configured_cloud), "cloud_default"
+        except (TypeError, ValueError):
+            return None, "unknown"
+
+    configured = ctx.get("effective_limit")
+    try:
+        value = int(configured)
+    except (TypeError, ValueError):
+        return None, "unknown"
+    if value <= 0:
+        return None, "unknown"
+    return value, "config"
+
 
 @dataclass
 class TokenBudget:
@@ -83,40 +167,47 @@ class TokenBudget:
         except (OSError, Exception):
             ctx = {}
 
-        effective_limit = ctx.get("effective_limit", 24000)
-        reserved_output = ctx.get("reserved_output", 2000)
-        model_overrides: dict[str, int] = {}
-        for m, overrides in (ctx.get("model_overrides") or {}).items():
-            if isinstance(overrides, dict) and "effective_limit" in overrides:
-                model_overrides[m] = overrides["effective_limit"]
+        return cls.from_loaded_config(
+            {"context": ctx},
+            model=model,
+            local_model=local_model,
+            detected_limit=detected_limit,
+        )
 
-        # Resolution must MATCH ContextCompactor.limit_for(), or the number
-        # reported to the operator is not the number in force. Before this,
-        # exact-match was the only rule, so `/context` answered 72000 on a
-        # local session actually budgeted 32768 (detected) and on a cloud
-        # session actually budgeted 1000000 — wrong in both directions, and
-        # wrong precisely where someone would look to check.
-        #
-        # Precedence, most specific first:
-        #   1. explicit per-model override — an operator said so
-        #   2. detected local window, when this is the local model
-        #   3. cloud default, for any other model (a per-session override)
-        #   4. the configured global
-        if model and model in model_overrides:
-            effective_limit = model_overrides[model]
-        elif model and local_model and model == local_model and detected_limit:
-            effective_limit = detected_limit
-        elif model and local_model and model != local_model:
-            from prometheus.context.compactor import DEFAULT_CLOUD_LIMIT
+    @classmethod
+    def from_loaded_config(
+        cls,
+        config: dict[str, Any] | None,
+        *,
+        model: str | None = None,
+        local_model: str | None = None,
+        detected_limit: int | None = None,
+    ) -> TokenBudget:
+        """Same resolution as :meth:`from_config`, from an ALREADY-LOADED dict.
 
-            effective_limit = int(
-                ctx.get("cloud_default_limit", DEFAULT_CLOUD_LIMIT)
-            )
+        The daemon has the parsed prometheus.yaml in hand; re-reading it from
+        disk would make the reported budget a second, independently-loaded
+        opinion of the enforced one. Both routes run through
+        :func:`resolve_effective_limit`, which is the point.
 
+        A TokenBudget must carry a number, so an unresolvable window falls
+        back to ``LEGACY_FALLBACK_LIMIT`` here. Callers that would rather
+        report "unknown" than a fabricated denominator should call
+        :func:`resolve_effective_limit` directly and read the source label.
+        """
+        ctx = (config or {}).get("context") or {}
+        limit, _source = resolve_effective_limit(
+            ctx,
+            model=model,
+            local_model=local_model,
+            detected_limit=detected_limit,
+        )
         return cls(
-            effective_limit=effective_limit,
-            reserved_output=reserved_output,
-            model_overrides=model_overrides,
+            effective_limit=(
+                limit if limit is not None else LEGACY_FALLBACK_LIMIT
+            ),
+            reserved_output=ctx.get("reserved_output", DEFAULT_RESERVED_OUTPUT),
+            model_overrides=_model_overrides(ctx),
         )
 
     # ------------------------------------------------------------------

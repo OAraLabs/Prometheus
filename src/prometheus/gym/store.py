@@ -38,6 +38,16 @@ CREATE TABLE IF NOT EXISTS gym_runs (
     error           TEXT,            -- harness-level error (timeout, crash)
     manifest_sha    TEXT NOT NULL,
     taskset_sha     TEXT NOT NULL,
+    -- Backend K/V cache quantisation, RECORDED not governed. Prometheus does
+    -- not launch llama-server, so it cannot set these; it can only attribute
+    -- a run to whatever the server was running. NULL k/v with
+    -- kv_cache_source='unreported' means the server was asked and does not
+    -- publish it — deliberately NOT collapsed to 'f16', so an unrecorded run
+    -- stays distinguishable from a confirmed-f16 one. Without that, an A/B
+    -- comparing q8_0 against f16 KV is unattributable the moment it ends.
+    kv_cache_k      TEXT,
+    kv_cache_v      TEXT,
+    kv_cache_source TEXT,
     PRIMARY KEY (series, experiment, task_id, run_idx)
 );
 """
@@ -61,6 +71,12 @@ class GymStore:
         for col in ("emission_pass", "execution_pass"):
             if col not in have:
                 self._conn.execute(f"ALTER TABLE gym_runs ADD COLUMN {col} INTEGER")
+        # KV-cache provenance. Rows written before this column existed keep
+        # NULL in all three, which reads as "never recorded" — correct, and
+        # distinct from a run that recorded 'unreported'.
+        for col in ("kv_cache_k", "kv_cache_v", "kv_cache_source"):
+            if col not in have:
+                self._conn.execute(f"ALTER TABLE gym_runs ADD COLUMN {col} TEXT")
 
     def record_run(self, **row: Any) -> None:
         cols = (
@@ -69,6 +85,7 @@ class GymStore:
             "fail_reasons", "tools_called", "latency_ms",
             "retries", "repairs", "dropped_malformed", "feedback_retries",
             "breaker_tripped", "error", "manifest_sha", "taskset_sha",
+            "kv_cache_k", "kv_cache_v", "kv_cache_source",
         )
         row.setdefault("timestamp", time.time())
         values = [row.get(c) for c in cols]

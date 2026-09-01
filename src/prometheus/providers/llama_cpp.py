@@ -182,6 +182,10 @@ class LlamaCppProvider(ModelProvider):
         self._suppress_thinking = suppress_thinking
         self.detected_model: str | None = None
         self.server_context_size: int | None = None
+        # What K/V cache quantisation the server is running, once probed.
+        # None until detect_kv_cache_types() runs, and "unknown" is a real
+        # answer it can return — see that method.
+        self.server_kv_cache: dict[str, Any] | None = None
         # force-search (IGNITION): the grammar SOURCE — the enforcer + tool
         # schemas the boot grammar was generated from — so per-call
         # required/{tool:X} grammars are derived through the SAME generate
@@ -309,6 +313,99 @@ class LlamaCppProvider(ModelProvider):
         except Exception as exc:
             log.warning("Context size detection failed: %s", exc)
             return None
+
+    # Key spellings checked, in order. llama.cpp names the launch flags
+    # --cache-type-k / --cache-type-v and the C fields type_k / type_v; if a
+    # build ever publishes them, it will be under one of these. Read several,
+    # invent none.
+    _KV_KEY_CANDIDATES = (
+        ("cache_type_k", "cache_type_v"),
+        ("type_k", "type_v"),
+        ("kv_cache_type_k", "kv_cache_type_v"),
+    )
+
+    async def detect_kv_cache_types(self) -> dict[str, Any]:
+        """Record the server's K/V cache quantisation — or that it did not say.
+
+        Prometheus does not launch llama-server, so it cannot SET the cache
+        type. It can only record it, and recording it is what makes a gym A/B
+        comparing q8_0 against f16 KV attributable after the fact: without
+        provenance the two arms are indistinguishable once the run is over.
+
+        MEASURED, NOT ASSUMED. Checked 2026-08-31 against the live endpoint
+        (llama.cpp build ``b1-9d57ce456``): ``/props`` does not publish the
+        cache types at ANY level — not top-level, not under
+        ``default_generation_settings``, not under its ``params`` — and
+        ``/slots`` and ``/metrics`` are disabled on that server (HTTP 501), so
+        there is no second place to ask. The honest answer today is
+        ``"unreported"``.
+
+        It is NOT defaulted to f16, which is the tempting move because f16 is
+        llama.cpp's own default. An unrecorded run must stay distinguishable
+        from a confirmed-f16 run, exactly as the judge-provenance record
+        requires — a plausible default silently converts "we never looked"
+        into "we checked and it was f16", and every A/B built on top of that
+        inherits the lie.
+
+        Returns ``{"k", "v", "source", "detail"}`` where *source* is:
+
+        ``props``       the server published them; k/v are its values
+        ``unreported``  the server answered and has no such field; k/v None
+        ``unreachable`` the server could not be asked; k/v None
+        """
+        url = f"{self._base_url}/props"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                props = resp.json()
+        except Exception as exc:
+            result = {
+                "k": None, "v": None, "source": "unreachable",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+            log.warning("KV cache type detection failed: %s", exc)
+            self.server_kv_cache = result
+            return result
+
+        # Top-level first, then the two nested scopes llama.cpp uses for
+        # generation settings. A dict at each level or nothing.
+        dgs = props.get("default_generation_settings")
+        dgs = dgs if isinstance(dgs, dict) else {}
+        params = dgs.get("params")
+        params = params if isinstance(params, dict) else {}
+        for scope_name, scope in (
+            ("props", props),
+            ("props.default_generation_settings", dgs),
+            ("props.default_generation_settings.params", params),
+        ):
+            for k_key, v_key in self._KV_KEY_CANDIDATES:
+                k_val, v_val = scope.get(k_key), scope.get(v_key)
+                if k_val is None and v_val is None:
+                    continue
+                result = {
+                    "k": str(k_val) if k_val is not None else None,
+                    "v": str(v_val) if v_val is not None else None,
+                    "source": "props",
+                    "detail": f"{scope_name}.{k_key}/{v_key}",
+                }
+                log.info(
+                    "Server KV cache: k=%s v=%s (from %s)",
+                    result["k"], result["v"], result["detail"],
+                )
+                self.server_kv_cache = result
+                return result
+
+        result = {
+            "k": None, "v": None, "source": "unreported",
+            "detail": (
+                f"build {props.get('build_info', '?')} publishes no cache "
+                "type at /props; not inferred"
+            ),
+        }
+        log.info("Server KV cache: unknown — %s", result["detail"])
+        self.server_kv_cache = result
+        return result
 
     async def detect_vision(self) -> bool:
         """Check if llama.cpp was started with --mmproj.

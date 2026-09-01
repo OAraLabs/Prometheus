@@ -308,6 +308,14 @@ class GEPAOptimizer:
                     # nobody could tell. Never infer this field; absent means
                     # unknown.
                     "judge": self._judge_provenance(),
+                    # WHAT IT RAN ON, next to who graded it. The K/V cache
+                    # quantisation of the backend that produced these
+                    # completions — recorded, never set (Prometheus does not
+                    # launch llama-server) and never inferred. Same rule as
+                    # `judge`: absent means unknown, and a run whose cache
+                    # type was never recorded must not be readable as a
+                    # confirmed f16 one.
+                    "kv_cache": self._kv_cache_provenance(),
                 })
             else:
                 # Scanner refused or filesystem error — count as unchanged.
@@ -531,6 +539,18 @@ class GEPAOptimizer:
         judge = self._get_or_build_judge()
         prov = getattr(judge, "provenance", None)
         return prov() if callable(prov) else None
+
+    def _kv_cache_provenance(self) -> dict[str, object] | None:
+        """The backend's K/V cache types, if the provider was probed for them.
+
+        Read off the provider's cached probe result rather than re-probing:
+        the value recorded must be the one in force while these completions
+        were produced, not a fresh reading taken after the fact. ``None``
+        means never probed — distinct from a probe that came back
+        ``source="unreported"``, which means the server was asked and does
+        not publish it.
+        """
+        return getattr(self._provider, "server_kv_cache", None)
 
     def _get_or_build_judge(self) -> object | None:
         """Lazily construct the default ``PrometheusJudge`` if none was supplied."""

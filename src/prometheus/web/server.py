@@ -136,8 +136,20 @@ def create_app(
     boot_sha: str = "unknown",
     skill_creator: Any | None = None,
     device_store: Any | None = None,
+    detected_context_size: int | None = None,
+    local_model: str | None = None,
+    detected_kv_cache: dict[str, Any] | None = None,
 ) -> FastAPI:
-    """Create the FastAPI application with all routes."""
+    """Create the FastAPI application with all routes.
+
+    *detected_context_size* is the window the local inference server actually
+    reported at boot (llama.cpp ``/props`` n_ctx) and *local_model* is the
+    model it reported it for. Together they are what this layer was missing:
+    with no resolved budget in scope, /api/lcm carried a hardcoded literal.
+    Both default to None so a bare create_app() in a test still builds — the
+    context surfaces then report ``source: "config"`` or ``"unknown"``, which
+    is true.
+    """
 
     _api_token = config.get("web", {}).get("api_token") or os.environ.get("PROMETHEUS_API_TOKEN", "")
     app = FastAPI(
@@ -361,6 +373,78 @@ def create_app(
     app.state.agent_state = "idle"
     app.state.current_model = config.get("model", {}).get("model", "unknown")
     app.state.current_provider = config.get("model", {}).get("provider", "unknown")
+
+    # ── Resolved context window ─────────────────────────────────────
+    # create_app() had NO budget in scope, so the one route that needed a
+    # context window typed the old default: /api/lcm reported "limit": 24000
+    # on a daemon whose config said 72000 and whose llama.cpp server reported
+    # 32768. It also PASSED that literal to assemble(), so the panel's
+    # total_tokens / fresh_count / summary_count / compression_ratio all
+    # described a window that does not exist rather than a stale view of the
+    # real one.
+    #
+    # daemon.py:660 documents the identical failure on the agent-loop path
+    # ("a config effective_limit that outlived a model swap silently won").
+    # This is that fix, applied to the web layer — through the SAME resolver,
+    # not a second copy of the rules.
+    app.state.detected_context_size = detected_context_size
+    app.state.local_model = local_model
+    app.state.detected_kv_cache = detected_kv_cache
+
+    def _resolved_context_limit(
+        model: str | None = None,
+    ) -> tuple[int | None, str]:
+        """(limit, source) for *model*, defaulting to the serving model.
+
+        Read off app.state rather than the closure so a late re-wire (the
+        identity probe swapping the served model) is picked up on the next
+        request instead of being frozen at construction.
+        """
+        from prometheus.context.budget import resolve_effective_limit
+
+        try:
+            return resolve_effective_limit(
+                config.get("context") or {},
+                model=model or getattr(app.state, "current_model", None),
+                local_model=getattr(app.state, "local_model", None),
+                detected_limit=getattr(app.state, "detected_context_size", None),
+            )
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "context limit resolution failed — reporting unknown"
+            )
+            return None, "unknown"
+
+    def _context_block() -> dict[str, Any]:
+        """The budget in force, plus the inputs that produced it.
+
+        All three numbers in one place, deliberately: the incident that
+        motivated this was three disagreeing values (config 72000, server
+        32768, panel 24000) with no surface that showed them together.
+        """
+        limit, source = _resolved_context_limit()
+        return {
+            "limit": limit,
+            "source": source,
+            # None = detection never ran or the backend was unreachable. The
+            # budget then comes from config, which is a HINT: correct only
+            # until the served model changes underneath it.
+            "detected_n_ctx": getattr(app.state, "detected_context_size", None),
+            "local_model": getattr(app.state, "local_model", None),
+            "configured_limit": (config.get("context") or {}).get(
+                "effective_limit"
+            ),
+            # The server's K/V cache quantisation — RECORDED, not governed.
+            # Prometheus does not launch llama-server, so there is deliberately
+            # no config key for this; a key here would misdescribe what the
+            # harness controls. None = never probed; a dict with
+            # source="unreported" = the server was asked and has no such
+            # field, which is different from "we did not look" and different
+            # again from a confirmed f16.
+            "kv_cache": getattr(app.state, "detected_kv_cache", None),
+        }
     app.state.active_profile = (
         profile_state.name if profile_state is not None
         else config.get("profiles", {}).get("default", "full")
@@ -604,6 +688,12 @@ def create_app(
             # bash running anyway.
             "security": await _floor_state(),
             "gateway": gateway_block,
+            # The context window actually in force, resolved through
+            # prometheus.context.budget — the SAME call /api/lcm makes, so
+            # status and lcm cannot disagree. /api/status previously exposed
+            # no budget at all, which is why a wrong one could sit on the
+            # Beacon panel unchallenged.
+            "context": _context_block(),
             # The ceilings the loop is ACTUALLY enforcing, read off the same
             # LoopContext object the guard reads (_effective_max_tool_iterations
             # at agent_loop.py:1670) -- not re-resolved from config here. An
@@ -1993,26 +2083,50 @@ def create_app(
 
     @app.get("/api/lcm/{session_id}")
     async def get_lcm_state(session_id: str):
-        if not lcm_engine:
+        """Context-window state for the Beacon panel.
+
+        The budget is RESOLVED — same resolver the loop budgets with. It was
+        four hardcoded 24000s, and the third of them was the damaging one: it
+        was the ``token_budget=`` argument, so this endpoint did not merely
+        mislabel the denominator, it ASSEMBLED a context against a window
+        that does not exist. Every number it returned described a parallel
+        session. On the live deploy, real utilisation of 9888/32768 (30%)
+        rendered as 41%.
+
+        ``limit: null`` with ``limit_source: "unknown"`` is a real answer, not
+        a defect — the same convention the judge/cost surfaces already use
+        (unrecorded is "unknown", never a confident fake). Assembly is then
+        SKIPPED rather than run against a guess, and ``assembled: false``
+        marks the zeros as "not measured" instead of "measured zero".
+        """
+        limit, limit_source = _resolved_context_limit()
+
+        def _unmeasured(reason: str) -> dict[str, Any]:
+            # Zeros kept for shape compatibility with existing clients; the
+            # `assembled` flag is what tells them the zeros aren't readings.
             return {
                 "session_id": session_id,
                 "total_tokens": 0,
-                "limit": 24000,
+                "limit": limit,
+                "limit_source": limit_source,
                 "compression_ratio": 0,
                 "fresh_count": 0,
                 "summary_count": 0,
+                "assembled": False,
+                "reason": reason,
             }
-        # Attempt to read from LCM engine stores
+
+        if not lcm_engine:
+            return _unmeasured("lcm_engine_unwired")
+
+        if limit is None:
+            # Nothing detected and nothing configured. Inventing a plausible
+            # window here is exactly the bug being removed — Beacon renders an
+            # unknown denominator instead.
+            return _unmeasured("context_limit_unknown")
+
         try:
-            result = lcm_engine.assemble(session_id, token_budget=24000)
-            return {
-                "session_id": session_id,
-                "total_tokens": result.total_tokens,
-                "limit": 24000,
-                "compression_ratio": result.compression_ratio,
-                "fresh_count": len(result.fresh_messages),
-                "summary_count": len(result.summaries),
-            }
+            result = lcm_engine.assemble(session_id, token_budget=limit)
         except Exception:
             # Don't silently disguise a real failure as "no data" — that hid the
             # missing get_leaf_summaries for a long time. Log it; still return a
@@ -2022,14 +2136,18 @@ def create_app(
             logging.getLogger(__name__).exception(
                 "LCM assemble failed for session %s — returning empty context state", session_id
             )
-            return {
-                "session_id": session_id,
-                "total_tokens": 0,
-                "limit": 24000,
-                "compression_ratio": 0,
-                "fresh_count": 0,
-                "summary_count": 0,
-            }
+            return _unmeasured("assemble_failed")
+
+        return {
+            "session_id": session_id,
+            "total_tokens": result.total_tokens,
+            "limit": limit,
+            "limit_source": limit_source,
+            "compression_ratio": result.compression_ratio,
+            "fresh_count": len(result.fresh_messages),
+            "summary_count": len(result.summaries),
+            "assembled": True,
+        }
 
     # ── Global conversation search (Beacon ⌘⇧F) ────────────────────
     # Spec: beacon-search-spec.md v2 (frozen; review delta: POST-only). Two
