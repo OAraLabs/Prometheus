@@ -25,18 +25,24 @@ from pathlib import Path
 
 def run_setup(args: argparse.Namespace) -> int:
     """Route to the rich wizard or the fast path. Returns an exit code."""
+    provider = getattr(args, "setup_provider", None)
     fast = bool(getattr(args, "fast", False)) or bool(
         getattr(args, "noninteractive", False)
-    )
+    ) or provider is not None  # an explicit cloud provider is a fast-path answer
     if fast:
         from prometheus.cli.init import run_init
 
         target_dir = getattr(args, "target_dir", None)
         config = run_init(
-            noninteractive=bool(getattr(args, "noninteractive", False)),
+            # An explicit --provider answers every question the fast path
+            # would ask; gateways are added later with --gateway-only.
+            noninteractive=bool(getattr(args, "noninteractive", False)) or provider is not None,
             target_dir=Path(target_dir) if target_dir else None,
             timeout=float(getattr(args, "timeout", 1.0)),
             probe_url=getattr(args, "probe_url", None),
+            provider=provider,
+            api_key_env=getattr(args, "api_key_env", None),
+            model=getattr(args, "setup_model", None),
         )
         # run_init returns None when it exited cleanly WITHOUT writing a
         # config (no server detected and the user chose the install-
@@ -82,6 +88,26 @@ def add_setup_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--timeout", type=float, default=1.0,
         help="[fast path] per-server probe timeout in seconds (default 1.0)",
+    )
+    from prometheus.cli.init import _CLOUD_FAST_PROVIDERS
+
+    parser.add_argument(
+        "--provider", dest="setup_provider", type=str, default=None,
+        choices=sorted(_CLOUD_FAST_PROVIDERS), metavar="NAME",
+        help="[fast path, implies --noninteractive] use THIS cloud provider "
+             f"({', '.join(sorted(_CLOUD_FAST_PROVIDERS))}) instead of a local "
+             "server. Its API key must already be in your environment or in the "
+             "env file — never on the command line.",
+    )
+    parser.add_argument(
+        "--api-key-env", type=str, default=None, metavar="VAR",
+        help="[fast path] read the cloud key from $VAR instead of the "
+             "provider's default variable",
+    )
+    parser.add_argument(
+        "--model", dest="setup_model", type=str, default=None, metavar="MODEL",
+        help="[fast path] model name for --provider (default: the provider's "
+             "preset)",
     )
     parser.add_argument(
         "--probe-url", type=str, default=None, metavar="URL",
