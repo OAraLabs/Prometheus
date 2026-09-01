@@ -656,7 +656,15 @@ def create_setup_app(
         if cfg_file is not None:
             try:
                 parsed = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
-            except Exception:
+            except (OSError, yaml.YAMLError) as exc:
+                # "not_configured" is what the caller is told either way, but
+                # a malformed config and an absent one need different fixes
+                # and the operator has to be able to tell which they have.
+                logger.error(
+                    "setup: UNREADABLE — %s exists but could not be parsed "
+                    "(%s: %s); answering not_configured",
+                    cfg_file, type(exc).__name__, exc,
+                )
                 parsed = None
         if not isinstance(parsed, dict) or not parsed.get("model"):
             return JSONResponse(status_code=409, content={

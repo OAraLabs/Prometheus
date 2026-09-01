@@ -165,19 +165,21 @@ class TokenBudget:
         reported budget that disagrees with the enforced one is worse than no
         report, because it is consulted precisely when something looks wrong.
         """
-        import yaml
-        from pathlib import Path
+        from prometheus.config.load import load_config_file
 
+        explicit = config_path is not None
         if config_path is None:
             from prometheus.config.defaults import DEFAULTS_PATH
             config_path = str(DEFAULTS_PATH)
 
-        try:
-            with open(Path(config_path).expanduser()) as fh:
-                data = yaml.safe_load(fh)
-            ctx = data.get("context", {})
-        except (OSError, Exception):
-            ctx = {}
+        load = load_config_file(
+            config_path,
+            subsystem="token_budget",
+            substituting=f"an unresolved window (limit_source='unknown', "
+                         f"reserved_output={DEFAULT_RESERVED_OUTPUT})",
+            explicit=explicit,
+        )
+        ctx = load.section("context")
 
         return cls.from_loaded_config(
             {"context": ctx},

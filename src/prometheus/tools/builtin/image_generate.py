@@ -260,8 +260,15 @@ def _image_config(context: ToolExecutionContext) -> dict[str, Any]:
                 if isinstance(block, dict):
                     return block
                 break
-    except Exception:
-        pass
+    except (OSError, yaml.YAMLError) as exc:
+        # {} here means "no image_generation configured", which is also what a
+        # readable-but-broken config produced — so a YAML typo silently
+        # reverted every generation setting to its built-in default.
+        logger.warning(
+            "image_generation: UNREADABLE — cannot read config (%s: %s); "
+            "using built-in defaults for every setting",
+            type(exc).__name__, exc,
+        )
     return {}
 
 

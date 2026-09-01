@@ -383,16 +383,23 @@ def _has_native_tool_calling(model_name: str) -> bool:
     if not registry_path.exists():
         return False
     try:
-        data = yaml.safe_load(registry_path.read_text())
-        models = data.get("models", {})
+        data = yaml.safe_load(registry_path.read_text()) or {}
+        models = data.get("models", {}) if isinstance(data, dict) else {}
         name_lower = model_name.lower()
         for _key, meta in models.items():
             patterns = meta.get("match_patterns", [])
             if any(p.lower() in name_lower for p in patterns):
                 fc = meta.get("capabilities", {}).get("function_calling", {})
                 return fc.get("supported", False) and fc.get("requires") is None
-    except Exception:
-        pass
+    except (OSError, yaml.YAMLError) as exc:
+        # Returning False here means "this model has no known function-calling
+        # support", which is also what an unreadable registry produced — so a
+        # broken registry looked exactly like an unlisted model.
+        log.warning(
+            "model registry: UNREADABLE — cannot read %s (%s: %s); reporting "
+            "NO function-calling support for %r, which may be wrong",
+            registry_path, type(exc).__name__, exc, model_name,
+        )
     return False
 
 

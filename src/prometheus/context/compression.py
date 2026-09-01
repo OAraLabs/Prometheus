@@ -68,19 +68,27 @@ class ContextCompressor:
         config_path: str | None = None,
     ) -> ContextCompressor:
         """Build from prometheus.yaml context.fresh_tail_count."""
-        import yaml
-        from pathlib import Path
+        from prometheus.config.load import load_config_file
 
+        # The shipped constant, not a bare 32 — the documented default and the
+        # code fallback must be the same object or they drift (config-absence
+        # ruling C, tests/test_config_absence_rulings.py).
+        from prometheus.config.defaults import DEFAULT_FRESH_TAIL_COUNT
+
+        explicit = config_path is not None
         if config_path is None:
             from prometheus.config.defaults import DEFAULTS_PATH
             config_path = str(DEFAULTS_PATH)
 
-        try:
-            with open(Path(config_path).expanduser()) as fh:
-                data = yaml.safe_load(fh)
-            fresh_tail_count = data.get("context", {}).get("fresh_tail_count", 32)
-        except (OSError, Exception):
-            fresh_tail_count = 32
+        load = load_config_file(
+            config_path,
+            subsystem="context_compressor",
+            substituting=f"fresh_tail_count={DEFAULT_FRESH_TAIL_COUNT}",
+            explicit=explicit,
+        )
+        fresh_tail_count = load.value(
+            "context", "fresh_tail_count", DEFAULT_FRESH_TAIL_COUNT
+        )
 
         return cls(budget=budget, fresh_tail_count=fresh_tail_count)
 

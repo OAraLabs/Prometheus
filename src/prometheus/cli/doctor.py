@@ -39,6 +39,10 @@ from prometheus.config.paths import (
 )
 from prometheus.infra.doctor import DiagnosticCheck
 
+import logging
+
+log = logging.getLogger(__name__)
+
 _SYMBOLS = {"ok": "✓", "error": "✗", "warning": "!", "info": "·"}
 
 
@@ -529,7 +533,15 @@ def check_config_pins() -> DiagnosticCheck:
             import yaml
             with cfg_path.open(encoding="utf-8") as fh:
                 on_disk = yaml.safe_load(fh) or {}
-        except Exception:
+        except (OSError, yaml.YAMLError) as exc:
+            # doctor's whole job is to report the truth about this file. An
+            # unreadable config reported as an empty one makes every pin below
+            # look un-overridden.
+            log.error(
+                "doctor: UNREADABLE — cannot read %s (%s: %s); pin comparison "
+                "below treats the on-disk config as EMPTY and is not reliable",
+                cfg_path, type(exc).__name__, exc,
+            )
             on_disk = {}
 
     overriding = []
@@ -787,9 +799,9 @@ def check_trajectory_export(config: dict[str, Any]) -> DiagnosticCheck:
     # How many golden rows sit past the export cursor. Best-effort: this is
     # a diagnostic, so a missing DB reports "unknown" rather than failing.
     stranded: int | None = None
-    try:
-        import sqlite3
+    import sqlite3  # module-scope so the handler below can name sqlite3.Error
 
+    try:
         from prometheus.sentinel.golden_trace_exporter import WATERMARK_FILENAME
 
         watermark = 0
@@ -808,7 +820,15 @@ def check_trajectory_export(config: dict[str, Any]) -> DiagnosticCheck:
                 ).fetchone()[0]
             finally:
                 conn.close()
-    except Exception:
+    except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
+        # `None` renders as "unknown" downstream, which is already the honest
+        # answer — but WHY it is unknown was unreadable. Narrowed and named:
+        # an unexpected exception type now propagates instead of quietly
+        # becoming a diagnostic that says "unknown" forever.
+        log.warning(
+            "doctor: stranded-trace count unavailable (%s: %s); reporting "
+            "unknown", type(exc).__name__, exc,
+        )
         stranded = None
 
     if not enabled:
