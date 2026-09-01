@@ -40,6 +40,10 @@ from prometheus.engine.fallback import build_fallback_target
 
 log = logging.getLogger("prometheus")
 
+# Subcommands whose stdout is consumed by scripts, not read by a person.
+# Their console logging defaults to WARNING like the chat surfaces do.
+_QUIET_CONSOLE_COMMANDS: frozenset[str] = frozenset({"token"})
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -1312,8 +1316,17 @@ def main() -> None:
     # INFO with a single stderr handler.
     log_level = logging.DEBUG if args.debug else logging.INFO
     cli_surface = args.command is None
+    # Machine-readable subcommands: their stdout IS the answer (`token show`
+    # prints the token so a script can capture it), and a log line ahead of
+    # it — env_override's INFO "Applied env overrides: OPENAI_API_KEY=…" the
+    # moment a cloud key is in the env file — makes `prometheus token show
+    # 2>&1 | head -1` read a log line as the token. The FIRSTLIGHT cloud
+    # leg failed at S6 on exactly that (2026-09-01). Same quiet console as
+    # the chat surfaces: WARNING+ unless -v/--debug. `daemon` and the rest
+    # keep INFO on stderr — journald is their reader.
+    machine_readable = args.command in _QUIET_CONSOLE_COMMANDS
     console = logging.StreamHandler(sys.stderr)
-    if cli_surface and not args.verbose and not args.debug:
+    if (cli_surface or machine_readable) and not args.verbose and not args.debug:
         console.setLevel(logging.WARNING)
     handlers: list[logging.Handler] = [console]
     if cli_surface:

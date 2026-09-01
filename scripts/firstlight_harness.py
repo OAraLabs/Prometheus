@@ -7,6 +7,8 @@ config, and fails loudly naming WHICH step broke and why:
   S1  git clone (of --source, at its current SHA) into a temp tree
   S2  python -m venv + pip install -e '.[full]'      (the README install line)
   S3  prometheus setup --noninteractive              (against a stub model server)
+      --leg cloud: no local server is offered; one cloud key in the environment
+      must pick the provider, and the harness points that provider at the stub
   S4  prometheus doctor                              (must exit 0)
   S5  prometheus --once "..."                        (one CLI turn that CALLS A TOOL)
   S6  prometheus daemon                              (401 bare -> token show -> /api/status; one REST turn)
@@ -27,20 +29,27 @@ CONTRACT
     round trip — the tool-call assertion rides the protocol.
   * Two harness-owned edits are made to the config setup wrote, and they are
     infra, not user steps: api_port/ws_port are moved to free ports so a
-    live daemon on the host can never collide with the run.
+    live daemon on the host can never collide with the run. The cloud leg
+    makes a third: model.base_url is set to the stub, because the cloud
+    provider's real endpoint is exactly what this harness must never reach.
 
 OUT OF SCOPE — documented, not silently skipped:
   * real inference (quality, GBNF, adapter tiers) — the stub is a script
   * messaging gateways (Telegram/Slack/Discord) — need real tokens
   * voice (whisper/TTS), media pipelines, GPU anything
   * Beacon/desktop clients; WebSocket streaming semantics beyond boot
-  * cloud providers and anything needing a paid key
+  * real cloud APIs and anything needing a paid key — `--leg cloud` covers
+    the cloud CODE PATH (setup lands on a cloud provider with no local server,
+    the CLI and daemon build that provider and talk OpenAI wire to the stub);
+    it never reaches a real endpoint
   * long-horizon subsystems (LCM compaction cadence, SENTINEL, curator)
 
 SELF-TEST LEVERS (mutation testing THIS harness's reporting):
   --stub-mode models-500   breaks S3 (setup finds no server)
   --stub-mode no-final     breaks S5 (the agent turn can never conclude)
   --self-mutation busy-api breaks S6 (the API port is already taken)
+  --self-mutation no-cloud-key  (--leg cloud) breaks S3: no server AND no key,
+                           so setup must refuse to write and exit 2
 A healthy tree must go red at exactly that step, naming it.
 """
 
@@ -61,6 +70,11 @@ import urllib.request
 from pathlib import Path
 
 FINAL_MARKER = "FIRSTLIGHT-COMPLETE"
+# --leg cloud: which preset the stranger's key selects, and the dummy value.
+CLOUD_PROVIDER = "openai"
+CLOUD_KEY_ENV = "OPENAI_API_KEY"
+CLOUD_KEY_VALUE = "firstlight-dummy-cloud-key-never-real"
+
 
 
 class StepFailure(Exception):
@@ -118,8 +132,10 @@ def tail(path: Path, lines: int = 40) -> str:
 
 class Harness:
     def __init__(self, source: Path, keep: bool, stub_mode: str,
-                 self_mutation: str, strict_shutdown: bool = False) -> None:
+                 self_mutation: str, strict_shutdown: bool = False,
+                 leg: str = "local") -> None:
         self.source = source
+        self.leg = leg
         self.keep = keep
         self.stub_mode = stub_mode
         self.self_mutation = self_mutation
@@ -149,7 +165,7 @@ class Harness:
 
     # -- environment the product runs in (NOT inherited from the host) -----
     def env(self) -> dict[str, str]:
-        return {
+        env = {
             "HOME": str(self.home),
             "PATH": f"{self.venv}/bin:/usr/bin:/bin",
             "LANG": "C.UTF-8",
@@ -157,6 +173,12 @@ class Harness:
             "PYTHONUNBUFFERED": "1",
             "PIP_DISABLE_PIP_VERSION_CHECK": "1",
         }
+        if self.leg == "cloud" and self.self_mutation != "no-cloud-key":
+            # The stranger's one asset: a cloud key, exported. A fixed dummy —
+            # the provider is pointed at the stub, so the value is never
+            # checked by anything, and it must not be a real one.
+            env[CLOUD_KEY_ENV] = CLOUD_KEY_VALUE
+        return env
 
     def run(self, cmd: list[str], log_name: str, timeout: int,
             cwd: Path | None = None, expect_rc: int | None = 0) -> tuple[int, Path]:
@@ -235,16 +257,57 @@ class Harness:
             stdout=stub_log, stderr=subprocess.STDOUT, env=self.env(),
         )
         self._wait_stub()
-        self.run([str(self.venv / "bin" / "prometheus"), "setup",
-                  "--noninteractive", "--timeout", "3",
-                  "--probe-url", f"http://127.0.0.1:{self.stub_port}"],
-                 "s3-setup", timeout=120)
+        if self.leg == "cloud":
+            # No local server on offer: --probe-url at a port nothing listens
+            # on replaces the four well-known candidates, so detection finds
+            # nothing wherever the host happens to run a model. With no
+            # prompts allowed, the one exported cloud key has to carry it.
+            self.run([str(self.venv / "bin" / "prometheus"), "setup",
+                      "--noninteractive", "--timeout", "1",
+                      "--probe-url", "http://127.0.0.1:9"],
+                     "s3-setup", timeout=120)
+        else:
+            self.run([str(self.venv / "bin" / "prometheus"), "setup",
+                      "--noninteractive", "--timeout", "3",
+                      "--probe-url", f"http://127.0.0.1:{self.stub_port}"],
+                     "s3-setup", timeout=120)
         cfg = self.home / ".prometheus" / "prometheus.yaml"
         if not cfg.exists():
             raise StepFailure(f"setup exited 0 but wrote no config at {cfg}",
                               self.logs / "s3-setup.log")
         text = cfg.read_text(encoding="utf-8")
-        if f"127.0.0.1:{self.stub_port}" not in text:
+        if self.leg == "cloud":
+            for needle, why in (
+                (f"provider: {CLOUD_PROVIDER}", "setup did not land on the cloud provider the key selects"),
+                (f"api_key_env: {CLOUD_KEY_ENV}", "config does not name the key's env var"),
+            ):
+                if needle not in text:
+                    raise StepFailure(f"{why} — {cfg} lacks `{needle}`",
+                                      self.logs / "s3-setup.log")
+            if "base_url:" in text:
+                raise StepFailure("a cloud config must not carry a base_url "
+                                  "from setup", self.logs / "s3-setup.log")
+            env_file = self.home / ".config" / "prometheus" / "env"
+            if not env_file.exists() or f"{CLOUD_KEY_ENV}=" not in env_file.read_text(encoding="utf-8"):
+                raise StepFailure("the key exported to setup was not copied into "
+                                  f"the daemon's env file {env_file} — the daemon "
+                                  "would boot without it", self.logs / "s3-setup.log")
+            if CLOUD_KEY_VALUE in text:
+                raise StepFailure("the key value landed in the yaml", None)
+            # Harness infra (third edit, documented in the header): aim the
+            # cloud provider at the stub. Explicit base_url wins in the
+            # provider registry, so this is a user-settable key, used here
+            # for the one purpose of never reaching the real endpoint.
+            needle = f"  api_key_env: {CLOUD_KEY_ENV}\n"
+            if text.count(needle) != 1:
+                raise StepFailure(
+                    f"expected exactly one `{needle.strip()}` line in the "
+                    f"generated config, found {text.count(needle)} — the "
+                    "setup template changed; update the harness's base_url "
+                    "insert", None)
+            text = text.replace(
+                needle, needle + f"  base_url: http://127.0.0.1:{self.stub_port}\n")
+        elif f"127.0.0.1:{self.stub_port}" not in text:
             raise StepFailure("config does not point at the probed server — "
                               f"{cfg} lacks the stub URL", self.logs / "s3-setup.log")
         # Harness infra (documented in the module header): move the web ports
@@ -259,6 +322,9 @@ class Harness:
                     f"update the harness's port rewrite", None)
             text = text.replace(old, f"{key}: {port}")
         cfg.write_text(text, encoding="utf-8")
+        if self.leg == "cloud":
+            return (f"no local server; ${CLOUD_KEY_ENV} picked {CLOUD_PROVIDER}; "
+                    "key copied to the env file; provider aimed at the stub")
         return f"config written; model={FINAL_MARKER.split('-')[0].lower()}-stub via --probe-url"
 
     def s4_doctor(self) -> str:
@@ -435,14 +501,16 @@ class Harness:
         steps = [
             ("S1", "git clone at source SHA", self.s1_clone),
             ("S2", "pip install -e '.[full]'", self.s2_install),
-            ("S3", "prometheus setup --noninteractive (stub model)", self.s3_setup),
+            ("S3", ("prometheus setup --noninteractive (no server, one cloud key)"
+                    if self.leg == "cloud" else
+                    "prometheus setup --noninteractive (stub model)"), self.s3_setup),
             ("S4", "prometheus doctor exits 0", self.s4_doctor),
             ("S5", "one CLI turn that calls a tool (--once)", self.s5_cli_turn),
             ("S6", "daemon boots; /api/status; one REST turn", self.s6_daemon_rest),
             ("S7", "teardown, no residue", self.s7_teardown),
         ]
         t0 = time.time()
-        print(f"[FIRSTLIGHT] source={self.source} work={self.work}")
+        print(f"[FIRSTLIGHT] leg={self.leg} source={self.source} work={self.work}")
         for sid, name, fn in steps:
             started = time.time()
             try:
@@ -458,8 +526,8 @@ class Harness:
                 return 1
             print(f"[FIRSTLIGHT] {sid} ok ({time.time() - started:5.1f}s) — "
                   f"{name}: {detail}")
-        print(f"\n[FIRSTLIGHT] PASS — all 7 steps, {time.time() - t0:.1f}s, "
-              f"SHA {self.sha[:12]}")
+        print(f"\n[FIRSTLIGHT] PASS ({self.leg} leg) — all 7 steps, "
+              f"{time.time() - t0:.1f}s, SHA {self.sha[:12]}")
         return 0
 
 
@@ -469,11 +537,15 @@ def main() -> int:
                         help="repo to test (cloned at its current HEAD)")
     parser.add_argument("--keep", action="store_true",
                         help="keep the temp tree on success too")
+    parser.add_argument("--leg", default="local", choices=["local", "cloud"],
+                        help="local: setup detects the stub as a local server "
+                             "(default). cloud: no local server, one cloud key "
+                             "in the environment, provider aimed at the stub")
     parser.add_argument("--stub-mode", default="normal",
                         choices=["normal", "models-500", "no-final"],
                         help="stub model mutation (harness self-test)")
     parser.add_argument("--self-mutation", default="none",
-                        choices=["none", "busy-api"],
+                        choices=["none", "busy-api", "no-cloud-key"],
                         help="harness-side mutation (harness self-test)")
     parser.add_argument("--strict-shutdown", dest="strict_shutdown",
                         action="store_true", default=True,
@@ -485,7 +557,7 @@ def main() -> int:
                              "(pre-FL-1 behavior; for bisecting only)")
     args = parser.parse_args()
     return Harness(Path(args.source).resolve(), args.keep, args.stub_mode,
-                   args.self_mutation, args.strict_shutdown).main()
+                   args.self_mutation, args.strict_shutdown, leg=args.leg).main()
 
 
 if __name__ == "__main__":
