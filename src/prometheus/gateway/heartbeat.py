@@ -214,7 +214,15 @@ class Heartbeat:
             import json
 
             return json.loads(self._stale_state_path.read_text()).get("notified_for")
-        except Exception:
+        except FileNotFoundError:
+            # Nothing nudged yet. Absence IS the answer here, not a substitute.
+            return None
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "heartbeat: stale-state file %s unreadable (%s: %s); treating "
+                "as never-nudged, so the next stale tree will re-notify",
+                self._stale_state_path, type(exc).__name__, exc,
+            )
             return None
 
     def _save_stale_state(self, tree_head: str | None) -> None:

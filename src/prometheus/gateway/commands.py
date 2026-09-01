@@ -317,11 +317,33 @@ def cmd_context(
         effective_limit = (
             None if limit_source == "unknown" else budget.effective_limit
         )
-    except Exception:
-        # No fabricated numbers on the failure path either. 24000/2000 used to
-        # be substituted here, which printed a confident window that no part of
-        # the system had ever agreed to.
+    except Exception as exc:
+        # No fabricated numbers on the failure path — 24000/2000 used to be
+        # substituted here, printing a confident window nothing had agreed to.
+        # Reporting "unknown" was the right ANSWER, but this branch still
+        # reached it in silence, which is the same defect one level down: the
+        # reader of /context could not tell a resolved-unknown from a crash.
+        # It is now recorded like every other config failure.
         from prometheus.context.budget import DEFAULT_RESERVED_OUTPUT
+
+        log.error(
+            "cmd_context: budget resolution FAILED (%s: %s) for model %r; "
+            "reporting the window as unknown rather than substituting a "
+            "figure. config=%s",
+            type(exc).__name__, exc, model_name,
+            "passed in" if config is not None else "read from disk",
+        )
+        try:
+            from prometheus.telemetry.tracker import get_telemetry_handle
+
+            _tel = get_telemetry_handle()
+            if _tel is not None and hasattr(_tel, "record_silent_failure"):
+                _tel.record_silent_failure(
+                    "context_command", "resolve_budget", exc,
+                    {"model": model_name, "substituting": "unknown window"},
+                )
+        except Exception:  # noqa: BLE001 — telemetry must not break a reply
+            log.debug("cmd_context: ledger write failed", exc_info=True)
 
         effective_limit = None
         reserved_output = DEFAULT_RESERVED_OUTPUT

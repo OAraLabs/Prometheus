@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from prometheus.config.load import load_config_file
 from prometheus.config.shipped_defaults import (
     resolve_denied_paths, resolve_workspace_root)
 from prometheus.permissions.audit import AuditDecision, AuditLogger
@@ -550,8 +551,17 @@ class SecurityGate:
       LEVEL 3 (AUTONOMOUS) — heartbeat checks, status notifications → ALLOW
 
     Usage (wired into AgentLoop):
-        gate = SecurityGate.from_config()
+        gate = SecurityGate.from_config(config_path)   # ALWAYS pass the path
         loop = AgentLoop(provider=..., permission_checker=gate)
+
+    ⚠ The no-argument form is NOT the recommended usage and was documented
+    here as if it were. It falls back to a module-level default path that
+    resolves to a file present on no checkout, so the gate it returns has an
+    empty ``security`` section: the shipped ``denied_paths`` floor still
+    holds, but every configured ``denied_commands`` entry is gone. What the
+    daemon actually does is build the gate from the config it already loaded
+    (``__main__.create_security_gate``), which is the pattern to copy. The
+    default path is fixed in its own change; until then, pass the path.
 
     Usage (standalone acceptance test):
         gate = SecurityGate()
@@ -645,19 +655,30 @@ class SecurityGate:
 
     @classmethod
     def from_config(cls, config_path: str | Path | None = None) -> SecurityGate:
-        """Load SecurityGate from prometheus.yaml security section."""
-        import yaml
+        """Load SecurityGate from prometheus.yaml security section.
 
+        ⚠ Pass *config_path*. Omitting it falls back to the module-level
+        default, and a gate built from a config that could not be read keeps
+        the hardcoded ``denied_paths`` floor but loses every CONFIG-supplied
+        ``denied_commands`` entry — measured, ``cat /etc/shadow`` goes
+        DENY -> ALLOW. The read is now loud about that (see
+        prometheus.config.load) instead of substituting ``{}`` in silence, but
+        loud is a diagnosis, not a fix: the caller still ends up with a gate
+        that is missing its deny list.
+        """
+        explicit = config_path is not None
         if config_path is None:
             from prometheus.config.defaults import DEFAULTS_PATH
             config_path = DEFAULTS_PATH
 
-        try:
-            with open(Path(config_path).expanduser()) as fh:
-                data = yaml.safe_load(fh)
-            sec = data.get("security", {})
-        except (OSError, Exception):
-            sec = {}
+        load = load_config_file(
+            config_path,
+            subsystem="security_gate",
+            substituting="the shipped denied_paths floor with NO configured "
+                         "denied_commands, allowed_commands or workspace roots",
+            explicit=explicit,
+        )
+        sec = load.section("security")
 
         # Sprint 11: optionally create audit logger + exfiltration detector
         audit_logger = None

@@ -279,7 +279,15 @@ def read_config_pins(pins_path: Path) -> dict:
     try:
         with pins_path.open(encoding="utf-8") as fh:
             return yaml.safe_load(fh) or {}
-    except Exception:
+    except (OSError, yaml.YAMLError) as exc:
+        # A pin file that exists and cannot be read is NOT "nothing pinned".
+        # Returning {} silently told every surface the operator had pinned
+        # nothing, which is the reading they would act on.
+        logger.error(
+            "config_pins: UNREADABLE — %s exists but could not be read "
+            "(%s: %s); reporting NO pins. Drift correction is not running.",
+            pins_path, type(exc).__name__, exc,
+        )
         return {}
 
 

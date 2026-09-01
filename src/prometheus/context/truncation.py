@@ -51,19 +51,20 @@ class ToolResultTruncator:
     @classmethod
     def from_config(cls, config_path: str | None = None) -> ToolResultTruncator:
         """Build from prometheus.yaml context.tool_result_max."""
-        import yaml
-        from pathlib import Path
+        from prometheus.config.load import load_config_file
 
+        explicit = config_path is not None
         if config_path is None:
             from prometheus.config.defaults import DEFAULTS_PATH
             config_path = str(DEFAULTS_PATH)
 
-        try:
-            with open(Path(config_path).expanduser()) as fh:
-                data = yaml.safe_load(fh)
-            max_tokens = data.get("context", {}).get("tool_result_max", _DEFAULT_MAX_TOKENS)
-        except (OSError, Exception):
-            max_tokens = _DEFAULT_MAX_TOKENS
+        load = load_config_file(
+            config_path,
+            subsystem="tool_result_truncator",
+            substituting=f"tool_result_max={_DEFAULT_MAX_TOKENS}",
+            explicit=explicit,
+        )
+        max_tokens = load.value("context", "tool_result_max", _DEFAULT_MAX_TOKENS)
 
         return cls(max_tokens=max_tokens)
 

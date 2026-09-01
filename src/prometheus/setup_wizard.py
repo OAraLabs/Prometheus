@@ -28,6 +28,10 @@ import yaml
 from prometheus.config.paths import get_config_dir, get_wiki_root
 from prometheus.providers.registry import CLOUD_DEFAULTS, ProviderRegistry
 
+import logging
+
+log = logging.getLogger(__name__)
+
 # Config file lives in the repo's config/ directory (checkout installs).
 _REPO_CONFIG = Path(__file__).resolve().parents[2] / "config" / "prometheus.yaml"
 
@@ -1183,8 +1187,16 @@ Run this wizard again after you're ready:
         try:
             with self._config_path.open(encoding="utf-8") as fh:
                 config = yaml.safe_load(fh) or {}
-        except Exception:
-            pass
+        except (OSError, yaml.YAMLError) as exc:
+            # An empty config prints a connect block with no token and no
+            # host — indistinguishable from a fresh install, and the operator
+            # would copy it.
+            log.error(
+                "setup wizard: UNREADABLE — cannot read %s (%s: %s); the "
+                "connect block below is built from an EMPTY config and will "
+                "be missing your token and host",
+                self._config_path, type(exc).__name__, exc,
+            )
         print(format_connect_client_block(config), end="")
 
     # ------------------------------------------------------------------
@@ -1247,7 +1259,16 @@ Run this wizard again after you're ready:
             try:
                 with self._config_path.open(encoding="utf-8") as fh:
                     return yaml.safe_load(fh) or {}
-            except Exception:
+            except (OSError, yaml.YAMLError) as exc:
+                # None here means "no existing config", and the wizard then
+                # offers a fresh setup — which would OVERWRITE the file it
+                # merely failed to parse. Say so before that choice is made.
+                log.error(
+                    "setup wizard: UNREADABLE — %s exists but could not be "
+                    "read (%s: %s); treating it as absent. Fix or move the "
+                    "file before continuing, or setup may overwrite it.",
+                    self._config_path, type(exc).__name__, exc,
+                )
                 return None
         return None
 

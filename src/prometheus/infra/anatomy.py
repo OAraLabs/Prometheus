@@ -643,9 +643,15 @@ class AnatomyScanner:
 
             cfg_path = Path(__file__).resolve().parents[3] / "config" / "prometheus.yaml"
             if cfg_path.exists():
-                cfg = yaml.safe_load(cfg_path.read_text())
-                whisper_cfg = cfg.get("whisper", {})
+                cfg = yaml.safe_load(cfg_path.read_text()) or {}
+                whisper_cfg = cfg.get("whisper", {}) if isinstance(cfg, dict) else {}
                 if whisper_cfg.get("enabled"):
                     state.whisper_model = whisper_cfg.get("model", "base")
-        except Exception:
-            pass
+        except (OSError, yaml.YAMLError) as exc:
+            # Leaving whisper_model unset renders as "whisper not configured",
+            # the same as a config that genuinely disables it.
+            log.warning(
+                "anatomy: UNREADABLE — cannot read %s (%s: %s); reporting "
+                "whisper as unconfigured",
+                cfg_path, type(exc).__name__, exc,
+            )

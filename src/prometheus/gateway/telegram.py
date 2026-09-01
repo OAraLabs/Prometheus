@@ -2332,7 +2332,23 @@ class TelegramAdapter(BasePlatformAdapter):
         config_path = Path(__file__).resolve().parents[3] / "config" / "prometheus.yaml"
         try:
             cfg = yaml.safe_load(config_path.read_text()) if config_path.exists() else {}
-        except Exception:
+        except (OSError, yaml.YAMLError) as exc:
+            # cfg = {} makes the check below report "web is disabled", which is
+            # the same answer a genuinely-disabled web surface gives. An
+            # operator reading /beacon could not tell the two apart.
+            logger.error(
+                "beacon: UNREADABLE — cannot read %s (%s: %s); reporting web "
+                "as disabled, which may be wrong",
+                config_path, type(exc).__name__, exc,
+            )
+            cfg = {}
+        if not isinstance(cfg, dict):
+            # Empty file -> safe_load returns None -> cfg.get() would raise
+            # AttributeError into nothing. The fourth state, named.
+            logger.error(
+                "beacon: MALFORMED — %s did not parse to a mapping; "
+                "reporting web as disabled", config_path,
+            )
             cfg = {}
 
         web = cfg.get("web", {})
