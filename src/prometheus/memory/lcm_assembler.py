@@ -121,6 +121,10 @@ class LCMAssembler:
             fresh_messages=fresh_messages,
             total_tokens=total_tokens,
             compression_ratio=compression_ratio,
+            # Not recomputed — the same two locals `total_tokens` was summed
+            # from three lines above.
+            fresh_tokens=fresh_tokens,
+            summary_tokens=summary_tokens,
         )
 
     # ------------------------------------------------------------------

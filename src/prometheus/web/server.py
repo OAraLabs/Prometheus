@@ -2081,6 +2081,35 @@ def create_app(
 
     # ── LCM / Context ──────────────────────────────────────────────
 
+    def _split_of(result: Any) -> tuple[int | None, int | None]:
+        """The fresh/summary token split, or (None, None) when it is not sound.
+
+        Read defensively and VALIDATED, for two reasons:
+
+        * ``result`` is duck-typed at this boundary. Requiring the attributes
+          outright means any object without them (an older assembler, a
+          caller's own stand-in) raises into the except below and collapses the
+          WHOLE response to the unmeasured shape — losing the total and the
+          limit as well, over a missing optional field. Found the hard way: the
+          first version of this did exactly that to eight existing tests.
+        * ``AssemblyResult`` defaults the split to 0/0 so positional
+          construction stays valid. A result built without it therefore reports
+          0/0 against a non-zero total, which a client would draw as "all free
+          space" — a confident picture of a context that is actually full.
+
+        The identity ``fresh + summary == total`` is the thing that makes a
+        segmented bar honest, so it is checked here rather than assumed. If it
+        does not hold, there is no split to publish and the client draws one
+        unsegmented fill.
+        """
+        fresh = getattr(result, "fresh_tokens", None)
+        summary = getattr(result, "summary_tokens", None)
+        if fresh is None or summary is None:
+            return None, None
+        if fresh + summary != getattr(result, "total_tokens", None):
+            return None, None
+        return fresh, summary
+
     @app.get("/api/lcm/{session_id}")
     async def get_lcm_state(session_id: str):
         """Context-window state for the Beacon panel.
@@ -2112,6 +2141,11 @@ def create_app(
                 "compression_ratio": 0,
                 "fresh_count": 0,
                 "summary_count": 0,
+                # null, not 0: nothing was assembled, so there is no split to
+                # report. Zeros here would draw an empty two-segment bar, which
+                # claims a measured breakdown of nothing.
+                "fresh_tokens": None,
+                "summary_tokens": None,
                 "assembled": False,
                 "reason": reason,
             }
@@ -2138,6 +2172,7 @@ def create_app(
             )
             return _unmeasured("assemble_failed")
 
+        _fresh_tokens, _summary_tokens = _split_of(result)
         return {
             "session_id": session_id,
             "total_tokens": result.total_tokens,
@@ -2146,6 +2181,12 @@ def create_app(
             "compression_ratio": result.compression_ratio,
             "fresh_count": len(result.fresh_messages),
             "summary_count": len(result.summaries),
+            # The two halves total_tokens is the sum of — the assembler's own
+            # arithmetic, not a re-estimate. Published ONLY when they actually
+            # reconstruct the total (see _split_of): a split that does not add
+            # up cannot be drawn inside the bar honestly.
+            "fresh_tokens": _fresh_tokens,
+            "summary_tokens": _summary_tokens,
             "assembled": True,
         }
 

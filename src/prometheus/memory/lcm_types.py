@@ -87,6 +87,19 @@ class AssemblyResult:
     fresh_messages: list[MessagePart] = field(default_factory=list)
     total_tokens: int = 0
     compression_ratio: float = 1.0
+    # The two halves ``total_tokens`` is the sum of. The assembler has always
+    # computed both and then discarded them by adding them together, so this is
+    # the SAME arithmetic surfaced rather than a second estimate: by
+    # construction fresh_tokens + summary_tokens == total_tokens. That identity
+    # is what makes a segmented bar honest — a split derived by re-estimating
+    # the two lists separately could disagree with the total it is drawn
+    # inside, and the viewer would have no way to tell.
+    #
+    # Default 0/0 keeps positional construction valid for older callers; a
+    # result built without them reports a total with no split, which consumers
+    # must render as unsegmented rather than as "all fresh".
+    fresh_tokens: int = 0
+    summary_tokens: int = 0
 
 
 @dataclass
