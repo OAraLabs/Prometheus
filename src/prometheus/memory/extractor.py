@@ -86,20 +86,14 @@ _DEFAULT_CADENCE_SECONDS = 1800  # 30 minutes
 # eval library "marshmallow" as a client organization and dozens of
 # path-trivia "facts" about the user. Module constants are the per-install
 # tuning surface (same idiom as entity_validation).
-_MACHINE_SESSION_PREFIXES: tuple[str, ...] = (
-    "bakeoff:",
-    "coding:",
-    "eval:",
-    "gym:",
-    "smoke:",
+# Promoted to memory/session_kind.py — retention, /api/status and the clients need the same
+# answer, and a second copy of this list is how one of them drifts. Re-exported under the old
+# private names so this module's existing callers and tests keep working.
+from prometheus.memory.session_kind import (  # noqa: E402
+    MACHINE_SESSION_IDS as _MACHINE_SESSION_IDS,
+    MACHINE_SESSION_PREFIXES as _MACHINE_SESSION_PREFIXES,
+    is_machine_session as _is_machine_session,
 )
-_MACHINE_SESSION_IDS = frozenset({"system"})
-
-
-def _is_machine_session(session_id: str | None) -> bool:
-    """True iff *session_id* belongs to a machine harness, not a user chat."""
-    sid = (session_id or "").strip()
-    return sid in _MACHINE_SESSION_IDS or sid.startswith(_MACHINE_SESSION_PREFIXES)
 
 
 # Near-duplicate folding: the model re-states the same fact in slightly
