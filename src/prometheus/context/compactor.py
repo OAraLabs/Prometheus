@@ -52,6 +52,10 @@ import time
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any
 
+from prometheus.context.budget import (
+    LEGACY_FALLBACK_LIMIT,
+    resolve_effective_limit,
+)
 from prometheus.context.token_estimation import estimate_tokens
 
 if TYPE_CHECKING:
@@ -227,11 +231,53 @@ class ContextCompactor:
             return None
 
         ctx = cfg.get("context") or {}
-        effective_limit = int(ctx.get("effective_limit", 24000))
+
+        # REACHABLE WITH AN UNRESOLVED CONFIG — the answer, not the question,
+        # because this shape has now shipped as a bug twice (daemon.py's
+        # 72000-over-32768, and /api/lcm's literal 24000).
+        #
+        # This is an ENFORCEMENT path: the value below becomes
+        # ``_effective_limit``, which limit_for() returns whenever
+        # ``_detected_limit`` is absent, and _threshold_tokens() compacts
+        # against. A config with ``compaction.enabled: true`` but no
+        # ``context.effective_limit``, on a boot where the backend was
+        # unreachable, previously produced a hard 24000 that no part of the
+        # system had agreed to — silently, and at the point where prompts get
+        # cut. That is reachable today: neither key is required, and detection
+        # returns None whenever the model server is down at daemon start.
+        #
+        # So it resolves through the same resolver as every other surface.
+        # Behaviour is unchanged where anything IS resolvable: limit_for()
+        # already prefers _detected_limit for the local model, and the
+        # per-model override branch is what the resolver returns first. The
+        # only changed case is the unresolvable one, which is now LOUD and
+        # named instead of silent and literal.
+        resolved, source = resolve_effective_limit(
+            ctx,
+            model=model,
+            # from_config always builds for the model this daemon serves
+            # locally; limit_for() handles cloud-routed sessions per call.
+            local_model=model,
+            detected_limit=detected_limit,
+        )
+        if resolved is None:
+            effective_limit = LEGACY_FALLBACK_LIMIT
+            log.warning(
+                "COMPACTION IS ENABLED WITH NO RESOLVABLE CONTEXT WINDOW: "
+                "the server reported nothing and context.effective_limit is "
+                "absent/invalid, so compaction will enforce a placeholder "
+                "%d tokens for model %r. Set context.effective_limit, or "
+                "bring the inference server up before the daemon, or this "
+                "number is arbitrary.",
+                LEGACY_FALLBACK_LIMIT, model,
+            )
+        else:
+            effective_limit = int(resolved)
+            log.debug(
+                "Compactor budget for %s: %d (source=%s)",
+                model, effective_limit, source,
+            )
         overrides = ctx.get("model_overrides") or {}
-        per_model = overrides.get(model)
-        if isinstance(per_model, dict) and "effective_limit" in per_model:
-            effective_limit = int(per_model["effective_limit"])
 
         # Flatten every per-model entry so limit_for() can resolve a model
         # this compactor was NOT built with (a cloud override mid-session).

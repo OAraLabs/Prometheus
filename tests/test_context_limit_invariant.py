@@ -1,5 +1,6 @@
 """THE INVARIANT: no bare integer literal is used as a context limit or token
-budget anywhere in ``src/prometheus/web/``.
+budget anywhere in ``src/prometheus/web/``, ``src/prometheus/gateway/`` or
+``src/prometheus/context/``.
 
 WHY THIS FILE EXISTS
 --------------------
@@ -22,6 +23,24 @@ the agent-loop path ("a config effective_limit that outlived a model swap
 silently won... n_ctx=32768 came to be budgeted at 72000"). Review did not
 catch it there either; a passing build is what caught it. Hence a test, not a
 convention.
+
+WHY THREE PACKAGES
+------------------
+Fixing only ``web/`` made the surfaces disagree with each other, which is
+worse than the uniform wrongness before it: Beacon reported the detected
+32768 while every chat gateway's /context reported a different number
+entirely, and nothing on either surface said which was authoritative. So the
+guard covers every package that resolves or displays a context window:
+
+  web/       the REST + WS surfaces (/api/lcm, /api/status, web slash)
+  gateway/   the chat surfaces (/context on Telegram, Slack, Discord)
+  context/   the resolver and the ENFORCEMENT path (ContextCompactor), where
+             a fabricated number does not merely mislead — it cuts prompts
+
+``context/budget.py`` is the one place a fallback integer is legitimate, and
+it is named (``LEGACY_FALLBACK_LIMIT``) rather than inline, which is exactly
+the distinction this guard draws: a named constant is a decision, a bare
+literal in a call is an accident.
 
 WHAT IS AND IS NOT FLAGGED
 --------------------------
@@ -51,9 +70,16 @@ from pathlib import Path
 
 import pytest
 
+import prometheus.context as context_pkg
+import prometheus.gateway as gateway_pkg
 import prometheus.web as web_pkg
 
-WEB_ROOT = Path(web_pkg.__file__).resolve().parent
+GUARDED_ROOTS = {
+    "web": Path(web_pkg.__file__).resolve().parent,
+    "gateway": Path(gateway_pkg.__file__).resolve().parent,
+    "context": Path(context_pkg.__file__).resolve().parent,
+}
+REPO_ROOT = GUARDED_ROOTS["web"].parents[2]
 
 # Names that mean "a model's context window" or "how much of it may be spent".
 # A bare integer bound to any of these is a fabricated budget by definition:
@@ -97,6 +123,28 @@ class _ContextLiteralVisitor(ast.NodeVisitor):
         for kw in node.keywords:
             if kw.arg in CONTEXT_NAMES and _is_int_literal(kw.value):
                 self.hits.append((kw.value.lineno, f"{kw.arg}=", kw.value.value))
+
+        # The dict-get default: ``ctx.get("effective_limit", 24000)``. This is
+        # the exact shape that shipped in ContextCompactor.from_config and in
+        # media_services, and it is the most deceptive of the family — the
+        # literal reads as a harmless fallback while being the number actually
+        # enforced whenever the key is absent. It is invisible to the kwarg and
+        # assignment rules: the literal is a positional argument, and the
+        # enclosing assignment's value is a Call (``int(...)``), not a constant.
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and len(node.args) == 2
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+            and node.args[0].value in CONTEXT_NAMES
+            and _is_int_literal(node.args[1])
+        ):
+            self.hits.append((
+                node.args[1].lineno,
+                f'.get("{node.args[0].value}", …)',
+                node.args[1].value,
+            ))
         self.generic_visit(node)
 
     def visit_Dict(self, node: ast.Dict) -> None:
@@ -136,6 +184,29 @@ class _ContextLiteralVisitor(ast.NodeVisitor):
             self.hits.append((node.lineno, f"{node.target.id} =", node.value.value))
         self.generic_visit(node)
 
+    def _visit_def(self, node: ast.AST) -> None:
+        """Parameter defaults — ``def f(effective_limit: int = 24000)``.
+
+        The same accident wearing a signature: every caller that omits the
+        argument silently inherits a window nothing agreed to, and the call
+        sites look clean.
+        """
+        args = node.args
+        positional = args.posonlyargs + args.args
+        padded = [None] * (len(positional) - len(args.defaults)) + list(args.defaults)
+        for arg, default in list(zip(positional, padded)) + list(
+            zip(args.kwonlyargs, args.kw_defaults)
+        ):
+            if default is not None and _is_int_literal(default):
+                if arg.arg.lower() in CONTEXT_NAMES:
+                    self.hits.append(
+                        (default.lineno, f"{arg.arg}=", default.value)
+                    )
+        self.generic_visit(node)
+
+    visit_FunctionDef = _visit_def
+    visit_AsyncFunctionDef = _visit_def
+
 
 def _scan(source: str) -> list[tuple[int, str, int]]:
     visitor = _ContextLiteralVisitor()
@@ -145,28 +216,43 @@ def _scan(source: str) -> list[tuple[int, str, int]]:
 
 def _python_files() -> list[Path]:
     return sorted(
-        p for p in WEB_ROOT.rglob("*.py") if "__pycache__" not in p.parts
+        p
+        for root in GUARDED_ROOTS.values()
+        for p in root.rglob("*.py")
+        if "__pycache__" not in p.parts
     )
 
 
-def test_web_package_is_actually_scanned() -> None:
-    """The walk finds files. A guard over an empty set is not a guard."""
-    files = _python_files()
-    assert len(files) >= 3, f"expected the web package, found {files}"
-    assert any(p.name == "server.py" for p in files)
+@pytest.mark.parametrize("package", sorted(GUARDED_ROOTS))
+def test_every_guarded_package_is_actually_scanned(package: str) -> None:
+    """The walk finds files in EACH root. A guard over an empty set is not a
+    guard, and a typo'd root would silently stop covering a whole package."""
+    root = GUARDED_ROOTS[package]
+    files = [p for p in root.rglob("*.py") if "__pycache__" not in p.parts]
+    assert len(files) >= 3, f"expected the {package} package, found {files}"
+
+
+def test_the_three_known_surfaces_are_covered() -> None:
+    """Name the files this guard exists for, so a move can't silently drop
+    one out of scope."""
+    names = {p.name for p in _python_files()}
+    assert {"server.py", "commands.py", "compactor.py", "budget.py"} <= names
 
 
 @pytest.mark.parametrize(
-    "path", _python_files(), ids=lambda p: p.name
+    "path", _python_files(), ids=lambda p: f"{p.parent.name}/{p.name}"
 )
 def test_no_hardcoded_context_budget(path: Path) -> None:
     hits = _scan(path.read_text(encoding="utf-8"))
     assert not hits, (
-        f"{path.relative_to(WEB_ROOT.parent.parent.parent)} hardcodes a context "
+        f"{path.relative_to(REPO_ROOT)} hardcodes a context "
         f"budget: " + ", ".join(f"line {ln}: {name} {val}" for ln, name, val in hits)
         + ". Resolve it through prometheus.context.budget.resolve_effective_limit "
-        "instead — a literal here is a window that exists nowhere in the system, "
-        "and assemble() will build a context against it."
+        "instead — a literal here is a window that exists nowhere in the system. "
+        "On a display path it renders a confident wrong denominator; on an "
+        "enforcement path (compactor, truncation) it cuts real prompts. If a "
+        "fallback genuinely belongs here, give it a NAME "
+        "(LEGACY_FALLBACK_LIMIT) so it reads as a decision, not an accident."
     )
 
 
@@ -210,6 +296,37 @@ recent = signal_bus.recent(limit=100)
 page = {"items": [], "limit": 20, "offset": 0}
 '''
     assert _scan(benign) == []
+
+
+def test_detector_catches_the_gateway_shapes() -> None:
+    """The literals this PR removed from the gateway and the compactor.
+
+    Both were invisible in review: one sat on an except-branch that only fires
+    when config loading fails, the other was a dict-get default two lines
+    above a min() that made it look harmless.
+    """
+    gateway_except = """
+try:
+    budget = TokenBudget.from_config(model=model_name)
+    effective_limit = budget.effective_limit
+except Exception:
+    effective_limit = 24000
+    reserved_output = 2000
+"""
+    assert {v for _, _, v in _scan(gateway_except)} == {24000, 2000}
+
+    compactor_default = """
+effective_limit = int(ctx.get("effective_limit", 24000))
+"""
+    # The dict-get default is a positional arg, not a kwarg — caught because
+    # the ASSIGNMENT target is a context name.
+    assert {v for _, _, v in _scan(compactor_default)} == {24000}
+
+    signature_default = """
+def truncate(text, *, effective_limit: int = 24000, reserved_output=2000):
+    return text
+"""
+    assert {v for _, _, v in _scan(signature_default)} == {24000, 2000}
 
 
 def test_detector_catches_a_context_limit_assignment() -> None:

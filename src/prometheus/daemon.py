@@ -1260,6 +1260,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 model_provider=model_config.get("provider", "llama_cpp"),
                 session_manager=session_manager,
                 prometheus_config=config,
+                # Same detected window the web path receives —
+                # one detection, one resolution, so /context and
+                # Beacon's panel cannot disagree.
+                detected_context_size=detected_ctx_size,
             )
             slack_adapter.profile_state = profile_state
             # SPRINT G1: registering replays every subsystem attached so far
@@ -1317,6 +1321,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 model_provider=model_config.get("provider", "llama_cpp"),
                 session_manager=session_manager,
                 prometheus_config=config,
+                # Same detected window the web path receives —
+                # one detection, one resolution, so /context and
+                # Beacon's panel cannot disagree.
+                detected_context_size=detected_ctx_size,
             )
             discord_adapter.profile_state = profile_state
             # SPRINT G1 contract: registering replays every subsystem attached

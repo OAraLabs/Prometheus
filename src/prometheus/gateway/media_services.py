@@ -118,12 +118,35 @@ def truncate_for_context(
 
     doc_tokens = estimate_tokens(text)
 
-    # Get server-detected context size if available, else use config
-    ctx_limit = prometheus_config.get("context", {}).get(
-        "effective_limit", 24000
+    # Resolved through the same resolver every other context surface uses.
+    # NOTE: this site was NOT producing a wrong value — the bare 24000 was a
+    # dict-get default and the min() clamp below already held the result to
+    # the server's real window. It is routed through the resolver for
+    # consistency, and the clamp is KEPT so the output is unchanged: where
+    # config is lower than the detected window, this path deliberately stays
+    # conservative about how much document text it admits.
+    from prometheus.context.budget import (
+        DEFAULT_RESERVED_OUTPUT,
+        LEGACY_FALLBACK_LIMIT,
+        resolve_effective_limit,
     )
+
     server_ctx = getattr(provider, "server_context_size", None)
-    if server_ctx:
+    _model = (prometheus_config.get("model") or {}).get("model") or None
+    ctx_limit, _ctx_source = resolve_effective_limit(
+        prometheus_config.get("context") or {},
+        model=_model,
+        # This provider IS the local one when it reports a window at all, so
+        # model and local_model are the same name here.
+        local_model=_model,
+        detected_limit=server_ctx,
+    )
+    if ctx_limit is None:
+        # Nothing detected and nothing configured. Truncation still has to
+        # pick a length, so it falls back explicitly and stays conservative;
+        # unlike a display surface, there is no "unknown" to render here.
+        ctx_limit = server_ctx or LEGACY_FALLBACK_LIMIT
+    elif server_ctx:
         ctx_limit = min(ctx_limit, server_ctx)
 
     # Calculate actual overhead from system prompt + tool schemas
@@ -132,8 +155,8 @@ def truncate_for_context(
     schema_chars = len(json.dumps(tool_registry.list_schemas()))
     tool_tokens = schema_chars // 4  # rough char-to-token ratio
 
-    reserved_output = prometheus_config.get("context", {}).get(
-        "reserved_output", 2000
+    reserved_output = (prometheus_config.get("context") or {}).get(
+        "reserved_output", DEFAULT_RESERVED_OUTPUT
     )
     # overhead = system prompt + tools + output reserve + conversation buffer
     overhead = prompt_tokens + tool_tokens + reserved_output + 500

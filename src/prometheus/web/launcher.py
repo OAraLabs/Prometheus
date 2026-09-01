@@ -129,6 +129,8 @@ async def launch_web(
         config=config,
         approval_queue=approval_queue,
         device_store=device_store,
+        detected_context_size=detected_context_size,
+        local_model=local_model,
     )
 
     # Expose the bridge on the FastAPI app so REST routes (e.g.
