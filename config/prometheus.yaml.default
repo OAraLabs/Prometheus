@@ -199,7 +199,16 @@ tools:
     # tokens buys the class out; the advertised set stays ~74% below the
     # full catalog.
     always_loaded: [bash, task_create, read_file, write_file, edit_file, grep, glob, tool_search, web_search, web_fetch, memory]
-    mcp_always_deferred: true
+    # MCP tools follow the servers you configured: a configured server IS
+    # the advertise decision, so its tools sit in the catalog like any
+    # always_loaded tool, and a server added or removed over REST changes
+    # the catalog on the next turn (2026-09-01, #369). Deferred (true) they
+    # are reachable by tool_search and exact name only — measured on the
+    # live box: a local model loaded the schema with tool_search and still
+    # declined to call it, the web_search finding above in a new form. Set
+    # true to keep a small prompt on a small window; the tools stay
+    # callable by name.
+    mcp_always_deferred: false
     search_mcp: true
 
 adapter:
