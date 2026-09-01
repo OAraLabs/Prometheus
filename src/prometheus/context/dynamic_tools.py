@@ -131,6 +131,10 @@ class DynamicToolLoader:
         # ``always_loaded: []`` explicitly, which is honoured (the key is
         # present, so the fallback never fires).
         configured = self._deferred.get("always_loaded")
+        # Runtime-registered (dynamic) names inside _always_loaded — MCP
+        # today. Tracked apart so a registry change can replace them
+        # without touching the operator's static list.
+        self._dynamic_names: frozenset[str] = frozenset()
         self._always_loaded: frozenset[str] = frozenset(
             SHIPPED_ALWAYS_LOADED if configured is None else configured
         )
@@ -146,13 +150,29 @@ class DynamicToolLoader:
         branch, called by mcp.bootstrap when
         ``tools.deferred_loading.mcp_always_deferred`` is false.
 
-        BOOT-TIME ONLY, before any run starts. The set stays frozen for
-        the life of the process afterwards — mutating it between runs of a
-        live session is the #120 prefix-mutation bug class this module's
-        docstrings keep warning about, and resolve_deferred/schemas_for_run
-        already freeze per-run on top of that.
+        Boot-time, or a registry change BETWEEN runs (an operator adding or
+        removing an MCP server over REST, #369 — see
+        ``sync_dynamic_always_loaded``). Never mid-run: resolve_deferred /
+        schemas_for_run freeze the catalog at run start, so a change here
+        lands on the next run of every session. That costs each session one
+        prompt-prefix cache miss on its next turn — the price of the tool
+        set actually changing, not the #120 mid-run mutation this module's
+        docstrings warn about.
         """
+        self._dynamic_names = frozenset(self._dynamic_names | set(names))
         self._always_loaded = frozenset(self._always_loaded | set(names))
+
+    def sync_dynamic_always_loaded(self, names: set[str] | list[str]) -> None:
+        """Make the dynamic part of the advertised baseline equal ``names``.
+
+        Replaces whatever runtime-registered names were advertised before
+        (so a removed server's tools leave the catalog) and leaves the
+        operator's static ``always_loaded`` list untouched. Between runs
+        only, same contract as ``add_always_loaded``.
+        """
+        static = self._always_loaded - self._dynamic_names
+        self._dynamic_names = frozenset(names)
+        self._always_loaded = frozenset(static | self._dynamic_names)
 
     @property
     def _deferred_enabled(self) -> bool:

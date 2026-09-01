@@ -356,6 +356,43 @@ class TestRoutes:
         assert _post_server(client).status_code == 200
         assert registry.get("mcp__docs__lookup") is not None
 
+    # ------------------------------------------------------------------ #
+    # #369 — a server added over REST is advertised on the next run
+    # ------------------------------------------------------------------ #
+
+    def _loader_hook(self, registry, config):
+        from prometheus.context.dynamic_tools import DynamicToolLoader
+        from prometheus.mcp.bootstrap import sync_mcp_advertisement
+
+        loader = DynamicToolLoader(registry, {"enabled": True, "always_loaded": ["read_file"]})
+        return loader, lambda runtime: sync_mcp_advertisement(config, loader, runtime)
+
+    def test_rest_added_tools_are_advertised_by_default_and_leave_on_delete(self, rig) -> None:
+        client, runtime, registry = rig
+        registry.register(_PlainTool("read_file"))
+        loader, sync = self._loader_hook(registry, {})
+        client.app.state.on_tools_changed = lambda: sync(runtime)   # the daemon's composition
+
+        advertised = lambda: {s["name"] for s in loader.schemas_for_run(True)}  # noqa: E731
+        assert advertised() == {"read_file"}
+        assert _post_server(client).status_code == 200
+        assert advertised() == {"read_file", "mcp__docs__lookup", "mcp__docs__search"}
+        client.patch("/api/mcp/servers/docs", json={"allowed_tools": ["lookup"]})
+        assert advertised() == {"read_file", "mcp__docs__lookup"}        # the excluded one left
+        assert client.delete("/api/mcp/servers/docs").status_code == 200
+        assert advertised() == {"read_file"}                             # static list untouched
+
+    def test_rest_added_tools_stay_deferred_when_the_operator_says_so(self, rig) -> None:
+        client, runtime, registry = rig
+        registry.register(_PlainTool("read_file"))
+        loader, sync = self._loader_hook(
+            registry, {"tools": {"deferred_loading": {"mcp_always_deferred": True}}},
+        )
+        client.app.state.on_tools_changed = lambda: sync(runtime)
+        assert _post_server(client).status_code == 200
+        assert registry.get("mcp__docs__lookup") is not None            # reachable by name …
+        assert {s["name"] for s in loader.schemas_for_run(True)} == {"read_file"}   # … not advertised
+
     def test_yaml_managed_servers_are_read_only(self, rig) -> None:
         client, _runtime, _registry = rig
         assert _post_server(client, name="yaml-srv").status_code == 409

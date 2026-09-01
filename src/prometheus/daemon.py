@@ -966,6 +966,17 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     _update_grammar()
 
+    def _on_tools_changed() -> None:
+        """#370 + #369: a registry change between runs (a server added or
+        removed over REST) must reach BOTH consumers of the registry —
+        the advertised catalog the model sees and the grammar it decodes
+        under. Either half alone reproduces a wired-but-uncallable tool."""
+        if mcp_runtime is not None:
+            from prometheus.mcp.bootstrap import sync_mcp_advertisement
+
+            sync_mcp_advertisement(config, tool_loader, mcp_runtime)
+        _update_grammar()
+
     # SUNRISE: PeriodicNudge — self-reflection prompt every N turns.
     # Optional; ``None`` disables injection in agent loop.
     nudge: object | None = None
@@ -2392,7 +2403,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 # #370: a server added over REST registers tools after the
                 # boot grammar was generated. Same regeneration SENTINEL
                 # triggers when it registers its tools post-start.
-                on_tools_changed=_update_grammar,
+                on_tools_changed=_on_tools_changed,
                 # The window the server actually reported, and the model it
                 # reported it for. Same two values the compactor and the
                 # Telegram /context command are built from, so every surface

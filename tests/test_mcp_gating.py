@@ -175,7 +175,10 @@ class TestAdvertisementDecision:
         registry.register(mcp_tool)
         return registry, mcp_tool
 
-    def test_default_defers_mcp_tools(self) -> None:
+    def test_loader_alone_advertises_only_the_static_list(self) -> None:
+        # The LOADER has no MCP knowledge: a registered mcp__ tool that no
+        # one added to the baseline is not advertised. The MCP default
+        # (#369: advertise) is applied by mcp.bootstrap on top of this.
         registry, _ = self._registry()
         loader = DynamicToolLoader(
             registry, {"enabled": True, "always_loaded": ["bash"]}

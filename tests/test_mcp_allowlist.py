@@ -151,7 +151,48 @@ class TestAdapterHonesty:
 
 
 class TestBootstrap:
-    def test_bootstrap_registers_and_defers_by_default(self, monkeypatch) -> None:
+    def test_bootstrap_registers_and_advertises_by_default(self, monkeypatch) -> None:
+        from prometheus.context.dynamic_tools import DynamicToolLoader
+        from prometheus.mcp.bootstrap import create_mcp_runtime
+        from prometheus.tools.base import ToolRegistry
+
+        async def _fake_connect_all(self):  # noqa: ANN001
+            pass
+
+        monkeypatch.setattr(McpRuntime, "connect_all", _fake_connect_all)
+        monkeypatch.setattr(
+            McpRuntime, "list_tools",
+            lambda self: [McpCatalogTool(
+                server_name="srv", safe_server_name="srv", tool_name="echo",
+                description="d", input_schema={"type": "object"},
+                read_only_hint=True,
+            )],
+        )
+        from prometheus.tools.tool_search import ToolSearchTool
+
+        registry = ToolRegistry()
+        # A real tool_search, so the search_mcp reader at the end of the
+        # bootstrap RUNS — the daemon always has one, and a NameError
+        # there is swallowed into "MCP runtime not available" (caught
+        # live 2026-09-01 while the loop-level assertions stayed green).
+        search = ToolSearchTool()
+        search.set_registry(registry)
+        registry.register(search)
+        loader = DynamicToolLoader(
+            registry, {"enabled": True, "always_loaded": []}
+        )
+        config = {"mcp_servers": {"srv": {"command": "x"}}}
+        runtime = asyncio.run(create_mcp_runtime(config, registry, tool_loader=loader))
+        assert runtime is not None, "bootstrap returned None — see the WARNING it logged"
+        assert registry.get("mcp__srv__echo") is not None
+        assert registry.get("mcp_status") is not None
+        assert search.include_mcp is True                    # the reader ran
+        # Default (#369): a configured server IS the advertise decision —
+        # its tools are in the advertised schemas without any config.
+        names = {s["name"] for s in loader.schemas_for_run(True)}
+        assert "mcp__srv__echo" in names
+
+    def test_bootstrap_defers_when_the_operator_says_so(self, monkeypatch) -> None:
         from prometheus.context.dynamic_tools import DynamicToolLoader
         from prometheus.mcp.bootstrap import create_mcp_runtime
         from prometheus.tools.base import ToolRegistry
@@ -172,14 +213,15 @@ class TestBootstrap:
         loader = DynamicToolLoader(
             registry, {"enabled": True, "always_loaded": []}
         )
-        config = {"mcp_servers": {"srv": {"command": "x"}}}
+        config = {
+            "mcp_servers": {"srv": {"command": "x"}},
+            "tools": {"deferred_loading": {"mcp_always_deferred": True}},
+        }
         runtime = asyncio.run(create_mcp_runtime(config, registry, tool_loader=loader))
         assert runtime is not None
-        assert registry.get("mcp__srv__echo") is not None
-        assert registry.get("mcp_status") is not None
-        # Default: deferred — not in the advertised schemas.
+        assert registry.get("mcp__srv__echo") is not None      # registered …
         names = {s["name"] for s in loader.schemas_for_run(True)}
-        assert "mcp__srv__echo" not in names
+        assert "mcp__srv__echo" not in names                    # … not advertised
 
     def test_bootstrap_advertises_when_configured(self, monkeypatch) -> None:
         from prometheus.context.dynamic_tools import DynamicToolLoader
