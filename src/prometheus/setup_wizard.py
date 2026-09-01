@@ -148,6 +148,15 @@ class SetupWizard:
 
     def __init__(self, gateway_only: bool = False) -> None:
         self._gateway_only = gateway_only
+        # Set when the config file EXISTS but could not be parsed. Distinct
+        # from "no config": one means start fresh, the other means STOP, and
+        # collapsing them costs the operator a working config. See
+        # _refuse_unreadable_config.
+        self._unreadable_config: tuple[Path, Exception] | None = None
+        # True once the operator has explicitly chosen to proceed past an
+        # unreadable config (with a backup taken), so the second
+        # _load_existing_config call in _write_config does not re-refuse.
+        self._unreadable_acknowledged = False
         self._provider: str = "llama_cpp"
         self._base_url: str = "http://localhost:8080"
         self._model_name: str = ""
@@ -178,6 +187,15 @@ class SetupWizard:
     def run(self) -> bool:
         """Run the full wizard. Returns True if setup succeeded."""
         existing = self._load_existing_config()
+
+        # A config that exists but will not parse is NOT a missing config.
+        # Everything below this line can write to that path, so the refusal
+        # comes first — before the banner, before any prompt, before any
+        # directory is created.
+        if self._unreadable_config is not None:
+            if not self._handle_unreadable_config():
+                return False
+            existing = None
 
         # Auto-detect Hermes/OpenClaw before setup
         if not existing and not self._gateway_only:
@@ -1236,6 +1254,81 @@ Run this wizard again after you're ready:
                 run_migration(args)
                 print()
 
+    def _backup_path(self) -> Path:
+        """``<config>.bak``, or ``.bak.1``, ``.bak.2``… if that exists.
+
+        A backup that silently replaces an older backup is the same class of
+        bug this whole change is about.
+        """
+        base = self._config_path.with_suffix(self._config_path.suffix + ".bak")
+        if not base.exists():
+            return base
+        for n in range(1, 1000):
+            candidate = Path(f"{base}.{n}")
+            if not candidate.exists():
+                return candidate
+        raise OSError(f"could not find a free backup name beside {base}")
+
+    def _handle_unreadable_config(self) -> bool:
+        """Refuse to overwrite an unparseable config. True = safe to continue.
+
+        Non-interactive runs NEVER continue: there is nobody to consent, and
+        the caller (cli/setup.py) turns False into exit status 1. Interactive
+        runs are offered a backup, defaulting to cancel.
+        """
+        path, exc = self._unreadable_config  # type: ignore[misc]
+        print(
+            f"\nERROR: {path} exists but could not be parsed.\n"
+            f"  {type(exc).__name__}: {exc}\n",
+            file=sys.stderr,
+        )
+
+        if not sys.stdin.isatty():
+            print(
+                "Refusing to overwrite it. Setup would replace this file with "
+                "a fresh config,\nand a YAML typo is not a reason to lose a "
+                "working configuration.\n\n"
+                "Fix the file, or move it aside, then run setup again:\n"
+                f"  mv {path} {path}.bak\n",
+                file=sys.stderr,
+            )
+            return False
+
+        choice = _ask_choice(
+            "Setup would REPLACE this file. What would you like to do?",
+            [
+                f"Back it up to {self._backup_path().name} and start fresh",
+                "Cancel — I will fix or move the file myself",
+            ],
+            default=2,
+        )
+        if choice != 1:
+            print(f"\nCancelled. {path} is unchanged.", file=sys.stderr)
+            return False
+
+        backup = self._backup_path()
+        try:
+            backup.write_bytes(path.read_bytes())
+        except OSError as backup_exc:
+            # Could not back up => must not overwrite. Failing to protect the
+            # file is not a licence to destroy it.
+            print(
+                f"\nCould not write the backup ({type(backup_exc).__name__}: "
+                f"{backup_exc}).\nRefusing to continue — {path} is unchanged.",
+                file=sys.stderr,
+            )
+            log.error("setup wizard: backup to %s failed: %s", backup, backup_exc)
+            return False
+
+        print(f"\nBacked up to {backup}\nContinuing with a fresh setup.\n")
+        log.warning(
+            "setup wizard: unparseable config %s backed up to %s before "
+            "overwrite (operator confirmed)", path, backup,
+        )
+        self._unreadable_acknowledged = True
+        self._unreadable_config = None
+        return True
+
     def _ask_rerun(self) -> int:
         """Ask what to do when config already exists. Returns 1-4."""
         return _ask_choice(
@@ -1254,21 +1347,40 @@ Run this wizard again after you're ready:
     # ------------------------------------------------------------------
 
     def _load_existing_config(self) -> dict[str, Any] | None:
-        """Load existing config if it exists."""
+        """Load existing config if it exists.
+
+        Returns None both when the file is absent and when it is unparseable —
+        but in the second case it also sets ``_unreadable_config``, which
+        ``run()`` checks before anything can write. Callers other than run()
+        get the historical None and stay simple.
+        """
+        if self._unreadable_acknowledged:
+            # The operator saw the error, took a backup, and chose to proceed.
+            # Re-reading would re-raise and re-refuse mid-write.
+            return None
         if self._config_path.exists():
             try:
                 with self._config_path.open(encoding="utf-8") as fh:
                     return yaml.safe_load(fh) or {}
             except (OSError, yaml.YAMLError) as exc:
-                # None here means "no existing config", and the wizard then
-                # offers a fresh setup — which would OVERWRITE the file it
-                # merely failed to parse. Say so before that choice is made.
+                # RECORDED, not merely logged. Returning None means "no
+                # existing config", and `run()` then skips the overwrite
+                # prompt entirely (`if existing and ...` is False) and writes
+                # a fresh file over the one it could not parse. A log line
+                # does not stop that: a non-interactive run has nobody to read
+                # it, and an interactive operator sees it scroll past above a
+                # successful-looking setup.
+                #
+                # So the state is carried to run(), which refuses. This is the
+                # only site in the config-honesty sweep with real data loss,
+                # and the only one that does not need DEFAULTS_PATH to be
+                # wrong to cause it.
                 log.error(
                     "setup wizard: UNREADABLE — %s exists but could not be "
-                    "read (%s: %s); treating it as absent. Fix or move the "
-                    "file before continuing, or setup may overwrite it.",
+                    "read (%s: %s); refusing to overwrite it.",
                     self._config_path, type(exc).__name__, exc,
                 )
+                self._unreadable_config = (self._config_path, exc)
                 return None
         return None
 
