@@ -31,6 +31,7 @@ import httpx
 import yaml
 
 from prometheus.config.api_token import resolve_api_token
+from prometheus.config.defaults import config_search_paths
 from prometheus.config.paths import (
     get_config_dir,
     get_data_dir,
@@ -43,29 +44,29 @@ _SYMBOLS = {"ok": "✓", "error": "✗", "warning": "!", "info": "·"}
 
 
 # ---------------------------------------------------------------------------
-# Config resolution (mirrors prometheus.__main__.load_config search order)
+# Config resolution
 # ---------------------------------------------------------------------------
 
 def resolve_config_path(explicit: str | None = None) -> tuple[Path | None, list[Path]]:
     """Return ``(found_path_or_None, searched_paths)``.
 
-    Search order (documented in the README and prometheus.yaml.default):
-    1. an explicit ``--config`` path
-    2. the repo-local ``config/prometheus.yaml`` (checkout installs)
-    3. ``$PROMETHEUS_CONFIG_DIR/prometheus.yaml`` (default ``~/.prometheus/``)
+    The candidate list comes from :func:`prometheus.config.defaults.config_search_paths`
+    — the search order documented in the README and prometheus.yaml.default.
+    This function keeps doctor's own contract on top of it: a ``None`` when
+    nothing was found (doctor REPORTS absence rather than falling back), and
+    the paths actually probed so the failure message can name them.
+
+    ⚠ It used to inline its own ``parents[3]``. That was correct, and the
+    identical expression in ``config/defaults.py`` was not — five hops instead
+    of four, naming a file one directory above the repo root. Two independent
+    hop counts is the shape that lets one of them be wrong for months; there is
+    now one.
     """
     searched: list[Path] = []
-    if explicit:
-        p = Path(explicit).expanduser()
-        return (p if p.is_file() else None), [p]
-    repo_cfg = Path(__file__).resolve().parents[3] / "config" / "prometheus.yaml"
-    searched.append(repo_cfg)
-    if repo_cfg.is_file():
-        return repo_cfg, searched
-    user_cfg = get_config_dir() / "prometheus.yaml"
-    searched.append(user_cfg)
-    if user_cfg.is_file():
-        return user_cfg, searched
+    for candidate in config_search_paths(explicit):
+        searched.append(candidate)
+        if candidate.is_file():
+            return candidate, searched
     return None, searched
 
 

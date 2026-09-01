@@ -177,8 +177,8 @@ class GEPAOptimizer:
         import yaml
 
         if config_path is None:
-            from prometheus.config.defaults import DEFAULTS_PATH
-            config_path = str(DEFAULTS_PATH)
+            from prometheus.config.defaults import resolve_config_path
+            config_path = str(resolve_config_path())
 
         # Narrow the catch — see SkillCreator.from_config for the rationale
         # (Tier-1 hotfix from docs/audits/SILENT-FAILURE-AUDIT.md). Any

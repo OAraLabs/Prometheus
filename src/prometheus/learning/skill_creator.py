@@ -188,8 +188,8 @@ class SkillCreator:
         import yaml
 
         if config_path is None:
-            from prometheus.config.defaults import DEFAULTS_PATH
-            config_path = str(DEFAULTS_PATH)
+            from prometheus.config.defaults import resolve_config_path
+            config_path = str(resolve_config_path())
 
         # Narrow the catch to genuine I/O + YAML-parse errors so any other
         # exception (e.g., a future config-schema upgrade that introduces

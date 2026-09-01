@@ -1,8 +1,102 @@
-"""Default configuration values for Prometheus."""
+"""Default configuration values for Prometheus — and the ONE resolver that
+finds ``prometheus.yaml`` in every install layout.
+
+WHY THERE IS A RESOLVER HERE AND NOT A CONSTANT
+------------------------------------------------
+This module used to export::
+
+    DEFAULTS_PATH = Path(__file__).parent.parent.parent.parent.parent \\
+        / "config" / "prometheus.yaml"
+
+``.parent`` #1 is this file's own ``config/`` directory, so five hops land one
+directory ABOVE the repo root. On a checkout at ``~/Prometheus`` it named
+``~/config/prometheus.yaml``; the ff-only deploy clone named the same
+nonexistent path. Every caller that fell back to it therefore opened nothing,
+swallowed the ``OSError``, and resolved against an empty config — silently, for
+the life of the constant. Verified by outcome, not inferred:
+``TokenBudget.from_config()`` answered 24000 on a box whose config says 72000.
+
+The off-by-one is only half of it. **A constant cannot express this at all.**
+``config/prometheus.yaml`` exists relative to the source tree in a checkout and
+in the ff-only deploy clone, and *nowhere* under ``site-packages`` — the wheel
+packages ``src/prometheus`` only (see ``config/template.py``, and the
+``force-include`` stanza in ``pyproject.toml`` that had to be added to ship the
+*template*). So a repo-relative path is right for two layouts out of three, and
+a pip install has no repo to be relative to. That is very likely why nobody
+noticed: the fallback was already dead for installed users, and the two live
+layouts hid it behind an ``except OSError``.
+
+``prometheus.__main__.load_config`` has always had the answer — a search order,
+not a path. It is written down here once so the eight subsystems that reach for
+a fallback config resolve the same file the CLI, the daemon and ``doctor`` do.
+``__main__`` and ``cli/doctor`` delegate to it rather than keeping a third and
+fourth copy of ``parents[N]``.
+"""
+
+from __future__ import annotations
 
 from pathlib import Path
 
-DEFAULTS_PATH = Path(__file__).parent.parent.parent.parent.parent / "config" / "prometheus.yaml"
+#: The checkout/deploy-clone candidate: ``<repo>/config/prometheus.yaml``.
+#:
+#: ⚠ FOUR parents, and the count is load-bearing —
+#: ``src/prometheus/config/defaults.py`` -> ``<repo>`` is
+#: ``parents[3]``. ``config/template.py`` resolves the same root the same way
+#: and says so in as many words; ``tests/test_config_path_resolution.py`` pins
+#: the two equal AND anchors both on ``pyproject.toml``, so the hop count is
+#: checked against the filesystem rather than against someone's counting.
+#:
+#: Module-level and public so tests can neutralise it. The developer's own
+#: gitignored ``config/prometheus.yaml`` is a live-state root exactly like
+#: ``~/.prometheus`` — ``tests/conftest.py::_isolated_state_dirs`` points this
+#: at tmp for the same reason it points ``PROMETHEUS_CONFIG_DIR`` there.
+REPO_CONFIG_PATH: Path = Path(__file__).resolve().parents[3] / "config" / "prometheus.yaml"
+
+
+def config_search_paths(explicit: str | Path | None = None) -> list[Path]:
+    """The candidate config paths, most specific first.
+
+    Mirrors ``prometheus.__main__.load_config`` — also documented in the README
+    and in ``config/prometheus.yaml.default``:
+
+    1. an explicit path (``--config``, or a caller's ``config_path=``)
+    2. the repo-local ``config/prometheus.yaml`` (checkout + deploy-clone installs)
+    3. ``$PROMETHEUS_CONFIG_DIR/prometheus.yaml`` — default
+       ``~/.prometheus/prometheus.yaml`` (pip installs; written by
+       ``prometheus setup``)
+
+    An explicit path SHORT-CIRCUITS: a caller that named a file wants that file
+    or an error, never a silent fall-through to somebody else's config.
+    """
+    if explicit:
+        return [Path(explicit).expanduser()]
+
+    from prometheus.config.paths import get_config_dir
+
+    return [REPO_CONFIG_PATH, get_config_dir() / "prometheus.yaml"]
+
+
+def resolve_config_path(explicit: str | Path | None = None) -> Path:
+    """The config file to read. **Always a Path, never None.**
+
+    Returns the first candidate from :func:`config_search_paths` that exists,
+    else the LAST one searched (``~/.prometheus/prometheus.yaml`` — where
+    ``prometheus setup`` writes, so it is the useful name to print).
+
+    ⚠ Never-None is a contract, not a convenience. The eight ``from_config``
+    fallbacks hand this straight to ``open()``; four of them catch only
+    ``(OSError, yaml.YAMLError)``, so a ``None`` here would become a
+    ``TypeError`` from ``Path(None)`` and take the daemon's boot with it. A
+    nonexistent Path raises ``FileNotFoundError`` — an ``OSError`` — which is
+    exactly what every one of them already handles, so "no config anywhere"
+    behaves precisely as it did when the constant was broken.
+    """
+    candidates = config_search_paths(explicit)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[-1]
+
 
 DEFAULT_MODEL_PROVIDER = "llama_cpp"
 DEFAULT_MODEL_BASE_URL = "http://localhost:8080"

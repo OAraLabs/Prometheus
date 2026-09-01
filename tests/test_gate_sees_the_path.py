@@ -320,6 +320,15 @@ _DIRECT_EVALUATE_TESTS: dict[str, str] = {
         "without testing anything the matrix is for. Registered rather than "
         "exempted: if that file ever stops calling evaluate directly, this "
         "entry fails as a stale registration.",
+    "test_config_fallback_callers.py":
+        "asserts WHICH CONFIG the gate was built from, not whether a caller "
+        "reaches it with a path. SecurityGate.from_config()'s fallback named a "
+        "file one directory above the repo root, so denied_commands, "
+        "workspace_root, allowed_commands, permission_mode and grants were all "
+        "read as absent; those tests pin each one to a decision now that the "
+        "file loads. The decision table is the SUBJECT there — evaluate() is "
+        "how you read a policy back out — and the delivery half is covered "
+        "here through _execute_tool_call, unchanged by that fix.",
 }
 
 

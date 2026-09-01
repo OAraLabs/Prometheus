@@ -45,14 +45,12 @@ log = logging.getLogger("prometheus")
 # Config
 # ---------------------------------------------------------------------------
 
-_PROMETHEUS_YAML = Path(__file__).resolve().parents[2] / "config" / "prometheus.yaml"
-
-
 def load_config(config_path: str | None = None) -> dict[str, Any]:
     """Load prometheus.yaml with env var overrides applied.
 
-    Config file search order (also documented in the README and in
-    config/prometheus.yaml.default):
+    Config file search order lives in
+    :func:`prometheus.config.defaults.config_search_paths` (also documented in
+    the README and in config/prometheus.yaml.default):
 
     1. an explicit ``--config`` path
     2. the repo-local ``config/prometheus.yaml`` (checkout installs)
@@ -63,19 +61,16 @@ def load_config(config_path: str | None = None) -> dict[str, Any]:
     Value precedence within the loaded file:
     env vars > secret files > YAML > defaults.
     """
+    from prometheus.config.defaults import config_search_paths
     from prometheus.config.env_override import apply_env_overrides
 
-    path = Path(config_path) if config_path else _PROMETHEUS_YAML
-    if not path.exists():
-        alt = get_config_dir() / "prometheus.yaml"
-        if alt.exists():
-            path = alt
-        else:
-            log.debug("No config file found — using defaults")
-            return apply_env_overrides({})
-    with path.open(encoding="utf-8") as fh:
-        config = yaml.safe_load(fh) or {}
-    return apply_env_overrides(config)
+    for path in config_search_paths(config_path):
+        if path.is_file():
+            with path.open(encoding="utf-8") as fh:
+                config = yaml.safe_load(fh) or {}
+            return apply_env_overrides(config)
+    log.debug("No config file found — using defaults")
+    return apply_env_overrides({})
 
 
 # ---------------------------------------------------------------------------
@@ -1499,7 +1494,9 @@ def main() -> None:
 
     # Load config — hint about setup wizard if no config exists
     config = load_config(args.config)
-    if not config and not _PROMETHEUS_YAML.exists() and not (get_config_dir() / "prometheus.yaml").exists():
+    from prometheus.config.defaults import config_search_paths
+
+    if not config and not any(p.is_file() for p in config_search_paths(args.config)):
         print("No configuration found. Run the setup wizard:\n")
         print("  prometheus setup\n")
         print("Or create config/prometheus.yaml manually.")
