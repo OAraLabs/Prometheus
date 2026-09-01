@@ -1394,19 +1394,41 @@ async def run_daemon(args: argparse.Namespace) -> None:
     heartbeat_task = asyncio.create_task(heartbeat.run_forever())
     tasks.append(heartbeat_task)
 
+    # ── Cron command vetting: UNCONDITIONAL ─────────────────────────────
+    # Vet cron commands through the SAME SecurityGate as the agent, at system
+    # (restricted) trust, before they run unattended (see cron_scheduler).
+    #
+    # This wiring used to live inside the `if not args.telegram_only:` block
+    # below, which made cron's security posture a function of which CHAT
+    # SURFACE was enabled — and those are unrelated. `--telegram-only` skips
+    # the scheduler loop, but it does NOT stop cron jobs running: the web
+    # bridge starts independently (its own `web.enabled` check, same
+    # indentation as this block), and POST /api/cron/{name}/run calls
+    # execute_job directly. With the gate unwired, cron_scheduler's
+    # _get_security_gate() fell back to a lazily-built
+    # `SecurityGate.from_config()` — no argument, so DEFAULTS_PATH, which
+    # resolves to a file that does not exist, so `sec = {}`.
+    #
+    # That fails OPEN, not closed. The hardcoded denied_paths floor survives
+    # (rm -rf /, /etc writes), but the ten CONFIG-supplied denied_commands do
+    # not: measured, `cat /etc/shadow` went DENY -> ALLOW. Wiring the real
+    # gate whenever one exists removes the fallback from the live path
+    # entirely.
+    #
+    # Deliberately NOT inside a try/except: security_gate is constructed
+    # unconditionally at boot, and a failure to gate cron must take the boot
+    # down rather than degrade to an ungated scheduler.
+    from prometheus.gateway.cron_scheduler import set_cron_security_gate
+
+    set_cron_security_gate(security_gate)
+
     # Cron scheduler (skip if --telegram-only). Wire a failure-notification
     # path so cron job failures push a Telegram message — the heartbeat
     # task-watcher only sees BackgroundTaskManager tasks, not cron
     # subprocesses, so without this a failing daily briefing is silent.
     if not args.telegram_only:
-        from prometheus.gateway.cron_scheduler import (
-            set_cron_notifier,
-            set_cron_security_gate,
-        )
+        from prometheus.gateway.cron_scheduler import set_cron_notifier
         set_cron_notifier(telegram, _notify_chat)
-        # Vet cron commands through the SAME SecurityGate as the agent, at system
-        # (restricted) trust, before they run unattended (see cron_scheduler).
-        set_cron_security_gate(security_gate)
         # own_signals=False: the daemon owns SIGTERM/SIGINT; the embedded
         # scheduler must not re-register them (FL-1 — last registration
         # wins, and this one was stealing the daemon's shutdown).
