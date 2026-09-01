@@ -2389,6 +2389,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 # when no servers configured, and the routes then answer
                 # honestly instead of inventing state.
                 mcp_runtime=mcp_runtime,
+                # #370: a server added over REST registers tools after the
+                # boot grammar was generated. Same regeneration SENTINEL
+                # triggers when it registers its tools post-start.
+                on_tools_changed=_update_grammar,
                 # The window the server actually reported, and the model it
                 # reported it for. Same two values the compactor and the
                 # Telegram /context command are built from, so every surface
