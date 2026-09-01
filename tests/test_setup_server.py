@@ -260,15 +260,51 @@ class TestFindConfigFile:
         assert find_config_file(None) == tmp_path / "confdir" / "prometheus.yaml"
 
     def test_repo_local_config_wins(self, tmp_path, monkeypatch):
+        """Repo-local beats the user config dir — unchanged.
+
+        ⚠ WHAT "REPO-LOCAL" MEANS CHANGED, and this test used to assert the
+        old meaning. It created ``config/prometheus.yaml`` under the CWD and
+        chdir'd there, because ``find_config_file`` resolved
+        ``Path("config/prometheus.yaml")`` relative to the PROCESS WORKING
+        DIRECTORY — so the assertion passed for a reason that was itself the
+        defect. The candidate is now anchored to the installed source
+        (``config.defaults.REPO_CONFIG_PATH``), so the test sets that instead
+        of arranging a working directory. The PRECEDENCE it exists to pin is
+        untouched. See ``test_a_cwd_config_is_not_repo_local`` below, which
+        forbids what this test used to require.
+        """
+        from prometheus.config import defaults
+
         monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path / "confdir"))
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / "config").mkdir()
-        repo_cfg = tmp_path / "config" / "prometheus.yaml"
+        (tmp_path / "confdir").mkdir()
+        (tmp_path / "confdir" / "prometheus.yaml").write_text("web: {}\n")
+
+        (tmp_path / "checkout" / "config").mkdir(parents=True)
+        repo_cfg = tmp_path / "checkout" / "config" / "prometheus.yaml"
         repo_cfg.write_text("web: {}\n")
-        found = find_config_file(None)
-        assert found is not None
-        # daemon.load_config uses the same cwd-relative path — compare resolved.
-        assert found.resolve() == repo_cfg.resolve()
+        monkeypatch.setattr(defaults, "REPO_CONFIG_PATH", repo_cfg)
+
+        assert find_config_file(None) == repo_cfg
+
+    def test_a_cwd_config_is_not_repo_local(self, tmp_path, monkeypatch):
+        """The setup-mode gate must not follow the shell.
+
+        This gate decides whether the daemon boots for real or enters setup
+        mode, and ``daemon.load_config`` then performs the read. Both resolve
+        through ``config_search_paths`` so they cannot disagree — which they
+        would if either one still honoured a ``config/`` directory that
+        happened to sit under the process working directory.
+        """
+        from prometheus.config import defaults
+
+        monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(tmp_path / "confdir"))
+        monkeypatch.setattr(defaults, "REPO_CONFIG_PATH", tmp_path / "none.yaml")
+
+        (tmp_path / "config").mkdir()
+        (tmp_path / "config" / "prometheus.yaml").write_text("web: {}\n")
+        monkeypatch.chdir(tmp_path)
+
+        assert find_config_file(None) is None
 
 
 class TestExplicitConfigMissing:

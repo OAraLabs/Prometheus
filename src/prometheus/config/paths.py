@@ -18,19 +18,39 @@ _DEFAULT_BASE_DIR = ".prometheus"
 _CONFIG_FILE_NAME = "settings.json"
 
 
+def config_dir_path() -> Path:
+    """Where the configuration directory IS. Creates nothing.
+
+    Resolution order:
+    1. PROMETHEUS_CONFIG_DIR environment variable
+    2. ~/.prometheus/
+
+    ⚠ Use this for QUESTIONS — "where would the config be?", "is there one?".
+    Use :func:`get_config_dir` only when about to WRITE. Asking where a file
+    lives is not a reason to create its directory, and one caller genuinely
+    cannot afford it: ``web.setup_server.find_config_file`` runs BEFORE the
+    daemon decides whether to enter setup mode, and setup mode must not create
+    ``~/.prometheus`` state. That constraint used to be met by hand-rolling
+    the resolution rather than calling the helper — which is how it became a
+    fifth, separately-drifting copy of the config search order.
+    """
+    env_dir = os.environ.get("PROMETHEUS_CONFIG_DIR")
+    if env_dir:
+        return Path(env_dir)
+    return Path.home() / _DEFAULT_BASE_DIR
+
+
 def get_config_dir() -> Path:
     """Return the configuration directory, creating it if needed.
 
     Resolution order:
     1. PROMETHEUS_CONFIG_DIR environment variable
     2. ~/.prometheus/
-    """
-    env_dir = os.environ.get("PROMETHEUS_CONFIG_DIR")
-    if env_dir:
-        config_dir = Path(env_dir)
-    else:
-        config_dir = Path.home() / _DEFAULT_BASE_DIR
 
+    The location itself comes from :func:`config_dir_path`; this adds the
+    ``mkdir``. Callers that only want the location should use that instead.
+    """
+    config_dir = config_dir_path()
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir
 

@@ -198,13 +198,61 @@ or on CI, the shape that passes here and fails there. `REPO_CONFIG_PATH` is
 public and module-level so `conftest._isolated_state_dirs` can neutralise it,
 alongside the `~/.prometheus` redirection that fixture already documents.
 
+## Closed 2026-09-01 — the daemon's own read (#363)
+
+The section above left one item: `daemon.load_config` resolving
+`Path("config/prometheus.yaml")` relative to the process CWD. Measured, one
+install, one `cd` apart — `cwd=<checkout>` loaded it, `cwd=<parent>` loaded
+**nothing** while `__main__` loaded it from both.
+
+**Why the guard could not see it.** `test_config_read_honesty_invariant.py`
+detects a broad catch *around* a config read: `_is_config_read()` takes an
+`ast.Try`. This function had **no `try` at all** — an `if not path.exists()`
+check and a bare `yaml.safe_load(fh) or {}`. It is the shape the guard is
+blind to by construction, and it was the highest-stakes read in the system.
+Recorded because the same blindness covers any future no-`try` config read;
+the guard was not widened here, since "reads a file and substitutes" without
+a catch is hard to separate from ordinary file handling by AST alone.
+
+**The half that was nearly missed.** `web.setup_server.find_config_file`
+decides whether the daemon boots for real or enters setup mode, and carried
+its own copy of the same CWD-relative branch — the **fifth** copy of the
+search order. Fixing only `load_config` would have made the gate and the read
+*disagree*: with the CWD moved, the gate reports "no config, enter setup mode"
+about a checkout whose config the read then finds.
+`tests/test_daemon_config_resolution.py::TestGateAndReadAgree` is that
+invariant, and it fails against exactly that partial fix.
+
+It had hand-rolled the resolution for a real reason: `get_config_dir()`
+`mkdir`s, and setup mode must not create `~/.prometheus` state. So
+`config_dir_path()` now answers *where* without creating, `get_config_dir()`
+keeps the `mkdir` for callers about to write, and `config_search_paths()`
+resolves through the former. The constraint holds by construction instead of
+by avoiding the helper.
+
+**One judgment call, stated plainly.** An error state now REFUSES the boot
+rather than substituting defaults. `config/load.py` never raises, which is
+right for a subsystem shrugging at one optional section — this is not that
+read. `daemon.main()` already refuses to half-start twice over (an explicit
+`--config` that does not exist exits 1; no config anywhere enters setup mode
+rather than "the old dead end"), so a config that *exists and does not parse*
+gets the same answer instead of a third one. Not a loosening either way: an
+unparseable config already killed the boot by propagating `yaml.YAMLError`.
+What changes is the **empty file**, which `yaml.safe_load(fh) or {}` turned
+into `{}` with no log line at all — the whole system on defaults, silently.
+
 ## Still open
 
-Nothing on the config-read leg. `daemon.load_config` resolves
-`Path("config/prometheus.yaml")` relative to the process CWD rather than the
-source tree — the same class, deliberately left for its own change, since it
-is the one path where a wrong answer means booting with the wrong gate.
-systemd pins `WorkingDirectory` and passes `--config`, so it is not live.
+Nothing on the config-read leg.
+
+`daemon.load_config` does **not** apply `apply_env_overrides`, which
+`__main__.load_config` does — so `ANTHROPIC_API_KEY` and friends reach the
+CLI's config dict and not the daemon's. Investigated and deliberately NOT
+changed here: the consumers that matter read `os.environ` directly
+(`tasks/manager.py`, `escalation/teacher.py` via `api_key_env`), so this is a
+divergence rather than a known break, and merging secrets into the daemon's
+runtime dict changes what flows into every subsystem downstream. It wants its
+own change, with its own evidence about who actually reads those keys.
 
 ## The guard
 

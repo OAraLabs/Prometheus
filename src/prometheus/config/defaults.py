@@ -67,13 +67,21 @@ def config_search_paths(explicit: str | Path | None = None) -> list[Path]:
 
     An explicit path SHORT-CIRCUITS: a caller that named a file wants that file
     or an error, never a silent fall-through to somebody else's config.
+
+    ⚠ CREATES NOTHING — ``config_dir_path()``, not ``get_config_dir()``. Asking
+    where a file lives is not a reason to ``mkdir`` its directory, and one
+    caller cannot afford it at all: ``web.setup_server.find_config_file`` runs
+    BEFORE the daemon chooses setup mode, and setup mode must not create
+    ``~/.prometheus`` state. That constraint is why it hand-rolled its own
+    resolution instead of calling a helper — so the helper is now safe for it,
+    and the hand-rolled copy is gone.
     """
     if explicit:
         return [Path(explicit).expanduser()]
 
-    from prometheus.config.paths import get_config_dir
+    from prometheus.config.paths import config_dir_path
 
-    return [REPO_CONFIG_PATH, get_config_dir() / "prometheus.yaml"]
+    return [REPO_CONFIG_PATH, config_dir_path() / "prometheus.yaml"]
 
 
 def resolve_config_path(explicit: str | Path | None = None) -> Path:
