@@ -252,41 +252,118 @@ def cmd_sentinel() -> str:
     return "\n".join(lines)
 
 
-def cmd_context(system_prompt: str, model_name: str) -> str:
-    """Return context window usage text."""
+# How each resolved source reads to a human. /context prints the number AND
+# where it came from, because "32768 detected" and "32768 configured" are
+# different facts: only the first survives a model swap, and a user comparing
+# Beacon's panel to /context has to be able to tell which surface is
+# authoritative rather than guessing from two bare integers.
+_LIMIT_SOURCE_TEXT = {
+    "detected": "detected — the inference server reported it (/props n_ctx)",
+    "model_override": "config — an explicit per-model override",
+    "cloud_default": "config — cloud_default_limit (this model is not the local one)",
+    "config": "config — context.effective_limit; a HINT, the server was not reached",
+    "unknown": "unknown — nothing detected and nothing configured",
+}
+
+
+def cmd_context(
+    system_prompt: str,
+    model_name: str,
+    *,
+    local_model: str | None = None,
+    detected_limit: int | None = None,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """Return context window usage text for the model SERVING this session.
+
+    *local_model* and *detected_limit* are what the daemon detected at boot;
+    without them the resolver cannot reach its "detected" branch and every
+    gateway silently reports the configured global instead — the value
+    daemon.py documents as the one that "outlived a model swap and silently
+    won". They are threaded from the daemon, never re-detected here.
+
+    *config* is the daemon's ALREADY-LOADED prometheus.yaml. Pass it: the
+    disk-reading fallback resolves ``DEFAULTS_PATH``, which points one
+    directory ABOVE the repo root and therefore does not exist on this
+    checkout or on the deploy — so ``from_config()`` silently swallows the
+    OSError and every /context reply is built on an empty config. Threading
+    the loaded dict is both "one detection, one resolution" and the only way
+    this reply reflects the file the daemon is actually running.
+
+    An unresolvable window is reported as unknown rather than as a confident
+    figure — the same state /api/lcm reports as ``limit: null``.
+    """
     from prometheus.context.token_estimation import estimate_tokens
 
+    effective_limit: int | None
     try:
         from prometheus.context.budget import TokenBudget
 
-        budget = TokenBudget.from_config(model=model_name)
-        effective_limit = budget.effective_limit
+        if config is not None:
+            budget = TokenBudget.from_loaded_config(
+                config, model=model_name, local_model=local_model,
+                detected_limit=detected_limit,
+            )
+        else:
+            budget = TokenBudget.from_config(
+                model=model_name, local_model=local_model,
+                detected_limit=detected_limit,
+            )
         reserved_output = budget.reserved_output
+        limit_source = budget.limit_source
+        # limit_source == "unknown" means effective_limit is a placeholder,
+        # not a measurement. Printing it would be exactly the failure this
+        # whole change exists to remove.
+        effective_limit = (
+            None if limit_source == "unknown" else budget.effective_limit
+        )
     except Exception:
-        effective_limit = 24000
-        reserved_output = 2000
+        # No fabricated numbers on the failure path either. 24000/2000 used to
+        # be substituted here, which printed a confident window that no part of
+        # the system had ever agreed to.
+        from prometheus.context.budget import DEFAULT_RESERVED_OUTPUT
+
+        effective_limit = None
+        reserved_output = DEFAULT_RESERVED_OUTPUT
+        limit_source = "unknown"
 
     prompt_tokens = estimate_tokens(system_prompt)
-    available = effective_limit - reserved_output
-    headroom = max(0, available - prompt_tokens)
-    usage_pct = (prompt_tokens / available * 100) if available > 0 else 0
 
-    lines = [
-        "Context Window\n",
-        f"Window size:    {effective_limit:,} tokens",
-        f"Reserved output: {reserved_output:,} tokens",
-        f"Available:       {available:,} tokens",
-        "",
-        f"System prompt:   {prompt_tokens:,} tokens ({usage_pct:.0f}%)",
-        f"Headroom:        {headroom:,} tokens",
+    lines = ["Context Window\n"]
+    if effective_limit is None:
+        lines += [
+            "Window size:     unknown",
+            f"Reserved output: {reserved_output:,} tokens",
+            "",
+            f"System prompt:   {prompt_tokens:,} tokens",
+            "Headroom:        unknown (no window to measure against)",
+        ]
+    else:
+        available = effective_limit - reserved_output
+        headroom = max(0, available - prompt_tokens)
+        usage_pct = (prompt_tokens / available * 100) if available > 0 else 0
+        lines += [
+            f"Window size:     {effective_limit:,} tokens",
+            f"Reserved output: {reserved_output:,} tokens",
+            f"Available:       {available:,} tokens",
+            "",
+            f"System prompt:   {prompt_tokens:,} tokens ({usage_pct:.0f}%)",
+            f"Headroom:        {headroom:,} tokens",
+        ]
+
+    lines += [
         "",
         f"Model: {model_name or '(unknown)'}",
+        f"Source: {_LIMIT_SOURCE_TEXT.get(limit_source, limit_source)}",
     ]
 
-    bar_len = 20
-    filled = round(usage_pct / 100 * bar_len)
-    bar = "\u2588" * filled + "\u2591" * (bar_len - filled)
-    lines.append(f"[{bar}] {usage_pct:.0f}% used")
+    if effective_limit is not None:
+        available = effective_limit - reserved_output
+        usage_pct = (prompt_tokens / available * 100) if available > 0 else 0
+        bar_len = 20
+        filled = round(usage_pct / 100 * bar_len)
+        bar = "\u2588" * filled + "\u2591" * (bar_len - filled)
+        lines.append(f"[{bar}] {usage_pct:.0f}% used")
 
     return "\n".join(lines)
 
@@ -1334,6 +1411,13 @@ class CommandContext:
     # SecurityGate THROUGH it (``queue._security_gate``), the same way
     # web/server.py's consent routes already do.
     approval_queue: Any = None
+    # What the daemon detected at boot: the model the LOCAL inference server
+    # is serving, and the window it reported. /context cannot resolve a
+    # "detected" budget without both, and silently reports the configured
+    # global instead — which is how Beacon and /context came to disagree.
+    # Same two values create_app() receives; one detection, one resolution.
+    local_model: str | None = None
+    detected_limit: int | None = None
 
 
 async def _fc_help(ctx: CommandContext, args: str) -> str:
@@ -1363,7 +1447,13 @@ async def _fc_sentinel(ctx: CommandContext, args: str) -> str:
 
 
 async def _fc_context(ctx: CommandContext, args: str) -> str:
-    return cmd_context(ctx.system_prompt, ctx.model_name)
+    return cmd_context(
+        ctx.system_prompt,
+        ctx.model_name,
+        local_model=ctx.local_model,
+        detected_limit=ctx.detected_limit,
+        config=ctx.config,
+    )
 
 
 async def _fc_note(ctx: CommandContext, args: str) -> str:

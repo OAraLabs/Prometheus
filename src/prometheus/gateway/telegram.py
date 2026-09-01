@@ -1591,52 +1591,27 @@ class TelegramAdapter(BasePlatformAdapter):
         if update.effective_chat is None:
             return
 
-        from prometheus.context.token_estimation import estimate_tokens
+        from prometheus.gateway.commands import cmd_context
 
+        # Delegates to the SHARED formatter rather than keeping a parallel
+        # copy. The copy that used to live here had drifted twice over: it
+        # carried its own literal 24000 on the failure path, and it resolved
+        # the budget for the SERVING model while printing the name of the
+        # LOCAL one — so a /claude session showed a 200k window labelled with
+        # the local GGUF. One implementation cannot disagree with itself.
+        #
         # Report the budget for the model actually serving THIS session — a
         # /qwen or /claude override has a different window than the local
         # primary, and the whole point of /context is to be believable.
         _session_key = f"{Platform.TELEGRAM.value}:{update.effective_chat.id}"
-        try:
-            from prometheus.context.budget import TokenBudget
-            budget = TokenBudget.from_config(
-                model=self._serving_model_name(_session_key),
-                local_model=self.model_name,
-                detected_limit=getattr(self, "_detected_context_size", None),
-            )
-            effective_limit = budget.effective_limit
-            reserved_output = budget.reserved_output
-        except Exception:
-            effective_limit = 24000
-            reserved_output = 2000
-
-        # Estimate system prompt cost
-        prompt_tokens = estimate_tokens(self.system_prompt)
-
-        # Available for conversation
-        available = effective_limit - reserved_output
-        headroom = max(0, available - prompt_tokens)
-        usage_pct = (prompt_tokens / available * 100) if available > 0 else 0
-
-        lines = [
-            "Context Window\n",
-            f"Window size:    {effective_limit:,} tokens",
-            f"Reserved output: {reserved_output:,} tokens",
-            f"Available:       {available:,} tokens",
-            f"",
-            f"System prompt:   {prompt_tokens:,} tokens ({usage_pct:.0f}%)",
-            f"Headroom:        {headroom:,} tokens",
-            f"",
-            f"Model: {self.model_name or '(unknown)'}",
-        ]
-
-        # Show bar visualization
-        bar_len = 20
-        filled = round(usage_pct / 100 * bar_len)
-        bar = "█" * filled + "░" * (bar_len - filled)
-        lines.append(f"[{bar}] {usage_pct:.0f}% used")
-
-        await self.send(update.effective_chat.id, "\n".join(lines), parse_mode=None)
+        text = cmd_context(
+            self.system_prompt,
+            self._serving_model_name(_session_key),
+            local_model=self.model_name,
+            detected_limit=getattr(self, "_detected_context_size", None),
+            config=getattr(self, "_prometheus_config", None) or None,
+        )
+        await self.send(update.effective_chat.id, text, parse_mode=None)
 
     # ------------------------------------------------------------------
     # Sprint 22 GRAFT-ROUTER-WIRE Phase 4: direct-mode provider overrides

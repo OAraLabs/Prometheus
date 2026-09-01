@@ -80,10 +80,18 @@ class WebSocketBridge:
         config: dict | None = None,
         approval_queue: Any | None = None,
         device_store: Any | None = None,
+        detected_context_size: int | None = None,
+        local_model: str | None = None,
     ) -> None:
         self.signal_bus = signal_bus
         self.session_mgr = session_mgr
         self.loop_context = loop_context
+        # What the daemon detected at boot. /context typed into Beacon chat
+        # routes through the same shared formatter the chat gateways use, so
+        # it needs the same two inputs — otherwise the web slash surface
+        # becomes a THIRD answer to "how big is the window".
+        self.detected_context_size = detected_context_size
+        self.local_model = local_model
         self.agent_state_ref = agent_state_ref
         # Full daemon config (config.web.*, etc.) — used by formatter commands
         # like /doctor and /beacon dispatched through the web slash-router.
@@ -741,6 +749,8 @@ class WebSocketBridge:
                     ensure_session=ensure_session,
                     session_id=session_id,
                     approval_queue=self.approval_queue,
+                    local_model=self.local_model,
+                    detected_limit=self.detected_context_size,
                 ),
             )
         if outcome is not None and outcome.handled:

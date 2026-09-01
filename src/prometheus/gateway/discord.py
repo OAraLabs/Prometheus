@@ -152,6 +152,7 @@ class DiscordAdapter(BasePlatformAdapter):
         model_provider: str = "",
         session_manager: SessionManager | None = None,
         prometheus_config: dict[str, Any] | None = None,
+        detected_context_size: int | None = None,
     ) -> None:
         super().__init__(config)
         self.agent_loop = agent_loop
@@ -159,6 +160,13 @@ class DiscordAdapter(BasePlatformAdapter):
         self.system_prompt = system_prompt
         self.model_name = model_name
         self.model_provider = model_provider
+        # Window the LOCAL inference server reported at boot, threaded from
+        # the daemon (never re-detected here). Without it /context cannot
+        # reach the resolver's "detected" branch and silently reports the
+        # configured global — the value daemon.py documents as the one that
+        # outlived a model swap. ``model_name`` is the local model it goes
+        # with.
+        self._detected_context_size = detected_context_size
         self._client: Any = None
         self._tree: Any = None
         self._connect_task: asyncio.Task | None = None
@@ -1112,7 +1120,14 @@ class DiscordAdapter(BasePlatformAdapter):
         from prometheus.gateway.commands import cmd_context
 
         await self._respond(
-            interaction, cmd_context(self.system_prompt, self.model_name),
+            interaction,
+            cmd_context(
+                self.system_prompt,
+                self.model_name,
+                local_model=self.model_name,
+                detected_limit=self._detected_context_size,
+                config=self._prometheus_config or None,
+            ),
         )
 
     async def _app_benchmark(self, interaction: Any, args: str) -> None:

@@ -165,6 +165,7 @@ class SlackAdapter(BasePlatformAdapter):
         model_provider: str = "",
         session_manager: SessionManager | None = None,
         prometheus_config: dict[str, Any] | None = None,
+        detected_context_size: int | None = None,
     ) -> None:
         super().__init__(config)
         self.agent_loop = agent_loop
@@ -177,6 +178,13 @@ class SlackAdapter(BasePlatformAdapter):
         self._connect_task: Any = None
         self._start_time: float = 0.0
         self._prometheus_config: dict[str, Any] = prometheus_config or {}
+        # Window the LOCAL inference server reported at boot, threaded from
+        # the daemon (never re-detected here). Without it /context cannot
+        # reach the resolver's "detected" branch and silently reports the
+        # configured global — the value daemon.py documents as the one that
+        # outlived a model swap. ``model_name`` is the local model it goes
+        # with.
+        self._detected_context_size = detected_context_size
 
         if session_manager is None:
             from prometheus.engine.session import SessionManager as _SM
@@ -861,7 +869,13 @@ class SlackAdapter(BasePlatformAdapter):
         await ack()
         from prometheus.gateway.commands import cmd_context
 
-        await respond(text=cmd_context(self.system_prompt, self.model_name))
+        await respond(text=cmd_context(
+            self.system_prompt,
+            self.model_name,
+            local_model=self.model_name,
+            detected_limit=self._detected_context_size,
+            config=self._prometheus_config or None,
+        ))
 
     async def _slash_skills(
         self, ack: Any, command: Any, respond: Any

@@ -139,6 +139,8 @@ def build_command_context(
     ensure_session: Any = None,
     session_id: str = "",
     approval_queue: Any = None,
+    local_model: str | None = None,
+    detected_limit: int | None = None,
 ) -> CommandContext:
     """Build a CommandContext from the web bridge's loop_context + config.
 
@@ -156,6 +158,7 @@ def build_command_context(
         return CommandContext(
             config=config, session=session, ensure_session=ensure_session,
             session_id=session_id, approval_queue=approval_queue,
+            local_model=local_model, detected_limit=detected_limit,
         )
     provider = getattr(loop_context, "provider", "")
     provider_str = getattr(provider, "value", None) or str(provider or "")
@@ -169,4 +172,8 @@ def build_command_context(
         ensure_session=ensure_session,
         session_id=session_id,
         approval_queue=approval_queue,
+        # Detected at boot by the daemon and threaded down; /context resolves
+        # its window from these, exactly as /api/lcm does.
+        local_model=local_model,
+        detected_limit=detected_limit,
     )

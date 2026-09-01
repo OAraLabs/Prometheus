@@ -115,8 +115,20 @@ class TokenBudget:
     """
 
     effective_limit: int
-    reserved_output: int = 2000
+    reserved_output: int = DEFAULT_RESERVED_OUTPUT
     model_overrides: dict[str, int] = field(default_factory=dict)
+    # WHERE effective_limit came from — one of LIMIT_SOURCES. Carried on the
+    # budget rather than recomputed by callers, so a surface that displays the
+    # number can display its provenance without a second resolution that might
+    # disagree with the first.
+    #
+    # "unknown" means nothing resolved and ``effective_limit`` is
+    # LEGACY_FALLBACK_LIMIT — a placeholder, NOT a measurement. A caller that
+    # can say "unknown" (a /context reply, an API field) must check this and
+    # say so rather than printing the placeholder as a figure. Defaults to
+    # "unknown" so a hand-constructed TokenBudget never claims a provenance it
+    # does not have.
+    limit_source: str = "unknown"
 
     # Internal usage tracking by category
     _usage: dict[str, int] = field(default_factory=dict, init=False, repr=False)
@@ -191,9 +203,11 @@ class TokenBudget:
         :func:`resolve_effective_limit`, which is the point.
 
         A TokenBudget must carry a number, so an unresolvable window falls
-        back to ``LEGACY_FALLBACK_LIMIT`` here. Callers that would rather
-        report "unknown" than a fabricated denominator should call
-        :func:`resolve_effective_limit` directly and read the source label.
+        back to ``LEGACY_FALLBACK_LIMIT`` here — and ``limit_source`` is then
+        ``"unknown"``, which is how a caller tells a placeholder from a
+        measurement. Callers that would rather report "unknown" than a
+        fabricated denominator check that field (or call
+        :func:`resolve_effective_limit` directly).
         """
         ctx = (config or {}).get("context") or {}
         limit, _source = resolve_effective_limit(
@@ -208,6 +222,7 @@ class TokenBudget:
             ),
             reserved_output=ctx.get("reserved_output", DEFAULT_RESERVED_OUTPUT),
             model_overrides=_model_overrides(ctx),
+            limit_source=_source,
         )
 
     # ------------------------------------------------------------------
