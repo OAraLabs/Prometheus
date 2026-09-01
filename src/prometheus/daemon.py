@@ -61,21 +61,105 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 
+#: What the daemon falls back to when it cannot read a config — named once,
+#: because every message from :func:`load_config` has to say it. This is not a
+#: subsystem shrugging at an optional section: it is the whole system.
+_DAEMON_SUBSTITUTING = (
+    "documented defaults for EVERY subsystem (model, gateway, security, "
+    "learning, sentinel)"
+)
+
+
 def load_config(config_path: str | None = None) -> dict[str, Any]:
-    """Load prometheus.yaml configuration."""
-    if config_path:
-        path = Path(config_path)
-    else:
-        path = Path("config/prometheus.yaml")
-        if not path.exists():
-            path = get_config_dir() / "prometheus.yaml"
+    """Load prometheus.yaml — the read every other subsystem inherits.
 
-    if not path.exists():
-        logger.warning("Config file not found at %s, using defaults", path)
-        return {}
+    Search order is :func:`prometheus.config.defaults.config_search_paths`,
+    the same one the CLI and ``doctor`` use: explicit path, then the
+    repo-local ``config/prometheus.yaml``, then
+    ``$PROMETHEUS_CONFIG_DIR/prometheus.yaml``.
 
-    with path.open(encoding="utf-8") as fh:
-        return yaml.safe_load(fh) or {}
+    ⚠ THE REPO-LOCAL CANDIDATE USED TO BE ``Path("config/prometheus.yaml")``
+    — relative to the PROCESS WORKING DIRECTORY, not to the installed source.
+    So the daemon's entire configuration depended on where it was launched
+    from. Measured, same install, one `cd` apart::
+
+        cwd=<checkout>    daemon -> loaded    __main__ -> loaded
+        cwd=<parent>      daemon -> NOTHING   __main__ -> loaded
+
+    That is the #361 defect wearing different clothes: a config path that is
+    right by accident of environment rather than by construction. It has not
+    been live — the systemd unit pins ``WorkingDirectory=%h/prometheus-deploy``
+    AND passes ``--config``, so both halves were belt-and-braces — but it is
+    the one read where a miss means booting the whole system on defaults, and
+    "not live" is a property of a unit file that anyone can edit.
+
+    Nothing is silent any more. The four states go through
+    :func:`config.load.load_config_file` (#360), so an EMPTY config file is
+    MALFORMED with a ledger row rather than ``{}`` — the state this function
+    could not express, because ``yaml.safe_load(fh) or {}`` renders "your
+    config is empty" and "you have no config" as the same value, and the
+    empty case logged nothing at all.
+
+    A named-but-missing ``--config`` is UNREADABLE (an error): a caller that
+    named a file wants that file. Finding nothing on the searched path is
+    ABSENT (legitimate), because a caller that named nothing is entitled to
+    defaults — as long as it is on the record that it got them.
+
+    AN ERROR STATE REFUSES THE BOOT (``ConfigReadError``), and that is a
+    deliberate exception to ``config/load.py``'s "never raises" rule. That
+    rule is right for a subsystem shrugging at one optional section; this is
+    not that read. ``main()`` already refuses to half-start twice over — an
+    explicit ``--config`` that does not exist exits 1, and no config anywhere
+    enters setup mode rather than "the old dead end" of booting on defaults.
+    A config that EXISTS and does not parse is the same situation, so it gets
+    the same answer instead of a third one.
+
+    Nothing here is a loosening: an unparseable config already killed the boot
+    (``yaml.YAMLError`` propagated out of the old body). What changes is the
+    EMPTY file, which ``yaml.safe_load(fh) or {}`` turned into ``{}`` with no
+    log line at all — the whole system on defaults, silently, because "your
+    config is empty" and "you have no config" rendered as the same value.
+    """
+    from prometheus.config.defaults import config_search_paths
+    from prometheus.config.load import ERROR_STATES, ConfigReadError, load_config_file
+
+    candidates = config_search_paths(config_path)
+    for candidate in candidates:
+        if candidate.is_file():
+            # First hit wins and we do NOT fall through: a config that exists
+            # and cannot be read is an error, not an absence. Falling through
+            # would resolve an unreadable file to somebody ELSE's config,
+            # which is the substitution this whole arc exists to remove.
+            return _require(load_config_file(
+                candidate, subsystem="daemon",
+                substituting=_DAEMON_SUBSTITUTING,
+            ), ERROR_STATES, ConfigReadError)
+
+    # Nothing exists anywhere. Report against the LAST candidate so the
+    # message names a real place to put one (~/.prometheus/prometheus.yaml,
+    # where `prometheus setup` writes) rather than the first one probed.
+    return _require(load_config_file(
+        candidates[-1] if candidates else None,
+        subsystem="daemon",
+        substituting=_DAEMON_SUBSTITUTING,
+        explicit=bool(config_path),
+    ), ERROR_STATES, ConfigReadError)
+
+
+def _require(load, error_states, exc_type) -> dict[str, Any]:
+    """Return the loaded config, or refuse the boot on an error state.
+
+    ``load_config_file`` has already logged the state and written the ledger
+    row by the time this runs, so the exception carries the operator-facing
+    sentence and nothing is reported twice.
+    """
+    if load.state in error_states:
+        raise exc_type(
+            f"prometheus.yaml is unusable ({load.state}): {load.detail}. "
+            f"Refusing to boot the daemon on {_DAEMON_SUBSTITUTING} — fix the "
+            f"file, or run `prometheus setup` to regenerate it."
+        )
+    return load.data
 
 
 def _sentinel_enabled(sentinel_config: dict[str, Any]) -> bool:
@@ -2444,7 +2528,18 @@ def main() -> None:
     # API call. WARNING keeps real failures visible without the URLs.
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
-    asyncio.run(run_daemon(args))
+    # A config that exists and does not parse refuses the boot (load_config).
+    # Caught here so the operator gets the same one-line refusal the two
+    # sibling cases above already give — "Config file not found: …" and setup
+    # mode — rather than a traceback. load_config has already logged the state
+    # and written the ledger row, so this prints, it does not re-diagnose.
+    from prometheus.config.load import ConfigReadError
+
+    try:
+        asyncio.run(run_daemon(args))
+    except ConfigReadError as exc:
+        print(f"{exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

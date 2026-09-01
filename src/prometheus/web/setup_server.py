@@ -77,6 +77,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from prometheus.config.defaults import config_search_paths
 from prometheus.web.strict_query import StrictQueryRoute
 
 logger = logging.getLogger("prometheus.setup_mode")
@@ -140,21 +141,32 @@ def resolve_setup_ws_port() -> int:
 def find_config_file(explicit: str | None = None) -> Path | None:
     """Locate prometheus.yaml WITHOUT creating any directories.
 
-    Mirrors the daemon's search order (explicit ``--config`` →
-    repo-local ``config/prometheus.yaml`` → ``$PROMETHEUS_CONFIG_DIR`` /
-    ``~/.prometheus``) but never calls :func:`get_config_dir` — that
-    helper ``mkdir``\\ s, and setup mode must not create state.
+    This decides whether the daemon boots for real or enters setup mode, so it
+    MUST agree with what ``daemon.load_config`` then reads. It no longer merely
+    *mirrors* that search order — it IS that search order
+    (:func:`prometheus.config.defaults.config_search_paths`), which is the only
+    arrangement in which the two cannot drift apart.
+
+    ⚠ THEY WERE ABOUT TO. This function hand-rolled the resolution to avoid
+    :func:`get_config_dir`, which ``mkdir``\\ s — setup mode must not create
+    ``~/.prometheus`` state. That constraint is real, and honouring it by
+    copying the search order is what made this the FIFTH copy. Its repo-local
+    branch was ``Path("config/prometheus.yaml")``, relative to the process
+    working directory — so fixing only ``load_config`` would have made the gate
+    and the read DISAGREE: with the CWD moved, this says "no config, enter
+    setup mode" about a checkout whose config ``load_config`` would have found.
+    ``config_search_paths`` now resolves through ``config_dir_path()`` and
+    creates nothing, so the constraint holds by construction rather than by
+    avoiding the helper.
+
+    Returns ``None`` when nothing exists — the signal for setup mode. This is
+    deliberately NOT ``resolve_config_path()``, whose never-None contract
+    serves the opposite kind of caller.
     """
-    if explicit:
-        p = Path(explicit).expanduser()
-        return p if p.is_file() else None
-    repo_cfg = Path("config/prometheus.yaml")
-    if repo_cfg.is_file():
-        return repo_cfg
-    env_dir = os.environ.get("PROMETHEUS_CONFIG_DIR")
-    base = Path(env_dir).expanduser() if env_dir else Path.home() / ".prometheus"
-    user_cfg = base / "prometheus.yaml"
-    return user_cfg if user_cfg.is_file() else None
+    for candidate in config_search_paths(explicit):
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 # ---------------------------------------------------------------------------
