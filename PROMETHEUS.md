@@ -221,6 +221,11 @@ in `config/prometheus.yaml.default` under `learning:` and `trajectory_export:`.
 - `prometheus.sentinel.gepa_engine.GEPAEngine` — bus-subscribed wrapper.
   `run_now()` bypasses the idle gate (used by `/gepa run`).
 - Operates ONLY on `~/.prometheus/skills/auto/`. Never touches manual skills.
+- Input requirement, measured 2026-09-01: golden traces are cloud-only
+  (`telemetry/tracker.py` `_CLOUD_PROVIDERS`) and only `Skill`-tool rows are
+  candidates; below `gepa_min_traces_required` (10) a cycle is a no-op. The
+  reference deployment has never promoted a skill. It does not consume the
+  `evals/golden_dataset.py` tasks and does not measure task outcomes.
 
 ### CLI / Telegram surface
 - `prometheus export-traces [--limit N --output PATH --tool NAME]`
