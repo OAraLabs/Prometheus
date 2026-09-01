@@ -153,7 +153,9 @@ class TokenBudget:
 
         Args:
             model: Active model name — the one serving this session.
-            config_path: Path to prometheus.yaml; defaults to DEFAULTS_PATH.
+            config_path: Path to prometheus.yaml; omit and it resolves via
+                ``config.defaults.resolve_config_path()`` (the same search
+                order the CLI and daemon use).
             local_model: The model the local inference server has loaded.
                 Needed to tell "this session is on the local model" from "this
                 session was routed to a cloud provider", which get different
@@ -169,8 +171,8 @@ class TokenBudget:
 
         explicit = config_path is not None
         if config_path is None:
-            from prometheus.config.defaults import DEFAULTS_PATH
-            config_path = str(DEFAULTS_PATH)
+            from prometheus.config.defaults import resolve_config_path
+            config_path = str(resolve_config_path())
 
         load = load_config_file(
             config_path,

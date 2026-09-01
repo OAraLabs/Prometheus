@@ -63,6 +63,22 @@ def _isolated_state_dirs(tmp_path, monkeypatch):
     # never pointed at tmp, so any data-dir-backed store written by a test
     # (mcp_servers.json being the first heavy one) landed on the live box.
     monkeypatch.setenv("PROMETHEUS_DATA_DIR", str(tmp_path / "prom-data"))
+    # The developer's OWN checkout config is a live-state root too, and it
+    # only became reachable when `config.defaults` stopped naming a path one
+    # directory above the repo root. `config/prometheus.yaml` is gitignored,
+    # so it exists in a working checkout and NOT in a worktree or on CI —
+    # exactly the shape that passes here and fails there (or worse, the
+    # reverse). `SecurityGate.from_config()` is the sharp case:
+    # tests/test_cron_security.py deliberately exercises the lazily-built
+    # default gate, and without this it would be built from whatever
+    # workspace_root and allowed_commands the developer happens to run with.
+    #
+    # Tests that WANT a config still win — they pass config_path= explicitly,
+    # which short-circuits the search (as all of them already do).
+    monkeypatch.setattr(
+        "prometheus.config.defaults.REPO_CONFIG_PATH",
+        tmp_path / "no-repo-config" / "prometheus.yaml",
+    )
 
 
 def _validated_allowance(marker: pytest.Mark) -> set[str]:
