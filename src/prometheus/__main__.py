@@ -97,28 +97,33 @@ def _detect_model_or_fallback(base_url: str, config_model: str) -> str:
 
 
 def create_provider(model_cfg: dict[str, Any]) -> tuple[ModelProvider, str]:
-    """Instantiate the model provider from config.  Returns (provider, model_name)."""
+    """Instantiate the model provider from config.  Returns (provider, model_name).
+
+    Delegates to ``ProviderRegistry.create`` — the same factory the daemon
+    uses (``daemon.py``, "Model provider — ProviderRegistry handles all
+    provider types"). Until 2026-09-01 this function knew three providers
+    and treated every other name as llama.cpp: a config saying
+    ``provider: openai`` (or gemini, xai, deepseek, kimi, glm, mimo, qwen)
+    gave a working ``prometheus daemon`` and a ``prometheus`` / ``prometheus
+    code`` that silently talked to ``localhost:8080``. A stranger who chose
+    the cloud path in setup hit exactly that.
+
+    An unknown provider, or a cloud provider with no key, is now a loud
+    exit — the registry's message names the valid providers / the missing
+    env var — never a fallback to a local server that may not exist.
+    """
+    from prometheus.providers.registry import CLOUD_DEFAULTS, ProviderRegistry
+
     provider_name = model_cfg.get("provider", "llama_cpp")
-    model_name = model_cfg.get("model", "qwen3.5-32b")
-    base_url = model_cfg.get("base_url", "http://localhost:8080")
-
-    if provider_name == "llama_cpp":
-        from prometheus.providers.llama_cpp import LlamaCppProvider
-        return LlamaCppProvider(base_url=base_url), model_name
-
-    if provider_name == "ollama":
-        from prometheus.providers.ollama import OllamaProvider
-        url = model_cfg.get("fallback_url", "http://localhost:11434")
-        return OllamaProvider(base_url=url), model_name
-
-    if provider_name == "anthropic":
-        from prometheus.providers.anthropic import AnthropicProvider
-        return AnthropicProvider(), model_name
-
-    # Fallback — treat as llama_cpp-compatible
-    from prometheus.providers.llama_cpp import LlamaCppProvider
-    log.warning("Unknown provider %r — falling back to llama_cpp", provider_name)
-    return LlamaCppProvider(base_url=base_url), model_name
+    try:
+        provider = ProviderRegistry.create(model_cfg)
+    except ValueError as exc:
+        print(f"error: model provider {provider_name!r}: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    model_name = model_cfg.get(
+        "model", CLOUD_DEFAULTS.get(provider_name, {}).get("model", "qwen3.5-32b")
+    )
+    return provider, model_name
 
 
 # ---------------------------------------------------------------------------
