@@ -165,11 +165,23 @@ def test_status_and_context_agree_on_the_source_label():
 def test_gateway_does_not_read_the_config_from_disk_when_given_one(monkeypatch):
     """One detection, one resolution.
 
-    The disk fallback resolves DEFAULTS_PATH, which points one directory ABOVE
-    the repo root — it does not exist on this checkout or on the deploy, so
-    from_config() swallows the OSError and silently resolves against an empty
-    config. Passing the daemon's loaded dict is what makes /context reflect
-    the file the daemon is actually running.
+    This test asserts ONE READ, not the right number — which is what keeps it
+    valid now that the fallback works. It used to be justified by the
+    fallback being broken: DEFAULTS_PATH named a file one directory above the
+    repo root, so from_config() swallowed the OSError and resolved against an
+    empty config. #361 fixed that, and both routes now run through
+    resolve_effective_limit over the same ``context`` section — for the SAME
+    FILE they return the same limit and the same source.
+
+    What a re-read still costs is the reason to keep passing the dict:
+    prometheus.yaml is mutated at runtime (SecurityGate.persist_grant splices
+    security.grants into it), so a second read is a second, independently-
+    loaded opinion of the config being enforced, and can be a NEWER one. And
+    the daemon's ``--config`` need not be the file the search order finds.
+
+    ``test_disk_fallback_still_works_for_callers_without_a_config`` below is
+    the other half: that path is now a working fallback rather than a
+    guaranteed-empty one.
     """
     from prometheus.context.budget import TokenBudget
 
