@@ -660,6 +660,16 @@ def create_app(
                 else app.state.active_profile
             ),
             "uptime_seconds": time.time() - app.state.start_time,
+            # Durable-store hygiene. Tombstones hide sessions and never remove them, so the store
+            # fills with conversations no surface will show again — it reached 92% hidden before
+            # anyone counted, because nothing reported it. None when there is no store to ask,
+            # NOT zeros: "no store" and "a perfectly clean store" are different answers.
+            "store": (
+                app.state.lcm_engine.conversation_store.store_health()
+                if getattr(app.state, "lcm_engine", None) is not None
+                and getattr(app.state.lcm_engine, "conversation_store", None) is not None
+                else None
+            ),
             "running_sha": running_sha,
             "tree_head": tree_head,
             # WHICH CHECKOUT those two shas describe. Additive, same shape as

@@ -683,6 +683,50 @@ class LCMConversationStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def store_health(self) -> dict[str, int | float]:
+        """How much of the durable store is hidden — the figure nobody could see.
+
+        A tombstone hides a session forever without removing it, so the store silently filled with
+        conversations no surface will ever show again: it reached 92% before anyone counted, and
+        the counting was a person deciding to. That is the definition of a number that belongs in
+        a health endpoint rather than in an audit.
+
+        ``hidden`` uses the same predicate ``list_sessions`` does — tombstoned AND no activity
+        newer than the tombstone — so this reports exactly what the listing suppresses.
+
+        COST: the hidden count groups over every message row, ~3 ms at 10k messages on the current
+        deployment. It scales with MESSAGES, not sessions, so if it ever shows up in a profile the
+        fix is a cached watermark, not a cheaper join.
+        """
+        from prometheus.memory.session_kind import is_machine_session
+
+        sessions = self._conn.execute(
+            "SELECT count(DISTINCT session_id) FROM lcm_messages"
+        ).fetchone()[0]
+        messages = self._conn.execute("SELECT count(*) FROM lcm_messages").fetchone()[0]
+        hidden_rows = self._conn.execute(
+            """
+            SELECT s.session_id AS sid
+            FROM (SELECT session_id, MAX(timestamp) AS lt FROM lcm_messages GROUP BY session_id) s
+            JOIN session_tombstones t ON t.session_id = s.session_id
+            WHERE s.lt <= t.deleted_at
+            """
+        ).fetchall()
+        hidden = len(hidden_rows)
+        machine_hidden = sum(1 for r in hidden_rows if is_machine_session(r["sid"]))
+        return {
+            "sessions": sessions,
+            "messages": messages,
+            "hidden": hidden,
+            # The headline. Rounded to one place because "76.4%" implies a precision that a
+            # count of conversations does not have.
+            "hidden_pct": round(100.0 * hidden / sessions, 1) if sessions else 0.0,
+            # Of the hidden, how many named themselves disposable. A LOW number here with a high
+            # hidden_pct is the actionable shape: probes are accumulating under conversation ids,
+            # so retention will hold them for the long window (see memory/retention.py).
+            "hidden_machine": machine_hidden,
+        }
+
     def purge_session(self, session_id: str) -> dict[str, int]:
         """IRREVERSIBLY remove a session's content. The opposite of a tombstone.
 
