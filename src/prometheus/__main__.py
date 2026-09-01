@@ -1079,12 +1079,14 @@ def main() -> None:
 
     # Onboarding Phase 0: the canonical setup/diagnostics surface.
     from prometheus.cli.doctor import add_doctor_subparser
+    from prometheus.cli.retention import add_retention_subparser
     from prometheus.cli.service import add_install_service_subparser
     from prometheus.cli.setup import add_setup_subparser
     from prometheus.cli.token import add_token_subparser
     add_setup_subparser(subparsers)
     add_token_subparser(subparsers)
     add_doctor_subparser(subparsers)
+    add_retention_subparser(subparsers)
     add_install_service_subparser(subparsers)
 
     daemon_parser = subparsers.add_parser("daemon", help="Start always-on daemon")
@@ -1443,6 +1445,10 @@ def main() -> None:
             sys.exit(0)
 
     # Migration subcommand — runs pre-agent, no model needed
+    if args.command == "retention":
+        from prometheus.cli.retention import run_retention
+        sys.exit(0 if run_retention(args) else 1)
+
     if args.command == "migrate":
         from prometheus.cli.migrate import run_migration
         success = run_migration(args)
