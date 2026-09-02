@@ -144,6 +144,15 @@ class PairStore:
                 f"refusing to bank {pair_source}/{tool_name}: chosen side "
                 f"carries chat-template markup — {markup_guard.describe(corrupt)}"
             )
+        # Capture-time redaction: a pair is training data — the one place a
+        # retained credential is guaranteed to be copied, exported and read
+        # back into a model. Redact every side (context, both calls, meta)
+        # before hashing, so the dedupe key is over what is actually stored.
+        from prometheus.security.log_redaction import redact_capture
+        context = redact_capture(context)
+        rejected = redact_capture(rejected)
+        chosen = redact_capture(chosen)
+        meta = redact_capture(meta)
         context_json = json.dumps(context or {}, default=str, sort_keys=True)
         rejected_json = (
             _call_json(rejected["name"], rejected.get("input", {}))

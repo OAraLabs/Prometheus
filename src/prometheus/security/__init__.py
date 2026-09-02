@@ -28,6 +28,7 @@ from prometheus.security.log_redaction import (
     RedactingFilter,
     RedactingFormatter,
     install_log_redaction,
+    redact_capture,
     redact_secrets,
 )
 from prometheus.security.path_guard import (
@@ -46,5 +47,6 @@ __all__ = [
     "assert_path_under_roots",
     "install_log_redaction",
     "is_path_under_roots",
+    "redact_capture",
     "redact_secrets",
 ]
