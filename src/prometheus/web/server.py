@@ -925,8 +925,37 @@ def create_app(
             tool_choice = _normalize_tc(_tc_raw, _valid) if _tc_raw is not None else None
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"error": str(exc)})
+        # Item 6 @-references: ``references: [{type: file|diff|url, target}]``.
+        # Resolved BEFORE dispatch so the caller gets the refusal (4xx + reason)
+        # instead of a turn that silently ran with less context than the chips
+        # promised. A reference never rides a slash command.
+        blocks = None
+        refs_raw = body.get("references")
+        if refs_raw is not None:
+            from prometheus.web.references import ReferenceRefused, parse_references
+            from prometheus.web.slash_router import parse_slash as _parse_slash
+
+            try:
+                refs = parse_references(refs_raw)
+                if refs and _parse_slash(message) is not None:
+                    raise ReferenceRefused(
+                        "bad_request", "references cannot be attached to a slash command"
+                    )
+            except ReferenceRefused as exc:
+                return JSONResponse(status_code=exc.status, content={"error": str(exc), "kind": exc.kind})
+            if refs:
+                if not hasattr(bridge, "resolve_references"):
+                    return JSONResponse(
+                        status_code=503,
+                        content={"error": "reference resolution unavailable — ws_bridge not wired"},
+                    )
+                try:
+                    blocks = await bridge.resolve_references(session_id, refs)
+                except ReferenceRefused as exc:
+                    return JSONResponse(status_code=exc.status, content={"error": str(exc), "kind": exc.kind})
         await bridge.dispatch_user_message(
-            session_id, message, client_msg_id=client_msg_id, mode=mode, tool_choice=tool_choice
+            session_id, message, client_msg_id=client_msg_id, mode=mode, tool_choice=tool_choice,
+            **({"blocks": blocks} if blocks else {}),
         )
         return {"run_id": idempotency_key, "status": "sent"}
 
@@ -3089,19 +3118,15 @@ def create_app(
     # its only file access. Every path is resolved and confined to the root:
     # .. / absolute / symlink escapes are rejected (resolve() follows symlinks).
 
-    from prometheus.config.paths import get_workspace_dir
-
     _FILES_READ_CAP = 256 * 1024  # 256 KB text-preview cap
 
     def _files_root() -> Path:
         # PROMETHEUS_FILES_ROOT widens/repoints the BROWSE root only (read-only,
-        # token-gated). Deliberately separate from PROMETHEUS_WORKSPACE_DIR, which
-        # doubles as an image_generate WRITE root — repointing that to browse more
-        # would widen the agent's write surface too.
-        env_root = os.environ.get("PROMETHEUS_FILES_ROOT", "").strip()
-        if env_root:
-            return Path(env_root).expanduser().resolve()
-        return get_workspace_dir().resolve()
+        # token-gated). One definition, shared with @-references (item 6) so the
+        # composer's fallback scope IS the browse root — see references.py.
+        from prometheus.web.references import default_files_root
+
+        return default_files_root()
 
     def _safe_file_path(rel: str) -> Path | None:
         """Resolve `rel` under the workspace root; None if it escapes the root."""

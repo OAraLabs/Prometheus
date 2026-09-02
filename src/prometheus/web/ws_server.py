@@ -96,6 +96,9 @@ class WebSocketBridge:
         # Full daemon config (config.web.*, etc.) — used by formatter commands
         # like /doctor and /beacon dispatched through the web slash-router.
         self.config = config or {}
+        # Item 6 @-references: built lazily from config + the loop's
+        # workspace_resolver; tests may inject one.
+        self.reference_resolver: Any | None = None
         # SPRINT-WEB-PARITY: /grants, /remember, /revoke need the queue, and
         # /gate reaches the SecurityGate through it. The REST layer already had
         # it (app.state.approval_queue); the bridge never did, which is one
@@ -371,9 +374,36 @@ class WebSocketBridge:
                     },
                 })
                 return
+            # Item 6 @-references: resolved HERE, before the turn is queued —
+            # an unresolvable reference is an error frame, never a dropped chip.
+            # A reference never rides a slash command (a command is not a turn).
+            blocks: list[Any] | None = None
+            refs_raw = payload.get("references")
+            if refs_raw is not None:
+                from prometheus.web.references import ReferenceRefused, parse_references
+                from prometheus.web.slash_router import parse_slash as _parse_slash
+
+                try:
+                    refs = parse_references(refs_raw)
+                    if refs and _parse_slash(content) is not None:
+                        raise ReferenceRefused(
+                            "bad_request", "references cannot be attached to a slash command"
+                        )
+                    blocks = await self.resolve_references(session_id, refs) if refs else None
+                except ReferenceRefused as exc:
+                    await self._send_one(websocket, {
+                        "type": "error",
+                        "timestamp": time.time(),
+                        "payload": {
+                            "session_id": session_id,
+                            "message": str(exc),
+                            "kind": exc.kind,
+                        },
+                    })
+                    return
             if session_id and content:
                 await self._handle_send_message(session_id, content, client_msg_id=client_msg_id,
-                                                mode=mode, tool_choice=tool_choice)
+                                                mode=mode, tool_choice=tool_choice, blocks=blocks)
 
         elif cmd_type == "chat_upload":
             # File upload from Beacon: { type: "chat_upload", payload: {
@@ -587,7 +617,7 @@ class WebSocketBridge:
 
     async def dispatch_user_message(
         self, session_id: str, content: str, client_msg_id: str | None = None, mode: str = "agent",
-        tool_choice: object | None = None
+        tool_choice: object | None = None, blocks: list[Any] | None = None
     ) -> None:
         """Public dispatch entry point — kicks off the same flow as a WS-borne
         ``send_message`` command.
@@ -602,8 +632,33 @@ class WebSocketBridge:
         ``client_msg_id`` (optional) is echoed on the user ``chat_message`` frame
         alongside the canonical ``msg-{turn_index}`` id, so a client that rendered
         the message optimistically can correlate its local id to the durable one.
+
+        ``blocks`` (optional) are already-resolved content blocks — the REST
+        route resolves @-references (``resolve_references``) BEFORE dispatch so
+        a bad reference is a 4xx to the caller, not a turn that runs short.
         """
-        await self._handle_send_message(session_id, content, client_msg_id=client_msg_id, mode=mode, tool_choice=tool_choice)
+        # ``blocks`` rides only when present — duck-typed handler fakes predate it.
+        await self._handle_send_message(
+            session_id, content, client_msg_id=client_msg_id, mode=mode,
+            tool_choice=tool_choice, **({"blocks": blocks} if blocks else {}),
+        )
+
+    async def resolve_references(self, session_id: str, refs: list[Any]) -> list[Any]:
+        """Resolve parsed @-references into content blocks for ``session_id``.
+
+        Scope follows the session: its workspace when bound (item W), else the
+        ``/api/files`` browse root. Raises ``ReferenceRefused`` with the kind
+        and reason — the REST route and the WS handler turn that into a 4xx /
+        error frame. Shared by both surfaces so they cannot drift.
+        """
+        if self.reference_resolver is None:
+            from prometheus.web.references import ReferenceResolver
+
+            self.reference_resolver = ReferenceResolver(
+                security_cfg=(self.config or {}).get("security"),
+                workspace_resolver=getattr(self.loop_context, "workspace_resolver", None),
+            )
+        return await self.reference_resolver.resolve(session_id, refs)
 
     async def run_turn_awaited(self, session_id: str, content: str) -> tuple[str, Any]:
         """Run ONE agent turn in ``session_id`` and await its completion.

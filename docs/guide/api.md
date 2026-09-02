@@ -61,7 +61,7 @@ Session semantics worth knowing:
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/chat/send` | Send a chat message. Body: `{"session_id": "my-session", "message": "..."}` (the field is `message`, not `content`); optional `mode` (`"agent"`/`"chat"`) and `tool_choice`. Returns `{"run_id", "status": "sent"}`; the reply streams over the WebSocket and lands in `GET /api/sessions/{session_id}/messages` |
+| POST | `/api/chat/send` | Send a chat message. Body: `{"session_id": "my-session", "message": "..."}` (the field is `message`, not `content`); optional `mode` (`"agent"`/`"chat"`), `tool_choice`, and `references` (@-references, see below). Returns `{"run_id", "status": "sent"}`; the reply streams over the WebSocket and lands in `GET /api/sessions/{session_id}/messages` |
 | POST | `/api/chat/interrupt` | Stop the running agent turn in a session — the chat Stop button. `{"session_id": ...}`; idempotent (`stopped: false` when nothing is running). Completed rounds persist, a mid-generation partial is kept as an assistant turn, and every client sees the broadcast `chat_done{interrupted:true}`. HTTP twin of the WS `interrupt` frame |
 | POST | `/api/chat` | Alternate chat send endpoint |
 
@@ -276,7 +276,7 @@ On success the server replies with a `connected` frame.
 |---|---|
 | `auth` | First-frame token auth (required) |
 | `subscribe` | Subscribe to event fan-out (server acks with `subscribed`) |
-| `send_message` | Send a chat turn; accepts optional `tool_choice` (validated against the live tool registry) and a `client_msg_id` for echo correlation |
+| `send_message` | Send a chat turn; accepts optional `tool_choice` (validated against the live tool registry), a `client_msg_id` for echo correlation, and `references` (@-references, resolved server-side before the turn is queued; an unresolvable one is an `error` frame with `kind`) |
 | `chat_upload` | Upload an attachment (base64); images get vision captions, documents get text extraction |
 | `switch_session` | Point this socket at a different session |
 | `interrupt` | Stop the running turn: `{"type": "interrupt", "payload": {"session_id": ...}}`. The requesting socket gets an `interrupt_ack`; every client learns the outcome from the broadcast `chat_done{interrupted:true}` |
@@ -288,9 +288,38 @@ Example `send_message`:
   "type": "send_message",
   "session_id": "web:default",
   "content": "Summarize today's telemetry",
-  "tool_choice": null
+  "tool_choice": null,
+  "references": [{"type": "file", "target": "src/app.py"}]
 }
 ```
+
+### @-references
+
+Both `POST /api/chat/send` and the WS `send_message` command accept an optional
+`references` list — the daemon half of the composer's `@` chips. The client
+**names** the reference; the daemon **reads** it, on this host, before the turn
+is queued. Each resolved reference becomes its own text block persisted with the
+user turn (the same blocks path as image uploads), so history shows exactly what
+the model was given.
+
+| `type` | `target` | Resolves to |
+|--------|----------|-------------|
+| `file` | path, relative to the session scope (absolute allowed if inside it) | the file's text, capped at 256 KB (`truncated="true"` past that); binary files refused |
+| `diff` | optional git revision or range (`HEAD~1`, `main...HEAD`); empty = working tree vs index | `git diff` in the session scope, capped at 128 KB |
+| `url` | `http(s)://…` | the page as compact text via the same fetcher and SSRF guard as `web_fetch`, capped at 64 KB |
+
+Scope follows the session: a session with a workspace bound
+(`PUT /api/sessions/{id}/workspace`) resolves `file` and `diff` inside that
+workspace and nowhere else; without one, the `/api/files` browse root is used
+(plus any configured `security.workspace_root`). Denied paths are the gate's own
+list — a path `read_file` could not read cannot be `@`-referenced. At most 16
+references per message.
+
+Failures are loud: REST answers `400` (malformed / bad ref / binary), `403`
+(outside scope, denied path, private address), `404` (no such file, not a git
+repo), `502` (fetch failed) or `503` (workspace lookup unavailable) with
+`{"error", "kind"}`; the WS path sends an `error` frame with the same `kind` and
+does not queue the turn. References cannot be attached to a slash command.
 
 ### Server → client messages
 
