@@ -8,14 +8,14 @@ A sovereign agent harness for local LLMs — the validation layer that makes ope
 
 Prometheus is two pieces that pair with a 6-digit code:
 
-- **The daemon** — an always-on Python agent runtime: agent loop + Model Adapter Layer, three chat gateways (Telegram / Slack / Discord), lossless memory, sandboxed coding runs, cron, a security gate, and a bearer-token REST + WebSocket control plane.
-- **[Beacon](https://github.com/OAraLabs/beacon-desktop)** — its native desktop cockpit (macOS / Linux): chat with live tool timelines, Mission Control, a Loop Manager for coding runs, a documents editor with AI redlines, Kanban, telemetry feeds, and per-provider key management.
+- **The daemon** — an always-on Python agent runtime: agent loop + Model Adapter Layer, three chat gateways (Telegram / Slack / Discord), lossless memory, sandboxed coding runs, cron, a security gate, and a bearer-token REST + WebSocket control plane — plus an OpenAI-compatible `/v1` surface so anything that already speaks OpenAI can talk to it.
+- **[Beacon](https://github.com/OAraLabs/beacon-desktop)** — its native desktop cockpit (macOS / Linux): chat with live tool timelines, `@`-references and hands-free voice, Mission Control, a Loop Manager for coding runs, per-turn file checkpoints you can restore, a documents editor with AI redlines, Kanban, telemetry feeds, and per-provider key management. An iOS client rides the same control plane (per-device tokens, push, pagination).
 
 ```bash
 git clone https://github.com/OAraLabs/Prometheus.git && cd Prometheus
 pip install -e '.[full]'
 oara setup          # auto-detects llama.cpp / Ollama / LM Studio / vLLM
-prometheus                # chat in the CLI
+oara                # chat in the CLI
 oara daemon         # always-on: web API + gateways + cron + background layer
 ```
 
@@ -40,8 +40,10 @@ Without this, `import fastapi` fails inside `.venv` and three test files won't e
 - **Visible memory that rides every prompt** — `MEMORY.md` and `USER.md` you can read, structured facts mined from conversations every 30 minutes, and passive recall that FTS-matches each message against the memory store and injects what's relevant.
 - **Lossless context** — DAG-based compression with full-text search so long sessions don't drop facts; originals are always recoverable.
 - **Sandboxed coding runs** — point it at a repo and an acceptance command; it iterates to green in a clone and hands you a reviewable branch. Never merges, never pushes.
+- **A working directory per conversation, with undo** — `/workspace <path>` points a chat at a repo; the security gate follows it, project instructions (`PROMETHEUS.md`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`…) load from it, and every turn takes a file checkpoint first so a bad edit is one REST call (or one Beacon click) from undone.
+- **Sees what you show it** — images reach a vision-capable model as images, not paraphrases; stored by reference so the bytes never bloat the transcript. `@file`, `@diff` and `@url` in the composer resolve on the daemon, scoped to the conversation's workspace.
 - **Telemetry that stays home** — every tool call, repair, and token count logged to SQLite on your own disk and sent nowhere. It's the raw material for tuning the adapter and fine-tuning your own model: the data big labs keep for themselves, kept by you instead.
-- **A desktop cockpit** — Beacon pairs to the daemon over your LAN or tailnet and gives every subsystem a native surface.
+- **A desktop cockpit** — Beacon pairs to the daemon over your LAN or tailnet and gives every subsystem a native surface; on OAra Voice it also talks back — phrase-by-phrase streaming TTS and a hands-free mode with barge-in.
 
 > **Status:** Active development. Expect rough edges. Fixes land weekly. Feedback welcome.
 
@@ -152,8 +154,11 @@ Three commitments run through everything below:
 - Per-session model override via slash command, REST, or Beacon's model switcher
 - Deferred tool loading (tri-state, default `auto`): cloud models get the full tool catalog; local models get a compact deferred catalog that hands back roughly 8K tokens of context on a 32K window
 - Cache-shaped context: the tool catalog is frozen at run start, any history rewrite is flagged, and mid-run compaction stays off on cloud providers — your prompt prefix is treated as a cache asset
+- Fallback chains that **degrade loudly**: when a provider fails terminally the turn moves to the configured fallback and says so — a `provider_degraded` frame on the wire, a line in history, and a named reason when a fallback *declines* (the context doesn't fit, the key is missing) instead of silence
+- The loop stops itself: a hard iteration ceiling per turn (50 by default, the live value reported on `/api/status`), plus a self-halt on unproductive repetition — the same call six times adjacent, or three consecutive divergent rounds — so a flailing model ends the turn instead of burning the budget
+- Thinking blocks persist and round-trip across providers with one wire vocabulary, so a reasoning model's traces survive a restart and a client switch
 
-### 40+ Builtin Tools
+### 50+ Builtin Tools
 
 `bash`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`, `web_search`, `web_fetch`, `youtube_transcript`, `download_file`, `browser` (Playwright), `image_generate`, `video_generate`, `tts`, `message`, `dashboard`, `notebook_edit`, `cron_create/delete/list`, `task_create/get/list/update/stop/output`, `todo_write`, `skill`, `agent` (subagent spawning), `ask_user`, `sessions_list/send/spawn`, `lcm_grep/expand/describe/expand_query`, `wiki_compile/query/lint`, `sentinel_status`, `audit_query`, `anatomy`, `lsp` (7 actions; when enabled), plus dynamic MCP tools (`mcp__{server}__{tool}`).
 
@@ -188,7 +193,9 @@ Why this only works here: a screen recording of you doing your job is among the 
 - Dynamic tool discovery from any MCP server, in the daemon and the CLI alike
 - Collision-free naming (`mcp__{server}__{tool}`), stdio transport today (HTTP/SSE planned), config fingerprinting
 - Scoped and gated: per-server `allowed_tools` allowlists (enforced at discovery *and* at call time), and tools a server doesn't declare read-only require confirmation before they run
+- Managed over REST as well as config: `/api/mcp/servers` adds, edits and removes servers live (Beacon's Connectors tab is its client); a server added at runtime is advertised to the model and reaches the llama.cpp grammar on the next turn, or the add fails loudly
 - Context7 is a two-line config away for up-to-date library documentation
+- **Packs** — the extension contract at the boundary: a pack declares its tools, skills and panels; skills arrive quarantined, panels are discoverable, and nothing a pack ships is trusted before it is declared ([FOUNDATION](docs/FOUNDATION.md) Part 2)
 
 ### Identity System
 
@@ -196,15 +203,17 @@ Why this only works here: a screen recording of you doing your job is among the 
 - **AGENTS.md** — agent registry with specializations for subagent spawning
 - **ANATOMY.md** — live infrastructure snapshot with Mermaid diagrams (hardware, VRAM, model + quant, Tailscale peers), queryable via the `anatomy` tool
 - **MEMORY.md + USER.md** — the agent learns who you are over time (bounded: 12K + 8K chars)
-- **Agent Profiles** — `full`, `coder`, `research`, `assistant`, `minimal` via `/profile` to trade tool breadth for context budget
+- **Agent Profiles** — `full`, `coder`, `research`, `assistant`, `minimal` via `/profile` to trade tool breadth for context budget — and a profile can belong to one conversation rather than the whole daemon
+- **Project instructions** — walking up from the daemon's cwd, or from a conversation's own `/workspace`, the assembler stacks `PROMETHEUS.md`, `HERMES.md`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, `.windsurfrules`, `.github/copilot-instructions.md` and `.prometheus/rules/*.md`, one per directory level, under a per-file and an aggregate cap that names what it had to omit
 - **Node & instance identity** — a local Ed25519 node keypair plus a vault-resident instance UUID (`oara vault adopt` / `vault status`); see [Identity, and what does not phone home](#identity-and-what-does-not-phone-home) and [docs/FOUNDATION.md](docs/FOUNDATION.md)
 
 ### Security
 
 - 4-level trust model (BLOCKED → APPROVE → AUTO → AUTONOMOUS), origin-aware: background work (SENTINEL, cron, gym) faces stricter gates than what you ask for directly
-- 8 always-blocked command patterns plus configurable deny lists and bash intent analysis, plus a workspace boundary on `write_file` / `edit_file` — **a speed bump, not confinement**: `bash` is gated on the command string, not on the paths a command writes to, so a shell redirect goes anywhere. `denied_paths` is the hard stop, and a turn-end check detects writes that landed outside the permitted area — after the fact; for a conversation with a workspace, every turn also takes a file checkpoint first, so the turn's writes can be undone over REST. [What each one actually catches](docs/guide/features.md#security)
+- 8 always-blocked command patterns plus configurable deny lists and bash intent analysis, plus a workspace boundary on `write_file` / `edit_file` — **a speed bump, not confinement**: `bash` is gated on the command string, not on the paths a command writes to, so a shell redirect goes anywhere. `denied_paths` is the hard stop, a turn-end check detects writes that landed outside the permitted area — after the fact — and for a conversation with a workspace every turn takes a file checkpoint first, so its writes can be undone over REST or from Beacon. With bubblewrap available, the **bash write floor** makes the boundary real in the kernel: the filesystem is mounted read-only except the workspace, and the gate follows the conversation's `/workspace`. [What each one actually catches](docs/guide/features.md#security--permissions)
 - Untrusted-input fencing: every message carries a provenance tag, and content from cron jobs, task output, and files is wrapped as data — not instructions — before it reaches the model
-- Secrets structurally absent: tool sandboxes strip key/token/secret variables from the environment (the agent can't `env` its own keys), the audit log redacts before writing, key updates reject control characters, and key reads return booleans — never values
+- Secrets structurally absent: tool sandboxes strip key/token/secret variables from the environment (the agent can't `env` its own keys), key updates reject control characters, and key reads return booleans — never values
+- **Secrets do not survive into logs or capture data**: every log handler redacts token shapes (Telegram `bot<token>`, Bearer headers, `?token=` query values, the `sk-`/`xai-`/`AIza`/GitHub/Discord/Slack key families) before a line is written — including the web server's own request log — and `daemon.log`/`cli.log` rotate. The same redactor runs at capture time on telemetry, training pairs and trajectory exports, and `scripts/scrub_capture_stores.py` cleans what was written before it existed. Not config-gated, on purpose
 - SSRF-hardened outbound: `web_fetch` and `download_file` resolve DNS and refuse private, loopback, and link-local address space before any request leaves the machine
 - Rate limiting on the public chat surface: a per-chat budget with a global ceiling above it, so one peer can't exhaust the daemon and the aggregate is capped even when every chat is individually under. Messages and media carry **separate** budgets, a refusal doesn't consume budget, and the sender is warned once per window rather than per message
 - Inbound media is checked cheapest-and-earliest-first: declared MIME before any transfer, then the size cap **before download** — then the download itself runs under a hard byte ceiling, because `file_size` is supplied by the peer and the pre-check believed it. Magic bytes are sniffed after, and a declared type that disagrees with the sniffed one is refused; that's the renamed-extension case
@@ -218,13 +227,14 @@ Why this only works here: a screen recording of you doing your job is among the 
 
 ### Always-On
 
-- Telegram gateway with photo (vision captioning), voice (Whisper STT), document (20+ formats), and sticker handling
+- Telegram gateway with photo (real vision when the served model can see; captioning when it can't), voice (Whisper STT), document (20+ formats), and sticker handling — and control-plane commands (`/steer`, `/approve`, `/status`) answer **mid-turn**, because the data plane no longer holds the fetcher
 - Slack gateway (Socket Mode) at Telegram parity: 45 slash commands, thread-based long replies, channel whitelists
 - Discord gateway at the same parity: `/prometheus` app commands, DM + guild/channel whitelists
 - Cron scheduler (natural-language scheduling supported), heartbeat monitoring, systemd service
 - Durable background tasks (`tasks.db` survives restarts) with an honesty check: "I'll let you know when it's done" must be backed by a real registered task — and tasks orphaned by a restart are marked failed instead of pretending to still run
 - 40+ slash commands on Telegram — including mid-turn `/steer`, `/queue`, and per-chat provider overrides
 - **Paperclip fleet gateway** (experimental, off by default) — Prometheus as a hireable agent: a fleet manager wakes it over HTTP, it checks out an issue, works a turn, reports back, and bills from real token usage
+- **A mobile-ready control plane** — per-device tokens (mint, verify, revoke), APNs push with Live Activity, message pagination (`?limit=` / `?before=`), a WebSocket `subscribe` that is a real session filter, and auto-titled sessions; the iOS client is built on nothing the desktop doesn't also use
 
 ### Sessions that behave like sessions
 
@@ -233,6 +243,9 @@ Why this only works here: a screen recording of you doing your job is among the 
 - **Liveness you can trust** — a progress pulse (phase / tool / round / elapsed) every few seconds distinguishes a long turn from a dead daemon, and failures arrive classified — a billing error says it's a billing error and how to fix it, instead of a blank timeout
 - **An outbox for deliverables** — files the agent produces land in `~/.prometheus/files` and are served by content id (renames don't break links, no path-traversal surface); Beacon shows them as download chips
 - **A real sync contract** — every message has a durable id that doubles as a cursor, so clients resync incrementally after any disconnect
+- **Rehydrate, pin, fork, purge** — a restarted daemon restores a session's working context, not just its list entry; pins are daemon-side so every client agrees; a conversation can be forked at any point (edit-and-branch without branching the model); purge deletes for real, with a retention window for the tombstones
+- **Search across everything** — `/api/search` spans messages and summaries, and a summary hit carries the durable row ids to jump to
+- **Honest context accounting** — `/api/lcm` reports against the *real* detected context window (one detection, one resolution, the same number `/context` shows), splits fresh from summarized tokens, and `/api/status` says how much of the store is hidden behind summaries
 
 ### Documents & Board
 
@@ -263,6 +276,8 @@ Why this only works here: a screen recording of you doing your job is among the 
 - Every model call wrapped in an `LLMCallEnvelope` — per-round token accounting, and every swallowed exception lands in a queryable silent-failure ledger before any failure policy runs
 - Per-round prompt-cache stats (cached vs cache-write tokens, hit ratio) across providers — a provider that doesn't report is recorded as unknown, never as a fake zero
 - The daemon knows when it's stale: `/api/status` reports the running SHA against the repo's HEAD, so merged-but-not-restarted can never masquerade as deployed
+- The ledger is readable over the API: `GET /api/tools/recent` (the per-call tool history, not the loop's echo), `GET /api/usage` (token cost that states what it does **not** know), `GET /api/tasks` (background work, all of it — not just since the last restart), the wiki's pages and search, and the approval lifecycle pushed over the WebSocket
+- Configuration honesty: a config read that substitutes a default has to say so, a missing key has one of three rulings (absent / null / present-but-empty), config pins correct the *running* config and leave the file alone, and `/api/status` reports which checkout booted
 - Phoenix/OpenTelemetry tracing — env-gated, zero-cost no-ops when off
 - Failure classification in evals (model vs harness vs unclear) with trend tracking — the judge runs on your local endpoint; `judge_base_url` chooses it and `evals.judge_model` pins which model grades
 - **Every score records which judge produced it** — base URL, model, and whether that model was *pinned* or auto-detected from whatever the endpoint had loaded. `pinned` is the field that matters and can't be inferred from the model name: an auto-detected judge that resolves to `qwen2.5:7b-instruct` records the same name as one pinned to it, but only the pinned run is reproducible. Result files written before this carry no judge key at all — that means **unknown**, permanently, and they must not be compared across paths. Backfilling them would manufacture exactly the false provenance the change exists to prevent
@@ -377,8 +392,8 @@ Connect via Tailscale, WireGuard, or any network — Beacon pairs over the same 
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                    INTERFACE LAYER                        │
-│  Telegram │ Slack │ Discord │ CLI │ Beacon desktop        │
-│           (REST :8005 + WebSocket :8010, token-authed)    │
+│  Telegram │ Slack │ Discord │ CLI │ Beacon desktop │ iOS  │
+│  (REST :8005 + WebSocket :8010, token-authed; /v1 OpenAI) │
 └────────────────────────┬─────────────────────────────────┘
                          │
 ┌────────────────────────┴─────────────────────────────────┐
@@ -443,9 +458,10 @@ context:
 security:
   permission_mode: "default"
   workspace_root: "~/.prometheus/workspace"   # or a list of roots
-  # This is the SHIPPED default (an earlier note here claimed it was "~" —
-  # that was wrong). A path outside every root makes write_file/edit_file ask
-  # first; it does not make the write impossible. See the note below.
+  # A path outside every root makes write_file/edit_file ask first; it does
+  # not make the write impossible (see Security). A conversation can override
+  # this with /workspace <path> — the gate, project instructions and per-turn
+  # file checkpoints all follow the conversation.
 
 gateway:
   telegram_enabled: true   # default: false — setup enables it when you add a token
@@ -496,6 +512,7 @@ The full 40+ command surface is in the [feature reference](docs/guide/features.m
 | `/queue` `/unqueue` | Line up follow-up messages while it's busy |
 | `/wiki` `/note` `/memory` | Knowledge base stats, quick capture, memory files |
 | `/skills` `/profile` `/anatomy` | Skills, agent profiles, infrastructure snapshot |
+| `/workspace <path>` | Point this conversation at a repo — gate, project files and checkpoints follow |
 | `/approve` `/deny` `/pending` | Human-in-the-loop approval queue |
 | `/claude` `/gpt` `/gemini` `/xai` `/deepseek` `/kimi` `/glm` `/mimo` | Per-chat cloud override |
 | `/local` `/route` | Back to the local model · show this chat's routing |
@@ -530,14 +547,16 @@ prometheus/
 │   ├── engine/          # Agent loop, sessions, streaming, honesty check
 │   ├── adapter/         # Model Adapter Layer (validator, formatter, enforcer, retry)
 │   ├── providers/       # llama_cpp, ollama, openai_compat, anthropic, xai_oauth, registry
-│   ├── tools/builtin/   # 49 builtin tools
+│   ├── tools/builtin/   # 50+ builtin tools
 │   ├── coding/          # Sandboxed iterate-to-green runs + supervision + livestream
 │   ├── hooks/           # PreToolUse / PostToolUse + hot reload + LSP diagnostics
 │   ├── permissions/     # Security gate + audit + exfiltration + approval queue
+│   ├── security/        # Log + capture redaction, path guard, dangerous-code scanner
+│   ├── checkpoints/     # Per-turn workspace snapshots + restore
 │   ├── memory/          # LCM engine, wiki compiler, extractor, passive recall
 │   ├── context/         # Token budget, compression, prompt assembly
 │   ├── gateway/         # Telegram, Slack, Discord, cron, heartbeat, paperclip
-│   ├── web/             # REST API, WebSocket bridge, setup-mode server, artifacts
+│   ├── web/             # REST API, /v1 OpenAI-compatible surface, WebSocket bridge, setup-mode server, @-references
 │   ├── documents/       # Confined documents service + AI redline suggestions
 │   ├── kanban/          # Projects + stories store
 │   ├── sentinel/        # Observer, AutoDream, wiki lint, consolidation, digest
@@ -551,8 +570,8 @@ prometheus/
 │   ├── telemetry/       # Tool-call tracking + cost
 │   └── config/          # Settings, paths, env overrides, profiles
 ├── templates/           # Identity templates (no personal data)
-├── skills/              # 102-file skill library (.md, opt-in)
-├── tests/               # 4,000+ tests across 239 files
+├── skills/              # 103-file skill library (.md, opt-in)
+├── tests/               # 6,700+ tests across 400 files
 ├── docs/                # Guides, architecture, sprint reports
 │   └── guide/           # Install · features · Beacon · coding · skills · memory · providers · API
 ├── gym/                 # Frozen task-sets, harvest corpus
@@ -562,13 +581,13 @@ prometheus/
 
 ## Stats
 
-- ~83,000 lines of production Python
-- 4,000+ tests across 239 test files
-- 49 builtin tools registered by default (plus config-gated LSP, MCP, and vision/STT tools) + dynamic MCP tools
-- 102-file skill library + self-authored skills
+- ~107,000 lines of production Python
+- 6,700+ tests across 400 test files
+- 50+ builtin tools registered by default (54 on the reference install, two of them MCP) + config-gated LSP and vision/STT tools
+- 103-file skill library + self-authored skills
 - 10+ model providers (local and cloud)
-- 88 REST routes (83 on the main API, 5 on the setup-mode pairing server) + an authenticated WebSocket event bridge
-- A native desktop cockpit with 13 views
+- 127 REST routes (120 on the main API, 2 on the OpenAI-compatible `/v1` surface, 5 on the setup-mode pairing server) + an authenticated WebSocket event bridge
+- A native desktop cockpit with 18 views, and an iOS client on the same control plane
 
 ## Roadmap
 
@@ -587,9 +606,18 @@ prometheus/
 - [x] LSP integration, MCP integration, migration tool (Hermes/OpenClaw)
 - [x] Durable sessions, turn interrupt, liveness pulse, artifact outbox
 - [x] Record a Skill — live DOM demonstration capture + video/YouTube ingestion
+- [x] Vision — images reach the model as images, stored by reference, served over `/api/media`
+- [x] Mobile control plane — per-device tokens, APNs push, pagination, session filters (iOS client)
+- [x] Foundation — node/instance identity, vault marker, gated MCP, the pack contract
+- [x] Loud provider fallback + self-halting loop + honest context accounting
+- [x] Per-conversation workspace, per-turn file checkpoints, `@`-references, project-instruction discovery
+- [x] OpenAI-compatible `/v1` surface; `oara` console script
+- [x] Streaming TTS + hands-free voice (OAra Voice bridge + Beacon)
+- [x] Beacon: attach to running coding runs, pause/inject/resume from the UI
+- [x] Secrets redacted at every log handler and at capture time; logs rotate
 - [ ] Fine-tuning flywheel (LoRA on collected traces) — *capture/export pipeline shipped; training loop pending*
-- [ ] PyPI release + published Beacon builds
-- [ ] Beacon: attach to running coding runs, pause/inject/resume from the UI
+- [ ] PyPI release + published Beacon builds — *`oara` is claimed on PyPI; the publish gate opens with the install path*
+- [ ] Wake word for hands-free (an in-renderer model under the app's CSP — a decision, not a build)
 
 ## License
 
