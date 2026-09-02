@@ -223,8 +223,8 @@ When the daemon starts with **no config file**, it boots a minimal setup server 
 |---|---|---|
 | GET | `/api/setup/status` | Setup progress / pairing window state |
 | POST | `/api/setup/pair` | Exchange the 6-digit pairing code for an API token |
-| GET | `/api/setup/detect` | Probe for local backends (llama.cpp, Ollama, LM Studio, vLLM) |
-| POST | `/api/setup/configure` | Write the chosen configuration |
+| GET | `/api/setup/detect` | Probe for local backends (llama.cpp, Ollama, LM Studio, vLLM); also lists the cloud presets (`cloud_providers`: name, key env var, default model, whether the daemon already holds the key — never the value) |
+| POST | `/api/setup/configure` | Write the chosen configuration. Local: `provider` + `base_url` + `model`, re-probed before writing. Cloud: `provider` (a preset name) + `api_key` (+ `model`), no `base_url`; the key goes to the env file, and a cloud provider with no key anywhere is refused (`cloud_key_missing`) |
 | POST | `/api/setup/complete` | Finish setup and hand off to the full daemon |
 
 The pairing flow: at startup the daemon prints a crypto-random 6-digit code once in a console banner, and a client (Beacon's first-run screen, or curl) POSTs it to `/api/setup/pair` as `{"code": "123456"}` to receive the bearer token. The code is one-time-use, expires after 15 minutes, and locks after 5 failed attempts (only a wrong code burns an attempt); comparison uses constant-time `hmac.compare_digest`. Once paired, the client uses the returned token for the remaining setup calls and for the full API after `complete`.

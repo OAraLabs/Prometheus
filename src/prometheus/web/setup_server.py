@@ -337,12 +337,20 @@ def _apply_configure(
     Idempotent: a re-POST overwrites the previous answers cleanly.
     Returns the written summary — never tokens (names only).
     """
-    from prometheus.cli.init import _default_config, probe_backend, write_config
+    from prometheus.cli.init import (
+        _CLOUD_FAST_PROVIDERS,
+        _cloud_default_config,
+        _default_config,
+        probe_backend,
+        write_config,
+    )
     from prometheus.config.paths import get_config_dir
 
     provider = str(body.get("provider") or "").strip()
     base_url = str(body.get("base_url") or "").strip().rstrip("/")
     model = str(body.get("model") or "").strip()
+    api_key = str(body.get("api_key") or "").strip()
+    is_cloud = provider in _CLOUD_FAST_PROVIDERS
     agent_name = str(body.get("agent_name") or "").strip()
     persona = str(body.get("persona") or "").strip()
     telegram_token = str(body.get("telegram_token") or "").strip()
@@ -359,19 +367,60 @@ def _apply_configure(
     slack_channels = _string_list(body.get("slack_channels"))
     discord_token = str(body.get("discord_token") or "").strip()
 
-    missing = [k for k, v in
-               (("provider", provider), ("base_url", base_url), ("model", model))
-               if not v]
-    if missing:
-        return JSONResponse(status_code=400, content={
-            "error": "bad_request",
-            "detail": f"missing required field(s): {', '.join(missing)}",
-        })
-    if not base_url.startswith(("http://", "https://")):
-        return JSONResponse(status_code=400, content={
-            "error": "bad_base_url",
-            "detail": "base_url must start with http:// or https://",
-        })
+    # A cloud provider has no base_url to probe and a key instead. The
+    # key goes to the env file (the daemon's secret store, mode 0600),
+    # never the yaml and never this response. Without a key anywhere the
+    # config would be known-broken, so it is refused (dead-end rule) —
+    # the same rule the local path enforces with probe_backend.
+    cloud_key_env: str | None = None
+    api_key_saved = False
+    if is_cloud:
+        import os
+
+        from prometheus.config.env_file import get_env_file_path, parse_env_file
+
+        if base_url:
+            return JSONResponse(status_code=400, content={
+                "error": "unexpected_base_url",
+                "detail": f"{provider} is a cloud provider and takes no base_url; "
+                          "send provider + model (+ api_key), or use a local "
+                          "provider with a base_url",
+            })
+        cloud_key_env, default_model, _limit = _CLOUD_FAST_PROVIDERS[provider]
+        model = model or default_model
+        if not api_key:
+            present = bool(os.environ.get(cloud_key_env))
+            if not present:
+                try:
+                    env_path = get_env_file_path()
+                    present = bool(
+                        env_path.exists()
+                        and parse_env_file(env_path).get(cloud_key_env)
+                    )
+                except Exception:
+                    present = False
+            if not present:
+                return JSONResponse(status_code=400, content={
+                    "error": "cloud_key_missing",
+                    "detail": f"{provider} needs an API key: send api_key, or "
+                              f"set ${cloud_key_env} in the daemon's env file "
+                              "first — configure refused (a config written now "
+                              "would be known-broken)",
+                })
+    else:
+        missing = [k for k, v in
+                   (("provider", provider), ("base_url", base_url), ("model", model))
+                   if not v]
+        if missing:
+            return JSONResponse(status_code=400, content={
+                "error": "bad_request",
+                "detail": f"missing required field(s): {', '.join(missing)}",
+            })
+        if not base_url.startswith(("http://", "https://")):
+            return JSONResponse(status_code=400, content={
+                "error": "bad_base_url",
+                "detail": "base_url must start with http:// or https://",
+            })
 
     # Slack is a token PAIR — half a pair can only produce a gateway that
     # is enabled but can never start. Refuse it loudly (dead-end rule).
@@ -401,18 +450,27 @@ def _apply_configure(
                           f"(got {g!r})",
             })
 
-    # Dead-end rule (Phase 0): never write a config pointing at a backend
-    # that is not there. Re-probe the exact provider+URL the client chose.
-    server = probe_backend(provider, base_url)
-    if server is None:
-        return JSONResponse(status_code=400, content={
-            "error": "backend_unreachable",
-            "detail": f"{base_url} did not answer like a {provider} "
-                      "inference server — configure refused (a config "
-                      "written now would be known-broken)",
-        })
+    if is_cloud:
+        assert cloud_key_env is not None
+        if api_key:
+            from prometheus.config.env_file import set_env_value
 
-    config = _default_config(server, model)
+            set_env_value(cloud_key_env, api_key)
+            api_key_saved = True
+        config = _cloud_default_config(provider, cloud_key_env, model)
+    else:
+        # Dead-end rule (Phase 0): never write a config pointing at a backend
+        # that is not there. Re-probe the exact provider+URL the client chose.
+        server = probe_backend(provider, base_url)
+        if server is None:
+            return JSONResponse(status_code=400, content={
+                "error": "backend_unreachable",
+                "detail": f"{base_url} did not answer like a {provider} "
+                          "inference server — configure refused (a config "
+                          "written now would be known-broken)",
+            })
+
+        config = _default_config(server, model)
     # The paired client reached setup mode on THESE ports — the real
     # daemon must come up on the same ones so the client's address keeps
     # working after the flip. Defaults (8005/8010) are unchanged.
@@ -488,11 +546,15 @@ def _apply_configure(
         "configured": True,
         "config_path": str(cfg_path),
         "provider": provider,
-        "base_url": base_url,
+        "base_url": base_url or None,
         "model": model,
         "agent_name": agent_name or None,
         "identity": identity,
         "telegram_token_saved": telegram_token_saved,
+        # Cloud path: which env var the daemon reads, and whether this call
+        # wrote it. The value itself never appears here.
+        "api_key_env": cloud_key_env,
+        "api_key_saved": api_key_saved,
         # SPRINT G3: names only — the summary NEVER echoes token values.
         "gateways_enabled": gateways_enabled,
         "web": {
@@ -628,8 +690,32 @@ def create_setup_app(
             )
         else:
             servers = detect_local_servers(timeout=1.0)
+        # The cloud presets ride along so a client can offer "no GPU? use a
+        # cloud provider" without a second round-trip. Names only:
+        # key_present says whether the daemon already holds the key, the
+        # value is never read into this response.
+        import os
+
+        from prometheus.cli.init import _CLOUD_FAST_PROVIDERS
+        from prometheus.config.env_file import get_env_file_path, parse_env_file
+
+        try:
+            env_path = get_env_file_path()
+            in_file = parse_env_file(env_path) if env_path.exists() else {}
+        except Exception:
+            in_file = {}
+        cloud = [
+            {
+                "provider": name,
+                "api_key_env": key_env,
+                "default_model": default_model,
+                "key_present": bool(os.environ.get(key_env) or in_file.get(key_env)),
+            }
+            for name, (key_env, default_model, _limit) in _CLOUD_FAST_PROVIDERS.items()
+        ]
         return JSONResponse(status_code=200, content={
             "backends": [_backend_payload(s) for s in servers],
+            "cloud_providers": cloud,
         })
 
     @app.post("/api/setup/configure")
@@ -644,7 +730,8 @@ def create_setup_app(
         if not isinstance(body, dict):
             return JSONResponse(status_code=400, content={
                 "error": "bad_request",
-                "detail": 'expected a JSON body: {"provider", "base_url", '
+                "detail": 'expected a JSON body: {"provider", "base_url" '
+                          '(local providers) | "api_key"? (cloud providers), '
                           '"model", "agent_name"?, "persona"?, '
                           '"telegram_token"?, "slack_bot_token"?, '
                           '"slack_app_token"?, "slack_channels"?, '
