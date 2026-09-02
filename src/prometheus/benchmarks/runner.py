@@ -267,6 +267,8 @@ def main() -> None:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    from prometheus.security import install_log_redaction
+    install_log_redaction()
 
     # Import provider lazily — StubProvider uses httpx
     from prometheus.providers.stub import StubProvider

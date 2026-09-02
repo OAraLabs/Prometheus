@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import logging.handlers
 import os
 import signal
 import sys
@@ -1362,8 +1363,14 @@ def main() -> None:
     if cli_surface:
         try:
             from prometheus.config.paths import get_logs_dir
-            cli_log = logging.FileHandler(
-                get_logs_dir() / "cli.log", encoding="utf-8"
+            # Rotating for the same reason as daemon.log: a log that only
+            # ever grows keeps every line forever, including ones that
+            # should never have been written.
+            cli_log = logging.handlers.RotatingFileHandler(
+                get_logs_dir() / "cli.log",
+                maxBytes=8 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
             )
             handlers.append(cli_log)
         except Exception:
@@ -1373,6 +1380,11 @@ def main() -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         handlers=handlers,
     )
+    # `prometheus setup` verifies a Telegram token with a getMe call, and
+    # httpx logs that URL — token and all — at INFO. Arm redaction before
+    # any subcommand can make an outbound call.
+    from prometheus.security import install_log_redaction
+    install_log_redaction()
 
     # `oara setup` — the ONE canonical wizard (Onboarding Phase 0).
     # `--setup` / `--setup-gateway-only` are thin forwarding aliases.

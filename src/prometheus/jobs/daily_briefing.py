@@ -40,6 +40,7 @@ from prometheus.providers.base import (
     ApiTextDeltaEvent,
 )
 from prometheus.providers.registry import ProviderRegistry
+from prometheus.security import install_log_redaction
 from prometheus.tools.base import ToolExecutionContext
 from prometheus.tools.builtin.message import (
     MessageInput,
@@ -219,6 +220,9 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    # This job resolves a Telegram bot token and sends through the API —
+    # the same shape of call that put the token in the log to begin with.
+    install_log_redaction()
     try:
         asyncio.run(_main_async())
     except BriefingError as exc:

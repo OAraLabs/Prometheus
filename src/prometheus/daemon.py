@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import logging.handlers
 import os
 import signal
 import sys
@@ -2523,6 +2524,14 @@ async def run_daemon(args: argparse.Namespace) -> None:
     logger.info("Prometheus daemon stopped")
 
 
+# Log rotation. Deliberately constants rather than config keys: there is no
+# `logging:` section in the template, and a knob nobody sets is not worth the
+# documented-key surface (tests/support/config_defaults.py pins every config
+# read against the shipped default).
+_LOG_MAX_BYTES = 64 * 1024 * 1024
+_LOG_BACKUPS = 5
+
+
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description="Prometheus daemon")
@@ -2540,6 +2549,8 @@ def main() -> None:
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.debug else logging.INFO
+
+    from prometheus.security import install_log_redaction
 
     # ── Setup mode (Onboarding Phase 1) ─────────────────────────────────
     # No config anywhere → don't half-start on defaults (the old dead
@@ -2565,6 +2576,7 @@ def main() -> None:
             format="%(asctime)s %(name)s %(levelname)s %(message)s",
             handlers=[logging.StreamHandler(sys.stdout)],
         )
+        install_log_redaction()
         result = run_setup_mode()
         # Phase 2: POST /api/setup/complete exits the serve loop with a
         # restart sentinel. RE-CHECK for config — present now → fall
@@ -2595,15 +2607,30 @@ def main() -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_dir / "daemon.log"),
+            # Rotating, not plain: an unrotated daemon.log grows without
+            # bound (it reached 1.4 GB on a long-lived install), which
+            # turns any line the daemon should not have written into
+            # permanent on-disk residue rather than something that ages
+            # out. 64 MB x 5 caps the directory at ~320 MB while still
+            # holding weeks of INFO.
+            logging.handlers.RotatingFileHandler(
+                log_dir / "daemon.log",
+                maxBytes=_LOG_MAX_BYTES,
+                backupCount=_LOG_BACKUPS,
+                encoding="utf-8",
+            ),
         ],
         force=True,
     )
-    # SPRINT G3: httpx logs every request URL at INFO — and the Telegram
-    # Bot API puts the bot TOKEN in the URL path (…/bot<token>/getMe), so
-    # httpx-at-INFO leaks the token into the daemon log on every Telegram
-    # API call. WARNING keeps real failures visible without the URLs.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # SPRINT G3 (#95): httpx logs every request URL at INFO — and the
+    # Telegram Bot API puts the bot TOKEN in the URL path
+    # (…/bot<token>/getMe), so httpx-at-INFO writes the token into the
+    # journal and daemon.log on every Telegram API call. The level gate
+    # lives inside install_log_redaction() now, alongside handler-level
+    # redaction that also covers the ERROR/traceback paths the gate sits
+    # above (httpx puts the URL in HTTPStatusError; telegram.py logs
+    # exception strings at ERROR).
+    install_log_redaction()
 
     # A config that exists and does not parse refuses the boot (load_config).
     # Caught here so the operator gets the same one-line refusal the two

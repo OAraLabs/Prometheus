@@ -858,7 +858,12 @@ async def _serve_setup_mode(
     app = create_setup_app(
         pairing, api_port=api_port, state=state, on_complete=stop_server,
     )
-    config = uvicorn.Config(app, host="0.0.0.0", port=api_port, log_level="info")
+    config = uvicorn.Config(app, host="0.0.0.0", port=api_port, log_level="info",
+                            # log_config=None: uvicorn must NOT install its own handlers.
+                            # Its default config gives uvicorn.access/uvicorn.error handlers
+                            # with propagate=False — a path around the root handlers, i.e.
+                            # around log redaction (security/log_redaction.py) and rotation.
+                            log_config=None)
     server = uvicorn.Server(config)
     server_box["server"] = server
 
