@@ -101,6 +101,33 @@ def redact_secrets(text: str) -> str:
     return text
 
 
+def redact_capture(value):
+    """Redact secrets inside anything about to be PERSISTED as capture data.
+
+    Log redaction (above) keeps secrets out of what the process emits. This is
+    the same scrubber for what the process KEEPS: tool inputs and raw model
+    output in ``telemetry.db``, training pairs in ``training.db``, golden-trace
+    JSONL under ``trajectories/``. The 2026-08-31 finding was a Telegram bot
+    token sitting in all three — fine-tune capture is the worst place for a
+    credential to be quietly retained, because it is the data that gets
+    copied around.
+
+    Recurses through dicts / lists / tuples; strings are redacted, everything
+    else is returned as is. Keys are left alone (a key is never a secret here;
+    a value can be). Pure, so a caller can redact a JSON string or the object
+    it came from and get the same answer.
+    """
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, dict):
+        return {k: redact_capture(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact_capture(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(redact_capture(v) for v in value)
+    return value
+
+
 class RedactingFilter(logging.Filter):
     """Redact a record's message in place.
 

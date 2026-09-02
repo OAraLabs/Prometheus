@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from prometheus.security.log_redaction import redact_capture as _redact
+
 from prometheus.telemetry.db import connect_telemetry_db
 
 log = logging.getLogger(__name__)
@@ -567,6 +569,15 @@ class ToolCallTelemetry:
             and retries == 0
             and raw_model_output is not None
         )
+        # Capture-time redaction (security/log_redaction.redact_capture): the
+        # model's raw output and the parsed call carry whatever the user typed
+        # or a tool echoed — a Telegram bot token was found in this table.
+        # Redact BEFORE the row exists; nothing downstream (exports, dashboards,
+        # fine-tune harvest) can then re-leak it.
+        from prometheus.security.log_redaction import redact_capture
+        error_detail = redact_capture(error_detail)
+        raw_model_output = redact_capture(raw_model_output)
+        parsed_tool_call = redact_capture(parsed_tool_call)
         self._conn.execute(
             """
             INSERT INTO tool_calls
@@ -705,10 +716,10 @@ class ToolCallTelemetry:
                     subsystem,
                     operation,
                     type(exc).__name__,
-                    str(exc)[:2000],
-                    tb_text[:8000],
-                    ctx_json,
-                    _response_body(exc),
+                    _redact(str(exc)[:2000]),
+                    _redact(tb_text[:8000]),
+                    _redact(ctx_json),
+                    _redact(_response_body(exc)),
                 ),
             )
             self._conn.commit()
@@ -1486,7 +1497,10 @@ class ToolCallTelemetry:
                 example = self._build_example(trace, context_messages)
                 if example is None:
                     continue
-                fh.write(json.dumps(example, ensure_ascii=False) + "\n")
+                # The export is the artifact that gets copied around; the rows
+                # were redacted at capture, but the resolver adds conversation
+                # context from the LCM store, which was not.
+                fh.write(json.dumps(_redact(example), ensure_ascii=False) + "\n")
                 written += 1
         return written
 
