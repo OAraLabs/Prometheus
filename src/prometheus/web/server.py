@@ -1401,6 +1401,65 @@ def create_app(
         logger.info("session workspace CLEARED for %s (rest)", session_id)
         return {"ok": True, "session_id": session_id, "workspace": None}
 
+    # ── File checkpoints (item 4, 2026-09-01) ─────────────────────────
+    # One per turn, for sessions with a workspace: list them, inspect what a
+    # restore would touch, restore. Restore names the checkpoint twice —
+    # cheap deliberately, impossible by accident, no undo behind it beyond
+    # the next turn's checkpoint.
+    def _checkpoints():
+        return getattr(app.state, "checkpoint_store", None)
+
+    @app.get("/api/sessions/{session_id}/checkpoints")
+    async def list_session_checkpoints(session_id: str):
+        store = _checkpoints()
+        if store is None:
+            return JSONResponse({"error": "file checkpoints are not enabled on this daemon"}, status_code=503)
+        return {"session_id": session_id, "checkpoints": store.list(session_id)}
+
+    @app.get("/api/sessions/{session_id}/checkpoints/{checkpoint_id}")
+    async def get_session_checkpoint(session_id: str, checkpoint_id: str):
+        """The checkpoint and, computed now, what restoring it would change."""
+        store = _checkpoints()
+        if store is None:
+            return JSONResponse({"error": "file checkpoints are not enabled on this daemon"}, status_code=503)
+        rec = store.get(checkpoint_id)
+        if rec is None or rec.session_id != session_id:
+            return JSONResponse({"error": f"no checkpoint {checkpoint_id!r} on session {session_id!r}"}, status_code=404)
+        import asyncio as _asyncio
+        diff = await _asyncio.to_thread(store.diff, checkpoint_id)
+        return {**rec.summary(), "files_detail": rec.files_detail, "skipped_detail": rec.skipped_detail, "diff": diff}
+
+    @app.post("/api/sessions/{session_id}/checkpoints/{checkpoint_id}/restore")
+    async def restore_session_checkpoint(session_id: str, checkpoint_id: str, request: Request):
+        """Body: ``{"confirm": "<checkpoint_id>", "dry_run": false}``. Puts the
+        workspace's files back as they were before that turn: changed and
+        deleted files rewritten from their blobs, files created since removed.
+        ``dry_run`` reports the same lists and touches nothing."""
+        store = _checkpoints()
+        if store is None:
+            return JSONResponse({"error": "file checkpoints are not enabled on this daemon"}, status_code=503)
+        rec = store.get(checkpoint_id)
+        if rec is None or rec.session_id != session_id:
+            return JSONResponse({"error": f"no checkpoint {checkpoint_id!r} on session {session_id!r}"}, status_code=404)
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "expected a JSON body {confirm, dry_run?}"}, status_code=400)
+        dry_run = bool(body.get("dry_run", False))
+        if not dry_run and body.get("confirm") != checkpoint_id:
+            return JSONResponse({"error": "confirm must equal the checkpoint id — a restore overwrites files"}, status_code=400)
+        import asyncio as _asyncio
+        try:
+            result = await _asyncio.to_thread(store.restore, checkpoint_id, dry_run=dry_run)
+        except Exception as exc:
+            return JSONResponse({"error": f"restore refused: {exc}"}, status_code=409)
+        if not dry_run:
+            logger.warning("checkpoint %s RESTORED on %s: %d file(s) rewritten, %d deleted, %d error(s)",
+                           checkpoint_id, session_id, len(result["restored"]), len(result["deleted"]), len(result["errors"]))
+        return result
+
     @app.put("/api/sessions/{session_id}/profile")
     async def set_session_profile(session_id: str, request: Request):
         """Bind this session to a profile. Body: ``{"profile": str}``; blank CLEARS it.

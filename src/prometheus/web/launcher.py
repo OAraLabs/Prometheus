@@ -37,6 +37,7 @@ async def launch_web(
     gateway_adapter: Any | None = None,
     mcp_runtime: Any | None = None,
     on_tools_changed: Any | None = None,
+    checkpoint_store: Any | None = None,
     static_dir: str | None = None,
     detected_context_size: int | None = None,
     local_model: str | None = None,
@@ -118,6 +119,7 @@ async def launch_web(
     # or the model keeps decoding against the boot-time tool set — the
     # registry says a tool exists and the grammar cannot produce it.
     app.state.on_tools_changed = on_tools_changed
+    app.state.checkpoint_store = checkpoint_store
 
     # Create WebSocket bridge. The WS uses the SAME token as the REST
     # middleware (config.web.api_token or PROMETHEUS_API_TOKEN); empty => auth
