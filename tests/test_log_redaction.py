@@ -200,3 +200,73 @@ def test_every_logging_entry_point_arms_redaction():
         "these modules configure logging without arming token redaction: "
         + ", ".join(sorted(offenders))
     )
+
+
+# ── the other secrets this codebase holds (fixtures stay under the hook's floors) ─────
+
+@pytest.mark.parametrize(
+    "line, secret",
+    [
+        ("Authorization: Bearer fake.bearer.token.0123456789", "fake.bearer.token.0123456789"),
+        ("GET ws://mini:8011/vad/stream?token=fake-vad-token-123 failed", "fake-vad-token-123"),
+        ("POST https://x/ws?session=a&token=fakeTok9876&x=1", "fakeTok9876"),
+        ("anthropic key sk-ant-fake-0123456789 rejected", "sk-ant-fake-0123456789"),
+        ("openai key sk-fakekey-0123456789ab rejected", "sk-fakekey-0123456789ab"),
+        ("xai key xai-fake0123456789 rejected", "xai-fake0123456789"),
+        ("google key AIzaFAKE-0123456789-abcdef rejected", "AIzaFAKE-0123456789-abcdef"),
+        ("github token ghp_fakeFAKEfake0123456789 rejected", "ghp_fakeFAKEfake0123456789"),
+        ("github pat github_pat_fakeFAKEfake0123456789 rejected", "github_pat_fakeFAKEfake0123456789"),
+        ("discord Bot MTIzNDU2Nzg5MDEyMzQ1Njc4OTA.FAKEfa.fakefakefakefakefakefakefak", "MTIzNDU2Nzg5MDEyMzQ1Njc4OTA.FAKEfa.fakefakefakefakefakefakefak"),
+        ("slack refresh xoxe-1-fake-0123456789 rejected", "xoxe-1-fake-0123456789"),
+    ],
+)
+def test_redacts_the_other_secret_shapes(line, secret):
+    out = redact_secrets(line)
+    assert secret not in out, out
+    assert REDACTED in out
+
+
+def test_bearer_and_query_redaction_keep_the_context():
+    """The label survives; only the value goes — the line still says what failed."""
+    out = redact_secrets("Authorization: Bearer fake.bearer.token.0123456789")
+    assert out == f"Authorization: Bearer {REDACTED}"
+    out = redact_secrets("ws://mini:8011/vad/stream?token=fake-vad-token-123")
+    assert out == f"ws://mini:8011/vad/stream?token={REDACTED}"
+
+
+@pytest.mark.parametrize(
+    "benign",
+    [
+        "bearer of bad news",                       # a word, not a header
+        "ask-for-help-in-the-channel",              # 'sk-' inside a word is not a key
+        "version 1.2.3 released",
+        "sha256 3f2a9c…",
+        "GET /api/files?path=src/app.py 200",       # a query string without a token
+        "xoxo, the team",
+    ],
+)
+def test_more_benign_lines_pass_through(benign):
+    assert redact_secrets(benign) == benign
+
+
+def test_install_without_a_logger_arms_loggers_that_own_handlers():
+    """uvicorn's default config attaches handlers to uvicorn.access with propagate=False —
+    a path around root. Arming root alone would look armed and leak."""
+    side = logging.getLogger("test_log_redaction.side_channel")
+    side.handlers.clear()
+    side.propagate = False
+    stream = io.StringIO()
+    side.addHandler(logging.StreamHandler(stream))
+    install_log_redaction()  # no argument — the production call
+    side.warning("POST https://api.telegram.org/bot%s/getMe", FAKE_TOKEN)
+    assert FAKE_TOKEN not in stream.getvalue()
+    side.handlers.clear()
+
+
+def test_uvicorn_does_not_install_its_own_handlers():
+    """log_config=None keeps the web server on the process's redacted, rotated logging."""
+    for name in ("web/server.py", "web/setup_server.py"):
+        text = (SRC / name).read_text(encoding="utf-8")
+        for m in re.finditer(r"uvicorn\.Config\((.*?)\)\n", text, re.S):
+            assert "log_config=None" in m.group(1), f"{name}: uvicorn.Config without log_config=None"
+        assert "uvicorn.Config(" in text

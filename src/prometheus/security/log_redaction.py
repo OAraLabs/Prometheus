@@ -62,10 +62,29 @@ REDACTED = "<redacted>"
 # 3. Slack bot/app/user tokens (xoxb-/xoxp-/… and the app-level
 #    xapp-), which travel in headers and exception strings rather
 #    than URLs.
+# 4. Everything else this codebase holds and could log by accident — pinned
+#    LOOSER than the pre-commit scanner's floors (.githooks/pre-commit #7) on
+#    purpose: the scanner keeps fixtures out of git, the redactor keeps real
+#    values out of logs, and a real value is always longer than a fixture.
+#      Bearer tokens          "Authorization: Bearer <tok>" (the daemon's own
+#                             API token, cloud keys in a header dump)
+#      ?token= / &token=      the voice middleware's WebSocket query-string convention
+#      sk-… / sk-ant-…        OpenAI / Anthropic / DeepSeek / Moonshot / Alibaba
+#      xai-…, AIza…           xAI, Google
+#      gh?_… / github_pat_…   GitHub
+#      Discord bot tokens     <base64 id>.<6 chars>.<27+ chars>
+#      Slack                  adds xoxc/xoxd (browser) and xoxe (refresh)
 _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(bot)(\d{5,}:[^/\s\"'\\]+)"), r"\1" + REDACTED),
     (re.compile(r"\b\d{5,}:[A-Za-z0-9_-]{30,}\b"), REDACTED),
-    (re.compile(r"\b(?:xox[abprs]|xapp)-[A-Za-z0-9-]{10,}"), REDACTED),
+    (re.compile(r"\b(?:xox[abcdeprs]|xapp)-[A-Za-z0-9-]{10,}"), REDACTED),
+    (re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{16,})"), r"\1" + REDACTED),
+    (re.compile(r"([?&]token=)([^&\s\"'<>]+)"), r"\1" + REDACTED),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), REDACTED),
+    (re.compile(r"\bxai-[A-Za-z0-9_-]{12,}"), REDACTED),
+    (re.compile(r"\bAIza[A-Za-z0-9_-]{20,}"), REDACTED),
+    (re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"), REDACTED),
+    (re.compile(r"\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{5,7}\.[A-Za-z0-9_-]{20,}\b"), REDACTED),
 )
 
 
@@ -127,27 +146,43 @@ class RedactingFormatter(logging.Formatter):
         return redact_secrets(self._inner.format(record))
 
 
+def _arm_handler(handler: logging.Handler) -> None:
+    if not any(isinstance(f, RedactingFilter) for f in handler.filters):
+        handler.addFilter(RedactingFilter())
+    formatter = handler.formatter
+    if not isinstance(formatter, RedactingFormatter):
+        handler.setFormatter(RedactingFormatter(formatter or logging.Formatter()))
+
+
 def install_log_redaction(logger: logging.Logger | None = None) -> None:
     """Arm redaction on every handler of ``logger`` (default: root).
 
     Call once, immediately after ``logging.basicConfig``. Idempotent, so
     a second call after a ``basicConfig(force=True)`` re-arm is safe and
-    will not stack wrappers.
+    will not stack wrappers. Without an explicit logger it arms root AND
+    every logger that already owns handlers (see below).
 
     Also pins the ``httpx`` request logger to WARNING. Redaction alone
     would make those lines safe, but they are ~1/second of pure noise
     that buries the real signal in daemon.log.
     """
-    target = logger if logger is not None else logging.getLogger()
+    if logger is not None:
+        targets = [logger]
+    else:
+        # Root AND every logger that already carries handlers of its own. A
+        # library that configures its own handlers with propagate=False
+        # (uvicorn's default log config is the live example) writes past
+        # the root handlers entirely — arming only root would leave that
+        # path unredacted while looking armed.
+        root = logging.getLogger()
+        targets = [root] + [
+            lg for lg in logging.root.manager.loggerDict.values()
+            if isinstance(lg, logging.Logger) and lg.handlers
+        ]
 
-    for handler in target.handlers:
-        if not any(isinstance(f, RedactingFilter) for f in handler.filters):
-            handler.addFilter(RedactingFilter())
-        formatter = handler.formatter
-        if not isinstance(formatter, RedactingFormatter):
-            handler.setFormatter(
-                RedactingFormatter(formatter or logging.Formatter())
-            )
+    for target in targets:
+        for handler in target.handlers:
+            _arm_handler(handler)
 
     # SPRINT G3 (#95) kept verbatim: httpx logs every request URL at INFO
     # and the Telegram token rides in that URL.

@@ -4738,6 +4738,11 @@ async def start_web(app: FastAPI, host: str = "0.0.0.0", port: int = 8005) -> No
     component of the chain, this one included.
     """
     import uvicorn
-    config = uvicorn.Config(app, host=host, port=port, log_level="info")
+    config = uvicorn.Config(app, host=host, port=port, log_level="info",
+                            # log_config=None: uvicorn must NOT install its own handlers.
+                            # Its default config gives uvicorn.access/uvicorn.error handlers
+                            # with propagate=False — a path around the root handlers, i.e.
+                            # around log redaction (security/log_redaction.py) and rotation.
+                            log_config=None)
     server = uvicorn.Server(config)
     await server.serve()
