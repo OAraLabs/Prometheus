@@ -470,6 +470,30 @@ def _format_gpu_processes(procs: list) -> list[str]:
     return out
 
 
+async def cmd_backends(args: str | list[str] | tuple[str, ...] | None = None) -> str:
+    """Shared /backends core: what every local backend is serving right now.
+
+    Reads the daemon's backend registry (providers/backends.py) through the
+    TTL — a fresh probe when the cache lapsed, the cache otherwise. ``refresh``
+    as the argument forces every backend. The table names the served model,
+    the reported window, detected vision, latency, and any config entry the
+    registry refused (with its reason), so the operator sees the same facts the
+    router and the catalog resolve against — not a second opinion.
+    """
+    from prometheus.providers.backends import get_registry
+
+    registry = get_registry()
+    if registry is None:
+        return "Backend registry not initialized. Is the daemon running?"
+    tokens = args.split() if isinstance(args, str) else list(args or [])
+    force = bool(tokens) and tokens[0].lower() in ("refresh", "probe", "force")
+    try:
+        await registry.probe_all(force=force)
+    except Exception as exc:  # noqa: BLE001 — render what we have, say what failed
+        return f"{registry.render_table()}\n\nProbe error: {exc}"
+    return registry.render_table()
+
+
 async def cmd_anatomy() -> str:
     """Return infrastructure summary text."""
     try:
@@ -1596,6 +1620,10 @@ async def _fc_anatomy(ctx: CommandContext, args: str) -> str:
     return await cmd_anatomy()
 
 
+async def _fc_backends(ctx: CommandContext, args: str) -> str:
+    return await cmd_backends(args)
+
+
 async def _fc_doctor(ctx: CommandContext, args: str) -> str:
     return await cmd_doctor(ctx.config)
 
@@ -1635,6 +1663,7 @@ _FORMATTER_COMMANDS: dict[str, Any] = {
     "health": _fc_health,
     "notifications": _fc_notifications,
     "anatomy": _fc_anatomy,
+    "backends": _fc_backends,
     "doctor": _fc_doctor,
     "profile": _fc_profile,
     "beacon": _fc_beacon,

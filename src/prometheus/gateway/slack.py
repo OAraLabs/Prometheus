@@ -466,6 +466,7 @@ class SlackAdapter(BasePlatformAdapter):
         self._app.command("/prometheus-qwen")(self._slash_qwen)
         self._app.command("/prometheus-local")(self._slash_local)
         self._app.command("/prometheus-route")(self._slash_route)
+        self._app.command("/prometheus-backends")(self._slash_backends)
 
         # Start Socket Mode connection.
         #
@@ -771,6 +772,7 @@ class SlackAdapter(BasePlatformAdapter):
             "  /prometheus-qwen           — Qwen (Alibaba)",
             "  /prometheus-local          — back to primary",
             "  /prometheus-route          — current routing (primary vs override)",
+            "  /prometheus-backends       — what each local inference box is serving",
             "",
             "Approvals & autonomy:",
             "  /prometheus-approve <id>   — approve a pending tool request",
@@ -1199,6 +1201,12 @@ class SlackAdapter(BasePlatformAdapter):
                 logger.debug("profile switch persistence skipped", exc_info=True)
 
         await respond(text=text)
+
+    async def _slash_backends(self, ack: Any, command: Any, respond: Any) -> None:
+        await ack()
+        from prometheus.gateway.commands import cmd_backends
+
+        await respond(text=await cmd_backends(self._cmd_text(command)))
 
     async def _slash_anatomy(self, ack: Any, respond: Any) -> None:
         await ack()

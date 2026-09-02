@@ -961,6 +961,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._register(provider, "qwen", self._app_qwen, "Route this channel via Qwen (Alibaba)")
         self._register(provider, "local", self._app_local, "Clear the override, back to primary")
         self._register(provider, "route", self._app_route, "Show current routing for this channel")
+        self._register(provider, "backends", self._app_backends, "What each local inference box is serving")
 
         tree.add_command(root)
 
@@ -1176,6 +1177,12 @@ class DiscordAdapter(BasePlatformAdapter):
         from prometheus.gateway.commands import cmd_wiki
 
         await self._respond(interaction, cmd_wiki())
+
+    async def _app_backends(self, interaction: Any, args: str) -> None:
+        from prometheus.gateway.commands import cmd_backends
+
+        await self._defer(interaction)
+        await self._respond(interaction, await cmd_backends(args))
 
     async def _app_anatomy(self, interaction: Any, args: str) -> None:
         from prometheus.gateway.commands import cmd_anatomy

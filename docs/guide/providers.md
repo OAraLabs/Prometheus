@@ -28,6 +28,35 @@ model:
       model: "claude-haiku-4-5-20251001"
 ```
 
+### Named backends — the registry
+
+Every local inference box the daemon can be pointed at lives in one table: the primary from `model:` (registered automatically as `local`) plus each entry under `backends:` in `prometheus.yaml`. The daemon probes them all at boot, in parallel, bounded by one timeout each, and again on demand — so "what is the 4090 serving right now" is a question the daemon answers, not one you curl by hand.
+
+```yaml
+backends:
+  4090:
+    provider: llama_cpp
+    base_url: http://gpu-box:8080
+  mini:
+    provider: ollama
+    base_url: http://localhost:11434
+    model: qwen2.5:14b-instruct                          # the model this backend serves for us
+    models: [qwen2.5:14b-instruct, qwen2.5:7b-instruct]  # vetted choices (ollama swaps per request)
+    context_limit: 32768                                 # a HINT, used only when the probe cannot size it
+
+backend_probe:
+  ttl_s: 60        # a read older than this re-probes
+  timeout_s: 5.0   # per backend
+```
+
+What a probe records, per backend: the served model (llama.cpp `/props` + `/v1/models`; ollama `/api/tags`, `/api/ps`, `/api/show`), the **reported** context window, **detected** vision, latency, and `changed_at` — set when a box starts serving a different model than it did last time, so a llama-server restarted onto another GGUF is known at the next read rather than the next daemon restart. A failed probe keeps the last good facts visible and flips `ok` with the error; a backend nothing has asked yet says `probed: false`, which is different from down.
+
+Where it shows: `/backends` on every chat surface and in Beacon (`refresh` forces a re-probe), `GET /api/backends` (`?refresh=1`), `POST /api/backends/{name}/probe`, and the `backends` block on `/api/status` — cache only there, so a status call never waits on a dead box.
+
+Names become slash commands, so they follow Telegram's grammar (`[a-z0-9_]{1,32}`) and may not collide with a cloud preset or a built-in command. A bad entry is refused with its reason — logged at boot and listed by `/backends` — and the rest still load. Only `llama_cpp` and `ollama` are backends; cloud providers are slash-command presets.
+
+Two things the registry deliberately does not do. It never changes what a box serves: llama-server is one model per process, and swapping it is a restart of that box's service, outside this harness. And it does not yet *switch* a chat to a backend — today it probes and reports; the `/4090`-style per-chat override is the follow-up that builds on this table.
+
 ## Adapter strictness
 
 The Model Adapter Layer validates every tool call before execution and repairs what it can (fuzzy tool-name matching, JSON extraction from markdown fences, type coercion). How aggressively it intervenes is the **strictness tier**:

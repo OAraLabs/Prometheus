@@ -318,6 +318,7 @@ MANIFEST: tuple[Family, ...] = (
     Family("qwen", ("cmd_provider_override",), _cmds("qwen", "prometheus-qwen", "qwen")),
     Family("local", ("cmd_local_override",), _cmds("local", "prometheus-local", "local")),
     Family("route", ("cmd_route",), _cmds("route", "prometheus-route", "route")),
+    Family("backends", ("cmd_backends",), _cmds("backends", "prometheus-backends", "backends")),
 )
 
 

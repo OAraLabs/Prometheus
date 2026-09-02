@@ -939,6 +939,41 @@ profiles:
   default: "full"
   custom_dir: "~/.prometheus/profiles"
 
+# Named local backends — every inference box this install can be pointed at,
+# beyond the primary in `model:` (which is registered automatically as
+# `local`). Each name becomes a slash command and a row in GET /api/models
+# (the switching half lands in a follow-up; today the registry PROBES and
+# REPORTS). The daemon probes every entry at boot and on demand (/backends,
+# GET /api/backends) and /api/status carries what each is serving: model,
+# reported window, detected vision, latency, and when the served model last
+# changed underneath us. The registry reports; it never restarts a server —
+# llama-server is one model per process and swapping it is that box's job.
+#
+# Names must match [a-z0-9_]{1,32} (Telegram's command grammar) and may not
+# collide with a cloud preset (/claude, /qwen, …) or a built-in command. A bad
+# entry is refused with its reason (logged, and shown by /backends); the rest
+# still load. Providers: llama_cpp | ollama only — cloud providers are
+# slash-command presets, not backends. Values are machine-specific and belong
+# in the live config only.
+# Example:
+#   backends:
+#     4090:
+#       provider: llama_cpp
+#       base_url: http://gpu-box:8080
+#     mini:
+#       provider: ollama
+#       base_url: http://localhost:11434
+#       model: qwen2.5:14b-instruct          # the model this backend serves for us
+#       models: [qwen2.5:14b-instruct, qwen2.5:7b-instruct]   # vetted choices (ollama swaps per request)
+#       context_limit: 32768                 # a HINT, used only when the probe cannot size it
+backends: {}
+
+# How the registry probes. A probe is HTTP only (llama.cpp /props + /v1/models;
+# ollama /api/tags, /api/ps, /api/show) — no SSH, no credentials.
+backend_probe:
+  ttl_s: 60          # a read older than this re-probes; /backends refresh forces it
+  timeout_s: 5.0     # per backend; a dead box costs one timeout, never a hang
+
 anatomy:
   enabled: true
   scan_on_startup: true

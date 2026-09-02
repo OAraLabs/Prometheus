@@ -42,6 +42,7 @@ async def launch_web(
     detected_context_size: int | None = None,
     local_model: str | None = None,
     detected_kv_cache: dict[str, Any] | None = None,
+    backend_registry: Any | None = None,
     api_host: str = "0.0.0.0",
     api_port: int = 8005,
     ws_host: str = "0.0.0.0",
@@ -99,6 +100,7 @@ async def launch_web(
         detected_context_size=detected_context_size,
         local_model=local_model,
         detected_kv_cache=detected_kv_cache,
+        backend_registry=backend_registry,
     )
 
     # Wire agent state ref into the app

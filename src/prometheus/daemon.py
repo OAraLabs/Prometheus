@@ -787,6 +787,23 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     model_name,
                 )
 
+    # Backend registry — every local inference box this install knows about
+    # (the primary as `local` + `backends:` in config), probed once here in
+    # parallel and bounded by its own timeout, so a dead box costs one timeout
+    # and never blocks boot. From here on the catalog, /api/status, /backends
+    # (and, in later PRs, the router and Anatomy) read THIS table; nothing else
+    # probes a backend.
+    from prometheus.providers.backends import BackendRegistry, set_registry
+    backend_registry = BackendRegistry.from_config(config)
+    set_registry(backend_registry)
+    try:
+        await asyncio.wait_for(
+            backend_registry.probe_all(), timeout=backend_registry.timeout_s + 2.0,
+        )
+    except Exception as exc:  # noqa: BLE001 — a probe failure is a recorded state, not a boot failure
+        logger.warning("Backend registry: boot probe did not finish cleanly: %s", exc)
+    logger.info("%s", backend_registry.render_table())
+
     # Cost tracker for cloud providers
     cost_tracker = None
     if ProviderRegistry.is_cloud(model_config.get("provider", "")):
@@ -2474,6 +2491,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 detected_context_size=detected_ctx_size,
                 local_model=model_name,
                 detected_kv_cache=detected_kv_cache,
+                backend_registry=backend_registry,
                 api_port=api_port,
                 ws_port=ws_port,
             ))

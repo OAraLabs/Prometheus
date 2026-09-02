@@ -139,6 +139,7 @@ def create_app(
     detected_context_size: int | None = None,
     local_model: str | None = None,
     detected_kv_cache: dict[str, Any] | None = None,
+    backend_registry: Any | None = None,
 ) -> FastAPI:
     """Create the FastAPI application with all routes.
 
@@ -393,6 +394,11 @@ def create_app(
     app.state.detected_context_size = detected_context_size
     app.state.local_model = local_model
     app.state.detected_kv_cache = detected_kv_cache
+    # The backend registry (providers/backends.py): the one table of local
+    # inference boxes and what each is serving. /api/backends probes it,
+    # /api/status renders its cache. None on a bare create_app() — the routes
+    # then say so rather than inventing an empty fleet.
+    app.state.backend_registry = backend_registry
 
     def _resolved_context_limit(
         model: str | None = None,
@@ -609,6 +615,20 @@ def create_app(
             # render as "nothing is wrong".
             return {"error": f"floor state unavailable: {exc}", "dark": None}
 
+    def _registry() -> Any | None:
+        reg = getattr(app.state, "backend_registry", None)
+        if reg is not None:
+            return reg
+        from prometheus.providers.backends import get_registry
+
+        return get_registry()
+
+    def _backends_block() -> dict[str, Any] | None:
+        reg = _registry()
+        if reg is None:
+            return None
+        return reg.snapshot()
+
     @app.get("/api/status")
     async def get_status():
         running_sha, tree_head, stale = _staleness()
@@ -707,6 +727,12 @@ def create_app(
             # no budget at all, which is why a wrong one could sit on the
             # Beacon panel unchallenged.
             "context": _context_block(),
+            # Every local backend this install knows about and what each was
+            # last seen serving — from the registry's CACHE (no I/O on a status
+            # call; `stale` says the TTL lapsed, `probed: false` says nothing
+            # was ever asked). One flat model string could not say "4090:
+            # Qwen3.8-27B, 32k, vision"; this can. Null when no registry is wired.
+            "backends": _backends_block(),
             # The ceilings the loop is ACTUALLY enforcing, read off the same
             # LoopContext object the guard reads (_effective_max_tool_iterations
             # at agent_loop.py:1670) -- not re-resolved from config here. An
@@ -4016,6 +4042,38 @@ def create_app(
                     "model": mdl, "is_default": False, "available": True,
                     "auth": credential_status(prov or "", cfg.get("api_key_env", ""))["mode"]}
         return next(o for o in catalog if o["is_default"])
+
+    # ── Backends (the registry) ──────────────────────────────────────
+    #
+    # GET probes through the TTL (a fresh answer when the cache lapsed, the cache
+    # otherwise); ?refresh=1 forces every backend. POST /{name}/probe forces one.
+    # Both are bounded by the registry's probe timeout, so a dead box costs one
+    # timeout, not a hang. 503 when the daemon booted without a registry.
+
+    @app.get("/api/backends")
+    async def list_backends(refresh: int = 0):
+        reg = _registry()
+        if reg is None:
+            return JSONResponse(status_code=503, content={
+                "error": "backend registry unavailable — the daemon booted without one"})
+        await reg.probe_all(force=bool(refresh))
+        return {
+            "backends": list(reg.snapshot().values()),
+            "config_errors": list(reg.config_errors),
+            "ttl_s": reg.ttl_s,
+        }
+
+    @app.post("/api/backends/{name}/probe")
+    async def probe_backend_route(name: str):
+        reg = _registry()
+        if reg is None:
+            return JSONResponse(status_code=503, content={
+                "error": "backend registry unavailable — the daemon booted without one"})
+        if reg.get(name) is None:
+            return JSONResponse(status_code=404, content={
+                "error": f"unknown backend {name!r}; known: {list(reg.names())}"})
+        st = await reg.probe(name, force=True)
+        return st.as_dict(stale=reg.is_stale(name))
 
     @app.get("/api/models")
     async def list_models():
