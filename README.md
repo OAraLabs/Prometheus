@@ -557,7 +557,7 @@ prometheus/
 │   └── guide/           # Install · features · Beacon · coding · skills · memory · providers · API
 ├── gym/                 # Frozen task-sets, harvest corpus
 ├── packaging/           # systemd unit
-└── PROMETHEUS.md        # Agent instructions (like CLAUDE.md)
+└── PROMETHEUS.md        # Agent instructions (CLAUDE.md, AGENTS.md, GEMINI.md… also read)
 ```
 
 ## Stats

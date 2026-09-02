@@ -136,18 +136,23 @@ def project_files_section(config: dict, cwd: str | Path) -> str | None:
     bootstrap_cfg = (config or {}).get("bootstrap", {}) or {}
     stack_project_files = context_cfg.get("stack_project_files", True)
     max_chars = context_cfg.get("project_file_max_chars", 12000)
-    # AGENTS.md is gated by bootstrap.load_agents (the subagent registry file
-    # shares the name). Discovery must honor that gate too, or turning the
-    # registry off would silently be undone the moment an AGENTS.md sits
-    # anywhere at or above cwd.
-    excluded_conventions = (
-        () if bootstrap_cfg.get("load_agents", True) else ("AGENTS.md",)
-    )
+    max_total_chars = context_cfg.get("project_files_max_total_chars", 48000)
+    # Two documents share the name AGENTS.md: the subagent REGISTRY at
+    # ~/.prometheus/AGENTS.md (loaded above, gated by bootstrap.load_agents)
+    # and a repo's own AGENTS.md (a project convention file, like CLAUDE.md).
+    # Discovery excludes the registry FILE — by path, always — so it is never
+    # loaded twice when cwd sits under the config dir, and so turning the
+    # registry off never makes it reappear here. It does NOT exclude the
+    # name: before this, `load_agents: false` also silently dropped every
+    # repo's AGENTS.md, which conflated the two documents.
+    del bootstrap_cfg  # the registry gate lives in build_runtime_system_prompt
+    registry_file = Path(get_config_dir()) / "AGENTS.md"
     return load_project_files_prompt(
         str(cwd),
         max_chars_per_file=max_chars,
+        max_total_chars=max_total_chars,
         stack=stack_project_files,
-        exclude=excluded_conventions,
+        exclude_paths=(registry_file,),
     )
 
 
