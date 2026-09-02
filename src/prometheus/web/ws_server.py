@@ -751,6 +751,7 @@ class WebSocketBridge:
                     approval_queue=self.approval_queue,
                     local_model=self.local_model,
                     detected_limit=self.detected_context_size,
+                    session_manager=self.session_mgr,
                 ),
             )
         if outcome is not None and outcome.handled:

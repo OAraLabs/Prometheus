@@ -1333,6 +1333,74 @@ def create_app(
             "dangling": bool(bound) and not known,
         }
 
+    # ── Session workspace (item W, 2026-09-01) ─────────────────────────
+    # A conversation's working directory. The gate follows the session: when
+    # set, it is that conversation's write boundary, its bash lock, where
+    # relative paths resolve, and where project instruction files are read.
+    # Setting it is therefore a security-relevant write, validated here.
+    from prometheus.context.workspace import validate_workspace_path as _validate_workspace
+
+    @app.get("/api/sessions/{session_id}/workspace")
+    async def get_session_workspace(session_id: str):
+        """The effective working directory for this session and where it came
+        from: ``session`` (bound over REST or /workspace) or ``daemon`` (the
+        process cwd and the configured workspace roots)."""
+        from prometheus.config.shipped_defaults import resolve_workspace_root
+
+        lcm = getattr(app.state, "lcm_engine", None)
+        store = lcm.conversation_store if lcm is not None else None
+        bound = store.get_session_workspace(session_id) if store is not None else None
+        roots = resolve_workspace_root(config.get("security", {}) or {})
+        return {
+            "session_id": session_id,
+            "workspace": bound,
+            "source": "session" if bound else "daemon",
+            "daemon_cwd": str(Path.cwd()),
+            "daemon_workspace_roots": roots if isinstance(roots, list) else [roots],
+        }
+
+    @app.put("/api/sessions/{session_id}/workspace")
+    async def set_session_workspace(session_id: str, request: Request):
+        """Bind this session to a working directory. Body: ``{"path": str}``;
+        blank CLEARS it. Refused unless the path is absolute, an existing
+        directory, not the filesystem root, and not under ``security.denied_paths``.
+        Takes effect on the session's next turn."""
+        lcm = getattr(app.state, "lcm_engine", None)
+        store = lcm.conversation_store if lcm is not None else None
+        if store is None:
+            return JSONResponse({"error": "no durable store — session workspaces unavailable"}, status_code=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        raw = body.get("path") if isinstance(body, dict) else None
+        if raw is not None and not isinstance(raw, str):
+            return JSONResponse({"error": "path must be a string"}, status_code=400)
+        raw = (raw or "").strip()
+        if not raw:
+            store.set_session_workspace(session_id, "", set_by="rest")
+            logger.info("session workspace CLEARED for %s (rest)", session_id)
+            return {"ok": True, "session_id": session_id, "workspace": None}
+        resolved, why = _validate_workspace(raw, config.get("security", {}) or {})
+        if resolved is None:
+            return JSONResponse({"error": why}, status_code=400)
+        store.set_session_workspace(session_id, str(resolved), set_by="rest")
+        # Security-relevant: the write boundary of a conversation changed. Say so
+        # where an operator reading the journal will see it.
+        logger.warning("session workspace SET for %s → %s (rest) — this is now that "
+                       "conversation's write boundary", session_id, resolved)
+        return {"ok": True, "session_id": session_id, "workspace": str(resolved)}
+
+    @app.delete("/api/sessions/{session_id}/workspace")
+    async def clear_session_workspace(session_id: str):
+        lcm = getattr(app.state, "lcm_engine", None)
+        store = lcm.conversation_store if lcm is not None else None
+        if store is None:
+            return JSONResponse({"error": "no durable store — session workspaces unavailable"}, status_code=503)
+        store.set_session_workspace(session_id, "", set_by="rest")
+        logger.info("session workspace CLEARED for %s (rest)", session_id)
+        return {"ok": True, "session_id": session_id, "workspace": None}
+
     @app.put("/api/sessions/{session_id}/profile")
     async def set_session_profile(session_id: str, request: Request):
         """Bind this session to a profile. Body: ``{"profile": str}``; blank CLEARS it.

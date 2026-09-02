@@ -432,6 +432,7 @@ class SlackAdapter(BasePlatformAdapter):
         self._app.command("/prometheus-unqueue")(self._slash_unqueue)
         self._app.command("/prometheus-clearsteers")(self._slash_clearsteers)
         self._app.command("/prometheus-profile")(self._slash_profile)
+        self._app.command("/prometheus-workspace")(self._slash_workspace)
         self._app.command("/prometheus-anatomy")(self._slash_anatomy)
         self._app.command("/prometheus-doctor")(self._slash_doctor)
         self._app.command("/prometheus-beacon")(self._slash_beacon)
@@ -747,6 +748,7 @@ class SlackAdapter(BasePlatformAdapter):
             "  /prometheus-reset          — clear conversation context for this channel",
             "  /prometheus-model          — current model and provider",
             "  /prometheus-profile [name] — show / switch agent profile",
+            "  /prometheus-workspace [path|clear] — this channel's working directory + write boundary",
             "  /prometheus-context        — context window usage",
             "  /prometheus-benchmark      — quick smoke test",
             "  /prometheus-beacon         — web bridge / dashboard URL",
@@ -1146,6 +1148,25 @@ class SlackAdapter(BasePlatformAdapter):
         await respond(text=(
             f":broom: Cleared {n} pending steer{'s' if n != 1 else ''}."
         ))
+
+    async def _slash_workspace(
+        self, ack: Any, command: Any, respond: Any
+    ) -> None:
+        """/prometheus-workspace [path|clear] — this channel's working directory (item W)."""
+        await ack()
+        from prometheus.gateway.commands import cmd_workspace
+        channel = ""
+        try:
+            channel = command.get("channel_id", "") or ""
+        except AttributeError:
+            pass
+        text = cmd_workspace(
+            f"slack:{channel}" if channel else "", self._cmd_text(command),
+            session_manager=self.session_manager,
+            security_cfg=getattr(self, "security_config", None),
+            set_by="slack",
+        )
+        await respond(text=text)
 
     async def _slash_profile(
         self, ack: Any, command: Any, respond: Any

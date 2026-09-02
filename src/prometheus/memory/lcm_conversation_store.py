@@ -144,6 +144,13 @@ class LCMConversationStore:
                 profile    TEXT NOT NULL,
                 updated_at REAL NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS session_workspaces (
+                session_id TEXT PRIMARY KEY,
+                path       TEXT NOT NULL,
+                set_by     TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
         """)
         self._conn.commit()
         self._migrate_add_content_json()
@@ -802,7 +809,7 @@ class LCMConversationStore:
             #    list so a NEW side table is a compile-time-visible omission
             #    here, not a silent survivor.
             for table in ("session_titles", "session_profiles", "session_pins",
-                          "session_tombstones", "session_forks"):
+                          "session_tombstones", "session_forks", "session_workspaces"):
                 counts[table] = self._conn.execute(
                     f"DELETE FROM {table} WHERE session_id = ?", (session_id,)
                 ).rowcount if self._table_exists(table) else 0
@@ -1013,6 +1020,40 @@ class LCMConversationStore:
                 (session_id, clean, time.time()),
             )
         self._conn.commit()
+
+    def set_session_workspace(self, session_id: str, path: str, *, set_by: str = "rest") -> None:
+        """Bind a session to a working directory. Blank CLEARS the binding.
+
+        Item W (2026-09-01): the conversation's cwd — where relative paths
+        resolve, where project instruction files are discovered, and (the
+        gate follows the session) the write boundary for that conversation.
+        Same clear-on-blank rule as :meth:`set_session_profile`: absence means
+        "follow the daemon's own cwd and the global workspace roots".
+
+        The PATH is not validated here — the store does not know the
+        filesystem or the denied list. Validation belongs at the write
+        surfaces (the REST route, the slash command), where a bad path is
+        refused with a reason. ``set_by`` records which surface bound it.
+        """
+        clean = (path or "").strip()
+        if not clean:
+            self._conn.execute(
+                "DELETE FROM session_workspaces WHERE session_id = ?", (session_id,)
+            )
+        else:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO session_workspaces (session_id, path, set_by, updated_at)"
+                " VALUES (?, ?, ?, ?)",
+                (session_id, clean, set_by, time.time()),
+            )
+        self._conn.commit()
+
+    def get_session_workspace(self, session_id: str) -> str | None:
+        """The path bound to *session_id*, or None (= follow the daemon)."""
+        row = self._conn.execute(
+            "SELECT path FROM session_workspaces WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return row[0] if row else None
 
     def get_session_profile(self, session_id: str) -> str | None:
         """The profile bound to this session, or None to follow the global default."""

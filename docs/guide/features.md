@@ -200,6 +200,7 @@ The full Telegram command table. Slack (`/prometheus-*`) and Discord (`/promethe
 | `/doctor` | Diagnostic health check against the model registry |
 | `/anatomy` | Hardware, GPU, VRAM, infrastructure snapshot |
 | `/profile` | Show or switch agent profiles |
+| `/workspace` | `[<absolute path> \| clear]` — this conversation's working directory, and its write boundary (the gate follows the session). Same rules on Telegram, Slack, Discord, the web chat and `PUT /api/sessions/{id}/workspace` |
 | `/reset` / `/clear` | Clear conversation context |
 | `/steer <text>` | Inject mid-turn guidance (arrives after the next tool call) |
 | `/queue <text>` | Line up a follow-up turn for after the current one ends |
@@ -272,7 +273,7 @@ The full Telegram command table. Slack (`/prometheus-*`) and Discord (`/promethe
 - **SOUL.md** — the agent's persistent identity, loaded into every prompt. Survives `/reset`. Generated at setup, no hardcoded names.
 - **AGENTS.md** — the agent registry with specializations used for subagent spawning.
 - **ANATOMY.md** — a live infrastructure snapshot: the AnatomyScanner scans CPU/RAM/GPU VRAM, the loaded model and its quantization, Tailscale peers, and disk, and renders Mermaid diagrams. Queryable via `/anatomy` or the `anatomy` tool, and it validates named project configs against available VRAM.
-- **PROMETHEUS.md** — per-project agent instructions, the CLAUDE.md equivalent, picked up by the context assembler.
+- **PROMETHEUS.md** — per-project agent instructions, the CLAUDE.md equivalent (also CLAUDE.md, AGENTS.md, .cursorrules, .windsurfrules, HERMES.md — discovered walking up from the daemon's cwd, or from a conversation's own workspace once `/workspace` is set), picked up by the context assembler.
 - **Agent profiles** — `full | coder | research | assistant | minimal`, switched with `/profile`, trading tool breadth for context budget.
 - **Node & instance identity** ([FOUNDATION](../FOUNDATION.md) Part 3) — two identities with different lifetimes. The **node** is an Ed25519 keypair under `~/.prometheus/node/` (private key mode `0600`), generated at first run, never transmitted anywhere, and never copied to another machine; the base64 public key is the node ID, visible on the bearer-gated `/api/status` as `node_pub`. The **instance** is a UUID in the vault's `.prometheus-vault` marker that travels *with the data* when you move machines. `prometheus vault status` shows the marker; `prometheus vault adopt` mints it once for a pre-marker vault — the daemon warns until you do (`vault.format_check: off | warn | refuse`) and never adopts silently. A vault marker with a **newer** format than the running build refuses the boot regardless of that setting: a newer vault under an older binary would be silently misread, and refusing loudly is the point.
 

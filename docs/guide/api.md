@@ -44,6 +44,9 @@ All paths below are served on `:8005`. `{id}` placeholders are path parameters.
 | GET | `/api/sessions/{session_id}/messages` | Message history (`?since=<message_id>` for incremental sync) |
 | DELETE | `/api/sessions/{session_id}` | Forget a session (durable tombstone — see below) |
 | GET | `/api/config` | Effective config (secrets redacted) |
+| GET | `/api/sessions/{id}/workspace` | The session's working directory and its source (`session` or `daemon`), plus the daemon's cwd and configured workspace roots |
+| PUT | `/api/sessions/{id}/workspace` | Bind a working directory: `{"path": "/abs/dir"}`; blank clears. Refused unless absolute, an existing directory, not `/`, not under `security.denied_paths`. **The gate follows the session:** from the next turn this is the conversation's write boundary (`write_file`/`edit_file`, bash's lock and write floor), where relative paths resolve, and where its instruction files (PROMETHEUS.md, CLAUDE.md, AGENTS.md, …) are read |
+| DELETE | `/api/sessions/{id}/workspace` | Clear it — the session follows the daemon again |
 
 Session semantics worth knowing:
 

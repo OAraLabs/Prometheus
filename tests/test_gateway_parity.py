@@ -212,6 +212,7 @@ MANIFEST: tuple[Family, ...] = (
             "a handler apiece, not a reimplementation."
         ),
     ),
+    Family("workspace", ("cmd_workspace",), _cmds("workspace", "prometheus-workspace", "workspace")),
     Family("help", ("cmd_help",), _cmds("help", "prometheus-help", "help")),
     Family("status", ("cmd_status",), _cmds("status", "prometheus-status", "status")),
     Family("model", ("cmd_model",), _cmds("model", "prometheus-model", "model")),

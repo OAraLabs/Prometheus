@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import logging
 import time
@@ -635,6 +636,23 @@ class LoopContext:
     # profile so /profile and Beacon switches reach the NEXT run through this
     # long-lived context — per-session values must be per-call parameters.
     profile_resolver: object | None = None
+    # Item W (2026-09-01): per-session working directory. A RESOLVER, like
+    # profile_resolver — this context is shared by every session, so the
+    # workspace is looked up per run, never stored here. Returns a Path (or
+    # None = follow ``cwd`` and the gate's configured roots). When set, for
+    # that run: relative paths resolve there, the tool execution context's
+    # cwd is it, the SecurityGate's write boundary is it (the gate follows
+    # the session), bash's lock and write floor use it, and the "# Project
+    # Instructions" section is the one discovered from it.
+    workspace_resolver: object | None = None
+    # The exact "# Project Instructions" text the boot prompt carries (from
+    # prompt_assembler.project_files_section for the daemon's own cwd), so a
+    # session workspace can swap its own section in by exact substring. None
+    # when the boot prompt has no such section.
+    boot_project_prompt: str | None = None
+    # (config, cwd) -> the section text for a workspace. Set by the daemon to
+    # prompt_assembler.project_files_section bound to its config.
+    project_prompt_builder: object | None = None
     # Phase 3.5: session_id used by the router's per-session override lookup.
     # Telegram: str(chat_id). Slack: str(channel_id). CLI: "cli". Web: "web".
     # Reserved: None and "system" never match any override (eval/benchmark/
@@ -708,6 +726,22 @@ def _effective_max_tool_iterations(context: LoopContext) -> int:
     if adapter is not None and getattr(adapter, "tier", None) == "off":
         return context.max_tool_iterations_cloud
     return context.max_tool_iterations
+
+
+# Item W: the per-run (cwd, workspace_roots) pair. A ContextVar rather than
+# a LoopContext field because the context is shared by every session and
+# must not carry per-run state; a ContextVar is copied into each task
+# asyncio.gather spawns for parallel tools, so a tool call always sees the
+# run that dispatched it. None = the daemon's cwd and the gate's own roots.
+_RUN_PATHS: contextvars.ContextVar = contextvars.ContextVar("prometheus_run_paths", default=None)
+
+
+def _run_paths(context: "LoopContext") -> tuple[Path, tuple[Path, ...] | None]:
+    """(cwd, workspace_roots) for the run in progress, else the daemon's."""
+    current = _RUN_PATHS.get()
+    if current is None:
+        return context.cwd, None
+    return current
 
 
 async def run_loop(
@@ -791,6 +825,12 @@ async def run_loop(
             # to break a turn.
             log.debug("DivergenceDetector.start_task raised", exc_info=True)
             div_task_id = None
+    # Item W: the per-run (cwd, roots) pair lives in a ContextVar; _run_loop
+    # sets it once it has resolved the session's workspace. Reset here on
+    # every exit path, or the previous run's paths would outlive it in this
+    # task (a stale workspace applied to the next turn is the exact
+    # cross-talk this must never allow).
+    _paths_token = _RUN_PATHS.set(None)
     try:
         async for item in _run_loop(
             context,
@@ -805,6 +845,7 @@ async def run_loop(
         ):
             yield item
     finally:
+        _RUN_PATHS.reset(_paths_token)
         if turn_key is not None:
             try:
                 fmv.discard_turn(turn_key=turn_key)
@@ -1090,10 +1131,55 @@ async def _run_loop(
 
     # Sprint 3: format tools + system prompt for the target model
     active_system_prompt = context.system_prompt
+
+    # Item W: resolve this session's workspace once per run (frozen for the
+    # run like the tool catalog; a /workspace change lands on the NEXT run).
+    session_workspace: Path | None = None
+    if context.workspace_resolver is not None and effective_session_id:
+        try:
+            _ws = context.workspace_resolver(effective_session_id)
+            if _ws:
+                session_workspace = Path(str(_ws)).expanduser().resolve()
+        except Exception:
+            log.warning("workspace_resolver failed for session=%s; using the daemon cwd",
+                        effective_session_id, exc_info=True)
+    run_cwd: Path = session_workspace or context.cwd
+    run_workspace_roots: tuple[Path, ...] | None = (session_workspace,) if session_workspace else None
+    _RUN_PATHS.set((run_cwd, run_workspace_roots))
+    if session_workspace is not None and context.project_prompt_builder is not None:
+        # Swap the boot-time project section for the workspace's own. Exact
+        # substring: both texts come from the same builder, so no parsing.
+        try:
+            session_section = context.project_prompt_builder(str(session_workspace))
+        except Exception:
+            log.warning("project_prompt_builder failed for %s", session_workspace, exc_info=True)
+            session_section = None
+        header = f"# Workspace\n\nThis conversation's working directory is `{session_workspace}`."
+        replacement = "\n\n".join(x for x in (header, session_section) if x)
+        swapped = bool(context.boot_project_prompt) and context.boot_project_prompt in active_system_prompt
+        if swapped:
+            active_system_prompt = active_system_prompt.replace(context.boot_project_prompt, replacement, 1)
+        else:
+            active_system_prompt = f"{active_system_prompt}\n\n{replacement}"
+        # Observable, not inferred: which directory's instructions this run
+        # carries, and whether they REPLACED the boot section or were appended.
+        log.info(
+            "Session workspace for %s: cwd=%s, project instructions %s (%d chars, %s the boot section)",
+            effective_session_id, session_workspace,
+            "loaded" if session_section else "none found",
+            len(session_section or ""), "replacing" if swapped else "appended after",
+        )
+    # The base prompt for THIS run — workspace-swapped when the session has
+    # one. The adapter's format_request (below, and again on model fallback
+    # and malformed-call retries) must start from this, not from
+    # context.system_prompt, or the swap is silently undone before the first
+    # request: that was the production shape on 2026-09-01 — the log said
+    # "replacing the boot section", the model saw the boot section.
+    run_system_prompt = active_system_prompt
     active_tools = tool_schema
     if context.adapter is not None and hasattr(context.adapter, "format_request"):
         active_system_prompt, active_tools = context.adapter.format_request(
-            context.system_prompt, tool_schema
+            run_system_prompt, tool_schema
         )
 
     # PASSIVE RECALL (MEMORY-3 follow-up): surface stored facts relevant to
@@ -1955,7 +2041,7 @@ async def _run_loop(
                         # Re-format for the new model's adapter if needed
                         if context.adapter is not None and hasattr(context.adapter, "format_request"):
                             active_system_prompt, active_tools = context.adapter.format_request(
-                                context.system_prompt, tool_schema
+                                run_system_prompt, tool_schema
                             )
                         # Feed error results back so the fallback model sees them
                         messages.append(ConversationMessage(role="user", content=tool_results))
@@ -1995,7 +2081,7 @@ async def _run_loop(
                         # Re-format for the new tier, feed error back, continue.
                         if context.adapter is not None and hasattr(context.adapter, "format_request"):
                             active_system_prompt, active_tools = context.adapter.format_request(
-                                context.system_prompt, tool_schema
+                                run_system_prompt, tool_schema
                             )
                         messages.append(ConversationMessage(role="user", content=tool_results))
                         continue
@@ -2212,9 +2298,13 @@ def _boundary_escapes(context, fmv, fmv_kw: dict) -> list[str]:
     if gate is None or not hasattr(fmv, "landed_paths"):
         return []
     escaped: list[str] = []
+    _, _roots = _run_paths(context)
     for path in fmv.landed_paths(**fmv_kw):
         try:
-            decision = gate.evaluate("write_file", file_path=path, origin="user")
+            decision = gate.evaluate(
+                "write_file", file_path=path, origin="user",
+                **({"workspace_roots": _roots} if _roots else {}),
+            )
         except Exception:
             # UNCLASSIFIABLE, and the direction is a deliberate choice rather
             # than whatever the exception happens to produce (CROSS-CUTTING
@@ -3779,8 +3869,9 @@ async def _execute_tool_call(
                     "unmapped-path fallback cannot run for this call",
                     tool_name, exc_info=True,
                 )
+        _run_cwd, _run_roots = _run_paths(context)
         _file_path, _path_unknown = gate_path_for(
-            tool_name, tool_input, schema=_gate_schema, base=context.cwd,
+            tool_name, tool_input, schema=_gate_schema, base=_run_cwd,
         )
         _command = str(tool_input.get("command", "")) or None
         # TRUST-CONTEXT: derive origin from the session_id already
@@ -3814,6 +3905,7 @@ async def _execute_tool_call(
                 file_path=_file_path,
                 command=_command,
                 origin=_origin,
+                **({"workspace_roots": _run_roots} if _run_roots else {}),
             )
         except TypeError:
             # Older permission_checker implementations don't accept origin.
@@ -3900,8 +3992,10 @@ async def _execute_tool_call(
             tool.execute(
                 parsed_input,
                 ToolExecutionContext(
-                    cwd=context.cwd,
+                    cwd=_run_paths(context)[0],
                     metadata={
+                        # Item W: the session's write boundary, when it has one.
+                        "workspace_roots": _run_paths(context)[1],
                         "tool_registry": context.tool_registry,
                         "ask_user_prompt": context.ask_user_prompt,
                         # Managed tasks: the creating session id, so task_create
@@ -4146,6 +4240,9 @@ class AgentLoop:
         microcompact_keep_chars_no_lcm: int = 500,
         lcm_engine: object | None = None,
         profile_resolver: object | None = None,
+        workspace_resolver: object | None = None,
+        boot_project_prompt: str | None = None,
+        project_prompt_builder: object | None = None,
         fallback: object | None = None,
     ) -> None:
         self._provider = provider
@@ -4165,6 +4262,9 @@ class AgentLoop:
         self._microcompact_keep_chars = microcompact_keep_chars
         self._microcompact_keep_chars_no_lcm = microcompact_keep_chars_no_lcm
         self._profile_resolver = profile_resolver
+        self._workspace_resolver = workspace_resolver
+        self._boot_project_prompt = boot_project_prompt
+        self._project_prompt_builder = project_prompt_builder
         self._max_tokens = max_tokens
         self._max_turns = max_turns
         self._max_tool_iterations = max_tool_iterations
@@ -4294,6 +4394,9 @@ class AgentLoop:
             memory_recall=self.memory_recall,
             lcm_engine=self.lcm_engine,
             profile_resolver=self._profile_resolver,
+            workspace_resolver=self._workspace_resolver,
+            boot_project_prompt=self._boot_project_prompt,
+            project_prompt_builder=self._project_prompt_builder,
             # The nudge USED to be injected below, in the `async for` body.
             # That made it AgentLoop-only, so no web / Beacon / Bridge turn
             # ever saw it — the parity guard could not catch it either,

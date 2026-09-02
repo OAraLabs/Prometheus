@@ -909,6 +909,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._register(core, "status", self._app_status, "Model, uptime, tools, memory, SENTINEL")
         self._register(core, "model", self._app_model, "Current model and provider")
         self._register(core, "profile", self._app_profile, "Show / switch agent profile")
+        self._register(core, "workspace", self._app_workspace, "This channel's working directory + write boundary")
         self._register(core, "context", self._app_context, "Context window usage")
         self._register(core, "benchmark", self._app_benchmark, "Quick smoke test")
         self._register(core, "beacon", self._app_beacon, "Web bridge / dashboard URL")
@@ -1091,6 +1092,17 @@ class DiscordAdapter(BasePlatformAdapter):
         await self._respond(
             interaction, cmd_model(self.model_name, self.model_provider),
         )
+
+    async def _app_workspace(self, interaction: Any, args: str) -> None:
+        from prometheus.gateway.commands import cmd_workspace
+        channel = self._cmd_channel(interaction)
+        text = cmd_workspace(
+            f"discord:{channel}" if channel else "", args,
+            session_manager=self.session_manager,
+            security_cfg=getattr(self, "security_config", None),
+            set_by="discord",
+        )
+        await self._respond(interaction, text)
 
     async def _app_profile(self, interaction: Any, args: str) -> None:
         from prometheus.gateway.commands import cmd_profile

@@ -1447,6 +1447,9 @@ class CommandContext:
     # /ephemeral, which keys on the session id itself rather than the object.
     # Not derivable from ``session`` — that is None on a quiet chat.
     session_id: str = ""
+    # Item W: the session manager (its lcm_engine holds the conversation store
+    # the /workspace command writes). None on surfaces without one.
+    session_manager: Any = None
     # ApprovalQueue for /grants, /remember, /revoke; /gate reaches the
     # SecurityGate THROUGH it (``queue._security_gate``), the same way
     # web/server.py's consent routes already do.
@@ -1775,6 +1778,17 @@ async def _sc_gate(ctx: CommandContext, args: str) -> str:
     return cmd_gate(getattr(ctx.approval_queue, "_security_gate", None), args)
 
 
+async def _sc_workspace(ctx: CommandContext, args: str) -> str:
+    if not ctx.session_id:
+        return "No active session."
+    return cmd_workspace(
+        ctx.session_id, args,
+        session_manager=ctx.session_manager,
+        security_cfg=(ctx.config or {}).get("security", {}),
+        set_by="web",
+    )
+
+
 async def _sc_ephemeral(ctx: CommandContext, args: str) -> str:
     if not ctx.session_id:
         return "No active session."
@@ -1830,6 +1844,7 @@ _SESSION_COMMANDS: dict[str, Any] = {
     "reset": _sc_reset,
     "clear": _sc_reset,   # Telegram muscle-memory alias, same handler
     "ephemeral": _sc_ephemeral,
+    "workspace": _sc_workspace,
     "revoke": _sc_revoke,
     "gate": _sc_gate,
 }
@@ -3767,6 +3782,61 @@ _EPHEMERAL_OFF_TEXT = (
     "Ephemeral mode OFF — this chat is remembered again.\n"
     "Messages from here on are stored and may be mined into memory."
 )
+
+
+def cmd_workspace(
+    session_id: str,
+    arg: str = "",
+    *,
+    session_manager: Any = None,
+    security_cfg: dict | None = None,
+    set_by: str = "chat",
+) -> str:
+    """/workspace [<absolute path> | clear] — this conversation's working directory.
+
+    Item W (2026-09-01). One implementation for Telegram, Slack, Discord and
+    the web chat: the store is the LCM conversation store the session manager
+    holds, validation is :func:`prometheus.context.workspace.validate_workspace_path`
+    (the same rules the REST route applies), and the change lands on the
+    session's NEXT turn — the run in flight keeps the catalog and paths it
+    started with. The gate follows the session: the bound directory becomes
+    that conversation's write boundary, so the reply says so.
+    """
+    from pathlib import Path as _Path
+
+    from prometheus.config.shipped_defaults import resolve_workspace_root
+    from prometheus.context.workspace import describe_workspace, validate_workspace_path
+
+    if not session_id:
+        return "No active session."
+    lcm = getattr(session_manager, "lcm_engine", None)
+    store = getattr(lcm, "conversation_store", None)
+    if store is None or not hasattr(store, "set_session_workspace"):
+        return "No durable store — session workspaces are unavailable on this daemon."
+    text = (arg or "").strip()
+    roots = resolve_workspace_root(security_cfg or {})
+    roots_list = roots if isinstance(roots, list) else [roots]
+    if not text:
+        return describe_workspace(
+            session_id, store.get_session_workspace(session_id), str(_Path.cwd()), roots_list,
+        )
+    if text.lower() in ("clear", "none", "off", "unset"):
+        store.set_session_workspace(session_id, "", set_by=set_by)
+        log.info("session workspace CLEARED for %s (%s)", session_id, set_by)
+        return "Workspace cleared — this conversation follows the daemon again from the next message."
+    resolved, why = validate_workspace_path(text, security_cfg)
+    if resolved is None:
+        return f"Refused: {why}"
+    store.set_session_workspace(session_id, str(resolved), set_by=set_by)
+    log.warning(
+        "session workspace SET for %s → %s (%s) — this is now that conversation's write boundary",
+        session_id, resolved, set_by,
+    )
+    return (
+        f"Workspace set to {resolved} — takes effect on the next message.\n"
+        "Relative paths resolve there, its instruction files are loaded, and it is "
+        "now this conversation's write boundary (write_file / edit_file / bash)."
+    )
 
 
 def cmd_ephemeral(session_key: str, arg: str, *, prefix: str = "/") -> str:
