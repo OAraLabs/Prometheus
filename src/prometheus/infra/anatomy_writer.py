@@ -127,6 +127,23 @@ class AnatomyWriter:
                 model_line += " Vision enabled."
             parts.append(model_line)
 
+        # Backends beyond the primary, one clause each — the summary a chat
+        # surface prints, so it stays one line.
+        others = [b for b in state.backends if b.get("name") != "local"]
+        if others:
+            clauses = []
+            for b in others:
+                if not b.get("probed"):
+                    clauses.append(f"{b.get('name')} not probed")
+                elif b.get("ok"):
+                    served = _short_model(b.get("model_path") or b.get("model") or "") or "?"
+                    window = f", {int(b['n_ctx']) // 1024}k" if b.get("n_ctx") else ""
+                    vision = ", vision" if b.get("vision") else ""
+                    clauses.append(f"{b.get('name')} up ({served}{window}{vision})")
+                else:
+                    clauses.append(f"{b.get('name')} DOWN")
+            parts.append("Backends: " + "; ".join(clauses) + ".")
+
         # VRAM
         if state.gpu_vram_free_mb is not None and state.gpu_vram_total_mb:
             free_gb = state.gpu_vram_free_mb / 1024
@@ -247,6 +264,36 @@ class AnatomyWriter:
         lines.append(f"- **Vision:** {'Enabled' if state.vision_enabled else 'Disabled'}")
         if state.inference_features:
             lines.append(f"- **Features:** {', '.join(state.inference_features)}")
+
+        # Every backend the registry knows — the same rows /api/backends and the
+        # Models catalog render, so the agent reads what the operator sees.
+        if state.backends:
+            lines.append("")
+            lines.append("### Backends (registry)")
+            lines.append(
+                "- **Note:** what each configured inference box was last seen "
+                "serving. `/4090`-style commands point a chat at a box; the "
+                "registry reports, it never restarts a server."
+            )
+            lines.append("")
+            lines.append("| Backend | State | Provider | Serving | Window | Vision | Latency |")
+            lines.append("|---------|-------|----------|---------|--------|--------|---------|")
+            for row in state.backends:
+                if not row.get("probed"):
+                    state_txt = "not probed"
+                elif row.get("ok"):
+                    state_txt = "up" + (" (stale)" if row.get("stale") else "")
+                else:
+                    state_txt = f"DOWN — {row.get('error') or 'unknown error'}"
+                served = _short_model(row.get("model_path") or row.get("model") or "") or "—"
+                window = f"{int(row['n_ctx']) // 1024}k" if row.get("n_ctx") else "—"
+                vision = {True: "yes", False: "no"}.get(row.get("vision"), "?")
+                latency = f"{row['latency_ms']:.0f} ms" if row.get("latency_ms") is not None else "—"
+                lines.append(
+                    f"| {row.get('name')} | {state_txt} | {row.get('provider')} | {served} | {window} | {vision} | {latency} |"
+                )
+                if row.get("changed_at"):
+                    lines.append(f"| | served model changed at {row['changed_at']} | | | | | |")
 
         # Services
         lines.append("")

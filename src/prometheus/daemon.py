@@ -1125,7 +1125,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
         checkpoint_store=checkpoint_store,
         # Without this the fallback is INERT: the loop reads context.fallback and nothing
         # ever set it, so every terminal provider failure ended the turn exactly as before.
-        fallback=build_fallback_target(model_config, detected_model=model_name),
+        fallback=build_fallback_target(model_config, detected_model=model_name, registry=backend_registry),
         profile_resolver=profile_state.get if profile_state else None,
         tool_registry=registry,
         adapter=adapter,
@@ -1769,6 +1769,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 inference_engine=model_config.get("provider", "llama_cpp"),
                 ssh_user=anatomy_config.get("ssh_user"),
                 ssh_key=anatomy_config.get("ssh_key"),
+                # Model facts come from the registry's probe — one implementation,
+                # shared with the catalog and /api/backends; ANATOMY.md gains the
+                # backends table. The SSH GPU leg stays the scanner's.
+                registry=backend_registry,
             )
             anatomy_writer = AnatomyWriter()
             project_store = ProjectConfigStore()
@@ -2295,7 +2299,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
             loop_context = LoopContext(
                 provider=provider,
                 model=model_name,
-                fallback=build_fallback_target(model_config, detected_model=model_name),
+                fallback=build_fallback_target(model_config, detected_model=model_name, registry=backend_registry),
                 system_prompt=system_prompt,
                 max_tokens=4096,
                 tool_registry=registry,
