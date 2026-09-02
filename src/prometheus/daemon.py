@@ -1133,6 +1133,54 @@ async def run_daemon(args: argparse.Namespace) -> None:
         (config.get("sessions") or {}).get("rehydrate", False)
     )
 
+    # LCM engine (optional, from Sprint 7)
+    #
+    # INVARIANT: the LCM engine must be constructed and attached to
+    # session_manager/agent_loop BEFORE any gateway adapter starts. A comment
+    # here used to say "sessions are created lazily by the gateway on first
+    # message, which happens after this point, so this ordering is safe" —
+    # that stopped being true once (a) start_polling runs with
+    # drop_pending_updates=False, so a Telegram update PENDING at boot is
+    # fetched the instant the adapter starts, and (b) #326 made the
+    # data-plane handlers block=False, so that first turn detaches
+    # immediately. Observed live in production 2026-08-29: adapter started
+    # 16:13:14.033, turn started 16:13:14.116, LCM engine initialised
+    # 16:13:14.533 — the turn's ChatSession was created via get_or_create
+    # with _effective_lcm_engine() → None and the whole conversation ran
+    # unpersisted (zero rows in lcm.db, session-title hook no-op'd), while
+    # the bot looked perfectly healthy because persistence is best-effort.
+    # tests/test_lcm_wired_before_gateway_start.py pins this ordering.
+    lcm_engine = None
+    try:
+        from prometheus.memory.lcm_engine import LCMEngine
+        from prometheus.tools.builtin.lcm_grep import set_lcm_engine
+        lcm_engine = LCMEngine(provider)
+        set_lcm_engine(lcm_engine)
+        logger.info("LCM engine initialised")
+    except Exception as exc:
+        logger.warning("LCM engine not available: %s", exc)
+
+    # Wire LCM into the session manager so ChatSession.add_result_messages
+    # can persist conversation messages to LCM (PR fix/memory-lcm-full-rewire,
+    # 2026-05-26). Must happen before the adapters below start — see the
+    # invariant above.
+    if lcm_engine is not None:
+        session_manager.lcm_engine = lcm_engine
+        # Same wiring for the loop itself: run_async reads the attribute
+        # per call, so every telegram/CLI/bakeoff turn from here on carries it
+        # into its LoopContext and the microcompactor's is_ingested check has
+        # a real engine instead of the always-None dead branch.
+        agent_loop.lcm_engine = lcm_engine
+        # Per-session profile binding: attach the durable lookup now that the store
+        # exists. Constructed above, long before this point — without this line the
+        # binding is stored and never read, which is the inert-feature shape.
+        if profile_state is not None:
+            try:
+                profile_state.session_lookup = lcm_engine.conversation_store.get_session_profile
+                logger.info("Per-session profile binding wired")
+            except Exception as exc:
+                logger.warning("per-session profile binding unavailable: %s", exc)
+
     # Collect async tasks to run
     tasks: list[asyncio.Task] = []
     shutdown_event = asyncio.Event()
@@ -1565,40 +1613,6 @@ async def run_daemon(args: argparse.Namespace) -> None:
             "Cron scheduler started (failure notifier %s)",
             "wired" if (telegram is not None and _notify_chat) else "disabled",
         )
-
-    # LCM engine (optional, from Sprint 7)
-    lcm_engine = None
-    try:
-        from prometheus.memory.lcm_engine import LCMEngine
-        from prometheus.tools.builtin.lcm_grep import set_lcm_engine
-        lcm_engine = LCMEngine(provider)
-        set_lcm_engine(lcm_engine)
-        logger.info("LCM engine initialised")
-    except Exception as exc:
-        logger.warning("LCM engine not available: %s", exc)
-
-    # PR fix/memory-lcm-full-rewire (2026-05-26) — wire LCM into the
-    # session manager so ChatSession.add_result_messages can persist
-    # conversation messages to LCM. session_manager was constructed
-    # earlier (line ~342) when lcm_engine wasn't yet available; assign
-    # here. Sessions are created lazily by the gateway on first message,
-    # which happens after this point, so this ordering is safe.
-    if lcm_engine is not None:
-        session_manager.lcm_engine = lcm_engine
-        # Same late-wiring for the loop itself: run_async reads the attribute
-        # per call, so every telegram/CLI/bakeoff turn from here on carries it
-        # into its LoopContext and the microcompactor's is_ingested check has
-        # a real engine instead of the always-None dead branch.
-        agent_loop.lcm_engine = lcm_engine
-        # Per-session profile binding: attach the durable lookup now that the store
-        # exists. Constructed above, long before this point — without this line the
-        # binding is stored and never read, which is the inert-feature shape.
-        if profile_state is not None:
-            try:
-                profile_state.session_lookup = lcm_engine.conversation_store.get_session_profile
-                logger.info("Per-session profile binding wired")
-            except Exception as exc:
-                logger.warning("per-session profile binding unavailable: %s", exc)
 
     # Memory extractor (optional, from Sprint 5)
     memory_recall = None  # set below when the store comes up; web path reads it
