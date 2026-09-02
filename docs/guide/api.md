@@ -59,6 +59,29 @@ Session semantics worth knowing:
 | POST | `/api/chat/interrupt` | Stop the running agent turn in a session — the chat Stop button. `{"session_id": ...}`; idempotent (`stopped: false` when nothing is running). Completed rounds persist, a mid-generation partial is kept as an assistant turn, and every client sees the broadcast `chat_done{interrupted:true}`. HTTP twin of the WS `interrupt` frame |
 | POST | `/api/chat` | Alternate chat send endpoint |
 
+### OpenAI-compatible surface — `/v1`
+
+Any client that speaks the OpenAI chat-completions wire (Open WebUI, LobeChat, Continue, Zed, the `openai` SDKs) can point at the daemon with the same bearer token. Beacon stays the surface; this is the second door.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/v1/models` | The keys from `/api/models` that have a credential present, in OpenAI's list shape (`id` = the catalog key: `local`, `claude`, `qwen:qwen3.7-max`, …) |
+| POST | `/v1/chat/completions` | One agent turn. `messages` (system/user/assistant, string or text parts), optional `model` (a key from `/v1/models`, default `local`), optional `stream` (SSE chunks ending in `data: [DONE]`), optional Prometheus extension `mode` (`agent` default, `chat` = no tools) |
+
+What to expect, stated plainly:
+
+- **Stateless, like OpenAI.** Send the whole conversation each call; each call runs one turn in a fresh `openai:<id>` session that persists nothing to LCM or memory. The daemon's own sessions are untouched. The response carries `prometheus.session_id` so a telemetry row can be traced.
+- **Tools run server-side and are never surfaced.** The model uses Prometheus's tools behind its security gate; the client sees only text. A request that sends `tools`, `functions` or `tool_choice` is refused with `400 tools_unsupported` rather than having them ignored. A non-read-only tool that needs approval blocks the turn exactly as it would for Beacon.
+- **`system` messages are appended** to the daemon's own system prompt as client instructions; they never replace the identity, tool and safety text.
+- **Ignored on purpose:** `temperature`, `top_p`, `max_tokens`, `n`, `stop`, `logprobs` — the loop owns generation settings. Image and audio content parts are refused (`400 unsupported_content`).
+- **Errors** use OpenAI's envelope (`{"error": {"message", "type", "code"}}`): `404 model_not_found`, `400 last_message_not_user`, `502` with the classified turn error when the loop dies, `503` when no loop is wired.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8005/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"local","messages":[{"role":"user","content":"What is the Context7 library ID for httpx?"}]}'
+```
+
 ### Telemetry & events
 
 | Method | Path | Purpose |
