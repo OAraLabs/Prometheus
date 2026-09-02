@@ -219,7 +219,10 @@ def create_app(
                     return JSONResponse(status_code=413, content={"error": "request body too large"})
             except ValueError:
                 return JSONResponse(status_code=400, content={"error": "invalid Content-Length"})
-        if _api_token and request.url.path.startswith("/api/"):
+        # /v1 is the OpenAI-compatible surface (web/openai_api.py): same
+        # bearer, same device tokens. A route prefix outside this tuple is
+        # an UNAUTHENTICATED route — widen here, never elsewhere.
+        if _api_token and request.url.path.startswith(("/api/", "/v1/")):
             # GRAFT-MOBILE-BRIDGE 1: the bearer may be the global token or an
             # enrolled device token. verify_token compares constant-time (the
             # old `!=` here was the timing side-channel the graft spec flags)
@@ -4619,10 +4622,22 @@ def create_app(
             return JSONResponse(status_code=404, content={"error": "story not found"})
         return {"ok": True, "story": updated}
 
+    # ── OpenAI-compatible surface (item 2, 2026-09-01) ─────────────────────
+    # Registered BEFORE the static catch-all below, like every route.
+    from prometheus.web.openai_api import register_openai_routes
+
+    register_openai_routes(
+        app,
+        config=config,
+        model_catalog=_model_catalog,
+        resolve_model_target=lambda key: _resolve_model_target(key, config),
+    )
+
     # ── Static files (must be last — catch-all) ─────────────────────
 
     if static_dir:
         static_path = Path(static_dir)
+
         if static_path.exists():
             app.mount(
                 "/",
