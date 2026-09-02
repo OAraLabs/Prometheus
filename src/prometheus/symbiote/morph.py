@@ -73,7 +73,7 @@ def _daemon_lock_path() -> Path:
     return get_config_dir() / "daemon.lock"
 
 
-_PKILL_PATTERN = "python.*prometheus daemon"
+_PKILL_PATTERN = "python.*oara daemon"
 _DAEMON_LAUNCH_CMD = ["python3", "-m", "prometheus", "daemon"]
 
 

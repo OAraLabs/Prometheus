@@ -43,13 +43,13 @@ Each run is also registered as a durable managed task in `tasks.db` (vetted by t
 ### From the CLI
 
 ```bash
-prometheus code \
+oara code \
   --repo /path/to/your/repo \
   --task "Add a --json flag to the export command" \
   --acceptance "uv run pytest tests/test_export.py"
 ```
 
-Flags (all verified against the `prometheus code` subcommand):
+Flags (all verified against the `oara code` subcommand):
 
 | Flag | Required | Default | Meaning |
 |---|---|---|---|
@@ -118,7 +118,7 @@ The daemon supports full mid-run supervision: **pause**, **inject** (feed guidan
 Two ways to use it:
 
 - **REST**, against a running run: `POST /api/code/{id}/pause`, `POST /api/code/{id}/inject`, `POST /api/code/{id}/resume` (plus `POST /api/code/{id}/stop` and `GET /api/code/{id}/diff`).
-- **CLI**, by passing `--control-dir <dir>` to `prometheus code` and writing the control file into that directory.
+- **CLI**, by passing `--control-dir <dir>` to `oara code` and writing the control file into that directory.
 
 One honest caveat: **Beacon's UI does not expose pause/inject yet.** Supervised mode in the Loop Manager currently means watching the live stream with a Stop button. The daemon capability is there and works over REST; surfacing pause/inject in Beacon is a roadmap item.
 

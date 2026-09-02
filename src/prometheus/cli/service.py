@@ -1,4 +1,4 @@
-"""``prometheus install-service`` — install the systemd user unit.
+"""``oara install-service`` — install the systemd user unit.
 
 Onboarding Phase 0, item 3: the README has promised
 ``systemctl --user enable --now prometheus`` for months without shipping
@@ -46,7 +46,7 @@ StandardOutput=journal
 StandardError=journal
 
 # Secrets (PROMETHEUS_API_TOKEN, gateway tokens, provider keys) live in
-# the env file, written by `prometheus setup` / `prometheus token rotate`.
+# the env file, written by `oara setup` / `oara token rotate`.
 # The leading "-" makes it optional so a fresh install still boots.
 EnvironmentFile=-%h/.config/prometheus/env
 
@@ -54,7 +54,7 @@ EnvironmentFile=-%h/.config/prometheus/env
 WantedBy=default.target
 """
 
-DEFAULT_EXEC_START = "/usr/bin/env prometheus daemon"
+DEFAULT_EXEC_START = "/usr/bin/env oara daemon"
 
 
 def get_systemd_user_dir() -> Path:
@@ -71,7 +71,7 @@ def resolve_exec_start() -> str:
     Falls back to a PATH lookup at unit start when the binary isn't
     findable right now (e.g. editable install outside PATH).
     """
-    binary = shutil.which("prometheus")
+    binary = shutil.which("oara") or shutil.which("prometheus")
     if binary:
         return f"{binary} daemon"
     return DEFAULT_EXEC_START
@@ -144,7 +144,7 @@ def install_service(
 
 
 def run_install_service_command(args: argparse.Namespace) -> int:
-    """Entry point for ``prometheus install-service``."""
+    """Entry point for ``oara install-service``."""
     systemd_dir = (
         Path(args.systemd_dir).expanduser() if getattr(args, "systemd_dir", None)
         else None
@@ -177,7 +177,7 @@ def add_install_service_subparser(subparsers: argparse._SubParsersAction) -> Non
 
 
 if __name__ == "__main__":  # pragma: no cover
-    parser = argparse.ArgumentParser(prog="prometheus install-service")
+    parser = argparse.ArgumentParser(prog="oara install-service")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--now", action="store_true")
     parser.add_argument("--systemd-dir", default=None)

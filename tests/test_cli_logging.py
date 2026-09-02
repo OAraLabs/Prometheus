@@ -1,6 +1,6 @@
 """FIRSTLIGHT GAP-3 — the CLI's first answer must not be buried in logs.
 
-The stranger walk (minute six): a first-ever ``prometheus --once`` reply
+The stranger walk (minute six): a first-ever ``oara --once`` reply
 arrived interleaved with httpx/agent_loop/audit INFO lines — operator
 logging on first contact, which a stranger reads as "broken". The fix:
 on the CLI surfaces (interactive chat and ``--once``) the console defaults
@@ -151,7 +151,7 @@ def test_verbose_restores_the_info_console_stream(cli_home):
 
 
 # ---------------------------------------------------------------------------
-# `prometheus token show` — machine-readable: the token is line 1 of stdout
+# `oara token show` — machine-readable: the token is line 1 of stdout
 # and no INFO line reaches the console by default
 # ---------------------------------------------------------------------------
 
@@ -209,7 +209,7 @@ def _run_token_show(home: Path, *extra: str) -> subprocess.CompletedProcess:
 
 
 def test_token_show_prints_the_token_first_and_no_info_by_default(token_home):
-    """The FIRSTLIGHT cloud leg's S6: `prometheus token show 2>&1 | head -1`
+    """The FIRSTLIGHT cloud leg's S6: `oara token show 2>&1 | head -1`
     read an INFO line as the token. A machine-readable subcommand's
     console is quiet unless asked."""
     proc = _run_token_show(token_home)

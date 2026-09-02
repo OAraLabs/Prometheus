@@ -6,12 +6,12 @@ config, and fails loudly naming WHICH step broke and why:
 
   S1  git clone (of --source, at its current SHA) into a temp tree
   S2  python -m venv + pip install -e '.[full]'      (the README install line)
-  S3  prometheus setup --noninteractive              (against a stub model server)
+  S3  oara setup --noninteractive              (against a stub model server)
       --leg cloud: no local server is offered; one cloud key in the environment
       must pick the provider, and the harness points that provider at the stub
-  S4  prometheus doctor                              (must exit 0)
-  S5  prometheus --once "..."                        (one CLI turn that CALLS A TOOL)
-  S6  prometheus daemon                              (401 bare -> token show -> /api/status; one REST turn)
+  S4  oara doctor                              (must exit 0)
+  S5  oara --once "..."                        (one CLI turn that CALLS A TOOL)
+  S6  oara daemon                              (401 bare -> token show -> /api/status; one REST turn)
   S7  teardown                                       (no residue: temp gone, ports closed)
 
 CONTRACT
@@ -232,7 +232,11 @@ class Harness:
                  "s2-install", timeout=120, cwd=self.work)
         self.run([str(self.venv / "bin" / "pip"), "install", "--quiet",
                   "-e", ".[full]"], "s2-install", timeout=1500)
-        rc, _ = self.run([str(self.venv / "bin" / "prometheus"), "--help"],
+        # The command is `oara`; `prometheus` is the alias kept for the
+        # deprecation window — a fresh install must have both on PATH.
+        self.run([str(self.venv / "bin" / "prometheus"), "--help"],
+                 "s2-alias-help", timeout=60)
+        rc, _ = self.run([str(self.venv / "bin" / "oara"), "--help"],
                          "s2-install", timeout=60)
         return "pip install -e '.[full]' + entrypoint present"
 
@@ -262,12 +266,12 @@ class Harness:
             # on replaces the four well-known candidates, so detection finds
             # nothing wherever the host happens to run a model. With no
             # prompts allowed, the one exported cloud key has to carry it.
-            self.run([str(self.venv / "bin" / "prometheus"), "setup",
+            self.run([str(self.venv / "bin" / "oara"), "setup",
                       "--noninteractive", "--timeout", "1",
                       "--probe-url", "http://127.0.0.1:9"],
                      "s3-setup", timeout=120)
         else:
-            self.run([str(self.venv / "bin" / "prometheus"), "setup",
+            self.run([str(self.venv / "bin" / "oara"), "setup",
                       "--noninteractive", "--timeout", "3",
                       "--probe-url", f"http://127.0.0.1:{self.stub_port}"],
                      "s3-setup", timeout=120)
@@ -328,13 +332,13 @@ class Harness:
         return f"config written; model={FINAL_MARKER.split('-')[0].lower()}-stub via --probe-url"
 
     def s4_doctor(self) -> str:
-        _, log = self.run([str(self.venv / "bin" / "prometheus"), "doctor"],
+        _, log = self.run([str(self.venv / "bin" / "oara"), "doctor"],
                           "s4-doctor", timeout=120)
         return "doctor exit 0"
 
     def s5_cli_turn(self) -> str:
         _, log = self.run(
-            [str(self.venv / "bin" / "prometheus"), "--once",
+            [str(self.venv / "bin" / "oara"), "--once",
              "firstlight: enumerate the repository files"],
             "s5-cli-turn", timeout=300,
         )
@@ -353,7 +357,7 @@ class Harness:
         daemon_log_path = self.logs / "s6-daemon.log"
         daemon_log = daemon_log_path.open("a", encoding="utf-8")
         self.daemon_proc = subprocess.Popen(
-            [str(self.venv / "bin" / "prometheus"), "daemon"],
+            [str(self.venv / "bin" / "oara"), "daemon"],
             cwd=self.clone, env=self.env(),
             stdout=daemon_log, stderr=subprocess.STDOUT,
         )
@@ -377,7 +381,7 @@ class Harness:
 
         # Fresh-install security default, pinned in BOTH directions: the
         # first daemon start MINTS a web API token (printed once; saved to
-        # the env file; `prometheus token show` re-prints it), so a bare
+        # the env file; `oara token show` re-prints it), so a bare
         # request must be refused...
         if first_code != 401:
             raise StepFailure(
@@ -385,8 +389,8 @@ class Harness:
                 f"fresh install must mint a token and refuse bare requests "
                 f"(expected 401)", daemon_log_path)
         # ...and a client that reads the product's own message gets in. The
-        # harness does what that message says: `prometheus token show`.
-        rc, tok_log = self.run([str(self.venv / "bin" / "prometheus"),
+        # harness does what that message says: `oara token show`.
+        rc, tok_log = self.run([str(self.venv / "bin" / "oara"),
                                 "token", "show"], "s6-token-show", timeout=60)
         token_lines = [
             ln.strip() for ln in
@@ -395,7 +399,7 @@ class Harness:
         ]
         if not token_lines or " " in token_lines[0]:
             raise StepFailure(
-                "`prometheus token show` did not print a token on its first "
+                "`oara token show` did not print a token on its first "
                 "line — the fresh install minted one, so show must re-print "
                 "it", tok_log)
         auth = {"Authorization": f"Bearer {token_lines[0]}"}
@@ -410,7 +414,7 @@ class Harness:
             time.sleep(1)
         if status is None:
             raise StepFailure("authenticated /api/status never answered 200 "
-                              "— the token `prometheus token show` printed "
+                              "— the token `oara token show` printed "
                               "does not open the API it minted",
                               daemon_log_path)
 
@@ -501,10 +505,10 @@ class Harness:
         steps = [
             ("S1", "git clone at source SHA", self.s1_clone),
             ("S2", "pip install -e '.[full]'", self.s2_install),
-            ("S3", ("prometheus setup --noninteractive (no server, one cloud key)"
+            ("S3", ("oara setup --noninteractive (no server, one cloud key)"
                     if self.leg == "cloud" else
-                    "prometheus setup --noninteractive (stub model)"), self.s3_setup),
-            ("S4", "prometheus doctor exits 0", self.s4_doctor),
+                    "oara setup --noninteractive (stub model)"), self.s3_setup),
+            ("S4", "oara doctor exits 0", self.s4_doctor),
             ("S5", "one CLI turn that calls a tool (--once)", self.s5_cli_turn),
             ("S6", "daemon boots; /api/status; one REST turn", self.s6_daemon_rest),
             ("S7", "teardown, no residue", self.s7_teardown),

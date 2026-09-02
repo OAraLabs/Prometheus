@@ -14,7 +14,7 @@ grabs both signals) and was exonerated: on >=0.29 it restores the previous
 handlers and RE-RAISES the captured signal on its way out, so with cron
 fixed, a mutation restoring plain ``uvicorn.Server`` changed nothing.
 
-The pin is deliberately behavioral and total: a REAL ``prometheus daemon``
+The pin is deliberately behavioral and total: a REAL ``oara daemon``
 subprocess, booted against a loopback stub model with an isolated HOME,
 must exit within seconds of SIGTERM and of SIGINT. Whatever component of
 the signal chain regresses — cron, uvicorn semantics on some future
@@ -63,7 +63,7 @@ class _ModelsHandler(BaseHTTPRequestHandler):
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT],
                          ids=["SIGTERM", "SIGINT-ctrl-c"])
 def test_daemon_exits_promptly_on_sigterm(tmp_path, sig):
-    """The FL-1 claim, against the real artifact: boot `prometheus daemon`
+    """The FL-1 claim, against the real artifact: boot `oara daemon`
     with an isolated HOME and a stub model server, signal it, and require
     exit within seconds — not systemd's 90s SIGKILL. Both signals: the
     walk's literal complaint was Ctrl+C (SIGINT); systemd stop is SIGTERM."""

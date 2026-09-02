@@ -1,6 +1,6 @@
 """Coding runs as managed tasks (SPRINT-coding-mode v2, scope item 5).
 
-A coding run is a ``tasks.db`` managed task: the ``prometheus code`` CLI
+A coding run is a ``tasks.db`` managed task: the ``oara code`` CLI
 subprocess IS the run, registered through the existing
 :class:`~prometheus.tasks.manager.BackgroundTaskManager` — durability
 (TaskStore), SecurityGate vetting at launch, ``task_completed`` /

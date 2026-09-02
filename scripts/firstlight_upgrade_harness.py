@@ -282,7 +282,7 @@ class UpgradeHarness:
         log_path = self.logs / f"{log_name}.log"
         log = log_path.open("a", encoding="utf-8")
         self.daemon = subprocess.Popen(
-            [str(self.venv / "bin" / "prometheus"), "daemon"],
+            [str(self.venv / "bin" / "oara"), "daemon"],
             cwd=self.clone, env=self.env(),
             stdout=log, stderr=subprocess.STDOUT,
         )
@@ -366,7 +366,7 @@ class UpgradeHarness:
 
     def u2_populate(self) -> str:
         self._start_stub(8080)
-        self.run([str(self.venv / "bin" / "prometheus"), "setup",
+        self.run([str(self.venv / "bin" / "oara"), "setup",
                   "--noninteractive", "--timeout", "3"], "u2-populate", 120)
         cfg = self.cfg_root() / "prometheus.yaml"
         if not cfg.exists():
@@ -395,7 +395,7 @@ class UpgradeHarness:
         cfg.write_text(text, encoding="utf-8")
 
         for i in range(3):
-            log = self.run([str(self.venv / "bin" / "prometheus"), "--once",
+            log = self.run([str(self.venv / "bin" / "oara"), "--once",
                             f"populate turn {i}"], "u2-populate", 300)
         if MARKER not in log.read_text(encoding="utf-8", errors="replace"):
             raise StepFailure("baseline --once turns never completed the "
@@ -510,9 +510,9 @@ class UpgradeHarness:
         if code != 200:
             raise StepFailure(f"authed /api/status -> {code} after upgrade "
                               f"(the pre-upgrade token must keep working)", log)
-        self.run([str(self.venv / "bin" / "prometheus"), "doctor"],
+        self.run([str(self.venv / "bin" / "oara"), "doctor"],
                  "u5-doctor", 120)
-        once = self.run([str(self.venv / "bin" / "prometheus"), "--once",
+        once = self.run([str(self.venv / "bin" / "oara"), "--once",
                          "post-upgrade turn"], "u5-once", 300)
         if MARKER not in once.read_text(encoding="utf-8", errors="replace"):
             raise StepFailure("post-upgrade --once turn did not complete",
@@ -568,7 +568,7 @@ class UpgradeHarness:
         try:
             self._boot_daemon("u6-daemon")
             report.append("  daemon: BOOTS")
-            once = self.run([str(self.venv / "bin" / "prometheus"), "--once",
+            once = self.run([str(self.venv / "bin" / "oara"), "--once",
                              "downgrade probe"], "u6-once", 300,
                             expect_rc=None)
             text = once.read_text(encoding="utf-8", errors="replace")

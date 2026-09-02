@@ -195,7 +195,7 @@ class TestRotateAndDescribe:
         token = mint_api_token()
         banner = format_minted_banner(token)
         assert banner.count(token) == 1
-        assert "prometheus token show" in banner
+        assert "oara token show" in banner
 
 
 # ---------------------------------------------------------------------------

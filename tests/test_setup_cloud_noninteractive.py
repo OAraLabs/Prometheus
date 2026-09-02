@@ -1,4 +1,4 @@
-"""``prometheus setup`` with no prompts can land on a cloud provider.
+"""``oara setup`` with no prompts can land on a cloud provider.
 
 Installability survey, 2026-09-01: every cloud choice lived behind an
 interactive menu, so ``setup --noninteractive`` on a box with no local

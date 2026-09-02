@@ -1,19 +1,19 @@
-"""``prometheus setup`` — the ONE canonical setup wizard.
+"""``oara setup`` — the ONE canonical setup wizard.
 
 Onboarding Phase 0, item 1: Prometheus previously shipped two competing
-init paths — the rich wizard (``prometheus --setup``, identity + gateway
+init paths — the rich wizard (``oara --setup``, identity + gateway
 + smoke test) and the fast probe (``prometheus-init``) — with different
 outputs and no guidance. They are now a single subcommand:
 
-    prometheus setup                   # rich wizard (identity, gateway,
+    oara setup                   # rich wizard (identity, gateway,
                                        # smoke test) — the default
-    prometheus setup --fast            # probe → yaml → env, 3 questions
-    prometheus setup --noninteractive  # fast path, zero questions
-    prometheus setup --gateway-only    # add/change a gateway only
+    oara setup --fast            # probe → yaml → env, 3 questions
+    oara setup --noninteractive  # fast path, zero questions
+    oara setup --gateway-only    # add/change a gateway only
 
 Back-compat aliases (thin forwards, no behavior of their own):
 
-- ``prometheus --setup`` / ``--setup-gateway-only``  → this command
+- ``oara --setup`` / ``--setup-gateway-only``  → this command
 - ``prometheus-init`` console script                 → ``setup --fast``
 """
 
@@ -58,7 +58,7 @@ def run_setup(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Standalone entry point (used by the forwarding aliases)."""
     parser = argparse.ArgumentParser(
-        prog="prometheus setup",
+        prog="oara setup",
         description="Set up Prometheus: detect your inference server, write "
                     "the config, generate identity, and smoke-test the loop.",
     )

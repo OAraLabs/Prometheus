@@ -139,7 +139,7 @@ def create_marker(vault_root: Path, created_by: str) -> VaultMarker:
 
     This is adoption, and adoption is explicit: the daemon never calls this
     on its own (Foundation Spec 1.1 — "do not silently adopt"). The one
-    caller is ``prometheus vault adopt``.
+    caller is ``oara vault adopt``.
     """
     if not vault_root.is_dir():
         raise VaultMarkerError(
@@ -192,7 +192,7 @@ def enroll_node(vault_root: Path, pubkey: str, label: str) -> bool:
     Returns True when the node was newly enrolled, False when it was
     already present (the every-boot case). Spec 3.5/3.6: in this version
     the local node self-enrolls on startup against an adopted vault — the
-    human who ran ``prometheus vault adopt`` is the approval. The explicit
+    human who ran ``oara vault adopt`` is the approval. The explicit
     approve-before-enroll step arrives with the fleet and replaces this.
 
     ``label`` is display only (a hostname, typically). It is never
@@ -260,7 +260,7 @@ def check_vault_marker(vault_root: Path, mode: str = "warn") -> VaultMarker | No
         message = (
             f"Vault at {vault_root} has no {MARKER_FILENAME} marker "
             "(a vault from before vault_format existed). Run "
-            "`prometheus vault adopt` once to mint its marker and "
+            "`oara vault adopt` once to mint its marker and "
             "instance identity. Prometheus does not adopt silently."
         )
         if mode == "refuse":

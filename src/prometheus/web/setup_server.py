@@ -1,6 +1,6 @@
 """Setup-mode web server — pairing + remote-drivable setup (Phases 1–2).
 
-``prometheus daemon`` with NO config used to be a dead end (nothing to
+``oara daemon`` with NO config used to be a dead end (nothing to
 serve, nothing to pair against). Now it boots THIS minimal server
 instead of the full daemon: a dedicated FastAPI app whose only live
 surface is ``/api/setup/*`` — the full daemon route surface does not
@@ -26,7 +26,7 @@ Phase 2 flow (the paired client completes the ENTIRE setup remotely):
    remote/custom URL instead.
 5. ``POST /api/setup/configure`` (authed) — validates the chosen
    backend by re-probing it, then writes ``prometheus.yaml`` via the
-   SAME writer ``prometheus setup --fast`` uses
+   SAME writer ``oara setup --fast`` uses
    (:func:`prometheus.cli.init._default_config` + ``write_config``),
    generates identity (SOUL.md/AGENTS.md) via the SetupWizard's
    generator when ``agent_name`` is given, and persists an optional
@@ -807,8 +807,8 @@ def create_setup_app(
         return JSONResponse(status_code=403, content={
             "error": "setup_mode",
             "detail": "the daemon is in setup mode — only /api/setup/* is "
-                      "available. Finish `prometheus setup` on the host, "
-                      "then restart `prometheus daemon`.",
+                      "available. Finish `oara setup` on the host, "
+                      "then restart `oara daemon`.",
         })
 
     return app
@@ -836,8 +836,8 @@ def format_pairing_banner(code: str, api_port: int) -> str:
         f"  Pair from Beacon: address {host}:{api_port} (or this machine's\n"
         "  Tailscale / LAN address) + the code above.\n"
         f"  Don't have Beacon yet?  {BEACON_DOWNLOAD_URL}\n"
-        "  Or set up here instead:  prometheus setup\n"
-        "  Expired or locked? Restart `prometheus daemon` for a new code.\n"
+        "  Or set up here instead:  oara setup\n"
+        "  Expired or locked? Restart `oara daemon` for a new code.\n"
         f"{bar}\n"
     )
 
@@ -873,7 +873,7 @@ async def _serve_setup_mode(
 
 
 def run_setup_mode() -> int | str:
-    """Entry point: `prometheus daemon` found no config.
+    """Entry point: `oara daemon` found no config.
 
     Boots the pairing-only server, prints the pairing code banner ONCE,
     serves until SIGTERM/SIGINT — or until a paired client finishes
@@ -889,7 +889,7 @@ def run_setup_mode() -> int | str:
             "No configuration found, and setup mode needs the web extra to "
             "serve the pairing API.\n"
             "Either install it:   pip install 'oara-prometheus[web]'\n"
-            "or set up directly:  prometheus setup",
+            "or set up directly:  oara setup",
         )
         return 1
 
@@ -900,7 +900,7 @@ def run_setup_mode() -> int | str:
     logger.warning(
         "No prometheus.yaml found — starting in SETUP MODE (pairing-only "
         "API on :%d; the full daemon surface is NOT running). Run "
-        "`prometheus setup` to configure, then restart the daemon — or "
+        "`oara setup` to configure, then restart the daemon — or "
         "drive the whole setup from a paired client (Beacon).",
         api_port,
     )

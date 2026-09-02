@@ -13,7 +13,7 @@ Authorization: Bearer $PROMETHEUS_API_TOKEN
 ```
 
 - The token is minted automatically on first daemon start (or by the setup wizard) and stored in `~/.config/prometheus/env`.
-- Retrieve or invalidate it with the CLI: `prometheus token show` | `prometheus token rotate`.
+- Retrieve or invalidate it with the CLI: `oara token show` | `oara token rotate`.
 - Requests with a missing or wrong token get a `401 {"error": "unauthorized — set Authorization: Bearer <token>"}`.
 - `GET /health` is the only unauthenticated API endpoint — it lives outside `/api/` precisely so external monitors can poll it without credentials. (The JSON API index served at `/` is likewise outside the bearer gate.)
 

@@ -44,11 +44,12 @@ jobs:
         run: python -m pip install --upgrade uv
       - name: Build sdist + wheel
         run: uv build
-      - name: Smoke the wheel (install into a scratch venv, `prometheus --help`)
+      - name: Smoke the wheel (install into a scratch venv, `oara --help` + the `prometheus` alias)
         run: |
           uv venv --python 3.12 /tmp/relcheck
           uv pip install --python /tmp/relcheck/bin/python dist/*.whl
-          /tmp/relcheck/bin/prometheus --help
+          /tmp/relcheck/bin/oara --help
+          /tmp/relcheck/bin/prometheus --help   # the alias, kept for the deprecation window
       - name: Upload build artifacts (always, incl. workflow_dispatch runs)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

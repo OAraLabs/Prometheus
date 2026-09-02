@@ -4,10 +4,10 @@ Walks the user through identity generation, provider selection, gateway
 configuration, directory creation, config writing, and a smoke test.
 
 Usage:
-    prometheus setup            # canonical entry point (Onboarding Phase 0)
-    prometheus setup --fast     # quick probe→yaml path (prometheus.cli.init)
+    oara setup            # canonical entry point (Onboarding Phase 0)
+    oara setup --fast     # quick probe→yaml path (prometheus.cli.init)
 
-``prometheus --setup`` remains a thin forwarding alias.
+``oara --setup`` remains a thin forwarding alias.
 
 Dead-end rule (Phase 0, item 5): no path in this wizard may write a
 config that is known to be broken. When no server answers, the user is
@@ -447,7 +447,7 @@ class SetupWizard:
                 print(f"  Config will reference ${default_env}.\n")
         elif len(key_input) > 20:
             # They pasted a raw key — persist it to the env file (the one
-            # `prometheus daemon` and the systemd unit load), never the yaml.
+            # `oara daemon` and the systemd unit load), never the yaml.
             from prometheus.config.env_file import get_env_file_path, set_env_value
 
             self._api_key_env = default_env
@@ -529,7 +529,7 @@ No problem. Here are your options:
     export XAI_API_KEY=...             # xAI Grok
 
 Run this wizard again after you're ready:
-  prometheus setup
+  oara setup
 """
         )
 
@@ -544,7 +544,7 @@ Run this wizard again after you're ready:
         print("\nHow do you want to talk to Prometheus?")
         print("\n  Enable any of the messaging gateways below — or none, for"
               "\n  CLI only. You can add or change gateways any time with:"
-              "\n    prometheus setup --gateway-only")
+              "\n    oara setup --gateway-only")
 
         # Telegram — a prefilled (rerun) gateway defaults to staying enabled.
         if self._ask_enable("Telegram", "telegram" in self._gateways):
@@ -579,7 +579,7 @@ Run this wizard again after you're ready:
         if not self._gateways:
             print(
                 "\n  Got it — CLI mode. Add a gateway later with:"
-                "\n    prometheus setup --gateway-only"
+                "\n    oara setup --gateway-only"
             )
 
     @staticmethod
@@ -1047,7 +1047,7 @@ Run this wizard again after you're ready:
             print(f"  x Smoke test failed: {exc}")
             print()
             print("  Config was saved. Fix the issue and test manually:")
-            print('    prometheus --once "What is 2+2?"')
+            print('    oara --once "What is 2+2?"')
             return False
 
     # ------------------------------------------------------------------
@@ -1179,11 +1179,11 @@ Run this wizard again after you're ready:
         print("Start Prometheus:")
         print()
         print("  Interactive:  prometheus")
-        print('  One-shot:     prometheus --once "your question"')
-        print("  Daemon:       prometheus daemon   (Beacon dashboard on http://localhost:8005)")
+        print('  One-shot:     oara --once "your question"')
+        print("  Daemon:       oara daemon   (Beacon dashboard on http://localhost:8005)")
         print("                first start mints a web API token — printed once;")
-        print("                `prometheus token show` re-prints it")
-        print("  Health check: prometheus doctor")
+        print("                `oara token show` re-prints it")
+        print("  Health check: oara doctor")
         if "telegram" in self._gateways and self._telegram_bot_name:
             print()
             print(f"Send /start to @{self._telegram_bot_name} to begin.")

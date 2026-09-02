@@ -14,10 +14,12 @@ Prometheus is two pieces that pair with a 6-digit code:
 ```bash
 git clone https://github.com/OAraLabs/Prometheus.git && cd Prometheus
 pip install -e '.[full]'
-prometheus setup          # auto-detects llama.cpp / Ollama / LM Studio / vLLM
+oara setup          # auto-detects llama.cpp / Ollama / LM Studio / vLLM
 prometheus                # chat in the CLI
-prometheus daemon         # always-on: web API + gateways + cron + background layer
+oara daemon         # always-on: web API + gateways + cron + background layer
 ```
+
+(`prometheus …` still works as an alias for now; only the command name changed — the package and its paths did not.)
 
 Running the tests from a uv-managed venv? Sync it with the same extras CI uses first:
 
@@ -27,7 +29,7 @@ uv sync --extra web --extra anthropic --extra mcp --group dev
 
 Without this, `import fastapi` fails inside `.venv` and three test files won't even collect (the daemon itself doesn't need it — `pip install -e '.[full]'` above already covers everything).
 
-`prometheus setup` probes for a running local inference server, generates your agent's identity, writes a working config with the web API enabled, and smoke-tests the loop. In a hurry? `prometheus setup --fast` (or `--noninteractive`) is the three-question version. On first daemon start a web API token is minted and printed once — `prometheus token show` re-prints it. If anything misbehaves: `prometheus doctor`.
+`oara setup` probes for a running local inference server, generates your agent's identity, writes a working config with the web API enabled, and smoke-tests the loop. In a hurry? `oara setup --fast` (or `--noninteractive`) is the three-question version. On first daemon start a web API token is minted and printed once — `oara token show` re-prints it. If anything misbehaves: `oara doctor`.
 
 > `pip install 'oara-prometheus[full]'` is the packaged path — CI builds sdist + wheel per tagged release; PyPI publishing lands once the release pipeline is public. Until then, the git checkout above is the path that works for everyone.
 
@@ -195,7 +197,7 @@ Why this only works here: a screen recording of you doing your job is among the 
 - **ANATOMY.md** — live infrastructure snapshot with Mermaid diagrams (hardware, VRAM, model + quant, Tailscale peers), queryable via the `anatomy` tool
 - **MEMORY.md + USER.md** — the agent learns who you are over time (bounded: 12K + 8K chars)
 - **Agent Profiles** — `full`, `coder`, `research`, `assistant`, `minimal` via `/profile` to trade tool breadth for context budget
-- **Node & instance identity** — a local Ed25519 node keypair plus a vault-resident instance UUID (`prometheus vault adopt` / `vault status`); see [Identity, and what does not phone home](#identity-and-what-does-not-phone-home) and [docs/FOUNDATION.md](docs/FOUNDATION.md)
+- **Node & instance identity** — a local Ed25519 node keypair plus a vault-resident instance UUID (`oara vault adopt` / `vault status`); see [Identity, and what does not phone home](#identity-and-what-does-not-phone-home) and [docs/FOUNDATION.md](docs/FOUNDATION.md)
 
 ### Security
 
@@ -276,14 +278,14 @@ Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, a
 - Python 3.11+
 - llama.cpp or Ollama running with any model loaded (or a cloud API key)
 - A Telegram bot token (from @BotFather) — optional, CLI works without it
-- `bubblewrap` or Docker — optional, only for coding mode's stronger sandbox backends (`coding.sandbox_type: bwrap | docker`). The default `process` backend needs neither; `prometheus doctor` reports which backend you have configured and whether it can actually start.
+- `bubblewrap` or Docker — optional, only for coding mode's stronger sandbox backends (`coding.sandbox_type: bwrap | docker`). The default `process` backend needs neither; `oara doctor` reports which backend you have configured and whether it can actually start.
 
 ### Install
 
 ```bash
 git clone https://github.com/OAraLabs/Prometheus.git && cd Prometheus
 pip install -e '.[full]'
-prometheus setup
+oara setup
 ```
 
 The setup wizard generates your personalized identity, detects your inference server (llama.cpp:8080, Ollama:11434, LM Studio:1234, vLLM:8000), writes the config with the web API **enabled**, and runs a smoke test. No server running? The wizard offers a remote URL, a cloud provider, or copy-paste install instructions — it never writes a config it knows is broken.
@@ -291,12 +293,12 @@ The setup wizard generates your personalized identity, detects your inference se
 Variants:
 
 ```bash
-prometheus setup --fast            # quick path: probe → yaml → env, 3 questions
-prometheus setup --noninteractive  # zero questions (first detected server, CLI gateway)
-prometheus setup --gateway-only    # add/change Telegram, Slack, or Discord later
+oara setup --fast            # quick path: probe → yaml → env, 3 questions
+oara setup --noninteractive  # zero questions (first detected server, CLI gateway)
+oara setup --gateway-only    # add/change Telegram, Slack, or Discord later
 ```
 
-Prefer doing setup from a couch? Skip `prometheus setup`, run `prometheus daemon` bare, and it boots in **setup mode** — a pairing-only API that prints a one-time 6-digit code. Beacon's wizard takes it from there (detects backends, names the agent, configures gateways) and the daemon wakes fully configured:
+Prefer doing setup from a couch? Skip `oara setup`, run `oara daemon` bare, and it boots in **setup mode** — a pairing-only API that prints a one-time 6-digit code. Beacon's wizard takes it from there (detects backends, names the agent, configures gateways) and the daemon wakes fully configured:
 
 ![Setup-mode pairing banner](docs/assets/shots/term-pairing-banner.svg)
 
@@ -304,22 +306,22 @@ Prefer doing setup from a couch? Skip `prometheus setup`, run `prometheus daemon
 
 ```bash
 prometheus                                        # interactive CLI
-prometheus --once "List the Python files here"    # one-shot
-prometheus daemon                                 # always-on
+oara --once "List the Python files here"    # one-shot
+oara daemon                                 # always-on
 ```
 
 On the first daemon start, Prometheus mints a secure `PROMETHEUS_API_TOKEN`, saves it to `~/.config/prometheus/env`, and prints it **once**:
 
 ```bash
-prometheus token show     # re-print the token
-prometheus token rotate   # invalidate + mint a new one
-curl -H "Authorization: Bearer $(prometheus token show | head -1)" http://localhost:8005/api/status
+oara token show     # re-print the token
+oara token rotate   # invalidate + mint a new one
+curl -H "Authorization: Bearer $(oara token show | head -1)" http://localhost:8005/api/status
 ```
 
 ### Run as a systemd service (Linux)
 
 ```bash
-prometheus install-service          # writes ~/.config/systemd/user/prometheus.service
+oara install-service          # writes ~/.config/systemd/user/prometheus.service
 systemctl --user start prometheus
 journalctl --user -u prometheus -f
 ```
@@ -327,10 +329,10 @@ journalctl --user -u prometheus -f
 ### When something is off
 
 ```bash
-prometheus doctor
+oara doctor
 ```
 
-![prometheus doctor output — every subsystem checked with a fix hint per failure](docs/assets/shots/term-doctor.svg)
+![oara doctor output — every subsystem checked with a fix hint per failure](docs/assets/shots/term-doctor.svg)
 
 Exit code is nonzero when anything is broken, so it also works in scripts.
 
@@ -346,7 +348,7 @@ Beacon is currently private while it hardens; public builds — macOS dmg, Linux
 2. `config/prometheus.yaml` — repo-local (checkout installs; gitignored)
 3. `$PROMETHEUS_CONFIG_DIR/prometheus.yaml` — default `~/.prometheus/prometheus.yaml`
 
-Secrets never go in the yaml — they live in the env file `~/.config/prometheus/env`, which both `prometheus daemon` and the systemd unit load.
+Secrets never go in the yaml — they live in the env file `~/.config/prometheus/env`, which both `oara daemon` and the systemd unit load.
 
 ### Multi-Machine Setup
 
@@ -473,7 +475,7 @@ profile:
 
 ## Gateways
 
-Three messaging gateways, all first-class: every onboarding surface (`prometheus setup`, the fast path, the remote setup API, and Beacon's wizard) can enable any subset, and `prometheus doctor` reports each one's state.
+Three messaging gateways, all first-class: every onboarding surface (`oara setup`, the fast path, the remote setup API, and Beacon's wizard) can enable any subset, and `oara doctor` reports each one's state.
 
 | Gateway | What you need | Env vars | Extra |
 |---------|---------------|----------|-------|
@@ -481,7 +483,7 @@ Three messaging gateways, all first-class: every onboarding surface (`prometheus
 | **Slack** | A Slack app ([api.slack.com/apps](https://api.slack.com/apps)) with Socket Mode — **both** tokens: bot (`xoxb-…`) + app-level (`xapp-…`) | `PROMETHEUS_SLACK_BOT_TOKEN`, `PROMETHEUS_SLACK_APP_TOKEN` | `pip install 'oara-prometheus[slack]'` |
 | **Discord** | A bot from the [developer portal](https://discord.com/developers/applications) with **Message Content Intent**, invited with `bot` + `applications.commands` scopes | `PROMETHEUS_DISCORD_TOKEN` | `pip install 'oara-prometheus[discord]'` |
 
-Tokens live in the env file, never in the yaml. The easiest way to configure any of them is `prometheus setup --gateway-only`.
+Tokens live in the env file, never in the yaml. The easiest way to configure any of them is `oara setup --gateway-only`.
 
 ## Commands
 

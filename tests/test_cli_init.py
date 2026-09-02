@@ -223,7 +223,7 @@ class TestWriteEnvTemplate:
         assert "api.slack.com/apps" in body
         assert "discord.com/developers/applications" in body
         # And the pointer to the guided path.
-        assert "prometheus setup --gateway-only" in body
+        assert "oara setup --gateway-only" in body
 
     def test_preserves_existing(self, tmp_path):
         path = tmp_path / "env"

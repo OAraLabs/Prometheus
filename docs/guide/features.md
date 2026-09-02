@@ -13,21 +13,21 @@ This page is the complete map of what Prometheus can do: every entry point, tool
 | Command / flag | What it does |
 |---|---|
 | `prometheus` (no args) | Interactive REPL chat against the configured model |
-| `prometheus --once "QUERY"` | Run a single query non-interactively, then exit |
-| `prometheus --voice` | Interactive mode with push-to-talk voice in and out |
+| `oara --once "QUERY"` | Run a single query non-interactively, then exit |
+| `oara --voice` | Interactive mode with push-to-talk voice in and out |
 | `--model` / `--provider` / `--config` / `--debug` | Per-run overrides |
 | `--reset-telemetry` / `--reset-data` | Wipe the telemetry database, or all user data |
-| `prometheus setup [--fast\|--noninteractive\|--gateway-only]` | First-run wizard: probes llama.cpp / Ollama / LM Studio / vLLM, generates your agent's identity, writes a working config, smoke-tests the loop, and mints the web API token |
-| `prometheus daemon [--telegram-only]` | Start the always-on daemon: web API and WebSocket, gateways, cron, heartbeat, SENTINEL (if enabled), memory extractor |
-| `prometheus doctor` | Diagnostics with one fix hint per failure; exits nonzero when anything is broken, so it works in scripts |
-| `prometheus token show \| rotate` | Re-print the web API bearer token, or invalidate it and mint a new one |
-| `prometheus install-service [--force]` | Write and enable a systemd **user** unit |
-| `prometheus identity --show \| --regenerate` | Manage the SOUL.md / AGENTS.md identity files |
-| `prometheus migrate --from hermes\|openclaw [--dry-run]` | Import config, identity, memory, and skills from `~/.hermes`, `~/.openclaw`, or `~/.clawdbot` |
-| `prometheus code --repo --task --acceptance [...]` | Launch a sandboxed iterate-to-green coding run; `--control-dir` enables pause / inject / resume |
-| `prometheus ingest-video <source> [--model --fps --no-audio --work-dir --force]` | Turn a screen recording or YouTube URL into a skill **draft** for review in Beacon (see [Record a Skill](record-a-skill.md)) |
-| `prometheus bakeoff-vlm --corpus --model [--provider --base-url --limit --threshold --output]` | Score a vision model against the annotated skill corpus — golden-SKILL.md diff, hallucination-penalized |
-| `prometheus export-traces [--limit --output --tool]` | Export golden tool-call traces to JSONL for fine-tuning |
+| `oara setup [--fast\|--noninteractive\|--gateway-only]` | First-run wizard: probes llama.cpp / Ollama / LM Studio / vLLM, generates your agent's identity, writes a working config, smoke-tests the loop, and mints the web API token |
+| `oara daemon [--telegram-only]` | Start the always-on daemon: web API and WebSocket, gateways, cron, heartbeat, SENTINEL (if enabled), memory extractor |
+| `oara doctor` | Diagnostics with one fix hint per failure; exits nonzero when anything is broken, so it works in scripts |
+| `oara token show \| rotate` | Re-print the web API bearer token, or invalidate it and mint a new one |
+| `oara install-service [--force]` | Write and enable a systemd **user** unit |
+| `oara identity --show \| --regenerate` | Manage the SOUL.md / AGENTS.md identity files |
+| `oara migrate --from hermes\|openclaw [--dry-run]` | Import config, identity, memory, and skills from `~/.hermes`, `~/.openclaw`, or `~/.clawdbot` |
+| `oara code --repo --task --acceptance [...]` | Launch a sandboxed iterate-to-green coding run; `--control-dir` enables pause / inject / resume |
+| `oara ingest-video <source> [--model --fps --no-audio --work-dir --force]` | Turn a screen recording or YouTube URL into a skill **draft** for review in Beacon (see [Record a Skill](record-a-skill.md)) |
+| `oara bakeoff-vlm --corpus --model [--provider --base-url --limit --threshold --output]` | Score a vision model against the annotated skill corpus — golden-SKILL.md diff, hallucination-penalized |
+| `oara export-traces [--limit --output --tool]` | Export golden tool-call traces to JSONL for fine-tuning |
 
 ---
 
@@ -244,12 +244,12 @@ The full Telegram command table. Slack (`/prometheus-*`) and Discord (`/promethe
 
 ## Learning & fine-tuning gym
 
-- **Record a Skill** — **Default: live recording on, video ingestion off.** Two ways to teach the agent a workflow by demonstration, with **two-tier trust**: live DOM recordings (a deterministic, no-model-calls pipeline with a five-check quality gate) may auto-persist to `skills/auto/`; video/YouTube ingestion (`prometheus ingest-video`, a vision-model pipeline) **never auto-persists** — it produces drafts you accept or reject in Beacon. `learning.live_recorder.enabled` ships `true`; `learning.video_ingest.enabled` ships `false` and needs a configured vision model. Full walkthrough in the [Record a Skill guide](record-a-skill.md).
+- **Record a Skill** — **Default: live recording on, video ingestion off.** Two ways to teach the agent a workflow by demonstration, with **two-tier trust**: live DOM recordings (a deterministic, no-model-calls pipeline with a five-check quality gate) may auto-persist to `skills/auto/`; video/YouTube ingestion (`oara ingest-video`, a vision-model pipeline) **never auto-persists** — it produces drafts you accept or reject in Beacon. `learning.live_recorder.enabled` ships `true`; `learning.video_ingest.enabled` ships `false` and needs a configured vision model. Full walkthrough in the [Record a Skill guide](record-a-skill.md).
 - **Skill creator** — **Default: on.** Turns successful multi-step traces (three or more tool calls) into markdown skill files the agent can reuse.
 - **Skill refiner** — **Default: off.** Updates existing skills when better executions come along.
 - **Nudge** — **Default: on.** Periodic self-reflection prompts.
 - **Skills library** — the package ships **3** builtin skills (`commit`, `debug`, `plan`); your own directory at `~/.prometheus/skills/` holds auto-created and installed skills. The repo's 102-file `skills/` library is deliberately **not auto-loaded** — copy in what you want. See [Honest status notes](#honest-status-notes).
-- **Pair capture** — **Default: on.** Adapter repairs and golden tool-call traces are captured and stored; browse with `/pairs`, export with `prometheus export-traces`.
+- **Pair capture** — **Default: on.** Adapter repairs and golden tool-call traces are captured and stored; browse with `/pairs`, export with `oara export-traces`.
 - **Gym** — **Default: on-demand.** Runs frozen task-sets against live models with deterministic **dual scoring** (raw emission vs post-repair execution), refuses to declare winners below sample-size thresholds, and enforces one-variable-per-experiment via manifests. It also **refuses untrustable results by construction**: a preflight probe of the model endpoint refuses the whole experiment if the backend isn't what the manifest claims, two-variable manifests are hard-rejected, and the manifest and task-set are sha256-pinned into every run row.
 - **Evals** — **Default: on-demand.** A local-LLM judge using constrained decoding (zero API cost), failure classification (model vs harness vs unclear), and trend tracking. Trigger with `/benchmark` or the REST API. **Honesty note:** the shipped config points the judge at the same endpoint as the model under test — the model judges itself. For an independent verdict, pin `evals.judge_base_url` and `evals.judge_model` in your config to a different backend.
 - **LoRA training** — **Roadmap.** DPO training and eval scripts exist, but the end-to-end flywheel currently ships only the data-collection half: capture → store → mine → export. Trajectory export is off by default.
@@ -276,7 +276,7 @@ The full Telegram command table. Slack (`/prometheus-*`) and Discord (`/promethe
 - **ANATOMY.md** — a live infrastructure snapshot: the AnatomyScanner scans CPU/RAM/GPU VRAM, the loaded model and its quantization, Tailscale peers, and disk, and renders Mermaid diagrams. Queryable via `/anatomy` or the `anatomy` tool, and it validates named project configs against available VRAM.
 - **PROMETHEUS.md** — per-project agent instructions, the CLAUDE.md equivalent (also CLAUDE.md, AGENTS.md, .cursorrules, .windsurfrules, HERMES.md — discovered walking up from the daemon's cwd, or from a conversation's own workspace once `/workspace` is set), picked up by the context assembler.
 - **Agent profiles** — `full | coder | research | assistant | minimal`, switched with `/profile`, trading tool breadth for context budget.
-- **Node & instance identity** ([FOUNDATION](../FOUNDATION.md) Part 3) — two identities with different lifetimes. The **node** is an Ed25519 keypair under `~/.prometheus/node/` (private key mode `0600`), generated at first run, never transmitted anywhere, and never copied to another machine; the base64 public key is the node ID, visible on the bearer-gated `/api/status` as `node_pub`. The **instance** is a UUID in the vault's `.prometheus-vault` marker that travels *with the data* when you move machines. `prometheus vault status` shows the marker; `prometheus vault adopt` mints it once for a pre-marker vault — the daemon warns until you do (`vault.format_check: off | warn | refuse`) and never adopts silently. A vault marker with a **newer** format than the running build refuses the boot regardless of that setting: a newer vault under an older binary would be silently misread, and refusing loudly is the point.
+- **Node & instance identity** ([FOUNDATION](../FOUNDATION.md) Part 3) — two identities with different lifetimes. The **node** is an Ed25519 keypair under `~/.prometheus/node/` (private key mode `0600`), generated at first run, never transmitted anywhere, and never copied to another machine; the base64 public key is the node ID, visible on the bearer-gated `/api/status` as `node_pub`. The **instance** is a UUID in the vault's `.prometheus-vault` marker that travels *with the data* when you move machines. `oara vault status` shows the marker; `oara vault adopt` mints it once for a pre-marker vault — the daemon warns until you do (`vault.format_check: off | warn | refuse`) and never adopts silently. A vault marker with a **newer** format than the running build refuses the boot regardless of that setting: a newer vault under an older binary would be silently misread, and refusing loudly is the point.
 
 ---
 

@@ -1,4 +1,4 @@
-"""`prometheus bakeoff-vlm` — score a vision model against the annotated corpus.
+"""`oara bakeoff-vlm` — score a vision model against the annotated corpus.
 
 The new-VLM ritual: before a vision model is enabled for video ingestion,
 run it over the annotated session corpus (screen-recording videos +
@@ -6,7 +6,7 @@ hand-written golden SKILL.md files) and score every generated skill with
 the hallucination-penalized golden diff (learning/skill_scoring.py).
 
 Corpus layout (the SkillForge annotated corpus, e.g.
-oara-4090:~/projects/skillforge):
+<gpu-host>:~/projects/skillforge):
 
     <corpus>/
         <videos or sessions dir>/*.mp4      (any of: ., videos/, sessions/, test-videos/)
@@ -18,7 +18,7 @@ lowercased, spaces -> underscores, and matched against ground_truth/*.md
 reported as skipped, never silently dropped.
 
 Usage:
-    prometheus bakeoff-vlm --corpus ~/projects/skillforge \
+    oara bakeoff-vlm --corpus ~/projects/skillforge \
         --model gemma-4 --base-url http://localhost:8080 [--provider llama_cpp]
         [--limit N] [--fps 2.0] [--force] [--output report.json]
 """
@@ -177,5 +177,5 @@ async def _run_bakeoff(args) -> int:
 
 
 def run_bakeoff_command(args) -> int:
-    """Entry point for `prometheus bakeoff-vlm`."""
+    """Entry point for `oara bakeoff-vlm`."""
     return asyncio.run(_run_bakeoff(args))

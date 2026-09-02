@@ -34,19 +34,21 @@ The `[full]` extra pulls in everything (web API, Slack/Discord gateways, MCP, br
 ## Run setup
 
 ```bash
-prometheus setup
+oara setup
 ```
 
-The wizard detects your inference server (llama.cpp on `:8080`, Ollama on `:11434`, LM Studio on `:1234`, vLLM on `:8000`), generates your agent's identity (`SOUL.md`), writes a working config with the web API enabled, and smoke-tests the loop with one real round-trip. If no server is running it offers a remote URL, a cloud provider, or copy-paste install instructions. With no prompts allowed (`--noninteractive`) and no server found, exactly one cloud key in your environment or env file picks that provider; several keys is refused with a `--provider` hint, none exits 2 with install instructions. A key found only in your shell is copied into the env file so `prometheus daemon` has it too.
+> The command is `oara`. `prometheus …` still works as an alias during the deprecation window; the package, the import path, `~/.prometheus`, and the `prometheus.service` unit name are unchanged.
+
+The wizard detects your inference server (llama.cpp on `:8080`, Ollama on `:11434`, LM Studio on `:1234`, vLLM on `:8000`), generates your agent's identity (`SOUL.md`), writes a working config with the web API enabled, and smoke-tests the loop with one real round-trip. If no server is running it offers a remote URL, a cloud provider, or copy-paste install instructions. With no prompts allowed (`--noninteractive`) and no server found, exactly one cloud key in your environment or env file picks that provider; several keys is refused with a `--provider` hint, none exits 2 with install instructions. A key found only in your shell is copied into the env file so `oara daemon` has it too.
 
 Variants:
 
 ```bash
-prometheus setup --fast            # quick path: probe local servers, write yaml + env — 3 questions
-prometheus setup --noninteractive  # zero questions (implies --fast): first detected server, CLI gateway
-prometheus setup --provider openai # zero questions: THIS cloud provider; its key must be in $OPENAI_API_KEY or the env file
-ANTHROPIC_API_KEY=sk-… prometheus setup --noninteractive   # no GPU, no local server: one cloud key in the environment is enough
-prometheus setup --gateway-only    # add or change Telegram, Slack, or Discord later
+oara setup --fast            # quick path: probe local servers, write yaml + env — 3 questions
+oara setup --noninteractive  # zero questions (implies --fast): first detected server, CLI gateway
+oara setup --provider openai # zero questions: THIS cloud provider; its key must be in $OPENAI_API_KEY or the env file
+ANTHROPIC_API_KEY=sk-… oara setup --noninteractive   # no GPU, no local server: one cloud key in the environment is enough
+oara setup --gateway-only    # add or change Telegram, Slack, or Discord later
 ```
 
 Note that `--fast` skips identity generation and the smoke test — it's for when you just want a config on disk.
@@ -55,7 +57,7 @@ Then run it:
 
 ```bash
 prometheus                # interactive CLI chat
-prometheus daemon         # always-on: web API + gateways + cron + background layer
+oara daemon         # always-on: web API + gateways + cron + background layer
 ```
 
 ## The API token
@@ -63,37 +65,37 @@ prometheus daemon         # always-on: web API + gateways + cron + background la
 On the **first** daemon start, Prometheus mints a secure `PROMETHEUS_API_TOKEN`, saves it to `~/.config/prometheus/env`, and prints it **once**. Everything that talks to the daemon's REST or WebSocket surface — including Beacon — presents this token.
 
 ```bash
-prometheus token show     # re-print the current token
-prometheus token rotate   # invalidate it and mint a new one
+oara token show     # re-print the current token
+oara token rotate   # invalidate it and mint a new one
 ```
 
 Quick sanity check that the API is up and authed:
 
 ```bash
-curl -H "Authorization: Bearer $(prometheus token show | head -1)" http://localhost:8005/api/status
+curl -H "Authorization: Bearer $(oara token show | head -1)" http://localhost:8005/api/status
 ```
 
-Secrets never go in the yaml config — they live in that env file, which both `prometheus daemon` and the systemd unit load.
+Secrets never go in the yaml config — they live in that env file, which both `oara daemon` and the systemd unit load.
 
 ## Run as a systemd service (Linux)
 
 ```bash
-prometheus install-service          # writes ~/.config/systemd/user/prometheus.service
+oara install-service          # writes ~/.config/systemd/user/prometheus.service
 systemctl --user start prometheus
 journalctl --user -u prometheus -f  # follow the logs
 ```
 
 `install-service` also does the `daemon-reload` and `enable` for you. Useful flags: `--now` (start immediately after enabling), `--force` (overwrite an existing unit, backing it up first), and `--systemd-dir` to target a nonstandard directory.
 
-## When something is off: `prometheus doctor`
+## When something is off: `oara doctor`
 
 ```bash
-prometheus doctor
+oara doctor
 ```
 
 Doctor checks every subsystem — config, backend reachability, token, gateways, service state — and prints a fix hint next to each failure:
 
-![prometheus doctor output — each subsystem checked, with a specific fix hint printed next to every failure](../assets/shots/term-doctor.svg)
+![oara doctor output — each subsystem checked, with a specific fix hint printed next to every failure](../assets/shots/term-doctor.svg)
 
 The exit code is nonzero when anything is broken, so it also works in scripts and CI.
 
@@ -128,10 +130,10 @@ Beacon is the native desktop cockpit (macOS / Linux). Honest status: the beacon-
 
 ## The guided install (couch mode)
 
-You don't have to run `prometheus setup` in a terminal at all. If you start the daemon with **no config**, it boots into **setup mode** — a pairing-only API that prints a one-time 6-digit code and waits for Beacon to drive the rest:
+You don't have to run `oara setup` in a terminal at all. If you start the daemon with **no config**, it boots into **setup mode** — a pairing-only API that prints a one-time 6-digit code and waits for Beacon to drive the rest:
 
 ```bash
-prometheus daemon
+oara daemon
 ```
 
 ![The daemon's setup-mode banner — pairing address and one-time 6-digit code printed loud in the terminal](../assets/shots/term-pairing-banner.svg)
@@ -164,7 +166,7 @@ Name your agent and give it a persona seed. This generates `SOUL.md` — the per
 
 ### 5. Gateways
 
-Optionally wire up Telegram, Slack, or Discord. All three are genuinely optional — **"Skip all" is a perfectly good answer**, and `prometheus setup --gateway-only` can add any of them later.
+Optionally wire up Telegram, Slack, or Discord. All three are genuinely optional — **"Skip all" is a perfectly good answer**, and `oara setup --gateway-only` can add any of them later.
 
 ![The Gateways step — Telegram, Slack, and Discord, all optional with a Skip all option](../assets/shots/install-5-gateways.png)
 
@@ -198,11 +200,11 @@ Nothing but the daemon's address and the token leave your machine, and the token
 
 ## Troubleshooting
 
-- **Something's broken and you don't know what** — `prometheus doctor`. It checks every subsystem and prints a fix hint per failure; nonzero exit when anything fails.
-- **Lost the API token** — it was only printed once, but `prometheus token show` re-prints it any time. `prometheus token rotate` if you think it leaked. It lives in `~/.config/prometheus/env`.
+- **Something's broken and you don't know what** — `oara doctor`. It checks every subsystem and prints a fix hint per failure; nonzero exit when anything fails.
+- **Lost the API token** — it was only printed once, but `oara token show` re-prints it any time. `oara token rotate` if you think it leaked. It lives in `~/.config/prometheus/env`.
 - **macOS refuses to open Beacon** — the build is unsigned. Right-click → **Open** → **Open** once, or `xattr -dr com.apple.quarantine /Applications/Beacon.app`.
-- **Pairing code rejected or expired** — codes are strict by design: each one lives **15 minutes**, pairs **one client**, and allows **5 wrong attempts** before locking. Restart the daemon (`prometheus daemon`) to mint a fresh code and try again. Only a wrong code burns an attempt.
-- **Beacon connects but shows auth errors** — the token Beacon stored no longer matches the daemon's (e.g. after a rotate). Open Connection Settings (`⌘,`), paste the output of `prometheus token show`, and hit **Test**.
+- **Pairing code rejected or expired** — codes are strict by design: each one lives **15 minutes**, pairs **one client**, and allows **5 wrong attempts** before locking. Restart the daemon (`oara daemon`) to mint a fresh code and try again. Only a wrong code burns an attempt.
+- **Beacon connects but shows auth errors** — the token Beacon stored no longer matches the daemon's (e.g. after a rotate). Open Connection Settings (`⌘,`), paste the output of `oara token show`, and hit **Test**.
 
 ## Upgrading (and what a downgrade actually does)
 
@@ -216,7 +218,7 @@ then restart the daemon. Your state — `~/.prometheus/*` (databases, sessions, 
 
 Two honest caveats the harness itself reports:
 
-- **An upgraded install keeps its old config** — fixes that ship as *better setup defaults* (for example the advertised-tools default) don't reach a config written by an older version. After upgrading, compare your `prometheus.yaml` against `config/prometheus.yaml.default` for new sections worth adopting, or re-run `prometheus setup` in a scratch directory to see what a fresh config looks like.
+- **An upgraded install keeps its old config** — fixes that ship as *better setup defaults* (for example the advertised-tools default) don't reach a config written by an older version. After upgrading, compare your `prometheus.yaml` against `config/prometheus.yaml.default` for new sections worth adopting, or re-run `oara setup` in a scratch directory to see what a fresh config looks like.
 - **Downgrading is not supported, and here is precisely what it does:** tested empirically (HEAD state, `v0.1.0` code) — the old daemon boots, a turn completes, and every table remains readable, so a downgrade is **probably readable but lossy**: columns and stores added since the old version are invisible to it, and anything written into new locations effectively vanishes until you upgrade again. If you must roll back, snapshot `~/.prometheus/` first and treat the downgraded run as read-mostly. We say this plainly rather than pretending it's covered.
 
 Next: the [feature reference](features.md) for what everything does, or the [Beacon guide](beacon.md) for a tour of the app you just installed.

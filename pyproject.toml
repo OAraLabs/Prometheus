@@ -84,6 +84,14 @@ dev = [
 ]
 
 [project.scripts]
+# The command is `oara` (2026-09-01, item C of the roadmap): `pip install oara`
+# and `brew install oaralabs/tap/oara` both put an `oara` on PATH, and a package
+# named oara that installs a `prometheus` binary collides with the CNCF project
+# in every shell. The import path and the package stay `prometheus`.
+oara = "prometheus.__main__:main"
+# The daemon is `oara daemon` — a subcommand, not a second binary.
+# Aliases for the deprecation window: every documented `prometheus …` command
+# keeps working. The chat surfaces print a one-line note when invoked this way.
 prometheus = "prometheus.__main__:main"
 prometheus-init = "prometheus.cli.init:main"
 prometheus-daemon = "prometheus.daemon:main"

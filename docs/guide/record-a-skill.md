@@ -47,7 +47,7 @@ for provenance and future training-data use.
 
 ```bash
 # local recording or YouTube URL
-prometheus daemon &  # or call the pipeline from your own code
+oara daemon &  # or call the pipeline from your own code
 python -c "..."      # see prometheus/learning/video_ingest/pipeline.py
 ```
 
@@ -84,7 +84,7 @@ the annotated session corpus (videos + hand-written golden SKILL.md
 files; the SkillForge corpus lives at `oara-4090:~/projects/skillforge`):
 
 ```bash
-prometheus bakeoff-vlm \
+oara bakeoff-vlm \
   --corpus ~/projects/skillforge \
   --model gemma-4 --base-url http://localhost:8080 \
   --output ~/bakeoffs/gemma-4.json

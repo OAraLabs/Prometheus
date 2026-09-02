@@ -147,10 +147,10 @@ class TestStartupGate:
     ) -> None:
         with caplog.at_level(logging.WARNING):
             assert check_vault_marker(vault, mode="warn") is None
-        assert "prometheus vault adopt" in caplog.text
+        assert "oara vault adopt" in caplog.text
 
     def test_no_marker_refuse_refuses(self, vault: Path) -> None:
-        with pytest.raises(VaultMarkerError, match="prometheus vault adopt"):
+        with pytest.raises(VaultMarkerError, match="oara vault adopt"):
             check_vault_marker(vault, mode="refuse")
 
     @pytest.mark.parametrize("mode", ["off", "warn", "refuse"])
@@ -232,7 +232,7 @@ class TestDaemonWiring:
 
 
 class TestVaultCli:
-    """Drive the real `prometheus vault` dispatch through main()."""
+    """Drive the real `oara vault` dispatch through main()."""
 
     def _run(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
              vault_root: Path, action: str) -> tuple[int, str]:
@@ -278,4 +278,4 @@ class TestVaultCli:
     ) -> None:
         code, _ = self._run(monkeypatch, tmp_path, vault, "status")
         assert code == 1
-        assert "prometheus vault adopt" in capsys.readouterr().out
+        assert "oara vault adopt" in capsys.readouterr().out

@@ -1349,7 +1349,7 @@ class ToolCallTelemetry:
         for why the old user/assistant split was not trainable.
 
         Deliberately NOT incremental — see :meth:`export_new_golden_traces`.
-        A human running ``prometheus export-traces`` asking for the last N
+        A human running ``oara export-traces`` asking for the last N
         should get them, not an empty file because the daemon already
         exported those rows.
 
@@ -1537,7 +1537,7 @@ class ToolCallTelemetry:
 
         The INCREMENTAL counterpart to :meth:`export_golden_traces`, which
         dumps the most recent N on demand and is right for a human running
-        ``prometheus export-traces``. A pipeline needs the other contract:
+        ``oara export-traces``. A pipeline needs the other contract:
         each cycle writes only what the last one did not, so the corpus
         accumulates instead of restating itself.
 

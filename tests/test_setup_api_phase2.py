@@ -264,7 +264,7 @@ class TestConfigure:
     def test_writes_the_same_yaml_as_the_cli_wizard(
         self, env_file, config_dir, tmp_path,
     ):
-        """The API and `prometheus setup --fast` share ONE writer — the
+        """The API and `oara setup --fast` share ONE writer — the
         model/web sections must be byte-identical."""
         from prometheus.cli.init import run_init
 
@@ -606,7 +606,7 @@ class TestConfiguredTransitionsAndComplete:
 
 
 class TestSetupCompleteFallthrough:
-    """`prometheus daemon` with no config pairs, configures, completes —
+    """`oara daemon` with no config pairs, configures, completes —
     and the SAME process then serves the real daemon."""
 
     def test_full_flow_boots_real_daemon_in_process(self, tmp_path):

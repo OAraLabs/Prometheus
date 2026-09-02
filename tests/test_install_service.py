@@ -1,4 +1,4 @@
-"""``prometheus install-service`` — never clobbers, idempotent (Phase 0, item 3).
+"""``oara install-service`` — never clobbers, idempotent (Phase 0, item 3).
 
 All writes go to a tmp systemd dir; the injectable runner means systemctl
 is NEVER actually invoked — this dev box runs a live prometheus.service.
@@ -44,7 +44,7 @@ class TestRenderUnit:
         content = render_unit(DEFAULT_EXEC_START)
         assert "After=network.target" in content
         assert "Restart=on-failure" in content
-        assert "ExecStart=/usr/bin/env prometheus daemon" in content
+        assert "ExecStart=/usr/bin/env oara daemon" in content
         assert "EnvironmentFile=-%h/.config/prometheus/env" in content
         assert "WantedBy=default.target" in content
 

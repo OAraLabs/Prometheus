@@ -5,9 +5,9 @@ plus a ``daemon`` subcommand that delegates to ``scripts/daemon.py``.
 
 Usage:
     prometheus                          # interactive REPL
-    prometheus --once "List files"      # single query, then exit
-    prometheus daemon                   # start always-on daemon
-    prometheus daemon --telegram-only   # daemon with Telegram only
+    oara --once "List files"      # single query, then exit
+    oara daemon                   # start always-on daemon
+    oara daemon --telegram-only   # daemon with Telegram only
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def load_config(config_path: str | None = None) -> dict[str, Any]:
     2. the repo-local ``config/prometheus.yaml`` (checkout installs)
     3. ``$PROMETHEUS_CONFIG_DIR/prometheus.yaml`` — default
        ``~/.prometheus/prometheus.yaml`` (pip installs; written by
-       ``prometheus setup``)
+       ``oara setup``)
 
     Value precedence within the loaded file:
     env vars > secret files > YAML > defaults.
@@ -108,7 +108,7 @@ def create_provider(model_cfg: dict[str, Any]) -> tuple[ModelProvider, str]:
     provider types"). Until 2026-09-01 this function knew three providers
     and treated every other name as llama.cpp: a config saying
     ``provider: openai`` (or gemini, xai, deepseek, kimi, glm, mimo, qwen)
-    gave a working ``prometheus daemon`` and a ``prometheus`` / ``prometheus
+    gave a working ``oara daemon`` and a ``prometheus`` / ``prometheus
     code`` that silently talked to ``localhost:8080``. A stranger who chose
     the cloud path in setup hit exactly that.
 
@@ -769,7 +769,7 @@ async def run_interactive(
 # ---------------------------------------------------------------------------
 
 def run_coding_task(args) -> int:
-    """`prometheus code` — clone, run the session, print the JSON report.
+    """`oara code` — clone, run the session, print the JSON report.
 
     Deliberately minimal construction compared to chat mode: the coding
     session pins its provider (no router/model fallback mid-run — that
@@ -1028,10 +1028,26 @@ def _reset_data() -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+# The command is `oara`; `prometheus` is the alias kept for the deprecation
+# window. argparse's prog follows whichever name was invoked, so `--help`
+# and usage lines never tell a user to type a name they did not use.
+COMMAND_NAME = "oara"
+LEGACY_COMMAND_NAME = "prometheus"
+
+
+def invoked_command_name() -> str:
+    """The console-script name this process was started as, else `oara`."""
+    import os
+
+    base = os.path.basename(sys.argv[0] or "")
+    return base if base in (COMMAND_NAME, LEGACY_COMMAND_NAME) else COMMAND_NAME
+
+
 def main() -> None:
-    """Prometheus CLI entry point."""
+    """Prometheus CLI entry point (installed as `oara`, alias `prometheus`)."""
+    invoked = invoked_command_name()
     parser = argparse.ArgumentParser(
-        prog="prometheus",
+        prog=invoked,
         description="Prometheus — sovereign AI agent harness",
     )
     parser.add_argument(
@@ -1065,11 +1081,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--setup", action="store_true",
-        help="[alias for `prometheus setup`] Run first-time setup wizard",
+        help="[alias for `oara setup`] Run first-time setup wizard",
     )
     parser.add_argument(
         "--setup-gateway-only", action="store_true",
-        help="[alias for `prometheus setup --gateway-only`] Add or change gateway only",
+        help="[alias for `oara setup --gateway-only`] Add or change gateway only",
     )
     parser.add_argument(
         "--reset-telemetry", action="store_true",
@@ -1277,7 +1293,7 @@ def main() -> None:
         help="Filter by tool name (default: all tools)",
     )
 
-    # `prometheus config --show-defaults` — print the SHIPPED TEMPLATE.
+    # `oara config --show-defaults` — print the SHIPPED TEMPLATE.
     #
     # Three artefacts could have gone here and only one is useful. The
     # EFFECTIVE MERGE is disqualified by its own name: under `--show-defaults`
@@ -1304,6 +1320,20 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Deprecation window for the old command name: one line, on the chat
+    # surfaces, only when a person is watching (stderr is a TTY). `daemon`
+    # (journald) and the machine-readable subcommands never see it.
+    if (
+        invoked == LEGACY_COMMAND_NAME
+        and args.command is None
+        and sys.stderr.isatty()
+    ):
+        print(
+            f"note: the command is now `{COMMAND_NAME}`; `{LEGACY_COMMAND_NAME}` "
+            "keeps working as an alias for now.",
+            file=sys.stderr,
+        )
+
     # Logging — FIRSTLIGHT GAP-3. On the CLI SURFACES (interactive chat and
     # --once; args.command is None on that fallthrough) the console defaults
     # to WARNING so a stranger's first answer isn't buried in httpx/audit/
@@ -1311,7 +1341,7 @@ def main() -> None:
     # ~/.prometheus/logs/cli.log (before this, the console spam was also the
     # ONLY record of a CLI run). -v/--verbose restores the old console
     # stream verbatim (same format, same stderr); --debug is unchanged.
-    # Subcommands — including `prometheus daemon`, which layers its own
+    # Subcommands — including `oara daemon`, which layers its own
     # file logging on top — keep the exact pre-GAP-3 configuration: root at
     # INFO with a single stderr handler.
     log_level = logging.DEBUG if args.debug else logging.INFO
@@ -1319,7 +1349,7 @@ def main() -> None:
     # Machine-readable subcommands: their stdout IS the answer (`token show`
     # prints the token so a script can capture it), and a log line ahead of
     # it — env_override's INFO "Applied env overrides: OPENAI_API_KEY=…" the
-    # moment a cloud key is in the env file — makes `prometheus token show
+    # moment a cloud key is in the env file — makes `oara token show
     # 2>&1 | head -1` read a log line as the token. The FIRSTLIGHT cloud
     # leg failed at S6 on exactly that (2026-09-01). Same quiet console as
     # the chat surfaces: WARNING+ unless -v/--debug. `daemon` and the rest
@@ -1344,19 +1374,19 @@ def main() -> None:
         handlers=handlers,
     )
 
-    # `prometheus setup` — the ONE canonical wizard (Onboarding Phase 0).
+    # `oara setup` — the ONE canonical wizard (Onboarding Phase 0).
     # `--setup` / `--setup-gateway-only` are thin forwarding aliases.
     if args.command == "setup" or args.setup or args.setup_gateway_only:
         from prometheus.cli.setup import run_setup
         if args.command != "setup":
-            print("note: `prometheus --setup` is now `prometheus setup` — "
+            print("note: `oara --setup` is now `oara setup` — "
                   "forwarding.\n")
             args.gateway_only = args.setup_gateway_only
             args.fast = False
             args.noninteractive = False
         sys.exit(run_setup(args))
 
-    # `prometheus token show|rotate` — web API token management.
+    # `oara token show|rotate` — web API token management.
     if args.command == "config":
         if getattr(args, "show_defaults", False):
             from prometheus.config.template import (
@@ -1374,22 +1404,22 @@ def main() -> None:
         from prometheus.cli.token import run_token_command
         sys.exit(run_token_command(args, load_config(args.config)))
 
-    # `prometheus doctor` — install diagnostics (exit nonzero on errors).
+    # `oara doctor` — install diagnostics (exit nonzero on errors).
     if args.command == "doctor":
         from prometheus.cli.doctor import run_doctor_command
         sys.exit(run_doctor_command(args))
 
-    # `prometheus bakeoff-vlm` — vision-model corpus scoring (record-a-skill).
+    # `oara bakeoff-vlm` — vision-model corpus scoring (record-a-skill).
     if args.command == "bakeoff-vlm":
         from prometheus.cli.bakeoff import run_bakeoff_command
         sys.exit(run_bakeoff_command(args))
 
-    # `prometheus ingest-video` — video/YouTube -> skill draft (record-a-skill).
+    # `oara ingest-video` — video/YouTube -> skill draft (record-a-skill).
     if args.command == "ingest-video":
         from prometheus.cli.ingest_video import run_ingest_video_command
         sys.exit(run_ingest_video_command(args, load_config(args.config)))
 
-    # `prometheus install-service` — systemd user unit installer.
+    # `oara install-service` — systemd user unit installer.
     if args.command == "install-service":
         from prometheus.cli.service import run_install_service_command
         sys.exit(run_install_service_command(args))
@@ -1401,7 +1431,7 @@ def main() -> None:
             if soul.exists():
                 print(soul.read_text())
             else:
-                print("No SOUL.md found. Run: prometheus setup")
+                print("No SOUL.md found. Run: oara setup")
                 sys.exit(1)
         elif args.regenerate:
             from prometheus.setup_wizard import SetupWizard
@@ -1436,7 +1466,7 @@ def main() -> None:
             if marker is None:
                 print(f"Marker:        absent (no {MARKER_FILENAME})")
                 print(f"This build:    vault_format {VAULT_FORMAT_CURRENT}")
-                print("Adopt with:    prometheus vault adopt")
+                print("Adopt with:    oara vault adopt")
                 sys.exit(1)
             verdict = (
                 "OK" if marker.vault_format == VAULT_FORMAT_CURRENT
@@ -1538,7 +1568,7 @@ def main() -> None:
 
     if not config and not any(p.is_file() for p in config_search_paths(args.config)):
         print("No configuration found. Run the setup wizard:\n")
-        print("  prometheus setup\n")
+        print("  oara setup\n")
         print("Or create config/prometheus.yaml manually.")
         sys.exit(1)
     model_cfg = config.get("model", {})

@@ -1,4 +1,4 @@
-"""``prometheus doctor`` extended checks (Phase 0, item 4).
+"""``oara doctor`` extended checks (Phase 0, item 4).
 
 Server up/down is exercised against a real ephemeral HTTP server (same
 pattern as test_cli_init); everything filesystem-shaped is confined to
@@ -88,7 +88,7 @@ class TestCheckConfig:
         check, config = check_config(str(isolated_dirs / "nope.yaml"))
         assert check.status == "error"
         assert config == {}
-        assert "prometheus setup" in (check.fix or "")
+        assert "oara setup" in (check.fix or "")
 
     def test_valid_config_parses(self, isolated_dirs):
         path = isolated_dirs / "ok.yaml"

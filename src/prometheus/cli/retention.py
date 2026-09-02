@@ -1,4 +1,4 @@
-"""``prometheus retention`` — collect tombstoned sessions that nothing will ever show again.
+"""``oara retention`` — collect tombstoned sessions that nothing will ever show again.
 
 DRY RUN BY DEFAULT. This deletes conversation data irreversibly and is reachable from cron, so
 ``--apply`` is required to destroy anything. Printing the plan first is the point: the population

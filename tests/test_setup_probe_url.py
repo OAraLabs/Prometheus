@@ -1,4 +1,4 @@
-"""``prometheus setup --probe-url`` — the flag the FIRSTLIGHT harness surfaced.
+"""``oara setup --probe-url`` — the flag the FIRSTLIGHT harness surfaced.
 
 ``setup --noninteractive`` probes four fixed localhost ports. On a machine
 whose inference server listens anywhere else — and in CI, always — there is
