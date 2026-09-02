@@ -183,6 +183,10 @@ context:
   microcompact_on_cloud: false
   project_file_max_chars: 12000
   stack_project_files: true
+  # Aggregate cap on the whole "# Project Instructions" section (all
+  # directory levels + .prometheus/rules). Nearest files are admitted first;
+  # anything that does not fit is omitted AND named in the section.
+  project_files_max_total_chars: 48000
 tools:
   deferred_loading:
     # Tri-state: true | false | auto (default). "auto" resolves at run start —

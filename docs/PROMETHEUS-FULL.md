@@ -1513,15 +1513,24 @@ def build_system_prompt(custom_prompt: str | None = None,
 def build_runtime_system_prompt(
     *, cwd: str, config: dict | None = None,
     memory_content: str = "", skills: list | None = None,
-    task_state: str = "", loaded_skill_content: str = "",
+    task_state: str = "", profile: object | None = None,
 ) -> str
-# Assembles: STATIC (base prompt + env) + DYNAMIC_BOUNDARY + DYNAMIC (PROMETHEUS.md, memory, skills, tasks)
+# Assembles: STATIC (bootstrap files + base prompt + env) + DYNAMIC_BOUNDARY + DYNAMIC (project files, memory, skills, tasks)
+
+def project_files_section(config: dict, cwd: str | Path) -> str | None
+# The "# Project Instructions" section for cwd — shared by boot and the per-session workspace swap
 ```
 
 ### `prometheus.context.prometheusmd`
 `src/prometheus/context/prometheusmd.py`
 
 ```python
+CONVENTION_FILES  # PROMETHEUS.md, HERMES.md, .hermes.md, CLAUDE.md, AGENTS.md, GEMINI.md,
+                  # .cursorrules, .windsurfrules, .github/copilot-instructions.md (priority order)
+def discover_project_files(cwd, stack=True, exclude=(), exclude_paths=()) -> list[tuple[Path, str]]
+def load_project_files_prompt(cwd, *, max_chars_per_file=12000, max_total_chars=48000,
+                              stack=True, exclude=(), exclude_paths=()) -> str | None
+# Legacy first-match-wins interfaces, kept for old callers:
 def discover_prometheus_md_files(cwd: str | Path) -> list[Path]
 def load_prometheus_md_prompt(cwd: str | Path, *, max_chars_per_file: int = 12000) -> str | None
 ```
