@@ -145,6 +145,7 @@ def _register(registry: Any, runtime: McpRuntime, tool_infos: list) -> list[str]
         )
         adapter = McpToolAdapter(runtime, tool_info, safe_name)
         registry.register(adapter)
+        tool_info.registered_as = safe_name
         logger.info("Registered MCP tool: %s", adapter.name)
         names.append(safe_name)
         # Bookkeeping for the REST lifecycle: which registry names belong

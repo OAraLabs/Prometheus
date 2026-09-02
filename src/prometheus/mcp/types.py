@@ -50,6 +50,13 @@ class McpCatalogTool:
     # confirmation-skipping inside an operator-allowlisted server) is
     # documented.
     read_only_hint: bool | None = None
+    # The name the tool is registered under in the ToolRegistry — set by
+    # adapter._register, None until then. build_safe_tool_name sanitises
+    # (`resolve-library-id` → `resolve_library_id`) and suffixes on
+    # collision, so this is not derivable from tool_name by concatenation;
+    # the REST card once did exactly that and reported a name nothing
+    # accepted (FOUNDATION §4 acceptance run, 2026-09-01).
+    registered_as: str | None = None
 
 
 @dataclass

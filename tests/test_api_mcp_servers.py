@@ -175,6 +175,35 @@ class TestRoutes:
         # The yaml server rides along, marked config-managed.
         assert cards["yaml-srv"]["source"] == "config"
 
+    def test_card_reports_the_name_the_registry_actually_holds(self, rig, monkeypatch) -> None:
+        """FOUNDATION §4 live run, 2026-09-01: the card said
+        ``mcp__context7__resolve-library-id`` while the registry held
+        ``mcp__context7__resolve_library_id`` — build_safe_tool_name sanitises
+        and the card rebuilt the name by concatenation. The surface that tells
+        an operator what to call must report what registration produced."""
+        client, runtime, registry = rig
+
+        async def _offered_with_hyphen(session):  # noqa: ANN001
+            return [_offered("resolve-library-id"), _offered("query-docs")]
+
+        monkeypatch.setattr("prometheus.mcp.runtime._list_all_tools", _offered_with_hyphen)
+        resp = _post_server(client, name="c7")
+        assert resp.status_code == 200, resp.text
+
+        reported = {t["tool_name"]: t["registered_as"] for t in resp.json()["server"]["tools"]}
+        assert reported == {
+            "resolve-library-id": "mcp__c7__resolve_library_id",
+            "query-docs": "mcp__c7__query_docs",
+        }
+        # Every reported name resolves; the naive concatenation does not.
+        for name in reported.values():
+            assert registry.get(name) is not None, name
+        assert registry.get("mcp__c7__resolve-library-id") is None
+
+        # Same truth from the listing route, not only the POST echo.
+        cards = {s["name"]: s for s in client.get("/api/mcp/servers").json()["servers"]}
+        assert {t["registered_as"] for t in cards["c7"]["tools"]} == set(reported.values())
+
     def test_added_tool_is_called_in_a_live_loop(self, rig) -> None:
         # THE acceptance line from the issue — driven through run_loop, not
         # asserted off a flag.

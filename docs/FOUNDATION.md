@@ -222,6 +222,18 @@ where the decision matters:
    models, the exact `vault_search` failure class the guard exists to prevent.
    Dynamic tools must force an explicit advertise-or-defer decision.
 
+**Status, 2026-09-01.** All four landed in #315 (`7b40f7a`, 2026-08-28, the day v3 was
+adopted): construction before both loop builds (`src/prometheus/daemon.py:845-852`);
+`readOnlyHint` honoured and non-read-only `mcp__` calls routed to APPROVE
+(`src/prometheus/mcp/adapter.py:53-68`, `src/prometheus/permissions/checker.py:881-895`);
+`allowed_tools` at discovery and at `call_tool` (`src/prometheus/mcp/runtime.py:194-220`,
+`:371-375`); `tools.deferred_loading.mcp_always_deferred` as the explicit decision
+(`src/prometheus/mcp/bootstrap.py:70`, default deferred). The paragraph above describes
+the state the survey found, kept for the record. Two things the live acceptance run
+then found (Part 4): a deferred MCP tool is reachable by the loop but a local model
+will not call a tool absent from its advertised list (#369), and tools registered by a
+server added over REST are not in the boot-time GBNF grammar (#370).
+
 Known limit, accepted: the client's HTTP/SSE transport is unimplemented (stdio only).
 Local subprocess servers are the third-party story at v3; remote servers are not a
 prerequisite, they are future work.
@@ -372,19 +384,19 @@ Before Beacon ships, each of these is independently confirmed, not assumed. Owne
 
 **Prometheus, data format and identity:**
 
-- [ ] Vault marker written on adopt/create, read on startup, refuses on higher version regardless of `format_check`, with a test asserting the refusal
-- [ ] Telemetry `schema_meta` present, same refusal behaviour, same test
-- [ ] Every trace row carries `node_id`, asserted by reading a row from a live run
-- [ ] Node keypair generated at first run, private key mode 0600, verified on a clean machine (operator, post-deploy)
-- [ ] `node.pub` visible on `/api/status`, verified by curl against the running daemon, not by unit test (operator, post-deploy)
+- [x] Vault marker written on adopt/create, read on startup, refuses on higher version regardless of `format_check`, with a test asserting the refusal — `tests/test_vault_marker.py:164` (`test_newer_format_refuses_regardless_of_mode`), read at boot `src/prometheus/daemon.py:598-600`. Live 2026-09-01: the adopted vault's `.prometheus-vault` carries `vault_format: 1`, `created: 2026-08-29T01:28:15Z`.
+- [x] Telemetry `schema_meta` present, same refusal behaviour, same test — `tests/test_telemetry_schema_meta.py:45` (`test_newer_schema_refuses_naming_both_versions`). Live: `~/.prometheus/telemetry.db` `schema_meta` = `schema_version 1`, `created_by prometheus telemetry v1`, `created_at 2026-08-29`.
+- [x] Every trace row carries `node_id`, asserted by reading a row from a live run — 2026-09-01: `tool_calls` row `c903502f…` (the live MCP call below) carries `node_id = J2fM3m…` equal to `~/.prometheus/node/node.pub`; 0 of the most recent 500 rows have a null `node_id`.
+- [ ] Node keypair generated at first run, private key mode 0600, verified on a clean machine (operator, post-deploy). On the mini, 2026-09-01: `~/.prometheus/node/node.key` is `-rw-------` (0600), `node.pub` 0644, both dated 2026-08-28. The clean-machine half is still the operator's.
+- [x] `node.pub` visible on `/api/status`, verified by curl against the running daemon, not by unit test (operator, post-deploy) — 2026-09-01, `curl /api/status` on the running daemon (`ccbde1c`): `node_pub = J2fM3m…`, identical to `node.pub` on disk and to the marker's enrolled pubkey.
 - [ ] Node-owned files in `~/.prometheus/node/`, instance-owned files in the vault, verified by copying a vault to a second machine and confirming no key travels (operator)
-- [ ] `instance_id` present in the vault marker and stable across daemon restarts
+- [x] `instance_id` present in the vault marker and stable across daemon restarts — marker `instance_id ff1def81-…` (file mtime 2026-08-28 21:58) equals `/api/status` `instance_id` on 2026-09-01, after 52 daemon starts in between (journal count).
 
 **Prometheus, extension surface:**
 
-- [ ] MCP runtime constructed in the daemon path, not only the CLI
-- [ ] An MCP tool from a configured server is *called* in a live loop, and per-server `allowed_tools` filtering demonstrably excludes a tool the server offers — at discovery and at `call_tool`
-- [ ] A non-read-only MCP call reaches the SecurityGate and requires confirmation; a `readOnlyHint` tool does not
+- [x] MCP runtime constructed in the daemon path, not only the CLI — #315, `src/prometheus/daemon.py:845-852`. Live 2026-09-01 on `ccbde1c`: boot log `MCP connected: context7 (2 tools)` before both loop builds; `GET /api/mcp/servers` → `wired: true`.
+- [x] An MCP tool from a configured server is *called* in a live loop, and per-server `allowed_tools` filtering demonstrably excludes a tool the server offers — at discovery and at `call_tool`. Live 2026-09-01: `mcp__context7__resolve_library_id` executed in session `smoke:mcp-live-forced-20260901` (`tool_calls` row `c903502f…`, real context7 answer `/websites/fastapi_tiangolo`), forced via `tool_choice` — under `auto` the local model declined to call a deferred tool it had just loaded with `tool_search` (#369). Discovery exclusion, live: a REST-added `c7allow` with `allowed_tools: [resolve-library-id]` logged `allowed_tools excluded 1 of 2 offered tool(s)`, registered one tool, and forcing the excluded name was refused at ingress (`400 unknown tool … not a registered tool`). `call_tool` exclusion: `tests/test_mcp_allowlist.py` against the real runtime (`src/prometheus/mcp/runtime.py:371-375`). Caveat: the REST-added server's surviving tool could not be forced — its name is not in the boot grammar (#370).
+- [x] A non-read-only MCP call reaches the SecurityGate and requires confirmation; a `readOnlyHint` tool does not. Live 2026-09-01, the `readOnlyHint` half: `[AUDIT] ALLOW: mcp__context7__resolve_library_id - Auto-allowed (user-initiated)`, no confirmation raised. The confirmation half: `tests/test_mcp_gating.py:121-160` drives a real `run_loop` against a real `SecurityGate` and stops the non-read-only call; context7 offers no non-read-only tool to exercise it live.
 - [ ] Pack loader exists, discovers a fixture pack, and its skill is *promoted and then used in a live loop*, not merely discovered
 - [ ] A pack declaring `pack_api: 999` is refused at load, with both versions named in the error — asserted by a fixture pack that declares it
 - [ ] A pack whose `provides` block disagrees with its contents is refused, asserted by a fixture pack that lies
@@ -407,3 +419,4 @@ Structure passing is not function working. Each item above asserts a side effect
 | 1 | 2026-08-25 | Initial draft |
 | 2 | 2026-08-28 | 2.2 gains a `pack_api` mismatch table mirroring 1.1. Tools removed from the pack contract and moved to MCP (2.3a); three registration points become two. 2.4 names an actual enforcement mechanism instead of asserting one, which the tools change made tractable. Part 4 acceptance items rewritten to match. |
 | 3 | 2026-08-28 | Adopted after a full survey of the code the spec touches. 1.1: `format_check` knob (warn this release, refuse later), explicit `prometheus vault adopt`, absent-vault non-error, writer discipline, `enrolled_nodes` lives in the marker. 1.3: telemetry versioning acknowledged as net-new; DB-path unification folded in. 2.3: quarantine pinned to the existing `SkillDraftStore` lifecycle; daemon-side panels scoped to declaration + discovery. 2.3a: prerequisites grow from one to four (daemon wiring, gate treatment, allowlist enforced twice, advertisement decision); stdio-only accepted. 2.5: same-change rule for contract keys. 3.2: `cryptography` to base deps; `/health` exclusion stated. 3.3/3.4: ownership rule binds now, relocation of existing state (incl. `ANATOMY.md`) explicitly deferred. 3.5: v1 self-enrollment named as the thing fleet approval later replaces. Part 4 items annotated with owners; gate and discovery items added. |
+| 3 | 2026-09-01 | Acceptance record only, no contract change. 2.3a: the four prerequisites marked landed (#315), with the two gaps the live run exposed (#369, #370). Part 4: the three MCP items and five of the seven data-format/identity items ticked with live evidence from the running daemon; the two clean-machine items stay with the operator. |

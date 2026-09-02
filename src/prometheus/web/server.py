@@ -1750,10 +1750,19 @@ def create_app(
         card["tools"] = [
             {"tool_name": t.tool_name, "description": t.description,
              "read_only_hint": t.read_only_hint,
-             "registered_as": f"mcp__{t.safe_server_name}__{t.tool_name}"}
+             # The registry name, as registered — not rebuilt from tool_name,
+             # which build_safe_tool_name sanitises and may suffix.
+             "registered_as": t.registered_as or _mcp_registered_name_fallback(t)}
             for t in runtime.list_tools() if t.server_name == name
         ]
         return card
+
+    def _mcp_registered_name_fallback(t) -> str:  # noqa: ANN001
+        """A discovered-but-not-yet-registered tool (disabled server, or a
+        card rendered before registration) gets the sanitised base name —
+        what registration WOULD produce absent a collision suffix."""
+        from prometheus.mcp.names import sanitize_tool_name
+        return f"mcp__{t.safe_server_name}__{sanitize_tool_name(t.tool_name)}"
 
     def _mcp_all_definitions() -> list[tuple[str, dict, str]]:
         out: list[tuple[str, dict, str]] = []
