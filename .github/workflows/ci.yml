@@ -103,3 +103,37 @@ jobs:
         # test, so the full suite gates with no deselects.
         run: >
           PYTHONPATH=$PWD/src uv run pytest -m "not network" -q
+
+  # The stranger's first ten minutes, executed — not unit-tested. Each leg
+  # clones this SHA into a temp tree, builds a venv, runs the README's
+  # install line, then setup / doctor / one CLI tool turn / daemon + one
+  # REST turn, with a non-inherited environment so nothing only the
+  # developer has can leak in. `local` detects a stub model server;
+  # `cloud` (2026-09-01) is the GPU-less box: no local server, one cloud
+  # key exported, and the provider aimed at the stub so no real endpoint
+  # is ever reached. Until this job existed the harness had never run
+  # anywhere but the developer's machine.
+  firstlight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [local, cloud]
+    env:
+      UV_PYTHON_DOWNLOADS: never
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # S1 clones the source at its current SHA; a shallow checkout
+          # has one, which is all it needs.
+          fetch-depth: 1
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: FIRSTLIGHT ${{ matrix.leg }} leg
+        # The harness is stdlib-only and builds its own venv; nothing is
+        # installed here on purpose — an install step above it would be a
+        # thing the stranger does not have.
+        run: python scripts/firstlight_harness.py --source . --leg ${{ matrix.leg }}

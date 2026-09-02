@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import site
 import socket
 import subprocess
 import sys
@@ -99,6 +100,10 @@ def test_daemon_exits_promptly_on_sigterm(tmp_path, sig):
         }
         if "VIRTUAL_ENV" in os.environ:
             env["VIRTUAL_ENV"] = os.environ["VIRTUAL_ENV"]
+        # Same reason as test_cli_logging: a foreign HOME moves the user
+        # site-packages, and a box whose deps live in ~/.local then loses
+        # pydantic in the child. Isolation is about config, not packages.
+        env["PYTHONUSERBASE"] = site.getuserbase()
         pythonpath = os.environ.get("PYTHONPATH")
         if pythonpath:
             env["PYTHONPATH"] = pythonpath
