@@ -56,7 +56,7 @@ class TestFormatConnectClientBlock:
     def test_no_token_prints_mint_note_not_a_value(self, env_file):
         block = format_connect_client_block({})
         assert "minted on first daemon start" in block
-        assert "prometheus token show" in block
+        assert "oara token show" in block
 
     def test_never_writes_the_env_file(self, env_file):
         format_connect_client_block({})
@@ -64,7 +64,7 @@ class TestFormatConnectClientBlock:
 
 
 # ---------------------------------------------------------------------------
-# Fast / noninteractive path (prometheus setup --noninteractive)
+# Fast / noninteractive path (oara setup --noninteractive)
 # ---------------------------------------------------------------------------
 
 

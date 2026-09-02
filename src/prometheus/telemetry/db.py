@@ -2,7 +2,7 @@
 
 The whole daemon writes to ``telemetry.db`` (the ``ToolCallTelemetry`` writer
 at ``tracker.py``), the dashboard reads it (``dashboard.py``), and during a
-coding run a SECOND process — the ``prometheus code`` subprocess — opens its own
+coding run a SECOND process — the ``oara code`` subprocess — opens its own
 writer and commits a row every round. The telemetry-write-timing survey
 (``audits/20260616T014041Z-telemetry-write-timing-survey.md``) caught a real
 ``database is locked (5)`` when a concurrent reader polled that db at the default

@@ -169,7 +169,7 @@ def test_an_empty_config_file_is_not_a_refusal(cfg, monkeypatch):
     """safe_load returns None on an empty file, but it PARSED.
 
     `or {}` already handles it, and refusing here would block a legitimate
-    `touch prometheus.yaml && prometheus setup`.
+    `touch prometheus.yaml && oara setup`.
     """
     cfg.write_text("# nothing yet\n")
     wiz = _wizard(True, monkeypatch)

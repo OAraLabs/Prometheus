@@ -196,7 +196,7 @@ class TestNonSetupRoutes403:
         assert resp.status_code == 403
         body = resp.json()
         assert body["error"] == "setup_mode"
-        assert "prometheus setup" in body["detail"]
+        assert "oara setup" in body["detail"]
 
     def test_403_even_with_a_valid_bearer_token(self, env_file):
         """Setup mode has no privileged surface — a token doesn't open it."""
@@ -226,7 +226,7 @@ class TestHelpers:
         assert "8123" in banner
         assert "SETUP MODE" in banner
         assert "=" * 68 in banner  # format_minted_banner's bar
-        assert "prometheus setup" in banner
+        assert "oara setup" in banner
 
     def test_resolve_setup_port_env_override(self, monkeypatch):
         monkeypatch.setenv("PROMETHEUS_WEB_API_PORT", "18205")

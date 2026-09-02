@@ -38,7 +38,7 @@ _CODING_DIFF_CAP = 256 * 1024
 def _load_coding_report(output_file: "Path") -> dict | None:
     """Parse a coding run's final JSON report from its managed-task output file.
 
-    The ``prometheus code`` subprocess prints exactly one JSON object (the run
+    The ``oara code`` subprocess prints exactly one JSON object (the run
     report) to stdout at the end; while running, the file holds no such object.
     Returns the LAST balanced top-level ``{...}`` that parses to a dict with a
     ``status`` field, or ``None`` if no report has been written yet.

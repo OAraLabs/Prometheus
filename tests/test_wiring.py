@@ -6922,7 +6922,7 @@ class TestSunriseGoldenTraceExporter:
         assert asyncio.run(exporter.run_once()) is not None
 
     def test_manual_export_still_dumps_recent_regardless_of_watermark(self, tmp_path):
-        """The CLI path (`prometheus export-traces`) is a user-initiated dump
+        """The CLI path (`oara export-traces`) is a user-initiated dump
         and must NOT inherit the pipeline's incremental semantics — a human
         asking for the last N should not get an empty file because the daemon
         already exported them."""

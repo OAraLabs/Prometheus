@@ -1,9 +1,9 @@
-"""``prometheus token`` — show or rotate the web API token.
+"""``oara token`` — show or rotate the web API token.
 
 Part of the onboarding overhaul (Phase 0, item 2): the daemon mints a
 token on first start with the web bridge enabled; this command is how
-the user retrieves it later ("prometheus token show") or invalidates it
-("prometheus token rotate").
+the user retrieves it later ("oara token show") or invalidates it
+("oara token rotate").
 """
 
 from __future__ import annotations
@@ -19,13 +19,13 @@ from prometheus.config.env_file import get_env_file_path
 
 
 def run_token_command(args: argparse.Namespace, config: dict | None = None) -> int:
-    """Execute ``prometheus token <show|rotate>``. Returns an exit code."""
+    """Execute ``oara token <show|rotate>``. Returns an exit code."""
     action = getattr(args, "token_action", None)
     if action == "show":
         token, source = resolve_api_token(config)
         if not token:
             print("No web API token is set — the web API is OPEN (no auth).")
-            print(f"Set one with: prometheus token rotate")
+            print(f"Set one with: oara token rotate")
             print(f"(env file: {get_env_file_path()}, var: {TOKEN_ENV_VAR})")
             return 1
         print(token)
@@ -38,7 +38,7 @@ def run_token_command(args: argparse.Namespace, config: dict | None = None) -> i
         print(f"Saved to: {get_env_file_path()}")
         print("Restart the daemon for it to take effect, then update your clients.")
         return 0
-    print("Usage: prometheus token <show|rotate>")
+    print("Usage: oara token <show|rotate>")
     return 2
 
 

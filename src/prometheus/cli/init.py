@@ -3,10 +3,10 @@
 Detect the user's local inference servers (llama.cpp, Ollama, LM
 Studio, vLLM), ask three questions, and write a working
 ``prometheus.yaml`` + env file that gets the user to
-``prometheus daemon`` in under five minutes.
+``oara daemon`` in under five minutes.
 
 Onboarding Phase 0: this is no longer a competing wizard. The ONE
-canonical entry point is ``prometheus setup`` (see
+canonical entry point is ``oara setup`` (see
 :mod:`prometheus.cli.setup`); this module implements its ``--fast`` /
 ``--noninteractive`` path. The ``prometheus-init`` console script is
 kept as a thin forwarding alias.
@@ -265,9 +265,9 @@ def _default_config(server: DetectedServer | None, model: str | None) -> dict[st
 
 
 _ENV_TEMPLATE = """# Prometheus environment file — secrets live here, not in prometheus.yaml.
-# Loaded by `prometheus daemon` at startup AND by the systemd unit
+# Loaded by `oara daemon` at startup AND by the systemd unit
 # (EnvironmentFile=). Uncomment and fill in what you need.
-# Guided gateway setup: `prometheus setup --gateway-only`.
+# Guided gateway setup: `oara setup --gateway-only`.
 #
 # Telegram — get a token by messaging @BotFather (/newbot); also set
 # gateway.telegram_enabled: true in prometheus.yaml:
@@ -309,7 +309,7 @@ _ENV_TEMPLATE = """# Prometheus environment file — secrets live here, not in p
 #   KLING_SECRET_KEY=
 #
 # Beacon dashboard API token. Leave UNSET and the daemon mints a secure
-# one on first start (printed once; `prometheus token show` re-prints it).
+# one on first start (printed once; `oara token show` re-prints it).
 # An explicit empty value (PROMETHEUS_API_TOKEN=) means deliberately open.
 #   PROMETHEUS_API_TOKEN=
 """
@@ -410,7 +410,7 @@ def _print_detection_summary(servers: list[DetectedServer]) -> None:
         print("Local inference: no servers detected on standard ports.")
         print("  Checked llama.cpp:8080, Ollama:11434, LM Studio:1234, vLLM:8000.")
         print("  Already running a server on another port or machine?")
-        print("    prometheus setup --probe-url http://host:port")
+        print("    oara setup --probe-url http://host:port")
         return
     print(f"Local inference: {len(servers)} server(s) detected:")
     for s in servers:
@@ -438,7 +438,7 @@ To run a local model, install one of:
     cd llama.cpp && cmake -B build && cmake --build build -j
     ./build/bin/llama-server -m models/your-model.gguf -c 32768 --port 8080
 
-Then run `prometheus setup` again — it will detect the server."""
+Then run `oara setup` again — it will detect the server."""
 
 
 def _print_install_instructions() -> None:
@@ -500,7 +500,7 @@ def _prompt_cloud_provider(env_path: Path) -> dict[str, Any] | None:
     elif not os.environ.get(key_env):
         print(f"  x No key pasted and ${key_env} is not set.")
         print(f"    Get one, add `{key_env}=...` to {env_path}, and re-run "
-              "`prometheus setup --fast`.")
+              "`oara setup --fast`.")
         return None
     else:
         print(f"  + Using ${key_env} from your environment "
@@ -543,7 +543,7 @@ def _cloud_config_noninteractive(
     Returns None (and writes nothing) when the key is nowhere: a cloud
     config without its key is exactly the known-broken config the
     dead-end rule exists to refuse. A key found only in the environment is
-    copied into the env file, because ``prometheus daemon`` under systemd
+    copied into the env file, because ``oara daemon`` under systemd
     does not inherit this shell.
     """
     import os
@@ -638,7 +638,7 @@ def run_init(
     a detected local server, because it is explicit. Without it, a
     noninteractive run that finds no local server looks for exactly one
     cloud key in the environment / env file and uses that provider —
-    ``ANTHROPIC_API_KEY=… prometheus setup --noninteractive`` on a box
+    ``ANTHROPIC_API_KEY=… oara setup --noninteractive`` on a box
     with no GPU is the cloud-only install. Several keys is ambiguous and
     refused with a ``--provider`` hint; none keeps the install-
     instructions dead end.
@@ -738,7 +738,7 @@ def run_init(
             elif len(keyed) > 1:
                 print(f"\nNo local server, and keys for several cloud providers are "
                       f"set ({', '.join(keyed)}). Say which one:")
-                print(f"  prometheus setup --noninteractive --provider {keyed[0]}")
+                print(f"  oara setup --noninteractive --provider {keyed[0]}")
                 print()
                 print("No config was written — the choice is yours, not a coin flip.")
                 return None
@@ -754,7 +754,7 @@ def run_init(
 
     # Gateway choice (don't require tokens up-front; user can enable later.
     # SPRINT G3: all three gateways are options in the SAME prompt — the
-    # fast path stays fast, `prometheus setup` has the guided per-gateway
+    # fast path stays fast, `oara setup` has the guided per-gateway
     # flow with token validation.)
     if noninteractive:
         gateway_choice = "cli"
@@ -807,17 +807,17 @@ def run_init(
     print("Setup complete. Next steps:")
     if gateway_choice == "cli":
         print("  1. Chat now:       prometheus")
-        print("  2. Always-on:      prometheus daemon   (Beacon dashboard on "
+        print("  2. Always-on:      oara daemon   (Beacon dashboard on "
               "http://localhost:8005;")
         print("     first start mints a web API token — printed once, "
-              "`prometheus token show` re-prints)")
+              "`oara token show` re-prints)")
     else:
         print(f"  1. Edit {env_path} to add gateway tokens")
-        print("  2. Run: prometheus daemon   (Beacon dashboard on "
+        print("  2. Run: oara daemon   (Beacon dashboard on "
               "http://localhost:8005)")
     print("  Guided gateway setup (Telegram / Slack / Discord, with token")
-    print("  validation):       prometheus setup --gateway-only")
-    print("  Health check anytime:  prometheus doctor")
+    print("  validation):       oara setup --gateway-only")
+    print("  Health check anytime:  oara doctor")
     print()
     return config
 
@@ -830,13 +830,13 @@ def run_init(
 def main(argv: list[str] | None = None) -> int:
     """``prometheus-init`` console-script entry point.
 
-    Thin forwarding alias: ``prometheus setup --fast`` is the canonical
+    Thin forwarding alias: ``oara setup --fast`` is the canonical
     command now. This keeps existing muscle memory and scripts working.
     """
     parser = argparse.ArgumentParser(
         prog="prometheus-init",
         description=(
-            "[alias for `prometheus setup --fast`] Detects local inference "
+            "[alias for `oara setup --fast`] Detects local inference "
             "servers and writes a working prometheus.yaml."
         ),
     )
@@ -859,7 +859,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    print("note: `prometheus-init` is now `prometheus setup --fast` — "
+    print("note: `prometheus-init` is now `oara setup --fast` — "
           "forwarding.\n")
     forward = ["--fast", "--timeout", str(args.timeout)]
     if args.noninteractive:

@@ -1,4 +1,4 @@
-"""``prometheus setup`` routing + the forwarding aliases (Phase 0, item 1)."""
+"""``oara setup`` routing + the forwarding aliases (Phase 0, item 1)."""
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ class TestRunSetupRouting:
 
 
 class TestMainCliAliases:
-    """`prometheus setup`, `prometheus --setup`, and `prometheus-init`."""
+    """`oara setup`, `oara --setup`, and `prometheus-init`."""
 
     def _patch_run_setup(self, monkeypatch):
         seen: list[argparse.Namespace] = []
@@ -117,7 +117,7 @@ class TestMainCliAliases:
         assert exc.value.code == 0
         assert len(seen) == 1
         assert getattr(seen[0], "gateway_only") is False
-        assert "prometheus setup" in capsys.readouterr().out
+        assert "oara setup" in capsys.readouterr().out
 
     def test_setup_gateway_only_alias(self, monkeypatch):
         import sys
@@ -141,4 +141,4 @@ class TestMainCliAliases:
         assert "--fast" in argv
         assert "--noninteractive" in argv
         assert str(tmp_path) in argv
-        assert "prometheus setup --fast" in capsys.readouterr().out
+        assert "oara setup --fast" in capsys.readouterr().out

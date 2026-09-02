@@ -121,8 +121,8 @@ def format_minted_banner(token: str) -> str:
         f"\n    {token}\n\n"
         f"  Saved to: {env_path}\n"
         "  Clients (Beacon, curl) must send: Authorization: Bearer <token>\n"
-        "  Show it again:  prometheus token show\n"
-        "  Rotate it:      prometheus token rotate\n"
+        "  Show it again:  oara token show\n"
+        "  Rotate it:      oara token rotate\n"
         f"{bar}\n"
     )
 
@@ -137,7 +137,7 @@ def format_connect_client_block(
     machine's hostname + the web API port — never a hardcoded host) and
     the API token. The token value is printed only when one already
     exists (config/env/env file); otherwise we point at the first-start
-    mint + ``prometheus token show``. The token is never *written*
+    mint + ``oara token show``. The token is never *written*
     anywhere here — printing only.
     """
     import socket
@@ -157,7 +157,7 @@ def format_connect_client_block(
     else:
         token_lines = (
             "    Token:    minted on first daemon start — re-print with\n"
-            "              `prometheus token show`\n"
+            "              `oara token show`\n"
         )
     bar = "=" * 68
     return (

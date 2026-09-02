@@ -12,7 +12,7 @@ Three surfaces, one vocabulary:
   closes the absence-of-evidence gap, not a nice-to-have.
 * ``/health`` — COUNTS ONLY. It is unauthenticated and the pinned values carry
   a backend URL and model names; the same reason no SHA is exposed there.
-* ``/api/status`` and ``prometheus doctor`` — full detail, bearer-gated or
+* ``/api/status`` and ``oara doctor`` — full detail, bearer-gated or
   local.
 
 Always ``config_pins``, never bare ``pins``: Beacon uses "pin" for SKILL pins

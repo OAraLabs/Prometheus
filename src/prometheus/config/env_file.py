@@ -6,7 +6,7 @@ The canonical location is ``~/.config/prometheus/env`` — the same file
 the shipped systemd unit loads via ``EnvironmentFile=`` (see
 ``packaging/prometheus.service``), so a value written here is visible
 both to ``systemctl --user start prometheus`` and to a bare
-``prometheus daemon`` (which calls :func:`load_env_file` at startup).
+``oara daemon`` (which calls :func:`load_env_file` at startup).
 
 Resolution order for the path (tests MUST use the override so they
 never touch the real file):
@@ -76,7 +76,7 @@ def load_env_file(path: Path | None = None) -> int:
 
     Variables already set in the environment win — under systemd the
     unit's ``EnvironmentFile=`` has already populated them and this is a
-    no-op; run bare, this gives ``prometheus daemon`` the same view.
+    no-op; run bare, this gives ``oara daemon`` the same view.
     Returns the number of variables newly set.
     """
     loaded = 0

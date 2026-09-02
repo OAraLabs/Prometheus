@@ -118,4 +118,4 @@ Each concern gets its own database — conversations, facts, telemetry, and audi
 
 The fact store is also **self-healing**: full-text search indexes are kept in sync by SQLite triggers (they can't drift from the tables they index), schema migrations are versioned and applied once per database, and every migration snapshots a `memory.db.backup-<timestamp>` copy before touching anything.
 
-`prometheus --reset-data` deletes all of it — `telemetry.db`, `memory.db`, `lcm.db`, the audit log, `eval_results/`, `wiki/`, `sentinel/`, and auto-generated skills (`skills/auto/`) — after listing exactly what it found and asking for confirmation. Your config files are preserved. (`--reset-telemetry` wipes only the telemetry database.)
+`oara --reset-data` deletes all of it — `telemetry.db`, `memory.db`, `lcm.db`, the audit log, `eval_results/`, `wiki/`, `sentinel/`, and auto-generated skills (`skills/auto/`) — after listing exactly what it found and asking for confirmation. Your config files are preserved. (`--reset-telemetry` wipes only the telemetry database.)

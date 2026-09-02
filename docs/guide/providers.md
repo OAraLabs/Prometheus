@@ -10,7 +10,7 @@ Prometheus talks to any inference server over HTTP; localhost or remote, it does
 
 - **llama.cpp** (`provider: llama_cpp`, default port 8080) — the first-class backend. This is the only backend that gets **GBNF grammar enforcement**: when the model is asked to emit a tool call, Prometheus sends a grammar that makes malformed JSON structurally impossible at the token level. Controlled by `model.grammar_enforcement: true` (the default). The loaded model is auto-detected from the server at startup — swap the GGUF, restart, done.
 - **Ollama** (`provider: ollama`, default port 11434) — fully supported, and the default fallback (`model.fallback_provider`).
-- **LM Studio, vLLM, LiteLLM, Together, …** — anything that serves the OpenAI-compatible chat API works: use `provider: openai` with a `base_url` pointing at it. `prometheus setup` probes the standard ports for all four local servers (llama.cpp :8080, Ollama :11434, LM Studio :1234, vLLM :8000) and writes the config for whichever it finds.
+- **LM Studio, vLLM, LiteLLM, Together, …** — anything that serves the OpenAI-compatible chat API works: use `provider: openai` with a `base_url` pointing at it. `oara setup` probes the standard ports for all four local servers (llama.cpp :8080, Ollama :11434, LM Studio :1234, vLLM :8000) and writes the config for whichever it finds.
 
 ### Multi-machine setups
 
@@ -156,7 +156,7 @@ QWEN_API_KEY=sk-...
 QWEN_BASE_URL=https://ws-<workspace-id>.<region>.maas.aliyuncs.com/compatible-mode/v1
 ```
 
-A 403 on a key you know is valid almost always means this. `prometheus doctor` reports whether `QWEN_BASE_URL` is set, so the endpoint override is visible when you are diagnosing one.
+A 403 on a key you know is valid almost always means this. `oara doctor` reports whether `QWEN_BASE_URL` is set, so the endpoint override is visible when you are diagnosing one.
 
 ⚠ The repo's pre-commit hook does **not** recognise these hostnames — its host check matches `OAra-*` only. Keeping a workspace endpoint in the env file (gitignored, 0600) rather than yaml is what keeps it out of a commit; nothing will stop you if you paste it into tracked code.
 
@@ -235,8 +235,8 @@ For scripting, the daemon exposes the same flow over REST:
 Three ways to manage provider keys, pick whichever fits:
 
 - **Beacon's Models tab** — one row per service, paste a key, save. Saved keys are **never displayed again** (only a set/not-set state), take effect **immediately with no daemon restart**, and can be removed from the same row. Each service has a **"Get a key ↗"** link straight to the right console page (console.anthropic.com, console.x.ai, DashScope, the Kling dev console, …), so you're never hunting for where a key comes from.
-- **Hand-edit the env file** — all keys live in `~/.config/prometheus/env` as plain `NAME=value` lines; both `prometheus daemon` and the systemd unit load it. Editing by hand requires a daemon restart.
-- **Check without exposing** — `prometheus doctor` prints a set/not-set line for every known key variable without ever echoing values.
+- **Hand-edit the env file** — all keys live in `~/.config/prometheus/env` as plain `NAME=value` lines; both `oara daemon` and the systemd unit load it. Editing by hand requires a daemon restart.
+- **Check without exposing** — `oara doctor` prints a set/not-set line for every known key variable without ever echoing values.
 
 Secrets never go in the yaml, and a pre-commit hook blocks them from ever landing in the repo.
 

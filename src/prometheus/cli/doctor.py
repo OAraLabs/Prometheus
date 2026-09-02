@@ -1,4 +1,4 @@
-"""``prometheus doctor`` — first-line diagnostics for a Prometheus install.
+"""``oara doctor`` — first-line diagnostics for a Prometheus install.
 
 Onboarding Phase 0, item 4: the :class:`prometheus.infra.doctor.Doctor`
 class existed (daemon startup check + /doctor Telegram command) but had
@@ -13,7 +13,7 @@ checks a fresh install actually trips over:
 - whisper available when voice is enabled
 
 Output is human-readable ✓/✗ lines; the exit code is nonzero when any
-check errors — "run prometheus doctor" is the eternal support answer.
+check errors — "run oara doctor" is the eternal support answer.
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ def check_config(explicit: str | None = None) -> tuple[DiagnosticCheck, dict[str
             name="Config", category="platform", status="error",
             message="no prometheus.yaml found (searched: "
                     + ", ".join(str(p) for p in searched) + ")",
-            fix="Run `prometheus setup` to create one.",
+            fix="Run `oara setup` to create one.",
         ), {}
     try:
         config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -94,13 +94,13 @@ def check_config(explicit: str | None = None) -> tuple[DiagnosticCheck, dict[str
         return DiagnosticCheck(
             name="Config", category="platform", status="error",
             message=f"{path} has a YAML parse error: {exc}",
-            fix=f"Fix the syntax in {path}, or re-run `prometheus setup`.",
+            fix=f"Fix the syntax in {path}, or re-run `oara setup`.",
         ), {}
     if not isinstance(config, dict):
         return DiagnosticCheck(
             name="Config", category="platform", status="error",
             message=f"{path} does not contain a YAML mapping",
-            fix="Re-run `prometheus setup` to regenerate it.",
+            fix="Re-run `oara setup` to regenerate it.",
         ), {}
     return DiagnosticCheck(
         name="Config", category="platform", status="ok",
@@ -155,7 +155,7 @@ def check_inference(config: dict[str, Any], timeout: float = 5.0) -> tuple[Diagn
             name="Inference", category="connectivity", status="error",
             message=f"{provider} not responding at {base_url}",
             fix="Start the inference server (or fix model.base_url), "
-                "then re-run `prometheus doctor`.",
+                "then re-run `oara doctor`.",
         )
         model = DiagnosticCheck(
             name="Model", category="model", status="error",
@@ -230,7 +230,7 @@ def check_token(config: dict[str, Any]) -> DiagnosticCheck:
     return DiagnosticCheck(
         name="API token", category="connectivity", status="warning",
         message="web auth OPEN — no PROMETHEUS_API_TOKEN set",
-        fix="Run `prometheus token rotate` (the daemon also mints one "
+        fix="Run `oara token rotate` (the daemon also mints one "
             "automatically on first start with web enabled).",
     )
 
@@ -265,7 +265,7 @@ def check_dirs_writable() -> DiagnosticCheck:
 def _env_or_env_file(name: str) -> str:
     """A gateway secret the daemon would see: process env, then env file.
 
-    ``prometheus doctor`` usually runs in a shell that has NOT sourced
+    ``oara doctor`` usually runs in a shell that has NOT sourced
     ``~/.config/prometheus/env`` — but the daemon loads it, so a token
     that lives only there still counts as present.
     """
@@ -369,7 +369,7 @@ def check_gateways(config: dict[str, Any]) -> list[DiagnosticCheck]:
                           "or PROMETHEUS_TELEGRAM_TOKEN)",
         token_fix="Get a token from @BotFather and add "
                   "PROMETHEUS_TELEGRAM_TOKEN to the env file — or run "
-                  "`prometheus setup --gateway-only`.",
+                  "`oara setup --gateway-only`.",
         library_module="telegram",
         library_label="python-telegram-bot",
         library_fix="pip install python-telegram-bot (a core dependency — "
@@ -478,7 +478,7 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
         return DiagnosticCheck(
             name="Advertised tools", category="resources", status="warning",
             message=f"could not resolve the advertised set ({exc})",
-            fix="Run `prometheus doctor --debug` and report this — the "
+            fix="Run `oara doctor --debug` and report this — the "
                 "advertised set is what the model can actually call.",
         )
 
@@ -952,7 +952,7 @@ def run_anatomy_checks(config: dict[str, Any]) -> list[DiagnosticCheck]:
                 check = DiagnosticCheck(
                     name=check.name, category=check.category, status="warning",
                     message=check.message,
-                    fix="Run `prometheus setup` (the rich wizard) to generate "
+                    fix="Run `oara setup` (the rich wizard) to generate "
                         "identity files. Until then the agent runs with a "
                         "generic identity (SOUL.md/AGENTS.md shape the system "
                         "prompt only — tools and the loop are unaffected).",
@@ -968,7 +968,7 @@ def run_anatomy_checks(config: dict[str, Any]) -> list[DiagnosticCheck]:
 
 def render_report(checks: list[DiagnosticCheck]) -> str:
     """Human-readable ✓/✗ report grouped like the Telegram /doctor output."""
-    lines = ["prometheus doctor", ""]
+    lines = ["oara doctor", ""]
     from prometheus.infra.doctor import DiagnosticReport
     for cat in DiagnosticReport.CATEGORY_ORDER:
         cat_checks = [c for c in checks if c.category == cat]
@@ -992,7 +992,7 @@ def render_report(checks: list[DiagnosticCheck]) -> str:
 
 
 def run_doctor_command(args: argparse.Namespace) -> int:
-    """Entry point for ``prometheus doctor``. Exit 1 on any error check."""
+    """Entry point for ``oara doctor``. Exit 1 on any error check."""
     import logging
     logging.getLogger("httpx").setLevel(logging.WARNING)  # probe noise
 

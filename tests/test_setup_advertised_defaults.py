@@ -1,6 +1,6 @@
 """FIRSTLIGHT FL-2 — a fresh install must advertise the shipped tool set.
 
-The stranger-walk found that ``prometheus setup`` wrote NO ``tools:``
+The stranger-walk found that ``oara setup`` wrote NO ``tools:``
 section, so ``DynamicToolLoader`` got an empty ``always_loaded`` and — with
 deferred mode ``auto`` resolving ON for every local provider — a fresh
 install advertised nothing. The turn in the walk worked only because the

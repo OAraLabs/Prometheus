@@ -137,7 +137,7 @@ def load_config(config_path: str | None = None) -> dict[str, Any]:
 
     # Nothing exists anywhere. Report against the LAST candidate so the
     # message names a real place to put one (~/.prometheus/prometheus.yaml,
-    # where `prometheus setup` writes) rather than the first one probed.
+    # where `oara setup` writes) rather than the first one probed.
     return _require(load_config_file(
         candidates[-1] if candidates else None,
         subsystem="daemon",
@@ -157,7 +157,7 @@ def _require(load, error_states, exc_type) -> dict[str, Any]:
         raise exc_type(
             f"prometheus.yaml is unusable ({load.state}): {load.detail}. "
             f"Refusing to boot the daemon on {_DAEMON_SUBSTITUTING} — fix the "
-            f"file, or run `prometheus setup` to regenerate it."
+            f"file, or run `oara setup` to regenerate it."
         )
     return load.data
 
@@ -548,11 +548,11 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     # ── Env file (Onboarding Phase 0) ───────────────────────────────────
     # Under systemd the unit's EnvironmentFile= already populated these;
-    # run bare, `prometheus daemon` loads the same file so tokens/keys
+    # run bare, `oara daemon` loads the same file so tokens/keys
     # behave identically either way (setdefault — real env always wins).
     # This MUST run before the wiki/vault roots are resolved below: both
     # resolvers consult environment variables (PROMETHEUS_VAULT among them),
-    # and loading the file after resolution meant a bare `prometheus daemon`
+    # and loading the file after resolution meant a bare `oara daemon`
     # pinned the default roots while systemd pinned the configured ones —
     # two boots of the same config disagreeing about where the vault is.
     from prometheus.config.env_file import get_env_file_path, load_env_file
@@ -593,7 +593,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # A vault written by a newer format than this build reads refuses the
     # boot outright; a vault from before markers existed follows
     # vault.format_check (off | warn | refuse, default warn) and is adopted
-    # only by an explicit `prometheus vault adopt`, never silently. An
+    # only by an explicit `oara vault adopt`, never silently. An
     # absent vault stays a non-error, same stance as the tools.
     from prometheus.config.vault_marker import check_vault_marker, enroll_node
     _format_check = (config.get("vault") or {}).get("format_check", "warn")
@@ -2153,7 +2153,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 print(format_minted_banner(_token), flush=True)
                 logger.warning(
                     "web auth: NEW API token generated and saved to %s "
-                    "(printed once above — `prometheus token show` re-prints it)",
+                    "(printed once above — `oara token show` re-prints it)",
                     get_env_file_path(),
                 )
         except Exception:
@@ -2483,7 +2483,7 @@ def main() -> None:
     # No config anywhere → don't half-start on defaults (the old dead
     # end): boot the minimal pairing-only web server instead, so a client
     # (Beacon) can exchange a one-time code for the real API token while
-    # the user finishes `prometheus setup`. Checked BEFORE the file
+    # the user finishes `oara setup`. Checked BEFORE the file
     # logger below — setup mode must not create ~/.prometheus/logs (or
     # any other ~/.prometheus state).
     from prometheus.web.setup_server import (
@@ -2514,7 +2514,7 @@ def main() -> None:
         if find_config_file(args.config) is None:
             print(
                 "Setup reported complete but no config was found — "
-                "run `prometheus setup` and restart the daemon.",
+                "run `oara setup` and restart the daemon.",
                 file=sys.stderr,
             )
             sys.exit(1)

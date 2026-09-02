@@ -63,7 +63,7 @@ def config_search_paths(explicit: str | Path | None = None) -> list[Path]:
     2. the repo-local ``config/prometheus.yaml`` (checkout + deploy-clone installs)
     3. ``$PROMETHEUS_CONFIG_DIR/prometheus.yaml`` — default
        ``~/.prometheus/prometheus.yaml`` (pip installs; written by
-       ``prometheus setup``)
+       ``oara setup``)
 
     An explicit path SHORT-CIRCUITS: a caller that named a file wants that file
     or an error, never a silent fall-through to somebody else's config.
@@ -89,7 +89,7 @@ def resolve_config_path(explicit: str | Path | None = None) -> Path:
 
     Returns the first candidate from :func:`config_search_paths` that exists,
     else the LAST one searched (``~/.prometheus/prometheus.yaml`` — where
-    ``prometheus setup`` writes, so it is the useful name to print).
+    ``oara setup`` writes, so it is the useful name to print).
 
     ⚠ Never-None is a contract, not a convenience. The eight ``from_config``
     fallbacks hand this straight to ``open()``; four of them catch only

@@ -4,7 +4,7 @@ Bakeoff finding F1: the loop's model calls bypassed the envelope entirely;
 UsageSnapshot was produced each round and never persisted (ws_server discards
 it, AgentLoop keeps only the last one in memory). The wrap must be
 behavior-preserving — identical request payloads, identical streaming
-behavior, identical error propagation — while making "prometheus tokens =
+behavior, identical error propagation — while making "oara tokens =
 null" structurally impossible.
 
 The payload-equivalence fixture (tests/fixtures/loop_envelope_prewrap_request

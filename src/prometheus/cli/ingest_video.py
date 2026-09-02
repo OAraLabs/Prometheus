@@ -1,4 +1,4 @@
-"""`prometheus ingest-video` — turn a screen recording into a skill draft.
+"""`oara ingest-video` — turn a screen recording into a skill draft.
 
 Runs the video-ingestion pipeline (learning/video_ingest/) on a local
 recording or YouTube URL and files the result as a DRAFT in
@@ -93,5 +93,5 @@ async def _run_ingest(args, config: dict) -> int:
 
 
 def run_ingest_video_command(args, config: dict) -> int:
-    """Entry point for `prometheus ingest-video`."""
+    """Entry point for `oara ingest-video`."""
     return asyncio.run(_run_ingest(args, config))

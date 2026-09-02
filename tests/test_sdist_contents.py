@@ -74,9 +74,6 @@ HOOK_PATTERN_FIXTURES: dict[str, tuple[int, str]] = {
         13, "wiki-dedup fixture entities, deliberately case-varied to exercise "
             "entity normalization; MagicDNS labels, no IPs",
     ),
-    "src/prometheus/cli/bakeoff.py": (
-        1, "docstring example naming the GPU box by MagicDNS label, not by IP",
-    ),
     "tests/test_turn_errors.py": (
         1, "the synthetic provider key in the test asserting a URL query "
            "string is never echoed to clients — the fixture IS the control",
