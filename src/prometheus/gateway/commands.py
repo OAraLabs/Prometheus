@@ -470,6 +470,80 @@ def _format_gpu_processes(procs: list) -> list[str]:
     return out
 
 
+async def cmd_backend_override(
+    agent_loop: Any,
+    prometheus_config: dict | None,
+    session_key: str,
+    name: str,
+    *,
+    prefix: str = "/",
+    model: str | None = None,
+) -> tuple[str, bool]:
+    """Point this session at a configured local backend (shared `/4090` core).
+
+    The backend half of :func:`cmd_provider_override`, through the SAME router
+    override path — the difference is what is checked first. A cloud preset is
+    checked for a credential; a backend is PROBED, now, forced: the switch then
+    carries the box's served model (so the window the compactor budgets is the
+    one that box reported for that model), its detected vision, and the
+    `backend` name — or it is refused with the probe's reason, so a dead box is
+    a named refusal at the command rather than a failed turn later.
+
+    Returns ``(reply_text, applied)`` like its cloud sibling.
+    """
+    router = getattr(agent_loop, "_model_router", None)
+    if router is None:
+        return ("Routing is not enabled. Backend overrides require a configured router in prometheus.yaml.", False)
+    if not getattr(router.config, "overrides_enabled", True):
+        return (
+            "Direct-mode provider overrides are disabled.\n"
+            "Set router.overrides.enabled: true in config/prometheus.yaml and restart the daemon to enable.",
+            False,
+        )
+    from prometheus.providers.backends import get_registry
+    from prometheus.router.model_router import resolve_model_choices, resolve_model_target
+
+    registry = get_registry()
+    if registry is None:
+        return ("Backend registry not initialized. Is the daemon running?", False)
+    spec = registry.get(name)
+    if spec is None or getattr(spec, "is_primary", False):
+        known = ", ".join(f"{prefix}{n}" for n in registry.names() if not registry.get(n).is_primary) or "(none configured)"
+        return (f"Unknown backend '{name}'. Configured: {known}", False)
+    key = f"{name}:{model}" if model else name
+    target = resolve_model_target(key, prometheus_config or {})
+    if target is None:
+        choices = resolve_model_choices(name, prometheus_config or {})
+        listed = "\n".join(f"  {prefix}{name} {m}" for m in choices) or "  (this backend serves one model)"
+        return (f"{name} has no model '{model}'.\nAvailable:\n{listed}", False)
+    status = await registry.probe(name, force=True)
+    if not status.ok:
+        return (
+            f"{name} is down — {status.error}\n"
+            f"({spec.provider} @ {spec.base_url}). Not switching; still on the current model.",
+            False,
+        )
+    target = dict(target)
+    if not target.get("model") and status.model:
+        target["model"] = status.model
+    if status.vision is True:
+        target["vision"] = True
+    router.set_override(session_key, target)
+    log.info("Backend override for session %s → %s (%s/%s)", session_key, name, target.get("provider"), target.get("model"))
+    window = f"{status.n_ctx // 1024}k" if status.n_ctx else "window unknown"
+    vision = "vision" if status.vision else ("no vision" if status.vision is False else "vision unknown")
+    others = [m for m in resolve_model_choices(name, prometheus_config or {}) if m != target.get("model")]
+    others_line = f"Others: {', '.join(others)}  (e.g. {prefix}{name} {others[0]})\n" if others else ""
+    return (
+        f"Switched to {name}.\n"
+        f"Model: {target.get('model', '?')}\n"
+        f"Window: {window}, {vision}, {status.latency_ms:.0f} ms\n"
+        f"{others_line}"
+        f"Back with {prefix}local.",
+        True,
+    )
+
+
 async def cmd_backends(args: str | list[str] | tuple[str, ...] | None = None) -> str:
     """Shared /backends core: what every local backend is serving right now.
 
@@ -2187,6 +2261,15 @@ def cmd_route(
     lines.append(f"  {prefix}mimo    — MiMo (Xiaomi)")
     lines.append(f"  {prefix}qwen    — Qwen (Alibaba)")
     lines.append(f"  {prefix}local   — back to primary")
+    try:
+        from prometheus.router.model_router import backend_command_names
+        backends = backend_command_names(None)  # the daemon's live registry, when there is one
+    except Exception:  # noqa: BLE001 — a listing, never a failure
+        backends = ()
+    if backends:
+        lines.append("Local backends (see " + prefix + "backends):")
+        for name in backends:
+            lines.append(f"  {prefix}{name}")
 
     return "\n".join(lines)
 

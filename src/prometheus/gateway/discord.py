@@ -962,6 +962,12 @@ class DiscordAdapter(BasePlatformAdapter):
         self._register(provider, "local", self._app_local, "Clear the override, back to primary")
         self._register(provider, "route", self._app_route, "Show current routing for this channel")
         self._register(provider, "backends", self._app_backends, "What each local inference box is serving")
+        from prometheus.router.model_router import backend_command_names
+        for _backend_name in backend_command_names(self._prometheus_config):
+            self._register(
+                provider, _backend_name, self._make_backend_app(_backend_name),
+                f"Route this channel to local backend {_backend_name}",
+            )
 
         tree.add_command(root)
 
@@ -1177,6 +1183,25 @@ class DiscordAdapter(BasePlatformAdapter):
         from prometheus.gateway.commands import cmd_wiki
 
         await self._respond(interaction, cmd_wiki())
+
+    def _make_backend_app(self, name: str):
+        async def _handler(interaction: Any, args: str) -> None:
+            from prometheus.gateway import commands as _cmds
+            channel = self._cmd_channel(interaction)
+            if not channel:
+                await self._respond(interaction, "Channel id missing from interaction.")
+                return
+            await self._defer(interaction)
+            model, rest = _cmds.split_model_arg(name, self._prometheus_config, (args or "").split())
+            text, _applied = await _cmds.cmd_backend_override(
+                self.agent_loop, self._prometheus_config, f"discord:{channel}", name,
+                prefix=PROVIDER_PREFIX, model=model,
+            )
+            if rest:
+                text += "\n\nNote: inline message dispatch isn't supported on Discord yet — send your question as a normal message."
+            await self._respond(interaction, text)
+        _handler.__name__ = f"_app_backend_{name}"
+        return _handler
 
     async def _app_backends(self, interaction: Any, args: str) -> None:
         from prometheus.gateway.commands import cmd_backends

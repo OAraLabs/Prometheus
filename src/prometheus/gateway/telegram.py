@@ -460,6 +460,13 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("local", self._cmd_local))
         self._app.add_handler(CommandHandler("route", self._cmd_route))
         self._app.add_handler(CommandHandler("backends", self._cmd_backends))
+        # One command per configured local backend (`/4090`, `/mini`) — the
+        # names come from the registry, so the command set follows the config.
+        from prometheus.router.model_router import backend_command_names
+        for _backend_name in backend_command_names(self._prometheus_config):
+            self._app.add_handler(
+                CommandHandler(_backend_name, self._make_backend_handler(_backend_name))
+            )
         # SPRINT-TEACHER-ESCALATION Phase 3: escalation stats / budget state
         self._app.add_handler(
             CommandHandler("escalations", self._cmd_escalations)
@@ -2326,6 +2333,43 @@ class TelegramAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
     # Sprint 18 ANATOMY: infrastructure self-awareness
     # ------------------------------------------------------------------
+
+    def _make_backend_handler(self, name: str):
+        """A /<backend> handler bound to one registry name (closure, not partial:
+        PTB inspects the callback's signature)."""
+        async def _handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+            await self._apply_backend_override(update, context, name)
+        _handler.__name__ = f"_cmd_backend_{name}"
+        return _handler
+
+    async def _apply_backend_override(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, name: str,
+    ) -> None:
+        """Shared logic for the per-backend commands — the backend twin of
+        _apply_override, with an inline message dispatched the same way."""
+        if update.effective_chat is None:
+            return
+        chat_id = update.effective_chat.id
+        session_key = f"{Platform.TELEGRAM.value}:{chat_id}"
+        from prometheus.gateway import commands as _cmds
+        model, args = _cmds.split_model_arg(name, self._prometheus_config, getattr(context, "args", None))
+        text, applied = await _cmds.cmd_backend_override(
+            self.agent_loop, self._prometheus_config, session_key, name, model=model,
+        )
+        await self.send(chat_id, text, parse_mode=None)
+        if not applied or not args:
+            return
+        inline_message = " ".join(args)
+        event = MessageEvent(
+            chat_id=chat_id,
+            user_id=update.effective_user.id if update.effective_user else 0,
+            text=inline_message,
+            message_id=update.message.message_id if update.message else 0,
+            platform=Platform.TELEGRAM,
+            message_type=MessageType.TEXT,
+            username=(update.effective_user.username if update.effective_user else None),
+        )
+        await self._dispatch_to_agent(event)
 
     async def _cmd_backends(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

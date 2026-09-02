@@ -402,6 +402,7 @@ def create_app(
 
     def _resolved_context_limit(
         model: str | None = None,
+        backend: str | None = None,
     ) -> tuple[int | None, str]:
         """(limit, source) for *model*, defaulting to the serving model.
 
@@ -412,11 +413,18 @@ def create_app(
         from prometheus.context.budget import resolve_effective_limit
 
         try:
+            reg = _registry()
+            spec = reg.get(backend) if (reg is not None and backend) else None
             return resolve_effective_limit(
                 config.get("context") or {},
                 model=model or getattr(app.state, "current_model", None),
                 local_model=getattr(app.state, "local_model", None),
                 detected_limit=getattr(app.state, "detected_context_size", None),
+                # Multi-backend: the registry's live windows, keyed by backend,
+                # and the operator hint for a box the probe could not size.
+                backend=backend,
+                detected=reg.detected_windows() if (reg is not None and backend) else None,
+                backend_hint=getattr(spec, "context_limit", None),
             )
         except Exception:
             import logging
@@ -2392,7 +2400,17 @@ def create_app(
         SKIPPED rather than run against a guess, and ``assembled: false``
         marks the zeros as "not measured" instead of "measured zero".
         """
-        limit, limit_source = _resolved_context_limit()
+        # The window of the model THIS session is on — a cloud or backend
+        # override has its own — not the primary's. Falls back to the primary
+        # when no router is wired (web-only boots).
+        _router = getattr(app.state, "model_router", None)
+        if _router is not None:
+            _eff = _effective_model(_router, session_id)
+            limit, limit_source = _resolved_context_limit(
+                model=_eff.get("model"), backend=_eff.get("backend"),
+            )
+        else:
+            limit, limit_source = _resolved_context_limit()
 
         def _unmeasured(reason: str) -> dict[str, Any]:
             # Zeros kept for shape compatibility with existing clients; the
@@ -3957,6 +3975,17 @@ def create_app(
     # sprint) so /api/models and /api/providers/keys never disagree on names.
     from prometheus.providers.key_catalog import PRESET_LABELS as _PRESET_LABELS
 
+    def _backend_health(name: str) -> dict[str, Any] | None:
+        """The registry's last probe of *name*, trimmed to what a row badge needs.
+        None when no registry is wired (the row then carries no health claim)."""
+        reg = _registry()
+        if reg is None:
+            return None
+        snap = reg.snapshot().get(name)
+        if snap is None:
+            return None
+        return {k: snap[k] for k in ("ok", "probed", "stale", "n_ctx", "latency_ms", "error", "changed_at", "probed_at")}
+
     def _primary_supports_vision() -> bool:
         """The boot provider's detected vision capability — the SAME object the
         WebSocket gate reads (`bridge.loop_context.provider`), so /api/models and
@@ -3990,7 +4019,41 @@ def create_app(
             # enabled (multimodal)" (#387). No bridge (web-only boots, tests) →
             # no provider → False, by absence.
             "vision": _primary_supports_vision(),
+            "backend": _LOCAL_MODEL_KEY,
+            "health": _backend_health(_LOCAL_MODEL_KEY),
         }]
+        # One row per configured local backend (× its vetted models for ollama),
+        # from the registry — the same table the router resolves against, so a
+        # row here IS a switch target and nothing here is a second opinion.
+        # `available` answers the question that varies for a backend —
+        # reachability — where the cloud rows answer "credential present";
+        # `health` carries the probe so a client can say WHY. `vision` is the
+        # probe's detected flag (absent → False), never a declared one.
+        reg = _registry()
+        if reg is not None:
+            for spec in reg.specs():
+                if spec.is_primary:
+                    continue
+                st = reg.status(spec.name)
+                health = _backend_health(spec.name)
+                served = (st.model if st is not None else None) or spec.model
+                choices = spec.models or ((served,) if served else ())
+                from prometheus.providers.backends import _short_model
+                for idx, model in enumerate(choices or (None,)):
+                    is_default_model = idx == 0
+                    catalog.append({
+                        "key": spec.name if is_default_model else f"{spec.name}{_MODEL_SEP}{model}",
+                        "label": f"{spec.name} · {_short_model(model) or '?'}",
+                        "provider": spec.provider,
+                        "model": model,
+                        "is_default": False,
+                        "available": bool(st is not None and st.ok),
+                        "auth": None,
+                        "vision": bool(st is not None and st.ok and st.vision is True),
+                        "backend": spec.name,
+                        "health": health,
+                        "detail": (st.model_path if st is not None else None),
+                    })
         for key in _OVERRIDE_PRESETS:
             # Resolve through the SAME path the /claude slash command uses, so REST and
             # Telegram agree: user slash_commands.<key> config merged over the preset.
@@ -4032,6 +4095,17 @@ def create_app(
         if override is not None:
             cfg = override.provider_config or {}
             prov, mdl = cfg.get("provider"), cfg.get("model")
+            backend = cfg.get("backend")
+            if backend:
+                rows = [o for o in catalog if o.get("backend") == backend]
+                exact = [o for o in rows if o["model"] == mdl]
+                if exact:
+                    return exact[0]
+                if rows:
+                    # The served model moved under the override (llama-server
+                    # restarted onto another GGUF): report the backend's row with
+                    # the model the override actually names.
+                    return {**rows[0], "model": mdl, "label": f"{backend} · {mdl}"}
             for opt in catalog:
                 if not opt["is_default"] and opt["provider"] == prov and opt["model"] == mdl:
                     return opt
@@ -4109,6 +4183,22 @@ def create_app(
         if preset is None:
             return JSONResponse(status_code=400, content={
                 "error": f"unknown model key {key!r}; choose a key from GET /api/models"})
+        if preset.get("backend"):
+            # Probe BEFORE switching: the first turn then has a fresh window and
+            # the box's detected vision, or the switch fails now with the probe's
+            # reason instead of a turn failing later against a stale budget.
+            reg = _registry()
+            if reg is not None:
+                st = await reg.probe(preset["backend"], force=True)
+                if not st.ok:
+                    return JSONResponse(status_code=503, content={
+                        "error": f"backend {preset['backend']!r} is down: {st.error}",
+                        "backend": preset["backend"], "health": _backend_health(preset["backend"])})
+                preset = dict(preset)
+                if not preset.get("model") and st.model:
+                    preset["model"] = st.model
+                if st.vision is True:
+                    preset["vision"] = True
         try:
             router.set_override(session_id, preset)
         except ValueError as exc:

@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import Any
 
 from prometheus.context.token_estimation import estimate_tokens
@@ -51,6 +52,9 @@ def resolve_effective_limit(
     model: str | None = None,
     local_model: str | None = None,
     detected_limit: int | None = None,
+    backend: str | None = None,
+    detected: Mapping[str, Any] | None = None,
+    backend_hint: int | None = None,
 ) -> tuple[int | None, str]:
     """Resolve the context window IN FORCE, and say where it came from.
 
@@ -76,14 +80,57 @@ def resolve_effective_limit(
     That is a real state, not a defect: nothing has been detected and nothing
     configured, and substituting a plausible integer there is what produced a
     confidently-wrong 41% utilisation reading on a window that did not exist.
+
+    MULTI-BACKEND (2026-09). ``local_model`` / ``detected_limit`` describe ONE
+    box — the boot primary. With several boxes the window is per backend, so
+    the resolver also takes *backend* (the registry name serving this turn,
+    ``"local"`` for the primary, ``None`` for a cloud override) and *detected*
+    (the registry's ``detected_windows()``: name → a ``DetectedWindow`` with
+    ``.model`` and ``.n_ctx``). A detected window applies only while the model
+    it was reported for is the model being resolved — a box that restarted
+    onto another GGUF must not be budgeted at the old size. *backend_hint* is
+    the operator's ``backends.<name>.context_limit``, for a box the probe could
+    not size. The source names the backend: ``detected:4090``,
+    ``backend_config:mini`` (``detected`` stays the bare word for the primary,
+    so existing readers of that string keep working). The single-box kwargs
+    remain as the shorthand every existing caller already uses.
+
+    A local backend with nothing detected and no hint falls to the configured
+    global — NEVER to ``cloud_default_limit``: that number describes a cloud
+    API, and a 27B behind llama-server is not one.
     """
     overrides = _model_overrides(ctx)
 
     if model and model in overrides:
         return overrides[model], "model_override"
 
+    if backend:
+        window = (detected or {}).get(backend)
+        if window is not None and getattr(window, "n_ctx", None):
+            reported_for = getattr(window, "model", None)
+            if not model or not reported_for or reported_for == model:
+                source = "detected" if backend == "local" else f"detected:{backend}"
+                return int(window.n_ctx), source
+        if backend_hint:
+            try:
+                hint = int(backend_hint)
+            except (TypeError, ValueError):
+                hint = 0
+            if hint > 0:
+                return hint, f"backend_config:{backend}"
+
     if model and local_model and model == local_model and detected_limit:
         return int(detected_limit), "detected"
+
+    if backend:
+        # A LOCAL backend with nothing detected: skip the cloud default (below)
+        # and take the configured global as the hint it is.
+        configured = ctx.get("effective_limit")
+        try:
+            value = int(configured)
+        except (TypeError, ValueError):
+            return None, "unknown"
+        return (value, "config") if value > 0 else (None, "unknown")
 
     if model and local_model and model != local_model:
         from prometheus.context.compactor import DEFAULT_CLOUD_LIMIT

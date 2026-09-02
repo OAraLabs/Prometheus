@@ -50,6 +50,7 @@ import hashlib
 import logging
 import time
 from collections import OrderedDict
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from prometheus.context.budget import (
@@ -156,6 +157,8 @@ class ContextCompactor:
         model_overrides: dict[str, int] | None = None,
         detected_limit: int | None = None,
         cloud_default_limit: int = DEFAULT_CLOUD_LIMIT,
+        windows: Callable[[], Mapping[str, Any]] | None = None,
+        backend_hints: Mapping[str, int] | None = None,
     ) -> None:
         from prometheus.learning.llm_envelope import LLMCallEnvelope
 
@@ -174,6 +177,11 @@ class ContextCompactor:
         # number that outlived a model swap is exactly how a 32768-token
         # server came to be budgeted at 72000, leaving no room to generate.
         self._detected_limit = int(detected_limit) if detected_limit else None
+        # Per-backend windows, read LIVE from the registry on every call (a
+        # callable, not a snapshot): a box that restarted onto another model is
+        # re-sized on the next turn, not the next daemon restart.
+        self._windows = windows
+        self._backend_hints: dict[str, int] = dict(backend_hints or {})
         # Fallback for a model we have no entry for AND that is not the local
         # one. Never inherit the local GGUF's window here: cloud models are
         # far larger, and silently capping a 1M-token model at 28k wastes
@@ -213,6 +221,7 @@ class ContextCompactor:
         telemetry: Any | None = None,
         signal_bus: Any | None = None,
         detected_limit: int | None = None,
+        registry: Any | None = None,
     ) -> "ContextCompactor | None":
         """Build from the loaded prometheus.yaml dict.
 
@@ -292,6 +301,14 @@ class ContextCompactor:
             effective_limit=effective_limit,
             model_overrides=flat_overrides,
             detected_limit=detected_limit,
+            # The registry's per-backend windows (live) and operator hints — None
+            # when the daemon booted without a registry (tests, web-only).
+            windows=registry.detected_windows if registry is not None else None,
+            backend_hints={
+                spec.name: spec.context_limit
+                for spec in (registry.specs() if registry is not None else ())
+                if getattr(spec, "context_limit", None)
+            },
             cloud_default_limit=int(
                 ctx.get("cloud_default_limit", DEFAULT_CLOUD_LIMIT)
             ),
@@ -337,7 +354,7 @@ class ContextCompactor:
         total += max(0, int(tools_chars)) // 4  # same chars/4 heuristic
         return total
 
-    def limit_for(self, model: str | None = None) -> int:
+    def limit_for(self, model: str | None = None, backend: str | None = None) -> int:
         """Context budget for whichever model is serving THIS call.
 
         Precedence, most specific first:
@@ -360,15 +377,31 @@ class ContextCompactor:
         throws away 97% of the window.
         """
         name = model or self._model
-        if name and name in self._model_overrides:
-            return int(self._model_overrides[name])
-        if name and name == self._model:
-            # The local model — prefer what the server actually reported.
+        if not name:
             return int(self._detected_limit or self._effective_limit)
-        if name:
-            # Some other model: a cloud override is in play for this session.
-            return int(self._cloud_default_limit)
-        return int(self._detected_limit or self._effective_limit)
+        # One resolver (context/budget.py) for the reported number AND the
+        # enforced one — this method used to restate the precedence by hand,
+        # which is how the two could drift. Multi-backend: `backend` selects
+        # that box's REPORTED window from the registry, live.
+        ctx = {
+            "model_overrides": {
+                m: {"effective_limit": v} for m, v in self._model_overrides.items()
+            },
+            "effective_limit": self._effective_limit,
+            "cloud_default_limit": self._cloud_default_limit,
+        }
+        resolved, _source = resolve_effective_limit(
+            ctx,
+            model=name,
+            local_model=self._model,
+            detected_limit=self._detected_limit,
+            backend=backend,
+            detected=self._windows() if (backend and self._windows) else None,
+            backend_hint=self._backend_hints.get(backend) if backend else None,
+        )
+        if resolved is None:
+            return int(self._detected_limit or self._effective_limit)
+        return int(resolved)
 
     def _threshold_tokens(self, model: str | None = None) -> int:
         available = max(1, self.limit_for(model) - self._reserve_tokens)

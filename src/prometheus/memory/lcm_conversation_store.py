@@ -151,6 +151,13 @@ class LCMConversationStore:
                 set_by     TEXT NOT NULL,
                 updated_at REAL NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS session_backends (
+                session_id TEXT PRIMARY KEY,
+                key        TEXT NOT NULL,
+                set_by     TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
         """)
         self._conn.commit()
         self._migrate_add_content_json()
@@ -809,7 +816,8 @@ class LCMConversationStore:
             #    list so a NEW side table is a compile-time-visible omission
             #    here, not a silent survivor.
             for table in ("session_titles", "session_profiles", "session_pins",
-                          "session_tombstones", "session_forks", "session_workspaces"):
+                          "session_tombstones", "session_forks", "session_workspaces",
+                          "session_backends"):
                 counts[table] = self._conn.execute(
                     f"DELETE FROM {table} WHERE session_id = ?", (session_id,)
                 ).rowcount if self._table_exists(table) else 0
@@ -1047,6 +1055,37 @@ class LCMConversationStore:
                 (session_id, clean, set_by, time.time()),
             )
         self._conn.commit()
+
+    def set_session_backend(self, session_id: str, key: str | None, *, set_by: str = "router") -> None:
+        """Remember which local backend a session is pointed at (`/4090`,
+        `mini:qwen2.5:7b-instruct`). None/blank CLEARS. Same shape and rules as
+        the workspace binding: absence means "the daemon's primary". Cloud
+        overrides are never stored here — they were always RAM-only and stay so.
+        """
+        clean = (key or "").strip()
+        if not clean:
+            self._conn.execute("DELETE FROM session_backends WHERE session_id = ?", (session_id,))
+        else:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO session_backends (session_id, key, set_by, updated_at)"
+                " VALUES (?, ?, ?, ?)",
+                (session_id, clean, set_by, time.time()),
+            )
+        self._conn.commit()
+
+    def get_session_backend(self, session_id: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT key FROM session_backends WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def all_session_backends(self) -> dict[str, str]:
+        """Every remembered binding — what boot restore walks."""
+        return {
+            sid: key for sid, key in self._conn.execute(
+                "SELECT session_id, key FROM session_backends"
+            ).fetchall()
+        }
 
     def get_session_workspace(self, session_id: str) -> str | None:
         """The path bound to *session_id*, or None (= follow the daemon)."""
