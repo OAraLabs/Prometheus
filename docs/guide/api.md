@@ -47,6 +47,9 @@ All paths below are served on `:8005`. `{id}` placeholders are path parameters.
 | GET | `/api/sessions/{id}/workspace` | The session's working directory and its source (`session` or `daemon`), plus the daemon's cwd and configured workspace roots |
 | PUT | `/api/sessions/{id}/workspace` | Bind a working directory: `{"path": "/abs/dir"}`; blank clears. Refused unless absolute, an existing directory, not `/`, not under `security.denied_paths`. **The gate follows the session:** from the next turn this is the conversation's write boundary (`write_file`/`edit_file`, bash's lock and write floor), where relative paths resolve, and where its instruction files (PROMETHEUS.md, CLAUDE.md, AGENTS.md, …) are read |
 | DELETE | `/api/sessions/{id}/workspace` | Clear it — the session follows the daemon again |
+| GET | `/api/sessions/{id}/checkpoints` | The session's file checkpoints, newest first — one per turn, taken before any tool runs, only for sessions with a workspace |
+| GET | `/api/sessions/{id}/checkpoints/{cid}` | The checkpoint's files, what was skipped (too large), and what a restore would change now (`changed`, `deleted`, `added`, `unchanged`) |
+| POST | `/api/sessions/{id}/checkpoints/{cid}/restore` | `{"confirm": "<cid>", "dry_run": false}` — rewrites changed/deleted files from the checkpoint and removes files created since; names every path. `dry_run` reports without touching anything. Naming the checkpoint twice is the confirmation |
 
 Session semantics worth knowing:
 

@@ -653,6 +653,11 @@ class LoopContext:
     # (config, cwd) -> the section text for a workspace. Set by the daemon to
     # prompt_assembler.project_files_section bound to its config.
     project_prompt_builder: object | None = None
+    # Item 4: per-turn file checkpoints (prometheus.checkpoints.FileCheckpointStore).
+    # Used only when the run has a session workspace — that is the write
+    # domain the bwrap floor bounds, so it is the domain a checkpoint can
+    # honestly claim to restore. None = no checkpoints.
+    checkpoint_store: object | None = None
     # Phase 3.5: session_id used by the router's per-session override lookup.
     # Telegram: str(chat_id). Slack: str(channel_id). CLI: "cli". Web: "web".
     # Reserved: None and "system" never match any override (eval/benchmark/
@@ -876,6 +881,26 @@ def _goal_message_from(messages: list[ConversationMessage]) -> str:
     for msg in reversed(messages):
         if getattr(msg, "role", None) == "user":
             return msg.text or ""
+    return ""
+
+
+def _human_message_from(messages: list[ConversationMessage]) -> str:
+    """The most recent text a PERSON sent — for labels a person will read.
+
+    ``_goal_message_from`` takes any user-role message, which includes the
+    turns the loop injects on the user side (the file-mutation verifier's
+    report, a task result). A checkpoint labelled "[FILE MUTATION VERIFIER]
+    Files touched this turn…" was the live shape on 2026-09-01: it named the
+    previous turn's machinery instead of the message the checkpoint sits
+    before. Provenance "user" is the human; absence of the field is legacy
+    and counts as human.
+    """
+    for msg in reversed(messages):
+        if getattr(msg, "role", None) != "user":
+            continue
+        if getattr(msg, "provenance", "user") != "user":
+            continue
+        return msg.text or ""
     return ""
 
 
@@ -1176,6 +1201,23 @@ async def _run_loop(
     # request: that was the production shape on 2026-09-01 — the log said
     # "replacing the boot section", the model saw the boot section.
     run_system_prompt = active_system_prompt
+
+    # Item 4: checkpoint the workspace BEFORE any tool of this turn runs.
+    # Blocking I/O (walk + hash) off the event loop. A refusal or failure is
+    # logged at ERROR and the turn proceeds — the checkpoint list then shows
+    # the gap, which is the honest state; a turn must never fail because its
+    # undo could not be written.
+    if session_workspace is not None and context.checkpoint_store is not None:
+        _label = _human_message_from(messages)[:80]
+        try:
+            _cp = await asyncio.to_thread(
+                context.checkpoint_store.create, effective_session_id or "", session_workspace, _label,
+            )
+            log.info("Checkpoint %s for %s: %d files, %d bytes, %d skipped (%s)",
+                     _cp.id, effective_session_id, _cp.files, _cp.bytes, _cp.skipped, session_workspace)
+        except Exception as exc:
+            log.error("Checkpoint NOT written for %s at %s: %s — this turn's writes have no undo",
+                      effective_session_id, session_workspace, exc)
     active_tools = tool_schema
     if context.adapter is not None and hasattr(context.adapter, "format_request"):
         active_system_prompt, active_tools = context.adapter.format_request(
@@ -4243,6 +4285,7 @@ class AgentLoop:
         workspace_resolver: object | None = None,
         boot_project_prompt: str | None = None,
         project_prompt_builder: object | None = None,
+        checkpoint_store: object | None = None,
         fallback: object | None = None,
     ) -> None:
         self._provider = provider
@@ -4265,6 +4308,7 @@ class AgentLoop:
         self._workspace_resolver = workspace_resolver
         self._boot_project_prompt = boot_project_prompt
         self._project_prompt_builder = project_prompt_builder
+        self._checkpoint_store = checkpoint_store
         self._max_tokens = max_tokens
         self._max_turns = max_turns
         self._max_tool_iterations = max_tool_iterations
@@ -4397,6 +4441,7 @@ class AgentLoop:
             workspace_resolver=self._workspace_resolver,
             boot_project_prompt=self._boot_project_prompt,
             project_prompt_builder=self._project_prompt_builder,
+            checkpoint_store=self._checkpoint_store,
             # The nudge USED to be injected below, in the `async for` body.
             # That made it AgentLoop-only, so no web / Beacon / Bridge turn
             # ever saw it — the parity guard could not catch it either,

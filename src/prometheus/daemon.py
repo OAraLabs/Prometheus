@@ -1078,12 +1078,29 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     _boot_project_prompt = _project_files_section(config, str(Path.cwd()))
 
+    # Item 4: per-turn file checkpoints for sessions with a workspace.
+    checkpoint_store = None
+    from prometheus.checkpoints import FileCheckpointStore, resolve_checkpoints_config
+    _cp_cfg = resolve_checkpoints_config(config)
+    if _cp_cfg.get("enabled", True):
+        try:
+            checkpoint_store = FileCheckpointStore(
+                Path(get_config_dir()) / "checkpoints", config=config.get("checkpoints") or {},
+            )
+            logger.info("File checkpoints: ON at %s (keep %s per session, max %s files / %s bytes)",
+                        checkpoint_store.root, _cp_cfg["keep_per_session"], _cp_cfg["max_files"], _cp_cfg["max_total_bytes"])
+        except Exception:
+            logger.error("File checkpoints could not be constructed — turns will have NO undo", exc_info=True)
+    else:
+        logger.info("File checkpoints: OFF (checkpoints.enabled: false)")
+
     agent_loop = AgentLoop(
         provider=provider,
         model=model_name,
         workspace_resolver=_session_workspace,
         boot_project_prompt=_boot_project_prompt,
         project_prompt_builder=_project_prompt_for,
+        checkpoint_store=checkpoint_store,
         # Without this the fallback is INERT: the loop reads context.fallback and nothing
         # ever set it, so every terminal provider failure ended the turn exactly as before.
         fallback=build_fallback_target(model_config, detected_model=model_name),
@@ -2264,6 +2281,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 workspace_resolver=_session_workspace,
                 boot_project_prompt=_boot_project_prompt,
                 project_prompt_builder=_project_prompt_for,
+                checkpoint_store=checkpoint_store,
                 # THE SAME LESSON, THIRD TIME (2026-07-31). Everything below is
                 # config that AgentLoop threads for telegram/CLI and that this
                 # pre-built context silently dropped, so web/Beacon turns ran on
@@ -2432,6 +2450,8 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 # boot grammar was generated. Same regeneration SENTINEL
                 # triggers when it registers its tools post-start.
                 on_tools_changed=_on_tools_changed,
+                # Item 4: the checkpoint routes read/restore through the same store.
+                checkpoint_store=checkpoint_store,
                 # The window the server actually reported, and the model it
                 # reported it for. Same two values the compactor and the
                 # Telegram /context command are built from, so every surface

@@ -126,6 +126,20 @@ compaction:
   reserve_tokens: 4096
   threshold_pct: 0.75
 
+# Per-turn file checkpoints (item 4, 2026-09-01): the undo an agent that
+# edits your files needs. For a conversation that has a workspace
+# (/workspace), every turn snapshots the workspace before any tool runs;
+# GET /api/sessions/{id}/checkpoints lists them and POST …/{cid}/restore
+# puts the files back. Sessions without a workspace are not checkpointed —
+# the daemon's own cwd is the wrong domain and the wrong cost.
+checkpoints:
+  enabled: true
+  max_file_bytes: 2000000       # larger files are recorded as skipped, never restored
+  max_total_bytes: 200000000    # a bigger workspace is refused (logged at ERROR), the turn proceeds
+  max_files: 5000
+  keep_per_session: 20          # newest N per session; unreferenced blobs are garbage-collected
+  skip_dirs: [.git, .hg, .svn, node_modules, .venv, venv, __pycache__, .mypy_cache, .pytest_cache, .ruff_cache, dist, build, .tox, .prometheus]
+
 # Session working-set behaviour.
 sessions:
   # Cold-start rehydrate (feat/session-rehydrate). After a daemon restart, a
