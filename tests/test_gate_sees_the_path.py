@@ -329,6 +329,13 @@ _DIRECT_EVALUATE_TESTS: dict[str, str] = {
         "file loads. The decision table is the SUBJECT there — evaluate() is "
         "how you read a policy back out — and the delivery half is covered "
         "here through _execute_tool_call, unchanged by that fix.",
+    "test_session_workspace.py": (
+        "Item W: two direct evaluate(file_path=…, workspace_roots=…) calls show "
+        "the boundary INVERTING when the session's roots are supplied — the same "
+        "test then drives the real path (run_loop → _execute_tool_call) and "
+        "asserts the tool executed, so the direct calls are the demonstration, "
+        "not the proof."
+    ),
 }
 
 

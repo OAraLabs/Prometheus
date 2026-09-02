@@ -123,6 +123,34 @@ def _load_anatomy_summary() -> str | None:
     )
 
 
+def project_files_section(config: dict, cwd: str | Path) -> str | None:
+    """The "# Project Instructions" section for *cwd*, or None.
+
+    One function, two callers: ``build_runtime_system_prompt`` at boot (the
+    daemon's own cwd) and the per-session workspace path (item W), which
+    computes it for the session's cwd and replaces the boot section by exact
+    substring. Same config keys, same loader, same text — that equality is
+    what makes the swap safe.
+    """
+    context_cfg = (config or {}).get("context", {}) or {}
+    bootstrap_cfg = (config or {}).get("bootstrap", {}) or {}
+    stack_project_files = context_cfg.get("stack_project_files", True)
+    max_chars = context_cfg.get("project_file_max_chars", 12000)
+    # AGENTS.md is gated by bootstrap.load_agents (the subagent registry file
+    # shares the name). Discovery must honor that gate too, or turning the
+    # registry off would silently be undone the moment an AGENTS.md sits
+    # anywhere at or above cwd.
+    excluded_conventions = (
+        () if bootstrap_cfg.get("load_agents", True) else ("AGENTS.md",)
+    )
+    return load_project_files_prompt(
+        str(cwd),
+        max_chars_per_file=max_chars,
+        stack=stack_project_files,
+        exclude=excluded_conventions,
+    )
+
+
 def build_runtime_system_prompt(
     *,
     cwd: str,
@@ -302,22 +330,11 @@ def build_runtime_system_prompt(
             dynamic_sections.append("# Available Skills\n\n" + "\n".join(lines))
 
     # Project instruction files (PROMETHEUS.md, HERMES.md, CLAUDE.md, etc.)
-    # Stacked loading: collects files from all directory levels walking upward
-    context_cfg = config.get("context", {})
-    stack_project_files = context_cfg.get("stack_project_files", True)
-    max_chars = context_cfg.get("project_file_max_chars", 12000)
-    # AGENTS.md is already gated by bootstrap.load_agents above. Discovery must
-    # honor that gate too, or turning the registry off would silently be undone
-    # the moment an AGENTS.md sits anywhere at or above cwd.
-    excluded_conventions = (
-        () if bootstrap_cfg.get("load_agents", True) else ("AGENTS.md",)
-    )
-    project_prompt = load_project_files_prompt(
-        cwd,
-        max_chars_per_file=max_chars,
-        stack=stack_project_files,
-        exclude=excluded_conventions,
-    )
+    # Stacked loading: collects files from all directory levels walking upward.
+    # Factored into project_files_section so a session with a workspace of
+    # its own (item W) can have the SAME text computed for its cwd and
+    # swapped in per run — exact-substring replacement, no prompt parsing.
+    project_prompt = project_files_section(config, cwd)
     if project_prompt:
         dynamic_sections.append(project_prompt)
 

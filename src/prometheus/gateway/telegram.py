@@ -399,6 +399,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("help", self._cmd_help))
         self._app.add_handler(CommandHandler("reset", self._cmd_reset))
         self._app.add_handler(CommandHandler("ephemeral", self._cmd_ephemeral))
+        self._app.add_handler(CommandHandler("workspace", self._cmd_workspace))
         self._app.add_handler(CommandHandler("model", self._cmd_model))
         self._app.add_handler(CommandHandler("wiki", self._cmd_wiki))
         self._app.add_handler(CommandHandler("note", self._cmd_note))
@@ -549,6 +550,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("reset", "Clear conversation context"),
                 BotCommand("clear", "Clear conversation context"),
                 BotCommand("ephemeral", "on|off — stop remembering this chat"),
+                BotCommand("workspace", "[path|clear] — this chat's working directory + write boundary"),
                 BotCommand("model", "Show current model and provider"),
                 BotCommand("wiki", "Wiki stats and recent entries"),
                 BotCommand("sentinel", "SENTINEL subsystem status"),
@@ -944,6 +946,28 @@ class TelegramAdapter(BasePlatformAdapter):
             "Conversation context reset.",
             parse_mode=None,
         )
+
+    async def _cmd_workspace(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /workspace [path|clear] — this chat's working directory.
+
+        Same session key ``_dispatch_to_agent`` uses, same shared command the
+        other surfaces call (item W); the change reaches the chat's NEXT turn
+        through the loop's per-run workspace resolver.
+        """
+        if update.effective_chat is None:
+            return
+        session_key = f"{Platform.TELEGRAM.value}:{update.effective_chat.id}"
+        arg = " ".join(context.args) if getattr(context, "args", None) else ""
+        from prometheus.gateway import commands as _cmds
+        text = _cmds.cmd_workspace(
+            session_key, arg,
+            session_manager=self.session_manager,
+            security_cfg=getattr(self, "security_config", None),
+            set_by="telegram",
+        )
+        await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_ephemeral(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

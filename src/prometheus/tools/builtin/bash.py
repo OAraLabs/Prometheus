@@ -95,6 +95,7 @@ class BashTool(BaseTool):
         # enforce, so the floor has nothing to do — the same "no roots
         # configured = no confinement" rule SecurityGate applies.
         self._write_confinement = _CONFINE.normalise_write_mode(write_confinement)
+        self._write_allow = write_allow
         self._writable = (
             _CONFINE.writable_roots(self._workspaces, write_allow)
             if self._workspaces else ()
@@ -103,19 +104,33 @@ class BashTool(BaseTool):
     async def execute(self, arguments: BashToolInput, context: ToolExecutionContext) -> ToolResult:
         cwd = Path(arguments.cwd).expanduser().resolve() if arguments.cwd else context.cwd.resolve()
 
-        if self._workspaces:
-            if any(_is_under(cwd, root) for root in self._workspaces):
+        # Item W: a session with a workspace of its own carries it in the
+        # execution context, and for that call it REPLACES the configured
+        # roots — the lock and the write floor both follow the session.
+        session_roots = tuple(
+            Path(r).expanduser().resolve()
+            for r in (context.metadata.get("workspace_roots") or ())
+        )
+        workspaces = session_roots or self._workspaces
+        primary = workspaces[0] if workspaces else None
+        writable = (
+            _CONFINE.writable_roots(workspaces, self._write_allow)
+            if session_roots else self._writable
+        )
+
+        if workspaces:
+            if any(_is_under(cwd, root) for root in workspaces):
                 pass
             else:
                 if not arguments.cwd:
                     # No explicit cwd requested — fall back to workspace root
                     # instead of blocking (daemon often runs from repo dir)
-                    cwd = self._workspace
+                    cwd = primary
                 else:
                     return ToolResult(
                         output=(
                             f"Workspace lock violation: {cwd} is outside "
-                            f"allowed workspace {self._workspace}"
+                            f"allowed workspace {primary}"
                         ),
                         is_error=True,
                     )
@@ -159,7 +174,7 @@ class BashTool(BaseTool):
         # composed argv and a stack that does not compose fails closed.
         write_floor = "off"
         if self._write_confinement != _CONFINE.WRITE_MODE_OFF:
-            if not self._writable:
+            if not writable:
                 # Loud, not silent: "required" with no workspace root is a
                 # config that asks for a boundary without defining one.
                 write_floor = "no-workspace"
@@ -172,7 +187,7 @@ class BashTool(BaseTool):
                 ok, detail = _CONFINE.write_preflight(inner_prefix=aa_prefix)
                 if ok:
                     argv = _CONFINE.write_wrap_argv(
-                        argv, writable=self._writable, cwd=cwd)
+                        argv, writable=writable, cwd=cwd)
                     write_floor = "active"
                 elif self._write_confinement == _CONFINE.WRITE_MODE_REQUIRED:
                     return ToolResult(

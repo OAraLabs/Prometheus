@@ -1060,9 +1060,30 @@ async def run_daemon(args: argparse.Namespace) -> None:
         logger.warning("profile store unavailable — advertisement unfiltered: %s", exc)
 
     # Agent loop
+    # Item W: per-session workspace. Late-bound closures — the LCM store is
+    # constructed further down (lcm_engine), and both loop constructions
+    # (this AgentLoop for Telegram/Slack/Discord/CLI, the LoopContext for
+    # web/Beacon below) must resolve through the SAME store or a workspace
+    # set from Beacon would be invisible on Telegram — the two-loop trap.
+    from prometheus.context.prompt_assembler import project_files_section as _project_files_section
+
+    def _session_workspace(session_id: str):
+        store = getattr(getattr(agent_loop, "lcm_engine", None), "conversation_store", None)
+        if store is None:
+            return None
+        return store.get_session_workspace(session_id)
+
+    def _project_prompt_for(cwd: str):
+        return _project_files_section(config, cwd)
+
+    _boot_project_prompt = _project_files_section(config, str(Path.cwd()))
+
     agent_loop = AgentLoop(
         provider=provider,
         model=model_name,
+        workspace_resolver=_session_workspace,
+        boot_project_prompt=_boot_project_prompt,
+        project_prompt_builder=_project_prompt_for,
         # Without this the fallback is INERT: the loop reads context.fallback and nothing
         # ever set it, so every terminal provider failure ended the turn exactly as before.
         fallback=build_fallback_target(model_config, detected_model=model_name),
@@ -1219,6 +1240,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
             # mutates THE holder the loops resolve, instead of a per-adapter
             # attribute nothing read.
             telegram.profile_state = profile_state
+            telegram.security_config = security_config  # item W: /workspace validation
             gateway_registry.register_adapter(telegram)
             await telegram.start()
             archive.archive_event("telegram_started")
@@ -1369,6 +1391,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 detected_context_size=detected_ctx_size,
             )
             slack_adapter.profile_state = profile_state
+            slack_adapter.security_config = security_config  # item W: /workspace validation
             # SPRINT G1: registering replays every subsystem attached so far
             # (cost tracker, approval queue, printing press, …) onto Slack.
             gateway_registry.register_adapter(slack_adapter)
@@ -1430,6 +1453,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 detected_context_size=detected_ctx_size,
             )
             discord_adapter.profile_state = profile_state
+            discord_adapter.security_config = security_config  # item W: /workspace validation
             # SPRINT G1 contract: registering replays every subsystem attached
             # so far (cost tracker, approval queue, printing press, …) onto
             # Discord.
@@ -2236,6 +2260,10 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 # per run — a Beacon profile switch reaches the next web turn
                 # through this pre-built context too, not just telegram/CLI.
                 profile_resolver=profile_state.get if profile_state else None,
+                # Item W: the same three hooks as the AgentLoop path above.
+                workspace_resolver=_session_workspace,
+                boot_project_prompt=_boot_project_prompt,
+                project_prompt_builder=_project_prompt_for,
                 # THE SAME LESSON, THIRD TIME (2026-07-31). Everything below is
                 # config that AgentLoop threads for telegram/CLI and that this
                 # pre-built context silently dropped, so web/Beacon turns ran on

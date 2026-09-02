@@ -772,8 +772,15 @@ class SecurityGate:
         file_path: str | None = None,
         command: str | None = None,
         origin: str = ORIGIN_SYSTEM,
+        workspace_roots: "tuple[Path, ...] | list[Path] | None" = None,
     ) -> PermissionDecision:
         """Evaluate whether a tool call is permitted.
+
+        ``workspace_roots`` (item W, 2026-09-01): the write boundary for THIS
+        call, when the calling session has a workspace of its own. None keeps
+        the gate's configured roots. The gate follows the session: a
+        conversation pointed at a repo has that repo as its write boundary,
+        so this is per-call state, never stored on the gate.
 
         Called by agent_loop._execute_tool_call() with keyword args.
 
@@ -906,7 +913,7 @@ class SecurityGate:
                 self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason)
                 self._remember_approve_target(reason, file_path=file_path, command=command)
                 return PermissionDecision.approve(reason)
-            if file_path and not self._within_workspace(file_path):
+            if file_path and not self._within_workspace(file_path, roots=workspace_roots):
                 reason = f"{tool_name} targets path outside workspace: {file_path}"
                 self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason)
                 self._remember_approve_target(reason, file_path=file_path, command=command)
@@ -1278,18 +1285,21 @@ class SecurityGate:
                 return f"Path {file_path!r} is under denied prefix {denied!r}"
         return ""
 
-    def _within_workspace(self, file_path: str) -> bool:
-        """True when the path is under ANY configured workspace root.
+    def _within_workspace(self, file_path: str, roots: "tuple[Path, ...] | list[Path] | None" = None) -> bool:
+        """True when the path is under ANY workspace root.
 
-        No roots configured = no confinement, unchanged: that is a deliberate
-        API choice used by most SecurityGate construction sites (tests, and
-        callers confined another way). What must never happen is a CONFIG that
-        merely omits the key landing there — see resolve_workspace_root.
+        ``roots`` overrides the configured set for one call (a session's own
+        workspace — item W). No roots configured = no confinement, unchanged:
+        that is a deliberate API choice used by most SecurityGate construction
+        sites (tests, and callers confined another way). What must never
+        happen is a CONFIG that merely omits the key landing there — see
+        resolve_workspace_root.
         """
-        if not self._workspaces:
+        effective = tuple(roots) if roots else self._workspaces
+        if not effective:
             return True
         resolved = Path(file_path).expanduser().resolve()
-        for root in self._workspaces:
+        for root in effective:
             try:
                 resolved.relative_to(root)
                 return True
