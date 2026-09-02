@@ -83,7 +83,10 @@ class OllamaProvider(ModelProvider):
         self, request: ApiMessageRequest
     ) -> AsyncIterator[ApiStreamEvent]:
         """Single attempt to Ollama's /v1/chat/completions."""
-        messages = _build_openai_messages(request)
+        # Ollama has no mmproj probe, so `supports_vision` stays at the class
+        # default (False) unless something sets it — an ImageBlock then raises
+        # rather than being silently paraphrased. Same threading as llama_cpp.
+        messages = _build_openai_messages(request, allow_images=self.supports_vision)
 
         payload: dict[str, Any] = {
             "model": request.model,

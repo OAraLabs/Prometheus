@@ -123,6 +123,10 @@ _OPENAI_COMPAT_PROVIDERS = {
     "openai", "gemini", "xai", "deepseek", "kimi", "glm", "mimo", "qwen",
 }
 
+# Providers that serve from a box you own. Both build their request body with the
+# shared OpenAI-shape builder, so both can carry an `image_url` part.
+_LOCAL_PROVIDERS = {"llama_cpp", "ollama"}
+
 
 def _resolve_base_url(config: dict[str, Any], provider_name: str) -> str:
     """Resolve the API base URL from config, environment, or the built-in default.
@@ -259,9 +263,32 @@ def provider_class_supports_vision(provider_name: str) -> bool:
     # a picture on this wire", which is a property of the class, not of the model.
     if provider_name in _OPENAI_COMPAT_PROVIDERS:
         return True
-    # llama_cpp / ollama probe their own endpoint (mmproj) and are not wired into the
-    # image-block path yet; unknown providers are False by the same absence rule.
+    # llama_cpp / ollama serialise through the SAME builder (`image_url`, the shape
+    # llama-server's multimodal endpoint takes — verified live against a Qwen3.8-27B
+    # + mmproj server 2026-09-02). Capable, not permitted: whether the served model
+    # can actually see is the instance's DETECTED `supports_vision` (the mmproj
+    # probe), which is `provider_supports_vision` below. Until this line they were
+    # False here while the daemon logged "Vision: enabled" — a capability the
+    # system had detected, asserted away by a constant (#387).
+    if provider_name in _LOCAL_PROVIDERS:
+        return True
+    # Unknown providers are False by the same absence rule.
     return False
+
+
+def provider_supports_vision(provider: object | None) -> bool:
+    """Can THIS provider instance take an image on the next turn?
+
+    The instance-level question, for a provider that already exists (the boot
+    primary). `supports_vision` on an instance is the one attribute every
+    provider maintains for exactly this: declared for anthropic and the
+    OpenAI-compatible presets, DETECTED for llama_cpp (`/props` modalities at
+    boot). Reading it here means the gate, the catalog and the boot log all
+    answer from the same attribute — none of them may carry a literal.
+
+    None / an object without the attribute → False (absence-is-not-permission).
+    """
+    return bool(getattr(provider, "supports_vision", False))
 
 
 class ProviderRegistry:
