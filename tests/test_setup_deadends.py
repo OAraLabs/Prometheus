@@ -96,7 +96,11 @@ def scripted_input(monkeypatch):
 
 
 class TestFastPathDeadEnds:
-    def test_noninteractive_no_server_writes_nothing(self, tmp_path, capsys):
+    def test_noninteractive_no_server_writes_nothing(self, tmp_path, capsys, monkeypatch):
+        # No cloud key anywhere either — with one set, the noninteractive
+        # path now degrades to that provider instead of dead-ending.
+        for _key_env, _m, _l in init_mod._CLOUD_FAST_PROVIDERS.values():
+            monkeypatch.delenv(_key_env, raising=False)
         result = run_init(
             noninteractive=True, target_dir=tmp_path,
             timeout=0.1, candidates=_NO_SERVERS,

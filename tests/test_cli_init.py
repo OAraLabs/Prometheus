@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from prometheus.cli import init as init_mod
 from prometheus.cli.init import (
     DetectedServer,
     detect_local_servers,
@@ -298,8 +299,12 @@ class TestRunInit:
         assert len(backups) == 1
         assert "previous: real" in backups[0].read_text()
 
-    def test_noninteractive_no_server_writes_nothing(self, tmp_path):
+    def test_noninteractive_no_server_writes_nothing(self, tmp_path, monkeypatch):
         """Dead-end rule: nothing detected → clean exit, NO config."""
+        # No cloud key anywhere either — with one set, the noninteractive
+        # path now degrades to that provider instead of dead-ending.
+        for _key_env, _m, _l in init_mod._CLOUD_FAST_PROVIDERS.values():
+            monkeypatch.delenv(_key_env, raising=False)
         result = run_init(
             noninteractive=True,
             target_dir=tmp_path,

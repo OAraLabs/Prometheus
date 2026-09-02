@@ -6,7 +6,13 @@ This page takes you from nothing to a running Prometheus daemon with Beacon conn
 
 ## Prerequisites
 
-- **Python 3.11+** on the machine that will run the daemon.
+- **Python 3.11+** on the machine that will run the daemon. Check first — stock macOS ships 3.10, and against `requires-python >=3.11` pip answers *"No matching distribution found"*, which reads like the package does not exist:
+
+  ```bash
+  python3 --version
+  ```
+
+  Below 3.11, install a newer one (`brew install python@3.12`, or `uv python install 3.12` and `uv venv`) before anything else.
 - **An inference backend** — llama.cpp or Ollama running with any model loaded (LM Studio and vLLM also work), *or* a cloud API key (OpenAI, Anthropic, Gemini, xAI, DeepSeek, Kimi, GLM, MiMo). The setup wizard probes for local servers and never writes a config it knows is broken.
 - **Optional:** a Telegram bot token from [@BotFather](https://t.me/BotFather) if you want the Telegram gateway. The CLI and Beacon work without any gateway.
 
@@ -31,13 +37,15 @@ The `[full]` extra pulls in everything (web API, Slack/Discord gateways, MCP, br
 prometheus setup
 ```
 
-The wizard detects your inference server (llama.cpp on `:8080`, Ollama on `:11434`, LM Studio on `:1234`, vLLM on `:8000`), generates your agent's identity (`SOUL.md`), writes a working config with the web API enabled, and smoke-tests the loop with one real round-trip. If no server is running it offers a remote URL, a cloud provider, or copy-paste install instructions.
+The wizard detects your inference server (llama.cpp on `:8080`, Ollama on `:11434`, LM Studio on `:1234`, vLLM on `:8000`), generates your agent's identity (`SOUL.md`), writes a working config with the web API enabled, and smoke-tests the loop with one real round-trip. If no server is running it offers a remote URL, a cloud provider, or copy-paste install instructions. With no prompts allowed (`--noninteractive`) and no server found, exactly one cloud key in your environment or env file picks that provider; several keys is refused with a `--provider` hint, none exits 2 with install instructions. A key found only in your shell is copied into the env file so `prometheus daemon` has it too.
 
 Variants:
 
 ```bash
 prometheus setup --fast            # quick path: probe local servers, write yaml + env — 3 questions
 prometheus setup --noninteractive  # zero questions (implies --fast): first detected server, CLI gateway
+prometheus setup --provider openai # zero questions: THIS cloud provider; its key must be in $OPENAI_API_KEY or the env file
+ANTHROPIC_API_KEY=sk-… prometheus setup --noninteractive   # no GPU, no local server: one cloud key in the environment is enough
 prometheus setup --gateway-only    # add or change Telegram, Slack, or Discord later
 ```
 

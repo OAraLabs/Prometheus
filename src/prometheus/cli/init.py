@@ -510,6 +510,78 @@ def _prompt_cloud_provider(env_path: Path) -> dict[str, Any] | None:
     return _cloud_default_config(provider, key_env, model)
 
 
+def _cloud_key_source(key_env: str, env_path: Path) -> str | None:
+    """Where ``key_env`` is set: ``"environment"``, ``"env file"``, or None.
+
+    The env file is the one the daemon loads (``~/.config/prometheus/env``,
+    or the target-dir copy), so a key present only there still counts —
+    a re-run of setup must not demand the key be re-exported.
+    """
+    import os
+
+    if os.environ.get(key_env):
+        return "environment"
+    try:
+        from prometheus.config.env_file import parse_env_file
+
+        if env_path.exists() and parse_env_file(env_path).get(key_env):
+            return "env file"
+    except Exception:  # unreadable env file: treat as absent, never crash setup
+        pass
+    return None
+
+
+def _cloud_config_noninteractive(
+    provider: str,
+    api_key_env: str | None,
+    env_path: Path,
+    model: str | None = None,
+) -> dict[str, Any] | None:
+    """Cloud config with NO prompts. The key comes from the environment or
+    the env file — never from argv, which lands in shell history.
+
+    Returns None (and writes nothing) when the key is nowhere: a cloud
+    config without its key is exactly the known-broken config the
+    dead-end rule exists to refuse. A key found only in the environment is
+    copied into the env file, because ``prometheus daemon`` under systemd
+    does not inherit this shell.
+    """
+    import os
+
+    if provider not in _CLOUD_FAST_PROVIDERS:
+        print(f"  x Unknown cloud provider {provider!r}. "
+              f"Choose one of: {', '.join(_CLOUD_FAST_PROVIDERS)}")
+        return None
+    default_env, default_model, _limit = _CLOUD_FAST_PROVIDERS[provider]
+    key_env = api_key_env or default_env
+    source = _cloud_key_source(key_env, env_path)
+    if source is None:
+        print(f"  x {provider}: ${key_env} is not set, and it is not in {env_path}.")
+        print(f"    Export {key_env} (or add `{key_env}=...` to {env_path}) and re-run.")
+        print()
+        print("No config was written — a cloud config without its key is known-broken,")
+        print("and Prometheus refuses to write a config that cannot work.")
+        return None
+    if source == "environment":
+        write_env_template(env_path)  # make sure the commented template exists
+        from prometheus.config.env_file import set_env_value
+
+        set_env_value(key_env, os.environ[key_env], env_path)
+        print(f"  + {provider}: using ${key_env} from your environment "
+              f"(copied to {env_path} so the daemon has it too)")
+    else:
+        print(f"  + {provider}: using ${key_env} from {env_path}")
+    return _cloud_default_config(provider, key_env, model or default_model)
+
+
+def _cloud_providers_with_keys(env_path: Path) -> list[str]:
+    """Every fast-path cloud provider whose default key is set somewhere."""
+    return [
+        name for name, (key_env, _model, _limit) in _CLOUD_FAST_PROVIDERS.items()
+        if _cloud_key_source(key_env, env_path) is not None
+    ]
+
+
 def _handle_no_server(
     env_path: Path, timeout: float,
 ) -> tuple[DetectedServer | None, dict[str, Any] | None]:
@@ -554,8 +626,22 @@ def run_init(
     timeout: float = 1.0,
     candidates: list[dict[str, str]] | None = None,
     probe_url: str | None = None,
+    provider: str | None = None,
+    api_key_env: str | None = None,
+    model: str | None = None,
 ) -> dict[str, Any] | None:
     """Run the fast setup flow. Returns the config that was written.
+
+    ``provider`` (``--provider``) names a fast-path cloud provider and
+    skips every menu: the config is written if that provider's key is in
+    the environment or the env file, and refused otherwise. It wins over
+    a detected local server, because it is explicit. Without it, a
+    noninteractive run that finds no local server looks for exactly one
+    cloud key in the environment / env file and uses that provider —
+    ``ANTHROPIC_API_KEY=… prometheus setup --noninteractive`` on a box
+    with no GPU is the cloud-only install. Several keys is ambiguous and
+    refused with a ``--provider`` hint; none keeps the install-
+    instructions dead end.
 
     Returns ``None`` when the flow exited cleanly WITHOUT writing a
     config (nothing detected and the user took — or noninteractive mode
@@ -597,7 +683,17 @@ def run_init(
     chosen_server: DetectedServer | None = None
     chosen_model: str | None = None
     cloud_config: dict[str, Any] | None = None
-    if servers:
+    if provider is not None:
+        # Explicit cloud choice: no menus, wins over any detected server.
+        if servers:
+            print(f"\n--provider {provider}: using the cloud provider, not the "
+                  f"detected local server(s).")
+        cloud_config = _cloud_config_noninteractive(
+            provider, api_key_env, env_path, model,
+        )
+        if cloud_config is None:
+            return None
+    elif servers:
         if noninteractive:
             chosen_server = servers[0]
             chosen_model = chosen_server.models[0] if chosen_server.models else None
@@ -630,13 +726,31 @@ def run_init(
         # Dead-end rule: never write a config pointing at a server that
         # isn't there.
         if noninteractive:
-            _print_install_instructions()
-            return None
-        chosen_server, cloud_config = _handle_no_server(env_path, timeout)
-        if chosen_server is None and cloud_config is None:
-            return None
-        if chosen_server is not None and chosen_server.models:
-            chosen_model = chosen_server.models[0]
+            keyed = _cloud_providers_with_keys(env_path)
+            if len(keyed) == 1:
+                print(f"\nNo local server, but ${_CLOUD_FAST_PROVIDERS[keyed[0]][0]} "
+                      f"is set — using the {keyed[0]} cloud provider.")
+                cloud_config = _cloud_config_noninteractive(
+                    keyed[0], api_key_env, env_path, model,
+                )
+                if cloud_config is None:
+                    return None
+            elif len(keyed) > 1:
+                print(f"\nNo local server, and keys for several cloud providers are "
+                      f"set ({', '.join(keyed)}). Say which one:")
+                print(f"  prometheus setup --noninteractive --provider {keyed[0]}")
+                print()
+                print("No config was written — the choice is yours, not a coin flip.")
+                return None
+            else:
+                _print_install_instructions()
+                return None
+        else:
+            chosen_server, cloud_config = _handle_no_server(env_path, timeout)
+            if chosen_server is None and cloud_config is None:
+                return None
+            if chosen_server is not None and chosen_server.models:
+                chosen_model = chosen_server.models[0]
 
     # Gateway choice (don't require tokens up-front; user can enable later.
     # SPRINT G3: all three gateways are options in the SAME prompt — the
