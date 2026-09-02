@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
@@ -57,33 +58,57 @@ class WebFetchTool(BaseTool):
             )
 
         try:
-            async with httpx.AsyncClient(
-                follow_redirects=True, timeout=20.0
-            ) as client:
-                response = await client.get(
-                    arguments.url,
-                    headers={"User-Agent": "Prometheus/0.1"},
-                )
-                response.raise_for_status()
+            page = await fetch_url_text(arguments.url, max_chars=arguments.max_chars)
         except httpx.HTTPError as exc:
             return ToolResult(output=f"web_fetch failed: {exc}", is_error=True)
 
-        content_type = response.headers.get("content-type", "")
-        body = response.text
-        if "html" in content_type:
-            body = _html_to_text(body)
-        body = body.strip()
-        if len(body) > arguments.max_chars:
-            body = body[: arguments.max_chars].rstrip() + "\n...[truncated]"
-
         return ToolResult(
             output=(
-                f"URL: {response.url}\n"
-                f"Status: {response.status_code}\n"
-                f"Content-Type: {content_type or '(unknown)'}\n\n"
-                f"{body}"
+                f"URL: {page.url}\n"
+                f"Status: {page.status}\n"
+                f"Content-Type: {page.content_type or '(unknown)'}\n\n"
+                f"{page.body}"
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# Fetch — shared with web/references.py (@url references), so the composer's
+# @-reference and the agent's web_fetch tool read a page the same way.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class FetchedText:
+    url: str
+    status: int
+    content_type: str
+    body: str
+    truncated: bool
+
+
+async def fetch_url_text(url: str, *, max_chars: int, timeout: float = 20.0) -> FetchedText:
+    """GET ``url`` and return compact text (HTML → readable text).
+
+    Raises ``httpx.HTTPError`` (transport errors and non-2xx alike) — callers
+    decide how to say it. Does NOT apply the SSRF guard; call
+    :func:`_is_safe_url` first.
+    """
+    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+        response = await client.get(url, headers={"User-Agent": "Prometheus/0.1"})
+        response.raise_for_status()
+
+    content_type = response.headers.get("content-type", "")
+    body = response.text
+    if "html" in content_type:
+        body = _html_to_text(body)
+    body = body.strip()
+    truncated = len(body) > max_chars
+    if truncated:
+        body = body[:max_chars].rstrip() + "\n...[truncated]"
+    return FetchedText(
+        url=str(response.url), status=response.status_code,
+        content_type=content_type, body=body, truncated=truncated,
+    )
 
 
 # ---------------------------------------------------------------------------
