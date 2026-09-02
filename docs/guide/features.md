@@ -201,7 +201,7 @@ The full Telegram command table. Slack (`/prometheus-*`) and Discord (`/promethe
 | `/anatomy` | Hardware, GPU, VRAM, infrastructure snapshot |
 | `/profile` | Show or switch agent profiles |
 | `/workspace` | `[<absolute path> \| clear]` — this conversation's working directory, and its write boundary (the gate follows the session). Same rules on Telegram, Slack, Discord, the web chat and `PUT /api/sessions/{id}/workspace` |
-| `/api/sessions/{id}/checkpoints` | **File checkpoints — Default: on.** For a conversation with a workspace, every turn snapshots the workspace (content-addressed, skipping `.git`/`node_modules`/…) before any tool runs; restore over REST puts the files back and deletes what the turn created. The undo an agent that edits your files needs — bounded by the write floor, scoped by `/workspace` |
+| `/api/sessions/{id}/checkpoints` | **File checkpoints — daemon half, REST only for now.** For a conversation with a workspace, every turn snapshots the workspace (content-addressed, skipping `.git`/`node_modules`/…) before any tool runs; restore over REST puts the files back and deletes what the turn created — bounded by the write floor, scoped by `/workspace`. **Know the posture:** a checkpoint that cannot be written is logged at ERROR and the turn proceeds; the only place that gap shows is the checkpoint list, and Beacon has no checkpoint surface yet. Until it does, treat this as an API you call deliberately, not an undo you can count on having happened |
 | `/reset` / `/clear` | Clear conversation context |
 | `/steer <text>` | Inject mid-turn guidance (arrives after the next tool call) |
 | `/queue <text>` | Line up a follow-up turn for after the current one ends |
