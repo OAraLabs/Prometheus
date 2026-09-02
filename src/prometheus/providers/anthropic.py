@@ -28,6 +28,7 @@ from prometheus.engine.messages import (
     ToolUseBlock,
 )
 from prometheus.engine.usage import UsageSnapshot
+from prometheus.providers.retry import stream_with_retry
 from prometheus.providers.base import (
     ApiMessageCompleteEvent,
     ApiMessageRequest,
@@ -146,44 +147,14 @@ class AnthropicProvider(ModelProvider):
         self, request: ApiMessageRequest
     ) -> AsyncIterator[ApiStreamEvent]:
         """Stream a response from the Anthropic API."""
-        import asyncio
-        import random
 
-        last_error: Exception | None = None
-
-        for attempt in range(_MAX_RETRIES + 1):
-            # Whether this attempt has handed anything to the consumer yet.
-            emitted = False
-            try:
-                async for event in self._call_once(request):
-                    emitted = True
-                    yield event
-                return
-            except Exception as exc:
-                last_error = exc
-                status = getattr(exc, "status_code", None) or (
-                    exc.response.status_code if hasattr(exc, "response") else None
-                )
-                retryable = status in _RETRYABLE_STATUS_CODES if status else isinstance(
-                    exc, (httpx.ConnectError, httpx.TimeoutException, ConnectionError)
-                )
-                # A retry re-runs the request from scratch. Anything already yielded is
-                # already on the consumer's screen, so replaying over it appends a SECOND,
-                # possibly contradictory answer to the first (issue #293). Once output has
-                # left, the only honest move is to fail. Retries stay fully available for
-                # the common case: a failure before the first event.
-                if emitted or attempt >= _MAX_RETRIES or not retryable:
-                    raise
-                delay = min(_BASE_DELAY * (2 ** attempt), _MAX_DELAY)
-                delay += random.uniform(0, delay * 0.25)
-                log.warning(
-                    "Anthropic request failed (attempt %d/%d), retrying in %.1fs: %s",
-                    attempt + 1, _MAX_RETRIES + 1, delay, exc,
-                )
-                await asyncio.sleep(delay)
-
-        if last_error is not None:
-            raise last_error
+        async for event in stream_with_retry(
+            lambda: self._call_once(request),
+            retryable_status=_RETRYABLE_STATUS_CODES,
+            label="Anthropic",
+            max_retries=_MAX_RETRIES,
+        ):
+            yield event
 
     async def _call_once(
         self, request: ApiMessageRequest
