@@ -459,6 +459,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app.add_handler(CommandHandler("qwen", self._cmd_qwen))
         self._app.add_handler(CommandHandler("local", self._cmd_local))
         self._app.add_handler(CommandHandler("route", self._cmd_route))
+        self._app.add_handler(CommandHandler("backends", self._cmd_backends))
         # SPRINT-TEACHER-ESCALATION Phase 3: escalation stats / budget state
         self._app.add_handler(
             CommandHandler("escalations", self._cmd_escalations)
@@ -590,6 +591,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 BotCommand("qwen", "Route this chat through Qwen (Alibaba)"),
                 BotCommand("local", "Clear override, back to primary"),
                 BotCommand("route", "Show current routing (primary vs override)"),
+                BotCommand("backends", "What each local inference box is serving (refresh = re-probe)"),
             ])
         except Exception as exc:
             logger.warning("Failed to register command menu: %s", exc)
@@ -2324,6 +2326,16 @@ class TelegramAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
     # Sprint 18 ANATOMY: infrastructure self-awareness
     # ------------------------------------------------------------------
+
+    async def _cmd_backends(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /backends — what every local backend is serving (registry)."""
+        if update.effective_chat is None:
+            return
+        from prometheus.gateway.commands import cmd_backends
+        text = await cmd_backends(getattr(context, "args", None))
+        await self.send(update.effective_chat.id, text, parse_mode=None)
 
     async def _cmd_anatomy(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
