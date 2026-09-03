@@ -313,7 +313,17 @@ Variants:
 oara setup --fast            # quick path: probe → yaml → env, 3 questions
 oara setup --noninteractive  # zero questions (first detected server, CLI gateway)
 oara setup --gateway-only    # add/change Telegram, Slack, or Discord later
+oara setup --provider anthropic --api-key-env ANTHROPIC_API_KEY --model claude-sonnet-5   # no local GPU yet: start on a cloud model, switch later
 ```
+
+**Other ways to get it.** One command, isolated, straight from the main branch — then `oara setup` as above:
+
+```bash
+uv tool install 'oara-prometheus[full] @ git+https://github.com/OAraLabs/Prometheus'
+# or: pipx install 'oara-prometheus[full] @ git+https://github.com/OAraLabs/Prometheus'
+```
+
+Homebrew and PyPI are **coming, not here**: the tap `oaralabs/tap` exists and the `oara` name is reserved on PyPI, but neither serves a package yet — `brew install` and `pip install oara` will not give you Prometheus today. Both open with the first published release (see Roadmap).
 
 Prefer doing setup from a couch? Skip `oara setup`, run `oara daemon` bare, and it boots in **setup mode** — a pairing-only API that prints a one-time 6-digit code. Beacon's wizard takes it from there (detects backends, names the agent, configures gateways) and the daemon wakes fully configured:
 
