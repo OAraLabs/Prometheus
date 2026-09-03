@@ -60,6 +60,11 @@ model:
     # provider: "llama_cpp"          # defaults to the model config above
     # model: ""                      # defaults to the model config above
     # base_url: "http://localhost:8080"
+    # backend: "mini"                # OR name a `backends:` entry — the same table /mini and the
+    #                                # Models catalog resolve against, so the fallback chain and
+    #                                # the switcher cannot disagree about what `mini` is. Replaces
+    #                                # provider/base_url/model above; an unknown name disables the
+    #                                # fallback (logged) rather than guessing.
 
   identity_probe_interval_seconds: 300  # Re-ask the backend which model it is serving (0 = off).
                                     # Detection used to run ONCE at boot, so swapping the model on

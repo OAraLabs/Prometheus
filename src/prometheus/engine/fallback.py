@@ -24,6 +24,7 @@ Three things shape this module, all of them survey findings rather than assumpti
 from __future__ import annotations
 
 import logging
+from typing import Any
 from dataclasses import dataclass
 
 from prometheus.api.turn_errors import KIND_AUTH, KIND_BILLING
@@ -171,11 +172,15 @@ class FallbackTarget:
     provider_name: str
     provider: object  # ModelProvider — constructed by the caller, never by this module
     is_local_backend: bool
+    # Registry name when the target is a configured backend (`fallback.backend`),
+    # so the window lookup can budget the fallback turn at THAT box's reported n_ctx.
+    backend: str | None = None
 
 
 def build_fallback_target(
     model_config: dict | None,
     detected_model: str | None = None,
+    registry: Any | None = None,
 ) -> FallbackTarget | None:
     """Construct the fallback target from the LOCAL model configuration, or None.
 
@@ -196,6 +201,27 @@ def build_fallback_target(
     cfg = dict(model_config.get("fallback") or model_config)
     if cfg.get("enabled") is False:
         return None
+    # `model.fallback.backend: mini` names a registry entry: the SAME table the
+    # catalog and `/mini` resolve against, so the fallback chain and the
+    # switcher cannot hold two ideas of what `mini` is. The registry's tuple
+    # (provider/base_url, the served model when probed) replaces any
+    # provider/base_url/model typed here; an unknown name is "no fallback",
+    # logged — never a silent fall-through to the primary's own config.
+    backend_name = cfg.get("backend")
+    if backend_name:
+        spec = registry.get(str(backend_name)) if registry is not None else None
+        if spec is None:
+            log.warning(
+                "model.fallback.backend=%r names no configured backend%s — "
+                "fallback disabled rather than guessed",
+                backend_name, "" if registry is not None else " (no registry)",
+            )
+            return None
+        status = registry.status(spec.name)
+        resolved = spec.provider_config()
+        if status is not None and status.ok and status.model and not resolved.get("model"):
+            resolved["model"] = status.model
+        cfg = {**cfg, **resolved}
     provider_name = str(cfg.get("provider") or "llama_cpp")
     # Config first (an explicit `model.fallback.model` is an operator saying so), then what the
     # backend actually reports. Blank config is the NORMAL case here, not a misconfiguration.
@@ -214,6 +240,7 @@ def build_fallback_target(
         provider=provider,
         # llama_cpp and ollama serve from this box; everything else is a remote API.
         is_local_backend=provider_name in ("llama_cpp", "ollama"),
+        backend=str(cfg.get("backend")) if cfg.get("backend") else None,
     )
 
 

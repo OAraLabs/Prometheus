@@ -12,6 +12,7 @@ import platform
 import shutil
 import time
 from dataclasses import dataclass, field
+from typing import Any
 from pathlib import Path
 
 import httpx
@@ -100,6 +101,11 @@ class AnatomyState:
     # Connectivity
     tailscale_ip: str | None = None
     tailscale_peers: list[dict] = field(default_factory=list)  # [{name, ip, online}]
+    # Every local inference backend the daemon knows and what each was last
+    # seen serving — the registry's snapshot rows (providers/backends.py), so
+    # ANATOMY.md and /api/backends render the SAME probe. Empty when the
+    # scanner runs without a registry (CLI, tests).
+    backends: list[dict] = field(default_factory=list)
 
     # Storage
     disk_total_gb: float = 0.0
@@ -120,12 +126,22 @@ class AnatomyScanner:
         inference_engine: str = "llama_cpp",
         ssh_user: str | None = None,
         ssh_key: str | None = None,
+        registry: Any | None = None,
     ) -> None:
         self._llama_url = llama_cpp_url.rstrip("/")
         self._ollama_url = ollama_url.rstrip("/")
         self._engine = inference_engine
         self._ssh_user = ssh_user
         self._ssh_key = str(Path(ssh_key).expanduser()) if ssh_key else None
+        # The backend registry, when the daemon built one. With it, model
+        # detection is a READ of the registry's probe (one implementation of
+        # "what is this box serving", shared with the catalog, the router and
+        # /api/backends) rather than this scanner's own HTTP probe of one URL —
+        # and the scan carries every configured backend, not just the primary.
+        # The GPU leg (nvidia-smi over SSH) stays here: the registry is HTTP
+        # only and carries no credentials. Without a registry the scanner's
+        # own probe still runs, so the CLI and tests are unchanged.
+        self._registry = registry
 
     async def scan(self) -> AnatomyState:
         """Full infrastructure scan."""
@@ -504,10 +520,42 @@ class AnatomyScanner:
         return AnatomyScanner._parse_nvidia_smi_primary(state, output)
 
     async def _detect_model(self, state: AnatomyState) -> None:
+        if self._registry is not None:
+            await self._detect_model_from_registry(state)
+            return
         if self._engine == "llama_cpp":
             await self._detect_model_llama_cpp(state)
         else:
             await self._detect_model_ollama(state)
+
+    async def _detect_model_from_registry(self, state: AnatomyState) -> None:
+        """Fill the model fields from the registry's probe of the primary
+        (`local`) and carry every backend's row. Probes through the registry's
+        TTL — a scan is a read of the same facts /api/backends serves, never a
+        second opinion about them."""
+        from prometheus.providers.backends import PRIMARY_NAME
+
+        reg = self._registry
+        try:
+            await reg.probe_all()
+        except Exception as exc:  # noqa: BLE001 — a probe failure is a recorded state
+            log.debug("backend registry probe during anatomy scan failed: %s", exc)
+        primary = reg.status(PRIMARY_NAME)
+        if primary is not None and primary.probed:
+            served = primary.model_path or primary.model
+            if served:
+                state.model_name = served
+                self._parse_model_id(state, served)
+            state.vision_enabled = bool(primary.vision)
+            if primary.ok:
+                state.inference_features.append("streaming")
+                if (primary.extra or {}).get("total_slots"):
+                    state.inference_features.append("multi_slot")
+        # Vision from the process cmdline is the last resort the HTTP path had;
+        # keep it for a server that publishes no `modalities`.
+        if primary is not None and primary.vision is None and not state.vision_enabled:
+            state.vision_enabled = await self._check_cmdline_vision()
+        state.backends = list(reg.snapshot().values())
 
     async def _detect_model_llama_cpp(self, state: AnatomyState) -> None:
         try:
