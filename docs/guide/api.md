@@ -196,9 +196,9 @@ Artifacts are **content-addressed**: ids are a sha256 prefix of the file bytes, 
 |---|---|---|
 | GET | `/api/backends` | Every local inference backend the daemon knows (the primary as `local` + `backends:` in config) and what each is serving — model, reported window, detected vision, latency, `stale`, `changed_at`. Probes through the registry's TTL; `?refresh=1` forces every backend |
 | POST | `/api/backends/{name}/probe` | Force one backend's probe now; 404 for an unknown name |
-| GET | `/api/models` | Model catalog (local + cloud providers). `vision` on the `local` row is the boot provider's **detected** capability (llama.cpp `/props` modalities, i.e. an mmproj is loaded) — the same value the image-upload gate uses; on cloud rows it is the preset's declared flag |
+| GET | `/api/models` | Model catalog (local + backends + cloud providers). Backend rows carry `backend`, `health` (the registry's last probe: `ok`, `probed`, `stale`, `n_ctx`, `latency_ms`, `error`, `changed_at`), `available` = reachable, `vision` = detected. The `local` row carries the same two fields. `vision` on the `local` row is the boot provider's **detected** capability (llama.cpp `/props` modalities, i.e. an mmproj is loaded) — the same value the image-upload gate uses; on cloud rows it is the preset's declared flag |
 | GET | `/api/sessions/{session_id}/model` | Current per-session model override |
-| POST | `/api/sessions/{session_id}/model` | Set a per-session override (`local` clears back to the primary) |
+| POST | `/api/sessions/{session_id}/model` | Set a per-session override (`local` clears back to the primary). A backend key (`4090`, `mini:qwen2.5:7b-instruct`) is **probed first**: 200 with the row on success, 503 with the probe's error and `health` when the box is down — nothing switches |
 | DELETE | `/api/sessions/{session_id}/model` | Clear the override |
 
 ### Provider keys & xAI OAuth

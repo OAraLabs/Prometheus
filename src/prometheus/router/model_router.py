@@ -15,7 +15,8 @@ import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from collections.abc import Mapping
+from typing import Any, Callable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -193,6 +194,10 @@ class RouteDecision:
     model_name: str = ""
     provider_name: str = ""
     cost_warning: str | None = None
+    # The registry name of the local box serving this decision (`/4090`), or
+    # None for the primary and for cloud overrides. Downstream reads it for the
+    # context window (that backend's REPORTED n_ctx) and the identity line.
+    backend: str | None = None
 
 
 @dataclass
@@ -408,7 +413,9 @@ def resolve_slash_command_target(
     """
     default_preset = OVERRIDE_PRESETS.get(command_name)
     if default_preset is None:
-        return None
+        # Not a cloud preset — a configured local backend resolves through the
+        # SAME function, so `/4090` and `/claude` are one code path from here on.
+        return resolve_backend_target(command_name, prometheus_config)
 
     cfg = prometheus_config or {}
     slash_section = cfg.get("slash_commands") or {}
@@ -442,6 +449,104 @@ def resolve_slash_command_target(
     if user_entry.get("base_url"):
         resolved["base_url"] = user_entry["base_url"]
     return resolved
+
+
+def _backend_of(override_fields: Mapping[str, Any] | None) -> str | None:
+    """The registry name an override names, or None (a cloud preset). These
+    fields are a PROVIDER config (the tuple ProviderRegistry.create takes), not
+    a section of prometheus.yaml — read through this helper so the config-key
+    extractors do not mistake them for one."""
+    if not isinstance(override_fields, Mapping):
+        return None
+    value = override_fields.get("backend")
+    return str(value) if value else None
+
+
+def _backend_table(prometheus_config: dict[str, Any] | None) -> Any:
+    """The registry: the daemon's live one (probed) when it exists, else a
+    config-only table with the same specs and no probe results. One source of
+    "which backends exist" either way — never a second parse of `backends:`."""
+    from prometheus.providers.backends import BackendRegistry, get_registry
+
+    reg = get_registry()
+    if reg is None:
+        reg = BackendRegistry.from_config(prometheus_config or {})
+    return reg
+
+
+def _backend_spec(name: str, prometheus_config: dict[str, Any] | None) -> Any | None:
+    if name in OVERRIDE_PRESETS:
+        return None
+    spec = _backend_table(prometheus_config).get(name)
+    if spec is None or getattr(spec, "is_primary", False):
+        # `local` is the clear-override key (bare /local), never an override target.
+        return None
+    return spec
+
+
+def resolve_backend_target(
+    name: str,
+    prometheus_config: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Provider config for a configured local backend, or None.
+
+    Carries `backend: <name>` so the router, the context resolver and the
+    identity line know which box a turn ran on. When the registry has probed
+    the box, the served model fills a missing `model` and DETECTED vision sets
+    `vision: True` — the gate then reads a probe result where a cloud preset
+    would carry a declared flag. Absent probe → absent flag → no images, by the
+    same absence-is-not-permission rule.
+    """
+    spec = _backend_spec(name, prometheus_config)
+    if spec is None:
+        return None
+    target = spec.provider_config()
+    status = _backend_table(prometheus_config).status(name)
+    if status is not None and status.ok:
+        if not target.get("model") and status.model:
+            target["model"] = status.model
+        if status.vision is True:
+            target["vision"] = True
+    return target
+
+
+def backend_command_names(prometheus_config: dict[str, Any] | None) -> tuple[str, ...]:
+    """The slash commands the configured backends add (`/4090`, `/mini`) — the
+    non-primary registry names. Gateways register one handler per name."""
+    reg = _backend_table(prometheus_config)
+    return tuple(n for n in reg.names() if not getattr(reg.get(n), "is_primary", False))
+
+
+def restore_backend_overrides(
+    router: "ModelRouter",
+    registry: Any,
+    bindings: Mapping[str, str],
+    prometheus_config: dict[str, Any] | None = None,
+) -> tuple[int, list[tuple[str, str, str]]]:
+    """Re-apply persisted backend overrides at boot — onto boxes the boot probe
+    found UP, and only those.
+
+    ``bindings`` is session_id → catalog key (``"4090"``, ``"mini:qwen2.5:7b"``)
+    as the conversation store remembers them. A binding whose backend is no
+    longer configured, or whose box is down, is SKIPPED with the reason and the
+    session starts on the primary — a dead pointer is never restored. Applied
+    directly to the override table (not via set_override) so restoring does
+    not re-persist what is already persisted. Returns (restored, skipped)."""
+    restored = 0
+    skipped: list[tuple[str, str, str]] = []
+    for session_id, key in bindings.items():
+        target = resolve_model_target(key, prometheus_config)
+        name = (target or {}).get("backend")
+        status = registry.status(name) if name else None
+        if target is None:
+            skipped.append((session_id, key, "not configured"))
+            continue
+        if status is None or not status.ok:
+            skipped.append((session_id, key, (status.error if status is not None else "never probed") or "down"))
+            continue
+        router._overrides[session_id] = ProviderOverride(provider_config=dict(target))
+        restored += 1
+    return restored, skipped
 
 
 def split_model_key(key: str) -> tuple[str, str | None]:
@@ -480,7 +585,12 @@ def resolve_model_choices(
     user_entry = (cfg.get("slash_commands") or {}).get(command_name) or {}
     user_models = user_entry.get("models")
 
-    if isinstance(user_models, (list, tuple)) and user_models:
+    backend_spec = _backend_spec(command_name, prometheus_config)
+    if backend_spec is not None:
+        # A backend's vetted list is its `models:` (ollama swaps per request);
+        # a llama.cpp box serves one model, so its list is just what it serves.
+        candidates = list(backend_spec.models)
+    elif isinstance(user_models, (list, tuple)) and user_models:
         candidates = [str(m).strip() for m in user_models if str(m).strip()]
     else:
         candidates = list(PRESET_MODEL_CHOICES.get(command_name, ()))
@@ -566,11 +676,18 @@ class ModelRouter:
         primary_provider: Any,
         primary_adapter: Any,
         primary_model: str = "local",
+        persist_override: Callable[[str, dict | None], None] | None = None,
     ) -> None:
         self.config = config
         self.primary_provider = primary_provider
         self.primary_adapter = primary_adapter
         self.primary_model = primary_model
+        # Durable home for a BACKEND override (`/4090`), so a chat pointed at a
+        # box comes back on it after a restart. Called with the provider config
+        # on set and None on clear; only overrides carrying a `backend` key are
+        # persisted — cloud presets stay RAM-only, as they always were. Wired by
+        # the daemon to the conversation store; None in tests and the CLI.
+        self.persist_override = persist_override
 
         # Lazy-built providers
         self._fallback_cache: list[tuple[dict, Any | None]] = [
@@ -681,6 +798,15 @@ class ModelRouter:
         self._overrides[session_id] = ProviderOverride(
             provider_config=provider_config,
         )
+        if (
+            self.persist_override is not None
+            and _backend_of(provider_config)
+            and self.config.overrides_sticky
+        ):
+            try:
+                self.persist_override(session_id, dict(provider_config))
+            except Exception:  # noqa: BLE001 — persistence is a convenience; the override is set
+                log.exception("backend override for %s could not be persisted", session_id)
 
     def clear_override(self, session_id: str) -> None:
         """Clear the override for one session (called by /local).
@@ -689,7 +815,12 @@ class ModelRouter:
         Clearing a reserved session_id is also a silent no-op (nothing to
         clear — reserved IDs never hold overrides).
         """
-        self._overrides.pop(session_id, None)
+        had = self._overrides.pop(session_id, None)
+        if self.persist_override is not None and had is not None and _backend_of(had.provider_config):
+            try:
+                self.persist_override(session_id, None)
+            except Exception:  # noqa: BLE001
+                log.exception("backend override for %s could not be un-persisted", session_id)
 
     def get_override_for_session(self, session_id: str | None) -> ProviderOverride | None:
         """Look up an override for this session.
@@ -730,6 +861,7 @@ class ModelRouter:
             reason=RouteReason.USER_OVERRIDE,
             model_name=entry.provider_config.get("model", "unknown"),
             provider_name=entry.provider_config.get("provider", "unknown"),
+            backend=entry.provider_config.get("backend"),
         )
         if not self.config.overrides_sticky:
             # One-shot mode — drop the override so the next message falls

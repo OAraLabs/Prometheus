@@ -467,6 +467,9 @@ class SlackAdapter(BasePlatformAdapter):
         self._app.command("/prometheus-local")(self._slash_local)
         self._app.command("/prometheus-route")(self._slash_route)
         self._app.command("/prometheus-backends")(self._slash_backends)
+        from prometheus.router.model_router import backend_command_names
+        for _backend_name in backend_command_names(self._prometheus_config):
+            self._app.command(f"/prometheus-{_backend_name}")(self._make_backend_slash(_backend_name))
 
         # Start Socket Mode connection.
         #
@@ -1201,6 +1204,25 @@ class SlackAdapter(BasePlatformAdapter):
                 logger.debug("profile switch persistence skipped", exc_info=True)
 
         await respond(text=text)
+
+    def _make_backend_slash(self, name: str):
+        async def _handler(ack: Any, command: Any, respond: Any) -> None:
+            await ack()
+            from prometheus.gateway import commands as _cmds
+            channel = self._cmd_channel(command)
+            if not channel:
+                await respond(text="Channel id missing from slash payload.")
+                return
+            raw = (self._cmd_text(command) or "").split()
+            model, rest = _cmds.split_model_arg(name, self._prometheus_config, raw)
+            text, _applied = await _cmds.cmd_backend_override(
+                self.agent_loop, self._prometheus_config, f"slack:{channel}", name, model=model,
+            )
+            if rest:
+                text += "\n\nNote: inline message dispatch isn't supported on Slack yet — send your question as a normal message."
+            await respond(text=text)
+        _handler.__name__ = f"_slash_backend_{name}"
+        return _handler
 
     async def _slash_backends(self, ack: Any, command: Any, respond: Any) -> None:
         await ack()

@@ -616,6 +616,11 @@ class LoopContext:
     # billing — never a 429, which is already retried a layer down). None disables it, which is
     # also the Phase 4 opt-out coding mode relies on to keep its pinned-provider guarantee.
     fallback: object | None = None        # FallbackTarget
+    # Registry name of the local box serving this context after routing
+    # (`/4090` → "4090"); None for the primary and for cloud overrides. The
+    # window lookup passes it so the compactor budgets THAT box's reported
+    # n_ctx, not the primary's.
+    backend: str | None = None
     # H1: per-result cap (tokens) applied to EACH tool result before injection,
     # via ToolResultTruncator's per-tool strategies. 0 disables (back-compat for
     # tests/benchmarks). Runs before the cross-result turn budget below, and
@@ -1114,6 +1119,9 @@ async def _run_loop(
                     context.adapter = decision.adapter
                 if decision.model_name:
                     context.model = decision.model_name
+                # Which box (if any) this decision runs on — the primary and cloud
+                # overrides leave it None; a `/4090` override names the registry entry.
+                context.backend = getattr(decision, "backend", None)
                 # Phase 4 fix: after the router swap, rewrite the identity
                 # line in the system prompt ("- Model: <name> (provider: <p>)")
                 # to match the *active* provider. Without this, a primary-
@@ -1137,7 +1145,11 @@ async def _run_loop(
                         context.system_prompt,
                         model_name=decision.model_name or "unknown",
                         provider_name=decision.provider_name or "unknown",
-                        serving_is_local_backend=(reason_repr == "primary"),
+                        # A named local backend IS local serving, even though the
+                        # route reason is "user override".
+                        serving_is_local_backend=(
+                            reason_repr == "primary" or context.backend is not None
+                        ),
                     )
             except Exception:
                 # Phase 4: elevated from DEBUG → WARNING. A silent DEBUG here
@@ -1468,8 +1480,11 @@ async def _run_loop(
             # Measured only for a local backend — llama.cpp publishes n_ctx at /props. Cloud
             # APIs do not publish context length at all, so that side is a configured floor and
             # the refusal message must say which it had.
-            measured = bool(getattr(context.fallback, "is_local_backend", False))
-            return context.compactor.limit_for(_model), measured
+            backend = getattr(context, "backend", None)
+            measured = (
+                bool(getattr(context.fallback, "is_local_backend", False)) or backend is not None
+            )
+            return context.compactor.limit_for(_model, backend=backend), measured
 
         def _estimate_tokens() -> int:
             if context.compactor is None:

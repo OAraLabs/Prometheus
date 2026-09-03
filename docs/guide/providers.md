@@ -55,7 +55,17 @@ Where it shows: `/backends` on every chat surface and in Beacon (`refresh` force
 
 Names become slash commands, so they follow Telegram's grammar (`[a-z0-9_]{1,32}`) and may not collide with a cloud preset or a built-in command. A bad entry is refused with its reason — logged at boot and listed by `/backends` — and the rest still load. Only `llama_cpp` and `ollama` are backends; cloud providers are slash-command presets.
 
-Two things the registry deliberately does not do. It never changes what a box serves: llama-server is one model per process, and swapping it is a restart of that box's service, outside this harness. And it does not yet *switch* a chat to a backend — today it probes and reports; the `/4090`-style per-chat override is the follow-up that builds on this table.
+One thing the registry deliberately does not do: it never changes what a box serves. llama-server is one model per process, and swapping it is a restart of that box's service, outside this harness. `/4090` points a chat at the box; what the box serves is the box's business, and the registry reports it.
+
+### Switching a chat to a backend: `/4090`, `/mini`
+
+Every configured backend is a slash command on every chat surface (`/4090` on Telegram, `/prometheus-4090` on Slack, `/prometheus provider 4090` on Discord) and a row in `GET /api/models` (Beacon's Models tab), through the **same per-session override path** the cloud commands use — `/claude` and `/4090` are one code path from the resolver down. Bare `/local` still means "back to the boot default".
+
+What differs is the check that runs first. A cloud preset is checked for a credential; a backend is **probed, now**: the switch carries the box's served model (so the compactor budgets the window *that box reported for that model*), its detected vision, and the backend name — or it is refused with the probe's reason ("4090 is down — connect timeout"), so a dead box is a named refusal at the command rather than a failed turn later. Ollama backends take a model argument from their vetted list (`/mini qwen2.5:7b-instruct`, REST key `mini:qwen2.5:7b-instruct`); a llama.cpp backend serves one model and takes none.
+
+The context window follows the box. `/api/status`, `/api/lcm`, and `/context` report the window in force for *that* session with a source that names the backend — `detected:4090`, or `backend_config:mini` when the operator's `context_limit` hint had to stand in — and a box that restarts onto a different model is re-sized on the next turn, not the next daemon restart. A local backend with nothing detected falls to the configured global, never to the cloud default.
+
+Backend overrides **persist**: the binding is stored beside the session's workspace and re-applied at boot — onto a box the boot probe found up, and only those. A session whose box is down comes back on the primary, noted once in the boot log. Cloud overrides stay RAM-only, as they always were.
 
 ## Adapter strictness
 

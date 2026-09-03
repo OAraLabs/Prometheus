@@ -1033,6 +1033,9 @@ async def run_daemon(args: argparse.Namespace) -> None:
         compactor = ContextCompactor.from_config(
             config, provider=provider, model=model_name, telemetry=telemetry,
             detected_limit=detected_ctx_size,
+            # Per-backend windows come from the registry, live — a `/4090` turn
+            # is budgeted at THAT box's reported n_ctx.
+            registry=backend_registry,
         )
         if compactor is not None:
             # Report the RESOLVED budget, not the configured one. This line
@@ -1090,6 +1093,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
         if store is None:
             return None
         return store.get_session_workspace(session_id)
+
 
     def _project_prompt_for(cwd: str):
         return _project_files_section(config, cwd)
@@ -1706,6 +1710,49 @@ async def run_daemon(args: argparse.Namespace) -> None:
         logger.info("Memory extractor started (task=memory_extractor)")
     except Exception as exc:
         logger.warning("Memory extractor not available: %s", exc)
+
+    # A session's BACKEND override (`/4090`) persists beside its workspace, in
+    # the same durable store, and is restored at boot — but only onto a box the
+    # boot probe found up. A session whose box is down comes back on the
+    # primary, said once here in the log; a dead pointer is never restored.
+    # Placed AFTER the agent loop and its LCM engine exist (the store hangs off
+    # the loop) and after the boot probe, so restore sees real probe results.
+    _backend_store = getattr(getattr(agent_loop, "lcm_engine", None), "conversation_store", None)
+    if (
+        model_router is not None
+        and _backend_store is not None
+        and hasattr(_backend_store, "set_session_backend")
+    ):
+        def _persist_backend(session_id: str, override: dict | None) -> None:
+            # `override` is the provider tuple the router holds for the session
+            # (provider/base_url/model/backend), not a prometheus.yaml section.
+            if override is None:
+                _backend_store.set_session_backend(session_id, None)
+                return
+            fields = dict(override)
+            key = str(fields.pop("backend", "") or "")
+            model = fields.pop("model", None)
+            spec = backend_registry.get(key)
+            # Store the catalog key: bare for the backend's default model, composite
+            # when a specific vetted model was chosen — the same key REST accepts.
+            if spec is not None and model and spec.models and model != spec.models[0] and model in spec.models:
+                key = f"{key}:{model}"
+            _backend_store.set_session_backend(session_id, key)
+
+        model_router.persist_override = _persist_backend
+        try:
+            from prometheus.router.model_router import restore_backend_overrides
+            restored, skipped = restore_backend_overrides(
+                model_router, backend_registry, _backend_store.all_session_backends(), config,
+            )
+            if restored or skipped:
+                logger.info(
+                    "Backend overrides restored for %d session(s); %d left on the primary: %s",
+                    restored, len(skipped),
+                    "; ".join(f"{s} → {k} ({why})" for s, k, why in skipped) or "—",
+                )
+        except Exception:  # noqa: BLE001 — restore is a convenience; boot continues on the primary
+            logger.exception("Backend override restore failed; sessions start on the primary")
 
     # Infrastructure self-awareness — AnatomyScanner (Sprint 18 ANATOMY)
     anatomy_config = config.get("anatomy", {})
