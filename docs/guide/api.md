@@ -194,7 +194,7 @@ Artifacts are **content-addressed**: ids are a sha256 prefix of the file bytes, 
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/models` | Model catalog (local + cloud providers) |
+| GET | `/api/models` | Model catalog (local + cloud providers). `vision` on the `local` row is the boot provider's **detected** capability (llama.cpp `/props` modalities, i.e. an mmproj is loaded) — the same value the image-upload gate uses; on cloud rows it is the preset's declared flag |
 | GET | `/api/sessions/{session_id}/model` | Current per-session model override |
 | POST | `/api/sessions/{session_id}/model` | Set a per-session override (`local` clears back to the primary) |
 | DELETE | `/api/sessions/{session_id}/model` | Clear the override |

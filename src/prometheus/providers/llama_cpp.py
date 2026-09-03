@@ -589,7 +589,11 @@ class LlamaCppProvider(ModelProvider):
         chat_template_kwargs in case a future field on ApiMessageRequest
         carries caller-supplied entries (today only suppress_thinking exists).
         """
-        messages = _build_openai_messages(request)
+        # `allow_images` is the DETECTED capability (detect_vision → /props
+        # modalities), never a literal: with an mmproj loaded an ImageBlock rides
+        # as an `image_url` part, without one the builder refuses loudly instead
+        # of dropping the picture. #387.
+        messages = _build_openai_messages(request, allow_images=self.supports_vision)
         payload: dict[str, Any] = {
             "model": request.model,
             "messages": messages,

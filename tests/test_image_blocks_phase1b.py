@@ -74,9 +74,10 @@ def test_gate_says_yes_for_a_declared_vision_override():
 
 
 def test_gate_reads_the_session_override_not_the_primary():
-    """#74's shape. With no override the primary answers, and in Phase 1 the
-    primary keeps the description path — so a session that never switched must
-    not get the image path just because the process model can see."""
+    """#74's shape. With no override the PRIMARY answers — from its own detected
+    `supports_vision` (#387; see test_local_vision_wiring.py). The stand-in here
+    has never detected anything, so the answer is no — by absence, not by the
+    literal False this branch carried through Phase 1."""
     bridge, _ = _bridge(None)
     assert bridge._turn_supports_vision("beacon:s1") is False
 
@@ -93,12 +94,11 @@ def test_gate_requires_the_provider_to_be_able_to_express_an_image():
     carry one — a user's slash_commands block can override `provider` while the
     preset's `vision` stays. Then the block would reach the OpenAI builder and
     raise. The gate refuses first."""
-    # The example moved in Phase 2. It used to be `qwen`, because the OpenAI builder
-    # raised on every image; that builder can now express one, so the old fixture
-    # asserted a fact that had changed. `llama_cpp` still exhibits the property:
-    # declared on the model, but not wired into the image-block path. Property kept,
-    # example moved.
-    bridge, _ = _bridge(_Override({"provider": "llama_cpp", "model": "qwen3.8-27b", "vision": True}))
+    # The example has moved twice. `qwen` stopped exhibiting the property in Phase 2
+    # (the OpenAI builder learned `image_url`); `llama_cpp` stopped in #387 (it
+    # builds through that same builder, so it CAN carry a picture — permission is
+    # the detected flag). A provider name nothing can build for still exhibits it.
+    bridge, _ = _bridge(_Override({"provider": "nonesuch", "model": "m", "vision": True}))
     assert bridge._turn_supports_vision("beacon:s1") is False
 
 
@@ -123,9 +123,11 @@ def test_provider_capability_comes_from_the_class():
     # permission; the declared per-model flag still decides (see the gate tests).
     assert provider_class_supports_vision("qwen") is True
     assert provider_class_supports_vision("openai") is True
-    # Not wired into the image-block path: these probe their own endpoint instead.
-    assert provider_class_supports_vision("llama_cpp") is False
-    assert provider_class_supports_vision("ollama") is False
+    # #387: both local providers build through the same `image_url` builder, so the
+    # CLASS can carry a picture; whether the served model can see is the instance's
+    # detected `supports_vision` (the mmproj probe) — see test_local_vision_wiring.py.
+    assert provider_class_supports_vision("llama_cpp") is True
+    assert provider_class_supports_vision("ollama") is True
     assert provider_class_supports_vision("nonesuch") is False
 
 

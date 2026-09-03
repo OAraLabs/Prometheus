@@ -749,9 +749,18 @@ class WebSocketBridge:
             return False
         override = router.get_override_for_session(session_id)
         if override is None:
-            # The configured primary. Phase 1 ships the image path for anthropic
-            # presets only; the primary keeps the description path unchanged.
-            return False
+            # The configured primary: the one provider that already EXISTS, so
+            # the question is answered by the instance itself — `supports_vision`
+            # as detected at boot (llama.cpp `/props` modalities) or declared by
+            # the class. This branch was a literal `False` ("Phase 1") for a
+            # release cycle while the boot log said "Vision: enabled" — the same
+            # defect as the 24000 in /api/lcm: a constant where a detected value
+            # existed. #387. The catalog's `local` row reads the same predicate.
+            from prometheus.providers.registry import provider_supports_vision
+
+            return provider_supports_vision(
+                getattr(self.loop_context, "provider", None)
+            )
         cfg = override.provider_config or {}
         if not bool(cfg.get("vision", False)):
             return False

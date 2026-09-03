@@ -55,6 +55,21 @@ Not flagged: pagination and feed limits (``recent(limit=100)``,
 have nothing to do with a model's context window. A guard that failed on them
 would be turned off within a week, which is worse than no guard.
 
+CAPABILITY FLAGS — THE SAME DEFECT IN A BOOLEAN
+-----------------------------------------------
+The fourth instance in a week was not an integer. ``GET /api/models`` carried
+``"vision": False`` on the ``local`` row as a literal ("Phase 1") while the
+daemon had probed the server, found an mmproj, and logged "Vision: enabled
+(multimodal)". Same shape: a surface asserting a constant where the system
+held a detected value; a client (Beacon) then believed the local model could
+not see and withheld the picture. So a capability the system can DETECT may
+never be a literal in a catalog row either: a ``"vision"`` (or
+``"supports_vision"``) entry whose value is a bool constant, inside a dict that
+is shaped like a catalog row (a ``"provider"``, ``"key"`` or ``"model"``
+sibling), is flagged. ``bool(preset.get("vision", False))`` is not — that is a
+read of a DECLARED flag with absence meaning False, which is the documented
+posture for cloud presets whose capability cannot be probed.
+
 BOTH DIRECTIONS
 ---------------
 A guard that flags nothing because its AST walk silently matches nothing looks
@@ -106,6 +121,20 @@ CONTEXT_SIBLINGS = frozenset({
     "limit_source",
 })
 
+# Capabilities the system DETECTS (llama.cpp ``/props`` modalities, a provider
+# class attribute). A bool literal bound to one of these inside a catalog row is
+# an assertion standing where a probe result belongs.
+CAPABILITY_NAMES = frozenset({"vision", "supports_vision"})
+
+# Siblings that identify a dict as a catalog / model row, so a ``"vision"``
+# literal inside it is a capability claim about a model rather than, say, a
+# feature toggle in an unrelated payload.
+CATALOG_SIBLINGS = frozenset({"provider", "key", "model"})
+
+
+def _is_bool_literal(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and isinstance(node.value, bool)
+
 
 def _is_int_literal(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(
@@ -153,12 +182,16 @@ class _ContextLiteralVisitor(ast.NodeVisitor):
             if isinstance(k, ast.Constant) and isinstance(k.value, str)
         }
         contextual = bool(keys & CONTEXT_SIBLINGS)
+        catalog_row = bool(keys & CATALOG_SIBLINGS)
         for key, value in zip(node.keys, node.values):
             if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
                 continue
             name = key.value
             flagged = name in CONTEXT_NAMES or (name == "limit" and contextual)
             if flagged and _is_int_literal(value):
+                self.hits.append((value.lineno, f'"{name}":', value.value))
+            # A detectable capability asserted as a constant in a model row.
+            if name in CAPABILITY_NAMES and catalog_row and _is_bool_literal(value):
                 self.hits.append((value.lineno, f'"{name}":', value.value))
         self.generic_visit(node)
 
@@ -245,8 +278,9 @@ def test_the_three_known_surfaces_are_covered() -> None:
 def test_no_hardcoded_context_budget(path: Path) -> None:
     hits = _scan(path.read_text(encoding="utf-8"))
     assert not hits, (
-        f"{path.relative_to(REPO_ROOT)} hardcodes a context "
-        f"budget: " + ", ".join(f"line {ln}: {name} {val}" for ln, name, val in hits)
+        f"{path.relative_to(REPO_ROOT)} hardcodes a context budget or a "
+        f"detectable capability: "
+        + ", ".join(f"line {ln}: {name} {val}" for ln, name, val in hits)
         + ". Resolve it through prometheus.context.budget.resolve_effective_limit "
         "instead — a literal here is a window that exists nowhere in the system. "
         "On a display path it renders a confident wrong denominator; on an "
@@ -337,3 +371,42 @@ DEFAULTS = {"token_budget": 32768}
 '''
     hits = _scan(variant)
     assert {v for _, _, v in hits} == {72000, 32768}
+
+
+def test_detector_catches_the_shipped_vision_literal() -> None:
+    """Replay of #387: the ``local`` catalog row as it shipped. The system had
+    detected vision (llama.cpp ``/props`` modalities → ``supports_vision``); the
+    row said False because someone typed False. One hit, and it is that one."""
+    shipped = '''
+catalog = [{
+    "key": "local", "label": "Local", "provider": primary_provider,
+    "model": primary_model, "is_default": True, "available": True,
+    "auth": None,
+    "vision": False,
+}]
+'''
+    hits = _scan(shipped)
+    assert [(name, val) for _, name, val in hits] == [('"vision":', False)]
+
+
+def test_detector_ignores_a_declared_capability_read() -> None:
+    """The cloud rows READ a declared flag with absence-is-False. That is a
+    config read, not an assertion, and it must stay legal — the cloud APIs
+    publish no capability to detect."""
+    declared = '''
+row = {
+    "key": key, "provider": preset.get("provider", "unknown"), "model": model,
+    "vision": bool(preset.get("vision", False)),
+}
+'''
+    assert _scan(declared) == []
+
+
+def test_detector_ignores_a_vision_flag_outside_a_model_row() -> None:
+    """``"vision"`` as a feature toggle in an unrelated payload is not a claim
+    about a model. Only a row shaped like the catalog (provider/key/model
+    sibling) is in scope, so the rule cannot fire on a settings dict."""
+    toggle = '''
+features = {"vision": False, "tts": True, "search": True}
+'''
+    assert _scan(toggle) == []

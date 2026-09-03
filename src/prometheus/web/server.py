@@ -3931,6 +3931,16 @@ def create_app(
     # sprint) so /api/models and /api/providers/keys never disagree on names.
     from prometheus.providers.key_catalog import PRESET_LABELS as _PRESET_LABELS
 
+    def _primary_supports_vision() -> bool:
+        """The boot provider's detected vision capability — the SAME object the
+        WebSocket gate reads (`bridge.loop_context.provider`), so /api/models and
+        an actual image upload answer from one attribute."""
+        from prometheus.providers.registry import provider_supports_vision
+
+        bridge = getattr(app.state, "ws_bridge", None)
+        loop_ctx = getattr(bridge, "loop_context", None)
+        return provider_supports_vision(getattr(loop_ctx, "provider", None))
+
     def _model_catalog() -> list[dict]:
         # Configured primary (key "local" → clear_override) + each vetted cloud preset.
         # `available`/`auth` are presence-only (credential_status: subscription
@@ -3946,11 +3956,14 @@ def create_app(
             "key": _LOCAL_MODEL_KEY, "label": "Local", "provider": primary_provider,
             "model": primary_model, "is_default": True, "available": True,
             "auth": None,
-            # False in Phase 1 even though the local llama.cpp endpoint may well
-            # report modalities.vision=true: this flag gates the IMAGE-BLOCK path,
-            # and Phase 1 ships that for anthropic only. The local model keeps the
-            # description path, byte-identical. Phase 2 wires the probe through.
-            "vision": False,
+            # DETECTED, never asserted. This flag gates the image-block path, and
+            # the value is the boot provider's own `supports_vision` — the mmproj
+            # probe for llama.cpp — read through the same predicate the WebSocket
+            # gate uses, so the row and the turn cannot disagree. It sat here as a
+            # literal False for a release cycle while the daemon logged "Vision:
+            # enabled (multimodal)" (#387). No bridge (web-only boots, tests) →
+            # no provider → False, by absence.
+            "vision": _primary_supports_vision(),
         }]
         for key in _OVERRIDE_PRESETS:
             # Resolve through the SAME path the /claude slash command uses, so REST and
