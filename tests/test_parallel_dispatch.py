@@ -7,7 +7,6 @@ error isolation, and hook integration.
 from __future__ import annotations
 
 import asyncio
-import time
 from pathlib import Path
 from typing import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
@@ -52,6 +51,53 @@ class ReadOnlyTool(BaseTool):
     async def execute(self, arguments: DummyInput, context: ToolExecutionContext) -> ToolResult:
         if self._delay:
             await asyncio.sleep(self._delay)
+        return ToolResult(output=f"{self.name} result")
+
+
+class _ConcurrencyGate:
+    """Shared by the probe tools: counts callers currently inside `execute`,
+    remembers the most that were inside at once, and releases everyone the
+    moment `expected` have arrived. A sequential dispatcher never fills it."""
+
+    def __init__(self, expected: int, timeout: float = 2.0) -> None:
+        self.expected = expected
+        self.timeout = timeout
+        self.active = 0
+        self.high_water = 0
+        self.timed_out = False
+        self._all_in = asyncio.Event()
+
+    async def enter(self) -> None:
+        self.active += 1
+        self.high_water = max(self.high_water, self.active)
+        if self.active >= self.expected:
+            self._all_in.set()
+        try:
+            await asyncio.wait_for(self._all_in.wait(), timeout=self.timeout)
+        except asyncio.TimeoutError:
+            # Sequential dispatch lands here: the lone caller gives up so the
+            # test can FAIL with a number instead of hanging.
+            self.timed_out = True
+        finally:
+            self.active -= 1
+
+
+class _OverlapProbeTool(BaseTool):
+    """A read-only tool whose only work is to stand inside the gate."""
+
+    name = "probe"
+    description = "records overlap with its siblings"
+    input_model = DummyInput
+
+    def __init__(self, name: str, gate: _ConcurrencyGate) -> None:
+        self.name = name
+        self._gate = gate
+
+    def is_read_only(self, arguments: DummyInput) -> bool:
+        return True
+
+    async def execute(self, arguments: DummyInput, context: ToolExecutionContext) -> ToolResult:
+        await self._gate.enter()
         return ToolResult(output=f"{self.name} result")
 
 
@@ -155,21 +201,36 @@ class TestParallelReadOnly:
 
     @pytest.mark.asyncio
     async def test_multiple_read_only_run_in_parallel(self):
-        """Three read-only tools with delays should finish faster than sequential."""
-        t1 = ReadOnlyTool("read_a", delay=0.05)
-        t2 = ReadOnlyTool("read_b", delay=0.05)
-        t3 = ReadOnlyTool("read_c", delay=0.05)
+        """Three read-only tools must be IN FLIGHT AT THE SAME TIME.
+
+        This used to assert wall-clock (`elapsed < 0.12` for three 50 ms
+        sleeps). That measures the machine, not the dispatcher: it failed on
+        the shared CI runner at 0.26-0.33 s and on a loaded dev box, every time
+        with the dispatcher doing exactly the right thing — a flaky gate that
+        trained readers to re-run red CI, which is the one habit a gate must
+        not create. Parallelism is a property of overlap, so it is asserted as
+        overlap: every tool waits inside its call until all three have entered,
+        and records the high-water mark of concurrent callers. Sequential
+        dispatch can never reach a mark of 3 (the first call would wait alone
+        until its timeout); parallel dispatch reaches it on every machine,
+        regardless of load.
+        """
+        gate = _ConcurrencyGate(expected=3)
+        t1 = _OverlapProbeTool("read_a", gate)
+        t2 = _OverlapProbeTool("read_b", gate)
+        t3 = _OverlapProbeTool("read_c", gate)
         ctx = _make_context([t1, t2, t3])
 
-        start = time.monotonic()
         results = await _dispatch_tool_calls(
             ctx, [_tc("read_a"), _tc("read_b"), _tc("read_c")]
         )
-        elapsed = time.monotonic() - start
 
         assert len(results) == 3
-        # If sequential, would take ~0.15s; parallel should be ~0.05s
-        assert elapsed < 0.12, f"Expected parallel execution, took {elapsed:.3f}s"
+        assert not any(r.is_error for r in results), [r.content for r in results]
+        assert gate.high_water == 3, (
+            f"Expected all three read-only calls in flight together; the most that "
+            f"overlapped was {gate.high_water} (timed out waiting: {gate.timed_out})"
+        )
 
     @pytest.mark.asyncio
     async def test_results_preserve_original_order(self):
