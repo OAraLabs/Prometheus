@@ -8,7 +8,7 @@ A sovereign agent harness for local LLMs — the validation layer that makes ope
 
 Prometheus is two pieces that pair with a 6-digit code:
 
-- **The daemon** — an always-on Python agent runtime: agent loop + Model Adapter Layer, three chat gateways (Telegram / Slack / Discord), lossless memory, sandboxed coding runs, cron, a security gate, and a bearer-token REST + WebSocket control plane — plus an OpenAI-compatible `/v1` surface so anything that already speaks OpenAI can talk to it.
+- **The daemon** — an always-on Python agent runtime: agent loop + Model Adapter Layer, a registry of every local inference box you own, three chat gateways (Telegram / Slack / Discord), lossless memory, sandboxed coding runs, cron, a security gate, and a bearer-token REST + WebSocket control plane — plus an OpenAI-compatible `/v1` surface so anything that already speaks OpenAI can talk to it.
 - **[Beacon](https://github.com/OAraLabs/beacon-desktop)** — its native desktop cockpit (macOS / Linux): chat with live tool timelines, `@`-references and hands-free voice, Mission Control, a Loop Manager for coding runs, per-turn file checkpoints you can restore, a documents editor with AI redlines, Kanban, telemetry feeds, and per-provider key management. An iOS client rides the same control plane (per-device tokens, push, pagination).
 
 ```bash
@@ -42,8 +42,9 @@ Without this, `import fastapi` fails inside `.venv` and three test files won't e
 - **Sandboxed coding runs** — point it at a repo and an acceptance command; it iterates to green in a clone and hands you a reviewable branch. Never merges, never pushes.
 - **A working directory per conversation, with undo** — `/workspace <path>` points a chat at a repo; the security gate follows it, project instructions (`PROMETHEUS.md`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`…) load from it, and every turn takes a file checkpoint first so a bad edit is one REST call (or one Beacon click) from undone.
 - **Sees what you show it** — images reach a vision-capable model as images, not paraphrases; stored by reference so the bytes never bloat the transcript. `@file`, `@diff` and `@url` in the composer resolve on the daemon, scoped to the conversation's workspace.
+- **Every GPU box you own, one table** — name your inference boxes under `backends:` and each becomes a slash command and a row in the model picker: `/4090`, `/mini`, `/mini qwen2.5:7b-instruct`. The daemon probes each box (served model, reported context window, detected vision, latency), refuses to switch a chat to a box that is down and says why, budgets the conversation at *that* box's window, and remembers the choice across restarts. `/backends` shows the table; `/local` brings a chat home.
 - **Telemetry that stays home** — every tool call, repair, and token count logged to SQLite on your own disk and sent nowhere. It's the raw material for tuning the adapter and fine-tuning your own model: the data big labs keep for themselves, kept by you instead.
-- **A desktop cockpit** — Beacon pairs to the daemon over your LAN or tailnet and gives every subsystem a native surface; on OAra Voice it also talks back — phrase-by-phrase streaming TTS and a hands-free mode with barge-in.
+- **A desktop cockpit** — Beacon pairs to the daemon over your LAN or tailnet and gives every subsystem a native surface; the model picker groups your own boxes above the cloud presets with each box's health, and on OAra Voice it also talks back — phrase-by-phrase streaming TTS and a hands-free mode with barge-in.
 
 > **Status:** Active development. Expect rough edges. Fixes land weekly. Feedback welcome.
 
@@ -81,7 +82,7 @@ The last one is there because its absence shipped: a control suite whose every c
 
 ### Provenance
 
-**Provenance.** Like most software, Prometheus started on the shoulders of open source: early scaffolding — base file tools, cron, the engine skeleton — was adapted from MIT-licensed projects, chiefly [OpenHarness](https://github.com/HKUDS/OpenHarness), with smaller pieces from the [Hermes Agent](https://github.com/NousResearch/hermes-agent) and [OpenClaw](https://github.com/openclaw/openclaw). Every adapted file names its source in a header comment; upstream notices are in [NOTICE](NOTICE). Several subsystems — the gateways, LSP integration, teacher escalation — were designed by studying prior art and implemented clean-room.
+**Provenance.** Prometheus is OAra Labs' code. It began in April 2026 as a scaffold renamed from the MIT-licensed [OpenHarness](https://github.com/HKUDS/OpenHarness) — the tool base class, the bash tool, the cron scheduler and the first agent loop — and has been built out from there: today 31 of 348 source files (about 9% of the lines) carry an OpenHarness header, and those files have been extended far beyond what was imported. A handful of files adapt or port specific pieces from the [Hermes Agent](https://github.com/NousResearch/hermes-agent) (the xAI OAuth sign-in, the memory tool, Slack-adapter and skill-curator patterns) and [OpenClaw](https://github.com/openclaw/openclaw) (the memory extractor's cadence, MCP naming and transport patterns); the skill-learning pipeline was ported from OAra's own skillforge-engine. Every adapted file names its source in a header comment, and [NOTICE](NOTICE) reproduces the upstream licences. The gateways, LSP integration and teacher escalation were designed by studying prior art and implemented clean-room; design influences with no code copied are listed in Credits below.
 
 ---
 
@@ -157,6 +158,7 @@ Three commitments run through everything below:
 - Fallback chains that **degrade loudly**: when a provider fails terminally the turn moves to the configured fallback and says so — a `provider_degraded` frame on the wire, a line in history, and a named reason when a fallback *declines* (the context doesn't fit, the key is missing) instead of silence
 - The loop stops itself: a hard iteration ceiling per turn (50 by default, the live value reported on `/api/status`), plus a self-halt on unproductive repetition — the same call six times adjacent, or three consecutive divergent rounds — so a flailing model ends the turn instead of burning the budget
 - Thinking blocks persist and round-trip across providers with one wire vocabulary, so a reasoning model's traces survive a restart and a client switch
+- A **backend registry** owns "which local boxes exist and what each is serving" — the model picker, the per-chat override, the fallback chain, Anatomy and `/api/status` all read it, so no two surfaces can disagree about a box. It reports; it never restarts a server (llama-server is one model per process, and swapping it is that box's business)
 
 ### 50+ Builtin Tools
 
@@ -489,6 +491,25 @@ profile:
   active: "full"       # full | coder | research | assistant | minimal
 ```
 
+Several GPU boxes? Name them once and every surface gets them — slash commands, the model picker, the fallback chain, `/api/status`:
+
+```yaml
+backends:                       # the primary in `model:` is registered automatically as `local`
+  4090:
+    provider: llama_cpp
+    base_url: http://gpu-box:8080
+  mini:
+    provider: ollama
+    base_url: http://localhost:11434
+    model: qwen2.5:14b-instruct                          # what this box serves for you
+    models: [qwen2.5:14b-instruct, qwen2.5:7b-instruct]  # vetted choices (ollama swaps per request)
+backend_probe:
+  ttl_s: 60                     # a read older than this re-probes; /backends refresh forces it
+  timeout_s: 5.0                # per box — a dead box costs one timeout, never a hang
+```
+
+`/mini` points a chat at that box after a live probe (a down box is a named refusal, not a failed turn); the chat is budgeted at the window the box *reported*, the choice survives a restart, and `/local` brings it home. `model.fallback.backend: mini` makes the same entry the fallback target, so the switcher and the fallback chain cannot disagree about what `mini` is.
+
 ## Gateways
 
 Three messaging gateways, all first-class: every onboarding surface (`oara setup`, the fast path, the remote setup API, and Beacon's wizard) can enable any subset, and `oara doctor` reports each one's state.
@@ -513,6 +534,7 @@ The full 40+ command surface is in the [feature reference](docs/guide/features.m
 | `/wiki` `/note` `/memory` | Knowledge base stats, quick capture, memory files |
 | `/skills` `/profile` `/anatomy` | Skills, agent profiles, infrastructure snapshot |
 | `/workspace <path>` | Point this conversation at a repo — gate, project files and checkpoints follow |
+| `/backends` `/<backend>` | What every local box is serving; `/4090`, `/mini [model]` point this chat at a box (probed first, refused if down) |
 | `/approve` `/deny` `/pending` | Human-in-the-loop approval queue |
 | `/claude` `/gpt` `/gemini` `/xai` `/deepseek` `/kimi` `/glm` `/mimo` | Per-chat cloud override |
 | `/local` `/route` | Back to the local model · show this chat's routing |
@@ -571,7 +593,7 @@ prometheus/
 │   └── config/          # Settings, paths, env overrides, profiles
 ├── templates/           # Identity templates (no personal data)
 ├── skills/              # 103-file skill library (.md, opt-in)
-├── tests/               # 6,700+ tests across 400 files
+├── tests/               # 6,700+ tests across 403 files
 ├── docs/                # Guides, architecture, sprint reports
 │   └── guide/           # Install · features · Beacon · coding · skills · memory · providers · API
 ├── gym/                 # Frozen task-sets, harvest corpus
@@ -582,7 +604,7 @@ prometheus/
 ## Stats
 
 - ~107,000 lines of production Python
-- 6,700+ tests across 400 test files
+- 6,700+ tests across 403 test files
 - 50+ builtin tools registered by default (54 on the reference install, two of them MCP) + config-gated LSP and vision/STT tools
 - 103-file skill library + self-authored skills
 - 10+ model providers (local and cloud)
@@ -613,6 +635,7 @@ prometheus/
 - [x] Per-conversation workspace, per-turn file checkpoints, `@`-references, project-instruction discovery
 - [x] OpenAI-compatible `/v1` surface; `oara` console script
 - [x] Streaming TTS + hands-free voice (OAra Voice bridge + Beacon)
+- [x] Multi-backend — a registry of every local inference box, `/4090`-style per-chat switching with probe-before-switch, per-backend context windows, Beacon desktop + iOS pickers
 - [x] Beacon: attach to running coding runs, pause/inject/resume from the UI
 - [x] Secrets redacted at every log handler and at capture time; logs rotate
 - [ ] Fine-tuning flywheel (LoRA on collected traces) — *capture/export pipeline shipped; training loop pending*
