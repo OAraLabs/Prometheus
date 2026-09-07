@@ -95,8 +95,54 @@ def ensure_api_token(config: dict[str, Any] | None = None) -> tuple[str, bool]:
     return token, True
 
 
-def rotate_api_token() -> str:
-    """Mint a fresh token, persist it to the env file, and return it."""
+class TokenRotationBlocked(RuntimeError):
+    """The effective token cannot be rotated where it actually lives (#320).
+
+    Rotation persists to the env file, but :func:`resolve_api_token` — and
+    with it ``create_app``/``launcher`` — reads ``web.api_token`` from
+    ``prometheus.yaml`` FIRST. When a token is pinned there, writing the env
+    file changes nothing the daemon reads: the command used to report success,
+    hand back a token that would never authenticate, and leave the old one
+    (in the incident that opened #320, a leaked one) valid across restarts.
+
+    Refusing is the honest outcome rather than rotating the YAML in place:
+    the env file is where this project keeps secrets BY DESIGN (see
+    ``config/env_file.py``), the daemon never writes ``prometheus.yaml``, and
+    that file is routinely version-controlled — silently minting a secret
+    into it would trade one quiet failure for a worse one.
+
+    Carries the remedy, not just the complaint: ``str(exc)`` names the key,
+    the file, and the two steps that make rotation effective.
+    """
+
+    def __init__(self, source: str, config_path: str | None = None) -> None:
+        self.source = source
+        self.config_path = config_path or "prometheus.yaml"
+        super().__init__(
+            f"the active web API token is pinned in {self.config_path} "
+            f"(web.api_token), which the daemon reads BEFORE the env file — "
+            f"writing a new token to {get_env_file_path()} would leave the "
+            f"current one live. Remove or blank the web.api_token line in "
+            f"{self.config_path} (the env file then governs), restart the "
+            f"daemon, and rotate again."
+        )
+
+
+def rotate_api_token(config: dict[str, Any] | None = None) -> str:
+    """Mint a fresh token, persist it to the env file, and return it.
+
+    Pass the loaded ``config`` so rotation can see a YAML-pinned token and
+    refuse instead of no-opping — :class:`TokenRotationBlocked`. Called with
+    no config (the pre-#320 signature) it can only see the env layers, so it
+    rotates them; every in-tree caller passes config.
+
+    The returned token is always one the daemon will accept after a restart.
+    """
+    _token, source = resolve_api_token(config)
+    if source == "config":
+        from prometheus.config.defaults import resolve_config_path
+
+        raise TokenRotationBlocked(source, str(resolve_config_path()))
     token = mint_api_token()
     set_env_value(TOKEN_ENV_VAR, token)
     os.environ[TOKEN_ENV_VAR] = token

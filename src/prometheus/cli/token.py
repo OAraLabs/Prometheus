@@ -12,10 +12,22 @@ import argparse
 
 from prometheus.config.api_token import (
     TOKEN_ENV_VAR,
+    TokenRotationBlocked,
     resolve_api_token,
     rotate_api_token,
 )
 from prometheus.config.env_file import get_env_file_path
+
+
+def _location_of(source: str) -> str:
+    """Human-readable home of the token `resolve_api_token` picked."""
+    if source == "config":
+        from prometheus.config.defaults import resolve_config_path
+
+        return f"web.api_token in {resolve_config_path()}"
+    if source == "env":
+        return f"{TOKEN_ENV_VAR} in the process environment"
+    return f"env file: {get_env_file_path()}"
 
 
 def run_token_command(args: argparse.Namespace, config: dict | None = None) -> int:
@@ -25,14 +37,25 @@ def run_token_command(args: argparse.Namespace, config: dict | None = None) -> i
         token, source = resolve_api_token(config)
         if not token:
             print("No web API token is set — the web API is OPEN (no auth).")
-            print(f"Set one with: oara token rotate")
+            print("Set one with: oara token rotate")
             print(f"(env file: {get_env_file_path()}, var: {TOKEN_ENV_VAR})")
             return 1
         print(token)
-        print(f"(source: {source}; env file: {get_env_file_path()})")
+        # Name where the token ACTUALLY is. This used to print the env-file
+        # path unconditionally, so a YAML-pinned token was reported as living
+        # in a file that did not contain it (#320, the `show` half).
+        print(f"(source: {source}; {_location_of(source)})")
         return 0
     if action == "rotate":
-        token = rotate_api_token()
+        try:
+            token = rotate_api_token(config)
+        except TokenRotationBlocked as exc:
+            # Loud refusal beats a silent no-op: rotating the env file here
+            # would report success and leave the live token valid (#320).
+            print("REFUSING to rotate — the new token would not take effect.\n")
+            print(f"  {exc}\n")
+            print("The current token is UNCHANGED and still valid.")
+            return 1
         print("New web API token generated and saved.")
         print(f"\n  {token}\n")
         print(f"Saved to: {get_env_file_path()}")
