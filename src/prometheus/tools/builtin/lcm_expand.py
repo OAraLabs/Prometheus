@@ -52,7 +52,7 @@ class LCMExpandTool(BaseTool):
         # Look up the summary node
         summary_store = engine.summary_store
         try:
-            node = summary_store.get(arguments.summary_id)
+            node = summary_store.get_by_id(arguments.summary_id)
         except Exception as exc:
             return ToolResult(
                 output=f"Failed to retrieve summary {arguments.summary_id}: {exc}",
@@ -81,12 +81,7 @@ class LCMExpandTool(BaseTool):
                 lines.append(f"Source messages ({len(node.source_message_ids)}):")
                 for mid in node.source_message_ids:
                     try:
-                        # Try to fetch individual message by ID
-                        if hasattr(conv_store, "get_by_id"):
-                            msg = conv_store.get_by_id(mid)
-                        else:
-                            # Fallback: search within the store
-                            msg = None
+                        msg = conv_store.get_by_id(mid)
                         if msg is not None:
                             lines.append(
                                 f"  [{msg.role}] turn={msg.turn_index} "
@@ -108,7 +103,7 @@ class LCMExpandTool(BaseTool):
                 lines.append(f"Child summaries ({len(node.parent_ids)}):")
                 for child_id in node.parent_ids:
                     try:
-                        child = summary_store.get(child_id)
+                        child = summary_store.get_by_id(child_id)
                         if child is not None:
                             lines.append(
                                 f"  [summary] id={child.id} depth={child.depth} "

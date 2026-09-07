@@ -63,7 +63,7 @@ class LCMDescribeTool(BaseTool):
         summary_store = engine.summary_store
 
         try:
-            node = summary_store.get(summary_id)
+            node = summary_store.get_by_id(summary_id)
         except Exception as exc:
             return ToolResult(
                 output=f"Failed to retrieve summary {summary_id}: {exc}",
