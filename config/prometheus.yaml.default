@@ -111,7 +111,7 @@ model:
   # any tool whose repetition signal sustains (when divergence is enabled).
   # Non-read-only flail with divergence disabled still rides to this cap.
   max_tool_iterations: 500              # Max tool calls per user message before hard stop (local/llama)
-  max_tool_iterations_cloud: 100        # Separate, LOWER cap for cloud (tier=off): every round is billed
+  max_tool_iterations_cloud: 500        # Cloud (tier=off) cap. EQUAL to local since 2026-09-07: one ceiling per session, so a turn that routes to cloud mid-run does not change its iteration budget. Cost is governed by the budget/quota layer + the provider plan, not by this backstop.
   fallback_provider: "ollama"
   fallback_url: "http://localhost:11434"
 

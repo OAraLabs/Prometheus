@@ -65,23 +65,31 @@ SHIPPED_MAX_TOOL_ITERATIONS: int = 500
 
 #: Tool-call ceiling for cloud routing (tier=off).
 #:
-#: ⚠ THIS IS NOW *BELOW* THE LOCAL CAP, INVERTING THE HISTORICAL ORDERING, AND
-#: THAT IS DELIBERATE (Will's call, LONGHAUL-1b). Cloud sat ABOVE local for the
-#: whole prior life of the key -- 50 vs 25 -- on the rationale that Claude plans
-#: longer multi-step sequences than local models do. The ordering flipped
-#: because the constraint that matters changed: cloud rounds cost money per
-#: call, local rounds cost only wall-clock on hardware already paid for, so the
-#: budget the operator actually wants to be generous with is the local one.
+#: EQUAL TO THE LOCAL CAP (Will's call, 2026-09-07), superseding LONGHAUL-1b.
+#: That earlier change set cloud BELOW local (100 vs 500) on the rationale that
+#: cloud rounds cost money per call while local rounds cost only wall-clock on
+#: hardware already paid for — so the generous budget went to local. The
+#: ordering has been deliberately removed: there is now one ceiling (500) for
+#: every provider, and a session that routes to cloud mid-run no longer changes
+#: its iteration budget underneath itself.
 #:
-#: ⚠ KNOWN RISK, RECORDED RATHER THAN MITIGATED: this hands the LARGEST budget
-#: to the path most prone to the one failure the progress detector cannot see.
-#: The detector keys on the exact (name, input) signature, so a flail with
-#: DIFFERENT arguments every round is invisible to it, and a weaker local model
-#: is likelier to produce exactly that shape than Claude is. A varied-argument
-#: runaway on local can now burn 500 rounds where it previously burned 50.
-#: If unattended local runs start costing hours rather than minutes, THIS
-#: number is the first thing to look at -- not the detector.
-SHIPPED_MAX_TOOL_ITERATIONS_CLOUD: int = 100
+#: WHY 100 WAS WRONG IN PRACTICE: the cap is a backstop for the varied-argument
+#: flail the progress detector cannot see (below), not a cost governor. Cost is
+#: governed by the budget/quota layer and by the operator's provider plan, not
+#: by a round count that silently differs between the local and cloud halves of
+#: ONE session. A lower cloud cap meant a long legitimate multi-step task that
+#: happened to route to cloud hit "Tool iteration limit reached" where the same
+#: task on local would not — a correctness cliff keyed on which provider served
+#: the turn, not on runaway behaviour.
+#:
+#: ⚠ KNOWN RISK, CARRIED FORWARD FROM LONGHAUL-1b AND NOW APPLIES TO CLOUD TOO:
+#: this hands the largest budget to a path the progress detector can partly not
+#: see. The detector keys on the exact (name, input) signature, so a flail with
+#: DIFFERENT arguments every round is invisible to it. On cloud that now costs
+#: money per round up to 500. If unattended runs start costing hours or dollars,
+#: the lever is the progress detector's varied-argument blind spot — not this
+#: number. THIS NUMBER IS NOT THE SAFETY MECHANISM; progress is.
+SHIPPED_MAX_TOOL_ITERATIONS_CLOUD: int = 500
 
 # gateway.media.allowed_*_types — inbound MIME allowlists on the Telegram
 # surface, the one exposed to the public internet by design. Absent from a
