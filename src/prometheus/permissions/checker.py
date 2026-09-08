@@ -15,7 +15,6 @@ Integrates with the permission_checker slot in LoopContext.
 
 from __future__ import annotations
 
-import fnmatch
 import logging
 import os
 import re
@@ -32,6 +31,10 @@ from prometheus.config.shipped_defaults import (
 from prometheus.permissions.audit import AuditDecision, AuditLogger
 from prometheus.permissions.exfiltration import ExfiltrationDetector
 from prometheus.permissions.modes import PermissionMode, TrustLevel
+# The ONE denied-path matcher. Imported from security/ (a leaf that checker
+# may depend on) so the gate and the grep/glob prune layer share it — see
+# _check_denied_path. security/ imports nothing from permissions/, so no cycle.
+from prometheus.security.path_guard import denied_entry_matches
 
 log = logging.getLogger(__name__)
 
@@ -1264,24 +1267,22 @@ class SecurityGate:
         """
         resolved = str(Path(file_path).expanduser().resolve())
         for denied in self._denied_paths:
-            if _is_glob(denied):
-                # A wildcard entry matches the path itself or anything under
-                # it. ``fnmatch``'s ``*`` spans ``/``, which is broader than a
-                # shell glob — deliberately: broader means MORE denied, and
-                # this is a deny list.
-                if fnmatch.fnmatch(resolved, denied) or fnmatch.fnmatch(
-                        resolved, f"{denied.rstrip('/')}/*"):
+            # The comparison is ONE shared predicate (path_guard.denied_entry_matches)
+            # — the SAME one the grep/glob prune layer uses. That symmetry is the
+            # fix for the matcher drift that left the shipped credential floor
+            # inert in the prune layer: this gate matched ``/*/.ssh`` with fnmatch
+            # while the prune layer expanded it with Path.glob to nothing. Two
+            # layers reading one deny list must not have two ideas of what matches.
+            #
+            # The branch below only chooses the WORDING of the denial (pattern vs
+            # prefix), not the decision. denied_entry_matches is the decision:
+            # a glob entry matches the path or anything under it (fnmatch's ``*``
+            # spans ``/`` — broader means MORE denied); a literal entry matches on
+            # PATH COMPONENTS, so "/etc" does not deny "/etcetera/notes" (a bare
+            # startswith did, silently — over-refusal that never announced itself).
+            if denied_entry_matches(resolved, denied):
+                if _is_glob(denied):
                     return f"Path {file_path!r} matches denied pattern {denied!r}"
-            # Match on PATH COMPONENTS, not raw string prefix. A bare
-            # ``startswith`` denied "/etcetera/notes" for the entry "/etc" —
-            # over-refusal, so it never announced itself, and it disagreed
-            # with the glob branch three lines up, which has always compared
-            # component-wise. Two branches of one matcher must not have
-            # different ideas of what "under" means. Surfaced by mutation M5:
-            # forcing every entry down the glob branch changed almost nothing,
-            # which is only true if the two branches nearly agree — the gap
-            # was exactly this.
-            elif resolved == denied or resolved.startswith(denied.rstrip("/") + os.sep):
                 return f"Path {file_path!r} is under denied prefix {denied!r}"
         return ""
 

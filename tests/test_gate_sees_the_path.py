@@ -336,6 +336,20 @@ _DIRECT_EVALUATE_TESTS: dict[str, str] = {
         "asserts the tool executed, so the direct calls are the demonstration, "
         "not the proof."
     ),
+    "test_denied_prune.py": (
+        "P4.1 matcher-drift fix: THREE readers share one deny list — the gate, "
+        "the grep/glob prune layer, and the /workspace validator — and they used "
+        "to match it three different ways (fnmatch vs Path.glob vs "
+        "Path.resolve), so the shipped credential floor held at the gate and was "
+        "inert in the other two. test_the_gate_and_the_prune_layer_agree calls "
+        "evaluate(file_path=…) to read the gate's DECISION so it can be compared "
+        "cell-for-cell against the other two readers; the subject is that the "
+        "three answers are identical, not whether a caller delivers a path. The "
+        "delivery half is covered here through _execute_tool_call, and the "
+        "prune/validator halves are driven through the real GrepTool/GlobTool "
+        "and validate_workspace_path. Registered, not exempted: if that file "
+        "stops calling evaluate directly this entry fails as stale."
+    ),
 }
 
 
