@@ -11,16 +11,23 @@
 
 from __future__ import annotations
 
-import ipaddress
-import socket
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, Field
 
+from prometheus.security.url_guard import (
+    SsrfBlocked,
+    check_url,
+    guard_request_hop,
+    is_safe_url,
+)
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
+
+#: Re-exported: the SSRF guard's home is security/url_guard, and these names are
+#: part of this tool's surface for callers that fetch through it.
+__all__ = ["SsrfBlocked", "WebFetchTool", "fetch_url_text", "is_safe_url"]
 
 
 class WebFetchInput(BaseModel):
@@ -50,15 +57,30 @@ class WebFetchTool(BaseTool):
     async def execute(
         self, arguments: WebFetchInput, context: ToolExecutionContext
     ) -> ToolResult:
-        # SSRF protection — block private/reserved IPs
-        if not _is_safe_url(arguments.url):
+        # Pre-flight SSRF check — refuses the obvious case before a connection is
+        # opened. The per-hop guard inside fetch_url_text is what actually closes
+        # the redirect hole; this is the cheap early answer with a reason.
+        ok, reason = check_url(arguments.url)
+        if not ok:
             return ToolResult(
-                output="Blocked: URL resolves to a private or reserved IP address.",
+                output=f"Blocked: {reason}.",
                 is_error=True,
             )
 
         try:
             page = await fetch_url_text(arguments.url, max_chars=arguments.max_chars)
+        except SsrfBlocked as exc:
+            # A REDIRECT hop landed somewhere non-public. Reported as a refusal,
+            # not as a transport failure — the distinction matters because the
+            # model retries transport failures and should not retry this.
+            return ToolResult(
+                output=(
+                    f"Blocked: a redirect from that URL went to a non-public "
+                    f"address ({exc}). Only the final destination was refused; "
+                    f"the original URL looked public."
+                ),
+                is_error=True,
+            )
         except httpx.HTTPError as exc:
             return ToolResult(output=f"web_fetch failed: {exc}", is_error=True)
 
@@ -89,11 +111,24 @@ class FetchedText:
 async def fetch_url_text(url: str, *, max_chars: int, timeout: float = 20.0) -> FetchedText:
     """GET ``url`` and return compact text (HTML → readable text).
 
-    Raises ``httpx.HTTPError`` (transport errors and non-2xx alike) — callers
-    decide how to say it. Does NOT apply the SSRF guard; call
-    :func:`_is_safe_url` first.
+    Raises ``httpx.HTTPError`` (transport errors and non-2xx alike) and
+    ``SsrfBlocked`` — callers decide how to say it.
+
+    Applies the SSRF guard to EVERY hop, not just the URL the caller supplied.
+    The guard used to run once on the original URL and then httpx followed the
+    whole 30x chain unchecked, so a public URL that 302s to
+    ``http://127.0.0.1:8005/api/…`` — the daemon's own REST surface, which
+    includes bash — was fetched and its body returned to the model. The request
+    hook below runs inside httpx's redirect loop, so it sees each hop and raises
+    before the request leaves; verified against httpx 0.28 with a MockTransport
+    that the secret body never arrives. The hook MUST be async: ``AsyncClient``
+    raises TypeError on a sync one (also verified).
     """
-    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=timeout,
+        event_hooks={"request": [guard_request_hop]},
+    ) as client:
         response = await client.get(url, headers={"User-Agent": "Prometheus/0.1"})
         response.raise_for_status()
 
@@ -109,27 +144,6 @@ async def fetch_url_text(url: str, *, max_chars: int, timeout: float = 20.0) -> 
         url=str(response.url), status=response.status_code,
         content_type=content_type, body=body, truncated=truncated,
     )
-
-
-# ---------------------------------------------------------------------------
-# SSRF protection
-# ---------------------------------------------------------------------------
-
-def _is_safe_url(url: str) -> bool:
-    """Return False if the URL resolves to a private or reserved IP."""
-    try:
-        parsed = urlparse(url)
-        hostname = parsed.hostname
-        if not hostname:
-            return False
-        addrs = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-        for _family, _, _, _, sockaddr in addrs:
-            ip = ipaddress.ip_address(sockaddr[0])
-            if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
-                return False
-    except (socket.gaierror, ValueError, OSError):
-        return False
-    return True
 
 
 # ---------------------------------------------------------------------------

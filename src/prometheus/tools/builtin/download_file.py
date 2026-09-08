@@ -6,9 +6,7 @@
 
 from __future__ import annotations
 
-import ipaddress
 import re
-import socket
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -16,6 +14,13 @@ import httpx
 from pydantic import BaseModel, Field
 
 from prometheus.permissions.path_schema import DIR_FIELD, PATH_FIELD
+# Both fetching tools use the ONE hook, from the security module — not one
+# importing a private helper from its sibling, which is how two callers drift.
+from prometheus.security.url_guard import (
+    SsrfBlocked,
+    guard_request_hop,
+    is_safe_url,
+)
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -72,7 +77,7 @@ class DownloadFileTool(BaseTool):
         arguments: DownloadFileInput,
         context: ToolExecutionContext,
     ) -> ToolResult:
-        if not _is_safe_url(arguments.url):
+        if not is_safe_url(arguments.url):
             return ToolResult(
                 output="Blocked: URL resolves to a private or reserved IP address.",
                 is_error=True,
@@ -97,7 +102,12 @@ class DownloadFileTool(BaseTool):
         content_type = ""
         try:
             async with httpx.AsyncClient(
-                follow_redirects=True, timeout=_DEFAULT_TIMEOUT
+                follow_redirects=True,
+                timeout=_DEFAULT_TIMEOUT,
+                # Per-hop SSRF guard — see fetch_url_text's docstring in
+                # web_fetch.py. A 302 to a loopback/tailnet address must abort
+                # the chain before the body is streamed to disk, not after.
+                event_hooks={"request": [guard_request_hop]},
             ) as client:
                 async with client.stream(
                     "GET",
@@ -141,6 +151,15 @@ class DownloadFileTool(BaseTool):
                                     is_error=True,
                                 )
                             fh.write(chunk)
+        except SsrfBlocked as exc:
+            # A redirect hop resolved to a non-public address. Remove the partial
+            # file so nothing half-written survives, and say we refused rather
+            # than reporting a transport failure the model would retry.
+            dest.unlink(missing_ok=True)
+            return ToolResult(
+                output=f"Blocked: a redirect went to a non-public address ({exc}).",
+                is_error=True,
+            )
         except httpx.HTTPError as exc:
             dest.unlink(missing_ok=True)
             return ToolResult(output=f"Error: download failed: {exc}", is_error=True)
@@ -171,7 +190,8 @@ def _resolve_destination(url: str, requested: str | None) -> Path:
     """Resolve the destination path. Apply path-traversal guard and reject
     common system paths (``/etc``, ``/sys``, ``/boot``).
     """
-    if requested is None:
+    derived = requested is None
+    if derived:
         candidate = _DOWNLOAD_DIR / _filename_from_url(url)
     else:
         candidate = Path(requested).expanduser()
@@ -194,36 +214,80 @@ def _resolve_destination(url: str, requested: str | None) -> Path:
             continue
         raise ValueError(f"Destination {candidate} is in a protected path")
 
+    if derived:
+        # THE INVARIANT THE FORBIDDEN LIST CANNOT EXPRESS: when the URL chose the
+        # name, the result must still be inside the download directory. The
+        # forbidden-prefix list above is a denylist of six locations — it says
+        # nothing about ~/.bashrc, ~/.profile or ~/.prometheus itself, which is
+        # exactly where the %2F traversal landed. A containment check is the
+        # property; the denylist is only ever a partial list of places not to go.
+        #
+        # An explicit `destination` is NOT held to this — the operator (or the
+        # model, at the operator's origin, through the gate) may name a path, and
+        # that is the gate's business, not this function's.
+        anchor = _DOWNLOAD_DIR.resolve()
+        if not candidate.is_relative_to(anchor):
+            raise ValueError(
+                f"a filename derived from the URL must land under {anchor}, "
+                f"not {candidate} — pass an explicit destination instead"
+            )
+
     return candidate
 
 
 def _filename_from_url(url: str) -> str:
+    """Derive a SAFE filename from a URL path.
+
+    ORDER IS THE WHOLE FIX. This used to take the last path segment first and
+    unquote it afterwards::
+
+        name = unquote(Path(parsed.path).name)
+
+    With a percent-encoded separator that inverts the intent: ``Path(
+    '/x%2F..%2F..%2F..%2F.bashrc').name`` is the single segment
+    ``'x%2F..%2F..%2F..%2F.bashrc'``, and unquoting it afterwards turns the
+    ``%2F``s into real separators. The caller then did
+    ``_DOWNLOAD_DIR / name``, so the URL chose the write target — measured to
+    resolve to ``$HOME/.bashrc``. A page the model was asked to fetch could aim
+    download_file at shell profiles or systemd user units with no gate prompt
+    (``destination`` is optional, and the gate has nothing to rule on when it is
+    unset) and no denied_paths check, since the forbidden-prefix list never saw
+    the escape.
+
+    Unquoting BEFORE reducing to a basename means the traversal is already a real
+    path when ``.name`` runs, so only the final component can survive — and a
+    basename can never contain a separator. ``_resolve_destination`` then holds
+    derived names inside the download directory, so containment is a property of
+    the call rather than of how well this function guesses.
+
+    This does NOT restrict which URLs may be fetched: the same URL downloads
+    fine, it just lands under the download directory with its own name.
+    """
     parsed = urlparse(url)
-    name = unquote(Path(parsed.path).name)
+    # Unquote first, so %2F and friends are real separators before .name runs.
+    decoded = unquote(parsed.path or "")
+    name = Path(decoded).name
+
     if not name:
         host = parsed.hostname or "download"
         return _FILENAME_FALLBACK_RE.sub("_", host) + ".bin"
+
+    # `.name` is a basename, so it cannot contain a separator and cannot escape —
+    # the traversal is gone by construction. Three degenerate shapes are left, and
+    # ONLY those are replaced:
+    #   * the traversal dots themselves — `/..`, `//..` and `/./..` all give '..'
+    #   * a NUL byte or control character from a decoded %00, which makes open()
+    #     raise OSError instead of writing anything
+    #
+    # Spaces and punctuation are deliberately NOT sanitised. The pinned contract is
+    # that `hello%20world.pdf` yields `hello world.pdf`, and a filename with a space
+    # is a normal thing for a URL to carry. Stripping it would rewrite the name a
+    # legitimate download asked for, to defend against a case `.name` already
+    # handles. The fallback sanitiser above stays scoped to the HOST string, where
+    # inventing a name anyway means there is no contract to keep.
+    if name in (".", "..") or any(ord(ch) < 32 or ch == "\x7f" for ch in name):
+        return "download.bin"
     return name
-
-
-# ---------------------------------------------------------------------------
-# SSRF protection (mirrors web_fetch._is_safe_url)
-# ---------------------------------------------------------------------------
-
-def _is_safe_url(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-        hostname = parsed.hostname
-        if not hostname:
-            return False
-        addrs = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-        for family, _, _, _, sockaddr in addrs:
-            ip = ipaddress.ip_address(sockaddr[0])
-            if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
-                return False
-    except (socket.gaierror, ValueError, OSError):
-        return False
-    return True
 
 
 def _format_size(num_bytes: int) -> str:

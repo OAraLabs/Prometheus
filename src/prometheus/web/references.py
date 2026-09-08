@@ -309,18 +309,29 @@ class ReferenceResolver:
     async def resolve_url(self, target: str) -> TextBlock:
         from urllib.parse import urlparse
 
-        from prometheus.tools.builtin.web_fetch import _is_safe_url, fetch_url_text
+        # The guard and its exception come from the SECURITY module; only the
+        # fetcher comes from the tool. Importing a private name out of a tool is
+        # how a boundary gets repaired in one place and stays inert in another.
+        from prometheus.security.url_guard import SsrfBlocked, is_safe_url
+        from prometheus.tools.builtin.web_fetch import fetch_url_text
 
         parsed = urlparse(target)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise ReferenceRefused("bad_request", f"@url {target}: only http(s) URLs can be referenced")
-        if not _is_safe_url(target):
+        if not is_safe_url(target):
             raise ReferenceRefused(
                 "forbidden", f"@url {target}: resolves to a private or reserved address"
             )
         fetch = self._fetch_url or fetch_url_text
         try:
             page = await fetch(target, max_chars=URL_CAP_CHARS)
+        except SsrfBlocked as exc:
+            # A redirect hop went somewhere non-public. Classified as FORBIDDEN,
+            # not fetch_failed: the latter reads as a transport problem worth
+            # retrying, and this is a refusal that will refuse again.
+            raise ReferenceRefused(
+                "forbidden", f"@url {target}: a redirect went to a non-public address"
+            ) from exc
         except Exception as exc:  # noqa: BLE001 — httpx's hierarchy, surfaced as-is
             raise ReferenceRefused("fetch_failed", f"@url {target}: {exc}") from exc
         attrs = (
