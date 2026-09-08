@@ -20,6 +20,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from prometheus.permissions import confinement as _CONFINE
+from prometheus.security.env_scrub import scrubbed_env as _scrubbed_env
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -203,9 +204,22 @@ class BashTool(BaseTool):
                     # and not only from a log line at startup.
                     write_floor = "unavailable"
 
+        # Strip secret-shaped variables before the child inherits the daemon's
+        # environment. Without this, ``env`` / ``printenv`` / ``echo
+        # $PROMETHEUS_API_TOKEN`` — routine debugging moves for a model — put the
+        # Bearer token, the gateway tokens and every provider key into the tool
+        # result, hence into model context, the outbound reply, the durable
+        # session store and the LCM history. At user origin the exfiltration
+        # detector is skipped entirely, so this was one ``curl -d "$(env)"`` from
+        # leaving the box. The README already claims tool sandboxes do this; only
+        # the coding sandbox did. See security/env_scrub.py for what stays (PATH,
+        # HOME, LANG, the PROMETHEUS_*_DIR paths, gh's keyring auth) and the
+        # honest limits (it does not guard secrets ON DISK — that is the
+        # denied-path floor's job).
         process = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(cwd),
+            env=_scrubbed_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,

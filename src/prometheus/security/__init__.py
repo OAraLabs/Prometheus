@@ -31,6 +31,11 @@ from prometheus.security.log_redaction import (
     redact_capture,
     redact_secrets,
 )
+from prometheus.security.env_scrub import (
+    is_secret_name,
+    scrubbed_env,
+    scrubbed_names,
+)
 from prometheus.security.path_guard import (
     assert_path_under_roots,
     is_path_under_roots,
@@ -45,6 +50,9 @@ __all__ = [
     "ScanResult",
     "ScanVerdict",
     "assert_path_under_roots",
+    "is_secret_name",
+    "scrubbed_env",
+    "scrubbed_names",
     "install_log_redaction",
     "is_path_under_roots",
     "redact_capture",
