@@ -1517,6 +1517,14 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 allowed_channel_ids=[
                     int(c) for c in (discord_nested or {}).get("channel_ids", []) or []
                 ],
+                # Discord DM user allowlist (audit P2.4). Threaded here so the
+                # config key is LIVE, not config-dark: a new PlatformConfig field
+                # no construction site populates is the exact defect class this
+                # repository's drift guard cannot see. Empty = any DM (the
+                # historical posture, deliberately unchanged by this PR).
+                allowed_user_ids=[
+                    int(u) for u in (discord_nested or {}).get("user_ids", []) or []
+                ],
             )
             if "system_prompt" not in dir():
                 from prometheus.context.prompt_assembler import build_runtime_system_prompt

@@ -471,18 +471,48 @@ gateway:
     enabled: false
     bot_token: ""                     # Set via PROMETHEUS_SLACK_BOT_TOKEN env var
     app_token: ""                     # Set via PROMETHEUS_SLACK_APP_TOKEN env var
+    # Channel allowlist. This now applies to SLASH COMMANDS too, not just
+    # messages: Slack slash commands are workspace-global, so before the global
+    # Bolt middleware landed any workspace member (including Slack Connect
+    # external users) could run /prometheus-approve always <id> — which persists
+    # a SecurityGate grant — from any channel or DM, whatever this list said.
+    #
+    # Empty = respond anywhere the bot is invited (unchanged). Flipping empty to
+    # mean "refuse to start" — what Telegram's allowed_chat_ids does since #219
+    # — is a deliberate follow-up, not bundled here, because it changes behaviour
+    # for every working install and needs the same boot-refusal + doctor + wizard
+    # treatment before it can be honest.
     allowed_channels: []              # e.g. [C0123456789]
 
   # SPRINT G2: Discord gateway (optional extra: pip install 'oara-prometheus[discord]').
-  # Whitelist semantics: DMs are ALWAYS allowed; guild-channel messages need
-  # a channel_ids (per-channel) or guild_ids (whole-guild) hit. With both
-  # empty the bot is DMs-only. App commands register guild-scoped (instant)
-  # when guild_ids is set, else globally (up to ~1h to propagate Discord-side).
+  # Whitelist semantics: DMs are allowed unless user_ids restricts them (see
+  # below); guild-channel messages need a channel_ids (per-channel) or guild_ids
+  # (whole-guild) hit. With both empty the bot is DMs-only. These whitelists now
+  # gate /prometheus APP COMMANDS as well as messages — previously every app
+  # command bypassed them entirely. App commands register guild-scoped (instant)
+  # when guild_ids is set, else globally (up to ~1h to propagate Discord-side);
+  # the global sync is why the command-path check is the enforcement, not a
+  # convenience.
   discord:
     enabled: false
     token: ""                          # Set via PROMETHEUS_DISCORD_TOKEN env var
     guild_ids: []                      # e.g. [123456789012345678]
     channel_ids: []                    # e.g. [987654321098765432]
+    # DM user allowlist (snowflake ids). These three whitelists now apply to
+    # /prometheus APP COMMANDS as well as plain messages — previously every
+    # app command bypassed them, so any account that could see the bot could
+    # run `ops approve always <id>` (which persists a SecurityGate grant) and
+    # the provider overrides. With guild_ids AND channel_ids empty, guild
+    # commands are refused (the documented "empty = DMs only" posture) and the
+    # command tree still syncs globally, so this layer is the enforcement.
+    #
+    # user_ids: [] means ANY DM is allowed — the historical posture, kept so
+    # this does not silently lock out a working install. Populate it to restrict
+    # DMs to named users, e.g. [424242424242424242]. Flipping the empty value
+    # to mean "refuse to start" (what Telegram's allowed_chat_ids does since
+    # #219) is a deliberate follow-up: it changes behaviour for every existing
+    # operator and needs the same boot-refusal + doctor + wizard treatment.
+    user_ids: []
     skill_event_notifications: quiet   # off | quiet | verbose
     long_reply_threshold: 800          # chars; longer replies open a thread
 

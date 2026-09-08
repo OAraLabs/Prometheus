@@ -521,6 +521,10 @@ class DiscordAdapter(BasePlatformAdapter):
 
         if not self.config.discord_inbound_allowed(
             is_dm=is_dm, guild_id=guild_id, channel_id=channel.id,
+            # DMs are gated by the user allowlist, so the sender must be named
+            # here — without it a populated allowed_user_ids could not apply to
+            # the message path and only the command path would be protected.
+            user_id=getattr(author, "id", None),
         ):
             logger.debug(
                 "Discord: ignoring message in non-whitelisted channel %s "
@@ -556,6 +560,9 @@ class DiscordAdapter(BasePlatformAdapter):
                 "is_dm": is_dm,
                 "guild_id": guild_id,
                 "message": message,
+                # Carried so the second check in on_message can apply the DM
+                # user allowlist too — one predicate, both call sites, no drift.
+                "user_id": getattr(author, "id", None),
             },
             media_urls=media_urls,
             media_types=media_types,
@@ -570,6 +577,7 @@ class DiscordAdapter(BasePlatformAdapter):
             is_dm=bool(raw.get("is_dm")),
             guild_id=raw.get("guild_id"),
             channel_id=event.chat_id,
+            user_id=raw.get("user_id"),
         ):
             logger.warning(
                 "Ignoring message from non-whitelisted Discord channel %s",
@@ -861,6 +869,26 @@ class DiscordAdapter(BasePlatformAdapter):
         from discord import app_commands
 
         async def _callback(interaction, args: str = "") -> None:
+            # AUTHORIZATION — the ONE chokepoint every app command passes
+            # through, so it covers all 43 families and every family added in
+            # FUTURE. This is the Discord half of the #202/#219 shape:
+            # `discord_inbound_allowed` used to be called only on the MESSAGE
+            # path, leaving `/prometheus ops approve always <id>` (which
+            # persists a SecurityGate grant to prometheus.yaml), `ops gate`,
+            # `session workspace` and the provider overrides callable by any
+            # account that could see the bot — and with `allowed_guild_ids`
+            # empty (the shipped default) the command tree syncs GLOBALLY, so
+            # that means every guild the bot was invited to, plus DMs.
+            #
+            # Guild commands obey the guild/channel allowlist; DMs obey the
+            # optional user allowlist (user_allowed). A refusal is answered
+            # ephemerally so the requester sees why but the channel does not.
+            if not self._interaction_allowed(interaction):
+                await self._respond(interaction, (
+                    "Prometheus is not authorised to take commands from this "
+                    "channel. The operator's allowlist does not include it."
+                ))
+                return
             await handler(interaction, (args or "").strip())
 
         _callback.__name__ = f"prometheus_{group.name}_{name}"
@@ -977,6 +1005,31 @@ class DiscordAdapter(BasePlatformAdapter):
     def _cmd_channel(interaction: Any) -> str:
         cid = getattr(interaction, "channel_id", None)
         return str(cid) if cid else ""
+
+    def _interaction_allowed(self, interaction: Any) -> bool:
+        """Authorise an app-command interaction against the SAME allowlist the
+        message path uses.
+
+        This is the structural fix for the #202 defect on Discord — the
+        allowlist used to run only on `_handle_discord_message`/`on_message`, so
+        all 43 app-command families bypassed it entirely and any account that
+        could see the bot could run `ops approve always <id>` (persisting a
+        SecurityGate grant to prometheus.yaml) plus the provider overrides.
+
+        It DELEGATES to `discord_inbound_allowed` rather than re-implementing the
+        DM/guild logic, so the command path and the message path cannot drift —
+        one predicate answers both. Fail-CLOSED on an interaction we cannot
+        attribute: with a populated user allowlist, a missing user id refuses.
+        """
+        guild_id = getattr(interaction, "guild_id", None)
+        channel_id = getattr(interaction, "channel_id", None)
+        user = getattr(interaction, "user", None)
+        return self.config.discord_inbound_allowed(
+            is_dm=guild_id is None,
+            guild_id=guild_id,
+            channel_id=channel_id or 0,
+            user_id=getattr(user, "id", None),
+        )
 
     async def _respond(self, interaction: Any, text: str) -> None:
         """Reply to an interaction, chunked at the 2000-char limit.

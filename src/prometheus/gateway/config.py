@@ -39,6 +39,12 @@ class PlatformConfig:
     # SPRINT G2: Discord whitelists (snowflake ids). See discord_inbound_allowed.
     allowed_guild_ids: list[int] = field(default_factory=list)
     allowed_channel_ids: list[int] = field(default_factory=list)
+    # Discord DM user allowlist (snowflake ids). See user_allowed. Empty =
+    # any DM is allowed (the historical posture); populated = only these users
+    # may reach the agent over DM. The default-deny flip — empty means refuse,
+    # with a loud boot refusal like Telegram's #219 — is a deliberate follow-up,
+    # not bundled here, because it changes behaviour for every working install.
+    allowed_user_ids: list[int] = field(default_factory=list)
     proxy_url: str | None = None
     max_message_length: int = 4096
     parse_mode: str = "MarkdownV2"
@@ -104,15 +110,22 @@ class PlatformConfig:
 
     def discord_inbound_allowed(
         self, *, is_dm: bool, guild_id: int | None, channel_id: int,
+        user_id: int | None = None,
     ) -> bool:
         """SPRINT G2: Discord inbound whitelist.
 
         Semantics (deliberately NOT a straight copy of ``chat_allowed``):
 
-          * DMs are always allowed — this matches the practical posture of
-            Telegram's ``allowed_chat_ids`` semantics when the whitelist is
-            empty (``chat_allowed`` above: empty list = allow every chat,
-            which for a Telegram bot means "anyone may DM it").
+          * DMs consult the user allowlist (:meth:`user_allowed`). An EMPTY
+            ``allowed_user_ids`` allows any DM — the historical posture, kept
+            so populating it is opt-in and no working install locks itself out.
+            The docstring used to justify "DMs always allowed" by citing
+            Telegram's empty-allowlist-means-allow-everything semantics; that
+            premise was INVERTED for Telegram in #219 (an empty allowlist now
+            REFUSES TO START), so the citation no longer holds. Flipping the
+            empty Discord default to deny is the deliberate follow-up that
+            gets the same boot-refusal + doctor + wizard treatment #219 gave
+            Telegram — it is not bundled into a structural-authorisation fix.
           * Guild-channel messages require an explicit whitelist hit:
             ``allowed_channel_ids`` (per-channel) or ``allowed_guild_ids``
             (whole guild). With BOTH empty, guild messages are ignored —
@@ -121,11 +134,35 @@ class PlatformConfig:
             can be invited into arbitrary servers by third parties; replying
             to every message in every guild it lands in would hand strangers
             an agent with tool access.
+
+        ``user_id`` defaults to None for callers that cannot attribute a sender;
+        with a populated allowlist that fails CLOSED (see :meth:`user_allowed`).
         """
         if is_dm:
-            return True
+            return self.user_allowed(user_id)
         if channel_id in self.allowed_channel_ids:
             return True
         if guild_id is not None and guild_id in self.allowed_guild_ids:
             return True
         return False
+
+    def user_allowed(self, user_id: int | None) -> bool:
+        """Discord DM user allowlist.
+
+        Empty list = any DM is allowed (the historical posture, kept so this
+        does not silently lock out a working install). Populated = only these
+        snowflake user ids may reach the agent over DM.
+
+        This is the second layer of the DM surface; the gateway boot refusal
+        that would make an EMPTY list mean "refuse to start" (the #219 shape
+        Telegram got) is a separate, deliberate follow-up — flipping the
+        default changes behaviour for every existing operator and deserves its
+        own ruling, not a sneak-in beside a structural-authorisation fix.
+
+        A ``None`` user id (an interaction we cannot attribute to a user) is
+        refused when the allowlist is non-empty: fail-closed on the
+        unidentifiable sender, exactly like the Telegram group -1 gate.
+        """
+        if not self.allowed_user_ids:
+            return True
+        return user_id is not None and user_id in self.allowed_user_ids

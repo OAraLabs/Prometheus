@@ -854,6 +854,15 @@ class TestSlackStartNonBlocking:
         class FakeApp:
             def __init__(self, token=None):
                 self.client = FakeWebClient()
+                # Records global middleware registered via app.use(...) — the
+                # authorisation gate (see SlackAdapter._authorize_request). A
+                # real AsyncApp has .use(); the fake must too or start() raises
+                # AttributeError, and the pin below would test nothing.
+                self.middleware_registered: list = []
+
+            def use(self, middleware):
+                self.middleware_registered.append(middleware)
+                return middleware
 
             def event(self, *_a, **_k):
                 return lambda f: f

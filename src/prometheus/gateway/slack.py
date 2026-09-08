@@ -405,6 +405,35 @@ class SlackAdapter(BasePlatformAdapter):
 
         self._app = AsyncApp(token=self.config.token)
 
+        # ------------------------------------------------------------------
+        # AUTHORIZATION — registered FIRST as Bolt GLOBAL middleware.
+        #
+        # `channel_allowed()` used to be enforced in exactly two places —
+        # `_handle_message` and `_handle_mention`, the plain-event handlers.
+        # Every one of the ~50 `/prometheus-*` SLASH handlers was structurally
+        # exempt, and Slack slash commands are WORKSPACE-GLOBAL: any member,
+        # including Slack Connect external users, can invoke them from any
+        # channel or a DM, regardless of allowed_channels. That reaches
+        # `/prometheus-approve always <id>` (persists a SecurityGate grant to
+        # prometheus.yaml), `/prometheus-workspace <path>` (moves the write
+        # boundary) and the provider-override commands.
+        #
+        # This is the exact defect Telegram fixed in #202 — there with a
+        # group -1 TypeHandler; here Bolt's equivalent is `app.use()`, a
+        # global middleware that runs before EVERY listener (events, slash
+        # commands, shortcuts, view submissions) and every listener added in
+        # FUTURE, which a per-handler check would not. Verified empirically
+        # against slack-bolt 1.28: a global middleware DOES intercept slash
+        # commands, `body["channel_id"]` is present on them, and returning a
+        # BoltResponse stops the handler from running.
+        #
+        # Fail-OPEN on a body with no channel_id is deliberate and bounded:
+        # those are url-verification/ssl-check handshakes and OAuth callbacks
+        # that carry no channel to authorize and act on nothing. Every real
+        # command/event body has a channel_id, so the control applies where it
+        # matters. Fail-CLOSED on any channel we can read and do not allow.
+        self._app.use(self._authorize_request)
+
         # Register event handlers
         self._app.event("message")(self._handle_message)
         self._app.event("app_mention")(self._handle_mention)
@@ -983,6 +1012,49 @@ class SlackAdapter(BasePlatformAdapter):
             return command.get("channel_id") or ""
         except AttributeError:
             return ""
+
+    async def _authorize_request(
+        self, body: dict[str, Any], next: Any, **_kwargs: Any
+    ) -> Any:
+        """Bolt global middleware: drop requests from non-allowed channels.
+
+        Registered via ``self._app.use(...)`` BEFORE any listener, so it runs
+        ahead of every event handler AND every slash command — the structural
+        fix for the #202 defect on Slack (see the registration-site comment
+        for why per-handler checks were not enough).
+
+        Returning a ``BoltResponse`` instead of awaiting ``next()`` halts
+        dispatch: the listener never runs. Slack still needs a 200 to the
+        slash-command POST or it shows the user "this command didn't respond",
+        so the refusal body is a 200 with an explanatory line — the requester
+        is not the operator, but a 500/timeout would leak that something was
+        gated and invite retries.
+
+        The imports are local so a Slack-less install (the module imports fine
+        without slack-bolt; only ``start()`` needs it) is unaffected.
+        """
+        from slack_bolt.response import BoltResponse
+
+        channel_id = body.get("channel_id") or ""
+        # No channel to authorize: url-verification / ssl_check / OAuth
+        # callbacks. They act on nothing — let them through.
+        if not channel_id:
+            return await next()
+        if self.config.channel_allowed(channel_id):
+            return await next()
+
+        logger.warning(
+            "Ignoring Slack request from non-allowed channel %s (command %s)",
+            channel_id,
+            (body.get("command") or body.get("type") or "?")[:32],
+        )
+        return BoltResponse(
+            status=200,
+            body=(
+                "This channel is not on Prometheus's allowed_channels list, so "
+                "the command was not run."
+            ),
+        )
 
     async def _slash_memory(
         self, ack: Any, command: Any, respond: Any
