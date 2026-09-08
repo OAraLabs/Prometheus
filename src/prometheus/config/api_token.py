@@ -59,14 +59,30 @@ def resolve_api_token(config: dict[str, Any] | None = None) -> tuple[str, str]:
 
 
 def _deliberately_open(config: dict[str, Any] | None) -> bool:
-    """True when the operator explicitly configured an EMPTY token."""
+    """True ONLY when the operator EXPLICITLY chose an empty token.
+
+    The distinction that closes the audit's critical finding: the shipped
+    template carries ``web.api_token:`` which YAML parses as present-with-a
+    NULL value. ``None`` is "not configured" — the operator copied the
+    template verbatim and expects the documented first-start mint. An
+    explicit empty STRING (``api_token: ""`` here, or ``PROMETHEUS_API_TOKEN=``
+    in the env file / environment) is the deliberate-open channel the module
+    docstring and the template comment both name.
+
+    Treating ``None`` as deliberate is what booted an unauthenticated control
+    plane on every verbatim template copy: REST on :8005, WS on :8010 and the
+    OpenAI-compatible surface — every tool, including bash — on 0.0.0.0 with no
+    token. ``None`` now mints; only an explicit ``""`` stays open.
+    """
     web_cfg = (config or {}).get("web") or {}
-    if "api_token" in web_cfg and not web_cfg.get("api_token"):
+    # Explicit empty STRING in config only. A null/absent value is NOT a
+    # choice — it is the template default and must mint.
+    if web_cfg.get("api_token", None) == "":
         return True
-    if TOKEN_ENV_VAR in os.environ and not os.environ[TOKEN_ENV_VAR]:
+    if TOKEN_ENV_VAR in os.environ and os.environ[TOKEN_ENV_VAR] == "":
         return True
     file_values = parse_env_file()
-    if TOKEN_ENV_VAR in file_values and not file_values[TOKEN_ENV_VAR]:
+    if file_values.get(TOKEN_ENV_VAR, None) == "":
         return True
     return False
 
@@ -93,6 +109,36 @@ def ensure_api_token(config: dict[str, Any] | None = None) -> tuple[str, bool]:
     set_env_value(TOKEN_ENV_VAR, token)
     os.environ[TOKEN_ENV_VAR] = token
     return token, True
+
+
+def web_refused_on_bootstrap_failure(
+    config: dict[str, Any] | None,
+    *,
+    bootstrap_raised: bool,
+    environ: dict[str, str] | None = None,
+) -> bool:
+    """True when the web plane must NOT serve.
+
+    The audit's second open door: when :func:`ensure_api_token` RAISES — an
+    unwritable env-file dir (permissions, full disk, read-only HOME) so a
+    freshly-minted token cannot persist — the old daemon logged one ERROR line
+    and launched the bridge anyway. A web-enabled default install came up
+    unauthenticated (bash reachable on 0.0.0.0), the only signal an INFO
+    "web auth: OPEN".
+
+    Refusing to serve beats serving open. This is DISTINCT from
+    deliberate-open: an explicit empty token resolves cleanly to ``""`` with no
+    exception (:func:`_deliberately_open`), and that operator choice still
+    serves open. A bootstrap RAISE means we could not establish auth at all, so
+    there is nothing to honour — only to refuse.
+
+    ``environ`` is injectable so the decision is testable without a daemon boot.
+    """
+    if not bootstrap_raised:
+        return False
+    env = os.environ if environ is None else environ
+    cfg_token = ((config or {}).get("web") or {}).get("api_token")
+    return not (cfg_token or env.get(TOKEN_ENV_VAR))
 
 
 class TokenRotationBlocked(RuntimeError):
