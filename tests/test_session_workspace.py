@@ -61,6 +61,83 @@ class TestValidator:
         resolved, why = validate_workspace_path(str(secret), {"denied_paths": [str(tmp_path)]})
         assert resolved is None and "denied path" in why
 
+    def test_a_GLOB_denied_entry_refuses_the_path_it_matches(self, tmp_path) -> None:
+        """A glob entry must MATCH, not be resolved to a literal directory.
+
+        The test above passes a literal path, and it passed even while glob
+        entries were inert: this validator resolved each entry with
+        ``Path(denied).resolve()``, so ``<root>/*/.ssh`` became a directory
+        literally named ``*`` that nothing can be ``relative_to``. Any denied
+        entry with a wildcard — including the entire shipped credential floor —
+        therefore refused nothing here, and ``/workspace ~/.ssh`` was ACCEPTED,
+        handing a session its write boundary inside a credential directory.
+
+        Same root cause as the grep/glob prune layer, third reader. One matcher
+        (``path_guard.denied_entry_matches``) now serves all three.
+        """
+        home = tmp_path / "home" / "operator"
+        (home / ".ssh").mkdir(parents=True)
+        (home / "projects").mkdir()
+        entry = str(tmp_path / "*" / "operator" / ".ssh")
+
+        resolved, why = validate_workspace_path(str(home / ".ssh"), {"denied_paths": [entry]})
+        assert resolved is None, (
+            "a glob denied_paths entry was ignored — the validator resolved the "
+            "PATTERN into a literal path instead of matching against it"
+        )
+        assert why is not None and "denied path" in why
+        assert "*" in why, "the message should name the entry that matched, pattern intact"
+
+        # And the legitimate sibling still binds — a validator that refuses
+        # everything is not a control, it is an outage.
+        ok, why_ok = validate_workspace_path(str(home / "projects"), {"denied_paths": [entry]})
+        assert ok is not None and why_ok is None
+
+    def test_the_shipped_credential_floor_refuses_a_real_ssh_dir(self) -> None:
+        """End to end with the SHIPPED list and the operator's real home: this is
+        the literal ``/workspace ~/.ssh`` acceptance the audit measured."""
+        from prometheus.config.shipped_defaults import SHIPPED_DENIED_PATHS
+
+        ssh = Path.home() / ".ssh"
+        if not ssh.is_dir():
+            return  # nothing to bind on a host with no .ssh; not a failure
+        resolved, why = validate_workspace_path("~/.ssh", {})
+        assert resolved is None, (
+            "~/.ssh was accepted as a workspace despite /*/.ssh being in the "
+            "shipped denied floor"
+        )
+        assert why is not None and ".ssh" in why
+
+    def test_validator_gate_and_prune_layer_agree(self, tmp_path) -> None:
+        """THREE readers of one deny list must give ONE answer. Asserted
+        directly rather than trusted, because they are three separate call sites
+        and only two of them agreed before this change."""
+        from prometheus.permissions.checker import SecurityGate
+        from prometheus.tools.denied_prune import is_denied, resolve_denied
+
+        home = tmp_path / "home" / "operator"
+        (home / ".ssh").mkdir(parents=True)
+        (home / ".ssh" / "id_rsa").write_text("k")
+        cfg = {"denied_paths": [str(tmp_path / "*" / "operator" / ".ssh")]}
+
+        _resolved, why = validate_workspace_path(str(home / ".ssh"), cfg)
+        validator_denies = why is not None
+
+        gate = SecurityGate(denied_paths=cfg["denied_paths"])
+        gate_denies = (
+            gate.evaluate("read_file", file_path=str(home / ".ssh" / "id_rsa")).action
+            == "DENY"
+        )
+
+        prune_denies = is_denied(
+            home / ".ssh" / "id_rsa", resolve_denied(cfg["denied_paths"])
+        )
+
+        assert validator_denies and gate_denies and prune_denies, (
+            f"the three readers disagree: validator={validator_denies} "
+            f"gate={gate_denies} prune={prune_denies}"
+        )
+
 
 # --------------------------------------------------------------------------- #
 # store
