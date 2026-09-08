@@ -23,7 +23,6 @@ from prometheus.tools.builtin.download_file import (
     DownloadFileTool,
     _filename_from_url,
     _format_size,
-    _is_safe_url,
     _resolve_destination,
 )
 from prometheus.tools.builtin.web_fetch import (
@@ -373,21 +372,10 @@ class TestPathTraversalGuard:
         assert path == (tmp_path / "subdir" / "file.txt").resolve()
 
 
-class TestSafeUrl:
-    def test_blocks_localhost(self):
-        assert _is_safe_url("http://localhost/x") is False
-
-    def test_blocks_127_0_0_1(self):
-        assert _is_safe_url("http://127.0.0.1/x") is False
-
-    def test_blocks_private_192(self):
-        assert _is_safe_url("http://192.168.1.1/x") is False
-
-    def test_blocks_private_10(self):
-        assert _is_safe_url("http://10.0.0.1/x") is False
-
-    def test_blocks_no_hostname(self):
-        assert _is_safe_url("not a url") is False
+# The SSRF predicate now has one home — security/url_guard — and its cases live in
+# tests/test_url_guard.py. The five that used to be here (localhost, 127.0.0.1,
+# 192.168.x, 10.x, "not a url") are all covered there; keeping a second copy of
+# them in this file is how a fix gets applied to one and missed in the other.
 
 
 class TestFormatSize:

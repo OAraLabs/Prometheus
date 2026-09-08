@@ -272,7 +272,7 @@ def test_url_goes_through_the_shared_fetcher(scope, monkeypatch):
         seen["url"], seen["max_chars"] = url, max_chars
         return _Page(url)
 
-    monkeypatch.setattr("prometheus.tools.builtin.web_fetch._is_safe_url", lambda _u: True)
+    monkeypatch.setattr("prometheus.security.url_guard.is_safe_url", lambda _u: True)
     blocks = _run(_resolver(ws, root, fetch_url=fake_fetch).resolve(
         "s1", [Reference("url", "https://example.com/doc")]))
     assert seen["url"] == "https://example.com/doc" and seen["max_chars"] > 0
@@ -301,7 +301,7 @@ def test_url_refusals(scope, monkeypatch):
     async def failing(url, *, max_chars):
         raise ConnectionError("boom")
 
-    monkeypatch.setattr("prometheus.tools.builtin.web_fetch._is_safe_url", lambda _u: True)
+    monkeypatch.setattr("prometheus.security.url_guard.is_safe_url", lambda _u: True)
     with pytest.raises(ReferenceRefused) as ei:
         _run(_resolver(ws, root, fetch_url=failing).resolve("s1", [Reference("url", "https://example.com")]))
     assert ei.value.kind == "fetch_failed" and ei.value.status == 502
