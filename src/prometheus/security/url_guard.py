@@ -40,13 +40,17 @@ WHAT THIS DELIBERATELY DOES NOT DO
   operator's instruction on this finding was explicit: check the post-redirect
   host, do not add an allowlist. A tool that only fetches blessed domains is not
   worth having.
-* It does not decide the TAILNET question. 100.64.0.0/10 is reachable from here
-  and is genuinely two-sided: it is how a fetched page could reach the daemon's
-  own :8005 or the GPU box's unauthenticated ollama/whisper/ComfyUI ports, and it
-  is also how the operator legitimately points this tool at their own services.
-  ``TAILNET_RANGE`` is defined and measured but NOT enforced; see
-  :func:`is_blocked_address` and the note at :data:`ENFORCE_TAILNET_BLOCK`.
-  Turning it on is an operator decision, not a default.
+* It does not block the tailnet on the URL THE CALLER SUPPLIED. That stays an
+  operator decision (:data:`ENFORCE_TAILNET_BLOCK`, default False) because
+  pointing this tool at one's own services is a legitimate, routine use.
+
+  It DOES block the tailnet on every redirect hop, unconditionally. The two
+  cases only look alike: hop 0 is a destination the operator chose, and a
+  redirect is a destination a remote server chose. Nothing legitimate requires
+  a fetched page to be able to steer the next hop onto the private fleet, and
+  what sits there is not theoretical — the GPU box answers
+  ``GET /api/tags`` on its inference port with HTTP 200 and the full model
+  list, no token. See :func:`guard_request_hop`.
 * It does NOT keep happy eyeballs. Pinning means one address is chosen, so a
   host whose first resolved address is unreachable now fails instead of falling
   back to its second. The address is the one ``getaddrinfo`` returned first,
@@ -87,20 +91,37 @@ ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 #: reports ``is_private=False`` and False for all three sibling flags.
 TAILNET_RANGE = ipaddress.ip_network("100.64.0.0/10")
 
-#: Whether to treat the tailnet as blocked. DEFAULT FALSE, deliberately: the
-#: operator runs a tailnet fleet and may legitimately point web_fetch at his own
-#: services on it. See the module docstring — this is his call to make, and
-#: flipping it is one assignment plus the tests that pin the choice.
+#: Whether to treat the tailnet as blocked ON THE CALLER-SUPPLIED URL. DEFAULT
+#: FALSE, deliberately: the operator runs a tailnet fleet and may legitimately
+#: point web_fetch at his own services on it. See the module docstring — this is
+#: his call to make, and flipping it is one assignment plus the tests that pin
+#: the choice.
+#:
+#: This flag does NOT govern redirect hops. Those block the tailnet regardless,
+#: because the destination was chosen by a remote server rather than by the
+#: operator; see :func:`guard_request_hop`. Setting this True therefore tightens
+#: hop 0 to match, it does not "turn the feature on".
 ENFORCE_TAILNET_BLOCK = False
 
 
-def is_blocked_address(ip: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> bool:
+def is_blocked_address(
+    ip: "ipaddress.IPv4Address | ipaddress.IPv6Address",
+    *,
+    block_tailnet: bool | None = None,
+) -> bool:
     """True when *ip* is not on a publicly routable path.
 
     Covers the four classes the old check did, plus the ones it missed:
     unspecified, multicast, and — unwrapped first — the IPv4 inside an
     IPv4-mapped IPv6 address, which otherwise inherits the mapped address's gap.
+
+    *block_tailnet* decides the 100.64.0.0/10 question FOR THIS CALL. ``None``
+    means "use :data:`ENFORCE_TAILNET_BLOCK`", which is what every pre-existing
+    caller gets. It is a parameter rather than only a module flag because the
+    right answer differs by hop: see :func:`guard_request_hop`.
     """
+    if block_tailnet is None:
+        block_tailnet = ENFORCE_TAILNET_BLOCK
     mapped = getattr(ip, "ipv4_mapped", None)
     if mapped is not None:
         ip = mapped
@@ -115,13 +136,13 @@ def is_blocked_address(ip: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> b
     ):
         return True
 
-    if ENFORCE_TAILNET_BLOCK and ip in TAILNET_RANGE:
+    if block_tailnet and ip in TAILNET_RANGE:
         return True
 
     return False
 
 
-def is_ip_literal_blocked(host: str) -> bool:
+def is_ip_literal_blocked(host: str, *, block_tailnet: bool | None = None) -> bool:
     """True when *host* is already an IP literal and is blocked.
 
     Returns False for a hostname (nothing to decide without resolving). Brackets
@@ -130,7 +151,9 @@ def is_ip_literal_blocked(host: str) -> bool:
     """
     text = host.strip("[]")
     try:
-        return is_blocked_address(ipaddress.ip_address(text))
+        return is_blocked_address(
+            ipaddress.ip_address(text), block_tailnet=block_tailnet
+        )
     except ValueError:
         return False
 
@@ -157,7 +180,9 @@ class PinnedTarget:
     was_literal: bool
 
 
-def resolve_pinned(url: str) -> tuple[PinnedTarget | None, str]:
+def resolve_pinned(
+    url: str, *, block_tailnet: bool | None = None
+) -> tuple[PinnedTarget | None, str]:
     """Validate *url* and return the single address it may connect to.
 
     ``(None, reason)`` when it may not be fetched at all.
@@ -194,7 +219,7 @@ def resolve_pinned(url: str) -> tuple[PinnedTarget | None, str]:
     except ValueError:
         ip = None
     if ip is not None:
-        if is_blocked_address(ip):
+        if is_blocked_address(ip, block_tailnet=block_tailnet):
             return None, "the host resolves to a non-public address"
         family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
         return PinnedTarget(literal, literal, family, True), ""
@@ -213,14 +238,16 @@ def resolve_pinned(url: str) -> tuple[PinnedTarget | None, str]:
             ipaddress.ip_address(sockaddr[0])
         except (ValueError, IndexError):
             return None, "the host resolves to an unparseable address"
-        if is_blocked_address(ipaddress.ip_address(sockaddr[0])):
+        if is_blocked_address(
+            ipaddress.ip_address(sockaddr[0]), block_tailnet=block_tailnet
+        ):
             return None, "the host resolves to a non-public address"
 
     family, _t, _p, _c, sockaddr = addrs[0]
     return PinnedTarget(hostname, sockaddr[0], family, False), ""
 
 
-def check_url(url: str) -> tuple[bool, str]:
+def check_url(url: str, *, block_tailnet: bool | None = None) -> tuple[bool, str]:
     """Whether *url* may be fetched, and why not.
 
     Returns ``(True, "")`` when allowed, else ``(False, reason)``. The reason is
@@ -230,7 +257,7 @@ def check_url(url: str) -> tuple[bool, str]:
     The boolean form of :func:`resolve_pinned`, kept for the pre-flight callers
     that only need the bit. The two cannot disagree: this IS that function.
     """
-    target, reason = resolve_pinned(url)
+    target, reason = resolve_pinned(url, block_tailnet=block_tailnet)
     return target is not None, reason
 
 
@@ -250,6 +277,13 @@ def is_safe_url(url: str) -> bool:
 #: reads as something worth retrying, and it is not.
 class SsrfBlocked(Exception):
     """A redirect hop (or the original URL) resolved to a non-public address."""
+
+
+#: Extensions key marking "this request has already been through the guard", so
+#: a later hop can tell it is a REDIRECT rather than the caller's own URL. Not a
+#: security boundary — a remote server cannot write here — just the hop counter
+#: httpx does not otherwise expose to an event hook.
+_HOP_SEEN = "url_guard_hop_seen"
 
 
 def _host_header_name(request) -> str | None:
@@ -384,13 +418,57 @@ async def guard_request_hop(request) -> None:
       it, ``SSLV3_ALERT_HANDSHAKE_FAILURE``. Verification is not given up — it is
       the reason the extension is set.
 
+    HOP ASYMMETRY, and what actually justifies it. The tailnet is blocked on
+    every redirect hop and left alone on the caller's own URL. Measured, on this
+    fleet, today:
+
+    * The real open door is the GPU box's INFERENCE PORT: an unauthenticated
+      ``GET /api/tags`` returns HTTP 200 and the full model list. Whisper and
+      ComfyUI sit beside it on the same terms. A fetched page that can redirect
+      onto the fleet reaches those with no credential at all.
+    * The daemon's own token gate is CONDITIONAL: ``server.py`` reads
+      ``if _api_token and path.startswith(("/api/", "/v1/"))``. An empty token
+      skips the gate entirely, so on a deployment where it is unset — a fresh
+      install before the wizard runs — ``/api/bash`` is open on 0.0.0.0.
+
+    NOT justified by the daemon's :8005 as it runs here, and the difference is
+    worth keeping straight. It does bind 0.0.0.0, but with a token set every
+    ``/api/*`` route answers 401 — verified just now, including
+    ``POST /api/bash`` with ``{"command":"id"}``. Only ``/`` returns 200, and it
+    leaks the endpoint inventory: information disclosure, not code execution.
+    Citing that as the reason would overstate the finding and make the two real
+    ones easier to dismiss.
+
+    What this costs, and it is not nothing: a public page that legitimately
+    redirects to a tailnet host will now be refused. The operator can still
+    fetch that host by naming it directly, which is the case
+    ``ENFORCE_TAILNET_BLOCK`` protects.
+
     WHAT PINNING COSTS, stated plainly: one address is chosen instead of the
     happy-eyeballs walk anyio would do, so a host whose first resolved address is
     unreachable now fails rather than falling back to its second. The address is
     the one ``getaddrinfo`` returned first, which is the one the system would
     have picked anyway.
     """
-    target, reason = resolve_pinned(str(request.url))
+    # HOP ASYMMETRY. A redirect is a destination chosen by a REMOTE SERVER, and
+    # nothing legitimate needs that server to be able to steer a fetch onto the
+    # tailnet. The caller-supplied URL is different in kind: the operator points
+    # this tool at his own services on purpose, which is why
+    # ENFORCE_TAILNET_BLOCK stays False and governs hop 0 only.
+    #
+    # Measured against the real guard across three hops: a value written into
+    # ``extensions`` at hop 0 is visible on every later hop (httpx carries the
+    # contents forward when it builds a redirect request), so the marker below
+    # is enough to tell "the caller asked for this" from "a server sent us here"
+    # with no httpx change and no state of our own to keep in sync.
+    from_redirect = request.extensions.get(_HOP_SEEN) is not None
+
+    target, reason = resolve_pinned(
+        str(request.url), block_tailnet=True if from_redirect else None
+    )
     if target is None:
+        if from_redirect:
+            raise SsrfBlocked(f"{reason} (redirect target)")
         raise SsrfBlocked(reason)
     pin_request(request, target)
+    request.extensions[_HOP_SEEN] = True
