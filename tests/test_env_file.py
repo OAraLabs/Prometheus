@@ -223,3 +223,125 @@ class TestTokenCli:
         assert run_token_command(self._args("show"), {}) == 0
         out = capsys.readouterr().out
         assert rotated in out
+
+
+class TestTemplateBootsAuthenticated:
+    """The audit's CRITICAL finding: a verbatim template copy booted an
+    UNAUTHENTICATED control plane.
+
+    The shipped template carries ``web.api_token:`` which YAML parses as a
+    present-with-NULL value. The old ``_deliberately_open`` read present-but-
+    falsy as "the operator chose an open API" and skipped minting — so anyone
+    who copied the template exactly as instructed got REST on :8005, WS on
+    :8010 and the OpenAI-compatible surface with no token, on 0.0.0.0, with
+    bash reachable.
+
+    These tests drive the REAL shipped template (not a hand-written dict) so a
+    future template edit that reintroduces the hole fails here, and pin the
+    distinction: NULL mints, an explicit empty STRING stays open.
+    """
+
+    def test_verbatim_template_mints_a_token(self, env_file):
+        """The whole finding: the template as shipped must NOT boot open."""
+        from prometheus.config.template import load_template
+
+        tmpl = load_template()
+        assert tmpl.get("web", {}).get("api_token", "MISSING") is None, (
+            "precondition: the shipped template carries api_token as NULL; if "
+            "that changed, re-derive this test from the new shape"
+        )
+        token, minted = ensure_api_token(tmpl)
+        assert minted is True, (
+            "a verbatim template copy booted an unauthenticated control plane"
+        )
+        assert len(token) >= 32
+        assert parse_env_file()[TOKEN_ENV_VAR] == token
+        os.environ.pop(TOKEN_ENV_VAR, None)
+
+    def test_null_api_token_is_not_deliberate_open(self):
+        """NULL == 'not configured' (mint). It is not a choice to be open."""
+        from prometheus.config.api_token import _deliberately_open
+
+        assert _deliberately_open({"web": {"api_token": None}}) is False
+        assert _deliberately_open({"web": {}}) is False
+        assert _deliberately_open({}) is False
+
+    def test_explicit_empty_string_config_stays_open(self):
+        """The deliberate-open channel still works via an explicit empty
+        string in config — symmetric with the env-file/env-var channels."""
+        from prometheus.config.api_token import _deliberately_open
+
+        assert _deliberately_open({"web": {"api_token": ""}}) is True
+
+    def test_explicit_empty_string_config_mints_nothing(self, env_file):
+        """End-to-end: ``api_token: ""`` is honored as auth-OFF (no mint)."""
+        token, minted = ensure_api_token({"web": {"api_token": ""}})
+        assert (token, minted) == ("", False)
+        assert TOKEN_ENV_VAR not in parse_env_file()
+
+    def test_a_real_token_in_config_is_never_overridden(self, env_file):
+        token, minted = ensure_api_token({"web": {"api_token": "pinned-secret"}})
+        assert (token, minted) == ("pinned-secret", False)
+        os.environ.pop(TOKEN_ENV_VAR, None)
+
+
+class TestRefuseToServeOnBootstrapFailure:
+    """The audit's second open door: when ensure_api_token RAISES (unwritable
+    env-file dir → a minted token cannot persist), the daemon logged one ERROR
+    and launched the web bridge OPEN anyway — unauthenticated, bash reachable.
+
+    The decision is now a pure helper so it can be tested without a daemon
+    boot. Refusing to serve beats serving open. The key distinction: a RAISE
+    (could not establish auth at all) refuses; deliberate-open (an explicit
+    empty token, no raise) still serves.
+    """
+
+    def test_bootstrap_raise_with_no_token_configured_refuses(self):
+        from prometheus.config.api_token import web_refused_on_bootstrap_failure
+
+        assert web_refused_on_bootstrap_failure(
+            {"web": {"enabled": True}},
+            bootstrap_raised=True,
+            environ={},
+        ) is True, "a bootstrap raise with nothing configured must refuse to serve"
+
+    def test_no_raise_never_refuses(self):
+        from prometheus.config.api_token import web_refused_on_bootstrap_failure
+
+        # Normal mint path (no raise) must never trip the refusal.
+        assert web_refused_on_bootstrap_failure(
+            {"web": {"enabled": True}}, bootstrap_raised=False, environ={}
+        ) is False
+
+    def test_raise_but_token_in_config_still_serves(self):
+        from prometheus.config.api_token import web_refused_on_bootstrap_failure
+
+        # The env-file write failed, but a token is pinned in config — auth is
+        # established, so serving is correct (not open).
+        assert web_refused_on_bootstrap_failure(
+            {"web": {"api_token": "pinned"}}, bootstrap_raised=True, environ={}
+        ) is False
+
+    def test_raise_but_token_in_environ_still_serves(self):
+        from prometheus.config.api_token import web_refused_on_bootstrap_failure
+        from prometheus.config.api_token import TOKEN_ENV_VAR
+
+        assert web_refused_on_bootstrap_failure(
+            {"web": {}}, bootstrap_raised=True, environ={TOKEN_ENV_VAR: "envtok"}
+        ) is False
+
+    def test_deliberate_open_is_not_a_raise_so_serves(self):
+        """The distinction the fix must preserve: an explicit empty token
+        resolves to ("", False) with NO exception, so it is not a refusal —
+        the operator chose open and open is what they get."""
+        from prometheus.config.api_token import (
+            _deliberately_open,
+            web_refused_on_bootstrap_failure,
+        )
+
+        cfg = {"web": {"api_token": ""}}
+        # deliberate-open: no raise, so the refusal helper stays False
+        assert _deliberately_open(cfg) is True
+        assert web_refused_on_bootstrap_failure(
+            cfg, bootstrap_raised=False, environ={}
+        ) is False

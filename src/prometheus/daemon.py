@@ -2270,7 +2270,14 @@ async def run_daemon(args: argparse.Namespace) -> None:
             describe_web_auth,
             ensure_api_token,
             format_minted_banner,
+            web_refused_on_bootstrap_failure,
         )
+        # A bootstrap RAISE (unwritable env-file dir → a minted token cannot
+        # persist) used to log one ERROR and launch open anyway. Capture it so
+        # the decision below can refuse-to-serve instead. See
+        # web_refused_on_bootstrap_failure() for why this differs from
+        # deliberate-open (an explicit empty token resolves to "" with no raise).
+        _token_bootstrap_failed = False
         try:
             _token, _minted = ensure_api_token(config)
             if _minted:
@@ -2281,8 +2288,30 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     get_env_file_path(),
                 )
         except Exception:
+            _token_bootstrap_failed = True
             logger.error("API token bootstrap failed", exc_info=True)
-        logger.info(describe_web_auth(config))
+
+        # Refuse-to-serve: could not establish a token AND none is configured.
+        # Serving now would expose the control plane unauthenticated, so the
+        # bridge does not bind. Distinct from deliberate-open (an explicit
+        # empty token resolves to _token="" with NO exception), which serves
+        # open as the operator chose and is reported by describe_web_auth below.
+        _web_refused = web_refused_on_bootstrap_failure(
+            config, bootstrap_raised=_token_bootstrap_failed
+        )
+        if _web_refused:
+            logger.critical(
+                "WEB REFUSED: the API token could not be bootstrapped "
+                "(env file at %s is likely unwritable — permissions, full "
+                "disk, or a read-only HOME) and no token is configured. "
+                "Serving would expose an unauthenticated control plane with "
+                "shell-capable tools on all interfaces. Fix the env-file "
+                "location or set web.api_token / PROMETHEUS_API_TOKEN "
+                "explicitly. The web bridge is NOT starting.",
+                get_env_file_path(),
+            )
+        else:
+            logger.info(describe_web_auth(config))
         try:
             from prometheus.web.launcher import launch_web
             from prometheus.engine.agent_loop import LoopContext
@@ -2508,46 +2537,56 @@ async def run_daemon(args: argparse.Namespace) -> None:
             except Exception:
                 web_skill_registry = None
 
-            web_task = asyncio.create_task(launch_web(
-                config=config,
-                boot_sha=boot_sha,
-                signal_bus=signal_bus if "signal_bus" in dir() else None,
-                session_mgr=session_manager,
-                telemetry=telemetry,
-                skill_registry=web_skill_registry,
-                lcm_engine=lcm_engine if "lcm_engine" in dir() else None,
-                agent_loop=agent_loop,
-                approval_queue=approval_queue if "approval_queue" in dir() else None,
-                loop_context=loop_context,
-                profile_store=profile_store,
-                profile_state=profile_state,
-                skill_creator=skill_creator,
-                # None when Telegram is disabled — /api/status then reports
-                # gateway.wired=false rather than a health verdict.
-                gateway_adapter=telegram,
-                # #332: the MCP REST surface manages the LIVE runtime — None
-                # when no servers configured, and the routes then answer
-                # honestly instead of inventing state.
-                mcp_runtime=mcp_runtime,
-                # #370: a server added over REST registers tools after the
-                # boot grammar was generated. Same regeneration SENTINEL
-                # triggers when it registers its tools post-start.
-                on_tools_changed=_on_tools_changed,
-                # Item 4: the checkpoint routes read/restore through the same store.
-                checkpoint_store=checkpoint_store,
-                # The window the server actually reported, and the model it
-                # reported it for. Same two values the compactor and the
-                # Telegram /context command are built from, so every surface
-                # answers with one number.
-                detected_context_size=detected_ctx_size,
-                local_model=model_name,
-                detected_kv_cache=detected_kv_cache,
-                backend_registry=backend_registry,
-                api_port=api_port,
-                ws_port=ws_port,
-            ))
-            tasks.append(web_task)
-            logger.info("Web bridge started (REST :%d, WS :%d)", api_port, ws_port)
+            if _web_refused:
+                # Token bootstrap failed and nothing is configured: do NOT bind
+                # the control plane. The refusal was logged CRITICAL above.
+                logger.warning(
+                    "Web bridge SKIPPED — refusing to serve an unauthenticated "
+                    "control plane (see WEB REFUSED above)."
+                )
+                web_task = None
+            else:
+                web_task = asyncio.create_task(launch_web(
+                    config=config,
+                    boot_sha=boot_sha,
+                    signal_bus=signal_bus if "signal_bus" in dir() else None,
+                    session_mgr=session_manager,
+                    telemetry=telemetry,
+                    skill_registry=web_skill_registry,
+                    lcm_engine=lcm_engine if "lcm_engine" in dir() else None,
+                    agent_loop=agent_loop,
+                    approval_queue=approval_queue if "approval_queue" in dir() else None,
+                    loop_context=loop_context,
+                    profile_store=profile_store,
+                    profile_state=profile_state,
+                    skill_creator=skill_creator,
+                    # None when Telegram is disabled — /api/status then reports
+                    # gateway.wired=false rather than a health verdict.
+                    gateway_adapter=telegram,
+                    # #332: the MCP REST surface manages the LIVE runtime — None
+                    # when no servers configured, and the routes then answer
+                    # honestly instead of inventing state.
+                    mcp_runtime=mcp_runtime,
+                    # #370: a server added over REST registers tools after the
+                    # boot grammar was generated. Same regeneration SENTINEL
+                    # triggers when it registers its tools post-start.
+                    on_tools_changed=_on_tools_changed,
+                    # Item 4: the checkpoint routes read/restore through the same store.
+                    checkpoint_store=checkpoint_store,
+                    # The window the server actually reported, and the model it
+                    # reported it for. Same two values the compactor and the
+                    # Telegram /context command are built from, so every surface
+                    # answers with one number.
+                    detected_context_size=detected_ctx_size,
+                    local_model=model_name,
+                    detected_kv_cache=detected_kv_cache,
+                    backend_registry=backend_registry,
+                    api_port=api_port,
+                    ws_port=ws_port,
+                ))
+            if web_task is not None:
+                tasks.append(web_task)
+                logger.info("Web bridge started (REST :%d, WS :%d)", api_port, ws_port)
         except Exception as exc:
             logger.warning("Web bridge not available: %s", exc)
 
