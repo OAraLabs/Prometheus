@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -51,6 +53,21 @@ class GlobTool(BaseTool):
         return True
 
     async def execute(self, arguments: GlobToolInput, context: ToolExecutionContext) -> ToolResult:
+        """Offloaded to a thread — the body below is entirely synchronous.
+
+        This was ``async def`` for the tool interface only: it contained no
+        ``await`` at all, so every directory walk ran ON THE EVENT LOOP and stalled
+        every gateway, the WebSocket, the heartbeat and the REST API at once
+        for as long as it took. The agent calls this constantly, so it was one
+        of the cheapest stalls to trigger and one of the least visible.
+
+        The offload is total rather than per-call: there is nothing to
+        interleave, so wrapping the whole body keeps one place to reason about
+        instead of a scatter of ``to_thread`` calls inside a loop.
+        """
+        return await asyncio.to_thread(self._execute_sync, arguments, context)
+
+    def _execute_sync(self, arguments: GlobToolInput, context: ToolExecutionContext) -> ToolResult:
         root = _resolve_path(context.cwd, arguments.root) if arguments.root else context.cwd
         # Same defect grep fixed in #134, unfixed in this sibling until the
         # 2026-08-18 handoff sweep: models frequently pass an ABSOLUTE

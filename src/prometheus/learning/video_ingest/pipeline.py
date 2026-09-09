@@ -14,6 +14,8 @@ review (see ``live_recorder.service`` for the two-tier policy).
 
 from __future__ import annotations
 
+import asyncio
+
 import logging
 import tempfile
 from pathlib import Path
@@ -110,23 +112,40 @@ async def ingest_video_to_skill(
         }
 
     try:
+        # THE FOUR HEAVY STAGES RUN IN A THREAD. Each is a long synchronous
+        # block — a download, ffmpeg, Whisper, and an SSIM pass over every
+        # frame — and this coroutine ran them ON THE EVENT LOOP, so a single
+        # ingest froze every gateway, the WebSocket, the heartbeat and the
+        # REST API together for as long as ten minutes.
+        #
+        # Offloaded per stage rather than wholesale because the digest step
+        # below is genuinely async and must keep awaiting on the loop; the
+        # cheap bookkeeping between stages is left where it is.
+
         # (a) Resolve the source video
         if _is_url(source):
-            video_path = download_video(source, session_dir)
+            video_path = await asyncio.to_thread(download_video, source, session_dir)
         else:
             video_path = Path(source)
             if not video_path.is_file():
                 return _error(f"video not found: {source}")
 
-        # (b) Extract frames
-        frame_count = extract_frames(video_path, session_dir, fps=fps)
+        # (b) Extract frames — ffmpeg
+        frame_count = await asyncio.to_thread(
+            extract_frames, video_path, session_dir, fps=fps
+        )
         duration_seconds = int(round(frame_count / fps)) if fps > 0 else 0
 
-        # (c) Optional narration transcription (best-effort)
-        transcription = transcribe(video_path, session_dir) if transcribe_audio else None
+        # (c) Optional narration transcription — Whisper (best-effort)
+        transcription = (
+            await asyncio.to_thread(transcribe, video_path, session_dir)
+            if transcribe_audio else None
+        )
 
-        # (d) Keyframe extraction (SSIM dedup)
-        keyframes = extract_keyframes(session_dir, session_dir, frame_fps=fps)
+        # (d) Keyframe extraction — SSIM dedup over every frame
+        keyframes = await asyncio.to_thread(
+            extract_keyframes, session_dir, session_dir, frame_fps=fps
+        )
         if not keyframes:
             return _error("no keyframes could be extracted from the recording")
         narration = align_narration(transcription, keyframes) if transcription else []
