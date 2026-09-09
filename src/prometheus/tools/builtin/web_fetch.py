@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from prometheus.security.url_guard import (
     SsrfBlocked,
     check_url,
+    display_url,
     guard_request_hop,
     is_safe_url,
 )
@@ -141,7 +142,10 @@ async def fetch_url_text(url: str, *, max_chars: int, timeout: float = 20.0) -> 
     if truncated:
         body = body[:max_chars].rstrip() + "\n...[truncated]"
     return FetchedText(
-        url=str(response.url), status=response.status_code,
+        # NOT str(response.url): the SSRF guard pins the connection to the
+        # validated IP, so that would report an address where the caller asked
+        # for a name. display_url puts the name back.
+        url=display_url(response), status=response.status_code,
         content_type=content_type, body=body, truncated=truncated,
     )
 

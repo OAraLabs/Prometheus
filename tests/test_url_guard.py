@@ -222,6 +222,17 @@ class TestCheckUrl:
 # --------------------------------------------------------------------------- #
 
 
+def _requested_host(request) -> str:
+    """The NAME this hop is for, as the origin server would see it.
+
+    The SSRF guard pins the connection to the validated IP, so by the time a
+    request reaches the transport ``request.url.host`` is an address and the
+    name lives in ``Host:`` — exactly as it does on the wire. Mock handlers
+    route on this so they keep answering for the host under test.
+    """
+    return (request.headers.get("Host") or request.url.host).rsplit(":", 1)[0]
+
+
 def _client(handler, hooks):
     return httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
@@ -238,7 +249,7 @@ class TestRedirectHopsAreGuarded:
         hops: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.host == "public.example":
+            if _requested_host(request) == "public.example":
                 return httpx.Response(302, headers={"Location": "http://127.0.0.1:8005/api/status"})
             return httpx.Response(200, text=SECRET_BODY)
 
@@ -267,7 +278,7 @@ class TestRedirectHopsAreGuarded:
         from prometheus.security.url_guard import SsrfBlocked, guard_request_hop
 
         def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.host == "public.example":
+            if _requested_host(request) == "public.example":
                 return httpx.Response(302, headers={"Location": "http://169.254.169.254/latest/meta-data/"})
             return httpx.Response(200, text=SECRET_BODY)
 
@@ -290,7 +301,7 @@ class TestRedirectHopsAreGuarded:
         from prometheus.security.url_guard import SsrfBlocked, guard_request_hop
 
         def handler(request: httpx.Request) -> httpx.Response:
-            host = request.url.host
+            host = _requested_host(request)
             if host == "public.example":
                 return httpx.Response(302, headers={"Location": "http://also-public.example/x"})
             if host == "also-public.example":
@@ -310,7 +321,7 @@ class TestRedirectHopsAreGuarded:
         from prometheus.security.url_guard import guard_request_hop
 
         def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.host == "public.example":
+            if _requested_host(request) == "public.example":
                 return httpx.Response(302, headers={"Location": "https://also-public.example/final"})
             return httpx.Response(200, text="public content")
 
@@ -369,7 +380,7 @@ class TestFetchUrlTextInstallsTheGuard:
         from prometheus.tools.builtin.web_fetch import SsrfBlocked, fetch_url_text
 
         def handler(request):
-            if request.url.host == "public.example":
+            if _requested_host(request) == "public.example":
                 return httpx.Response(302, headers={"Location": "http://127.0.0.1:8005/api/status"})
             return httpx.Response(200, text=SECRET_BODY)
 
@@ -388,7 +399,7 @@ class TestFetchUrlTextInstallsTheGuard:
         from prometheus.tools.builtin.web_fetch import SsrfBlocked, fetch_url_text
 
         def handler(request):
-            if request.url.host == "public.example":
+            if _requested_host(request) == "public.example":
                 return httpx.Response(302, headers={"Location": "http://10.0.0.5/internal"})
             return httpx.Response(200, text=SECRET_BODY)
 
@@ -408,7 +419,7 @@ class TestFetchUrlTextInstallsTheGuard:
         from prometheus.tools.builtin.web_fetch import fetch_url_text
 
         def handler(request):
-            if request.url.host == "public.example":
+            if _requested_host(request) == "public.example":
                 return httpx.Response(302, headers={"Location": "https://also-public.example/final"})
             return httpx.Response(200, text="public content", headers={"content-type": "text/plain"})
 
