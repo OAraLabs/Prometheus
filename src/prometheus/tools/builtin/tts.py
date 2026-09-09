@@ -10,11 +10,10 @@ from __future__ import annotations
 import asyncio
 import shutil
 import tempfile
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from prometheus.permissions.path_schema import DIR_FIELD, PATH_FIELD
+from prometheus.permissions.path_schema import PATH_FIELD
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 

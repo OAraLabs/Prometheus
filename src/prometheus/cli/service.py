@@ -139,7 +139,7 @@ def install_service(
             return 1
         print(f"Started {UNIT_NAME}")
     else:
-        print(f"Enabled. Start it with: systemctl --user start prometheus")
+        print("Enabled. Start it with: systemctl --user start prometheus")
     return 0
 
 

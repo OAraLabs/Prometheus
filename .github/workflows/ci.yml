@@ -101,8 +101,61 @@ jobs:
         # never a broken test — it read the developer's REAL ~/.prometheus
         # state. conftest's _isolated_state_dirs fixture now sandboxes every
         # test, so the full suite gates with no deselects.
+        #
+        # COVERAGE FLOOR (2026-09-09). Measured 76% on this SHA; the floor sits
+        # one point below so a runner-to-runner difference cannot turn a green
+        # suite red, while a real drop still does. It only goes UP — raise it
+        # when the number does, and never lower it to make a PR pass.
         run: >
           PYTHONPATH=$PWD/src uv run pytest -m "not network" -q
+          --cov --cov-report=term:skip-covered --cov-fail-under=75
+
+  # Lint, types and dependency advisories. A separate job so it reports its own
+  # red X: folded into `test` these would be invisible behind a suite failure,
+  # and they answer different questions.
+  #
+  # WHY THESE FOUR AND NOT A STYLE SUITE. Each was chosen because it has already
+  # caught something in this repository, not because it is conventional:
+  #   * ruff found a live NameError (F821), a task that was never registered
+  #     for shutdown cancellation (F841) and two same-named route handlers
+  #     3000 lines apart (F811).
+  #   * the type gate is a RATCHET, not a cliff — 447 errors across 122 modules
+  #     would fail on day one and get switched off. See scripts/mypy_gate.py.
+  #   * pip-audit had 6 advisories across 3 packages when this landed; all had
+  #     fix versions, so the lock moved and the gate blocks from zero.
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv (from PyPI — matching the test job)
+        run: python -m pip install --upgrade uv
+      - name: Sync dependencies (same extras as the test job, plus the lint group)
+        # The SAME extras the suite uses. A narrower env would type-check a
+        # different import graph than the one that ships.
+        run: uv sync --extra web --extra anthropic --extra mcp --group dev --group lint
+
+      - name: Lint (ruff, src/)
+        # Config lives in pyproject [tool.ruff]; scope and next-widening plan
+        # are documented there rather than duplicated here.
+        run: uv run ruff check src/
+
+      - name: Types (mypy, ratcheted against mypy-debt.txt)
+        # Fails on an error in an already-clean module AND on a debt entry that
+        # has become clean, so the list can only shrink.
+        run: uv run python scripts/mypy_gate.py
+
+      - name: Dependency advisories (pip-audit)
+        # Audits the RESOLVED lock, not the loose ranges in pyproject: the lock
+        # is what installs, and a range that permits a fixed version proves
+        # nothing about what CI and the deploy clone actually get.
+        run: |
+          uv export --format requirements-txt --no-hashes --no-emit-project > /tmp/requirements-audit.txt
+          uv run pip-audit -r /tmp/requirements-audit.txt --progress-spinner off
 
   # The stranger's first ten minutes, executed — not unit-tested. Each leg
   # clones this SHA into a temp tree, builds a venv, runs the README's

@@ -376,7 +376,6 @@ async def run_task_once(
             if hasattr(provider, "set_grammar_source"):
                 provider.set_grammar_source(adapter.enforcer, registry.to_api_schema())
 
-    t_start = time.time()
     tel_before = gym_tel._conn.execute(
         "SELECT COUNT(*), COALESCE(SUM(retries),0), COALESCE(SUM(repairs),0), "
         "COALESCE(SUM(error_type = 'malformed_empty'),0) FROM tool_calls"

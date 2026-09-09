@@ -89,7 +89,12 @@ _DEFAULT_CADENCE_SECONDS = 1800  # 30 minutes
 # Promoted to memory/session_kind.py — retention, /api/status and the clients need the same
 # answer, and a second copy of this list is how one of them drifts. Re-exported under the old
 # private names so this module's existing callers and tests keep working.
-from prometheus.memory.session_kind import (  # noqa: E402
+# noqa: F401 — the two constants are DELIBERATE RE-EXPORTS, not dead imports.
+# ruff removed them while the lint gate was being wired; the comment above said
+# they were re-exports and the linter cannot read prose.
+# tests/test_session_kind.py::test_the_contract_is_still_the_one_the_extractor_uses
+# pins all three, which is what caught it.
+from prometheus.memory.session_kind import (  # noqa: E402,F401
     MACHINE_SESSION_IDS as _MACHINE_SESSION_IDS,
     MACHINE_SESSION_PREFIXES as _MACHINE_SESSION_PREFIXES,
     is_machine_session as _is_machine_session,

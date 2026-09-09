@@ -17,7 +17,6 @@ import asyncio
 import logging
 import logging.handlers
 import os
-import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -25,8 +24,8 @@ from typing import Any
 import yaml
 
 from prometheus import __version__
-from prometheus.config.paths import get_config_dir, get_data_dir, get_logs_dir, get_wiki_root
-from prometheus.engine.agent_loop import AgentLoop, RunResult, run_loop, LoopContext
+from prometheus.config.paths import get_config_dir, get_data_dir, get_wiki_root
+from prometheus.engine.agent_loop import run_loop, LoopContext
 from prometheus.config.shipped_defaults import resolve_max_tool_iterations, resolve_max_tool_iterations_cloud
 from prometheus.engine.messages import ConversationMessage
 from prometheus.engine.stream_events import (
@@ -35,7 +34,6 @@ from prometheus.engine.stream_events import (
     ToolExecutionCompleted,
     ToolExecutionStarted,
 )
-from prometheus.engine.usage import UsageSnapshot
 from prometheus.providers.base import ModelProvider
 from prometheus.engine.fallback import build_fallback_target
 
@@ -1038,7 +1036,6 @@ LEGACY_COMMAND_NAME = "prometheus"
 
 def invoked_command_name() -> str:
     """The console-script name this process was started as, else `oara`."""
-    import os
 
     base = os.path.basename(sys.argv[0] or "")
     return base if base in (COMMAND_NAME, LEGACY_COMMAND_NAME) else COMMAND_NAME
@@ -1402,7 +1399,7 @@ def main() -> None:
     if args.command == "config":
         if getattr(args, "show_defaults", False):
             from prometheus.config.template import (
-                TemplateNotFound, get_template_path, read_template_text)
+                TemplateNotFound, read_template_text)
             try:
                 sys.stdout.write(read_template_text())
             except TemplateNotFound as exc:

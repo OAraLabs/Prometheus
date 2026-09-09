@@ -18,7 +18,6 @@ from uuid import uuid4
 
 import httpx
 
-from prometheus.engine.messages import ConversationMessage, TextBlock, ToolUseBlock
 from prometheus.engine.usage import UsageSnapshot
 from prometheus.providers.retry import stream_with_retry
 from prometheus.providers.base import (
@@ -29,10 +28,8 @@ from prometheus.providers.base import (
     ModelProvider,
 )
 from prometheus.providers.stub import (
-    MAX_DELAY,
     MAX_RETRIES,
     RETRYABLE_STATUS_CODES,
-    BASE_DELAY,
     _build_openai_messages,
     _parse_assistant_message,
 )

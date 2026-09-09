@@ -132,7 +132,7 @@ def _ask_choice(prompt: str, options: list[str], default: int = 1) -> int:
     print(f"\n{prompt}\n")
     for i, opt in enumerate(options, 1):
         print(f"  {i}. {opt}")
-    raw = _input(f"\nChoice", str(default))
+    raw = _input("\nChoice", str(default))
     try:
         choice = int(raw)
         if 1 <= choice <= len(options):
@@ -339,13 +339,13 @@ class SetupWizard:
         )
 
         while True:
-            url = _input(f"\nEnter the URL", default_url)
+            url = _input("\nEnter the URL", default_url)
             url = url.rstrip("/")
             print(f"\n  Testing connection to {url}...")
 
             model = self._test_provider(url)
             if model is not None:
-                print(f"  + Connected")
+                print("  + Connected")
                 if model:
                     print(f"  Detected model: {model}")
                     self._model_name = model
@@ -435,7 +435,7 @@ class SetupWizard:
         default_env = CLOUD_DEFAULT_ENV_VARS[provider]
 
         print(f"\nEnter your API key, or press Enter to use env var ${default_env}:")
-        key_input = _input(f"API key", default_env)
+        key_input = _input("API key", default_env)
 
         if key_input == default_env or not key_input:
             # Use env var
@@ -463,7 +463,7 @@ class SetupWizard:
 
         # Model selection
         models = CLOUD_PROVIDER_MODELS[provider]
-        print(f"\nWhich model?")
+        print("\nWhich model?")
         for i, (name, desc, price) in enumerate(models, 1):
             print(f"  {i}. {name} ({desc}, {price})")
         raw = _input("Choice", "1")
@@ -1032,7 +1032,7 @@ Run this wizard again after you're ready:
                 choices = data.get("choices", [])
                 text = (choices[0].get("message", {}).get("content", "") or "").strip() if choices else ""
 
-            print(f'  Sending test prompt: "What is 2+2?"')
+            print('  Sending test prompt: "What is 2+2?"')
             print(f"  Response: {text!r}")
 
             if "4" in text:

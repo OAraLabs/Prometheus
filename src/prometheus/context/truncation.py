@@ -118,7 +118,7 @@ class ToolResultTruncator:
 
     def _truncate_grep(self, output: str) -> str:
         """Keep top 20 grep results."""
-        lines = [l for l in output.splitlines() if l.strip()]
+        lines = [line for line in output.splitlines() if line.strip()]
         kept = lines[:20]
         dropped = len(lines) - len(kept)
         result = "\n".join(kept)

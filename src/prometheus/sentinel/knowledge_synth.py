@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from prometheus.config.paths import get_config_dir, get_wiki_root
+from prometheus.config.paths import get_wiki_root
 
 if TYPE_CHECKING:
     from prometheus.memory.store import MemoryStore

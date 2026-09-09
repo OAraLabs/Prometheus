@@ -477,7 +477,6 @@ def _prompt_cloud_provider(env_path: Path) -> dict[str, Any] | None:
     Returns a complete, valid config dict — or None when no usable key
     could be established (in which case nothing is written).
     """
-    import os
 
     providers = list(_CLOUD_FAST_PROVIDERS)
     idx = _prompt_choice(
@@ -517,7 +516,6 @@ def _cloud_key_source(key_env: str, env_path: Path) -> str | None:
     or the target-dir copy), so a key present only there still counts —
     a re-run of setup must not demand the key be re-exported.
     """
-    import os
 
     if os.environ.get(key_env):
         return "environment"
@@ -546,7 +544,6 @@ def _cloud_config_noninteractive(
     copied into the env file, because ``oara daemon`` under systemd
     does not inherit this shell.
     """
-    import os
 
     if provider not in _CLOUD_FAST_PROVIDERS:
         print(f"  x Unknown cloud provider {provider!r}. "

@@ -24,23 +24,22 @@ Persistence: SQLite at ~/.prometheus/symbiote/sessions.db.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import sqlite3
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import uuid4
 
 from prometheus.config.paths import get_config_dir
 from prometheus.symbiote.graft import GraftEngine, GraftReport
 from prometheus.symbiote.harvest import HarvestEngine, HarvestReport
 from prometheus.symbiote.license_gate import LicenseCheck, LicenseVerdict
-from prometheus.symbiote.scout import ScoutEngine, ScoutReport
+from prometheus.symbiote.scout import ScoutEngine
 
 log = logging.getLogger(__name__)
 
@@ -580,7 +579,7 @@ class SymbioteCoordinator:
     @staticmethod
     def _rebuild_graft_report(d: dict[str, Any] | None):
         """Reconstruct a GraftReport-shaped object from the stored dict."""
-        from prometheus.symbiote.graft import GraftedFile, GraftReport
+        from prometheus.symbiote.graft import GraftedFile
         if not d:
             return None
         files = [

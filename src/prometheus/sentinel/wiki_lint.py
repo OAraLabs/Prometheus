@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from prometheus.config.paths import get_config_dir, get_wiki_root
+from prometheus.config.paths import get_wiki_root
 
 log = logging.getLogger(__name__)
 
@@ -381,7 +381,7 @@ class WikiLinter:
 
         for rel, info in pages.items():
             content_lower = info["content"].lower()
-            linked_lower = {l.lower() for l in info["links"]}
+            linked_lower = {link.lower() for link in info["links"]}
             own_name = info["entity_name"].lower()
 
             for name, name_rel in all_names.items():

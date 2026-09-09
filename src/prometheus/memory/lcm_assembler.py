@@ -14,7 +14,6 @@ from prometheus.context.token_estimation import estimate_tokens
 from prometheus.memory.lcm_types import (
     AssemblyResult,
     CompactionConfig,
-    MessagePart,
     SummaryNode,
 )
 

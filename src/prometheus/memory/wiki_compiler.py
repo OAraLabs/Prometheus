@@ -13,11 +13,10 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any
 
 import yaml
 
-from prometheus.config.paths import get_config_dir, get_wiki_root
+from prometheus.config.paths import get_wiki_root
 from prometheus.memory.entity_validation import classify_entity, quarantine
 from prometheus.memory.store import MemoryStore
 

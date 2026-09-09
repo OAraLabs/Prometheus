@@ -21,7 +21,6 @@ from typing import Any
 
 from prometheus.benchmarks.suite import BenchmarkSuite, TestCase, load_suite
 from prometheus.engine.agent_loop import AgentLoop, RunResult
-from prometheus.engine.messages import ConversationMessage
 from prometheus.providers.base import ModelProvider
 from prometheus.tools.base import ToolRegistry
 

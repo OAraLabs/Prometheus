@@ -1068,8 +1068,9 @@ def list_stale_docker_containers(
 
     Returns list of dicts with ``id``, ``name``, ``created``, ``status``.
     """
-    cutoff = datetime.now(timezone.utc).timestamp() - (max_age_hours * 3600)
-
+    # (The age filter is applied per-container below via _parse_docker_age;
+    # the old precomputed cutoff timestamp went unused when that helper
+    # replaced the raw comparison.)
     result = subprocess.run(
         [
             "docker", "ps", "-a",

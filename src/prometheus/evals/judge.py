@@ -382,7 +382,7 @@ Example ending: SCORE: 0.85"""
 
         # Last resort: standalone decimal (0.X or 1.0) on the last non-empty line
         if not match:
-            last_lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+            last_lines = [line.strip() for line in raw.strip().splitlines() if line.strip()]
             if last_lines:
                 last_match = re.search(r"\b(0\.\d+|1\.0)\b", last_lines[-1])
                 if last_match:

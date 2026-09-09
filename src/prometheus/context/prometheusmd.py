@@ -98,7 +98,6 @@ def discover_project_files(
             continue
 
     for directory in [current, *current.parents]:
-        found_at_level = False
 
         # --- Convention files (priority order, one per directory level) ---
         for fname in CONVENTION_FILES:
@@ -110,7 +109,6 @@ def discover_project_files(
                     continue  # a different document that shares the name
                 if candidate not in seen:
                     seen.add(candidate)
-                    found_at_level = True
                     label = directory.name or str(directory)
                     results.append((candidate, label))
                 break  # Only take the highest-priority file per level
@@ -121,7 +119,6 @@ def discover_project_files(
             for rule in sorted(rules_dir.glob("*.md")):
                 if rule not in seen:
                     seen.add(rule)
-                    found_at_level = True
                     label = directory.name or str(directory)
                     results.append((rule, label))
 

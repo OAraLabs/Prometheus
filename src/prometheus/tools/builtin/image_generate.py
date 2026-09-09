@@ -44,13 +44,13 @@ import logging
 import uuid
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, Field
 
 from prometheus.security.path_guard import assert_path_under_roots
-from prometheus.permissions.path_schema import DIR_FIELD, PATH_FIELD
+from prometheus.permissions.path_schema import PATH_FIELD
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 logger = logging.getLogger(__name__)

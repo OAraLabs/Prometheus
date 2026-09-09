@@ -219,10 +219,6 @@ class ContextCompressor:
         Returns (compressed_messages, number_of_batches_summarized).
         """
         from prometheus.engine.messages import ConversationMessage, TextBlock
-        from prometheus.providers.base import (
-            ApiMessageCompleteEvent,
-            ApiMessageRequest,
-        )
 
         user_indices = [i for i, m in enumerate(messages) if m.role == "user"]
         protected = set(user_indices[-self._fresh_tail_count:])

@@ -19,7 +19,7 @@ from prometheus.context.token_estimation import estimate_tokens
 from prometheus.memory.lcm_assembler import LCMAssembler
 from prometheus.memory.lcm_compaction import LCMCompactor
 from prometheus.memory.lcm_conversation_store import LCMConversationStore
-from prometheus.memory.lcm_summarize import LCMCircuitBreakerOpen, LCMSummarizer
+from prometheus.memory.lcm_summarize import LCMSummarizer
 from prometheus.memory.lcm_summary_store import LCMSummaryStore
 from prometheus.memory.lcm_types import (
     AssemblyResult,

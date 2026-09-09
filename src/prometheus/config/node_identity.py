@@ -28,7 +28,6 @@ import base64
 import logging
 import os
 from dataclasses import dataclass
-from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey

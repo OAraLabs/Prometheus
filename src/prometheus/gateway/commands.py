@@ -198,7 +198,7 @@ def cmd_note(store, raw: str) -> str:
 def cmd_sentinel() -> str:
     """Return SENTINEL subsystem status text."""
     try:
-        from prometheus.sentinel.signals import SignalBus
+        from prometheus.sentinel.signals import SignalBus  # noqa: F401 — availability probe
         from prometheus.tools.builtin.sentinel_status import (
             _autodream,
             _observer,
@@ -579,7 +579,6 @@ async def cmd_anatomy() -> str:
         return "Anatomy not initialized. Is the daemon running with anatomy enabled?"
 
     from prometheus.infra.anatomy import AnatomyScanner
-    from prometheus.infra.anatomy_writer import AnatomyWriter
 
     scanner: AnatomyScanner = _scanner  # type: ignore[assignment]
 
@@ -735,7 +734,7 @@ async def cmd_doctor(config: dict | None = None) -> str:
         return "Doctor: anatomy not initialized. Is the daemon running?"
 
     from prometheus.infra.anatomy import AnatomyScanner
-    from prometheus.infra.doctor import Doctor, DiagnosticReport
+    from prometheus.infra.doctor import Doctor
 
     scanner: AnatomyScanner = _scanner  # type: ignore[assignment]
 
@@ -2538,7 +2537,7 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     # structured target (path/command) it carries.
     action = queue.pending.get(request_id)
     from prometheus.permissions.approval_queue import (
-        derive_grant, scope_is_persistent, scope_widens)
+        derive_grant)
 
     gate = getattr(queue, "_security_gate", None)
     # SPRINT-CONSENT Phase 3: the grant is derived BEFORE approve() so the

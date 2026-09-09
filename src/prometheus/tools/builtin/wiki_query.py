@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from prometheus.config.paths import get_config_dir, get_wiki_root
+from prometheus.config.paths import get_wiki_root
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 log = logging.getLogger(__name__)

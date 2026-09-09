@@ -14,7 +14,7 @@ from prometheus.memory.lcm_types import MessagePart, SummaryNode
 from prometheus.providers.base import ApiMessageRequest, ModelProvider
 
 if TYPE_CHECKING:
-    from prometheus.engine.messages import ConversationMessage
+    pass
 
 logger = logging.getLogger(__name__)
 
