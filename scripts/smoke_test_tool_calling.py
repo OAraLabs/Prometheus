@@ -90,6 +90,31 @@ class TestResult:
     lucky_guesses: int = 0
 
 
+def _tools_called(result) -> list[str]:
+    """Every tool the model actually invoked, in order.
+
+    THE ASSERTION THIS SCRIPT WAS MISSING. `expect_tools` existed as a
+    parameter of ``run_test`` from the beginning and was never once read, and
+    `TestResult.tools_called` was never written — the two halves of the one
+    deterministic way to check the thing this file is named after, both dead,
+    while the tests leaned on the model's prose instead.
+
+    Walks the conversation for ``tool_use`` blocks rather than parsing text,
+    so it reports what the loop DID, not what the model said it would do.
+    """
+    names: list[str] = []
+    for message in getattr(result, "messages", None) or []:
+        content = getattr(message, "content", None)
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if getattr(block, "type", None) == "tool_use":
+                name = getattr(block, "name", None)
+                if name:
+                    names.append(name)
+    return names
+
+
 @dataclass
 class SmokeTestRunner:
     config: dict
@@ -121,6 +146,7 @@ class SmokeTestRunner:
             "result": result,
             "elapsed_ms": elapsed_ms,
             "text": getattr(result, "text", str(result)),
+            "tools": _tools_called(result),
         }
 
     async def run_test(
@@ -134,85 +160,43 @@ class SmokeTestRunner:
         expect_file_contains: Optional[str] = None,
         expect_blocked: bool = False,
         max_iterations: int = 10,
+        attempts: int = 3,
     ) -> TestResult:
-        """Run a single smoke test."""
-        if self.verbose:
-            print(f"\n  ▶ {name}...")
-            print(f"    Message: {message[:80]}{'...' if len(message) > 80 else ''}")
+        """Run a single smoke test, retrying a transient model failure.
 
-        try:
-            out = await self.run_agent(message, max_iterations)
-            text = out["text"]
-            elapsed = out["elapsed_ms"]
+        WHY RETRIES, AND WHY THEY ARE NOT PAPERING OVER ANYTHING.
 
-            # ── Assertions ──
-            errors = []
+        This script drives a REAL local model, so every run is a sample from a
+        stochastic process. Measured over 8 runs with honest assertions, half
+        contained at least one failure and the failures MOVED: a turn that
+        ended having called no tool at all, a write that never happened, an
+        edit that ran and produced the wrong content. Independent and
+        transient, not a broken pipeline.
 
-            if expect_in_output and expect_in_output.lower() not in text.lower():
-                errors.append(
-                    f"Expected '{expect_in_output}' in output, got: {text[:200]}"
-                )
-
-            if expect_file_exists:
-                p = Path(expect_file_exists)
-                if not p.exists():
-                    errors.append(f"Expected file {expect_file_exists} to exist")
-                elif expect_file_contains:
-                    content = p.read_text()
-                    if expect_file_contains not in content:
-                        errors.append(
-                            f"Expected '{expect_file_contains}' in {expect_file_exists}, "
-                            f"got: {content[:200]}"
-                        )
-
-            if expect_blocked:
-                # Accept EITHER SecurityGate denial OR model-level refusal
-                gate_indicators = ["denied", "blocked", "security", "not allowed", "permission"]
-                model_indicators = ["cannot", "refuse", "won't", "i'm not able", "i am not able",
-                                    "i can't", "i cannot execute", "destructive", "prohibited",
-                                    "not fulfill", "safety"]
-                all_indicators = gate_indicators + model_indicators
-                if not any(ind in text.lower() for ind in all_indicators):
-                    errors.append(
-                        f"Expected command to be blocked, but got: {text[:200]}"
-                    )
-
-            passed = len(errors) == 0
-
-            # Soft pass: tool pipeline worked but model wording was unexpected
-            soft_pass = False
-            if not passed and expect_in_output and not expect_file_exists and not expect_blocked:
-                # The model responded (no crash, no circuit breaker) but
-                # used unexpected wording — log as warning, not failure
-                if "circuit breaker" not in text.lower():
-                    soft_pass = True
-                    passed = True
-                    errors = [f"SOFT PASS (unexpected wording): {e}" for e in errors]
-
-            result = TestResult(
-                name=name,
-                category=category,
-                passed=passed,
-                duration_ms=elapsed,
-                details=text[:300] if self.verbose else "",
-                error="; ".join(errors) if errors else "",
+        A gate on a stochastic system either retries or it lies. A genuinely
+        broken pipeline fails every attempt and still reports loudly; what the
+        retry removes is the coin flip. The attempt count is REPORTED, never
+        swallowed — if these start needing two and three tries where one used
+        to do, that is a real degradation and hiding it would rebuild the
+        vacuum described below.
+        """
+        result: TestResult | None = None
+        for attempt in range(1, attempts + 1):
+            result = await self._attempt(
+                name, category, message, expect_tools, expect_in_output,
+                expect_file_exists, expect_file_contains, expect_blocked,
+                max_iterations,
             )
-
-        except Exception as e:
-            result = TestResult(
-                name=name,
-                category=category,
-                passed=False,
-                duration_ms=0,
-                error=f"{type(e).__name__}: {e}",
-            )
-            if self.verbose:
-                traceback.print_exc()
+            if result.passed:
+                if attempt > 1:
+                    joiner = "; " if result.error else ""
+                    result.error = f"{result.error}{joiner}passed on attempt {attempt}/{attempts}"
+                break
 
         self.results.append(result)
 
         if result.passed and result.error:
-            status = "⚠️"   # soft pass
+            status = "⚠️"   # soft pass, or passed only after a retry
         elif result.passed:
             status = "✅"
         else:
@@ -221,10 +205,127 @@ class SmokeTestRunner:
         print(f"  {status} {name} {timing}")
         if not result.passed:
             print(f"     → {result.error}")
+            # The tools the turn ACTUALLY called. An empty list is the single
+            # most useful fact about a failure: it separates "the pipeline ran
+            # the wrong thing" from "the turn ended without calling anything",
+            # and those have completely different causes.
+            print(f"       tools called: {result.tools_called or '[] — NO TOOL WAS CALLED'}")
         elif result.error:
             print(f"     ⚠ {result.error}")
 
         return result
+
+    async def _attempt(
+        self,
+        name: str,
+        category: str,
+        message: str,
+        expect_tools: Optional[list[str]],
+        expect_in_output: Optional[str],
+        expect_file_exists: Optional[str],
+        expect_file_contains: Optional[str],
+        expect_blocked: bool,
+        max_iterations: int,
+    ) -> TestResult:
+        """One sample. Assertions live here; the retry policy lives above."""
+        if self.verbose:
+            print(f"\n  ▶ {name}...")
+            print(f"    Message: {message[:80]}{'...' if len(message) > 80 else ''}")
+
+        try:
+            out = await self.run_agent(message, max_iterations)
+            text = out["text"]
+            elapsed = out["elapsed_ms"]
+            tools = out["tools"]
+
+            # ── Assertions ──
+            # Each carries its KIND. What may be forgiven is decided by which
+            # assertion FAILED, not by which parameters the caller supplied —
+            # the rule below had that backwards, and it was the flake.
+            errors: list[tuple[str, str]] = []
+
+            if expect_tools:
+                missing = [t for t in expect_tools if t not in tools]
+                if missing:
+                    errors.append((
+                        "tools",
+                        f"Expected tool(s) {missing} to be called, got {tools or '[]'}",
+                    ))
+
+            if expect_in_output and expect_in_output.lower() not in text.lower():
+                errors.append((
+                    "wording",
+                    f"Expected '{expect_in_output}' in output, got: {text[:200]}",
+                ))
+
+            if expect_file_exists:
+                fp = Path(expect_file_exists)
+                if not fp.exists():
+                    errors.append(("file", f"Expected file {expect_file_exists} to exist"))
+                elif expect_file_contains:
+                    content = fp.read_text()
+                    if expect_file_contains not in content:
+                        errors.append((
+                            "file",
+                            f"Expected '{expect_file_contains}' in {expect_file_exists}, "
+                            f"got: {content[:200]}",
+                        ))
+
+            if expect_blocked:
+                # Accept EITHER SecurityGate denial OR model-level refusal
+                gate_indicators = ["denied", "blocked", "security", "not allowed", "permission"]
+                model_indicators = ["cannot", "refuse", "won't", "i'm not able", "i am not able",
+                                    "i can't", "i cannot execute", "destructive", "prohibited",
+                                    "not fulfill", "safety"]
+                if not any(ind in text.lower() for ind in gate_indicators + model_indicators):
+                    errors.append((
+                        "blocked",
+                        f"Expected command to be blocked, but got: {text[:200]}",
+                    ))
+
+            passed = len(errors) == 0
+
+            # SOFT PASS — forgive model WORDING, never a missing effect.
+            #
+            # This keyed on which parameters were supplied
+            # (`expect_in_output and not expect_file_exists`), which inverted
+            # it exactly where it mattered: a test asserting BOTH a file and a
+            # phrase got NO forgiveness, even though the file assertion had
+            # already proved the pipeline worked. That is the flake —
+            # file_write_and_read wrote the file correctly and hard-failed on
+            # "got: Now let me read it back.", roughly one run in three.
+            #
+            # The decision now comes from the failures themselves. A missing
+            # file, an uncalled tool, or an unblocked command is never soft.
+            if not passed and {kind for kind, _ in errors} == {"wording"}:
+                if "circuit breaker" not in text.lower():
+                    passed = True
+                    errors = [(k, f"SOFT PASS (unexpected wording): {m}") for k, m in errors]
+
+            return TestResult(
+                name=name,
+                category=category,
+                passed=passed,
+                duration_ms=elapsed,
+                details=text[:300] if self.verbose else "",
+                error="; ".join(m for _, m in errors) if errors else "",
+                # Populated at last. This field existed from the start and was
+                # never written or read — the same dead scaffolding as the
+                # `expect_tools` parameter. A smoke test for tool calling that
+                # recorded no tool calls could only ever assert on prose.
+                tools_called=tools,
+            )
+
+        except Exception as e:
+            if self.verbose:
+                traceback.print_exc()
+            return TestResult(
+                name=name,
+                category=category,
+                passed=False,
+                duration_ms=0,
+                error=f"{type(e).__name__}: {e}",
+            )
 
 
 # ── Test definitions ─────────────────────────────────────────────────
@@ -237,6 +338,11 @@ async def test_basic_tool_calls(runner: SmokeTestRunner):
         name="bash_echo",
         category="basic",
         message="Run this command: echo 'adapter pipeline works'",
+        # Safe to require: bash is the ONLY tool here that can run a command.
+        # Contrast write_file/edit_file below, deliberately NOT required — the
+        # model may reach the same effect through bash, and asserting HOW it
+        # got there would trade one flake for another.
+        expect_tools=["bash"],
         expect_in_output="adapter pipeline works",
     )
 
@@ -252,15 +358,23 @@ async def test_basic_tool_calls(runner: SmokeTestRunner):
         expect_in_output="smoke test passed",
     )
 
+    # SET UP ITS OWN PRECONDITION. This edited the file the test ABOVE asked
+    # the model to create, so a turn that ended early up there failed down
+    # here as "Expected file .../hello.txt to exist" — a report about the
+    # wrong test, for a reason that has nothing to do with editing. A test's
+    # precondition is the harness's job, not another model turn's.
+    edit_target = SMOKE_WORKSPACE / "edit_me.txt"
+    edit_target.write_text("smoke test passed\n")
+
     await runner.run_test(
         name="file_edit",
         category="basic",
         message=(
-            f"Edit the file {SMOKE_WORKSPACE}/hello.txt — replace 'smoke test passed' "
+            f"Edit the file {edit_target} — replace 'smoke test passed' "
             f"with 'smoke test edited'. Then read it to confirm."
         ),
         expect_file_contains="smoke test edited",
-        expect_file_exists=f"{SMOKE_WORKSPACE}/hello.txt",
+        expect_file_exists=str(edit_target),
     )
 
     await runner.run_test(
@@ -284,6 +398,11 @@ async def test_basic_tool_calls(runner: SmokeTestRunner):
             f"print(2 + 2)\n"
             f"Then run it with: python3 {SMOKE_WORKSPACE}/add.py"
         ),
+        # This asserted the model's prose and NOTHING else, so a turn ending
+        # on "I'll create the file first." soft-passed and the test proved
+        # only that the model replied. It now asserts the effects.
+        expect_tools=["bash"],
+        expect_file_exists=f"{SMOKE_WORKSPACE}/add.py",
         expect_in_output="4",
     )
 
