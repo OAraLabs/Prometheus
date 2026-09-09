@@ -193,7 +193,13 @@ jobs:
 
       - name: Install bubblewrap and permit unprivileged namespaces
         run: |
-          sudo apt-get update -qq
+          # `apt-get update` exits non-zero if ANY configured index fails,
+          # and GitHub runners ship third-party sources we do not use. A
+          # Google Chrome "Hash Sum mismatch" failed this job once with
+          # exit 100 — an upstream mirror hiccup breaking a security gate that
+          # has nothing to do with Chrome. Only the INSTALL has to succeed:
+          # if bubblewrap cannot be installed, the next step fails loudly.
+          sudo apt-get update -qq -o Acquire::Retries=3 || true
           sudo apt-get install -y -qq bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bwrap --ro-bind / / -- /bin/true
