@@ -282,3 +282,71 @@ def load_config_file(
 
     log.debug("config %s: LOADED %s", subsystem, path)
     return ConfigLoad(raw, LOADED, str(path), "", subsystem)
+
+
+# ---------------------------------------------------------------------------
+# The one loader
+# ---------------------------------------------------------------------------
+
+
+def load_config_resolved(
+    config_path: "str | Path | None" = None,
+    *,
+    subsystem: str,
+    substituting: str,
+    strict: bool,
+    strict_action: str = "start",
+) -> dict:
+    """Search, read honestly, then apply env overrides. ONE implementation.
+
+    There were two, and each had what the other lacked:
+
+      * ``daemon.load_config`` searched correctly and reported all four read
+        states to the ledger, but never applied env overrides — so
+        ``PROMETHEUS_MODEL``, ``PROMETHEUS_PERMISSION_MODE``,
+        ``PROMETHEUS_TRUST_LEVEL`` and every ``*_FILE`` secret worked under
+        ``oara`` and were silently dead under ``oara daemon``. A security knob
+        that is dark on the surface that matters.
+      * ``__main__.load_config`` applied the overrides but read the file with
+        ``yaml.safe_load(fh) or {}``, which renders "your config is empty" and
+        "you have no config" as the same value and logs neither.
+
+    Composing them here means neither can drift back. *strict* is the only
+    difference between the two callers, and it is a named argument rather
+    than a second function: the daemon refuses to boot on an unusable config,
+    while a CLI command that already tolerated an empty file still does —
+    except that the state is now on the record instead of silent.
+    """
+    from prometheus.config.defaults import config_search_paths
+    from prometheus.config.env_override import apply_env_overrides
+
+    candidates = config_search_paths(config_path)
+    for candidate in candidates:
+        if candidate.is_file():
+            # First hit wins and we do NOT fall through: a config that exists
+            # and cannot be read is an error, not an absence. Falling through
+            # would resolve an unreadable file to somebody ELSE's config.
+            load = load_config_file(
+                candidate, subsystem=subsystem, substituting=substituting,
+            )
+            break
+    else:
+        # Nothing anywhere. Report against the LAST candidate so the message
+        # names a real place to put one, not the first path probed.
+        load = load_config_file(
+            candidates[-1] if candidates else None,
+            subsystem=subsystem, substituting=substituting,
+            explicit=bool(config_path),
+        )
+
+    if strict and load.state in ERROR_STATES:
+        # *strict_action* keeps the caller's own operator-facing sentence.
+        # The daemon says "Refusing to boot the daemon", which is what its
+        # message has always said and what tests pin — sharing the loader
+        # must not quietly reword the one line an operator reads at 3am.
+        raise ConfigReadError(
+            f"prometheus.yaml is unusable ({load.state}): {load.detail}. "
+            f"Refusing to {strict_action} on {substituting} — fix the file, "
+            f"or run `oara setup` to regenerate it."
+        )
+    return apply_env_overrides(load.data)
