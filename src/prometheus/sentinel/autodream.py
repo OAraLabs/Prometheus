@@ -107,6 +107,19 @@ class AutoDreamEngine:
         Can be called directly (e.g. from tests) or via the dream loop.
         Checks ``_dreaming`` between phases so the cycle can abort early
         if ``idle_end`` fires, but only when running inside the loop.
+
+        ⚠ THIS WAS THE IDLE EVENT-LOOP STALL, and it was measurable long
+        before it was found. The daemon's own loop watchdog logged 328 lag
+        warnings in seven days; 313 of the 327 gaps between them were 1803
+        seconds apart — a 30-minute period matching this engine's default
+        `dream_interval_minutes`. Every one was `phase=idle tool=None`, p50
+        1084 ms, worst 2830 ms, so it looked like nothing the agent did.
+
+        Three of the four phases called SYNCHRONOUS workers — a wiki tree
+        walk, SQLite dedup/decay, and a telemetry aggregation — directly on
+        the loop, freezing every gateway, the WebSocket, the heartbeat and
+        the REST API for the duration, twice an hour, forever. They run in a
+        thread now. Phase 4 was already async and is unchanged.
         """
         results: list[DreamResult] = []
         was_dreaming = self._dreaming  # track if loop-driven
@@ -172,7 +185,9 @@ class AutoDreamEngine:
         summary and, when present, emitted as a ``dream_insight`` so they reach
         the operator instead of dying in the lint log. (wiki-dedupe 2026-08)
         """
-        result = self._wiki_linter.lint()  # type: ignore[union-attr]
+        # OFF THE LOOP. `lint()` walks the whole wiki. See the note on
+        # run_cycle: these four phases were the 30-minute idle stall.
+        result = await asyncio.to_thread(self._wiki_linter.lint)  # type: ignore[union-attr]
         case_variants = [
             i for i in result.issues if i.category == "duplicate_case"
         ]
@@ -197,13 +212,18 @@ class AutoDreamEngine:
                 source="autodream",
             ))
         if result.has_issues and self._auto_fix_wiki:
-            fixed = self._wiki_linter.auto_fix(result)  # type: ignore[union-attr]
+            fixed = await asyncio.to_thread(
+                self._wiki_linter.auto_fix, result,  # type: ignore[union-attr]
+            )
             summary["auto_fixed"] = fixed
         return summary
 
     async def _phase_memory_consolidation(self) -> dict[str, Any]:
         """Phase 2: Memory dedup, decay, tombstone."""
-        result = self._memory_consolidator.consolidate()  # type: ignore[union-attr]
+        # OFF THE LOOP — dedup, decay and tombstone are SQLite work.
+        result = await asyncio.to_thread(
+            self._memory_consolidator.consolidate,  # type: ignore[union-attr]
+        )
         return {
             "duplicates_merged": result.duplicates_merged,
             "confidence_decayed": result.confidence_decayed,
@@ -212,7 +232,10 @@ class AutoDreamEngine:
 
     async def _phase_telemetry_digest(self) -> dict[str, Any]:
         """Phase 3: Telemetry health check."""
-        result = self._telemetry_digest.generate()  # type: ignore[union-attr]
+        # OFF THE LOOP — aggregates the telemetry tables.
+        result = await asyncio.to_thread(
+            self._telemetry_digest.generate,  # type: ignore[union-attr]
+        )
         summary = {
             "total_calls": result.total_calls,
             "anomalies": len(result.anomalies),
