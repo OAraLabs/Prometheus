@@ -167,6 +167,10 @@ MIS_RESOLVED_ROOTS: dict[str, str] = {
     "vision_model": "MIS-RESOLVED — really learning.video_ingest.vision_model.*",
     "checks": "MIS-RESOLVED — the live-recorder quality gate's sub-config, "
               "passed in by its caller rather than read from the root",
+    "deferred": "MIS-RESOLVED — really tools.deferred_loading.always_loaded, "
+                "documented there. config/divergence.py resolves it from the "
+                "section its caller passes in, so the receiver is a parameter "
+                "and the extractor cannot tie it to a config expression",
 }
 
 

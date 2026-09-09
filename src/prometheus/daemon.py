@@ -34,6 +34,7 @@ from prometheus.config.paths import (
 )
 from prometheus.context.environment import git_head_sha
 from prometheus.engine.agent_loop import AgentLoop
+from prometheus.config.divergence import warn_on_divergence
 from prometheus.config.shipped_defaults import resolve_max_tool_iterations, resolve_max_tool_iterations_cloud
 from prometheus.gateway.archive_writer import ArchiveWriter
 from prometheus.gateway.config import Platform, PlatformConfig
@@ -642,6 +643,13 @@ async def run_daemon(args: argparse.Namespace) -> None:
 
     # PR-B shape-B ruling: absent gates that fail closed say so at boot.
     _warn_absent_gating_keys(config)
+    # Phase C: the config analogue of deploy_guard.sh's staleness check.
+    # _warn_absent_gating_keys covers a key that is MISSING; this covers a key
+    # that is PRESENT and quietly overrides the shipped default. Both are
+    # silence, and the second is what let the live config pin a cloud
+    # iteration ceiling below the shipped default with /health green, the
+    # tree clean and the deploy guard passing. Warns; never refuses.
+    warn_on_divergence(config)
 
     # Sprint 15 GRAFT: scoped daemon lock — prevent duplicate instances
     from prometheus.gateway.status import acquire_daemon_lock, release_daemon_lock
