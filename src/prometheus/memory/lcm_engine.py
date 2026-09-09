@@ -39,7 +39,27 @@ logger = logging.getLogger(__name__)
 # Default config file path
 # ---------------------------------------------------------------------------
 
-_PROMETHEUS_YAML = Path(__file__).resolve().parents[4] / "config" / "prometheus.yaml"
+#: Resolved through the SHARED search order, not a parent count.
+#:
+#: This was ``Path(__file__).resolve().parents[4] / "config" /
+#: "prometheus.yaml"``, which on the deploy clone resolves to
+#: ``~/config/prometheus.yaml`` — one level ABOVE the repo — a path that has
+#: never existed. So compaction has run on hard-coded defaults since it was
+#: written, and the miss was logged at DEBUG. Today's live values happen to
+#: equal the defaults, which is exactly why nobody noticed.
+#:
+#: A parent count cannot be made right here in any case: a wheel ships only
+#: ``src/prometheus``, so no ``config/`` exists at ANY level above this
+#: module. ``config_search_paths`` is the one answer the CLI, the daemon and
+#: doctor already use, and it knows about ``$PROMETHEUS_CONFIG_DIR``.
+def _prometheus_yaml() -> "Path | None":
+    """The config file this process would actually load, or None."""
+    from prometheus.config.defaults import config_search_paths
+
+    for candidate in config_search_paths(None):
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _load_config_from_yaml() -> CompactionConfig:
@@ -49,9 +69,16 @@ def _load_config_from_yaml() -> CompactionConfig:
     or the relevant keys are absent.
     """
     cfg = CompactionConfig()
-    yaml_path = _PROMETHEUS_YAML
-    if not yaml_path.is_file():
-        logger.debug("prometheus.yaml not found at %s -- using defaults", yaml_path)
+    yaml_path = _prometheus_yaml()
+    if yaml_path is None:
+        # INFO, not DEBUG. "Compaction is running on defaults" is a fact about
+        # the running system, and at DEBUG it was invisible for the entire
+        # life of the feature.
+        logger.info(
+            "compaction: no prometheus.yaml on the search path — using "
+            "CompactionConfig defaults (context_threshold=%s, fresh_tail=%s)",
+            cfg.context_threshold, cfg.fresh_tail_count,
+        )
         return cfg
 
     try:
@@ -72,6 +99,11 @@ def _load_config_from_yaml() -> CompactionConfig:
             cfg.summary_model = str(ctx["summary_model"])
     except Exception:
         logger.warning("Failed to parse prometheus.yaml -- using default CompactionConfig", exc_info=True)
+    else:
+        logger.info(
+            "compaction: loaded from %s (context_threshold=%s, fresh_tail=%s)",
+            yaml_path, cfg.context_threshold, cfg.fresh_tail_count,
+        )
 
     return cfg
 

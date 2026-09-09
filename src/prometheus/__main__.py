@@ -21,8 +21,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from prometheus import __version__
 from prometheus.config.paths import get_config_dir, get_data_dir, get_wiki_root
 from prometheus.engine.agent_loop import run_loop, LoopContext
@@ -64,16 +62,19 @@ def load_config(config_path: str | None = None) -> dict[str, Any]:
     Value precedence within the loaded file:
     env vars > secret files > YAML > defaults.
     """
-    from prometheus.config.defaults import config_search_paths
-    from prometheus.config.env_override import apply_env_overrides
+    from prometheus.config.load import load_config_resolved
 
-    for path in config_search_paths(config_path):
-        if path.is_file():
-            with path.open(encoding="utf-8") as fh:
-                config = yaml.safe_load(fh) or {}
-            return apply_env_overrides(config)
-    log.debug("No config file found — using defaults")
-    return apply_env_overrides({})
+    # NON-STRICT on purpose. This is the same dict the old body produced for
+    # every input — including an empty file, which still yields defaults
+    # rather than refusing — but the read STATE is now logged and recorded
+    # instead of vanishing into `yaml.safe_load(fh) or {}`. The daemon uses
+    # the same function with strict=True, because booting the whole system on
+    # substituted defaults is not the same situation as one CLI command
+    # tolerating a missing file.
+    return load_config_resolved(
+        config_path, subsystem="cli",
+        substituting="built-in defaults", strict=False,
+    )
 
 
 # ---------------------------------------------------------------------------

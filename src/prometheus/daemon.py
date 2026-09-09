@@ -120,31 +120,24 @@ def load_config(config_path: str | None = None) -> dict[str, Any]:
     EMPTY file, which ``yaml.safe_load(fh) or {}`` turned into ``{}`` with no
     log line at all — the whole system on defaults, silently, because "your
     config is empty" and "you have no config" rendered as the same value.
+
+    ⚠ AND IT IGNORED EVERY ENV OVERRIDE THE CLI HONOURS, until 2026-09-09.
+    This function searched and read correctly and then never called
+    ``apply_env_overrides``, so ``PROMETHEUS_MODEL``,
+    ``PROMETHEUS_PERMISSION_MODE``, ``PROMETHEUS_TRUST_LEVEL`` and every
+    ``*_FILE`` secret worked under ``oara`` and were silently dead under
+    ``oara daemon`` — a security knob dark on the surface that matters. The
+    body now delegates to :func:`config.load.load_config_resolved`, which is
+    the ONE implementation both entry points use; the only difference left
+    between them is the ``strict`` flag.
     """
-    from prometheus.config.defaults import config_search_paths
-    from prometheus.config.load import ERROR_STATES, ConfigReadError, load_config_file
+    from prometheus.config.load import load_config_resolved
 
-    candidates = config_search_paths(config_path)
-    for candidate in candidates:
-        if candidate.is_file():
-            # First hit wins and we do NOT fall through: a config that exists
-            # and cannot be read is an error, not an absence. Falling through
-            # would resolve an unreadable file to somebody ELSE's config,
-            # which is the substitution this whole arc exists to remove.
-            return _require(load_config_file(
-                candidate, subsystem="daemon",
-                substituting=_DAEMON_SUBSTITUTING,
-            ), ERROR_STATES, ConfigReadError)
-
-    # Nothing exists anywhere. Report against the LAST candidate so the
-    # message names a real place to put one (~/.prometheus/prometheus.yaml,
-    # where `oara setup` writes) rather than the first one probed.
-    return _require(load_config_file(
-        candidates[-1] if candidates else None,
-        subsystem="daemon",
-        substituting=_DAEMON_SUBSTITUTING,
-        explicit=bool(config_path),
-    ), ERROR_STATES, ConfigReadError)
+    return load_config_resolved(
+        config_path, subsystem="daemon",
+        substituting=_DAEMON_SUBSTITUTING, strict=True,
+        strict_action="boot the daemon",
+    )
 
 
 def _require(load, error_states, exc_type) -> dict[str, Any]:
@@ -381,6 +374,11 @@ def read_config_pins(pins_path: Path) -> dict:
 #: and WITHOUT re-running the comparison — the surface must describe what
 #: actually happened at boot, not recompute a fresh opinion (CROSS-CUTTING §12:
 #: the runtime auto-detects, the record must follow).
+#: Distinguishes "this key is not in the config" from "its value is falsy".
+#: ``.get(p, {})`` collapsed the two, which is why a pin could not correct
+#: either of them.
+_PIN_MISSING = object()
+
 CONFIG_PINS_STATE: dict = {"path": None, "pins": {}, "drifted": []}
 
 
@@ -426,13 +424,25 @@ def apply_config_pins(config: dict, pins_path: Path) -> list[str]:
         if expected is None:
             continue
         parts = str(dotpath).split(".")
-        val = config
+        # ⚠ THE WALK USES A SENTINEL, and the guard below tests it explicitly.
+        # This read `val.get(p, {})` and then `if val and ...`, so a pin could
+        # not correct the two cases most worth pinning: a key that is ABSENT
+        # (the walk produced a falsy {}) and a value that is FALSY — False, 0,
+        # "", []. Pinning `telegram_enabled: true` against a config that had
+        # deleted the key, or set it false, did nothing at all, while
+        # /health went on reporting the pin as active. A mechanism that
+        # reports itself working and is not is worse than no mechanism.
+        val: Any = config
         for p in parts:
-            val = val.get(p, {}) if isinstance(val, dict) else None
-        if val and str(val) != str(expected):
+            val = val.get(p, _PIN_MISSING) if isinstance(val, dict) else _PIN_MISSING
+            if val is _PIN_MISSING:
+                break
+        if val is _PIN_MISSING or str(val) != str(expected):
             logger.warning(
-                "CONFIG DRIFT DETECTED: %s = %r (pinned: %r). %s",
-                dotpath, val, expected, CONFIG_PIN_EFFECT,
+                "CONFIG DRIFT DETECTED: %s = %s (pinned: %r). %s",
+                dotpath,
+                "<absent>" if val is _PIN_MISSING else repr(val),
+                expected, CONFIG_PIN_EFFECT,
             )
             obj = config
             for p in parts[:-1]:
