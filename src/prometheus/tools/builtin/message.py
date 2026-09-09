@@ -14,9 +14,74 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel, Field
 
+from prometheus.permissions.checker import ORIGIN_SYSTEM, origin_from_session_id
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 import os
+
+
+# ---------------------------------------------------------------------------
+# Destination perimeter
+# ---------------------------------------------------------------------------
+#
+# `message` is the only tool that POSTs model-authored CONTENT to a model-chosen
+# URL. That makes it an exfiltration primitive, not merely an SSRF one:
+# web_fetch READS from an address, this one WRITES to it.
+#
+# The rule constrains WHERE data may flow, never how much the agent may attempt
+# — no caps, no approval prompts, no gate on the model's reasoning:
+#
+#   user origin   -> the model may choose the destination. A human asked for
+#                    this turn and sees the result, so "post this to my ntfy
+#                    endpoint" and "post to my own box" both keep working.
+#   system origin -> the destination must be OPERATOR-supplied, via env var.
+#                    Cron, Sentinel, GEPA and managed tasks have nobody in the
+#                    loop, so a URL the model picked *after reading a fetched
+#                    page* is indistinguishable from one that page chose for it.
+#
+# Deliberately NOT an address-class (SSRF) check. An attacker's collector sits
+# at a perfectly public address, so `url_guard.is_blocked_address` cannot see
+# the threat this tool poses; and applying it here would break posting to the
+# operator's own local services, which is legitimate at user origin.
+#
+# Only the two arbitrary-URL platforms are governed. Slack and Telegram POST to
+# hardcoded API hosts (slack.com, api.telegram.org) and treat `recipient` as a
+# channel/chat id, so a steered value stays inside the operator's own workspace,
+# reachable only with the operator's own bot token. Different blast radius,
+# excluded on purpose rather than by oversight.
+
+#: Operator-owned destination for the generic `webhook` platform. Discord and
+#: Slack already had one; this platform had none, which would have left it dead
+#: at system origin rather than merely constrained.
+WEBHOOK_URL_ENV = "PROMETHEUS_WEBHOOK_URL"
+
+
+def resolve_destination(
+    model_supplied: str | None,
+    env_var: str,
+    origin: str,
+) -> tuple[str, str | None]:
+    """Resolve the URL to POST to, under the origin rule.
+
+    Returns ``(url, refusal)``. A non-None *refusal* means the send must not
+    proceed and carries the reason shown to the model. ``("", None)`` means
+    nothing was supplied at all, leaving the caller's own "missing destination"
+    message intact — a refusal and an absence are not the same answer.
+    """
+    configured = os.environ.get(env_var, "").strip()
+    if origin != ORIGIN_SYSTEM:
+        # User origin: model's choice wins, falling back to the operator's.
+        # This is the pre-existing precedence, preserved exactly.
+        return (model_supplied or configured), None
+    if configured:
+        return configured, None
+    if model_supplied:
+        return "", (
+            f"Refused: a background session may only post to the destination "
+            f"configured in {env_var}, not to a URL chosen at runtime. Set "
+            f"{env_var} to enable this, or run the send from a user session."
+        )
+    return "", None
 
 
 class MessagePlatform(str, Enum):
@@ -51,15 +116,21 @@ class MessageTool(BaseTool):
         self, arguments: MessageInput, context: ToolExecutionContext
     ) -> ToolResult:
         platform = arguments.platform
+        # The session id comes from the agent loop's tool metadata, which is
+        # trusted context — the loop sets it from LoopContext, never from tool
+        # arguments, so an injected argument cannot forge a user origin.
+        # Contexts built without metadata (jobs, cron) classify as system,
+        # which is the fail-closed direction.
+        origin = origin_from_session_id((context.metadata or {}).get("session_id"))
         try:
             if platform == MessagePlatform.discord:
-                return await _send_discord(arguments)
+                return await _send_discord(arguments, origin)
             elif platform == MessagePlatform.slack:
                 return await _send_slack(arguments)
             elif platform == MessagePlatform.telegram:
                 return await _send_telegram(arguments)
             elif platform == MessagePlatform.webhook:
-                return await _send_webhook(arguments)
+                return await _send_webhook(arguments, origin)
             else:
                 return ToolResult(
                     output=f"Unsupported platform: {platform}", is_error=True
@@ -70,8 +141,12 @@ class MessageTool(BaseTool):
             return ToolResult(output=f"message error: {exc}", is_error=True)
 
 
-async def _send_discord(args: MessageInput) -> ToolResult:
-    webhook_url = args.recipient or os.environ.get("DISCORD_WEBHOOK_URL", "")
+async def _send_discord(args: MessageInput, origin: str) -> ToolResult:
+    webhook_url, refusal = resolve_destination(
+        args.recipient, "DISCORD_WEBHOOK_URL", origin
+    )
+    if refusal:
+        return ToolResult(output=refusal, is_error=True)
     if not webhook_url:
         return ToolResult(
             output="Discord requires a webhook URL via recipient or DISCORD_WEBHOOK_URL env var.",
@@ -136,11 +211,16 @@ async def _send_telegram(args: MessageInput) -> ToolResult:
     return ToolResult(output=f"Message sent to Telegram chat {chat_id}.")
 
 
-async def _send_webhook(args: MessageInput) -> ToolResult:
-    url = args.recipient
+async def _send_webhook(args: MessageInput, origin: str) -> ToolResult:
+    url, refusal = resolve_destination(args.recipient, WEBHOOK_URL_ENV, origin)
+    if refusal:
+        return ToolResult(output=refusal, is_error=True)
     if not url:
         return ToolResult(
-            output="Webhook platform requires a URL in the recipient field.",
+            output=(
+                "Webhook platform requires a URL in the recipient field, or "
+                f"{WEBHOOK_URL_ENV} set for background sessions."
+            ),
             is_error=True,
         )
     async with httpx.AsyncClient(timeout=15.0) as client:
