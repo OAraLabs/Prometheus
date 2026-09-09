@@ -313,7 +313,22 @@ class BwrapSandbox(ProcessSandbox):
     only for a task that genuinely needs it (a `uv sync`/`pip install` step);
     this is a plain constructor flag, never silently toggled by this class.
 
-    ⚠ HOST FINDING, live and unresolved as of 2026-08-13 (deployment host):
+    ⚠ HOST FINDING of 2026-08-13 — RESOLVED 2026-09-09. Kept because the
+    diagnosis is still the right one to reach for when bwrap will not run,
+    and because the resolution is the interesting part. The finding below was
+    accurate when written; both halves of it are now fixed on the deployment
+    host by the targeted AppArmor allowance it recommends
+    (`/etc/apparmor.d/bwrap`), and `self_check()` reports
+    `ok=True, isolated_ok=True, networked_ok=True` there today.
+
+    A SECOND, UNRELATED failure wore the same skip message until 2026-09-09
+    and is worth separating from this one: `self_check`'s probe bound only
+    `/usr` and `/bin`, which cannot exec anything dynamically linked, so it
+    reported "cannot run a namespaced process" on every merged-/usr host
+    INCLUDING ones where this class works perfectly. That was a defect in the
+    probe, not in any host. See the comment in `self_check`.
+
+    The original finding, as recorded on 2026-08-13:
 
     This class is implemented and unit-tested (argv construction, the
     self-check, the sentinel-based construction-failure detector), but its
@@ -399,10 +414,27 @@ class BwrapSandbox(ProcessSandbox):
                 *extra,
                 "--proc", "/proc",
                 "--dev", "/dev",
-                "--ro-bind-try", "/usr", "/usr",
-                "--ro-bind-try", "/bin", "/bin",
-                "--", "/bin/sh", "-c", f'printf "%s" {sentinel}',
             ]
+            # THE SAME BASE BIND SET THE REAL SANDBOX USES, not a shorter
+            # hand-written one. This probe used to bind only /usr and /bin,
+            # and that is not enough to exec anything dynamically linked:
+            # on a merged-/usr system the loader lives at the absolute path
+            # /lib64/ld-linux-x86-64.so.2, itself a symlink INTO /lib, so
+            # both must be present. Measured on Ubuntu 24.04:
+            #
+            #   /usr /bin                 -> execvp /bin/sh: No such file...
+            #   /usr /bin /lib64          -> same (the loader symlink dangles)
+            #   /usr /bin /lib            -> same (no /lib64 path at all)
+            #   /usr /bin /lib /lib64     -> OK
+            #
+            # The ENOENT names /bin/sh, which is present — it is the
+            # INTERPRETER that is missing, and that is why the old failure
+            # read as "this host cannot namespace" instead of "this probe is
+            # malformed". Deriving the list from _BASE_RO_BIND_DIRS is what
+            # makes the probe answer the question the sandbox actually asks.
+            for base in _BASE_RO_BIND_DIRS:
+                argv += ["--ro-bind-try", base, base]
+            argv += ["--", "/bin/sh", "-c", f'printf "%s" {sentinel}']
             try:
                 proc = subprocess.run(
                     argv, capture_output=True, text=True, timeout=timeout_seconds
