@@ -1936,6 +1936,11 @@ async def _run_loop(
         effective_iter_limit = _effective_max_tool_iterations(context)
         if tool_iteration > effective_iter_limit:
             _log_iteration(context, _IterationReason.MAX_ITERATIONS_HIT, turn, tool_iteration)
+            # final_message (carrying these tool_use blocks) is already in
+            # history. Answer every one of them BEFORE the exit text or the
+            # next message on this session is a hard 400 (see
+            # _unanswered_tool_results).
+            messages.append(_unanswered_tool_results(tool_calls))
             error_msg = _make_assistant_msg(
                 f"Tool iteration limit reached ({tool_iteration}/{effective_iter_limit}). "
                 f"Stopping to prevent runaway loops."
@@ -2144,11 +2149,19 @@ async def _run_loop(
                         continue
 
                     # Recovery not possible — emit the structured diagnostic.
+                    # The dispatch DID run, so its real results go in history
+                    # before the exit text: they answer the committed tool_use
+                    # blocks (without them the next message on this session is
+                    # a hard 400) and they are the evidence the diagnostic
+                    # refers to. The `continue` paths above append the same
+                    # message; only these two exits used to drop it.
+                    messages.append(ConversationMessage(role="user", content=tool_results))
                     error_msg = _make_assistant_msg(recovery.diagnostic_message)
                     messages.append(error_msg)
                     yield AssistantTurnComplete(message=error_msg, usage=usage), usage
                     return
 
+                messages.append(ConversationMessage(role="user", content=tool_results))
                 error_msg = _make_assistant_msg(
                     f"Circuit breaker tripped: {trip_msg}. "
                     f"The model cannot produce valid tool calls for this request."
@@ -2412,6 +2425,40 @@ def _make_assistant_msg(text: str) -> ConversationMessage:
     """Build a synthetic assistant message."""
     from prometheus.engine.messages import TextBlock
     return ConversationMessage(role="assistant", content=[TextBlock(text=text)])
+
+
+def _unanswered_tool_results(tool_calls) -> ConversationMessage:
+    """Pair committed ``tool_use`` blocks that will never be dispatched.
+
+    THE INVARIANT (session.py: "a hard 400 from every provider"): once an
+    assistant message carrying ``tool_use`` blocks is appended to history,
+    the NEXT message must be a user message with a ``tool_result`` for every
+    one of those ids. Anthropic rejects with "tool_use ids were found
+    without tool_result blocks immediately after"; OpenAI-compat with "must
+    be followed by tool messages".
+
+    Turn-exit paths that fire between the assistant append and the dispatch
+    (iteration cap) or discard dispatch results (breaker exits) used to
+    append their exit text with the calls unanswered — which committed fine
+    locally but poisoned the session: the NEXT user message on that session
+    400'd, and it stayed broken until in-memory state and the LCM tail were
+    both cleared. The honest content is "this never ran": synthesizing a
+    success would be a lie the model could act on.
+    """
+    return ConversationMessage(
+        role="user",
+        content=[
+            ToolResultBlock(
+                tool_use_id=tc.id,
+                content=(
+                    "NOT EXECUTED: the turn was halted before this call was "
+                    "dispatched. No result exists for this call."
+                ),
+                is_error=True,
+            )
+            for tc in tool_calls
+        ],
+    )
 
 
 def _maybe_periodic_nudge(context: LoopContext, turn_count: int) -> str | None:

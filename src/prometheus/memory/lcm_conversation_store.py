@@ -637,6 +637,27 @@ class LCMConversationStore:
         ).fetchone()
         return row is not None
 
+    def get_by_id(self, message_id: str) -> MessagePart | None:
+        """Return one persisted message by its UUID, or ``None`` if absent.
+
+        The id-keyed read the LCM tools need to expand a summary node back to
+        its source messages: ``SummaryNode.source_message_ids`` holds these
+        UUIDs, and ``lcm_expand`` / ``lcm_expand_query`` resolve each one here.
+
+        Both tools previously called this method when it did not exist, behind
+        a ``hasattr`` guard that turned the contract break into a plausible
+        "not found" — so every expansion reported the history as gone and the
+        model concluded it had no memory. ``has_message`` answers the same
+        question as a bool; this returns the row.
+        """
+        if not message_id:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM lcm_messages WHERE id = ? LIMIT 1",
+            (message_id,),
+        ).fetchone()
+        return self._row_to_message(row) if row is not None else None
+
     def rowids_for_message_ids(self, message_ids: list[str]) -> dict[str, int]:
         """Map message UUIDs (``lcm_messages.id``) to their durable rowids.
 

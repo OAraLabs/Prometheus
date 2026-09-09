@@ -128,9 +128,13 @@ class LCMExpandQueryTool(BaseTool):
                         )
                         break
                     try:
-                        msg = None
-                        if hasattr(conv_store, "get_by_id"):
-                            msg = conv_store.get_by_id(mid)
+                        # No hasattr guard: get_by_id is part of the store
+                        # contract. A store missing it now raises (caught
+                        # below, reported per-message) instead of silently
+                        # degrading every expansion to "not found" — the
+                        # contract break that made the model read its own
+                        # history as gone.
+                        msg = conv_store.get_by_id(mid)
                         if msg is not None:
                             lines.append(
                                 f"  [{msg.role}] turn={msg.turn_index}: "
