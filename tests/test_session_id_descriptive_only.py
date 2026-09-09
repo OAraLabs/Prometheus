@@ -45,6 +45,22 @@ EFFECTIVE = "effective_session_id"
 ALLOWED_ARGS = {
     "context.session_id",
     "context.get('session_id') if isinstance(context, dict) else None",
+    # REVIEWED 2026-09-08 (message tool destination perimeter). A TOOL has no
+    # LoopContext — ToolExecutionContext carries only cwd and metadata — so it
+    # cannot use the first form. This reads the value the agent loop puts there
+    # at agent_loop.py:4062, whose source is the literal `context.session_id`:
+    #
+    #     metadata={..., "session_id": context.session_id,
+    #               **(context.tool_metadata or {})}
+    #
+    # so it is the reviewed form one hop away, not a new alias. Two properties
+    # were checked before admitting it, and both are asserted below:
+    #   1. tool_metadata spreads LAST and could shadow the key. It is populated
+    #      only by daemon.py with "printing_press", never with a session id and
+    #      never from tool arguments — so a model cannot forge an origin.
+    #   2. A tool reached with no metadata (jobs, cron) yields None, which
+    #      classifies as SYSTEM. Absence must fail closed, not open.
+    "(context.metadata or {}).get('session_id')",
 }
 
 
@@ -125,3 +141,46 @@ def test_the_literal_web_is_still_load_bearing():
         "'web:' now classifies as USER — the piece-5 split may no longer be "
         "necessary, and the web:-prefix question should be closed explicitly"
     )
+
+
+def test_tool_metadata_cannot_shadow_the_trusted_session_id():
+    """Premise 1 of the message-tool admission in ALLOWED_ARGS.
+
+    The agent loop spreads ``context.tool_metadata`` AFTER "session_id", so a
+    "session_id" key there would win. Nothing sets one today, and nothing may:
+    a tool that reads origin from metadata is only as trustworthy as the
+    dict, and tool_metadata must stay daemon-populated.
+    """
+    keys: set[str] = set()
+    for path in SRC.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if "_tool_metadata[" not in text:
+            continue
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "_tool_metadata"
+                and isinstance(node.slice, ast.Constant)
+            ):
+                keys.add(str(node.slice.value))
+
+    # Guard the guard: if the write moves or is renamed, find nothing and say so
+    # rather than passing vacuously.
+    assert keys, "found no tool_metadata key writes — has the write site moved?"
+    assert "session_id" not in keys, (
+        f"tool_metadata now carries a 'session_id' key ({sorted(keys)}). It "
+        "spreads after the loop's trusted value at agent_loop.py:4062, so it "
+        "would OVERRIDE the origin that the message tool's destination "
+        "perimeter depends on. Either stop writing that key, or move the "
+        "trusted assignment after the spread."
+    )
+
+
+def test_absent_session_metadata_classifies_as_system():
+    """Premise 2. Contexts built without metadata must fail CLOSED."""
+    from prometheus.permissions.checker import ORIGIN_SYSTEM, origin_from_session_id
+
+    assert origin_from_session_id(({} or {}).get("session_id")) == ORIGIN_SYSTEM
+    assert origin_from_session_id(None) == ORIGIN_SYSTEM
