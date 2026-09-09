@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import re
 from glob import has_magic
 from pathlib import Path
@@ -70,6 +72,21 @@ class GrepTool(BaseTool):
         return True
 
     async def execute(self, arguments: GrepToolInput, context: ToolExecutionContext) -> ToolResult:
+        """Offloaded to a thread — the body below is entirely synchronous.
+
+        This was ``async def`` for the tool interface only: it contained no
+        ``await`` at all, so every tree walk and file read ran ON THE EVENT LOOP and stalled
+        every gateway, the WebSocket, the heartbeat and the REST API at once
+        for as long as it took. The agent calls this constantly, so it was one
+        of the cheapest stalls to trigger and one of the least visible.
+
+        The offload is total rather than per-call: there is nothing to
+        interleave, so wrapping the whole body keeps one place to reason about
+        instead of a scatter of ``to_thread`` calls inside a loop.
+        """
+        return await asyncio.to_thread(self._execute_sync, arguments, context)
+
+    def _execute_sync(self, arguments: GrepToolInput, context: ToolExecutionContext) -> ToolResult:
         root = _resolve_path(context.cwd, arguments.root) if arguments.root else context.cwd
         # Models frequently pass an ABSOLUTE file_glob (e.g. "/tmp/x/*.py");
         # pathlib raises NotImplementedError on non-relative patterns, which

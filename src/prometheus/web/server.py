@@ -3248,7 +3248,15 @@ def create_app(
         from prometheus.config.paths import get_artifacts_dir
         from prometheus.web.artifacts import scan_artifacts
 
-        return {"artifacts": scan_artifacts(get_artifacts_dir())}
+        # scan_artifacts stats and HASHES every artifact. On a directory
+        # holding gigabyte files that is minutes of CPU, and it ran on the
+        # event loop — so listing artifacts stalled chat, the WebSocket and
+        # the heartbeat together.
+        return {
+            "artifacts": await asyncio.to_thread(
+                scan_artifacts, get_artifacts_dir()
+            )
+        }
 
     @app.get("/api/artifacts/{artifact_id}")
     async def download_artifact(artifact_id: str):

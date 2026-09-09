@@ -21,6 +21,8 @@ agent can't exhaust the GitHub quota in seconds.
 
 from __future__ import annotations
 
+import asyncio
+
 import json
 import logging
 import os
@@ -186,7 +188,11 @@ class GitHubClient:
         accept: str = "application/vnd.github+json",
         expect_json: bool = True,
     ) -> Any:
-        slept = self._rate.wait_token()
+        # `wait_token` SLEEPS — up to the full rate-limit window (60s on the
+        # search endpoint). On the event loop that froze every gateway, the
+        # WebSocket and the heartbeat for the whole nap, for a background
+        # capability search nobody was waiting on.
+        slept = await asyncio.to_thread(self._rate.wait_token)
         if slept:
             log.debug("GitHubClient: throttled %.2fs before %s", slept, endpoint)
 
