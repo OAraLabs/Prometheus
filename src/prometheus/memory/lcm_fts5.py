@@ -17,9 +17,6 @@ import re
 # (3 live lcm_expand_query failures, 0% tool success).
 _WORD_TOKEN = re.compile(r"\w+", re.UNICODE)
 
-# Collapse whitespace runs into a single space.
-_WHITESPACE_RUN = re.compile(r"\s+")
-
 
 def sanitize_fts5_query(query: str) -> str:
     """Render an arbitrary string safe for an FTS5 MATCH clause.
@@ -43,12 +40,19 @@ def sanitize_fts5_query(query: str) -> str:
 def tokenize_for_fts5(text: str) -> str:
     """Produce a simple whitespace-normalised form suitable for FTS5 indexing.
 
-    Strips the same special characters that *sanitize_fts5_query* removes,
-    lower-cases everything, and collapses runs of whitespace.  The result is
-    appropriate for inserting into an FTS5 content table.
+    Keeps the same characters *sanitize_fts5_query* keeps, lower-cases
+    everything, and collapses runs of whitespace. The result is appropriate
+    for inserting into an FTS5 content table.
+
+    ⚠ THIS FUNCTION RAISED ``NameError`` ON EVERY CALL until 2026-09-09. It
+    referenced ``_FTS5_SPECIAL``, a blocklist regex deleted when the sibling
+    sanitiser was rewritten to whitelist-extraction — the rewrite updated the
+    function that had failures to fix and left this one pointing at a name
+    that no longer existed. It had no callers and no test, so nothing noticed;
+    `ruff`'s F821 is what found it. Rewritten here on the same whitelist basis,
+    so the two cannot drift apart again, and now tested.
     """
     if not text:
         return ""
-    cleaned = _FTS5_SPECIAL.sub(" ", text)
-    cleaned = _WHITESPACE_RUN.sub(" ", cleaned).strip()
-    return cleaned.lower()
+    tokens = _WORD_TOKEN.findall(text)
+    return " ".join(tokens).lower()

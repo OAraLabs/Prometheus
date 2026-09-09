@@ -42,7 +42,6 @@ from prometheus.gateway.cron_scheduler import run_scheduler_loop
 from prometheus.gateway.heartbeat import Heartbeat
 from prometheus.gateway.platform_base import GatewaySubsystemRegistry
 from prometheus.gateway.telegram import TelegramAdapter
-from prometheus.providers.llama_cpp import LlamaCppProvider
 from prometheus.providers.registry import ProviderRegistry
 from prometheus.__main__ import (
     create_adapter,
@@ -1620,6 +1619,12 @@ async def run_daemon(args: argparse.Namespace) -> None:
     from prometheus.engine import loop_watchdog as _loop_watchdog
     watchdog_task = asyncio.create_task(_loop_watchdog.watch(),
                                         name="event-loop-watchdog")
+    # Registered for shutdown like every other long-running task. It was the
+    # ONE that was not: `tasks` is what the shutdown path cancels and awaits,
+    # so the watchdog ran through shutdown, was never awaited, and could log
+    # "Task was destroyed but it is pending". Found by ruff F841 — the unused
+    # variable was pointing at the missing registration, not at a dead local.
+    tasks.append(watchdog_task)
 
     heartbeat_task = asyncio.create_task(heartbeat.run_forever())
     tasks.append(heartbeat_task)

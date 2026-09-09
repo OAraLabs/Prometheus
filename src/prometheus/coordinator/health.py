@@ -13,7 +13,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Awaitable
+from typing import Callable, Awaitable
 
 logger = logging.getLogger(__name__)
 

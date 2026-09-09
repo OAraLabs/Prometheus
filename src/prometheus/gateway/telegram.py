@@ -12,14 +12,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
 import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from telegram import BotCommand, Update
-from telegram.constants import ChatAction, ParseMode
+from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -32,7 +31,7 @@ from telegram.ext import (
 
 from prometheus.config.paths import get_wiki_root
 from prometheus.gateway.config import Platform, PlatformConfig
-from prometheus.gateway.commands import cmd_anatomy, cmd_beacon, cmd_doctor, cmd_gate, cmd_profile
+from prometheus.gateway.commands import cmd_anatomy, cmd_doctor, cmd_gate, cmd_profile
 from prometheus.sentinel.signals import ActivitySignal
 from prometheus.gateway.platform_base import (
     BasePlatformAdapter,
@@ -59,12 +58,11 @@ _MARKDOWN_V2_ESCAPE = re.compile(r"([_\*\[\]\(\)~`>#+\-=|{}.!\\])")
 # Telegram message length limit
 MAX_MESSAGE_LENGTH = 4096
 
-# Sprint 22 GRAFT-ROUTER-WIRE Phase 4: display labels for /claude, /gpt, etc.
-# SPRINT G1: canonical table moved to the shared commands layer; kept as an
-# alias for backward compatibility.
-from prometheus.gateway.commands import (  # noqa: E402
-    PROVIDER_PRESET_DISPLAY_NAMES as _PRESET_DISPLAY_NAMES,
-)
+# Sprint 22 GRAFT-ROUTER-WIRE Phase 4 / SPRINT G1: the display-label table for
+# /claude, /gpt etc. lives in the shared commands layer. This module used to
+# re-import it as `_PRESET_DISPLAY_NAMES` "for backward compatibility"; nothing
+# ever referenced that alias, so it went with the lint sweep on 2026-09-09.
+# Import PROVIDER_PRESET_DISPLAY_NAMES from prometheus.gateway.commands.
 
 
 def escape_markdown_v2(text: str) -> str:
@@ -616,7 +614,6 @@ class TelegramAdapter(BasePlatformAdapter):
     def _save_chat_id(self, chat_id: int) -> None:
         """Persist chat ID so startup greeting works after restart."""
         try:
-            import os
             path = self._last_chat_id_path()
             with open(path, "w") as f:
                 f.write(str(chat_id))
@@ -2777,7 +2774,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
         # Largest resolution is the last element
         from prometheus.gateway.media_guard import (
-            MediaRejected, check_declared_mime, check_size_precheck,
+            MediaRejected, check_size_precheck,
         )
         from prometheus.gateway.rate_limit import Budget
 
@@ -2836,7 +2833,7 @@ class TelegramAdapter(BasePlatformAdapter):
     ) -> None:
         """Handle incoming voice messages — transcribe via Whisper."""
         from prometheus.gateway.media_guard import (
-            MediaRejected, check_declared_mime, check_size_precheck,
+            check_declared_mime, check_size_precheck,
         )
         from prometheus.gateway.rate_limit import Budget
 
@@ -2976,7 +2973,7 @@ class TelegramAdapter(BasePlatformAdapter):
     ) -> None:
         """Handle incoming sticker messages."""
         from prometheus.gateway.media_guard import (
-            MediaRejected, check_declared_mime, check_size_precheck,
+            check_size_precheck,
         )
         from prometheus.gateway.rate_limit import Budget
 

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from prometheus.permissions.path_schema import DIR_FIELD, PATH_FIELD
+from prometheus.permissions.path_schema import DIR_FIELD
 from prometheus.tools.denied_prune import (
     is_denied,
     resolve_denied,

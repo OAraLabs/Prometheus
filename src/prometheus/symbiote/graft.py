@@ -24,10 +24,8 @@ the public interface.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
-import subprocess
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path

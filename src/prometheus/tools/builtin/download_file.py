@@ -13,7 +13,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 from pydantic import BaseModel, Field
 
-from prometheus.permissions.path_schema import DIR_FIELD, PATH_FIELD
+from prometheus.permissions.path_schema import PATH_FIELD
 # Both fetching tools use the ONE hook, from the security module — not one
 # importing a private helper from its sibling, which is how two callers drift.
 from prometheus.security.url_guard import (

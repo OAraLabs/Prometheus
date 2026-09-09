@@ -9,7 +9,6 @@ the full SQLite store on every turn.
 from __future__ import annotations
 
 import fcntl
-import time
 from pathlib import Path
 
 from prometheus.config.paths import get_config_dir

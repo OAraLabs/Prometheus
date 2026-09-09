@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import fcntl
 import re
-import time
 from pathlib import Path
 from typing import Literal
 

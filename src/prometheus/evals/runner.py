@@ -15,8 +15,6 @@ from pathlib import Path
 from typing import Any
 
 from prometheus.evals.classifier import (
-    FailureClassification,
-    FailureSource,
     classify_failure,
 )
 from prometheus.evals.golden_dataset import GoldenTask, load_golden_dataset

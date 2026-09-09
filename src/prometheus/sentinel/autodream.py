@@ -11,7 +11,6 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from prometheus.config.paths import get_config_dir

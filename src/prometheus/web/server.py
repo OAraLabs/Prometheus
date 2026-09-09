@@ -16,8 +16,6 @@ import logging
 import os
 import time
 from pathlib import Path
-
-logger = logging.getLogger(__name__)
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
@@ -30,6 +28,8 @@ from prometheus.web.strict_query import StrictQueryRoute
 from prometheus.config.node_identity import get_instance_id, get_node_pubkey
 from prometheus.config.paths import get_wiki_root
 from prometheus.context.environment import booted_from as _booted_from, git_head_sha
+
+logger = logging.getLogger(__name__)
 
 # Cap on the coding diff payload (matches the files-preview 256 KB cap).
 _CODING_DIFF_CAP = 256 * 1024
@@ -3833,7 +3833,6 @@ def create_app(
         queue = app.state.approval_queue
         if not queue:
             return []
-        from prometheus.gateway import commands as _cmds
 
         gate = getattr(queue, "_security_gate", None)
         if gate is None:
@@ -3900,8 +3899,15 @@ def create_app(
     # ── Chat ───────────────────────────────────────────────────────
 
     @app.post("/api/chat")
-    async def send_chat(body: dict):
-        """Send a message to the agent — mirrors Telegram dispatch."""
+    async def post_chat(body: dict):
+        """Send a message to the agent — mirrors Telegram dispatch.
+
+        Named for its route. It was a second `send_chat` 3000 lines below the
+        `/api/chat/send` handler of the same name: both routes worked, because
+        FastAPI holds its own reference from the decorator, but the module-level
+        name resolved to whichever came last. Renamed while wiring the lint
+        gate (ruff F811).
+        """
         session_id = body.get("session_id", "")
         content = body.get("content", "")
         if not session_id or not content:

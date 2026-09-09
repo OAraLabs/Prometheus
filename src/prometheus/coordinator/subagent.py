@@ -12,9 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from prometheus.coordinator.agent_definitions import AgentDefinition, get_agent_definition
+from prometheus.coordinator.agent_definitions import get_agent_definition
 from prometheus.engine.agent_loop import AgentLoop, RunResult
-from prometheus.engine.messages import ConversationMessage
 from prometheus.providers.base import ModelProvider
 from prometheus.tools.base import ToolRegistry
 

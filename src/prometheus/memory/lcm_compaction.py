@@ -23,7 +23,6 @@ from prometheus.memory.lcm_types import (
 if TYPE_CHECKING:
     from prometheus.memory.lcm_conversation_store import LCMConversationStore
     from prometheus.memory.lcm_summary_store import LCMSummaryStore
-    from prometheus.providers.base import ModelProvider
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +102,7 @@ class LCMCompactor:
 
         for batch in batches:
             try:
-                node = await self._summarize_messages(batch, session_id)
+                await self._summarize_messages(batch, session_id)
                 result.summaries_created += 1
                 result.messages_compacted += len(batch)
 
@@ -193,7 +192,7 @@ class LCMCompactor:
             for batch in batches:
                 if len(batch) < 2:
                     continue
-                new_node = await self._summarize_nodes(batch, depth + 1, session_id)
+                await self._summarize_nodes(batch, depth + 1, session_id)
                 created += 1
 
                 # Mark source nodes as non-leaf.

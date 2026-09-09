@@ -53,8 +53,7 @@ if TYPE_CHECKING:
     # Sprint 10 / Phase 2: Model Router + Divergence Detector
     # Lazy-imported at runtime to avoid circular import
     # (coordinator.__init__ → subagent → engine.agent_loop)
-    from prometheus.router import ModelRouter, RouteDecision
-    from prometheus.coordinator.divergence import DivergenceDetector, CheckpointStore
+    pass
 
 log = logging.getLogger(__name__)
 

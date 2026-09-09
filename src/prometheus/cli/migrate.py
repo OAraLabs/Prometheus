@@ -603,7 +603,7 @@ class OpenClawMigrator(_BaseMigrator):
 def _print_plan(report: MigrationReport, options: MigrationOptions) -> None:
     print(f"\n  Prometheus Migration: {report.source}")
     print(f"  Source:  {report.source_path}")
-    print(f"  Target:  ~/.prometheus/")
+    print("  Target:  ~/.prometheus/")
     print(f"  Preset:  {options.preset}")
     print(f"  Mode:    {'DRY RUN' if options.dry_run else 'LIVE'}\n")
 
@@ -639,7 +639,7 @@ def _print_results(report: MigrationReport) -> None:
             if item.category == "secrets":
                 print(f"    Copy API keys from {item.source_path} to your shell profile:")
                 print(f"      cat {item.source_path}")
-                print(f"      export OPENAI_API_KEY=sk-...")
+                print("      export OPENAI_API_KEY=sk-...")
 
     print()
 

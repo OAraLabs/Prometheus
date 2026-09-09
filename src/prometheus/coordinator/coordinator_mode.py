@@ -12,7 +12,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from prometheus.coordinator.agent_definitions import AgentDefinition, get_agent_definition
 
 logger = logging.getLogger(__name__)
 

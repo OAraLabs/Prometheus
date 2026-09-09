@@ -17,11 +17,10 @@ import re
 import time
 from typing import TYPE_CHECKING, Any
 
-from prometheus.gateway.config import Platform, PlatformConfig
+from prometheus.gateway.config import PlatformConfig
 from prometheus.gateway.platform_base import (
     BasePlatformAdapter,
     MessageEvent,
-    MessageType,
     SendResult,
 )
 

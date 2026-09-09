@@ -16,7 +16,7 @@ they run on catalog GETs and on every provider-switch command.
 from __future__ import annotations
 
 import os
-from typing import Any, Callable
+from typing import Any
 
 
 def _xai_subscription_active() -> bool:

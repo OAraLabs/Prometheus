@@ -67,7 +67,6 @@ from prometheus.learning.skill_state import (
     SKILL_STATE_ACTIVE,
     SKILL_STATE_ARCHIVED,
     SKILL_STATE_STALE,
-    SkillRecord,
     SkillStateStore,
 )
 

@@ -15,6 +15,8 @@ REST/WS convention that an empty token disables auth.
 
 from __future__ import annotations
 
+from dataclasses import dataclass as _dataclass
+
 import os
 import secrets
 from typing import Any
@@ -270,9 +272,6 @@ def format_connect_client_block(
 # ---------------------------------------------------------------------------
 # Token verification (GRAFT-MOBILE-BRIDGE 1: per-device tokens)
 # ---------------------------------------------------------------------------
-
-from dataclasses import dataclass as _dataclass
-
 
 @_dataclass(frozen=True)
 class DeviceIdentity:
