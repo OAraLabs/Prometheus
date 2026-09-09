@@ -276,7 +276,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # install: how the product gets into the venv, and it is not a
+        # cosmetic axis. `pip install -e` keeps the CHECKOUT layout live, so a
+        # file outside `packages = ["src/prometheus"]` is still on disk and
+        # still importable — which is why every leg here ran green for the
+        # whole time templates/ did not ship in the wheel and a real first run
+        # died at the identity step. The wheel row installs a built artefact
+        # and nothing else, so an unpackaged file is genuinely absent.
         leg: [local, cloud]
+        install: [editable]
+        include:
+          - leg: local
+            install: wheel
     env:
       UV_PYTHON_DOWNLOADS: never
     steps:
@@ -289,8 +300,10 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - name: FIRSTLIGHT ${{ matrix.leg }} leg
+      - name: FIRSTLIGHT ${{ matrix.leg }} leg (${{ matrix.install }} install)
         # The harness is stdlib-only and builds its own venv; nothing is
         # installed here on purpose — an install step above it would be a
         # thing the stranger does not have.
-        run: python scripts/firstlight_harness.py --source . --leg ${{ matrix.leg }}
+        run: >-
+          python scripts/firstlight_harness.py --source .
+          --leg ${{ matrix.leg }} --install-mode ${{ matrix.install }}
