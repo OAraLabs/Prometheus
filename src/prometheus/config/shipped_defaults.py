@@ -280,9 +280,15 @@ def resolve_max_tool_iterations_cloud(model_cfg: dict | None) -> int:
 def _positive_int(value: object, fallback: int) -> int:
     """Coerce a config value to a POSITIVE int, else the shipped default.
 
-    A zero or negative ceiling would halt every turn on its first tool batch;
-    a string "100" is what a hand-edited YAML actually produces. Both are
-    treated as "not configured" rather than obeyed.
+    A zero or negative ceiling would halt every turn on its first tool batch,
+    so it is treated as "not configured" rather than obeyed.
+
+    A quoted number IS obeyed: ``int("100")`` parses, so a hand-edited YAML
+    that writes ``max_tool_iterations: "100"`` gets 100, not the default.
+    (This paragraph previously claimed the opposite. Corrected 2026-09-08
+    after measuring it — the claim had been wrong since the function was
+    written, and `config/divergence.py` classified against the docstring
+    rather than the behaviour until the measurement caught it.)
     """
     try:
         n = int(value)  # type: ignore[arg-type]
