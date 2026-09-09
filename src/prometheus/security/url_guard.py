@@ -47,13 +47,24 @@ WHAT THIS DELIBERATELY DOES NOT DO
   ``TAILNET_RANGE`` is defined and measured but NOT enforced; see
   :func:`is_blocked_address` and the note at :data:`ENFORCE_TAILNET_BLOCK`.
   Turning it on is an operator decision, not a default.
-* It cannot fully close DNS rebinding. The check resolves the name, then httpx
-  resolves it again at connect time — a TTL-0 record can flip between the two.
-  Checking every redirect hop narrows that to milliseconds per hop rather than
-  the whole chain, but closing it outright means pinning the resolved address
-  into the connection, which for https means giving up SNI and certificate
-  verification against the real hostname. That trade is worse than the residual
-  window, so the window is documented rather than papered over.
+* It does NOT keep happy eyeballs. Pinning means one address is chosen, so a
+  host whose first resolved address is unreachable now fails instead of falling
+  back to its second. The address is the one ``getaddrinfo`` returned first,
+  i.e. the one the system would have picked anyway.
+
+WHAT THIS USED TO GET WRONG
+---------------------------
+This module previously listed DNS rebinding as something it "cannot fully
+close", on the reasoning that pinning the resolved address "means giving up SNI
+and certificate verification against the real hostname" — a worse trade than a
+residual window narrowed to milliseconds per hop.
+
+Both halves were false. The window was an open door, not milliseconds: with a
+resolver answering public for the guard and loopback for the connection, a fetch
+returned a loopback service's body with HTTP 200. And the trade does not exist —
+httpcore honours a ``sni_hostname`` extension, so a connection to a pinned IP
+still presents the real server name and still verifies the certificate against
+it. :func:`guard_request_hop` carries the measurements.
 
 Source: Prometheus (OAra Labs)
 License: MIT
@@ -63,6 +74,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 #: Schemes this guard will clear. httpx speaks these two; anything else (file,
@@ -123,6 +135,91 @@ def is_ip_literal_blocked(host: str) -> bool:
         return False
 
 
+@dataclass(frozen=True)
+class PinnedTarget:
+    """The ONE address a validated URL is allowed to connect to.
+
+    The whole point of returning an address rather than a bool: the name is
+    resolved once, and that answer is what the socket uses. A second lookup at
+    connect time is a second chance for the answer to change.
+    """
+
+    #: The name to present as ``Host:`` and as the TLS server name. Equals
+    #: *address* when the URL already named an IP.
+    hostname: str
+    #: The validated IP the connection must go to.
+    address: str
+    #: ``AF_INET`` / ``AF_INET6`` — carried through from the answer that was
+    #: validated, never re-selected at connect time.
+    family: int
+    #: True when the URL already named an IP literal: already validated by
+    #: value, and there is nothing to pin.
+    was_literal: bool
+
+
+def resolve_pinned(url: str) -> tuple[PinnedTarget | None, str]:
+    """Validate *url* and return the single address it may connect to.
+
+    ``(None, reason)`` when it may not be fetched at all.
+
+    EVERY resolved address is checked, not just the one returned: a name with
+    one public and one loopback answer must not pass on the strength of the
+    public one. The address handed back is the FIRST the resolver returned,
+    which is the one the system itself would have chosen — ``getaddrinfo``
+    applies RFC 6724 sorting, so on a host with no IPv6 route the A record
+    already sorts first.
+
+    Resolution failure is a refusal: an unresolvable host is not fetchable
+    anyway, and reading the error as "safe" would invert fail-closed.
+    """
+    if not url or not isinstance(url, str):
+        return None, "no URL supplied"
+
+    try:
+        parsed = urlparse(url.strip())
+    except ValueError:
+        return None, "malformed URL"
+
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ALLOWED_SCHEMES:
+        return None, f"scheme {scheme!r} is not fetchable (http/https only)"
+
+    hostname = parsed.hostname
+    if not hostname:
+        return None, "URL has no host"
+
+    literal = hostname.strip("[]")
+    try:
+        ip = ipaddress.ip_address(literal)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if is_blocked_address(ip):
+            return None, "the host resolves to a non-public address"
+        family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+        return PinnedTarget(literal, literal, family, True), ""
+
+    try:
+        addrs = socket.getaddrinfo(
+            literal, None, socket.AF_UNSPEC, socket.SOCK_STREAM
+        )
+    except (socket.gaierror, socket.herror, UnicodeError, OSError):
+        return None, "the host does not resolve"
+    if not addrs:
+        return None, "the host does not resolve"
+
+    for _family, _type, _proto, _canon, sockaddr in addrs:
+        try:
+            ipaddress.ip_address(sockaddr[0])
+        except (ValueError, IndexError):
+            return None, "the host resolves to an unparseable address"
+        if is_blocked_address(ipaddress.ip_address(sockaddr[0])):
+            return None, "the host resolves to a non-public address"
+
+    family, _t, _p, _c, sockaddr = addrs[0]
+    return PinnedTarget(hostname, sockaddr[0], family, False), ""
+
+
 def check_url(url: str) -> tuple[bool, str]:
     """Whether *url* may be fetched, and why not.
 
@@ -130,48 +227,11 @@ def check_url(url: str) -> tuple[bool, str]:
     shown to the model, so it names the class of problem without echoing an
     address that may be attacker-chosen.
 
-    Resolves the hostname and checks EVERY address it returns: a name with one
-    public and one loopback answer must not pass on the strength of the public
-    one. Resolution failure is a refusal — an unresolvable host is not fetchable
-    anyway, and treating the error as "safe" would be the inverse of fail-closed.
+    The boolean form of :func:`resolve_pinned`, kept for the pre-flight callers
+    that only need the bit. The two cannot disagree: this IS that function.
     """
-    if not url or not isinstance(url, str):
-        return False, "no URL supplied"
-
-    try:
-        parsed = urlparse(url.strip())
-    except ValueError:
-        return False, "malformed URL"
-
-    scheme = (parsed.scheme or "").lower()
-    if scheme not in ALLOWED_SCHEMES:
-        return False, f"scheme {scheme!r} is not fetchable (http/https only)"
-
-    hostname = parsed.hostname
-    if not hostname:
-        return False, "URL has no host"
-
-    if is_ip_literal_blocked(hostname):
-        return False, "the host resolves to a non-public address"
-
-    try:
-        addrs = socket.getaddrinfo(
-            hostname.strip("[]"), None, socket.AF_UNSPEC, socket.SOCK_STREAM
-        )
-    except (socket.gaierror, socket.herror, UnicodeError, OSError):
-        return False, "the host does not resolve"
-    if not addrs:
-        return False, "the host does not resolve"
-
-    for _family, _type, _proto, _canon, sockaddr in addrs:
-        try:
-            ip = ipaddress.ip_address(sockaddr[0])
-        except (ValueError, IndexError):
-            return False, "the host resolves to an unparseable address"
-        if is_blocked_address(ip):
-            return False, "the host resolves to a non-public address"
-
-    return True, ""
+    target, reason = resolve_pinned(url)
+    return target is not None, reason
 
 
 def is_safe_url(url: str) -> bool:
@@ -192,33 +252,145 @@ class SsrfBlocked(Exception):
     """A redirect hop (or the original URL) resolved to a non-public address."""
 
 
-async def guard_request_hop(request) -> None:
-    """httpx request hook: re-apply the guard on EVERY hop of a redirect chain.
+def _host_header_name(request) -> str | None:
+    """The NAME in the Host header, or None when there isn't one.
 
-    THE MECHANISM, verified against httpx 0.28 rather than assumed: the client runs
-    request event hooks INSIDE ``_send_handling_redirects``'s ``while True`` loop,
-    so a hook sees each hop before it is sent and raising here aborts the chain
-    with the body unread. Checked with a MockTransport that a 302 from a public
-    host to ``http://127.0.0.1:8005/api/…`` was refused and the secret body never
-    arrived — and that the hook saw BOTH hops.
+    Returns None for an absent header and for one carrying a bare IP, because
+    neither names a server whose certificate could be checked against it.
+    """
+    raw = request.headers.get("Host")
+    if not raw:
+        return None
+    name = raw.rsplit(":", 1)[0] if raw.count(":") == 1 else raw
+    name = name.strip("[]")
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        return name or None
+    return None
+
+
+def pin_request(request, target: PinnedTarget) -> None:
+    """Point this request at the validated address, keeping its identity intact.
+
+    The URL's host becomes the IP, so the socket connects where the guard
+    looked. ``Host:`` and the TLS server name stay the original name, so
+    virtual hosting still routes and the certificate is still verified against
+    the name the caller asked for — which is why pinning does NOT cost SNI or
+    verification, contrary to what this module used to claim.
+
+    ONE RULE FOR SNI: it follows the Host header. Measured on httpx 0.28 —
+    a cross-origin redirect RECOMPUTES ``Host`` but carries ``extensions``
+    forward, so a ``sni_hostname`` set on an earlier hop reaches a later,
+    unrelated host unless something clears it. Deriving it from Host each hop
+    means there is no stale value to leak, and it keeps a same-origin relative
+    redirect working: httpx preserves ``Host`` there, so the name survives even
+    though the URL now holds an IP.
+    """
+    if target.was_literal:
+        # Nothing to pin — the URL named an address and it was validated by
+        # value. Still fix SNI, because this hop may be a redirect carrying a
+        # previous hop's name.
+        name = _host_header_name(request)
+        if name:
+            request.extensions["sni_hostname"] = name
+        else:
+            request.extensions.pop("sni_hostname", None)
+        return
+
+    port = request.url.port
+    authority = target.hostname if port is None else f"{target.hostname}:{port}"
+    literal = f"[{target.address}]" if ":" in target.address else target.address
+
+    request.url = request.url.copy_with(host=literal)
+    # Set explicitly, not left to httpx. Measured: httpx fills Host at Request
+    # CONSTRUCTION and does not recompute it when ``request.url`` changes, so
+    # today this re-affirms the value that is already there. It stays because
+    # the invariant — the origin server is told the name, not the address — must
+    # not rest on that implementation detail, and because a caller that builds
+    # its own headers can arrive here without a Host at all.
+    request.headers["Host"] = authority
+    if request.url.scheme == "https":
+        request.extensions["sni_hostname"] = target.hostname
+    else:
+        request.extensions.pop("sni_hostname", None)
+
+
+def display_url(response) -> str:
+    """The response's URL with the pinned IP swapped back for the real name.
+
+    Pinning puts an address in ``request.url``, which is what the socket needs
+    and NOT what the caller asked for. ``web_fetch`` reports this string to the
+    model, and answering "URL: https://93.184.216.34/docs" for a request to
+    ``example.com`` would be a worse answer than the one before pinning.
+
+    Reconstructed from the ``Host`` header rather than from stashed state,
+    because extensions carry across redirect hops and stashed state would go
+    stale exactly where redirects make it hardest to notice. Redirects still
+    show their real final URL: the Host header tracks each hop.
+    """
+    url = response.url
+    try:
+        request = response.request
+    except (AttributeError, RuntimeError):
+        # httpx raises RuntimeError when no request is attached, and a caller
+        # may hand us a response-shaped object that has none. Reporting is not
+        # worth failing a fetch over: fall back to the URL as it stands.
+        return str(url)
+
+    name = _host_header_name(request)
+    if name and name != url.host:
+        url = url.copy_with(host=name)
+    return str(url)
+
+
+async def guard_request_hop(request) -> None:
+    """httpx request hook: validate EVERY hop, and pin it to what was validated.
+
+    THE MECHANISM, verified against httpx 0.28 rather than assumed: the client
+    runs request event hooks INSIDE ``_send_handling_redirects``'s ``while True``
+    loop, so a hook sees each hop before it is sent and raising here aborts the
+    chain with the body unread. Checked with a MockTransport that a 302 from a
+    public host to ``http://127.0.0.1:8005/api/…`` was refused and the secret
+    body never arrived — and that the hook saw BOTH hops.
 
     MUST be ``async``. ``httpx.AsyncClient`` raises TypeError on a sync request
-    hook (also verified), so a ``def`` here would turn every guarded fetch into a
-    confusing TypeError instead of a guard.
+    hook (also verified), so a ``def`` here would turn every guarded fetch into
+    a confusing TypeError instead of a guard.
 
     Lives here, in the security module, rather than in one of the tools: both
     ``web_fetch`` and ``download_file`` build their own client and need the same
-    hook, and a tool importing a private helper from a sibling tool is how the two
-    drift apart again.
+    hook, and a tool importing a private helper from a sibling tool is how the
+    two drift apart again.
 
-    DNS rebinding is NOT fully closed by this, and the residual window is stated
-    rather than papered over: the guard resolves the name, then httpx resolves it
-    again at connect time, so a TTL-0 record can flip between the two. Checking
-    every hop narrows that to milliseconds per hop instead of the whole chain.
-    Closing it outright means pinning the resolved address into the connection,
-    which for https costs SNI and certificate verification against the real
-    hostname — a worse trade than the residual window.
+    DNS REBINDING IS CLOSED HERE, and the claim it replaces was wrong. This
+    docstring used to say the window was "narrowed to milliseconds per hop but
+    not closed", and that closing it "means pinning the resolved address into
+    the connection, which for https costs SNI and certificate verification
+    against the real hostname — a worse trade than the residual window."
+
+    Both halves were false, and measurement is what showed it:
+
+    * It was not a narrow window, it was an open door. With a resolver that
+      answered public for the guard's lookups and loopback for the connection's,
+      a fetch returned the body of a loopback service — HTTP 200, secret read.
+      The detail that hides this from a casual patch: connect-time resolution
+      DOES go through ``socket.getaddrinfo``, but the host arrives as **bytes**,
+      so an interceptor comparing against a ``str`` never fires.
+    * The trade does not exist. httpcore honours a ``sni_hostname`` request
+      extension, so a connection to a pinned IP can still present the real
+      server name and verify the certificate against it. Measured against a live
+      host with a fresh client per attempt: with the extension, HTTP 200; without
+      it, ``SSLV3_ALERT_HANDSHAKE_FAILURE``. Verification is not given up — it is
+      the reason the extension is set.
+
+    WHAT PINNING COSTS, stated plainly: one address is chosen instead of the
+    happy-eyeballs walk anyio would do, so a host whose first resolved address is
+    unreachable now fails rather than falling back to its second. The address is
+    the one ``getaddrinfo`` returned first, which is the one the system would
+    have picked anyway.
     """
-    ok, reason = check_url(str(request.url))
-    if not ok:
+    target, reason = resolve_pinned(str(request.url))
+    if target is None:
         raise SsrfBlocked(reason)
+    pin_request(request, target)

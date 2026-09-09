@@ -40,6 +40,18 @@ from prometheus.tools.builtin.download_file import (
     _resolve_destination,
 )
 
+
+def _requested_host(request) -> str:
+    """The NAME this hop is for, as the origin server would see it.
+
+    The SSRF guard pins the connection to the validated IP, so by the time a
+    request reaches the transport ``request.url.host`` is an address and the
+    name lives in ``Host:`` — exactly as it does on the wire. Mock handlers
+    route on this so they keep answering for the host under test.
+    """
+    return (request.headers.get("Host") or request.url.host).rsplit(":", 1)[0]
+
+
 # The audit's own payloads, plus the shapes that follow from them.
 TRAVERSAL_URLS = [
     "https://evil.example/x%2F..%2F..%2F..%2F.bashrc",
@@ -174,7 +186,7 @@ class TestDownloadFileInstallsTheHopGuard:
         from prometheus.tools.builtin.web_fetch import SsrfBlocked  # noqa: F401
 
         def handler(request):
-            if request.url.host == "public.example":
+            if _requested_host(request) == "public.example":
                 return httpx.Response(302, headers={"Location": "http://127.0.0.1:8005/api/x"})
             return httpx.Response(200, content=b"SECRET-BODY-MUST-NOT-BE-WRITTEN")
 
