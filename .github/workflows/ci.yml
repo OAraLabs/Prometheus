@@ -157,6 +157,103 @@ jobs:
           uv export --format requirements-txt --no-hashes --no-emit-project > /tmp/requirements-audit.txt
           uv run pip-audit -r /tmp/requirements-audit.txt --progress-spinner off
 
+  # The security floors, actually executed. Until now they SKIPPED on every CI
+  # run and had been proven only on the operator's own machine — and the files
+  # themselves say "SKIPPED IS NOT PASSED: these are live holes, not covered
+  # ground." A floor nothing exercises is a claim, not a floor.
+  #
+  # MEASURED on ubuntu-24.04 (runner image 20260831) before this job was
+  # written, because none of it is guessable from a dev box:
+  #   bwrap                                     NOT INSTALLED
+  #   kernel.apparmor_restrict_unprivileged_userns  = 1  -> bwrap exits 1
+  #   after `sysctl -w ...=0`                          -> bwrap exits 0
+  #   apparmor_parser -r deploy/apparmor/prometheus-bash -> exit 0, enforce
+  #   write_preflight        -> (True, 'bwrap mount namespace: ...')
+  #   profile preflight      -> (True, 'prometheus-bash (enforce)')
+  #
+  # WHY RELAXING THE SYSCTL IS ACCEPTABLE HERE AND NOWHERE ELSE. Ubuntu 24.04
+  # restricts unprivileged user namespaces, which is what blocks bwrap. This
+  # job turns that off on a DISPOSABLE VM that exists for one run and holds no
+  # secrets beyond the checkout. Do NOT copy this line to a host: on the
+  # operator's machine the sanctioned route is the AppArmor profile in
+  # /etc/apparmor.d/bwrap, not a global sysctl.
+  security-floors:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: python -m pip install --upgrade uv
+      - name: Sync dependencies
+        run: uv sync --extra web --extra anthropic --extra mcp --group dev
+
+      - name: Install bubblewrap and permit unprivileged namespaces
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --ro-bind / / -- /bin/true
+
+      - name: Load the shipped AppArmor profile
+        # The same file the deploy installs, so CI proves THAT profile rather
+        # than a CI-only approximation of it.
+        run: |
+          sudo apparmor_parser -r -W deploy/apparmor/prometheus-bash
+          sudo aa-status | grep -q prometheus-bash
+
+      - name: Provide the two preconditions these tests legitimately need
+        # Deliberately NOT solved by adding skips. The decoy fixture writes
+        # under ~/.ssh, and the git-network case reaches the network from the
+        # deploy clone's path — both are real properties of the operator's box,
+        # so CI reproduces them instead of excusing the tests from running.
+        run: |
+          mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+          git clone --depth 1 "${{ github.server_url }}/${{ github.repository }}" "$HOME/prometheus-deploy"
+
+      - name: Refuse to continue if the floors are not actually active
+        # THE POINT OF THE JOB. Without this, a future runner image that blocks
+        # bwrap again would make every floor test skip and the job would go
+        # green having proven nothing — the exact state this replaces.
+        run: |
+          PYTHONPATH=$PWD/src uv run python -c "
+          import sys
+          from prometheus.permissions import confinement as C
+          w_ok, w = C.write_preflight(force=True)
+          p_ok, p = C.preflight(C.PROFILE, force=True)
+          print('write floor :', w_ok, w)
+          print('apparmor    :', p_ok, p)
+          if not (w_ok and p_ok):
+              sys.exit('FLOORS INACTIVE — the tests below would skip, and a skip is not a pass.')
+          "
+
+      # tests/test_bwrap_sandbox.py is DELIBERATELY NOT HERE, and the reason is
+      # a finding rather than an exclusion of convenience. Its 9 cases skip
+      # with "bwrap cannot run a namespaced process in EITHER network policy on
+      # this host: bwrap: execvp /bin/sh: No such file or directory" — measured
+      # BOTH on this runner (where write_preflight succeeds, so bwrap itself
+      # works) and on the operator's own machine. That is a defect in the
+      # CODING sandbox's bind set, not a gap in CI, and it means the bwrap
+      # coding backend cannot start a shell anywhere it has been measured.
+      # Adding the file here would only convert a silent skip into a red job
+      # without fixing anything; it wants its own change, with the diagnosis
+      # done somewhere bwrap is not already nested.
+      - name: Run the security floors (and assert nothing skipped)
+        run: |
+          set -o pipefail
+          PYTHONPATH=$PWD/src uv run pytest \
+            tests/test_bash_write_floor.py \
+            tests/test_bash_confinement.py \
+            tests/test_bash_floor_reporting.py \
+            -q -rs --no-header | tee /tmp/floors.txt
+          if grep -qE "[0-9]+ skipped" /tmp/floors.txt; then
+            echo "::error::A security-floor test SKIPPED. That is the condition this job exists to end."
+            exit 1
+          fi
+
   # The stranger's first ten minutes, executed — not unit-tested. Each leg
   # clones this SHA into a temp tree, builds a venv, runs the README's
   # install line, then setup / doctor / one CLI tool turn / daemon + one
