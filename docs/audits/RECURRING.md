@@ -73,3 +73,65 @@ unreachable or untested — both worth knowing. Pairs well with the per-defense
 counters in `tool_calls.error_type`. The config-load equivalent: a
 `silent_failures` row with subsystem `security_gate` / `token_budget` and state
 `unreadable` means a subsystem is live on defaults right now.
+
+## 3. A command lied about its own outcome
+
+**Question:** for every command whose exit status or output decides something —
+*did the suite pass, is the daemon running, did the push land* — is the status
+you read the status of the thing you care about?
+
+**Born from:** three occurrences, recorded together because none of them was
+recorded at the time. `git grep -niE "PIPESTATUS|pipefail|exit code.*pipe"`
+across tracked `*.md` returned **zero** before this section existed, so there
+was no ledger to append a third item to. This is not a backfilled history — it
+is the first entry, and it happens to have three instances.
+
+1. **2026-08-30, Beacon parity.** A full `pytest` run read through `| tail`.
+   The status belonged to `tail`, which always succeeds. A failing suite
+   reported success.
+2. **2026-09-07, P4 security sprint.** An `EXIT=0` printed by a smoke script,
+   from the same shape. The number was real and meant nothing.
+3. **2026-09-07/08, same sprint.** `echo "exit: $?"` after a pipeline, twice in
+   one session.
+
+**Not a defect in tracked code, and the distinction matters.** All five tracked
+`*.sh` files already `set -o pipefail`, and no CI step reads the status of a
+pipeline — both verified when this section was written. This is an **ad-hoc
+command** trap. It bites in interactive sessions and agent tool calls, where the
+pipeline is typed once, the number is believed, and nothing reviews it.
+
+**How:** `set -o pipefail`, or read `${PIPESTATUS[0]}` explicitly. Never accept
+a status printed after a pipe without one of the two. When the result decides
+whether to ship, print the status *and* the evidence: a bare `EXIT=0` is not
+evidence that the thing you ran succeeded.
+
+### Related shapes — the report is not about what you think
+
+Same family, different mechanism. Each was measured, not recalled.
+
+* **`pgrep -f <pattern>` finds the shell that is running the search.** Measured:
+  searching for a marker string that matches **no running program at all**
+  returned exit 0 and three matches. `pgrep -f` compares full command lines, and
+  the pattern is sitting in the command line of the shell invoking it — pgrep
+  excludes its own PID, but not its parent. So a restart check written this way
+  reports "still running" for a process that never existed, and the operator
+  concludes the stop failed.
+
+  Remedies: match on the pid file or `systemctl --user is-active` instead; or
+  keep the pattern out of the searching command line (`pgrep -f "[p]attern"` is
+  the old trick); or compare against a known PID rather than a string.
+
+* **`git push` during a conflicted rebase succeeds, and pushes the wrong
+  commit.** Measured on git 2.43 with a deliberately conflicted rebase:
+
+  ```
+  HEAD state                      : HEAD (no branch), detached at the partial replay
+  refs/heads/feature still points : the PRE-rebase tip
+  git push origin feature         : exit 0 — "* [new branch]"
+  ```
+
+  The push sends the **branch ref**, which the rebase has not moved yet. So it
+  reports success while publishing the state you were rebasing *away from*, and
+  the work you are standing in is not in it. Finish or abort the rebase first;
+  `git status` saying "rebase in progress" is the tell.
+
