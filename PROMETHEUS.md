@@ -53,10 +53,31 @@ git -C ~/prometheus-deploy fetch origin && git -C ~/prometheus-deploy merge --ff
 ```
 
 **Merging a PR and deferring the deploy is two steps, not one.** The daemon's
-`ExecStartPre` guard refuses to boot unless that clone is on `main` AND equal
-to local `origin/main` — *behind* is a refusal too. Skip the ff and you have
-armed a failure on the next restart for any reason, which lands on whoever
-restarts next, not on whoever merged.
+`ExecStartPre` guard refuses to boot when that clone is not on `main`, is
+AHEAD of local `origin/main`, has DIVERGED from it, or has uncommitted changes
+to tracked files.
+
+*Behind* is **not** a refusal, and this doc said it was until 2026-09-08.
+Measured against a clone four commits behind:
+
+```
+deploy-guard: WARNING: <repo> is BEHIND origin/main (ahead 0, behind 4) — starting anyway.
+exit 0
+```
+
+The code is right and the doc was wrong, so the doc changed. `deploy_guard.sh`
+explains why: every commit in a behind checkout *is* on `origin/main` and was
+reviewed, so it is old, not unmerged — and refusing there would make a
+deliberate dark-merge incompatible with surviving an unrelated reboot, landing
+the unit in `failed` with `StartLimitBurst` exhausted, unattended.
+
+**What that costs you, and it is the reason the two-step rule still stands:** a
+merged-but-not-deployed clone boots happily and quietly. `/health` will even
+report `stale: false`, correctly — it compares the running code against the
+*checked-out tree*, and those agree. Neither signal is comparing against
+`origin/main`, and the guard does not fetch (deliberately: boot is the wrong
+time for a network call — see the stale-tracking-ref note in the script). So
+nothing tells you the clone is behind until you look.
 
 Why this is a hard rule rather than a preference — it has failed twice:
 
