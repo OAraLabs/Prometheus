@@ -248,6 +248,7 @@ jobs:
             tests/test_bash_write_floor.py \
             tests/test_bash_confinement.py \
             tests/test_bash_floor_reporting.py \
+            tests/test_bwrap_sandbox.py \
             -q -rs --no-header | tee /tmp/floors.txt
           if grep -qE "[0-9]+ skipped" /tmp/floors.txt; then
             echo "::error::A security-floor test SKIPPED. That is the condition this job exists to end."

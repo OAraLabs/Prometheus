@@ -277,6 +277,21 @@ class TestAcceptance:
     def test_shell_redirect_to_outside_path_fails(
         self, box: BwrapSandbox, tmp_path: Path
     ):
+        """The 2026-08-13 audit's acceptance case: nothing lands on the host.
+
+        THE PROPERTY IS THE ABSENT FILE, not the exit code. This test asserted
+        a nonzero exit as well, and that assertion was wrong — it had simply
+        never run, because a malformed self-check probe skipped this whole
+        class on every host (see the fix in coding/sandbox.py).
+
+        Why the exit code is 0 here, measured: the sandbox mounts its own
+        `--tmpfs /tmp`, then `--bind`s the jail root. bwrap creates the bind
+        DESTINATION's parent chain inside that tmpfs — and pytest's tmp_path
+        is itself under /tmp — so the redirect's parent directory exists in
+        the namespace. The write succeeds into an ephemeral tmpfs that is
+        discarded when the namespace exits. Nothing reaches the host, which is
+        the whole claim.
+        """
         outside = tmp_path / "escaped.txt"
         outside.unlink(missing_ok=True)
         r = asyncio.run(box.run(f"echo pwned > {outside}"))
@@ -284,9 +299,33 @@ class TestAcceptance:
             "the redirect target must not exist on the host — this is the "
             "exact failure ProcessSandbox has (rc=0, file lands outside)"
         )
-        # The write attempt inside the namespace fails at open(2) — a
-        # nonzero shell exit, not a crash, not silently swallowed.
-        assert r.exit_code != 0
+        assert not r.timed_out
+
+    def test_a_write_into_a_read_only_bind_fails(self, box: BwrapSandbox):
+        """The mechanism half — and the only shape where an exit code is a
+        reliable signal.
+
+        There is NO dependable "writing outside the jail fails at open(2)"
+        case, and two attempts at one both failed for the same reason. bwrap's
+        namespace root is a tmpfs, and it CREATES the parent chain of every
+        bind destination inside it. So any target that shares an ancestor with
+        the jail root — pytest's tmp_path under /tmp, or anything under HOME on
+        a CI runner whose workspace is under HOME — lands in an ephemeral
+        directory, succeeds, and is discarded. That is containment working; it
+        just is not visible in the exit code.
+
+        `/usr` is different: it is `--ro-bind`ed, so it genuinely exists inside
+        the namespace and is genuinely read-only. A write there must fail, on
+        every host, for a reason that is about the sandbox rather than about
+        which directory the test runner happened to choose.
+        """
+        r = asyncio.run(box.run("echo pwned > /usr/prometheus-bwrap-probe"))
+        assert not Path("/usr/prometheus-bwrap-probe").exists(), (
+            "the write reached the host's /usr"
+        )
+        assert r.exit_code != 0, (
+            f"a write into a read-only bind reported success: {r!r}"
+        )
 
     def test_absolute_path_read_of_a_real_host_secret_style_file_fails(
         self, box: BwrapSandbox, tmp_path: Path
@@ -363,3 +402,64 @@ class TestRunBehaviour:
         see it in the output they read."""
         r = asyncio.run(box.run("echo hello"))
         assert "__bwrap_run_" not in r.output
+
+
+# --------------------------------------------------------------------------- #
+# The self-check must answer the question the sandbox actually asks
+# --------------------------------------------------------------------------- #
+
+
+@requires_bwrap_binary
+def test_self_check_agrees_with_what_the_sandbox_can_really_do(tmp_path: Path):
+    """THE REGRESSION GUARD. A probe stricter than the real thing is worse
+    than no probe: it reports "this host cannot namespace" about a host that
+    can, and every gated test skips on a false negative.
+
+    That is exactly what happened. ``self_check`` bound only ``/usr`` and
+    ``/bin``, which cannot exec anything dynamically linked — on a merged-/usr
+    system the loader is at ``/lib64/ld-linux-x86-64.so.2``, itself a symlink
+    into ``/lib``, so both are required. The ENOENT names ``/bin/sh``, which is
+    present, so the failure read as a host limitation rather than a malformed
+    probe, and this file's 9 acceptance cases skipped on every machine and
+    every CI run from the day they were written.
+
+    Asserted as AGREEMENT rather than as "self_check is True", so it holds on
+    a host where bwrap genuinely cannot run: there both sides are False and
+    the invariant still means something.
+    """
+    root = tmp_path / "jail"
+    root.mkdir()
+    box = BwrapSandbox(root=root)
+
+    try:
+        result = asyncio.run(box.run("echo AGREEMENT_PROBE"))
+        really_works = result.exit_code == 0 and "AGREEMENT_PROBE" in result.output
+    except Exception:
+        really_works = False
+
+    check = BwrapSandbox.self_check()
+    assert check.ok == really_works, (
+        f"self_check says ok={check.ok!r} ({check.detail!r}) but a real "
+        f"sandbox run {'SUCCEEDS' if really_works else 'FAILS'}. A probe that "
+        f"disagrees with the thing it is probing sends every gated test to a "
+        f"skip for a reason no code change can fix."
+    )
+
+
+def test_the_self_check_probe_does_not_hand_write_its_bind_set():
+    """Structural: the probe must derive its binds from the sandbox's own list.
+
+    Behaviour alone cannot catch a re-divergence — a hand-written list that
+    happens to be complete today passes the agreement test above and rots the
+    moment the real bind set gains an entry.
+    """
+    import inspect
+
+    from prometheus.coding import sandbox as sandbox_mod
+
+    src = inspect.getsource(sandbox_mod.BwrapSandbox.self_check)
+    assert "_BASE_RO_BIND_DIRS" in src, (
+        "self_check no longer derives its bind set from _BASE_RO_BIND_DIRS. "
+        "A probe with its own copy of the list is how it came to bind /usr "
+        "and /bin only, and report every host as unable to namespace."
+    )
