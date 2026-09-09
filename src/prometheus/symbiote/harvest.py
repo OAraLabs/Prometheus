@@ -32,6 +32,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from prometheus.config.paths import get_config_dir
 from prometheus.security.code_scanner import (
@@ -207,6 +208,56 @@ class HarvestReport:
 # ---------------------------------------------------------------------------
 
 
+#: The only host a harvest may clone from. Scout is the sole producer of these
+#: URLs — ``github_search.GITHUB_API_BASE`` is hardcoded and the candidate's
+#: ``url`` is GitHub's own ``html_url`` — so restricting to it loses nothing.
+ALLOWED_CLONE_HOST = "github.com"
+
+
+def _refuse_clone_url(repo_url: str) -> str | None:
+    """Why *repo_url* may not be cloned, or None when it may.
+
+    DEFENCE IN DEPTH, and worth being honest about the severity rather than
+    overselling it. Measured against git 2.43, which is what runs here:
+
+        git clone 'ext::sh -c "touch PWNED"'  -> fatal: transport 'ext' not
+                                                 allowed; nothing executed
+        git clone file:///path/to/repo        -> SUCCEEDS, local repo read
+
+    So the command-execution shape is already closed by git's own default
+    protocol policy, and what remains is reading an arbitrary local repository.
+    Reaching even that means changing the ``url`` on a candidate inside the
+    persisted ``scout_report`` — a row in the symbiote_sessions SQLite table,
+    not a value any tool argument carries: ``symbiote_harvest`` accepts only a
+    candidate ``full_name``, and the coordinator resolves the URL itself.
+
+    Parsed rather than prefix-matched. A bare ``startswith`` would be adequate
+    only because of its trailing slash, and the shapes it has to survive are
+    exactly the ones nobody thinks of:
+    ``https://github.com@evil.example/x`` (host is evil.example, "github.com"
+    is userinfo) and ``https://github.com.evil.example/x``.
+    """
+    if not repo_url or not isinstance(repo_url, str):
+        return "refused: no repository URL"
+
+    try:
+        parsed = urlparse(repo_url.strip())
+    except ValueError:
+        return "refused: malformed repository URL"
+
+    if (parsed.scheme or "").lower() != "https":
+        return (
+            f"refused: only https GitHub URLs may be cloned "
+            f"(got scheme {parsed.scheme!r})"
+        )
+    if (parsed.hostname or "").lower() != ALLOWED_CLONE_HOST:
+        return (
+            f"refused: only {ALLOWED_CLONE_HOST} may be cloned "
+            f"(got host {parsed.hostname!r})"
+        )
+    return None
+
+
 class HarvestEngine:
     """Run Phase 2 of SYMBIOTE."""
 
@@ -320,7 +371,17 @@ class HarvestEngine:
     # ------------------------------------------------------------------
 
     async def _clone(self, repo_url: str, sandbox_path: Path) -> None:
-        """Run ``git clone --depth 1`` with a hard timeout."""
+        """Run ``git clone --depth 1`` with a hard timeout.
+
+        Refuses anything that is not an https GitHub URL first. Nothing
+        legitimate is lost: Scout is the only producer of these URLs, its
+        ``GITHUB_API_BASE`` is hardcoded to api.github.com, and the candidate's
+        ``url`` is GitHub's own ``html_url``.
+        """
+        refusal = _refuse_clone_url(repo_url)
+        if refusal:
+            raise RuntimeError(refusal)
+
         sandbox_path.parent.mkdir(parents=True, exist_ok=True)
         if sandbox_path.exists():
             shutil.rmtree(sandbox_path)
