@@ -32,6 +32,7 @@ import yaml
 
 from prometheus.config.api_token import resolve_api_token
 from prometheus.config.defaults import config_search_paths
+from prometheus.config.env_file import get_env_file_path, parse_env_file
 from prometheus.config.paths import (
     get_config_dir,
     get_data_dir,
@@ -108,22 +109,64 @@ def check_config(explicit: str | None = None) -> tuple[DiagnosticCheck, dict[str
     ), config
 
 
+def _cloud_key_source(
+    model_cfg: dict[str, Any],
+    provider: str,
+    cloud_defaults: dict[str, Any],
+) -> tuple[str, str | None]:
+    """Which variable holds the key, and where it was actually found.
+
+    Answers the SAME question `providers.registry._resolve_api_key` answers at
+    boot, in the same order, because a doctor that disagrees with the daemon is
+    worse than no doctor. Two disagreements existed:
+
+    * the daemon reads the env file (systemd loads it via ``EnvironmentFile=``,
+      and ``oara daemon`` calls ``load_env_file()``); doctor read only
+      ``os.environ``, so a correctly-installed key reported as "not set" to
+      anyone running ``oara doctor`` from a plain shell — the exact first-run
+      moment this command exists for;
+    * ``api_key_env`` is optional — absent, the registry falls back to the
+      provider's ``default_env``. Doctor required it, so a config written by
+      the cloud fast path reported ``<api_key_env unset>`` while the daemon
+      started fine.
+
+    Returns ``(variable_name, source)`` where source is ``"environment"``,
+    ``"env file"``, ``"config"`` or ``None`` when the key is nowhere.
+    """
+    if model_cfg.get("api_key", ""):
+        return model_cfg.get("api_key_env", "") or "api_key", "config"
+    key_env = str(
+        model_cfg.get("api_key_env", "")
+        or cloud_defaults.get(provider, {}).get("default_env", "")
+    )
+    if not key_env:
+        return "", None
+    if os.environ.get(key_env):
+        return key_env, "environment"
+    if parse_env_file().get(key_env):
+        return key_env, "env file"
+    return key_env, None
+
+
 def check_inference(config: dict[str, Any], timeout: float = 5.0) -> tuple[DiagnosticCheck, DiagnosticCheck]:
     """Inference server reachable + a model detected. Returns two checks."""
     model_cfg = config.get("model", {}) or {}
     provider = model_cfg.get("provider", "llama_cpp")
 
-    from prometheus.providers.registry import ProviderRegistry
+    from prometheus.providers.registry import CLOUD_DEFAULTS, ProviderRegistry
     if ProviderRegistry.is_cloud(provider):
-        key_env = model_cfg.get("api_key_env", "")
-        has_key = bool(key_env and os.environ.get(key_env))
+        key_env, source = _cloud_key_source(model_cfg, provider, CLOUD_DEFAULTS)
+        has_key = source is not None
         reach = DiagnosticCheck(
             name="Inference", category="connectivity",
             status="ok" if has_key else "error",
-            message=(f"cloud provider {provider} (key ${key_env} set)" if has_key
-                     else f"cloud provider {provider} but ${key_env or '<api_key_env unset>'} is not set"),
+            message=(f"cloud provider {provider} (key ${key_env} set — {source})"
+                     if has_key
+                     else f"cloud provider {provider} but ${key_env or '<api_key_env unset>'} "
+                          f"is set neither in the environment nor in "
+                          f"{get_env_file_path()}"),
             fix=None if has_key else f"Export {key_env or 'the provider API key'} "
-                                     f"or add it to the env file.",
+                                     f"or add it to {get_env_file_path()}.",
         )
         model = DiagnosticCheck(
             name="Model", category="model", status="ok" if model_cfg.get("model") else "warning",

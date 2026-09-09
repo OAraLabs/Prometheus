@@ -8,13 +8,66 @@ from __future__ import annotations
 
 import platform
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 
 from prometheus.config.paths import get_config_dir
 
 
-TEMPLATES_DIR = Path(__file__).resolve().parent.parent.parent.parent / "templates"
 PROMETHEUS_HOME = get_config_dir()
+
+TEMPLATE_NAMES = ("SOUL.md.template", "AGENTS.md.template")
+
+
+class IdentityTemplateNotFound(FileNotFoundError):
+    """A shipped identity template is missing from an installed package."""
+
+
+@lru_cache(maxsize=None)
+def identity_template_path(name: str) -> Path:
+    """Absolute path to a shipped identity template.
+
+    ⚠ THIS USED TO BE A MODULE CONSTANT, AND THE CONSTANT DID NOT SHIP.
+    It pointed four parents up from this file, at ``<repo>/templates`` — one
+    level ABOVE ``src/prometheus``, which is the only tree
+    ``[tool.hatch.build.targets.wheel] packages`` carries. So every git
+    checkout had these files by accident of the checkout, and every ``pip
+    install`` had none: ``oara setup`` reached the identity step and died on
+    ``FileNotFoundError`` partway through a first run. Same defect, same
+    shape, and the same fix as the config template (see
+    :mod:`prometheus.config.template`).
+
+    Looks, in order:
+
+    1. ``prometheus/templates/`` beside the package — where the wheel
+       force-includes them;
+    2. ``<repo>/templates/`` — a source checkout or editable install.
+
+    Raises rather than returning ``None``: a caller handed ``None`` writes a
+    half-personalised SOUL.md, which is worse than not writing one.
+    """
+    package_root = Path(__file__).resolve().parent.parent  # src/prometheus
+    packaged = package_root / "templates" / name
+    if packaged.is_file():
+        return packaged
+
+    # src/prometheus/cli/generate_identity.py -> repo root is four parents up.
+    checkout = Path(__file__).resolve().parents[3] / "templates" / name
+    if checkout.is_file():
+        return checkout
+
+    raise IdentityTemplateNotFound(
+        f"{name} not found at {packaged} nor at {checkout}. The wheel "
+        f"force-includes templates/ via "
+        f"[tool.hatch.build.targets.wheel.force-include]; if that stanza was "
+        f"removed, `oara setup` fails at the identity step on installed "
+        f"packages while every checkout keeps working."
+    )
+
+
+def read_identity_template(name: str) -> str:
+    """The raw text of a shipped identity template."""
+    return identity_template_path(name).read_text(encoding="utf-8")
 
 
 def detect_hardware() -> dict:
@@ -69,6 +122,26 @@ def _detect_ram() -> int:
 
 
 def _detect_gpu() -> str | None:
+    """Best-effort GPU name for the SOUL.md hardware block.
+
+    ⚠ THIS RUNS DURING FIRST-RUN SETUP, so anything it raises aborts the
+    install partway through. It caught only ``FileNotFoundError`` — the case
+    where nvidia-smi is absent — and every other way nvidia-smi disappoints
+    was an unhandled exception on a fresh machine:
+
+    * **two GPUs.** ``--format=csv,noheader`` prints one line PER GPU, and
+      this split the whole blob on "," — so ``parts[1]`` was
+      ``"24564\nNVIDIA GeForce RTX 4090"`` and ``int()`` raised. A second
+      card broke setup.
+    * a hung driver → ``TimeoutExpired`` after 5s;
+    * ``nvidia-smi`` present but not executable → ``PermissionError``;
+    * a driver reporting ``[N/A]`` for memory → ``ValueError``.
+
+    Now: first line only, and every failure degrades to less detail rather
+    than to an exception — matching :func:`_detect_cpu` and :func:`_detect_ram`
+    beside it, which have always caught broadly. A cosmetic field in a
+    generated markdown file must never be able to fail an install.
+    """
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.total",
@@ -76,11 +149,20 @@ def _detect_gpu() -> str | None:
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0 and result.stdout.strip():
-            parts = result.stdout.strip().split(",")
+            # One line per GPU; the first is the one SOUL.md names.
+            first = result.stdout.strip().splitlines()[0]
+            parts = first.split(",")
             name = parts[0].strip()
-            vram = int(parts[1].strip()) // 1024
+            if not name:
+                return None
+            try:
+                vram = int(parts[1].strip()) // 1024
+            except (IndexError, ValueError):
+                # Driver gave no usable number ("[N/A]", a changed column
+                # set). The name alone is still true and still useful.
+                return name
             return f"{name} ({vram}GB)"
-    except FileNotFoundError:
+    except Exception:
         pass
     if platform.system() == "Darwin" and "arm" in platform.machine():
         return "Apple Silicon (unified memory)"
@@ -105,7 +187,7 @@ def render_soul_md(
     ``persona`` (Onboarding Phase 2, Beacon identity step) appends a
     short "## Persona" section when non-empty.
     """
-    template = (TEMPLATES_DIR / "SOUL.md.template").read_text()
+    template = read_identity_template("SOUL.md.template")
 
     if hardware_layout == "split":
         hw_lines = [
@@ -155,7 +237,7 @@ def render_soul_md(
 
 def render_agents_md() -> str:
     """Render AGENTS.md from template. No personalization needed."""
-    return (TEMPLATES_DIR / "AGENTS.md.template").read_text()
+    return read_identity_template("AGENTS.md.template")
 
 
 def generate_identity_files(

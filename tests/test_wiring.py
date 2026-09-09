@@ -3398,9 +3398,9 @@ class TestCleanSlateWiring:
 
     @pytest.mark.integration
     def test_no_personal_data_in_templates(self):
-        from prometheus.cli.generate_identity import TEMPLATES_DIR
+        from prometheus.cli.generate_identity import read_identity_template
         for name in ("SOUL.md.template", "AGENTS.md.template"):
-            content = (TEMPLATES_DIR / name).read_text()
+            content = read_identity_template(name)
             assert "Will" not in content
             assert "OAra" not in content
             assert "100.110" not in content

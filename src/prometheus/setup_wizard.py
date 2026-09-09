@@ -619,18 +619,42 @@ Run this wizard again after you're ready:
                 print("  Skipping Telegram.")
                 return
 
-        # Optional: restrict to chat ID
+        # The allowlist. NOT optional, and the prompt used to say it was:
+        # "Leave blank to allow all users" described behaviour that stopped
+        # being true when the daemon started REFUSING an empty allowlist
+        # (daemon.telegram_gateway_decision). Blank no longer opens the bot
+        # to the world — it produces a Telegram block that is written, looks
+        # configured in the summary, and whose gateway never starts. So the
+        # prompt asks, explains, and re-asks once rather than describing an
+        # outcome the daemon will not deliver.
         print(
-            "\n  Optional: Restrict to your chat ID only?"
-            "\n  Send /start to your bot, then enter your chat ID here."
-            "\n  Leave blank to allow all users."
+            "\n  Your Telegram chat ID (required — the gateway will not start"
+            "\n  without it; an empty allowlist would expose an agent with"
+            "\n  shell access to anyone who finds the bot)."
+            "\n  Send /start to your bot, then find your ID with @userinfobot."
         )
-        chat_id_str = _input("Chat ID", "")
-        if chat_id_str:
+        for attempt in (1, 2):
+            chat_id_str = _input("Chat ID", "").strip()
+            if not chat_id_str:
+                if attempt == 1:
+                    print("  A chat ID is required to run the Telegram gateway.")
+                    continue
+                break
             try:
                 self._telegram_chat_ids = [int(chat_id_str)]
+                break
             except ValueError:
-                print("  Invalid chat ID, skipping restriction.")
+                print(f"  {chat_id_str!r} is not a number — a chat ID is all digits "
+                      f"(it may start with '-' for a group).")
+                if attempt == 2:
+                    break
+        if not self._telegram_chat_ids:
+            print(
+                "  ! No chat ID. The token is saved and gateway.telegram_enabled\n"
+                "    stays on, but the daemon will REFUSE to start the Telegram\n"
+                "    gateway and say so at boot. Add your id to\n"
+                "    gateway.allowed_chat_ids in prometheus.yaml, or re-run setup."
+            )
 
     def _setup_slack(self) -> None:
         """Collect and validate Slack bot + app tokens."""

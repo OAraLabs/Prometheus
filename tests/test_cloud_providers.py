@@ -168,7 +168,12 @@ class TestProviderRegistry:
         assert "llama_cpp" in providers
         # CLOUD EXPANSION (2026-07): +deepseek/kimi/glm/mimo → 11
         # Alibaba Model Studio (2026-08): +qwen → 12
-        assert len(providers) == 12
+        # First-run path (2026-09): +lm_studio/vllm → 14. `oara setup` had
+        # detected both since it was written and wrote their names into
+        # model.provider, where create() did not recognise them.
+        assert "lm_studio" in providers
+        assert "vllm" in providers
+        assert len(providers) == 14
 
     def test_qwen_is_openai_compat_not_local_adapter(self):
         """A provider NAMED qwen must not fall through to QwenFormatter.

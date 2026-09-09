@@ -7,9 +7,10 @@ from pathlib import Path
 import pytest
 
 from prometheus.cli.generate_identity import (
-    TEMPLATES_DIR,
     detect_hardware,
     generate_identity_files,
+    identity_template_path,
+    read_identity_template,
     render_agents_md,
     render_soul_md,
 )
@@ -21,10 +22,10 @@ _HW = {"hostname": "h", "os": "Linux", "arch": "x86_64",
 # ── Templates exist ─────────────────────────────────────────────────
 
 def test_soul_template_exists():
-    assert (TEMPLATES_DIR / "SOUL.md.template").is_file()
+    assert identity_template_path("SOUL.md.template").is_file()
 
 def test_agents_template_exists():
-    assert (TEMPLATES_DIR / "AGENTS.md.template").is_file()
+    assert identity_template_path("AGENTS.md.template").is_file()
 
 
 # ── Hardware detection ──────────────────────────────────────────────
@@ -112,7 +113,7 @@ def test_user_md_never_overwritten(tmp_path):
 
 def test_no_personal_names_in_templates():
     for name in ("SOUL.md.template", "AGENTS.md.template"):
-        content = (TEMPLATES_DIR / name).read_text()
+        content = read_identity_template(name)
         assert "Will" not in content
         assert "OAra" not in content
         assert "100.110" not in content
