@@ -568,9 +568,12 @@ whisper:
   device: "auto"
   language: "en"
 
-model_router:
-  enabled: false
-
+# NOTE — this section was named `model_router:` before GRAFT-ROUTER-WIRE v3.
+# The old key is no longer shipped here because nothing reads it: a config
+# that still carries one gets a boot WARNING from create_model_router() and
+# runs primary-only routing until it is migrated. Rename the block to
+# `router:` and re-check its contents against the schema below.
+#
 # Sprint 22 GRAFT-ROUTER-WIRE Phase 4 — direct-mode provider overrides.
 #
 # Lets you switch a single Telegram (or Slack) chat to a different cloud

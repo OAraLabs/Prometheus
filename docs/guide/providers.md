@@ -281,24 +281,27 @@ Secrets never go in the yaml, and a pre-commit hook blocks them from ever landin
 
 ## Model Router
 
-The router (`model_router`) is the bigger, autonomous sibling of the slash commands: task-type classification (route coding tasks one way, chat another), fallback chains when a provider is down, and opt-in **cloud escalation** — when a tool call keeps failing validation past the adapter's retry budget, a subagent on a stronger provider attempts that one call and feeds the result back, while the main agent keeps running locally:
+The router (`router:`) is the bigger, autonomous sibling of the slash commands: task-type classification (route coding tasks one way, chat another), fallback chains when a provider is down, and opt-in **cloud escalation** — when a tool call keeps failing validation past the adapter's retry budget, a subagent on a stronger provider attempts that one call and feeds the result back, while the main agent keeps running locally:
 
 ```yaml
-model_router:
-  enabled: false          # the default — see below
-
-# router:
-#   escalation:
-#     enabled: false
-#     provider:
-#       provider: anthropic
-#       api_key_env: ANTHROPIC_API_KEY
-#       model: claude-sonnet-4-6
-#     as_subagent: true
-#     budget_usd: 1.00     # soft cost cap per escalation (future enforcement)
+router:
+  smart_routing:
+    enabled: false         # the default — task-type classification is opt-in
+  rules: []                # the default — no routing rules
+  fallback: []             # the default — no provider fallback chain
+  escalation:
+    enabled: false         # the default
+    provider:
+      provider: anthropic
+      api_key_env: ANTHROPIC_API_KEY
+      model: claude-sonnet-4-6
+    as_subagent: true
+    budget_usd: 1.00       # soft cost cap per escalation (future enforcement)
 ```
 
-**Defaults, honestly:** the router itself ships **off** — most single-model setups don't need it. The per-chat overrides (`router.overrides`) are a separate, lightweight mechanism and ship **on**.
+**Defaults, honestly:** the router object is built on every boot — that is what makes the override commands above work out of the box — but its autonomous halves ship **inert**: `rules` and `fallback` are empty, `smart_routing` and `escalation` are off. The per-chat overrides (`router.overrides`) are a separate, lightweight mechanism and ship **on**.
+
+> **Renamed key.** This section was `model_router:` before GRAFT-ROUTER-WIRE v3. Nothing reads the old name: a config that still carries it gets a boot warning saying its rules are not being applied, and runs primary-only routing. Rename the block to `router:`.
 
 ## Force-search / `tool_choice`
 
