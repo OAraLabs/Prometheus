@@ -135,3 +135,60 @@ Same family, different mechanism. Each was measured, not recalled.
   the work you are standing in is not in it. Finish or abort the rebase first;
   `git status` saying "rebase in progress" is the tell.
 
+
+---
+
+## 4. A standing rule that names the wrong cause
+
+**Question:** for every rule written after an incident — does the thing it
+tells you to change actually control the thing that went wrong? A rule is
+only a control if disabling the named cause would have prevented the
+recurrence. Otherwise it is a memorial that reads like a control.
+
+**Born from:** the same accident twice, with a rule in between.
+
+1. **PR #4** was merged and its branch deleted. That branch was the base of
+   **#7, #8 and #9**, which GitHub closed permanently — a closed PR cannot
+   have its base changed, so they could not be reopened.
+2. A standing rule was written: **disable auto-delete-on-merge.**
+3. **2026-09-10, PR #417** was merged and its branch deleted. That branch was
+   the base of **#418**, which closed permanently. Same shape, same
+   irreversibility, one rule later.
+
+**Measured on 2026-09-10, from three sources:**
+
+```
+repos/OAraLabs/Prometheus  .delete_branch_on_merge : false
+branches/main/protection                           : HTTP 404 (not protected)
+rulesets/<id> "protect-main" rules                 : deletion, non_fast_forward,
+                                                     pull_request,
+                                                     required_linear_history
+```
+
+**Auto-delete was already off, and had been.** No repo setting, no branch
+protection and no ruleset deletes a head branch here. The only thing that
+does is the flag on the merge invocation — `gh pr merge --delete-branch`.
+
+So the rule named a mechanism that was not operating. Following it perfectly
+would have changed nothing, and #418 closed anyway. Worse than useless: it
+occupied the slot where the real control belonged, so the second occurrence
+looked like bad luck rather than an unaddressed cause.
+
+**How:**
+
+- Omit `--delete-branch`. It is the whole mechanism. Branches accumulate on
+  origin — that is the trade, and it is cheap next to a permanently closed PR.
+- Before merging anything, check whether its branch is another PR's base:
+  `gh pr list --json number,baseRefName` and look for your head ref. If it is,
+  merge that stack in immediate succession.
+- **The general rule, which is why this is section 4 and not a footnote:**
+  when writing a rule after an incident, verify the named cause was actually
+  operating *at the time of that incident*. `delete_branch_on_merge` was
+  queryable in one API call throughout. Nobody asked, so a guess became a
+  standing rule, and the guess was wrong in the direction that reads as
+  diligence.
+
+**Not found in this repository.** The original rule is not in `docs/`,
+`PROMETHEUS.md` or any tracked `*.md` — searched when this section was
+written. Wherever it lives, it should be corrected or removed rather than
+left to be followed.
