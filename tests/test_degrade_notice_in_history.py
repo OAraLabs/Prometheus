@@ -118,12 +118,32 @@ def test_the_request_sent_to_the_fallback_names_the_FALLBACK_model():
 
 
 def test_the_prompt_identity_line_follows_the_serving_model():
-    """Otherwise the degraded model answers "what model is this?" as the primary."""
-    _p, _l, ctx, _t = _run()
-    assert "Qwen3.8-27B" in ctx.system_prompt
+    """Otherwise the degraded model answers "what model is this?" as the primary.
+
+    ⚠ ASSERTED ON THE WIRE, not on the context. This used to read
+    ``ctx.system_prompt`` — the caller's own object — which passed only
+    because the rewrite mutated the SHARED context in place, the same write
+    that made the next session's prompt claim to be this session's model.
+    The rewrite now lands on the run's private copy, so the container tells
+    you nothing; what the fallback provider actually RECEIVED is the claim
+    that matters, and the one the model answers "what model is this?" from.
+    """
+    _p, local, ctx, _t = _run()
+    sent = local.requests[0].system_prompt or ""
+    assert "Qwen3.8-27B" in sent, f"the fallback was told it was something else: {sent!r}"
     # is_local_backend=True, so the "separate local backend, not you" clause must be ABSENT —
     # here the serving model IS the local backend and the clause would be false.
-    assert "not you" not in ctx.system_prompt
+    assert "not you" not in sent
+
+
+def test_the_identity_rewrite_does_not_touch_the_callers_context():
+    """The leak the rewrite used to have. One shared context serves every
+    web session, so an in-place rewrite left the NEXT session's prompt
+    naming the previous session's model — and compounded on each turn."""
+    _p, _l, ctx, _t = _run()
+    assert ctx.system_prompt == "- Model: qwen3.8-max (provider: qwen)", (
+        "the caller's system prompt was rewritten in place"
+    )
 
 
 def test_a_healthy_turn_gains_no_notice_and_stays_a_single_block():

@@ -13,13 +13,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import contextvars
 import hashlib
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import AsyncIterator, Awaitable, Callable
+from typing import AsyncIterator, Awaitable, Callable, ClassVar
 
 from prometheus.adapter import markup_guard
 from prometheus.engine.messages import (
@@ -475,8 +476,19 @@ def _do_diagnose_and_recover(
         recovery_method = "diagnostic_only:special_char_escape"
     elif active_tier in _TIER_BUMP_LADDER and context.adapter is not None:
         # Bump the adapter tier one rung up (off → light, light → full).
+        #
+        # ⚠ ON A COPY. This used to write `context.adapter.tier` straight
+        # through to the ADAPTER OBJECT, which the daemon shares with every
+        # session — and it is the only write to `.tier` outside the adapter's
+        # constructor, so nothing ever put it back. One turn that tripped the
+        # breaker raised strictness for every session, on every surface, for
+        # the life of the process. The bump is meant to be one-shot recovery
+        # for THIS run (`breaker.recovery_attempted` says so), and a copy is
+        # what makes the scope match the intent. Shallow: the adapter's own
+        # collaborators stay shared, only the tier binding is ours.
         next_tier = _TIER_BUMP_LADDER[active_tier]
         try:
+            context.adapter = copy.copy(context.adapter)
             context.adapter.tier = next_tier
             new_tier = next_tier
             recovery_method = f"tier_bump:{active_tier}->{next_tier}"
@@ -565,9 +577,50 @@ def _do_diagnose_and_recover(
     )
 
 
+class SharedLoopContextMutation(RuntimeError):
+    """A per-run field was written on a context that is shared across runs."""
+
+
 @dataclass
 class LoopContext:
-    """Context shared across a loop run."""
+    """Context shared across a loop run.
+
+    ⚠ ONE INSTANCE SERVES EVERY SESSION. ``run_daemon`` builds the web
+    context ONCE at startup and hands the same object to every Beacon, REST
+    and WebSocket turn (``daemon.py`` → ``launch_web(loop_context=...)``).
+    That is deliberate — most of what lives here is a service bundle (the
+    tool registry, the security gate, the hook executor, telemetry, the
+    router) that SHOULD be shared and is never written to.
+
+    A handful of fields are not like that. ``provider``, ``adapter``,
+    ``model``, ``backend`` and ``system_prompt`` are rewritten mid-run by the
+    router, by provider fallback and by the identity-line rewrite, and
+    ``pair_pending`` accumulates within a run. Written on the shared
+    instance, each of those crosses into every other session:
+
+    * the ROUTER RACE — ``/claude`` in one chat swapped the provider,
+      adapter and model for every concurrent session, because turn locks are
+      per-session and this object is not;
+    * the IDENTITY-LINE LEAK — ``system_prompt`` was rewritten IN PLACE to
+      name the routed model, so the next session's prompt claimed to be the
+      previous session's model, and each rewrite compounded on the last;
+    * the TIER-BUMP LEAK — ``context.adapter.tier = next_tier`` mutated the
+      shared ADAPTER OBJECT, and nothing anywhere restores it, so one bad
+      turn raised strictness for every session for the life of the daemon;
+    * the PAIR STASH — a rejected call in one session could pair with a
+      matching success in ANOTHER, manufacturing a repair pair that never
+      happened and filing it as training data.
+
+    The fix is structural rather than remembered: :meth:`for_run` makes a
+    per-run copy that every mutation lands on, ``run_loop`` calls it once per
+    turn so both loop construction sites get it for free, and :meth:`seal`
+    makes the shared instance REFUSE those writes so a future mutation is an
+    exception instead of a leak.
+
+    The precedent is already here: ``mode``, ``session_id``, ``ephemeral``,
+    ``profile_resolver`` and ``workspace_resolver`` were each moved off this
+    object one at a time for exactly this reason. This generalises it.
+    """
 
     provider: ModelProvider
     model: str
@@ -715,6 +768,71 @@ class LoopContext:
     # docstring of tests/test_run_async_web_parity.py.
     nudge: object | None = None
 
+    #: Fields a run rewrites. Sealed instances refuse them; :meth:`for_run`
+    #: is how a run gets a copy it may write. ``pair_pending`` is here for a
+    #: different reason than the rest — it is not rewritten, it ACCUMULATES,
+    #: and its own field comment already says "within this loop run".
+    PER_RUN_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "provider", "adapter", "model", "backend", "system_prompt",
+        "pair_pending",
+    })
+
+    #: Not a dataclass field, deliberately: ``dataclasses.replace`` copies
+    #: fields only, so a copy of a sealed context comes back UNSEALED — which
+    #: is exactly what a run needs, with nothing to remember to clear.
+    _sealed: ClassVar[bool] = False
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in LoopContext.PER_RUN_FIELDS and getattr(self, "_sealed", False):
+            raise SharedLoopContextMutation(
+                f"{name!r} was written on a SEALED LoopContext. This object is "
+                f"shared by every session on this daemon, so the write would "
+                f"reach turns it was never meant for — the router race, the "
+                f"identity-line leak and the tier bump were all this. Take a "
+                f"per-run copy with LoopContext.for_run() and write to that; "
+                f"run_loop() already does, so a mutation reaching this line "
+                f"comes from somewhere that bypassed it."
+            )
+        object.__setattr__(self, name, value)
+
+    def seal(self) -> "LoopContext":
+        """Mark this instance as shared: per-run writes now raise.
+
+        Called by the daemon on the one context every web session shares.
+        Returns self so it can be chained onto construction.
+        """
+        object.__setattr__(self, "_sealed", True)
+        return self
+
+    @property
+    def sealed(self) -> bool:
+        return bool(getattr(self, "_sealed", False))
+
+    def for_run(self) -> "LoopContext":
+        """A copy this turn may write to, leaving the shared instance alone.
+
+        Shallow by design. The service bundle — registry, gate, hooks,
+        telemetry, router, the file-mutation verifier — must stay the SAME
+        objects: they carry state the daemon means to share, and the verifier
+        in particular is already turn-scoped by key rather than by instance.
+        Only the binding of the per-run FIELDS is private to the run.
+
+        ``pair_pending`` is the one exception to "shallow": the run gets its
+        own dict. A stash that outlives its run is how a rejected call in one
+        session pairs with a matching success in ANOTHER — a repair pair that
+        never happened, filed as training data. It is COPIED rather than
+        emptied so a caller that seeds a stash still has it honoured; in
+        production nothing seeds one, and because every write during a run
+        lands on this copy, the shared instance's dict stays empty for the
+        life of the daemon either way.
+
+        ``adapter`` stays shared here on purpose — swapping it costs a copy
+        on every turn for a mutation almost no turn makes. The one place that
+        writes THROUGH it (the tier bump in ``_do_diagnose_and_recover``)
+        copies it there instead, so the cost falls on the rare path.
+        """
+        return replace(self, pair_pending=dict(self.pair_pending or {}))
+
 
 def _effective_max_tool_iterations(context: LoopContext) -> int:
     """Resolve the iteration limit for the currently-active provider.
@@ -789,6 +907,18 @@ async def run_loop(
     flagged. Resolving it HERE means both loop construction sites get it by
     construction, with nothing to remember to pass and nothing to cross-talk.
     """
+    # THE PER-RUN COPY. Everything below — and everything `_run_loop` does —
+    # works on a context private to this turn, so the router swap, the
+    # provider fallback, the identity-line rewrite and the pair stash cannot
+    # reach the instance the daemon shares with every other session. One
+    # `run_loop` call is one turn, and both loop construction sites go
+    # through it, which is the same reason `mode`, `session_id` and
+    # `ephemeral` are resolved here rather than parked on the context.
+    #
+    # Deliberately BEFORE the verifier lookup below: `fmv` and everything
+    # after it must read the copy, or a later refactor that moves a read
+    # above this line silently reintroduces the shared read.
+    context = context.for_run()
     # A duck-typed verifier without ``new_turn_key`` predates turn scoping;
     # it keeps its single accumulator and we never pass it a key it can't
     # accept. Capability is resolved ONCE here so the call sites below don't
@@ -1503,14 +1633,45 @@ async def _run_loop(
             # The serving model is the fallback from here on, so the prompt's identity line has
             # to follow — shared with the router rather than copied, and keyed on whether the
             # SERVING model is the local backend (not on why it changed).
-            context.system_prompt = rewrite_model_identity(
-                context.system_prompt,
+            #
+            # ⚠ THIS WROTE `context.system_prompt` AND THE REQUEST NEVER READ IT.
+            # `active_system_prompt` is bound from the context ONCE, above the turn
+            # loop, and the request carries `per_call_system_prompt` derived from
+            # that — so a write to the context here changed nothing about the turn
+            # it fires on. It "worked" only by mutating the SHARED context and
+            # landing on somebody else's later turn, and the test that covered it
+            # read back the same leaked field, so both agreed and both were wrong.
+            # Measured on the wire: the fallback provider received
+            # "- Model: qwen3.8-max (provider: qwen)" — the model that just failed.
+            #
+            # `stream_round_with_fallback` calls this BEFORE `build_request(target.model)`,
+            # so rebinding the two names the request actually reads fixes the turn in
+            # hand. `nonlocal` rather than the one-element-list idiom used for
+            # `degrade_notice_this_turn` above: there the value is appended to, here
+            # it is genuinely rebound, and hiding a rebind inside a list is how this
+            # kind of thing goes unnoticed in the first place.
+            nonlocal active_system_prompt, per_call_system_prompt
+            rewritten = rewrite_model_identity(
+                active_system_prompt,
                 model_name=_decision.model or "unknown",
                 provider_name=_decision.provider_name or "unknown",
                 serving_is_local_backend=bool(
                     getattr(context.fallback, "is_local_backend", False)
                 ),
             )
+            # Later turns in this run re-derive from `active_system_prompt`; the
+            # request about to be built reads `per_call_system_prompt`, which was
+            # derived from the pre-swap value earlier in THIS turn. Both, or the
+            # fix lands one turn late — which is the bug, one iteration smaller.
+            per_call_system_prompt = rewrite_model_identity(
+                per_call_system_prompt,
+                model_name=_decision.model or "unknown",
+                provider_name=_decision.provider_name or "unknown",
+                serving_is_local_backend=bool(
+                    getattr(context.fallback, "is_local_backend", False)
+                ),
+            )
+            active_system_prompt = rewritten
 
         _degrade_announced = False
         async for event in stream_round_with_fallback(
