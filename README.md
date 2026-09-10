@@ -286,7 +286,7 @@ Why this only works here: a screen recording of you doing your job is among the 
 
 ### On by default vs opt-in
 
-Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, and the web API are on out of the box. The bigger autonomous subsystems — SENTINEL dreaming, the model router, LSP, GEPA, escalation-to-teacher, SYMBIOTE (GitHub research → license gate → AST scan → safe graft → blue-green hot swap with auto-rollback; experimental), the Paperclip gateway, and Record-a-Skill's video ingestion — ship **off by default** and are one config flag away when you want them. The [feature reference](docs/guide/features.md) marks every subsystem's default.
+Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, and the web API are on out of the box. The bigger autonomous subsystems — SENTINEL dreaming, the router's autonomous half (task classification and fallback chains — its per-chat `/claude`-style overrides ship **on**), LSP, GEPA, escalation-to-teacher, SYMBIOTE (GitHub research → license gate → AST scan → safe graft → blue-green hot swap with auto-rollback; experimental), the Paperclip gateway, and Record-a-Skill's video ingestion — ship **off by default** and are one config flag away when you want them. The [feature reference](docs/guide/features.md) marks every subsystem's default.
 
 ## Quick Start
 

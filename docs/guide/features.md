@@ -46,9 +46,11 @@ Two extras worth knowing about:
 
 The flagship feature: a validation layer between the agent loop and whatever model you run, built to make open models reliable in a tool loop. It validates every tool call before execution (with NONE / MEDIUM / STRICT strictness levels), repairs common errors automatically (fuzzy tool-name matching, JSON extraction from markdown fences and prose, type coercion), formats prompts per model family (Qwen, Gemma, Anthropic, generic), and when a call still fails, retries by feeding the specific schema error back to the model rather than a generic "try again." On llama.cpp, GBNF grammars enforce valid JSON at the token level. If you enable adaptive strictness, the layer tunes itself from telemetry — tightening for models that misbehave, relaxing for ones that don't.
 
-### Model router — Default: off (per-chat overrides: on)
+### Model router — Default: per-chat overrides on, autonomous routing off
 
-An optional router classifies tasks, follows fallback chains, and can escalate to cloud models. The router itself ships disabled. What is always on is the per-chat override system: `/claude`, `/gpt`, `/gemini`, `/xai`, `/deepseek`, `/kimi`, `/glm`, `/mimo`, `/qwen` route the current chat through that provider, `/local` returns to your local model, and `/route` shows what is currently in effect.
+The router is built on **every** boot — there is no master enable flag for it, and `RouterConfig` has no `enabled` field. That is what makes the per-chat override system work on a fresh install: `/claude`, `/gpt`, `/gemini`, `/xai`, `/deepseek`, `/kimi`, `/glm`, `/mimo`, `/qwen` route the current chat through that provider, `/local` returns to your local model, and `/route` shows what is currently in effect.
+
+What ships inert is everything the router does *on its own*: `router.rules` and `router.fallback` are empty lists, and `router.smart_routing.enabled` and `router.escalation.enabled` are false — so task classification, fallback chains, and cloud escalation do nothing until you configure them. See [Honest status notes](#honest-status-notes).
 
 ### Search forcing (tool_choice) — Default: on (per call)
 
