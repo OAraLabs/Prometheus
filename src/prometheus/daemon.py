@@ -163,44 +163,57 @@ def _sentinel_enabled(sentinel_config: dict[str, Any]) -> bool:
     The old read was ``.get("enabled", True)`` — deleting the key launched
     an autonomous background subsystem, the exact ``allowed_chat_ids``
     empty-means-allow-all shape #219 fixed at the gateway. An autonomous
-    subsystem is opted INTO, never inherited from a missing line. The
-    shipped template says ``enabled: true``, so fresh installs are
-    unchanged; only a hand-written config that omits the key changes
-    behaviour, and it gets a WARNING naming the line to write.
+    subsystem is opted INTO, never inherited from a missing line.
+
+    The shipped template sets ``sentinel.enabled: false`` — and has since
+    the initial commit — so SENTINEL is OFF on every fresh install and
+    this ruling did not change that. (This docstring claimed the opposite
+    when the ruling landed in #325: it said the template shipped ``true``,
+    which would have made absence the only case that moved. The template
+    has never said ``true``.) What the ruling changes is a hand-written
+    config that OMITS the key: it used to start the subsystem, and now
+    gets a WARNING naming the line to write.
     """
     if "enabled" not in sentinel_config:
         logger.warning(
             "sentinel.enabled is ABSENT from config — SENTINEL stays OFF. "
-            "Write `sentinel.enabled: true` (the shipped template's value) "
-            "to start it. Before this ruling an absent key STARTED the "
-            "subsystem."
+            "Write `sentinel.enabled: true` to start it. The shipped "
+            "template sets it false, so OFF is the fresh-install default "
+            "too. Before this ruling an absent key STARTED the subsystem."
         )
         return False
     return bool(sentinel_config.get("enabled"))
 
 
-# PR-B ruling, shape B (absence → silently disabled): gates the shipped
-# template turns ON but whose readers fail closed. Fail-closed is kept — a
-# missing line must not start a web server or an exporter — but the
-# operator who believes the template's value is in force gets told at boot
-# instead of discovering it from an absent subsystem weeks later
-# (compaction.enabled already bit exactly this way: config-dark since
-# birth). Entries: (section, key, effective-when-absent).
-_ABSENT_GATE_WARNINGS: tuple[tuple[str, str, str], ...] = (
-    ("web", "enabled", "the web API does not start"),
-    ("trajectory_export", "enabled", "no trajectory export runs"),
-    ("compaction", "enabled", "no compactor is constructed"),
+# PR-B ruling, shape B (absence → silently disabled): gates whose readers
+# fail closed. Fail-closed is kept — a missing line must not start a web
+# server or an exporter — but the operator who believes the template's
+# value is in force gets told at boot instead of discovering it from an
+# absent subsystem weeks later (compaction.enabled already bit exactly
+# this way: config-dark since birth).
+#
+# Each entry carries the value the TEMPLATE ships, because it is NOT the
+# same for all three: web and compaction ship true, trajectory_export
+# ships false. The warning used to assert "the shipped template sets it
+# true" for every entry, which was wrong for the exporter — it told the
+# operator to switch on something the template deliberately leaves off.
+# TestShapeB pins these against the template so they cannot drift again.
+# Entries: (section, key, effective-when-absent, value shipped by template).
+_ABSENT_GATE_WARNINGS: tuple[tuple[str, str, str, bool], ...] = (
+    ("web", "enabled", "the web API does not start", True),
+    ("trajectory_export", "enabled", "no trajectory export runs", False),
+    ("compaction", "enabled", "no compactor is constructed", True),
 )
 
 
 def _warn_absent_gating_keys(config: dict[str, Any]) -> None:
-    for section, key, effect in _ABSENT_GATE_WARNINGS:
+    for section, key, effect, shipped in _ABSENT_GATE_WARNINGS:
         if key not in (config.get(section) or {}):
             logger.warning(
                 "%s.%s is ABSENT from config — it fails CLOSED: %s. The "
-                "shipped template sets it true; if you believe it is on, "
-                "write the key.",
-                section, key, effect,
+                "shipped template sets it %s; write the key to say what "
+                "you mean.",
+                section, key, effect, "true" if shipped else "false",
             )
 
 
