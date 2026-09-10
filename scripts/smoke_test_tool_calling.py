@@ -28,6 +28,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -35,26 +36,214 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+# ── which codebase is this actually testing? ────────────────────────────
+#
+# THE SCORE THIS SCRIPT PRINTS IS ABOUT A CODEBASE, AND IT USED TO BE SILENT
+# ABOUT WHICH ONE. It builds its own AgentLoop, ToolRegistry and SecurityGate
+# in-process (see the imports at the top) — it does not drive the running
+# daemon over HTTP. So "6/6" means "the `prometheus` package that `import`
+# resolved to behaves correctly", and nothing printed said what that package
+# was.
+#
+# Measured 2026-09-10: a `_prometheus.pth` in the user site-packages, present
+# since 2026-04-07, puts a DEV CHECKOUT on every interpreter's sys.path. When
+# PYTHONPATH is set (the systemd unit sets it) the deploy tree wins. When it
+# is not — `python3 scripts/smoke_test_tool_calling.py`, the documented
+# invocation — the checkout wins. That checkout sat on a feature branch, 79
+# commits behind, with 62 dirty files, and 42 bare runs between 2026-08-30
+# and 2026-09-10 scored it while reporting on the deployment.
+#
+# Deleting the path entry would fix that instance and leave this defect: a
+# verification script that can bind to a different codebase and still hand
+# you a number. Next time it is another venv, or a wheel installed beside a
+# checkout, and nothing says so.
+#
+# Same shape as `context.budget.resolve_effective_limit`: return the value
+# AND where it came from, and make "unknown" a state of its own. A tag that
+# renders like agreement when nothing was checked is the failure being fixed,
+# not a smaller version of it.
+
+PROVENANCE_MATCHES = "matches"
+PROVENANCE_MISMATCH = "mismatch"
+PROVENANCE_UNKNOWN = "unknown"
+
+
+def _git(root: Path, *args: str) -> Optional[str]:
+    """A git field for *root*, or None when it cannot be read."""
+    try:
+        r = subprocess.run(["git", "-C", str(root), *args],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def _git_root(start: Path) -> Optional[Path]:
+    top = _git(start, "rev-parse", "--show-toplevel")
+    return Path(top) if top else None
+
+
+def _service_tree() -> Optional[Path]:
+    """The src/ directory the systemd unit puts on PYTHONPATH.
+
+    The unit is the authority on what the service imports, and reading it
+    needs no daemon, no port and no token — so this still works when the
+    daemon is down, which is exactly when someone runs a smoke test.
+    """
+    out = None
+    try:
+        r = subprocess.run(
+            ["systemctl", "--user", "show", "prometheus.service", "-p", "Environment"],
+            capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            out = r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not out:
+        return None
+    for assignment in out.partition("=")[2].split():
+        if assignment.startswith("PYTHONPATH="):
+            first = assignment.partition("=")[2].split(":")[0]
+            return Path(first) if first else None
+    return None
+
+
+def resolve_package_provenance() -> tuple[dict, str]:
+    """What `import prometheus` resolved to, and whether it is the deployment.
+
+    Returns ``(facts, verdict)``. *verdict* is one of ``"matches"``,
+    ``"mismatch"`` or ``"unknown"`` — never a bool, because "I could not
+    check" and "I checked and it agrees" are different answers and the whole
+    point is that they must not print the same.
+    """
+    import prometheus
+
+    loaded = Path(prometheus.__file__).resolve().parent          # .../src/prometheus
+    loaded_src = loaded.parent                                    # .../src
+    root = _git_root(loaded)
+    facts = {
+        "loaded_package": str(loaded),
+        "loaded_src": str(loaded_src),
+        "git_root": str(root) if root else None,
+        "sha": _git(root, "rev-parse", "HEAD") if root else None,
+        "branch": _git(root, "rev-parse", "--abbrev-ref", "HEAD") if root else None,
+        "dirty": None,
+        "service_src": None,
+    }
+    if root:
+        status = _git(root, "status", "--porcelain")
+        facts["dirty"] = len(status.splitlines()) if status is not None else None
+
+    service_src = _service_tree()
+    facts["service_src"] = str(service_src) if service_src else None
+    if service_src is None:
+        # No unit, or no PYTHONPATH in it. Nothing to compare against — say
+        # so rather than assuming agreement.
+        return facts, PROVENANCE_UNKNOWN
+    try:
+        same = loaded_src.samefile(service_src)
+    except OSError:
+        same = str(loaded_src) == str(service_src)
+    return facts, (PROVENANCE_MATCHES if same else PROVENANCE_MISMATCH)
+
+
+def render_provenance(facts: dict, verdict: str) -> str:
+    """One block, printed before any test runs. Three distinct renderings."""
+    sha = (facts.get("sha") or "unknown")[:12]
+    branch = facts.get("branch") or "unknown"
+    dirty = facts.get("dirty")
+    dirty_s = "clean" if dirty == 0 else (f"{dirty} dirty file(s)" if dirty else "dirty state unknown")
+    head = {
+        PROVENANCE_MATCHES: "TREE OK — testing the code the service loads",
+        PROVENANCE_MISMATCH: "TREE MISMATCH — this is NOT the code the service loads",
+        PROVENANCE_UNKNOWN: "TREE UNKNOWN — could not establish what the service loads",
+    }[verdict]
+    lines = [
+        f"  {head}",
+        f"    testing : {facts['loaded_package']}",
+        f"    commit  : {sha} on {branch} ({dirty_s})",
+    ]
+    if verdict == PROVENANCE_MATCHES:
+        lines.append(f"    service : {facts['service_src']} (same tree)")
+    elif verdict == PROVENANCE_MISMATCH:
+        lines.append(f"    service : {facts['service_src']}  <- loads THIS instead")
+    else:
+        lines.append("    service : could not be determined")
+    return "\n".join(lines)
+
+
+def provenance_gate(allow_unverified: bool) -> int:
+    """Print the provenance and decide whether running is meaningful.
+
+    Returns an exit code: 0 to proceed, non-zero to refuse.
+
+    MISMATCH refuses outright — a score for a tree nobody is running is worse
+    than no score, because it reads exactly like one that counts.
+
+    UNKNOWN also refuses, behind ``--allow-unverified-tree``. That is a
+    judgement worth stating: "I could not verify what I am testing" is the
+    state that produced the 42 readings above, and a warning printed above a
+    green 6/6 is a warning nobody reads. The flag exists so a machine with no
+    systemd unit is not locked out — it just has to say so out loud.
+    """
+    facts, verdict = resolve_package_provenance()
+    print(render_provenance(facts, verdict))
+    if verdict == PROVENANCE_MATCHES:
+        return 0
+    if verdict == PROVENANCE_UNKNOWN and allow_unverified:
+        print("    proceeding anyway: --allow-unverified-tree was passed")
+        return 0
+    print()
+    if verdict == PROVENANCE_MISMATCH:
+        print("  REFUSING TO RUN. The result would describe a codebase that is")
+        print("  not deployed, in a report that looks like one that is.")
+        print("    re-run against the service's tree:")
+        print(f"      PYTHONPATH={facts['service_src']} python3 {sys.argv[0]} ...")
+    else:
+        print("  REFUSING TO RUN. Nothing here establishes which codebase this")
+        print("  would score. Pass --allow-unverified-tree to accept that.")
+    return 2
+
+
 # ── Prometheus imports ──────────────────────────────────────────────
-# These match the daemon.py wiring pattern
-from prometheus.__main__ import load_config
-from prometheus.engine import AgentLoop
-from prometheus.providers.registry import ProviderRegistry
-from prometheus.tools.base import ToolRegistry
-from prometheus.tools.builtin import (
-    BashTool,
-    FileReadTool,
-    FileWriteTool,
-    FileEditTool,
-    GrepTool,
-    GlobTool,
-)
-from prometheus.__main__ import (
-    create_adapter,
-    create_security_gate,
-)
-from prometheus.telemetry.tracker import ToolCallTelemetry
-from prometheus.security.env_scrub import scrubbed_names
+# These match the daemon.py wiring pattern.
+#
+# WRAPPED, because the FIRST symptom of loading the wrong tree is often an
+# ImportError here rather than a wrong score below: a codebase old enough to
+# be missing a module this script needs dies at import with a name and no
+# explanation. On 2026-09-10 that was `prometheus.security.env_scrub`,
+# missing from a checkout 79 commits behind, and the traceback said nothing
+# about which tree it had read. The provenance block above knows; it just
+# has to be asked before the interpreter gives up.
+try:
+    from prometheus.__main__ import load_config
+    from prometheus.engine import AgentLoop
+    from prometheus.providers.registry import ProviderRegistry
+    from prometheus.tools.base import ToolRegistry
+    from prometheus.tools.builtin import (
+        BashTool,
+        FileReadTool,
+        FileWriteTool,
+        FileEditTool,
+        GrepTool,
+        GlobTool,
+    )
+    from prometheus.__main__ import (
+        create_adapter,
+        create_security_gate,
+    )
+    from prometheus.telemetry.tracker import ToolCallTelemetry
+    from prometheus.security.env_scrub import scrubbed_names
+except ImportError as _exc:
+    _facts, _verdict = resolve_package_provenance()
+    print(render_provenance(_facts, _verdict))
+    print()
+    print(f"  IMPORT FAILED against that tree: {_exc}")
+    if _verdict == PROVENANCE_MISMATCH:
+        print("  That is the tree above, not the one the service loads — the")
+        print("  missing name almost certainly exists in the service's tree.")
+        print(f"      PYTHONPATH={_facts['service_src']} python3 {sys.argv[0]} ...")
+    sys.exit(2)
 
 # Conditional imports — these may not exist yet or may be optional
 try:
@@ -941,5 +1130,19 @@ if __name__ == "__main__":
         help="Run specific test category: basic, security, parallel, "
              "deferred, budget, microcompact, errors, telemetry, adapter",
     )
+    parser.add_argument(
+        "--allow-unverified-tree",
+        action="store_true",
+        help="run even when the codebase under test cannot be matched to the "
+             "service's (no systemd unit, for instance). Never silences a "
+             "MISMATCH — only an UNKNOWN.",
+    )
     args = parser.parse_args()
+
+    # BEFORE ANY TEST RUNS. A score is about a codebase; this says which one,
+    # and refuses when that is not the deployed one. See provenance_gate.
+    rc = provenance_gate(args.allow_unverified_tree)
+    if rc != 0:
+        sys.exit(rc)
+
     asyncio.run(main(args))
