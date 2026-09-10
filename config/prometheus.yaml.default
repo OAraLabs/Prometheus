@@ -1049,6 +1049,23 @@ anatomy:
 #       allowed_tools: [resolve-library-id, get-library-docs]
 mcp_servers: {}
 
+# The REST write surface for MCP servers (POST/PATCH/DELETE
+# /api/mcp/servers), which is separate from the `mcp_servers` map above.
+#
+# Defining an MCP stdio server STARTS A PROCESS on this host as the daemon
+# user — that is what an MCP stdio server is, not a flaw in the endpoint. So
+# the write verbs require the GLOBAL api token; an enrolled device token gets
+# 401, the same rule POST /api/devices uses so a stolen phone cannot escalate.
+# Reading (`GET /api/mcp/servers`) is NOT restricted and never returns an env
+# VALUE — only the names.
+#
+# Set rest_management: false if you manage MCP servers in the map above and
+# want the write surface gone entirely. GET keeps working; POST/PATCH/DELETE
+# return 403. Nothing the agent does goes through this endpoint, so turning it
+# off removes no agent capability — only the remote management path.
+mcp:
+  rest_management: true
+
 # H3: lifecycle hooks. Empty by default (no hooks run). Each event maps to a
 # list of hook definitions; supported types: command, http, prompt, agent.
 # Example:

@@ -52,6 +52,58 @@ _ALLOWED_KEYS = {
     "allowed_tools", "enabled",
 }
 
+# ── WHAT THIS VALIDATION DOES AND DOES NOT CLAIM ───────────────────────
+#
+# It does NOT make defining an MCP server safe, and nothing below should be
+# read as claiming that. Launching a stdio MCP server IS arbitrary code
+# execution by construction: the canonical definition is
+# `npx -y some-package`, and whatever that package does is what runs. No
+# allowlist of command names changes that — `node -e`, `python -c`,
+# `uvx <anything>` and `docker run` are all ordinary, legitimate MCP
+# launchers and all of them are "run this code". A filter that appeared to
+# make this endpoint safe would be the mechanism-that-reports-itself-working
+# failure this codebase keeps finding, in a new place.
+#
+# The control that actually bounds this surface is at the door, in
+# web/server.py: the mutating verbs require the GLOBAL token (a device token
+# is the wrong credential for spawning a process), and `mcp.rest_management`
+# turns the surface off entirely.
+#
+# What the checks below DO buy is that a definition MEANS WHAT IT SAYS. An
+# operator reading `command: npx, args: [-y, docs-mcp]` off a server card is
+# entitled to conclude that is the program that runs. These variables are the
+# ones that falsify that reading — they redirect the loader or hand the
+# interpreter code to run before it ever reaches the named script, so the
+# card and the process stop describing the same thing:
+_ENV_HIJACK_NAMES = frozenset({
+    # Dynamic-loader injection (glibc / macOS dyld)
+    "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH",
+    # Interpreters that will execute code handed to them via the environment
+    "NODE_OPTIONS", "NODE_REPL_EXTERNAL_MODULE",
+    "PYTHONSTARTUP", "PYTHONPATH", "PYTHONHOME", "PYTHONEXECUTABLE",
+    "BASH_ENV", "ENV", "SHELLOPTS", "PS4",
+    "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+    # Programs that take an executable through their own configuration
+    "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EXTERNAL_DIFF", "GIT_PAGER",
+})
+
+#: POSIX environment names. A name outside this shape cannot be exported by
+#: any normal launcher, so accepting one only stores something unusable.
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _has_control_chars(text: str) -> bool:
+    """True if *text* carries a C0 control, DEL, or a NUL.
+
+    argv and environ are NUL-terminated: an embedded NUL truncates the value
+    at the exec boundary, so what the store shows and what the kernel receives
+    are different strings. Newlines matter for the same reason one layer up —
+    they let a single stored field span lines in every log and card that
+    renders it.
+    """
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text)
+
 
 class McpStoreError(ValueError):
     """A definition the store refuses; the message is client-facing."""
@@ -106,6 +158,47 @@ class McpServerStore:
             raise McpStoreError(
                 "definition needs a stdio `command` or an http/sse `url`"
             )
+        # ── command / args / cwd ───────────────────────────────────────
+        # Previously unchecked in full: presence of `command` was the ONLY
+        # test, and args/cwd were never looked at on any path. These reach
+        # StdioServerParameters verbatim (mcp/runtime.py _connect_stdio).
+        command = definition.get("command")
+        if command is not None:
+            if not isinstance(command, str) or not command.strip():
+                raise McpStoreError("command must be a non-empty string")
+            if _has_control_chars(command):
+                raise McpStoreError("command contains control characters")
+        args = definition.get("args")
+        if args is not None:
+            if not isinstance(args, list) or not all(
+                isinstance(a, str) for a in args
+            ):
+                raise McpStoreError("args must be a list of strings")
+            for a in args:
+                if _has_control_chars(a):
+                    raise McpStoreError(
+                        f"args entry {a[:40]!r} contains control characters"
+                    )
+        for key in ("cwd", "workingDirectory"):
+            cwd = definition.get(key)
+            if cwd is None:
+                continue
+            if not isinstance(cwd, str):
+                raise McpStoreError(f"{key} must be a string")
+            if _has_control_chars(cwd):
+                raise McpStoreError(f"{key} contains control characters")
+            if cwd.strip() and not Path(cwd).is_absolute():
+                raise McpStoreError(
+                    f"{key} must be an absolute path — a relative one resolves "
+                    "against the DAEMON's working directory, which is not the "
+                    "directory whoever wrote this definition was picturing"
+                )
+            # Deliberately not an existence check: a definition may legitimately
+            # be stored before its directory is created. A regular FILE is the
+            # error worth catching, because it can never become a valid cwd.
+            if cwd.strip() and Path(cwd).is_file():
+                raise McpStoreError(f"{key} is a file, not a directory: {cwd}")
+        # ── env ────────────────────────────────────────────────────────
         env = definition.get("env")
         if env is not None:
             if not isinstance(env, dict) or not all(
@@ -114,11 +207,22 @@ class McpServerStore:
             ):
                 raise McpStoreError("env must be a {NAME: value} string map")
             for k, v in env.items():
-                if any(ord(ch) < 0x20 for ch in v) or any(
-                    ord(ch) < 0x20 for ch in k
-                ):
+                if _has_control_chars(v) or _has_control_chars(k):
                     raise McpStoreError(
                         f"env {k!r} contains control characters"
+                    )
+                if not _ENV_NAME_RE.match(k):
+                    raise McpStoreError(
+                        f"env name {k!r} is not a POSIX environment name "
+                        "([A-Za-z_][A-Za-z0-9_]*)"
+                    )
+                if k.upper() in _ENV_HIJACK_NAMES:
+                    raise McpStoreError(
+                        f"env {k!r} is refused: it changes WHICH program runs "
+                        "rather than configuring the one named in `command`, "
+                        "so the stored definition would stop describing the "
+                        "process. Set it in the MCP server's own launcher if "
+                        "it is genuinely needed."
                     )
         allowed = definition.get("allowed_tools")
         if allowed is not None and (
