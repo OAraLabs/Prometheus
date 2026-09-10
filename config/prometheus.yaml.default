@@ -871,6 +871,14 @@ symbiote:
       - manual
       - pre_restore
 
+# SENTINEL — the autonomous background subsystem (idle dreaming, wiki
+# synthesis, nudges). It ships OFF, and has since the first commit: an
+# autonomous subsystem is opted INTO, never inherited. Set `enabled: true`
+# to start it.
+#
+# OMITTING the key is not the same as `false` here — it is still OFF, but
+# the daemon logs a WARNING at boot naming the line to write, because an
+# absent key used to START it (PR-B shape A, #325).
 sentinel:
   enabled: false
   idle_threshold_minutes: 15
