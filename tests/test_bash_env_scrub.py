@@ -178,8 +178,20 @@ class TestTheBashToolDoesNotLeak:
         assert str(tmp_path) in self._run("pwd", tmp_path)
 
     def test_path_and_home_survive_so_tools_keep_working(self, planted_secrets, tmp_path):
-        out = self._run("echo $PATH", tmp_path)
-        assert os.environ["PATH"] in out, "PATH was stripped — every command breaks"
+        """PATH was not stripped, so commands still work.
+
+        Membership, not order, and not an ordered substring: bash runs as ``-lc``,
+        so the operator's login startup files run in the child. On macOS
+        ``/etc/zprofile`` runs ``path_helper``, which REORDERS PATH — every parent
+        entry is still there, just moved. That reordering is the operator's
+        environment, not the scrub (the same caveat env_scrub's docstring makes
+        about startup files re-exporting), and it is not the failure this test
+        guards. What would break every command is an entry going MISSING, so that
+        is what is asserted. Entries the login files ADD are fine and ignored.
+        """
+        child = set(self._run("echo $PATH", tmp_path).strip().split(":"))
+        missing = set(os.environ["PATH"].split(":")) - child
+        assert not missing, f"PATH entries were stripped — commands break: {sorted(missing)}"
         assert self._run("echo $HOME", tmp_path).strip(), "HOME was stripped"
 
     def test_a_subshell_cannot_recover_the_secret_from_the_parent(
