@@ -144,9 +144,21 @@ class TestShapeC_CodingFallbacksMatchTheTemplate:
 # Duplicating it would make the self-check decorative: weakening the real
 # pattern would leave the copy — and the test — green.
 _CLAIMS_TEMPLATE_ENABLES_SENTINEL = re.compile(
+    # "the shipped template says/sets/ships `enabled: true`" — the DOCSTRING
+    # form #325 carried.
     r"template[^.\n]{0,80}(?:says|sets|ships)[^.\n]{0,40}"
     r"(?:``)?enabled:?\s*true|"
-    r"(?:``)?sentinel\.enabled[^.\n]{0,60}template[^.\n]{0,40}true",
+    # "`sentinel.enabled` ... the template ... true" — template BEFORE true.
+    r"(?:``)?sentinel\.enabled[^.\n]{0,60}template[^.\n]{0,40}true|"
+    # ...and TRUE BEFORE TEMPLATE, which is how the WARNING TEXT said it:
+    # "Write `sentinel.enabled: true` (the shipped template's value)". The
+    # same claim with no verb, and both alternatives above miss it — the
+    # first wants says/sets/ships, the second wants `template` to come
+    # first. That sentence was the OTHER HALF of the very defect this file
+    # forbids: #424 deleted it from daemon.py, and the detector would not
+    # have stopped it coming back. Found by restoring it verbatim and
+    # watching all fifteen tests pass.
+    r"(?:``|`)?sentinel\.enabled[^.\n]{0,40}true[^.\n]{0,40}template",
     re.I,
 )
 
@@ -196,16 +208,28 @@ class TestTemplateClaimsAreTrue:
         Without this the regex above could be softened to match nothing and
         stay green — the standing failure mode of a prohibition.
         """
-        shipped = (
+        docstring_form = (
             "    subsystem is opted INTO, never inherited from a missing "
             "line. The\n    shipped template says ``enabled: true``, so "
             "fresh installs are\n    unchanged; only a hand-written config "
             "that omits the key changes\n    behaviour."
         )
-        assert _CLAIMS_TEMPLATE_ENABLES_SENTINEL.search(shipped), (
-            "the detector no longer catches the sentence that actually "
-            "shipped in #325 — it has been weakened past proving anything"
+        # BOTH halves of #325, not one. The warning text made the same claim
+        # in the possessive, and a detector fed only the docstring form was
+        # green while blind to the sentence #424 actually had to delete.
+        warning_form = (
+            '            "Write `sentinel.enabled: true` (the shipped '
+            'template\'s value) "\n'
+            '            "to start it. Before this ruling an absent key '
+            'STARTED the "\n            "subsystem."'
         )
+        for label, text in (("docstring", docstring_form),
+                            ("warning text", warning_form)):
+            assert _CLAIMS_TEMPLATE_ENABLES_SENTINEL.search(text), (
+                f"the detector no longer catches the {label} form that "
+                f"actually shipped in #325 — it has been weakened past "
+                f"proving anything"
+            )
 
 
 class TestShapeB_TemplateValuesAreReal:
