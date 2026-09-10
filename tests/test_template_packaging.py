@@ -174,3 +174,117 @@ def test_installed_resolver_returns_the_PACKAGED_copy(tmp_path: Path):
         f"user's machine."
     )
     assert int(sections) > 0, "installed template parsed to an empty mapping"
+
+
+# ── identity templates (audit item 4a) ──────────────────────────────
+#
+# Exactly the same defect, found again two years later in the other set of
+# templates: `templates/SOUL.md.template` and `templates/AGENTS.md.template`
+# sat at the repo root, outside `packages = ["src/prometheus"]`, and
+# `cli/generate_identity.py` reached them with `parents[3] / "templates"`.
+# Every checkout had them; every wheel had none. `oara setup` reached the
+# identity step and raised FileNotFoundError partway through a first run.
+#
+# The two in-repo tests that touched these files (test_clean_slate.py,
+# test_wiring.py) asserted the CHECKOUT had them — green throughout.
+
+
+def test_pyproject_force_includes_the_identity_templates():
+    """Config-level pin. The weaker half, same as above."""
+    import tomllib
+
+    data = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
+    fi = (data["tool"]["hatch"]["build"]["targets"]["wheel"]
+          .get("force-include", {}))
+    for name in ("SOUL.md.template", "AGENTS.md.template"):
+        src = f"templates/{name}"
+        assert src in fi, (
+            f"the wheel no longer force-includes {src}. `oara setup` goes back "
+            f"to raising FileNotFoundError at the identity step on every pip "
+            f"install, while every checkout keeps working."
+        )
+        assert fi[src] == f"prometheus/templates/{name}", (
+            "identity templates must land inside the package, where "
+            "cli.generate_identity.identity_template_path() looks first"
+        )
+
+
+def test_identity_resolver_finds_the_templates_in_this_checkout():
+    from prometheus.cli.generate_identity import (
+        TEMPLATE_NAMES,
+        identity_template_path,
+        read_identity_template,
+    )
+
+    for name in TEMPLATE_NAMES:
+        assert identity_template_path(name).is_file()
+        assert read_identity_template(name).strip()
+
+
+def test_identity_resolver_raises_rather_than_returning_none():
+    """A caller handed None writes a half-personalised SOUL.md."""
+    from prometheus.cli.generate_identity import (
+        IdentityTemplateNotFound,
+        identity_template_path,
+    )
+
+    with pytest.raises(IdentityTemplateNotFound):
+        identity_template_path("NOT_A_TEMPLATE.md.template")
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv not on PATH")
+def test_identity_generation_works_from_an_INSTALLED_package(tmp_path: Path):
+    """The assertion the defect required: run the identity generator inside a
+    scratch venv that has only the wheel, and check it produced real files.
+
+    Deliberately not "is the file in the wheel" — that is the container
+    again. This calls the function `oara setup` calls, from the artefact a
+    stranger installs, and looks at what came out.
+    """
+    dist = tmp_path / "dist"
+    build = subprocess.run(
+        ["uv", "build", "--wheel", "--offline", "--out-dir", str(dist)],
+        cwd=REPO, capture_output=True, text=True,
+    )
+    if build.returncode != 0:
+        pytest.skip(f"wheel build unavailable here: {build.stderr.strip()[:200]}")
+    wheels = list(dist.glob("*.whl"))
+    assert len(wheels) == 1, f"expected one wheel, got {wheels}"
+
+    venv = tmp_path / "venv"
+    for cmd in (["uv", "venv", str(venv), "--python", f"{sys.version_info.major}."
+                 f"{sys.version_info.minor}"],
+                ["uv", "pip", "install", "--python",
+                 str(venv / "bin" / "python"), str(wheels[0])]):
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            pytest.skip(f"scratch venv unavailable: {proc.stderr.strip()[:200]}")
+
+    dest = tmp_path / "identity"
+    probe = (
+        "import pathlib;"
+        "from prometheus.cli.generate_identity import "
+        "identity_template_path, generate_identity_files;"
+        f"dest = pathlib.Path({str(dest)!r});"
+        "hw = {'hostname':'h','os':'Linux','arch':'x86_64','cpu':'C',"
+        "'ram_gb':8,'gpu':None,'has_gpu':False};"
+        "generate_identity_files('Stranger', hw, dest=dest);"
+        "print(identity_template_path('SOUL.md.template'));"
+        "print(sorted(p.name for p in dest.iterdir()))"
+    )
+    out = subprocess.run([str(venv / "bin" / "python"), "-c", probe],
+                         capture_output=True, text=True, env=_clean_env(),
+                         cwd=str(tmp_path))
+    assert out.returncode == 0, (
+        "identity generation FAILED from an installed package — this is the "
+        f"original defect:\n{out.stderr}"
+    )
+    resolved, produced = out.stdout.strip().splitlines()[:2]
+    assert "site-packages" in resolved, (
+        f"the installed resolver returned {resolved!r} — it fell through to a "
+        f"checkout path that will not exist on a user's machine."
+    )
+    assert "SOUL.md" in produced, produced
+    soul = (dest / "SOUL.md").read_text(encoding="utf-8")
+    assert "Stranger" in soul, "SOUL.md was written without the owner's name"
+    assert "{{" not in soul, f"unsubstituted template slots left in SOUL.md"

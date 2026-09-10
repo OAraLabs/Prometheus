@@ -123,9 +123,58 @@ _OPENAI_COMPAT_PROVIDERS = {
     "openai", "gemini", "xai", "deepseek", "kimi", "glm", "mimo", "qwen",
 }
 
+# Local servers that speak the OpenAI wire but are NOT cloud services: LM Studio
+# and vLLM. `oara setup` detects both (see cli/init.py LOCAL_SERVERS) and writes
+# their names straight into model.provider — and for the whole life of that
+# detector neither name existed here, so a fresh install that found LM Studio on
+# :1234 wrote a config whose first boot died on
+# `ValueError: Unknown provider: 'lm_studio'`. Setup reported success.
+#
+# Deliberately NOT in _OPENAI_COMPAT_PROVIDERS, which is the CLOUD set: that
+# membership is what `is_cloud()` answers (cost accounting, teacher/student
+# corpus labelling) and what routes key resolution through `_resolve_api_key`,
+# which RAISES when no key is configured. Neither server needs a key.
+_LOCAL_OPENAI_COMPAT_PROVIDERS = {"lm_studio", "vllm"}
+
+# Endpoints for the pair above. Separate from CLOUD_DEFAULTS on purpose: that
+# dict is iterated as "the cloud catalogue" (web/server.py builds /api/models
+# from it), so putting a localhost server in it would advertise a cloud
+# provider that does not exist. The base URLs match what the setup detector
+# probes, so a detected server and a hand-written config resolve identically.
+LOCAL_OPENAI_COMPAT_DEFAULTS: dict[str, dict[str, Any]] = {
+    "lm_studio": {
+        "base_url": "http://localhost:1234/v1",
+        "default_base_url_env": "LM_STUDIO_BASE_URL",
+    },
+    "vllm": {
+        "base_url": "http://localhost:8000/v1",
+        "default_base_url_env": "VLLM_BASE_URL",
+    },
+}
+
+# The bearer sent to a local OpenAI-compatible server that was started without
+# authentication. OpenAI-shaped clients must send *something* — an empty
+# Authorization header is what `_resolve_bearer` refuses — and both LM Studio
+# and an unkeyed vLLM ignore the value. A vLLM started with `--api-key` is
+# still configurable the normal way: set `api_key_env` and this is not used.
+LOCAL_PLACEHOLDER_BEARER = "local"
+
 # Providers that serve from a box you own. Both build their request body with the
 # shared OpenAI-shape builder, so both can carry an `image_url` part.
-_LOCAL_PROVIDERS = {"llama_cpp", "ollama"}
+_LOCAL_PROVIDERS = {"llama_cpp", "ollama"} | _LOCAL_OPENAI_COMPAT_PROVIDERS
+
+
+def _provider_defaults(provider_name: str) -> dict[str, Any]:
+    """Built-in endpoint/key defaults for a provider, cloud or local.
+
+    Two dicts rather than one because the cloud dict doubles as the catalogue
+    /api/models publishes; this is the single read point that spans both.
+    """
+    return (
+        CLOUD_DEFAULTS.get(provider_name)
+        or LOCAL_OPENAI_COMPAT_DEFAULTS.get(provider_name)
+        or {}
+    )
 
 
 def _resolve_base_url(config: dict[str, Any], provider_name: str) -> str:
@@ -153,7 +202,7 @@ def _resolve_base_url(config: dict[str, Any], provider_name: str) -> str:
     if direct:
         return str(direct)
 
-    defaults = CLOUD_DEFAULTS.get(provider_name, {})
+    defaults = _provider_defaults(provider_name)
     env_name = config.get("base_url_env", "") or defaults.get("default_base_url_env", "")
     if env_name:
         from_env = os.environ.get(env_name, "").strip()
@@ -204,6 +253,20 @@ def _resolve_api_key(config: dict[str, Any], provider_name: str) -> str:
         )
 
     raise ValueError(f"No API key source found for provider {provider_name}")
+
+
+def _resolve_local_bearer(config: dict[str, Any], provider_name: str) -> str:
+    """Bearer for a local OpenAI-compatible server.
+
+    A configured key still wins and still raises when its variable is unset —
+    asking for `api_key_env: VLLM_KEY` and getting silence is a mistake worth
+    hearing about. Only the UNCONFIGURED case falls back to the placeholder,
+    because "no key" is the normal state of a server on your own desk, not an
+    error to refuse the boot over.
+    """
+    if config.get("api_key") or config.get("api_key_env"):
+        return _resolve_api_key(config, provider_name)
+    return LOCAL_PLACEHOLDER_BEARER
 
 
 def _resolve_xai_credential(config: dict[str, Any]) -> "str | object":
@@ -263,7 +326,8 @@ def provider_class_supports_vision(provider_name: str) -> bool:
     # a picture on this wire", which is a property of the class, not of the model.
     if provider_name in _OPENAI_COMPAT_PROVIDERS:
         return True
-    # llama_cpp / ollama serialise through the SAME builder (`image_url`, the shape
+    # llama_cpp / ollama / lm_studio / vllm serialise through the SAME builder
+    # (`image_url`, the shape
     # llama-server's multimodal endpoint takes — verified live against a Qwen3.8-27B
     # + mmproj server 2026-09-02). Capable, not permitted: whether the served model
     # can actually see is the instance's DETECTED `supports_vision` (the mmproj
@@ -306,16 +370,17 @@ class ProviderRegistry:
               model: "gpt-4o"
         """
         provider_name = config.get("provider", "llama_cpp")
-        defaults = CLOUD_DEFAULTS.get(provider_name, {})
+        defaults = _provider_defaults(provider_name)
 
-        if provider_name in _OPENAI_COMPAT_PROVIDERS:
+        if provider_name in _OPENAI_COMPAT_PROVIDERS | _LOCAL_OPENAI_COMPAT_PROVIDERS:
             from prometheus.providers.openai_compat import OpenAICompatProvider
 
-            api_key = (
-                _resolve_xai_credential(config)
-                if provider_name == "xai"
-                else _resolve_api_key(config, provider_name)
-            )
+            if provider_name in _LOCAL_OPENAI_COMPAT_PROVIDERS:
+                api_key: "str | object" = _resolve_local_bearer(config, provider_name)
+            elif provider_name == "xai":
+                api_key = _resolve_xai_credential(config)
+            else:
+                api_key = _resolve_api_key(config, provider_name)
             return OpenAICompatProvider(
                 # The preset's DECLARED vision flag, carried from the catalog. Absent
                 # means False — a preset that says nothing is text-only until proven
@@ -392,8 +457,7 @@ class ProviderRegistry:
 
         raise ValueError(
             f"Unknown provider: {provider_name!r}. "
-            f"Valid providers: llama_cpp, ollama, stub, openai, anthropic, "
-            f"gemini, xai, deepseek, kimi, glm, mimo, qwen"
+            f"Valid providers: {', '.join(ProviderRegistry.list_providers())}"
         )
 
     @staticmethod
@@ -405,6 +469,7 @@ class ProviderRegistry:
     def list_providers() -> list[str]:
         """Return all supported provider names."""
         return [
-            "llama_cpp", "ollama", "stub", "openai", "anthropic", "gemini",
-            "xai", "deepseek", "kimi", "glm", "mimo", "qwen",
+            "llama_cpp", "ollama", "lm_studio", "vllm", "stub", "openai",
+            "anthropic", "gemini", "xai", "deepseek", "kimi", "glm", "mimo",
+            "qwen",
         ]

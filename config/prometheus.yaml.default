@@ -24,10 +24,23 @@ bootstrap:
 
 model:
   # Env var holding this provider's API key (cloud providers only; local
-  # llama_cpp/ollama need none). Read by cli/doctor.py:112.
+  # llama_cpp / ollama / lm_studio / vllm need none). Resolved by
+  # providers/registry.py::_resolve_api_key and reported by
+  # cli/doctor.py::_cloud_key_source, which look in the same order:
+  # api_key below, then this variable, then the provider's built-in default
+  # name (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...). Both read the environment
+  # AND ~/.config/prometheus/env, because that is the file systemd loads.
   api_key_env: ""
-  provider: "llama_cpp"             # llama_cpp, ollama, openai, anthropic, gemini, xai,
-                                    # deepseek, kimi, glm, mimo
+  # The key ITSELF, inline. Supported and DISCOURAGED: prometheus.yaml gets
+  # copied between machines and pasted into issues, which is why every writer
+  # in this repo (setup wizard, `oara setup`, the setup server) puts keys in
+  # the 0600 env file and only the variable NAME here. Documented because it
+  # is read at runtime — an undocumented key that works is worse than a
+  # documented one you are told not to use.
+  api_key: ""
+  provider: "llama_cpp"             # llama_cpp, ollama, lm_studio, vllm, openai,
+                                    # anthropic, gemini, xai, deepseek, kimi,
+                                    # glm, mimo, qwen
   base_url: "http://localhost:8080" # Inference server URL
   model: ""                         # A HINT, not an assertion. The BACKEND is authoritative:
                                     # whatever llama-server reports from /v1/models wins, and this

@@ -61,7 +61,9 @@ _CLOUD_PROVIDERS: frozenset[str] = frozenset(
 # whichever bucket the default happens to be. Mislabelling a LOCAL provider
 # as cloud is the worse direction — it would file student output as teacher
 # exemplars and quietly poison the training corpus.
-_LOCAL_PROVIDERS: frozenset[str] = frozenset({"llama_cpp", "ollama", "stub"})
+_LOCAL_PROVIDERS: frozenset[str] = frozenset(
+    {"llama_cpp", "ollama", "lm_studio", "vllm", "stub"}
+)
 
 
 # D3 denominator honesty: these error types are POLICY outcomes — the

@@ -120,6 +120,12 @@ include = ["src/prometheus/web/static/*"]
 # `config.template.get_template_path()` looks first.
 [tool.hatch.build.targets.wheel.force-include]
 "config/prometheus.yaml.default" = "prometheus/config/prometheus.yaml.default"
+# Same defect, same fix: templates/ sat at the repo root, outside
+# `packages = ["src/prometheus"]`, so `oara setup` died at the identity step
+# on every pip install while every checkout worked. Resolved by
+# `cli.generate_identity.identity_template_path()`, which looks here first.
+"templates/SOUL.md.template" = "prometheus/templates/SOUL.md.template"
+"templates/AGENTS.md.template" = "prometheus/templates/AGENTS.md.template"
 
 # ---------------------------------------------------------------------------
 # SDIST — an explicit ALLOWLIST, because the default is not a decision.
