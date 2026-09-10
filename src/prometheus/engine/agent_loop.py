@@ -1567,7 +1567,18 @@ async def _run_loop(
             try:
                 render_source = await context.compactor.apply(
                     messages,
-                    session_id=context.session_id or "",
+                    # THIS TURN's conversation, not the routing namespace.
+                    # ``context.session_id`` is the literal "web" for every
+                    # web/Beacon/REST/WS turn (ONE LoopContext is shared by
+                    # all of them), so passing it collapsed every one of those
+                    # conversations into a single anchor slot and a single
+                    # cache partition. The anchor is what lets a growing
+                    # conversation keep substituting the span it already paid
+                    # for; clobbered every time another session took a turn,
+                    # each turn re-summarised a longer prefix from scratch.
+                    # Descriptive use only — never fed to
+                    # origin_from_session_id (see the note in ``run_loop``).
+                    session_id=effective_session_id or "",
                     system_prompt=per_call_system_prompt,
                     tools_chars=len(str(_payload_tools)) if _payload_tools else 0,
                     # The model serving THIS turn — a per-session override
