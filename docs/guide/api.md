@@ -28,6 +28,11 @@ curl -s http://localhost:8005/api/status \
 
 All paths below are served on `:8005`. `{id}` placeholders are path parameters.
 
+This section is the **curated** reference — what each endpoint is for and
+what its answer means. For the **complete** list, generated from the live
+app and kept current by CI, see
+[the route reference](../reference/routes.md).
+
 ### Status & sessions
 
 | Method | Path | Purpose |
