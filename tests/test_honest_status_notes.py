@@ -22,6 +22,12 @@ state this file replaces. Where a bullet states a NUMBER or a NAME, the
 number or name is parsed out of the prose, so changing the code without
 changing the sentence fails.
 
+SCOPE WIDENED (2026-09-10): the guards were section-scoped, and that is
+exactly how the router claim survived its own correction — #420 fixed the
+bullet here and the same sentence went on standing in features.md's own body
+section and in the README. The last block in this file scans EVERY doc for
+that claim rather than one section. See the banner above it.
+
 Claims not covered here, and why:
 
 * "the fine-tuning flywheel is data-collection only" — the absence of a
@@ -388,4 +394,214 @@ def test_budget_usd_still_has_no_enforcing_reader():
         "the `budget_usd` call sites changed — the note claims the cap is "
         "declared but not enforced. Re-read these and update the note if it "
         "now stops spending:\n  " + "\n  ".join(hits)
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# THE ROUTER CLAIM, WHEREVER IT APPEARS
+#
+# The guards above read ONE section. That scoping is what let the router
+# claim survive its own correction: #420 fixed the bullet at features.md's
+# Honest status notes and nothing else, while the SAME claim went on
+# standing in two other places —
+#
+#   features.md, "### Model router — Default: off"  / "The router itself
+#     ships disabled."   (so features.md contradicted itself)
+#   README.md, "the model router" listed among subsystems that "ship off by
+#     default and are one config flag away"
+#
+# — plus providers.md's "the router itself ships **off**", which handed the
+# reader a `model_router:` snippet to paste under it.
+#
+# The section's tie-breaker sentence ("if a claim elsewhere in the docs
+# conflicts with this list, this list wins") RESOLVES that contradiction on
+# paper and hides it in practice: a reader who never reaches the notes just
+# believes the wrong sentence. Precedence is not a substitute for a guard.
+#
+# WHY A PROHIBITION AND NOT A STRING PIN
+# --------------------------------------
+# The claim is prose that will be reworded, so pinning today's wording would
+# fail on an innocent edit and teach the next author to weaken the test.
+# What is stable is the ERROR: saying the router AS A WHOLE is off. Saying a
+# NAMED half is off is true and stays legal — "smart_routing and escalation
+# are off", "the router's autonomous half ships off by default" all pass.
+#
+# The detector self-verifies. test_the_detector_catches_the_real_regressions
+# runs it against the four sentences that were actually live in this repo,
+# recovered from git. Without that, a later edit could soften these patterns
+# into something that matches nothing and the file would still be green —
+# which is the failure mode a prohibition invites.
+# ═══════════════════════════════════════════════════════════════════
+
+# Docs a user is expected to read as current. Sprint records under
+# docs/sprints/ describe what was true at the time and are deliberately in
+# range too — the scan finds nothing there today, so no exclusion is needed,
+# and an exclusion list is the hiding place this file exists to avoid.
+def _user_docs() -> list[Path]:
+    return [REPO / "README.md"] + sorted(REPO.glob("docs/**/*.md"))
+
+
+# "The router (as a whole) is off." Each pattern targets one grammatical
+# shape the repo actually shipped.
+_ROUTER_IS_OFF = (
+    # "The router itself ships disabled." / "the router itself ships **off**"
+    re.compile(
+        r"\bthe\s+(?:model\s+)?router(?:\s+itself)?\s+"
+        r"(?:ships?|is|defaults?\s+to|comes)\s+\**(?:off|disabled)\b", re.I),
+    # "### Model router — Default: off (per-chat overrides: on)"
+    re.compile(r"^#{1,6}\s.*\brouter\b.*Default:\s*off\b", re.I),
+)
+
+# List membership: "..., the model router, ..." inside an off-by-default
+# sentence. Split from the tuple above because it needs BOTH halves on the
+# line — "the model router," alone is a legitimate way to name it.
+_ROUTER_IN_LIST = re.compile(r"\bthe\s+model\s+router\s*,", re.I)
+_OFF_CLAIM = re.compile(r"\bships?\s+\**off\b|\boff\s+by\s+default\b", re.I)
+
+
+def _calls_the_whole_router_off(line: str) -> bool:
+    if any(p.search(line) for p in _ROUTER_IS_OFF):
+        return True
+    return bool(_ROUTER_IN_LIST.search(line) and _OFF_CLAIM.search(line))
+
+
+# The four sentences that were live in this repo, verbatim. A is what
+# features.md carried until it was fixed; B is the bullet #420 rewrote; C is
+# the README line; D is providers.md.
+REAL_REGRESSIONS = {
+    "features.md heading (pre-fix)":
+        "### Model router — Default: off (per-chat overrides: on)",
+    "features.md body (pre-fix)":
+        "An optional router classifies tasks, follows fallback chains, and can "
+        "escalate to cloud models. The router itself ships disabled. What is "
+        "always on is the per-chat override system: `/claude`, `/gpt`.",
+    "features.md honest-status bullet (pre-#420)":
+        "- **Many marquee subsystems ship off by default** and need a config "
+        "flag: SENTINEL (including AutoDream), the model router, divergence "
+        "detection, LSP, Symbiote, GEPA, escalation-to-teacher.",
+    "README.md subsystem list (pre-fix)":
+        "The bigger autonomous subsystems — SENTINEL dreaming, the model "
+        "router, LSP, GEPA, escalation-to-teacher, SYMBIOTE — ship **off by "
+        "default** and are one config flag away when you want them.",
+    "providers.md defaults paragraph (pre-fix)":
+        "**Defaults, honestly:** the router itself ships **off** — most "
+        "single-model setups don't need it.",
+}
+
+# Scoped claims that are TRUE and must keep passing. Without these the
+# prohibition could be tightened until it banned the correct sentences too,
+# and the only way back would be to delete the accurate explanation.
+LEGAL_SCOPED_CLAIMS = (
+    "What ships inert is everything the router does *on its own*: "
+    "`router.rules` and `router.fallback` are empty lists, and "
+    "`router.smart_routing.enabled` and `router.escalation.enabled` are false.",
+    "### Model router — Default: per-chat overrides on, autonomous routing off",
+    "The bigger autonomous subsystems — SENTINEL dreaming, the router's "
+    "autonomous half (task classification and fallback chains — its per-chat "
+    "`/claude`-style overrides ship **on**), LSP — ship **off by default**.",
+    "- **The model router is NOT off by default** — this note listed it as "
+    "off from the day the note was written.",
+    "the router object is built on every boot — but its autonomous halves "
+    "ship **inert**: `rules` and `fallback` are empty.",
+)
+
+
+def test_the_detector_catches_the_real_regressions():
+    """The prohibition, run against the prose that actually shipped.
+
+    This is what stops the patterns below from being softened into a test
+    that matches nothing. If someone rewrites them, these five sentences
+    must still trip — they are not hypotheticals, they are what was live.
+    """
+    missed = [k for k, v in REAL_REGRESSIONS.items()
+              if not _calls_the_whole_router_off(v)]
+    assert not missed, (
+        "the detector no longer catches prose this repo actually shipped. It "
+        "has been weakened past the point of proving anything:\n  "
+        + "\n  ".join(missed)
+    )
+
+
+def test_the_detector_allows_scoped_claims():
+    """The other half: naming which PART is off is true and must stay legal.
+
+    A prohibition that also banned these would push the next author to
+    delete the accurate explanation rather than fight the test.
+    """
+    caught = [c for c in LEGAL_SCOPED_CLAIMS if _calls_the_whole_router_off(c)]
+    assert not caught, (
+        "the detector now rejects TRUE, correctly-scoped statements. Saying "
+        "`smart_routing` or the autonomous half is off is accurate — only "
+        "calling the whole router off is the error:\n  "
+        + "\n  ".join(c[:120] for c in caught)
+    )
+
+
+def test_no_doc_calls_the_whole_router_off():
+    """The guard itself, across every doc — not one section.
+
+    The router has NO master enable flag: `RouterConfig` carries no
+    `enabled` field, and `create_model_router` has no enable check. A doc
+    that calls it off is not merely stale, it describes a switch that has
+    never existed.
+    """
+    hits = []
+    for doc in _user_docs():
+        for n, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
+            if _calls_the_whole_router_off(line):
+                hits.append(f"{doc.relative_to(REPO)}:{n}: {line.strip()[:160]}")
+    assert not hits, (
+        f"{len(hits)} doc line(s) call the model router off by default. There "
+        f"is no flag that turns it off — it is built on every boot, and "
+        f"`router.overrides.enabled` defaults to true, which is what makes "
+        f"/claude and friends work on a fresh install.\n\nSay which HALF is "
+        f"off instead (rules, fallback, smart_routing, escalation).\n\n  "
+        + "\n  ".join(hits)
+    )
+
+
+def test_router_config_has_no_master_enable_field():
+    """The code half of the sentence features.md now prints.
+
+    features.md tells the reader `RouterConfig` has no `enabled` field, and
+    that this absence is WHY the override commands work on a fresh install.
+    If someone adds a master switch, that sentence becomes false and the
+    docs must change with it.
+    """
+    from dataclasses import fields
+    from prometheus.router.model_router import RouterConfig
+
+    names = {f.name for f in fields(RouterConfig)}
+    assert "enabled" not in names, (
+        "RouterConfig gained an `enabled` field. features.md and "
+        "providers.md both tell the reader no such switch exists — rewrite "
+        "them, and re-check the Honest status notes bullet, before landing "
+        "this."
+    )
+    # The halves that ARE switchable, named so a rename surfaces here.
+    assert {"smart_routing_enabled", "escalation_enabled",
+            "overrides_enabled"} <= names
+
+
+def test_the_explanation_survives_in_each_doc_that_makes_the_claim():
+    """A prohibition alone can be satisfied by DELETING the explanation.
+
+    Each doc that describes the router's default must still carry the
+    positive statement, so "fixing" the guard by removing the sentence
+    fails too.
+    """
+    features = (REPO / "docs" / "guide" / "features.md").read_text(encoding="utf-8")
+    providers = (REPO / "docs" / "guide" / "providers.md").read_text(encoding="utf-8")
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+
+    assert "built on **every** boot" in features, (
+        "features.md no longer explains that the router is constructed "
+        "unconditionally — the fact that makes /claude work out of the box"
+    )
+    assert "built on every boot" in providers, (
+        "providers.md lost the same explanation"
+    )
+    assert "overrides ship **on**" in readme, (
+        "README.md no longer says the per-chat overrides are on; without it "
+        "the subsystem list reads as though the whole router were off again"
     )
