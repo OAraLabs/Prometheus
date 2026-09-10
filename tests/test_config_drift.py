@@ -263,3 +263,73 @@ def test_every_registered_key_carries_a_disposition():
         f"KNOWN_UNREAD entries must start with one of {valid}:\n  "
         + "\n  ".join(bad)
     )
+
+
+# ---------------------------------------------------------------------------
+# Deprecated keys: renamed away in the code, but still shipped in the template.
+#
+# `model_router:` was renamed to `router:` in GRAFT-ROUTER-WIRE v3, and
+# __main__.create_model_router grew a boot WARNING for configs that still
+# carry it ("your existing rules are not being applied"). The template kept
+# shipping `model_router: {enabled: false}` anyway — so anyone who followed
+# this template's OWN instruction ("Copy to config/prometheus.yaml") earned a
+# deprecation warning on every boot, for a block nothing reads.
+#
+# That is the inverse of the drift above: not a live key missing from the
+# template, but a template key the code knows only how to reject. It is
+# invisible to `test_no_new_config_key_without_a_reader`, whose reader test is
+# a substring scan of src/ — and the deprecation warning quotes the very key
+# name it is warning about, so the dead key looked read.
+#
+# The warning itself STAYS. It serves configs written before the rename, which
+# the template cannot reach. Only the template's copy goes.
+# tests/test_wiring.py::test_create_model_router_emits_migration_warning_for_legacy_key
+# pins the surviving half.
+# ---------------------------------------------------------------------------
+
+# dotted key path -> where its deprecation is enforced.
+DEPRECATED_KEYS: dict[str, str] = {
+    "model_router": "renamed to `router:` — warned by __main__.create_model_router",
+}
+
+
+def test_template_ships_no_deprecated_config_key():
+    """A key the daemon warns about must not be in the file we tell users to copy.
+
+    Checked against the PARSED template, not its text, so the migration note
+    left behind in the comments is allowed to name the key it is retiring.
+    """
+    present = sorted(DEPRECATED_KEYS.keys() & _flatten(_load(_DEFAULT)))
+    assert not present, (
+        f"{len(present)} deprecated key(s) are still shipped in "
+        f"prometheus.yaml.default. The template instructs the reader to copy "
+        f"it verbatim, so every one of these hands a fresh install a boot "
+        f"warning for a block nothing reads. Delete the key from the template "
+        f"— keep the deprecation warning, which serves configs the template "
+        f"cannot reach.\n\n  "
+        + "\n  ".join(f"{k}  ({DEPRECATED_KEYS[k]})" for k in present)
+    )
+
+
+def test_deprecated_key_register_is_not_stale():
+    """The other direction: an entry whose deprecation the code no longer carries.
+
+    Same ratchet shape as KNOWN_UNREAD. If the migration warning is ever
+    deleted — the rename fully absorbed, or the key resurrected under a new
+    meaning — this register is bookkeeping for a rule nobody enforces, and it
+    must be removed rather than left to imply a guard that is gone.
+    """
+    # src/ ONLY, deliberately. _reader_blob() spans tests/ too, and
+    # test_wiring.py asserts on this exact warning string — scanning it would
+    # let the test suite satisfy a check about the shipped code.
+    blob = "\n".join(
+        py.read_text(encoding="utf-8", errors="replace")
+        for py in (_REPO / "src").rglob("*.py")
+    )
+    orphans = sorted(k for k in DEPRECATED_KEYS if f"{k}: config key is deprecated" not in blob)
+    assert not orphans, (
+        f"{len(orphans)} entry(ies) in DEPRECATED_KEYS name a key that no code "
+        f"warns about any more. Remove them from the register — an entry here "
+        f"claims a deprecation the codebase enforces.\n\n  "
+        + "\n  ".join(f"{k}  ({DEPRECATED_KEYS[k]})" for k in orphans)
+    )
