@@ -5,7 +5,11 @@ Drives the exact flow the README promises, in an environment with no host
 config, and fails loudly naming WHICH step broke and why:
 
   S1  git clone (of --source, at its current SHA) into a temp tree
-  S2  python -m venv + pip install -e '.[full]'      (the README install line)
+  S2  python -m venv + install                      (--install-mode editable|wheel)
+  S2i oara identity --regenerate               (SOUL.md/AGENTS.md from the
+      SHIPPED templates — the ONE first-run step `setup --noninteractive`
+      never reaches, and the step that stayed green while templates/ did not
+      ship, because an editable install keeps the checkout layout live)
   S3  oara setup --noninteractive              (against a stub model server)
       --leg cloud: no local server is offered; one cloud key in the environment
       must pick the provider, and the harness points that provider at the stub
@@ -48,6 +52,9 @@ SELF-TEST LEVERS (mutation testing THIS harness's reporting):
   --stub-mode models-500   breaks S3 (setup finds no server)
   --stub-mode no-final     breaks S5 (the agent turn can never conclude)
   --self-mutation busy-api breaks S6 (the API port is already taken)
+  --self-mutation no-templates  deletes the packaged identity templates from the
+                           INSTALLED tree (needs --install-mode wheel) and must
+                           break S2i — this is the pre-fix wheel, reproduced
   --self-mutation no-cloud-key  (--leg cloud) breaks S3: no server AND no key,
                            so setup must refuse to write and exit 2
 A healthy tree must go red at exactly that step, naming it.
@@ -133,9 +140,10 @@ def tail(path: Path, lines: int = 40) -> str:
 class Harness:
     def __init__(self, source: Path, keep: bool, stub_mode: str,
                  self_mutation: str, strict_shutdown: bool = False,
-                 leg: str = "local") -> None:
+                 leg: str = "local", install_mode: str = "editable") -> None:
         self.source = source
         self.leg = leg
+        self.install_mode = install_mode
         self.keep = keep
         self.stub_mode = stub_mode
         self.self_mutation = self_mutation
@@ -181,7 +189,8 @@ class Harness:
         return env
 
     def run(self, cmd: list[str], log_name: str, timeout: int,
-            cwd: Path | None = None, expect_rc: int | None = 0) -> tuple[int, Path]:
+            cwd: Path | None = None, expect_rc: int | None = 0,
+            stdin_text: str | None = None) -> tuple[int, Path]:
         log = self.logs / f"{log_name}.log"
         with log.open("a", encoding="utf-8") as fh:
             fh.write(f"$ {' '.join(cmd)}\n")
@@ -189,6 +198,7 @@ class Harness:
             try:
                 proc = subprocess.run(
                     cmd, cwd=cwd or self.clone, env=self.env(),
+                    input=stdin_text, text=stdin_text is not None,
                     stdout=fh, stderr=subprocess.STDOUT, timeout=timeout,
                 )
             except subprocess.TimeoutExpired:
@@ -228,17 +238,120 @@ class Harness:
         return f"SHA {self.sha[:12]}"
 
     def s2_install(self) -> str:
+        """Install the product the way a stranger does.
+
+        TWO SHAPES, because they are not the same artefact and only one of
+        them was ever exercised. `pip install -e` keeps the CHECKOUT layout
+        live, so anything that lives outside `packages = ["src/prometheus"]`
+        is still on disk and still importable — which is precisely why this
+        harness ran green for the entire time `templates/` did not ship. In
+        `--install-mode wheel` the venv gets a built wheel and nothing else,
+        so a file that was not packaged is genuinely absent, the way it is
+        absent for someone who typed `pip install oara-prometheus`.
+        """
         self.run([sys.executable, "-m", "venv", str(self.venv)],
                  "s2-install", timeout=120, cwd=self.work)
-        self.run([str(self.venv / "bin" / "pip"), "install", "--quiet",
-                  "-e", ".[full]"], "s2-install", timeout=1500)
+        if self.install_mode == "wheel":
+            dist = self.work / "dist"
+            self.run([str(self.venv / "bin" / "pip"), "install", "--quiet",
+                      "build"], "s2-install", timeout=600)
+            self.run([str(self.venv / "bin" / "python"), "-m", "build",
+                      "--wheel", "--outdir", str(dist)],
+                     "s2-install", timeout=900)
+            wheels = sorted(dist.glob("*.whl"))
+            if len(wheels) != 1:
+                raise StepFailure(
+                    f"expected exactly one wheel in {dist}, got "
+                    f"{[w.name for w in wheels]}", self.logs / "s2-install.log")
+            self.run([str(self.venv / "bin" / "pip"), "install", "--quiet",
+                      f"{wheels[0]}[full]"], "s2-install", timeout=1500)
+            what = f"pip install {wheels[0].name}[full]"
+        else:
+            self.run([str(self.venv / "bin" / "pip"), "install", "--quiet",
+                      "-e", ".[full]"], "s2-install", timeout=1500)
+            what = "pip install -e '.[full]'"
         # The command is `oara`; `prometheus` is the alias kept for the
         # deprecation window — a fresh install must have both on PATH.
         self.run([str(self.venv / "bin" / "prometheus"), "--help"],
                  "s2-alias-help", timeout=60)
         rc, _ = self.run([str(self.venv / "bin" / "oara"), "--help"],
                          "s2-install", timeout=60)
-        return "pip install -e '.[full]' + entrypoint present"
+        if self.self_mutation == "no-templates":
+            # Self-test lever: delete the packaged identity templates from the
+            # INSTALLED tree, reproducing the pre-fix wheel. S2i must go red.
+            #
+            # ⚠ MEASURED, not assumed: on an EDITABLE install this deletion
+            # changes nothing observable. Hatchling does materialise the
+            # force-included files under site-packages, so they are there to
+            # delete — but the module still imports from the clone, so the
+            # resolver's checkout fallback finds <clone>/templates and every
+            # step stays green. A lever that cannot go red is worse than no
+            # lever, so the combination is refused rather than run.
+            if self.install_mode != "wheel":
+                raise StepFailure(
+                    "--self-mutation no-templates requires --install-mode "
+                    "wheel. On an editable install the module imports from "
+                    "the clone, so the resolver falls back to "
+                    "<clone>/templates and the mutation cannot fail anything "
+                    "— which is exactly why this harness stayed green while "
+                    "the templates did not ship.", None)
+            removed = 0
+            for hit in self.venv.glob(
+                    "lib/*/site-packages/prometheus/templates/*"):
+                hit.unlink()
+                removed += 1
+            if not removed:
+                raise StepFailure(
+                    "--self-mutation no-templates found no packaged templates "
+                    "to delete in the installed tree — they already do not "
+                    "ship, which is the defect this lever exists to model.",
+                    None)
+        return f"{what} + entrypoint present"
+
+    def s2i_identity(self) -> str:
+        """`oara identity --regenerate` — the FIRST thing setup does.
+
+        WHY THIS STEP EXISTS. `oara setup --noninteractive` (S3) never
+        generates identity: only the interactive wizard and the setup server
+        call `generate_identity_files`. So the templates that SOUL.md and
+        AGENTS.md are rendered from were read by nothing this harness ran,
+        and when they turned out not to ship in the wheel, every leg stayed
+        green while a real first run died with
+
+            FileNotFoundError: .../site-packages/templates/SOUL.md.template
+
+        `oara identity --regenerate` is that code path behind a one-purpose
+        CLI entry point, so the harness can drive it without scripting the
+        whole wizard — three prompts, and the assertions are on the FILES,
+        not on the prompt text, so adding a wizard question cannot make this
+        fail for a non-product reason.
+
+        Answers: a name, a description, then blank for the hardware layout
+        (default: single machine).
+        """
+        self.run([str(self.venv / "bin" / "oara"), "identity", "--regenerate"],
+                 "s2i-identity", timeout=120,
+                 stdin_text="Stranger\nbuilds things\n\n")
+        home_cfg = self.home / ".prometheus"
+        for name in ("SOUL.md", "AGENTS.md"):
+            f = home_cfg / name
+            if not f.exists():
+                raise StepFailure(
+                    f"identity generation exited 0 but wrote no {name} at {f}",
+                    self.logs / "s2i-identity.log")
+            text = f.read_text(encoding="utf-8")
+            if "{{" in text:
+                raise StepFailure(
+                    f"{name} carries unsubstituted template slots — the "
+                    f"template was found but not rendered",
+                    self.logs / "s2i-identity.log")
+        soul = (home_cfg / "SOUL.md").read_text(encoding="utf-8")
+        if "Stranger" not in soul:
+            raise StepFailure(
+                "SOUL.md does not carry the name that was typed — identity is "
+                "generic, so the personalisation step did nothing",
+                self.logs / "s2i-identity.log")
+        return "SOUL.md + AGENTS.md rendered from the SHIPPED templates"
 
     def _wait_stub(self) -> None:
         for _ in range(50):
@@ -504,7 +617,10 @@ class Harness:
     def main(self) -> int:
         steps = [
             ("S1", "git clone at source SHA", self.s1_clone),
-            ("S2", "pip install -e '.[full]'", self.s2_install),
+            ("S2", ("pip install <wheel>[full]" if self.install_mode == "wheel"
+                    else "pip install -e '.[full]'"), self.s2_install),
+            ("S2i", "oara identity --regenerate (renders the SHIPPED templates)",
+             self.s2i_identity),
             ("S3", ("oara setup --noninteractive (no server, one cloud key)"
                     if self.leg == "cloud" else
                     "oara setup --noninteractive (stub model)"), self.s3_setup),
@@ -514,7 +630,8 @@ class Harness:
             ("S7", "teardown, no residue", self.s7_teardown),
         ]
         t0 = time.time()
-        print(f"[FIRSTLIGHT] leg={self.leg} source={self.source} work={self.work}")
+        print(f"[FIRSTLIGHT] leg={self.leg} install={self.install_mode} "
+              f"source={self.source} work={self.work}")
         for sid, name, fn in steps:
             started = time.time()
             try:
@@ -530,7 +647,8 @@ class Harness:
                 return 1
             print(f"[FIRSTLIGHT] {sid} ok ({time.time() - started:5.1f}s) — "
                   f"{name}: {detail}")
-        print(f"\n[FIRSTLIGHT] PASS ({self.leg} leg) — all 7 steps, "
+        print(f"\n[FIRSTLIGHT] PASS ({self.leg} leg, {self.install_mode} "
+              f"install) — all {len(steps)} steps, "
               f"{time.time() - t0:.1f}s, SHA {self.sha[:12]}")
         return 0
 
@@ -545,11 +663,19 @@ def main() -> int:
                         help="local: setup detects the stub as a local server "
                              "(default). cloud: no local server, one cloud key "
                              "in the environment, provider aimed at the stub")
+    parser.add_argument("--install-mode", default="editable",
+                        choices=["editable", "wheel"],
+                        help="editable: `pip install -e .[full]`, the README's "
+                             "contributor line (default). wheel: build a wheel "
+                             "and install THAT — the shape a `pip install "
+                             "oara-prometheus` user gets, and the only one in "
+                             "which an unpackaged file is genuinely absent")
     parser.add_argument("--stub-mode", default="normal",
                         choices=["normal", "models-500", "no-final"],
                         help="stub model mutation (harness self-test)")
     parser.add_argument("--self-mutation", default="none",
-                        choices=["none", "busy-api", "no-cloud-key"],
+                        choices=["none", "busy-api", "no-cloud-key",
+                                 "no-templates"],
                         help="harness-side mutation (harness self-test)")
     parser.add_argument("--strict-shutdown", dest="strict_shutdown",
                         action="store_true", default=True,
@@ -561,7 +687,8 @@ def main() -> int:
                              "(pre-FL-1 behavior; for bisecting only)")
     args = parser.parse_args()
     return Harness(Path(args.source).resolve(), args.keep, args.stub_mode,
-                   args.self_mutation, args.strict_shutdown, leg=args.leg).main()
+                   args.self_mutation, args.strict_shutdown, leg=args.leg,
+                   install_mode=args.install_mode).main()
 
 
 if __name__ == "__main__":
