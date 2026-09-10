@@ -138,57 +138,126 @@ Same family, different mechanism. Each was measured, not recalled.
 
 ---
 
-## 4. A standing rule that names the wrong cause
+## 4. A control that names the wrong thing
 
-**Question:** for every rule written after an incident — does the thing it
-tells you to change actually control the thing that went wrong? A rule is
-only a control if disabling the named cause would have prevented the
-recurrence. Otherwise it is a memorial that reads like a control.
+**Question:** for every rule, check or gate — does the thing it names
+actually govern the thing that goes wrong? A control is only a control if
+the named mechanism, disabled, would have prevented the failure. Otherwise
+it is a memorial that reads like a control, and it occupies the slot where
+the real one belongs.
 
-**Born from:** the same accident twice, with a rule in between.
+**Born from three, recorded together on 2026-09-10** because they were only
+recognisable as one shape once they were side by side.
 
-1. **PR #4** was merged and its branch deleted. That branch was the base of
-   **#7, #8 and #9**, which GitHub closed permanently — a closed PR cannot
-   have its base changed, so they could not be reopened.
-2. A standing rule was written: **disable auto-delete-on-merge.**
-3. **2026-09-10, PR #417** was merged and its branch deleted. That branch was
-   the base of **#418**, which closed permanently. Same shape, same
-   irreversibility, one rule later.
+### 4a. The rule named the wrong mechanism
 
-**Measured on 2026-09-10, from three sources:**
+**PR #4** was merged and its branch deleted. That branch was the base of
+**#7, #8 and #9**, which GitHub closed permanently — a closed PR cannot have
+its base changed, so they could not be reopened. A standing rule was
+written: **disable auto-delete-on-merge.**
+
+On **2026-09-10, PR #417** was merged and its branch deleted. That branch
+was the base of **#418**, which closed permanently. Same shape, one rule
+later.
+
+Measured that day, three sources:
 
 ```
 repos/OAraLabs/Prometheus  .delete_branch_on_merge : false
 branches/main/protection                           : HTTP 404 (not protected)
-rulesets/<id> "protect-main" rules                 : deletion, non_fast_forward,
+ruleset "protect-main" rules                       : deletion, non_fast_forward,
                                                      pull_request,
                                                      required_linear_history
 ```
 
-**Auto-delete was already off, and had been.** No repo setting, no branch
-protection and no ruleset deletes a head branch here. The only thing that
-does is the flag on the merge invocation — `gh pr merge --delete-branch`.
+**Auto-delete was already off, and had been.** Nothing in the settings,
+branch protection or the ruleset deletes a head branch here. The only thing
+that does is `--delete-branch` on the merge invocation. Following the rule
+perfectly would have changed nothing.
 
-So the rule named a mechanism that was not operating. Following it perfectly
-would have changed nothing, and #418 closed anyway. Worse than useless: it
-occupied the slot where the real control belonged, so the second occurrence
-looked like bad luck rather than an unaddressed cause.
+**How:** omit `--delete-branch`; branches accumulate, which is cheap beside
+a permanently closed PR. Before merging, check whether the head is another
+PR's base (`gh pr list --json number,baseRefName`) and merge such a stack in
+immediate succession.
 
-**How:**
+### 4b. The check named the wrong dependency
 
-- Omit `--delete-branch`. It is the whole mechanism. Branches accumulate on
-  origin — that is the trade, and it is cheap next to a permanently closed PR.
-- Before merging anything, check whether its branch is another PR's base:
-  `gh pr list --json number,baseRefName` and look for your head ref. If it is,
-  merge that stack in immediate succession.
-- **The general rule, which is why this is section 4 and not a footnote:**
-  when writing a rule after an incident, verify the named cause was actually
-  operating *at the time of that incident*. `delete_branch_on_merge` was
-  queryable in one API call throughout. Nobody asked, so a guess became a
-  standing rule, and the guess was wrong in the direction that reads as
-  diligence.
+Sequencing five PRs the same day, the merge order was computed from
+**pairwise file overlap** — the standard check. #427 (generates a route,
+command and config reference from source) and #430 (adds an `mcp:` section
+to the config template) share **no file**: #427 touches nothing under
+`config/`, #430 nothing under `docs/reference/`. Independent, by that check.
 
-**Not found in this repository.** The original rule is not in `docs/`,
+Merged #427 then #430 and `main` went red — three of #427's own drift guards,
+because the generated table was two rows short of the template it describes.
+
+**A generated artifact depends on every input to its generator, whatever
+files the other change happens to touch.** File overlap cannot see that.
+`routes.md` survived only because #430 guarded existing routes instead of
+adding one.
+
+**How:** land a generated-reference PR **last** among any batch touching
+generator inputs, or regenerate afterwards. Repaired in #431.
+
+### 4c. The gate named the wrong tree
+
+`scripts/smoke_test_tool_calling.py` builds its own AgentLoop and
+SecurityGate in-process; it does not drive the running daemon. Its score is
+about whatever `import prometheus` resolved to, and it said nothing about
+which tree that was.
+
+A `_prometheus.pth` in user site-packages, present since **2026-04-07**,
+puts a dev checkout on every interpreter's `sys.path`. With `PYTHONPATH`
+set — the systemd unit sets it — the deploy tree wins. Without it the
+checkout wins, and the bare `python3 scripts/smoke_test_tool_calling.py` is
+the invocation in use.
+
+**THE RETRACTION, measured from transcripts and git:**
+
+```
+dev checkout            : diag/355-llama-tokenize @ b107c29 (2026-08-29)
+                          62 dirty files, 79 commits behind main
+main diverged from it   : 2026-08-30, 10968cf
+smoke invocations seen  : 117 bare, 72 correctly pathed (2026-08-02 .. 2026-09-10)
+BARE runs on/after the divergence : 42
+```
+
+Every one of those 42 scored a tree that was not deployed, in a report read
+as a statement about the deployment. Before 2026-08-30 the checkout still
+tracked main closely, which is why five months of this was invisible: the
+answer happened to be right, so nobody asked how it was obtained.
+
+The count is a **lower bound**. Transcripts are a rolling window, so runs
+before ~2026-08-11 are not covered, and runs outside an agent session are
+not counted at all.
+
+**How:** the script now resolves `(facts, verdict)` with `verdict` in
+`matches | mismatch | unknown`, prints the loaded package path, SHA, branch
+and dirty count beside the tree the systemd unit loads, and refuses on a
+mismatch naming both paths. The three renderings are asserted pairwise
+distinct — see 2 in this file, and
+`context.budget.resolve_effective_limit`, whose `(value, source)` shape this
+copies. **Unknown and matches must never render identically.**
+
+⚠ The `.pth` itself is deliberately NOT removed. Something may depend on it,
+the checkout it points at has 62 dirty files, and pulling a path entry out
+from under that is how this gets a second instance instead of a fix. The
+reporting was fixed first; the removal is a recommendation.
+
+### The rule the three share
+
+**Verify that the named mechanism was actually operating.** In 4a the
+setting was one API call away and nobody asked, so a guess became a standing
+rule — wrong in the direction that reads as diligence. In 4b the check ran
+correctly and answered a question adjacent to the one that mattered. In 4c
+the gate was never asked what it was measuring.
+
+A control you have not seen fail is not yet known to be a control. Prefer
+the version that can produce a *distinguishable* wrong answer — a tag with
+an `unknown` state, a check whose subject is named — over one whose only
+output is silence.
+
+**Not found in this repository.** The 4a rule is not in `docs/`,
 `PROMETHEUS.md` or any tracked `*.md` — searched when this section was
 written. Wherever it lives, it should be corrected or removed rather than
 left to be followed.
