@@ -5293,7 +5293,14 @@ class TestCircuitBreakerDiagnosis:
         )
         assert result.recovered is True
         assert result.new_tier == "light"
-        assert adapter.tier == "light"
+        # The RUN's adapter is bumped...
+        assert ctx.adapter.tier == "light"
+        # ...and the one that was handed in is NOT. The bump used to write
+        # straight through to the shared adapter object, and it is the only
+        # write to `.tier` outside the constructor, so nothing put it back:
+        # one turn that tripped the breaker raised strictness for every
+        # session for the life of the daemon.
+        assert adapter.tier == "off", "the shared adapter was mutated"
         assert breaker.recovery_attempted is True
 
     @pytest.mark.integration
@@ -5316,7 +5323,8 @@ class TestCircuitBreakerDiagnosis:
         result = breaker.diagnose_and_recover(context=ctx, tool_name="bash")
         assert result.recovered is True
         assert result.new_tier == "full"
-        assert adapter.tier == "full"
+        assert ctx.adapter.tier == "full"
+        assert adapter.tier == "light", "the shared adapter was mutated"
 
     @pytest.mark.integration
     def test_full_tier_gives_up_with_diagnostic(self):

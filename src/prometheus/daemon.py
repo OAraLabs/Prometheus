@@ -2491,6 +2491,18 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 lcm_engine=lcm_engine,
             )
 
+            # SEAL IT. This is THE shared context: one instance, handed to
+            # `launch_web` below and read by every Beacon, REST and WebSocket
+            # turn for the life of the daemon. Sealing makes a per-run write
+            # (provider / adapter / model / backend / system_prompt /
+            # pair_pending) raise here instead of silently reaching every
+            # other session — the router race, the identity-line leak, the
+            # tier bump and the cross-session pair stash were all that write.
+            # `run_loop` takes a per-run copy, so nothing on the turn path
+            # touches this object; anything that trips the seal has bypassed
+            # it and wants fixing, not unsealing.
+            loop_context.seal()
+
             # ── Startup agreement check: the two loops must carry the same
             # iteration ceilings ──────────────────────────────────────────
             #
