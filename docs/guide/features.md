@@ -189,7 +189,7 @@ Beacon's chat rides the API and WebSocket above, with slash-command parity for f
 
 ## Commands
 
-The full Telegram command table. Slack (`/prometheus-*`) and Discord (`/prometheus`) expose the same command layer with platform-appropriate naming.
+The full Telegram command table. For every command as REGISTERED across all three gateways — including Discord's nested `/prometheus core …` form — see the generated [command reference](../reference/commands.md). Slack (`/prometheus-*`) and Discord (`/prometheus`) expose the same command layer with platform-appropriate naming.
 
 | Command | What it does |
 |---|---|
@@ -302,6 +302,8 @@ The full Telegram command table. Slack (`/prometheus-*`) and Discord (`/promethe
 One reference config (`config/prometheus.yaml.default`, ~21KB, heavily commented) documents every section:
 
 `system, bootstrap, model, compaction, context, tools, adapter, security, infrastructure, gateway (telegram/slack/discord), whisper, router, slash_commands, divergence, learning (nudge/skill/curator/gepa), trajectory_export, symbiote, sentinel, memory.recall, web, image_generation, video_generation.kling, web_tools, printing_press, lsp, profiles, anatomy, mcp_servers, hooks, evals, tracing`
+
+Every key, with the value the template ships, is listed in the generated [config key reference](../reference/config-keys.md).
 
 A separate `config/model_registry.yaml` carries per-model capability flags.
 
