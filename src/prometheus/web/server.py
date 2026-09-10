@@ -4841,11 +4841,95 @@ def create_app(
         if static_path.exists():
             app.mount(
                 "/",
-                _HttpOnlyStaticFiles(directory=str(static_path), html=True),
+                _HttpOnlyStaticFiles(
+                    directory=str(static_path),
+                    html=True,
+                    security_headers=lambda scope: _static_security_headers(config, scope),
+                ),
                 name="static",
             )
 
     return app
+
+
+def _request_host(scope) -> str | None:
+    """``host:ws_port`` for this request, or None when there is no Host.
+
+    Only the HOSTNAME is taken from the header — the port is the daemon's
+    configured one — so a forged Host can name a different machine but
+    never a different port, and the browser will only honour it for a
+    page it already loaded from that host.
+    """
+    for k, v in (scope.get("headers") or ()):
+        if k == b"host":
+            hostname = v.decode("latin-1").split(":")[0].strip()
+            return hostname or None
+    return None
+
+
+def _static_security_headers(config: dict[str, Any], scope=None) -> list[tuple[bytes, bytes]]:
+    """Response headers for the bundled Mission Control page.
+
+    WHY THIS EXISTS. ``web/static/index.html`` is the only UI this daemon
+    ships, it is mounted as a catch-all at ``/`` on the authenticated API,
+    and it held the bearer token in ``localStorage`` with **no** Content
+    Security Policy of any kind. Anything that ever managed to run a script
+    in that origin could read the token and then drive every REST route the
+    token opens — which on this daemon includes ``bash``. The page renders
+    agent-adjacent data (feed events, skill names, memory files), so "a
+    script never lands here" was a hope, not a property.
+
+    ``script-src 'self'`` is only expressible because the inline ``<script>``
+    and the nine ``on*=""`` handlers moved out to ``app.js``; ``style-src
+    'self'`` likewise, because the inline ``<style>`` and five ``style=``
+    attributes moved to ``app.css``. Ordering matters — a CSP added while
+    the page was still inline would have had to allow ``'unsafe-inline'``
+    for both, which is close to no policy at all.
+
+    ``connect-src`` has to name the WebSocket bridge, which listens on its
+    OWN port, so the configured ``web.ws_port`` is read here rather than
+    assumed.
+
+    ⚠ KNOWN, PRE-EXISTING, NOT FIXED HERE: ``app.js`` hardcodes ``:8010``
+    for that bridge instead of learning it, so a deployment with a custom
+    ``web.ws_port`` already had a dead live-feed before this change. The
+    port is not published on any API surface, so teaching the page to
+    discover it is a wire-contract change, not a header change. This policy
+    names the CONFIGURED port — the correct one — rather than encoding the
+    page's bug into a security control.
+    """
+    ws_port = int((config.get("web") or {}).get("ws_port", 8010) or 8010)
+    # The bridge is always the SAME HOST as the page, on its own port, so the
+    # host comes from this request rather than a wildcard. `ws://*:PORT` would
+    # have been simpler and would also have let an injected script open a
+    # socket to attacker.example:PORT and stream the page out — the one thing
+    # connect-src exists to stop.
+    host = _request_host(scope) if scope is not None else None
+    ws_sources = (
+        f"ws://{host}:{ws_port} wss://{host}:{ws_port}" if host else "'none'"
+    )
+    policy = "; ".join((
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self'",
+        "img-src 'self' data:",
+        f"connect-src 'self' {ws_sources}",
+        # Nothing here loads a plugin, embeds a frame, submits a form, or
+        # wants a <base> — so each is denied outright rather than scoped.
+        "object-src 'none'",
+        "frame-ancestors 'none'",
+        "form-action 'none'",
+        "base-uri 'none'",
+    ))
+    return [
+        (b"content-security-policy", policy.encode()),
+        # A JSON or markdown body must never be sniffed into script.
+        (b"x-content-type-options", b"nosniff"),
+        # frame-ancestors covers modern browsers; this covers the rest.
+        (b"x-frame-options", b"DENY"),
+        # The URL can carry a session id; do not hand it to another origin.
+        (b"referrer-policy", b"no-referrer"),
+    ]
 
 
 class _HttpOnlyStaticFiles(StaticFiles):
@@ -4868,13 +4952,32 @@ class _HttpOnlyStaticFiles(StaticFiles):
     WebSocket to an endpoint that only serves HTTP.
     """
 
+    def __init__(self, *args, security_headers=None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        #: ``scope -> [(name, value)]``. A callable rather than a fixed list
+        #: because connect-src names this request's own host.
+        self._security_headers = security_headers
+
     async def __call__(self, scope, receive, send) -> None:  # type: ignore[override]
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 1002})
             return
         if scope["type"] != "http":
             return
-        await super().__call__(scope, receive, send)
+
+        async def _send(message):
+            # Injected on the response START so it covers every file this
+            # mount serves — the page, app.js, app.css and any 404 — rather
+            # than only the paths someone remembered to decorate.
+            if message["type"] == "http.response.start" and self._security_headers:
+                message = dict(message)
+                message["headers"] = (
+                    list(message.get("headers") or [])
+                    + list(self._security_headers(scope))
+                )
+            await send(message)
+
+        await super().__call__(scope, receive, _send)
 
 
 def _sanitize_config(config: dict[str, Any]) -> dict[str, Any]:

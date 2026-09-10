@@ -1,0 +1,200 @@
+  :root {
+    --bg: #0f1419;
+    --panel: #1a2028;
+    --panel-2: #232b35;
+    --border: #2d3742;
+    --text: #d6deeb;
+    --text-dim: #8693a8;
+    --accent: #ffae57;
+    --accent-2: #82aaff;
+    --success: #6ee7b7;
+    --warn: #fcd34d;
+    --error: #f87171;
+    --shadow: 0 1px 2px rgba(0,0,0,0.4);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    height: 100%;
+  }
+  body { display: flex; flex-direction: column; }
+  header {
+    padding: 12px 20px; border-bottom: 1px solid var(--border);
+    background: var(--panel); display: flex; justify-content: space-between;
+    align-items: center; box-shadow: var(--shadow);
+  }
+  header h1 { margin: 0; font-size: 18px; color: var(--accent); letter-spacing: 0.5px; }
+  header .status {
+    display: flex; gap: 16px; font-size: 12px; color: var(--text-dim);
+    align-items: center;
+  }
+  header .status .pill {
+    padding: 3px 10px; border-radius: 12px; background: var(--panel-2);
+    border: 1px solid var(--border);
+  }
+  header .status .ws-state.up { color: var(--success); border-color: var(--success); }
+  header .status .ws-state.down { color: var(--error); border-color: var(--error); }
+  main {
+    flex: 1; display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    gap: 16px; padding: 16px;
+    overflow: hidden;
+  }
+  .col { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px; box-shadow: var(--shadow);
+    min-height: 0; display: flex; flex-direction: column;
+  }
+  .panel h2 {
+    margin: 0 0 8px 0; font-size: 13px; text-transform: uppercase;
+    letter-spacing: 1px; color: var(--text-dim); display: flex;
+    justify-content: space-between; align-items: center;
+  }
+  .panel h2 .badge {
+    font-size: 11px; padding: 2px 8px; background: var(--panel-2);
+    border-radius: 10px; color: var(--text);
+  }
+  .panel-body {
+    flex: 1; overflow-y: auto; padding-right: 4px;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  }
+  .panel-body::-webkit-scrollbar { width: 8px; }
+  .panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  /* Activity feed */
+  .feed-row {
+    padding: 8px 6px; border-bottom: 1px solid var(--border);
+    display: grid; grid-template-columns: 28px 1fr auto; gap: 8px;
+    align-items: start; cursor: pointer; transition: background 0.1s;
+  }
+  .feed-row:hover { background: var(--panel-2); }
+  .feed-row.expanded { background: var(--panel-2); }
+  .feed-icon { font-size: 16px; line-height: 22px; }
+  .feed-meta { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+  .feed-payload {
+    grid-column: 2 / span 2; margin-top: 6px;
+    padding: 8px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 4px; font-family: ui-monospace, Menlo, monospace;
+    font-size: 11px; white-space: pre-wrap; word-break: break-word;
+    color: var(--text-dim); display: none; max-height: 240px; overflow-y: auto;
+  }
+  .feed-row.expanded .feed-payload { display: block; }
+  .feed-summary { font-size: 13px; }
+  .feed-type { font-weight: 500; color: var(--accent-2); }
+  .feed-empty { padding: 20px; text-align: center; color: var(--text-dim); }
+  .feed-time { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+
+  /* Tools panel (deferred loading toggle) */
+  .tools-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; margin-bottom: 8px;
+  }
+  .tools-label { font-size: 13px; }
+  .tools-modes { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .tools-modes button {
+    font: inherit; font-size: 11px; padding: 3px 10px; cursor: pointer;
+    background: transparent; border: none; color: var(--muted, #8a93a0);
+  }
+  .tools-modes button + button { border-left: 1px solid var(--border); }
+  .tools-modes button.active { background: var(--panel-2); color: var(--fg, #e6ebf0); font-weight: 600; }
+  .tools-status { font-size: 12px; color: var(--muted, #8a93a0); margin-bottom: 6px; }
+  .tools-status .eff-on { color: #6fc27c; }
+  .tools-status .eff-off { color: #c2946f; }
+  .tools-note { font-size: 11px; color: var(--muted, #8a93a0); opacity: 0.75; font-style: italic; }
+
+  /* Memory panel */
+  .mem-section {
+    margin-bottom: 14px; padding: 8px; background: var(--panel-2);
+    border-radius: 6px; border: 1px solid var(--border);
+  }
+  .mem-section h3 {
+    margin: 0 0 6px 0; font-size: 12px; color: var(--accent);
+    display: flex; justify-content: space-between;
+  }
+  .mem-section .bar {
+    height: 4px; background: var(--bg); border-radius: 2px; overflow: hidden;
+    margin: 4px 0;
+  }
+  .mem-section .bar > div {
+    height: 100%; background: var(--accent-2); transition: width 0.3s;
+  }
+  .mem-section .bar > div.warn { background: var(--warn); }
+  .mem-section .bar > div.error { background: var(--error); }
+  .mem-section pre {
+    margin: 6px 0 0 0; padding: 6px; background: var(--bg);
+    border-radius: 4px; font-size: 11px; max-height: 220px;
+    overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+    color: var(--text-dim);
+  }
+  .mem-section .meta { font-size: 11px; color: var(--text-dim); }
+
+  /* Skills panel */
+  .skill-row {
+    padding: 8px; margin-bottom: 6px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 6px; display: flex; justify-content: space-between;
+    align-items: center; gap: 8px;
+  }
+  .skill-row .name {
+    font-weight: 500; cursor: pointer; flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .skill-row .name:hover { color: var(--accent); }
+  .skill-row .state {
+    font-size: 11px; padding: 2px 6px; border-radius: 3px;
+    background: var(--bg); color: var(--text-dim);
+  }
+  .skill-row .state.active { color: var(--success); }
+  .skill-row .state.stale { color: var(--warn); }
+  .skill-row .state.archived { color: var(--text-dim); }
+  .skill-row button.pin {
+    background: var(--bg); border: 1px solid var(--border);
+    color: var(--text-dim); padding: 2px 8px; border-radius: 4px;
+    cursor: pointer; font-size: 12px;
+  }
+  .skill-row button.pin:hover { color: var(--accent); border-color: var(--accent); }
+  .skill-row button.pin.pinned { color: var(--accent); border-color: var(--accent); }
+
+  /* Modal for skill content */
+  .modal-overlay {
+    display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.7); z-index: 10;
+    justify-content: center; align-items: center; padding: 40px;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; max-width: 800px; width: 100%;
+    max-height: 80vh; display: flex; flex-direction: column;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+  }
+  .modal h3 {
+    margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--border);
+    color: var(--accent); display: flex; justify-content: space-between;
+    align-items: center;
+  }
+  .modal h3 button {
+    background: transparent; border: none; color: var(--text-dim);
+    cursor: pointer; font-size: 18px;
+  }
+  .modal pre {
+    margin: 0; padding: 16px; overflow-y: auto; flex: 1;
+    font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+    color: var(--text); white-space: pre-wrap; word-break: break-word;
+  }
+
+  /* Responsive — single column on narrow viewports */
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; }
+  }
+
+/* Layout utilities — these were inline `style=` attributes on the panels.
+   Moved here so the page needs no `style-src 'unsafe-inline'`: an attacker
+   who lands markup cannot then style it into a convincing overlay. */
+.panel-fill  { height: 100%; }
+.panel-half  { flex: 0 0 auto; max-height: 50%; }
+.panel-grow  { flex: 1; }
+.panel-fixed { flex: 0 0 auto; }
