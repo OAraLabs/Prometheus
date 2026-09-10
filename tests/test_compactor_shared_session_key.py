@@ -1,9 +1,25 @@
 """Two conversations sharing one session_id must not see each other's summaries.
 
 The web path pins the literal ``"web"`` on a SHARED LoopContext, so every web
-session reaches ``ContextCompactor.apply()`` under the same ``session_id``.
+session USED to reach ``ContextCompactor.apply()`` under the same ``session_id``.
 Surveyed 2026-08-18: no leakage, and no cost — a shared key totals the same
 model calls as distinct keys.
+
+HALF OF THAT SURVEY WAS WRONG, corrected 2026-09-09. The leakage half is right
+and is what this file still pins. The no-cost half was an artifact of the
+scenario below: every history here is a FIXED length, and a conversation that
+never grows re-derives the same ``max_end`` every call and hits the content
+cache regardless of what the anchor says — which hides the anchor completely.
+Grow the histories, which is what real conversations do, and the shared key
+costs 2x the summariser calls, because the clobbered anchor makes every turn
+re-summarise a longer prefix from scratch. Live telemetry agreed all along:
+1120 compactions under ``"web"`` missed the cache 21.8% of the time against
+11.5% for ``telegram:*``, which had a real per-conversation id.
+
+So ``agent_loop`` now passes ``effective_session_id``, and the closing
+paragraph below no longer describes the code. The tests in this file are
+unaffected — they call ``apply()`` directly — and remain the leakage pin.
+See ``tests/test_compactor_anchor_is_per_session.py`` for the cost.
 
 WHY it is safe is the only reason it is safe: ``_span_key`` hashes the session
 id AND THE SPAN CONTENT, so two different conversations produce different keys
@@ -16,11 +32,12 @@ session" refactor would do — and cross-conversation leakage appears immediatel
 and silently. Asserted by mutation in the last test here, so the pin cannot be
 decoration.
 
-The compactor's key is BEHAVIOURAL (it partitions a cache and anchors spans,
-both of which change what reaches the model), which is why it deliberately did
-NOT receive the ``session_id or context.session_id`` precedence that the
-telemetry writers did in #258. Descriptive readers get the real id; behavioural
-ones keep the key they were built with.
+HISTORICAL — the reasoning that was corrected above. "The compactor's key is
+BEHAVIOURAL (it partitions a cache and anchors spans, both of which change what
+reaches the model), which is why it deliberately did NOT receive the
+``session_id or context.session_id`` precedence that the telemetry writers did
+in #258." The premise is sound and the conclusion inverted it: because the key
+is behavioural, a wrong key costs real work, and the right key is the turn's.
 """
 
 from __future__ import annotations
