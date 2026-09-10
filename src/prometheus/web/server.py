@@ -1905,6 +1905,87 @@ def create_app(
         from prometheus.mcp.store import McpServerStore
         return McpServerStore()
 
+    # ── the door on the MCP write surface ───────────────────────────────
+    #
+    # POST/PATCH/DELETE here end in StdioServerParameters(command=..., args=...)
+    # — a process spawned as the daemon user (mcp/runtime.py _connect_stdio).
+    # That is not a defect of this route; it is what an MCP stdio server IS.
+    # What WAS a defect: any valid bearer reached it, including a device token,
+    # and an operator had no way to switch the surface off.
+    #
+    # Two controls, and note which question each answers:
+    #
+    #   WHO      the global token only. A device token is the wrong credential
+    #            for spawning a process, exactly as it is the wrong credential
+    #            for minting another device (POST /api/devices, above, for the
+    #            same reason in the same words: a stolen phone must not be able
+    #            to escalate). 401 rather than 403 — wrong credential, not
+    #            insufficient one.
+    #   WHETHER  `mcp.rest_management`. An operator who manages MCP servers in
+    #            prometheus.yaml has no use for the write surface at all and
+    #            can now say so. GET is unaffected either way: it lists what is
+    #            configured and has redacted env VALUES since #332.
+    #
+    # Reading is deliberately NOT narrowed to the global token. It exposes no
+    # credential (McpServerStore.public_view), and a phone that can see which
+    # connectors are live while being unable to change them is the split that
+    # makes the read surface worth keeping.
+    def _mcp_write_allowed(request: "Request") -> JSONResponse | None:
+        """None when this request may change the MCP server set; else the 4xx."""
+        mcp_cfg = config.get("mcp") or {}
+        if isinstance(mcp_cfg, dict) and not mcp_cfg.get("rest_management", True):
+            return JSONResponse(status_code=403, content={
+                "error": "MCP server management over REST is disabled "
+                         "(mcp.rest_management: false) — define servers in "
+                         "prometheus.yaml under mcp_servers"})
+        identity = getattr(request.state, "device_identity", None)
+        if _api_token and (identity is None or not identity.is_global):
+            return JSONResponse(status_code=401, content={
+                "error": "defining an MCP server starts a process on this "
+                         "host; that requires the global token, not a device "
+                         "token"})
+        return None
+
+    def _mcp_audit_spawn(request: "Request", name: str, definition: dict,
+                         outcome: str) -> None:
+        """Record a REST-defined process launch in the SECURITY trail.
+
+        Before this the only record was an app-log ``logger.info``, so the one
+        surface built to answer "what was allowed to run, and on whose
+        authority" did not know this route existed.
+
+        ⚠ ``env`` VALUES ARE NEVER PASSED HERE, and that is load-bearing rather
+        than tidy. ``env`` is where an MCP server's own API keys live, and the
+        audit trail is read back into model context by ``audit_query``. Sending
+        credentials into that sink would create the leak this record exists to
+        make visible. Only the env NAMES go in — the same public_view stance
+        the GET side takes.
+        """
+        try:
+            from prometheus.permissions.audit import AuditDecision, AuditLogger
+            from prometheus.config.paths import get_data_dir
+
+            identity = getattr(request.state, "device_identity", None)
+            AuditLogger(get_data_dir()).log(
+                tool_name="mcp.rest_define_server",
+                decision=AuditDecision.ALLOW,
+                trust_level=0,
+                reason=f"MCP server {name!r} defined over REST → {outcome}",
+                tool_input={
+                    "name": name,
+                    "command": definition.get("command"),
+                    "args": definition.get("args"),
+                    "cwd": definition.get("cwd")
+                           or definition.get("workingDirectory"),
+                    "url": definition.get("url"),
+                    "env_names": sorted(definition.get("env") or {}),
+                },
+                user_id=getattr(identity, "id", None) or "global-token",
+            )
+        except Exception:  # noqa: BLE001 — an audit sink must not fail the route
+            logger.warning("MCP REST: could not write the security audit row "
+                           "for %r", name, exc_info=True)
+
     async def _mcp_server_card(name: str, definition: dict, source: str,
                                *, probe: bool = False) -> dict:
         from prometheus.mcp.store import McpServerStore
@@ -2060,9 +2141,11 @@ def create_app(
         }
 
     @app.post("/api/mcp/servers")
-    async def post_mcp_server(body: dict):
+    async def post_mcp_server(body: dict, request: Request):
         from prometheus.mcp.store import McpStoreError
 
+        if (err := _mcp_write_allowed(request)) is not None:
+            return err
         name = body.get("name")
         definition = {k: v for k, v in body.items() if k != "name"}
         if not isinstance(name, str) or not name:
@@ -2085,15 +2168,18 @@ def create_app(
                 applies = await _mcp_apply_live(name, definition)
             except _GrammarRefreshError as exc:
                 return _grammar_refresh_failed(exc)
+        _mcp_audit_spawn(request, name, definition, applies)
         card = await _mcp_server_card(
             name, definition, "store", probe=False
         )
         return {"ok": True, "applies": applies, "server": card}
 
     @app.patch("/api/mcp/servers/{name}")
-    async def patch_mcp_server(name: str, body: dict):
+    async def patch_mcp_server(name: str, body: dict, request: Request):
         from prometheus.mcp.store import McpStoreError
 
+        if (err := _mcp_write_allowed(request)) is not None:
+            return err
         if name in _mcp_yaml_servers():
             return JSONResponse(status_code=409, content={
                 "error": f"{name!r} is config-managed (prometheus.yaml) — "
@@ -2123,11 +2209,15 @@ def create_app(
                     runtime._statuses[name] = McpConnectionStatus(
                         name=name, state="disabled",
                     )
+        if merged.get("enabled", True):
+            _mcp_audit_spawn(request, name, merged, applies)
         card = await _mcp_server_card(name, merged, "store", probe=False)
         return {"ok": True, "applies": applies, "server": card}
 
     @app.delete("/api/mcp/servers/{name}")
-    async def delete_mcp_server(name: str):
+    async def delete_mcp_server(name: str, request: Request):
+        if (err := _mcp_write_allowed(request)) is not None:
+            return err
         if name in _mcp_yaml_servers():
             return JSONResponse(status_code=409, content={
                 "error": f"{name!r} is config-managed (prometheus.yaml) — "
