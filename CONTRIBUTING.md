@@ -96,6 +96,20 @@ Check the GitHub issues or the roadmap in README.md. Good first contributions:
 5. Commit with a clear message
 6. Push and open a PR
 
+## No real infrastructure identifiers in persisted content
+
+This repo is **public**. Never put real tailnet/LAN host addresses, chat ids,
+tokens, device ids or account ids into a PR body, a PR comment, a commit
+message, docs, or an agent/scheduled-task prompt. Name hosts (`OAra-mini`) and
+namespaces (`telegram:<operator-chat-id>`) instead, and resolve addresses at
+runtime.
+
+The pre-commit secret hook scans **tracked files only**, so it cannot catch any
+of those surfaces — and GitHub keeps PR-body edit history, so a later redaction
+limits future exposure without erasing it. Range constants that are part of the
+logic (the CGNAT block `100.64.0.0/10`) are exempt. Full rule: `PROMETHEUS.md`
+-> "No real infrastructure identifiers in persisted content".
+
 ## Architecture Decisions
 
 If your contribution changes the architecture (new subsystem, new provider, new gateway), open an issue first to discuss. The guide pages under `docs/guide/` (especially the [feature reference](docs/guide/features.md)) are the reference for the current design.

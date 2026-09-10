@@ -121,6 +121,32 @@ looks the same as one that is merely *behind* until the ff fails.
 - Tool results truncated by tool_result_max in config
 - ADDITIVE ONLY: extend existing files, don't replace them
 
+### No real infrastructure identifiers in persisted content
+The test is **"does it persist?"**, not "is it committed?".
+
+Never write real tailnet/LAN host addresses, Telegram chat ids, tokens, device
+ids or account ids into: PR bodies or PR comments, commit messages, docs,
+scheduled-task prompts (they are stored as `SKILL.md` on disk), audit reports,
+`OAra-Brain/wiki/log.md`, memory files, or scripts under `~/.local/`.
+
+Refer to hosts by NAME (`OAra-mini`, `oara-4090`) and sessions by NAMESPACE
+(`telegram:<operator-chat-id>`). Resolve addresses at runtime from
+`tailscale status` rather than writing one down. When you author a prompt for
+an agent or scheduled task that will WRITE a report, put this rule in that
+prompt too — it persists what it writes.
+
+EXEMPT: range constants that are part of the logic, e.g. the CGNAT block
+`100.64.0.0/10` in `security/url_guard.py` and the `100.64.0.x` literals in
+`tests/test_tailnet_hop_asymmetry.py`. Those are the specification, not an
+address.
+
+WHY THIS IS A WRITTEN RULE RATHER THAN A HOOK: this repo is PUBLIC, and the
+pre-commit secret hook scans **tracked files only** (there is no GHAS). Every
+recurrence so far has been in something the hook structurally cannot see — a PR
+body, a commit message, a task prompt, a file outside the repo. GitHub also
+retains PR-body edit history, so redacting after the fact limits future exposure
+but does not erase it. Get it right the first time.
+
 ## Security Philosophy
 
 Prometheus is designed for sovereign single-operator deployment on
