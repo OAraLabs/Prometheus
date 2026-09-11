@@ -288,6 +288,34 @@ class OpenAICompatProvider(ModelProvider):
             async with client.stream(
                 "POST", url, json=payload, headers=headers
             ) as response:
+                if response.status_code >= 400:
+                    # READ THE BODY BEFORE RAISING. On a streamed response the
+                    # content has not been fetched, so `response.text` raises
+                    # httpx.ResponseNotRead — and `classify_turn_error` catches
+                    # that and degrades to an empty body, by design.
+                    #
+                    # The body is the only reliable billing signal. Providers
+                    # disagree on the status (Anthropic 400, others 402/429),
+                    # so `_BILLING_MARKERS` looks for "insufficient_quota" and
+                    # friends in the TEXT. Without it a 429 can only be read as
+                    # a rate limit:
+                    #
+                    #   exhausted quota, body unread -> kind=rate_limit
+                    #                                   is_terminal=False
+                    #                                -> retried with backoff,
+                    #                                   fallback NEVER fires
+                    #
+                    # Same call with the body read -> kind=billing, terminal,
+                    # and the turn degrades to the fallback model as intended.
+                    #
+                    # `anthropic.py` already does exactly this (`await
+                    # response.aread()` before raise_for_status); this path was
+                    # the one that did not.
+                    await response.aread()
+                    log.error(
+                        "HTTP %d from %s: %s",
+                        response.status_code, url, response.text[:500],
+                    )
                 response.raise_for_status()
 
                 async for line in response.aiter_lines():
