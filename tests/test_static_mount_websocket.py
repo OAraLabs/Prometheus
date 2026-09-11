@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import pytest
 
+pytest.importorskip("fastapi")
+
 from prometheus.web.server import _HttpOnlyStaticFiles
 
 

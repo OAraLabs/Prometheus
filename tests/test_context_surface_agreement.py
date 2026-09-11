@@ -27,6 +27,8 @@ import re
 from dataclasses import dataclass, field
 
 import pytest
+
+pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from prometheus.gateway.commands import cmd_context

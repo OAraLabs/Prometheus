@@ -7,6 +7,8 @@ profiles flow, and the no-store path reproduces the old dead behavior.
 from __future__ import annotations
 
 import pytest
+
+pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from prometheus.config.profiles import get_profile_store

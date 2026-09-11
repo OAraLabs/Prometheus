@@ -26,6 +26,8 @@ import argparse
 import os
 
 import pytest
+
+pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from prometheus.cli.token import run_token_command

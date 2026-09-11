@@ -52,6 +52,23 @@ the same one the daemon runs on, which has those packages:
 python3 -m pytest tests/test_api_cron.py tests/test_boot_sha_staleness.py -v
 ```
 
+> **This is enforced, because for eleven modules it was not true.** Until
+> 2026-09-10 those files imported `fastapi` at module scope with no
+> `importorskip`, so they did not skip — they raised `ModuleNotFoundError`
+> during **collection**, and pytest aborts the entire run on a collection
+> error. `uv run pytest tests/` therefore executed **zero tests** and exited 2,
+> while this section described it as skipping cleanly. Measured on `main` at
+> `7a48060`: `66 skipped, 11 errors`, `Interrupted: 11 errors during
+> collection` — no test ran at all.
+>
+> The `importorskip` calls were added so the code matches the design this
+> section describes, and
+> `tests/test_suite_collects_without_the_web_extra.py` now fails if a test
+> module imports `fastapi` (or anything under `prometheus.web`) without one.
+>
+> Note what that means for coverage: a suite that "passes" under `uv` has not
+> exercised any of this. The paragraph below is the important half.
+
 So a change under `web/` (FastAPI routes) or `gateway/` WS auth is **not** fully
 exercised by `uv run pytest` alone — run the relevant suite under `python3` too.
 

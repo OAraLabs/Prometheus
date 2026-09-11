@@ -39,6 +39,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 REPO = Path(__file__).resolve().parent.parent

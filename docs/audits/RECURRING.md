@@ -100,10 +100,15 @@ pipeline — both verified when this section was written. This is an **ad-hoc
 command** trap. It bites in interactive sessions and agent tool calls, where the
 pipeline is typed once, the number is believed, and nothing reviews it.
 
-**How:** `set -o pipefail`, or read `${PIPESTATUS[0]}` explicitly. Never accept
-a status printed after a pipe without one of the two. When the result decides
-whether to ship, print the status *and* the evidence: a bare `EXIT=0` is not
-evidence that the thing you ran succeeded.
+**How:** `set -o pipefail`, then read `$?`. Never accept a status printed after
+a pipe without it. When the result decides whether to ship, print the status
+*and* the evidence: a bare `EXIT=0` is not evidence that the thing you ran
+succeeded.
+
+> **This rule used to read "or read `${PIPESTATUS[0]}` explicitly."** That half
+> was wrong in both shells it was aimed at — corrected 2026-09-10, see **§4d**.
+> `set -o pipefail` + `$?` is the portable read, and the only one recommended
+> here.
 
 ### Related shapes — the report is not about what you think
 
@@ -120,6 +125,39 @@ Same family, different mechanism. Each was measured, not recalled.
   Remedies: match on the pid file or `systemctl --user is-active` instead; or
   keep the pattern out of the searching command line (`pgrep -f "[p]attern"` is
   the old trick); or compare against a known PID rather than a string.
+
+* **A secret scanner reported "All clean" for a scan it never performed.**
+  `.githooks/pre-commit` ran every pattern through `grep -nP`, and the call was
+  `... | grep -nP "$pattern" || true`. BSD grep — the grep git invokes on macOS —
+  has no `-P`:
+
+  ```
+  /usr/bin/grep -qP abc  : grep: invalid option -- P
+                           exit 2
+  ```
+
+  `|| true` collapses grep's **three** outcomes into two: exit 1 *no matches*
+  and exit 2 *the scanner did not run* both produced an empty result. All nine
+  patterns evaluated nothing, and the hook printed `All clean. No sensitive
+  data found in staged files.` and exited 0 with a real match staged. Measured
+  by live probe before the fix: **9 invalid-option errors, 0 blocks, exit 0.**
+
+  This is the §3 shape with the stakes inverted — not a test suite whose pass
+  you over-trust, but the repo's only secret scanner, and the mechanism behind
+  the standing no-infrastructure-identifiers rule. It reported *clean*, which
+  is stronger than reporting *success*: clean is a claim about the data.
+
+  **The flag was not the defect; the failure mode was.** Swapping `-P` for `-E`
+  works today and leaves the next missing flag to read as "no matches" again.
+  Fixed in both directions: patterns are POSIX ERE (both greps have it), and
+  grep's exit code is now a three-way contract where `>=2` **refuses the
+  commit**, naming the pattern that could not be evaluated. A scanner that
+  cannot run must fail closed — `unknown` and `zero` must never render the
+  same. Guarded by `tests/test_precommit_fails_closed.py`, which replays a
+  grep that rejects the flag, a grep that is absent, and — the one an
+  exit-code check alone cannot catch — a grep that truthfully-looking returns
+  exit 1 for everything. That last one is why the hook now self-tests its
+  engine against a positive control before trusting any clean.
 
 * **`git push` during a conflicted rebase succeeds, and pushes the wrong
   commit.** Measured on git 2.43 with a deliberately conflicted rebase:
@@ -147,7 +185,9 @@ it is a memorial that reads like a control, and it occupies the slot where
 the real one belongs.
 
 **Born from three, recorded together on 2026-09-10** because they were only
-recognisable as one shape once they were side by side.
+recognisable as one shape once they were side by side. **4d was added the same
+day**, from the fourth: a rule in *this file* that named a mechanism the shell
+it was written for does not have.
 
 ### 4a. The rule named the wrong mechanism
 
@@ -244,18 +284,70 @@ the checkout it points at has 62 dirty files, and pulling a path entry out
 from under that is how this gets a second instance instead of a fix. The
 reporting was fixed first; the removal is a recommendation.
 
-### The rule the three share
+### 4d. The rule named a mechanism the shell does not have
+
+**§3's own remedy** said: "`set -o pipefail`, **or read `${PIPESTATUS[0]}`
+explicitly**." That rule was written for, and applied in, sessions whose shell
+is **zsh**. `PIPESTATUS` is a bash-ism. zsh spells it `$pipestatus` and indexes
+from 1, so in zsh `${PIPESTATUS[0]}` is not wrong — it is **empty**.
+
+Measured 2026-09-10, `(exit 7) | cat` under `set -o pipefail`:
+
+```
+zsh   $?                 : 7
+zsh   ${PIPESTATUS[0]}   : (empty)
+zsh   ${pipestatus[1]}   : 7
+bash  $?                 : 7
+bash  ${PIPESTATUS[0]}   : 7    -- but only when read IMMEDIATELY
+bash  ${PIPESTATUS[0]}   : 0    -- after ONE intervening command
+```
+
+Two failures, and the second is worse than the first.
+
+**In zsh the recommended read expands to nothing.** `echo "rc=${PIPESTATUS[0]}"`
+prints `rc=` — not a wrong number, no number. Piped into a comparison it is an
+empty string, and `[ "" -eq 0 ]` is a syntax error, not a verdict. Followed,
+the rule produces a verdict-shaped blank.
+
+**In bash it is right only for one command.** `PIPESTATUS` is rebuilt by the
+*next* command — including a bare assignment. `q=$?; echo "${PIPESTATUS[0]}"`
+reports **0** for a pipeline that failed with 7, because the assignment
+overwrote it. The natural way to write it is the broken way.
+
+So the rule against trusting a status after a pipe named, as its alternative,
+a mechanism that is absent in one shell and silently stale in the other. It is
+§4a exactly: following it perfectly would not have helped, and it occupied the
+slot where the working remedy belongs.
+
+**How:** `set -o pipefail` and read `$?`. It is correct in both shells, it
+survives an intervening command, and it is what §3 now says. If you genuinely
+need a *per-stage* status, spell the shell's own name for it (`$pipestatus` in
+zsh, `$PIPESTATUS` in bash) and read it on the very next line — but prefer
+restructuring so you never need it: capture into a variable, then test.
+
+---
+
+### The rule the four share
 
 **Verify that the named mechanism was actually operating.** In 4a the
 setting was one API call away and nobody asked, so a guess became a standing
 rule — wrong in the direction that reads as diligence. In 4b the check ran
 correctly and answered a question adjacent to the one that mattered. In 4c
-the gate was never asked what it was measuring.
+the gate was never asked what it was measuring. In 4d the mechanism was
+never run in the shell it was prescribed for — one `(exit 7) | cat` would
+have shown it expanding to nothing.
 
 A control you have not seen fail is not yet known to be a control. Prefer
 the version that can produce a *distinguishable* wrong answer — a tag with
 an `unknown` state, a check whose subject is named — over one whose only
 output is silence.
+
+**4d is the sharpest form of it, because the rule was in this file.** A
+document that collects controls which named the wrong thing contained one.
+Nothing about writing the shape down inoculates the next rule against it;
+the only thing that does is running the named mechanism once and reading
+what it returns. §3's remedy is now one mechanism, not two, because the
+second was never measured.
 
 **Not found in this repository.** The 4a rule is not in `docs/`,
 `PROMETHEUS.md` or any tracked `*.md` — searched when this section was
