@@ -48,6 +48,62 @@ _MAX_DELAY = 30.0
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 529}
 
 
+# Anthropic's documented mid-stream error types, mapped to the HTTP status the
+# same condition carries when it arrives as a response code instead.
+#
+# The mapping exists so ONE policy governs both shapes. `_RETRYABLE_STATUS_CODES`
+# above already says which conditions are worth another attempt; without a
+# status an `overloaded_error` delivered mid-stream would be classified
+# differently from the identical overload delivered as a 529, purely because of
+# where in the response it appeared.
+#
+# An UNRECOGNISED error type maps to None, which `retry._status_of` reports as
+# "no status" and no retry set contains — so a new error type surfaces and is
+# NOT retried. That is the safe direction: retrying something nobody has
+# classified is how a hard failure becomes four hard failures.
+_STREAM_ERROR_STATUS: dict[str, int] = {
+    "invalid_request_error": 400,
+    "authentication_error": 401,
+    "permission_error": 403,
+    "not_found_error": 404,
+    "request_too_large": 413,
+    "rate_limit_error": 429,
+    "api_error": 500,
+    "overloaded_error": 529,
+}
+
+
+class AnthropicStreamError(RuntimeError):
+    """An `error` event on a stream whose response already returned 200.
+
+    WHY THIS EXISTS. The Messages API can report a failure PART-WAY THROUGH a
+    successful response: the HTTP status is 200, headers are sent, some deltas
+    arrive, and then `{"type": "error", ...}` ends the stream.
+
+    The parser's event chain had no branch for it, so the event fell through
+    and the loop simply ended. Execution continued to the bottom of the method,
+    which unconditionally yields `ApiMessageCompleteEvent` — reporting a
+    COMPLETE message built from whatever partial content had arrived. Measured
+    on an `overloaded_error` after one text delta: no exception, and a
+    complete-message event whose text was EMPTY, because the content block had
+    never been closed. A caller could not tell that from a model that chose to
+    say nothing.
+
+    `status_code` is read by `retry._status_of`, so the shared retry loop
+    classifies this exactly as it classifies the same condition arriving as an
+    HTTP status. Note that `stream_with_retry` never retries once output has
+    been yielded (#293), so a mid-stream error after visible text propagates
+    rather than replaying a contradictory second answer over the first.
+    """
+
+    def __init__(self, error_type: str, message: str) -> None:
+        self.error_type = error_type
+        self.status_code = _STREAM_ERROR_STATUS.get(error_type)
+        super().__init__(
+            f"Anthropic stream error after HTTP 200: {error_type}: {message}"
+        )
+
+
 def _native_tool_choice(tool_choice: object) -> dict:
     """Map the engine's per-call tool_choice to Anthropic's native param.
 
@@ -292,6 +348,23 @@ class AnthropicProvider(ModelProvider):
                         stop_reason = delta.get("stop_reason") or stop_reason
                         usage = event.get("usage", {})
                         output_tokens = usage.get("output_tokens", output_tokens)
+
+                    elif etype == "error":
+                        # A FAILURE ON AN ALREADY-200 RESPONSE. This had no
+                        # branch, so it fell through the chain, the loop ended,
+                        # and the code below yielded ApiMessageCompleteEvent —
+                        # announcing a complete message built from whatever
+                        # partial content had arrived. An overload became a
+                        # short answer, or an empty one.
+                        err = event.get("error") or {}
+                        err_type = str(err.get("type") or "unknown_error")
+                        err_msg = str(err.get("message") or "")
+                        log.error(
+                            "Anthropic stream error after HTTP 200: %s: %s "
+                            "(%d content block(s) received before the failure)",
+                            err_type, err_msg, len(content_blocks),
+                        )
+                        raise AnthropicStreamError(err_type, err_msg)
 
         # Build final ConversationMessage from collected blocks
         msg_content: list[Any] = []
