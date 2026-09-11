@@ -2805,6 +2805,33 @@ class TelegramAdapter(BasePlatformAdapter):
 
         caption = update.message.caption or ""
 
+        # NOT CACHED — degrade, do not block. `cache_image_from_bytes` returns
+        # None below the free-disk floor or on a write error; it used to
+        # fabricate a path to a file that was never written, and the vision
+        # call below then failed on a missing file for a reason that looked
+        # unrelated. The message still reaches the model, which is the
+        # documented fail-open contract — it just carries no picture.
+        if cached_path is None:
+            logger.warning(
+                "photo from chat %s was not cached (low disk?) — forwarding "
+                "the message without vision analysis",
+                update.effective_chat.id,
+            )
+            note = "[The user sent a photo; it could not be stored for analysis]"
+            await self.on_message(MessageEvent(
+                chat_id=update.effective_chat.id,
+                user_id=update.effective_user.id if update.effective_user else 0,
+                text=f"{note}\n{caption}".strip(),
+                message_id=update.message.message_id,
+                platform=Platform.TELEGRAM,
+                message_type=MessageType.PHOTO,
+                username=update.effective_user.username if update.effective_user else None,
+                media_urls=[],
+                media_types=[],
+                caption=caption or None,
+            ))
+            return
+
         # Try vision analysis to describe the image
         description = await self._describe_image(cached_path)
         if description:
@@ -2861,10 +2888,24 @@ class TelegramAdapter(BasePlatformAdapter):
             await self.send(update.effective_chat.id, "Failed to download voice memo.")
             return
 
-        # Transcribe via Whisper
-        transcription = await self._transcribe_audio(cached_path)
-        if not transcription:
-            transcription = "[Voice memo received but transcription unavailable]"
+        # Transcribe via Whisper. A voice memo that could not be cached has no
+        # file to transcribe — say so and keep the turn, rather than passing a
+        # fabricated path to Whisper and reporting the resulting failure as
+        # "transcription unavailable", which reads like a model problem.
+        if cached_path is None:
+            logger.warning(
+                "voice memo from chat %s was not cached (low disk?) — "
+                "forwarding the message without transcription",
+                update.effective_chat.id,
+            )
+            transcription = (
+                "[Voice memo received; it could not be stored, so it was not "
+                "transcribed]"
+            )
+        else:
+            transcription = await self._transcribe_audio(cached_path)
+            if not transcription:
+                transcription = "[Voice memo received but transcription unavailable]"
 
         event = MessageEvent(
             chat_id=update.effective_chat.id,
@@ -2874,8 +2915,11 @@ class TelegramAdapter(BasePlatformAdapter):
             platform=Platform.TELEGRAM,
             message_type=MessageType.VOICE,
             username=update.effective_user.username if update.effective_user else None,
-            media_urls=[cached_path],
-            media_types=["audio/ogg"],
+            # No url for something that was never written. A list containing
+            # None is worse than an empty one: every consumer would have to
+            # special-case it, and none of them do.
+            media_urls=[cached_path] if cached_path else [],
+            media_types=["audio/ogg"] if cached_path else [],
         )
         await self.on_message(event)
 
@@ -2944,7 +2988,18 @@ class TelegramAdapter(BasePlatformAdapter):
 
         # Try to extract text for inline injection (shared extractor handles
         # plain text, PDF, DOCX, XLSX — same logic as Beacon web uploads)
-        extracted = extract_text(cached_path)
+        # A document that was not cached has no file to extract from. The
+        # caption (if any) still reaches the model; the content does not, and
+        # the text says which — previously `extract_text` was handed a path to
+        # nothing and returned empty, so a low-disk condition and an
+        # unextractable file were indistinguishable.
+        extracted = extract_text(cached_path) if cached_path is not None else ""
+        if cached_path is None:
+            logger.warning(
+                "document %r from chat %s was not cached (low disk?) — "
+                "forwarding without extracted content",
+                original_name, update.effective_chat.id,
+            )
         if extracted:
             # Truncate if extracted text would overflow the context window
             extracted = self._truncate_for_context(extracted)
@@ -2962,8 +3017,8 @@ class TelegramAdapter(BasePlatformAdapter):
             platform=Platform.TELEGRAM,
             message_type=MessageType.DOCUMENT,
             username=update.effective_user.username if update.effective_user else None,
-            media_urls=[cached_path],
-            media_types=[mime],
+            media_urls=[cached_path] if cached_path else [],
+            media_types=[mime] if cached_path else [],
             caption=caption or None,
         )
         await self.on_message(event)
@@ -3020,7 +3075,14 @@ class TelegramAdapter(BasePlatformAdapter):
                     if sticker_bytes is None:
                         return
                     cached_path = cache_image_from_bytes(bytes(sticker_bytes), ext=".webp")
-                    description = await self._describe_image(cached_path)
+                    if cached_path is not None:
+                        description = await self._describe_image(cached_path)
+                    else:
+                        logger.warning(
+                            "sticker from chat %s was not cached (low disk?) "
+                            "— forwarding without a description",
+                            update.effective_chat.id,
+                        )
                 except Exception as exc:
                     logger.warning("Failed to analyze sticker: %s", exc)
 

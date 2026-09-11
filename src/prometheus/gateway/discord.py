@@ -776,6 +776,21 @@ class DiscordAdapter(BasePlatformAdapter):
                 if data is None:
                     continue
                 cached = cache_image_from_bytes(data, ext=ext or ".jpg")
+                if cached is None:
+                    # Not cached (low disk / write error). Degrade: the
+                    # attachment is announced, the message still goes
+                    # through. `cache_*_from_bytes` used to fabricate a
+                    # path here and the analysis call below failed on a
+                    # file that was never written.
+                    logger.warning(
+                        "attachment %s was not cached — forwarding without analysis",
+                        filename,
+                    )
+                    parts.append(
+                        f"[The user sent an image: {filename}; it could "
+                        f"not be stored for analysis]"
+                    )
+                    continue
                 description = await media_services.describe_image(
                     cached, provider=self._get_provider(),
                 )
@@ -793,6 +808,21 @@ class DiscordAdapter(BasePlatformAdapter):
                 if data is None:
                     continue
                 cached = cache_audio_from_bytes(data, ext=ext or ".ogg")
+                if cached is None:
+                    # Not cached (low disk / write error). Degrade: the
+                    # attachment is announced, the message still goes
+                    # through. `cache_*_from_bytes` used to fabricate a
+                    # path here and the transcription call below failed on a
+                    # file that was never written.
+                    logger.warning(
+                        "attachment %s was not cached — forwarding without transcription",
+                        filename,
+                    )
+                    parts.append(
+                        f"[The user sent a voice message: {filename}; it could "
+                        f"not be stored for transcription]"
+                    )
+                    continue
                 transcription = await media_services.transcribe_audio(cached)
                 parts.append(
                     transcription
@@ -811,6 +841,21 @@ class DiscordAdapter(BasePlatformAdapter):
                 if data is None:
                     continue
                 cached = cache_document_from_bytes(data, filename)
+                if cached is None:
+                    # Not cached (low disk / write error). Degrade: the
+                    # attachment is announced, the message still goes
+                    # through. `cache_*_from_bytes` used to fabricate a
+                    # path here and the extraction call below failed on a
+                    # file that was never written.
+                    logger.warning(
+                        "attachment %s was not cached — forwarding without extraction",
+                        filename,
+                    )
+                    parts.append(
+                        f"[The user sent a document: {filename}; it could "
+                        f"not be stored for extraction]"
+                    )
+                    continue
                 extracted = extract_text(cached)
                 if extracted:
                     extracted = media_services.truncate_for_context(

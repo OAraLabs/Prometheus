@@ -183,16 +183,41 @@ def _cache_write(path: Path, data: bytes) -> str | None:
     return str(path)
 
 
-def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str:
+# ---------------------------------------------------------------------------
+# THE RETURN IS ``str | None``. None MEANS "NOT CACHED", AND CALLERS MUST DEGRADE.
+#
+# These four wrappers used to end ``return written or str(path)``. ``_cache_write``
+# returns None when it declines or fails — below the free-disk floor, or on any
+# write error — and the ``or`` then fabricated the path the file WOULD have had.
+# Callers received a real-looking absolute path to a file that was never created:
+#
+#     photo     returned: /.../img_8ec90e18bb12.jpg          exists: False
+#     voice     returned: /.../audio_47eeb5854566.ogg        exists: False
+#     document  returned: /.../doc_1f0287453a55_report.pdf   exists: False
+#
+# ``_cache_write``'s fail-open is CORRECT and unchanged: caching is a
+# convenience, and its docstring says the caller must still process the media.
+# The defect was these wrappers turning "not cached" into "here is where it is",
+# which is not fail-open — it is a false statement, and the message still lost
+# its content, just silently and one layer further on.
+#
+# So: None, not a raise. Raising would make every surface fail CLOSED — the
+# Telegram handlers already catch broadly and would start blocking the message
+# on low disk, which is the opposite of the stated contract. Returning None
+# keeps the message flowing and makes the absence something the caller has to
+# look at.
+# ---------------------------------------------------------------------------
+
+def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str | None:
     """Write image bytes to cache, return absolute path."""
     name = f"img_{uuid4().hex[:12]}{ext}"
     path = image_cache_dir() / name
     written = _cache_write(path, data)
     logger.debug("Cached image: %s (%d bytes)", written or "<not cached>", len(data))
-    return written or str(path)
+    return written
 
 
-def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
+def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str | None:
     """Write video bytes to cache, return absolute path.
 
     CLOUD EXPANSION (2026-07): sink for the video_generate tool — mirrors
@@ -203,26 +228,26 @@ def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
     path = video_cache_dir() / name
     written = _cache_write(path, data)
     logger.debug("Cached video: %s (%d bytes)", written or "<not cached>", len(data))
-    return written or str(path)
+    return written
 
 
-def cache_audio_from_bytes(data: bytes, ext: str = ".ogg") -> str:
+def cache_audio_from_bytes(data: bytes, ext: str = ".ogg") -> str | None:
     """Write audio bytes to cache, return absolute path."""
     name = f"audio_{uuid4().hex[:12]}{ext}"
     path = audio_cache_dir() / name
     written = _cache_write(path, data)
     logger.debug("Cached audio: %s (%d bytes)", written or "<not cached>", len(data))
-    return written or str(path)
+    return written
 
 
-def cache_document_from_bytes(data: bytes, original_filename: str) -> str:
+def cache_document_from_bytes(data: bytes, original_filename: str) -> str | None:
     """Write document bytes to cache, return absolute path."""
     safe_name = original_filename.replace("/", "_").replace("\\", "_")
     name = f"doc_{uuid4().hex[:12]}_{safe_name}"
     path = document_cache_dir() / name
     written = _cache_write(path, data)
     logger.debug("Cached document: %s (%d bytes)", written or "<not cached>", len(data))
-    return written or str(path)
+    return written
 
 
 def extract_text_from_document(path: str) -> str | None:
