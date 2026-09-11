@@ -6,6 +6,12 @@ Compares current period against baseline to flag anomalies. No LLM needed.
 
 from __future__ import annotations
 
+from prometheus.telemetry.latency import (
+    LATENCY_MEASURED,
+    LATENCY_UNKNOWN,
+    render_latency,
+)
+
 import logging
 import time
 from dataclasses import dataclass, field
@@ -114,10 +120,25 @@ class TelemetryDigest:
                     baseline_value=b_retry,
                 ))
 
-            # Latency increase > 50%
-            c_lat = ct.get("avg_latency_ms", 0.0)
-            b_lat = bt.get("avg_latency_ms", 0.0)
-            if b_lat > 0 and c_lat > 0 and (c_lat - b_lat) / b_lat > 0.50:
+            # Latency increase > 50%.
+            #
+            # Only compared when BOTH sides were actually measured. Comparing a
+            # measured window against one whose average includes never-ran rows
+            # (or pre-v2 rows of unknown provenance) manufactures a spike out of
+            # a provenance difference — which is the defect this change exists
+            # to stop, in the one place that turns a number into an alert.
+            c_lat = ct.get("avg_latency_ms")
+            b_lat = bt.get("avg_latency_ms")
+            both_measured = (
+                ct.get("avg_latency_source") == LATENCY_MEASURED
+                and bt.get("avg_latency_source") == LATENCY_MEASURED
+            )
+            if (
+                both_measured
+                and b_lat and c_lat
+                and b_lat > 0 and c_lat > 0
+                and (c_lat - b_lat) / b_lat > 0.50
+            ):
                 anomalies.append(DigestAnomaly(
                     tool_name=tool_name,
                     metric="latency_spike",
@@ -137,6 +158,37 @@ class TelemetryDigest:
         lines = [
             f"Telemetry digest: {total} calls, {rate:.1%} overall success rate",
         ]
+
+        # PER-TOOL LATENCY, RENDERED WITH ITS PROVENANCE.
+        #
+        # `avg_latency_ms` used to be a bare float, and an unmeasured call was
+        # stored as 0.0, so a tool with nothing but permission denials read as
+        # "0.0ms" — "took no time" — and a tool with a mix had its average
+        # dragged toward zero by rows that never executed.
+        #
+        # The value now arrives with a source (see telemetry/latency.py) and
+        # this renders the source rather than averaging across it. The three
+        # cases MUST NOT read alike:
+        #
+        #     measured    12.3ms
+        #     unmeasured  not measured
+        #     unknown     12.3ms (unverified: includes rows written before schema v2)
+        #
+        # `unknown` is rows predating schema v2, where a stored 0.0 cannot be
+        # told from the old NOT NULL DEFAULT. Those rows are deliberately not
+        # backfilled, so the only honest thing left is to say so here.
+        tools = report.get("tools") or {}
+        if tools:
+            lines.append("  Latency by tool:")
+            for tool_name in sorted(tools):
+                td = tools[tool_name] or {}
+                lines.append(
+                    f"    {tool_name}: "
+                    + render_latency(
+                        td.get("avg_latency_ms"),
+                        td.get("avg_latency_source", LATENCY_UNKNOWN),
+                    )
+                )
         if anomalies:
             lines.append(f"  {len(anomalies)} anomaly(ies) detected:")
             for a in anomalies:

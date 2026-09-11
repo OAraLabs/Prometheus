@@ -162,6 +162,12 @@ class ToolDashboard:
         A tool with NO measured rows is OMITTED rather than reported as 0.0 — "we never timed
         this" is not "this is instant", which is the whole point of the change.
         """
+        # SCHEMA v2: `latency_ms` is nullable and an unmeasured call is stored
+        # as NULL, so AVG skips it on its own. `NULLIF(..., 0)` is KEPT for the
+        # rows written BEFORE v2, where an unmeasured call is a literal 0.0 and
+        # nothing else distinguishes it. That is the rotting inference this
+        # change exists to bound — it is not backfilled away, and it is not
+        # relied on for v2 rows either. It applies only to history.
         rows = self._conn.execute(
             f"""
             SELECT tool_name, AVG(NULLIF(latency_ms, 0)) AS avg_lat
