@@ -275,6 +275,32 @@ security:
   # outside your working area asks first. For anything that must never be
   # written, use denied_paths below — that one is a refusal.
   workspace_root: "~/.prometheus/workspace"
+  # Which interface the `dashboard` TOOL binds its HTTP server to.
+  #
+  # (Not the Beacon dashboard — that is `web:` further down. This is the
+  # agent-callable `dashboard` tool, which serves HTML the MODEL wrote.)
+  #
+  # ⚠ THIS SHIPPED AS "0.0.0.0" IN CODE, WITH NO KEY AND NO WAY TO NARROW IT.
+  # The tool bound every interface, on a port the model chose, with no
+  # authentication and no config gate, and it is registered unconditionally.
+  # One tool call published arbitrary model-authored markup to the LAN and the
+  # tailnet.
+  #
+  # Loopback is the default because the MODEL must not choose the interface.
+  # The OPERATOR choosing to expose it is legitimate — the tool's own
+  # description advertises reaching it over Tailscale, and that use is real.
+  # So widen it here, deliberately, rather than having it widened for you:
+  #
+  #   "127.0.0.1"   this machine only (default)
+  #   "100.x.y.z"   a specific tailnet address — narrowest way to get the
+  #                 documented Tailscale use back
+  #   "0.0.0.0"     every interface, the old behaviour
+  #
+  # ⚠ THE SERVED HTML HAS NO CONTENT-SECURITY-POLICY. The bundled UI got one
+  # in #425; this is the second HTML surface and it did not. Widening this key
+  # puts model-authored markup, with no CSP, in front of whoever can reach the
+  # address. That is a separate piece of work, not a reason this key is safe.
+  dashboard_tool_bind_host: "127.0.0.1"
   denied_commands:
     - "rm -rf /"
     - "rm -rf ~"

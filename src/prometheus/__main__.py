@@ -236,8 +236,13 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
         DownloadFileTool(),
         MessageTool(),
         TTSTool(),
-        # Visualization
-        DashboardTool(),
+        # Visualization.
+        # The bind host is OPERATOR-chosen, never model-chosen: this tool used
+        # to bind 0.0.0.0 unconditionally and serve model-authored HTML on
+        # every interface. Loopback unless the operator widens it.
+        DashboardTool(
+            bind_host=security_cfg.get("dashboard_tool_bind_host", "127.0.0.1")
+        ),
         NotebookEditTool(),
         # Agent delegation
         AgentTool(),
