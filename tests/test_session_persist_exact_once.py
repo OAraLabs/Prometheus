@@ -179,15 +179,34 @@ def test_clear_resets_watermark():
 
 
 def test_trim_shifts_watermark_with_positions():
+    """The watermark follows the trim, so the next row still persists.
+
+    ⚠ THE EXPECTED turn_index CHANGED FROM 3 TO 5, AND THE OLD NUMBER WAS THE
+    DEFECT. `turn_index` is stamped as `list position + _turn_index_offset`.
+    trim() moved every survivor down without advancing the offset, so "m5"
+    landed on turn_index 3 — an ordinal "m3" had ALREADY written durably. Four
+    store readers ORDER BY that column, and two rows sharing an ordinal makes
+    their order undefined.
+
+    This test's subject is the WATERMARK — that the new row persists instead of
+    being skipped as already-written — and that is unchanged and still asserted
+    below. The index was only ever how the row was located; 5 is now the
+    correct ordinal, because 0-4 are spoken for.
+
+    See tests/test_trim_advances_turn_offset.py for the collision itself.
+    """
     eng = _RecordingEngine()
     s = ChatSession("telegram:trim", lcm_engine=eng)
     for i in range(5):
         s.add_user_message(f"m{i}")          # rows 0-4 persisted
     s.trim(3)                                # keeps m2..m4 at positions 0..2
-    s.add_user_message("m5")                 # lands at position 3
-    assert (3, "user", "m5") in eng.rows
+    s.add_user_message("m5")                 # position 3, durable ordinal 5
+    assert (5, "user", "m5") in eng.rows
     # ...and the new row was not skipped as already-persisted:
     assert sum(1 for _i, _r, c in eng.rows if c == "m5") == 1
+    # ...and it did not re-use an ordinal an earlier row already wrote.
+    indices = [i for i, _r, _c in eng.rows]
+    assert len(indices) == len(set(indices)), f"turn_index re-used: {indices}"
 
 
 def test_rollback_retreats_watermark():

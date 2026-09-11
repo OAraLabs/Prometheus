@@ -644,8 +644,28 @@ class ChatSession:
         """Truncate from the front if history exceeds *max_messages*.
 
         Every surviving message shifts down by ``dropped`` positions, so the
-        persistence bookkeeping shifts with them (turn_index has always been
-        list position; that contract is unchanged).
+        persistence bookkeeping shifts with them — AND the durable numbering
+        shifts the other way by the same amount.
+
+        ⚠ THE OFFSET IS THE HALF THAT WAS MISSING. ``turn_index`` is stamped at
+        persist time as ``list position + _turn_index_offset``. Trimming moves
+        every surviving message DOWN the list, so without advancing the offset
+        the next row re-uses an ordinal a dropped message already wrote:
+
+            60 messages through a 50-message window, before this fix
+              durable rows written : 60
+              distinct turn_index  : 51
+              turn_index 50 written TEN times, for m50 ... m59
+
+        Four store readers ``ORDER BY turn_index``, so two different messages
+        sharing an ordinal makes their order undefined — and the LCM compactor
+        and assembler read exactly that column.
+
+        ``_turn_index_offset`` already existed for the rehydrate case
+        (``restore()`` sets it so rows written after a rehydrate continue the
+        durable numbering instead of colliding with the history the restored
+        tail came from). Trimming is the same situation arrived at from the
+        other direction: list positions move, durable ordinals must not.
         """
         if len(self.messages) > max_messages:
             dropped = len(self.messages) - max_messages
@@ -654,6 +674,10 @@ class ChatSession:
             self._lcm_persisted_ahead = {
                 i - dropped for i in self._lcm_persisted_ahead if i >= dropped
             }
+            # Positions went down by `dropped`; the durable numbering goes up
+            # by `dropped`, so `position + offset` is unchanged for every
+            # surviving message and keeps advancing for every new one.
+            self._turn_index_offset += dropped
 
 
 class SessionManager:
