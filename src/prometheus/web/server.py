@@ -35,6 +35,110 @@ logger = logging.getLogger(__name__)
 _CODING_DIFF_CAP = 256 * 1024
 
 
+def _yaml_block(lines: list[str], lo: int, hi: int, key: str
+                ) -> tuple[int, int, int] | None:
+    """Locate ``key`` at the top level of the window ``lines[lo:hi]``.
+
+    Returns ``(line_index, block_end, indent)`` or None. The block ends at the
+    next non-blank, non-comment line indented at or above ``key``'s own level.
+    """
+    level: int | None = None
+    for i in range(lo, hi):
+        stripped = lines[i].lstrip()
+        if not stripped.strip() or stripped.startswith("#"):
+            continue
+        indent = len(lines[i]) - len(stripped)
+        if level is None:
+            level = indent
+        if indent < level:
+            break
+        if indent > level:
+            continue
+        if stripped.split(":", 1)[0].strip().strip('"\'') != key:
+            continue
+        end = hi
+        for j in range(i + 1, hi):
+            s2 = lines[j].lstrip()
+            if not s2.strip() or s2.startswith("#"):
+                continue
+            if len(lines[j]) - len(s2) <= level:
+                end = j
+                break
+        return i, end, level
+    return None
+
+
+def _set_yaml_scalar_preserving_comments(
+    text: str, path_keys: "list[str]", literal: str
+) -> str:
+    """Return ``text`` with one nested scalar set, everything else byte-identical.
+
+    WHY THIS EXISTS. `PUT /api/tools/deferred` used to persist by round-tripping
+    the whole file::
+
+        on_disk = yaml.safe_load(fh)
+        on_disk[...]["enabled"] = normalized
+        yaml.dump(on_disk, fh, ...)
+
+    `safe_load` returns plain dicts and lists. Comments are not part of that
+    representation, so they are not lost at dump time — they were already gone
+    at load time, and `yaml.dump` faithfully wrote back everything it was given.
+    Measured against the shipped template: **713 comment lines to 0, 61,504
+    bytes to 9,937**, from one toggle of one boolean.
+
+    The template's comments are not decoration. They carry the reasoning for
+    denied_paths being absolute-only, for the workspace_root speed-bump caveat,
+    for which defaults are load-bearing — the things an operator needs at the
+    moment they are editing that line.
+
+    So this edits TEXT, not a parsed document: find the line, replace the
+    scalar, leave every other byte alone. A trailing comment on the edited line
+    is preserved too.
+
+    If the key path does not exist, the missing levels are appended rather than
+    threaded in — appending cannot disturb what is already there, and a config
+    that never mentioned the key has no comments attached to it to preserve.
+    """
+    lines = text.splitlines(keepends=True)
+    lo, hi, indent = 0, len(lines), -1
+
+    for depth, key in enumerate(path_keys):
+        found = _yaml_block(lines, lo, hi, key)
+        if found is None:
+            # Append the remaining path as a fresh block at the end of file.
+            tail = "" if not lines or lines[-1].endswith("\n") else "\n"
+            pad = " " * (indent + 2) if depth else ""
+            block = []
+            for k in path_keys[depth:-1]:
+                block.append(f"{pad}{k}:\n")
+                pad += "  "
+            block.append(f"{pad}{path_keys[-1]}: {literal}\n")
+            return text + tail + "".join(block)
+        i, hi, indent = found
+        if depth == len(path_keys) - 1:
+            line = lines[i]
+            body = line.rstrip("\n")
+            # Keep any trailing comment: `enabled: false   # why` stays annotated.
+            comment = ""
+            in_quote = ""
+            for pos, ch in enumerate(body):
+                if in_quote:
+                    if ch == in_quote:
+                        in_quote = ""
+                elif ch in "\"'":
+                    in_quote = ch
+                elif ch == "#" and pos and body[pos - 1] in " \t":
+                    comment = body[pos:]
+                    break
+            newline = "\n" if line.endswith("\n") else ""
+            spacing = "  " if comment else ""
+            lines[i] = f"{' ' * indent}{key}: {literal}{spacing}{comment}{newline}"
+            return "".join(lines)
+        lo = i + 1
+
+    return text  # unreachable for a non-empty path
+
+
 def _load_coding_report(output_file: "Path") -> dict | None:
     """Parse a coding run's final JSON report from its managed-task output file.
 
@@ -3080,14 +3184,43 @@ def create_app(
 
                 cfg_path = get_config_dir() / "prometheus.yaml"
             if cfg_path.exists():
-                with cfg_path.open(encoding="utf-8") as fh:
-                    on_disk = _yaml.safe_load(fh) or {}
-                on_disk.setdefault("tools", {}).setdefault(
-                    "deferred_loading", {}
-                )["enabled"] = normalized
-                with cfg_path.open("w", encoding="utf-8") as fh:
-                    _yaml.dump(on_disk, fh, default_flow_style=False, sort_keys=False)
-                persisted = True
+                original = cfg_path.read_text(encoding="utf-8")
+                literal = "true" if normalized is True else (
+                    "false" if normalized is False else '"auto"'
+                )
+                updated = _set_yaml_scalar_preserving_comments(
+                    original, ["tools", "deferred_loading", "enabled"], literal
+                )
+
+                # VERIFY BEFORE WRITING. A text edit can be wrong in ways a
+                # dict assignment cannot, so the result must re-parse to the
+                # value we asked for, and must not have lost a comment line. If
+                # either check fails the file is left exactly as it was and the
+                # response reports persisted=False — the in-memory update above
+                # already governs the next run, so a refused write costs the
+                # durability of the choice and nothing else.
+                reparsed = _yaml.safe_load(updated) or {}
+                got = (
+                    reparsed.get("tools", {})
+                    .get("deferred_loading", {})
+                    .get("enabled", "<<missing>>")
+                )
+                comments_before = sum(
+                    1 for ln in original.splitlines() if ln.lstrip().startswith("#")
+                )
+                comments_after = sum(
+                    1 for ln in updated.splitlines() if ln.lstrip().startswith("#")
+                )
+                if got == normalized and comments_after == comments_before:
+                    cfg_path.write_text(updated, encoding="utf-8")
+                    persisted = True
+                else:
+                    logger.warning(
+                        "Refusing to persist tools.deferred_loading.enabled to "
+                        "%s: surgical edit did not verify (value=%r expected %r, "
+                        "comments %d -> %d). File left unchanged.",
+                        cfg_path, got, normalized, comments_before, comments_after,
+                    )
         except Exception:
             logger.warning("deferred-loading toggle: config persist failed", exc_info=True)
 
