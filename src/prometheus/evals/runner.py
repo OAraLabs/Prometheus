@@ -50,6 +50,9 @@ class EvalResult:
     tool_trace: list[dict[str, Any]] = field(default_factory=list)
     metrics: list[MetricScore] = field(default_factory=list)
     error: str | None = None
+    # Metrics whose judge call raised. NOT the same as a metric that scored
+    # zero: one says the model did badly, the other says we do not know.
+    unavailable_metrics: list[str] = field(default_factory=list)
     failure_source: str = "pass"       # "pass", "model", "harness", "unclear"
     failure_category: str = "none"     # e.g. "model:wrong_tool", "harness:tool_crash"
     failure_detail: str = ""
@@ -96,9 +99,15 @@ class EvalRunner:
                 )
 
                 # Run metrics
-                metric_scores = await self._evaluate_metrics(
+                metric_scores, unavailable = await self._evaluate_metrics(
                     task, result.text, tool_trace
                 )
+                if unavailable:
+                    log.error(
+                        "Task %s: %d metric(s) could not be evaluated (%s) — "
+                        "recording HARNESS failure, NOT a pass",
+                        task.id, len(unavailable), ", ".join(unavailable),
+                    )
 
                 # Classify failure source
                 score_map = {m.metric_name: m.score for m in metric_scores}
@@ -109,6 +118,7 @@ class EvalRunner:
                     agent_output=result.text,
                     error=None,
                     metric_scores=score_map,
+                    unavailable_metrics=unavailable,
                 )
 
                 return EvalResult(
@@ -120,6 +130,7 @@ class EvalRunner:
                     latency_ms=round(latency_ms, 1),
                     tool_trace=tool_trace,
                     metrics=metric_scores,
+                    unavailable_metrics=unavailable,
                     failure_source=classification.source.value,
                     failure_category=classification.category.value,
                     failure_detail=classification.detail,
@@ -156,8 +167,14 @@ class EvalRunner:
         task: GoldenTask,
         agent_output: str,
         tool_trace: list[dict[str, Any]],
-    ) -> list[MetricScore]:
-        """Run all three metrics against a completed task."""
+    ) -> tuple[list[MetricScore], list[str]]:
+        """Run all three metrics. Returns (scores, names that could not run).
+
+        A metric whose judge call raises is NAMED in the second list rather
+        than silently omitted from the first. Omitting it made a judge outage
+        indistinguishable from a clean sweep — see classify_failure.
+        """
+        unavailable: list[str] = []
         from prometheus.evals.metrics import (
             TaskCompletionMetric,
             ToolUsageMetric,
@@ -192,6 +209,7 @@ class EvalRunner:
             )
         except Exception as exc:
             log.warning("ToolUsageMetric failed: %s", exc)
+            unavailable.append("Tool Usage")
 
         # TaskCompletionMetric — LLM judge
         try:
@@ -210,6 +228,7 @@ class EvalRunner:
             )
         except Exception as exc:
             log.warning("TaskCompletionMetric failed: %s", exc)
+            unavailable.append("Task Completion")
 
         # NoHallucinationMetric — LLM judge
         try:
@@ -228,8 +247,9 @@ class EvalRunner:
             )
         except Exception as exc:
             log.warning("NoHallucinationMetric failed: %s", exc)
+            unavailable.append("No Hallucination")
 
-        return scores
+        return scores, unavailable
 
     async def run_all(
         self,
