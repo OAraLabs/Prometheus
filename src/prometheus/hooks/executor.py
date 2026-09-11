@@ -78,18 +78,21 @@ class HookExecutor:
         event: HookEvent,
         payload: dict[str, Any],
     ) -> HookResult:
-        command = _inject_arguments(hook.command, payload)
+        # $ARGUMENTS IS A SHELL PARAMETER, NOT A TEXT SPLICE. See
+        # _payload_environment below for why that distinction is the whole
+        # fix — the command string is passed to bash EXACTLY as the operator
+        # wrote it, and the model-controlled payload only ever arrives as the
+        # VALUE of a variable.
         process = await asyncio.create_subprocess_exec(
             "/bin/bash",
             "-lc",
-            command,
+            hook.command,
             cwd=str(self._context.cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env={
                 **os.environ,
-                "PROMETHEUS_HOOK_EVENT": event.value,
-                "PROMETHEUS_HOOK_PAYLOAD": json.dumps(payload),
+                **_payload_environment(event, payload),
             },
         )
 
@@ -209,7 +212,81 @@ def _matches_hook(hook: HookDefinition, payload: dict[str, Any]) -> bool:
     return fnmatch.fnmatch(subject, matcher)
 
 
+def _payload_environment(event: HookEvent, payload: dict[str, Any]) -> dict[str, str]:
+    """Environment for a command hook. The payload travels as DATA, not text.
+
+    WHY THIS EXISTS
+    ---------------
+    Command hooks used to be built by string replacement::
+
+        command = hook.command.replace("$ARGUMENTS", json.dumps(payload))
+        await asyncio.create_subprocess_exec("/bin/bash", "-lc", command, ...)
+
+    The payload is model-controlled. `PRE_TOOL_USE` carries
+    ``{"tool_name": ..., "tool_input": ...}`` and `tool_input` is whatever the
+    model decided to pass — a bash command, a file body, or text it copied out
+    of a page it fetched a moment earlier. Splicing that into a string handed
+    to `bash -lc` makes the data into code.
+
+    Reproduced against this executor, using the example the loader's own
+    docstring documents (``echo checking $ARGUMENTS``) and a `tool_input` of
+    ``{"command": "$(touch /tmp/PWNED)"}``: the file was created. Any operator
+    following the documented example got arbitrary command execution from a
+    tool argument, in a login shell carrying the daemon's full environment —
+    `ANTHROPIC_API_KEY`, `PROMETHEUS_API_TOKEN` and the rest.
+
+    THE FIX, AND WHY IT IS THIS ONE
+    -------------------------------
+    Quoting the splice (`shlex.quote`) would be a fix for one layer and a trap
+    for the next: it is correct only when the placeholder sits outside quotes
+    in the operator's command, and `"$ARGUMENTS"` — the natural way to write
+    it, and the way the example did — would then interpolate literal quote
+    characters. The escaping would be right and the meaning wrong.
+
+    So the payload is not spliced at all. It is exported as `ARGUMENTS`, and
+    the command string reaches bash exactly as written. `$ARGUMENTS` then
+    resolves through ordinary parameter expansion, and BASH DOES NOT RE-EVALUATE
+    THE VALUE OF AN EXPANDED VARIABLE. Verified on this platform, both quoted
+    and unquoted::
+
+        ARGUMENTS='$(touch /tmp/M)' bash -lc 'echo "checking $ARGUMENTS"'
+          -> checking $(touch /tmp/M)      /tmp/M NOT created
+        ARGUMENTS='`touch /tmp/M`'  bash -lc 'echo "checking $ARGUMENTS"'
+          -> checking `touch /tmp/M`       /tmp/M NOT created
+
+    Command substitution, backticks, `;`, `&&`, redirections — all of it is
+    inert, because the shell parses the command text and the payload is never
+    part of the command text. This is a property of where the data goes, not
+    of how carefully it was escaped, which is why no pattern list or character
+    filter appears anywhere here.
+
+    WHAT THIS CHANGES FOR HOOK AUTHORS
+    ----------------------------------
+    The spelling is unchanged: `echo "$ARGUMENTS"` works exactly as documented.
+    One case differs deliberately — `'$ARGUMENTS'` inside SINGLE quotes no
+    longer interpolates, because single quotes are how a shell author says
+    "literal". That is the correct reading of the operator's own syntax, and
+    the previous behaviour of substituting there anyway was part of the defect.
+
+    `PROMETHEUS_HOOK_PAYLOAD` carries the same JSON and predates this change;
+    it is kept, and is the better name to use in new hooks.
+    """
+    blob = json.dumps(payload, ensure_ascii=True)
+    return {
+        "PROMETHEUS_HOOK_EVENT": event.value,
+        "PROMETHEUS_HOOK_PAYLOAD": blob,
+        "ARGUMENTS": blob,
+    }
+
+
 def _inject_arguments(template: str, payload: dict[str, Any]) -> str:
+    """Textual substitution for PROMPT hooks only.
+
+    NEVER use this to build a shell command. A prompt is model input, where
+    interpolated text stays text; a command string is parsed by bash, where it
+    becomes code. `_run_command_hook` deliberately does not call this — see
+    `_payload_environment`.
+    """
     return template.replace("$ARGUMENTS", json.dumps(payload, ensure_ascii=True))
 
 

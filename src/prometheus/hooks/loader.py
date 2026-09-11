@@ -37,11 +37,25 @@ def load_hook_registry(hooks_config: dict[str, list[dict[str, Any]]]) -> HookReg
         hooks:
           pre_tool_use:
             - type: command
-              command: "echo checking $ARGUMENTS"
+              command: 'echo "checking $ARGUMENTS"'
               block_on_failure: false
           post_tool_use:
             - type: http
               url: "http://localhost:9090/hook"
+
+    ``$ARGUMENTS`` is an ENVIRONMENT VARIABLE holding the event payload as
+    JSON, not a placeholder substituted into the command text. The command
+    reaches bash exactly as written here, so nothing in the payload — which is
+    model-controlled, and for tool events includes arguments the model may have
+    chosen after reading a fetched page — can be parsed as shell syntax.
+    ``PROMETHEUS_HOOK_PAYLOAD`` holds the same JSON and is the clearer name.
+
+    QUOTE IT. The example above quotes ``$ARGUMENTS`` because an unquoted
+    expansion is still word-split and glob-expanded by the shell — not a
+    command-execution risk, but it will mangle any payload containing spaces.
+    This example used to read ``command: "echo checking $ARGUMENTS"``, which
+    was substituted into the command string; following it verbatim yielded
+    arbitrary command execution from a tool argument.
 
     Args:
         hooks_config: mapping of event name → list of hook definition dicts.
