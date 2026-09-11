@@ -13,7 +13,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 from pydantic import BaseModel, Field
 
-from prometheus.permissions.path_schema import PATH_FIELD
+from prometheus.permissions.path_schema import PATH_FIELD_WRITE
 # Both fetching tools use the ONE hook, from the security module — not one
 # importing a private helper from its sibling, which is how two callers drift.
 from prometheus.security.url_guard import (
@@ -35,7 +35,7 @@ class DownloadFileInput(BaseModel):
 
     url: str = Field(description="HTTP or HTTPS URL to download")
     destination: str | None = Field(
-        json_schema_extra=PATH_FIELD,
+        json_schema_extra=PATH_FIELD_WRITE,
         default=None,
         description="Local path to save the file (default: ~/.prometheus/downloads/<filename>)",
     )

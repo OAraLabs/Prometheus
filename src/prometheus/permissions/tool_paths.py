@@ -49,7 +49,9 @@ from pathlib import Path
 from typing import Any
 
 from prometheus.permissions.path_schema import (
+    PATH_ACCESS_WRITE,
     PATH_KIND_DIR,
+    declared_path_access,
     declared_path_params,
 )
 
@@ -235,3 +237,42 @@ def gate_path_for(
                 f"target is unknown"
             )
     return str(candidate.resolve()), None
+
+
+def gate_path_is_write(
+    tool_name: str,
+    *,
+    schema: dict[str, Any] | None = None,
+) -> bool:
+    """Does the path :func:`gate_path_for` returned get WRITTEN to?
+
+    The workspace boundary is a property of the WRITE. It used to be
+    ``tool_name in {"write_file", "edit_file"}`` — a list of names — and
+    ``notebook_edit``, ``download_file``, ``tts`` and ``youtube_transcript``
+    all write to arbitrary paths without being on it. A list of names is
+    exactly how four tools got past a gate whose docstring promised that
+    writes outside the workspace prompt.
+
+    The answer comes from the parameter's own declaration
+    (``permissions.path_schema``), because neither the tool NOR the call is a
+    fine enough unit:
+
+      * ``video_generate`` is not read-only, but its mapped ``image_path`` is
+        the SOURCE image it reads.
+      * ``task_create`` is not read-only, but its mapped ``watch_dir`` is a
+        directory a file_watch task watches and never writes to.
+
+    Keying on the tool prompts for both — over-refusal, in a control whose
+    credibility depends on not crying wolf. Keying on the parameter does not.
+
+    An UNDECLARED access resolves to write, so a new path param nobody
+    classified prompts instead of passing silently.
+    """
+    if tool_name in PATH_PARAM_EXEMPT:
+        return False
+    param = TOOL_PATH_PARAM.get(tool_name)
+    if param is None:
+        # Unmapped. gate_path_for already returns UNKNOWN for these, which
+        # prompts on its own; saying "write" here keeps the two consistent.
+        return True
+    return declared_path_access(schema).get(param, PATH_ACCESS_WRITE) == PATH_ACCESS_WRITE

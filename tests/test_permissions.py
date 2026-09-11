@@ -118,7 +118,7 @@ class TestSecurityGateEvaluate:
 
     def test_denied_path_blocks_file_write(self):
         gate = SecurityGate(denied_paths=["/etc"])
-        d = gate.evaluate("write_file", is_read_only=False, file_path="/etc/passwd")
+        d = gate.evaluate("write_file", is_read_only=False, file_path="/etc/passwd", path_is_write=True)
         assert d.allowed is False
         assert d.action == "DENY"
 
@@ -136,13 +136,13 @@ class TestSecurityGateEvaluate:
 
     def test_write_outside_workspace_requires_approval(self):
         gate = SecurityGate(workspace_root="/tmp/workspace")
-        d = gate.evaluate("write_file", is_read_only=False, file_path="/tmp/other/file.txt")
+        d = gate.evaluate("write_file", is_read_only=False, file_path="/tmp/other/file.txt", path_is_write=True)
         assert d.action == "APPROVE"
         assert d.requires_confirmation is True
 
     def test_write_inside_workspace_is_allowed(self):
         gate = SecurityGate(workspace_root="/tmp/workspace")
-        d = gate.evaluate("write_file", is_read_only=False, file_path="/tmp/workspace/file.txt")
+        d = gate.evaluate("write_file", is_read_only=False, file_path="/tmp/workspace/file.txt", path_is_write=True)
         assert d.action == "ALLOW"
 
     def test_autonomous_mode_allows_everything_except_blocked(self):
@@ -157,7 +157,7 @@ class TestSecurityGateEvaluate:
 
     def test_strict_mode_write_requires_approval(self):
         gate = SecurityGate(mode=PermissionMode.STRICT)
-        d = gate.evaluate("write_file", is_read_only=False, file_path="/tmp/workspace/file.txt")
+        d = gate.evaluate("write_file", is_read_only=False, file_path="/tmp/workspace/file.txt", path_is_write=True)
         assert d.action == "APPROVE"
 
 
@@ -344,6 +344,7 @@ class TestSecurityGateOriginUser:
         gate = self._gate(denied_paths=["/etc"])
         d = gate.evaluate(
             "write_file", file_path="/etc/passwd", origin=ORIGIN_USER,
+            path_is_write=True,
         )
         assert d.action == "DENY"
 
@@ -354,6 +355,7 @@ class TestSecurityGateOriginUser:
             "write_file",
             file_path="/tmp/elsewhere/file.txt",
             origin=ORIGIN_USER,
+            path_is_write=True,
         )
         assert d.action == "APPROVE"
 

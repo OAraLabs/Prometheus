@@ -110,7 +110,7 @@ def test_floor_holds_above_every_grant_kind(grant_spec, target, mode):
     — the case an attacker or a careless `/approve always` would produce — and
     now every case again under `/gate off`."""
     grants = [_grant(*grant_spec)] if grant_spec else []
-    decision = _gate(grants, mode=mode).evaluate("write_file", file_path=target)
+    decision = _gate(grants, mode=mode).evaluate("write_file", file_path=target, path_is_write=True)
 
     assert decision.action == "DENY", (
         f"FLOOR BREACHED in mode={mode!r}: grant={grant_spec!r} reached "
@@ -164,7 +164,7 @@ def test_admission_direction_still_works(grant_spec):
     Any grant covering the target -> ALLOW (the prompt is silenced).
     A grant NOT covering the target -> APPROVE (still prompts)."""
     grants = [_grant(*grant_spec)] if grant_spec else []
-    decision = _gate(grants).evaluate("write_file", file_path=ORDINARY)
+    decision = _gate(grants).evaluate("write_file", file_path=ORDINARY, path_is_write=True)
 
     if grant_spec is None:
         assert decision.action == "APPROVE", (
@@ -192,8 +192,8 @@ def test_the_matrix_is_not_uniform():
     the same grant that is REFUSED on a floor path is ALLOWED on an ordinary
     one."""
     g = [_grant("path_prefix", "/home/will")]
-    floor = _gate(g).evaluate("write_file", file_path=FLOOR_TARGETS[0].values[0])
-    ordinary = _gate(g).evaluate("write_file", file_path=ORDINARY)
+    floor = _gate(g).evaluate("write_file", file_path=FLOOR_TARGETS[0].values[0], path_is_write=True)
+    ordinary = _gate(g).evaluate("write_file", file_path=ORDINARY, path_is_write=True)
 
     assert floor.action == "DENY"
     assert ordinary.action == "ALLOW"

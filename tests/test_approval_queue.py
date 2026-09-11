@@ -124,7 +124,7 @@ class TestApprovalQueue:
 
         gate = SecurityGate(mode="strict")
         # In strict mode, write_file always requires confirmation
-        decision = gate.evaluate("write_file", file_path="/etc/something")
+        decision = gate.evaluate("write_file", file_path="/etc/something", path_is_write=True)
         assert decision.requires_confirmation
         assert not decision.allowed
 

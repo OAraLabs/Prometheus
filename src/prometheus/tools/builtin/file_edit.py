@@ -11,7 +11,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from prometheus.permissions.path_schema import PATH_FIELD
+from prometheus.permissions.path_schema import PATH_FIELD_WRITE
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -19,7 +19,7 @@ class FileEditToolInput(BaseModel):
     """Arguments for the file edit tool."""
 
     path: str = Field(
-        json_schema_extra=PATH_FIELD,description="Path of the file to edit")
+        json_schema_extra=PATH_FIELD_WRITE,description="Path of the file to edit")
     old_str: str = Field(description="Existing text to replace")
     new_str: str = Field(description="Replacement text")
     replace_all: bool = Field(
