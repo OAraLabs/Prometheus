@@ -28,6 +28,7 @@ from uuid import uuid4
 from prometheus.security.log_redaction import redact_capture as _redact
 
 from prometheus.telemetry.db import connect_telemetry_db
+from prometheus.telemetry.latency import LatencyAggregate
 
 log = logging.getLogger(__name__)
 
@@ -102,7 +103,11 @@ SYNTHETIC_TOOL_NAME = "_loop_transition"
 # reading a newer DB. Version 1 = schema_meta exists + node_id columns.
 # Bumping this requires a migration step in __init__ and a changelog row
 # in docs/FOUNDATION.md.
-TELEMETRY_SCHEMA_VERSION = 1
+# v2 (2026-09-11): `latency_ms` became NULLABLE so an unmeasured call can
+# be recorded as absent rather than as 0.0. Requires a table REBUILD — the
+# additive `_migrate_schema` cannot relax a NOT NULL. See
+# `_migrate_latency_nullable` and docs/FOUNDATION.md.
+TELEMETRY_SCHEMA_VERSION = 2
 
 
 class TelemetrySchemaError(RuntimeError):
@@ -122,7 +127,11 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     tool_name         TEXT NOT NULL,
     success           INTEGER NOT NULL,   -- 0 or 1
     retries           INTEGER NOT NULL DEFAULT 0,
-    latency_ms        REAL NOT NULL DEFAULT 0.0,
+    -- NULLABLE SINCE SCHEMA v2. `NOT NULL DEFAULT 0.0` made "nobody
+    -- measured this" and "this took zero milliseconds" the same stored
+    -- value; see telemetry/latency.py. Rows written before v2 keep their
+    -- 0.0 and are NOT backfilled — readers tag them `unknown` instead.
+    latency_ms        REAL,
     error_type        TEXT,
     error_detail      TEXT,
     -- Golden Trace Capture sprint additions (nullable for backcompat):
@@ -434,6 +443,7 @@ class ToolCallTelemetry:
         #    columns don't fail against freshly-migrated pre-existing tables)
         self._conn.executescript(_SCHEMA_SQL_TABLES)
         self._migrate_schema()
+        self._migrate_latency_nullable()
         self._conn.executescript(_SCHEMA_SQL_INDEXES)
         # A DB at or below the current version is stamped current — the
         # additive migration above IS the upgrade path. A legacy DB (no
@@ -492,6 +502,136 @@ class ToolCallTelemetry:
     # Schema migration (Golden Trace Capture sprint)
     # ------------------------------------------------------------------
 
+    #: schema_meta key holding the wall-clock instant `latency_ms` became
+    #: nullable. Rows older than this cannot distinguish a measured zero from
+    #: the old NOT NULL DEFAULT, which is what readers tag as `unknown`.
+    LATENCY_NULLABLE_SINCE_KEY = "latency_nullable_since"
+
+    def _migrate_latency_nullable(self) -> None:
+        """Relax `tool_calls.latency_ms` to NULL-able. Idempotent.
+
+        SQLite cannot ALTER a column's nullability, so this is the rebuild
+        dance: create the new shape, copy, drop, rename. `_migrate_schema`
+        above is additive-only (`ALTER TABLE ... ADD COLUMN`) and cannot do
+        this — which is why the schema version had to move rather than the
+        column list.
+
+        EXISTING ROWS ARE COPIED VERBATIM. A stored 0.0 stays 0.0. Backfilling
+        it to NULL would encode the inference "an exact 0.0 always means
+        unmeasured" — sound today, and exactly the kind of thing that rots —
+        into a permanent, irreversible migration. Readers tag those rows
+        `unknown` instead, which is a statement that can be revisited.
+
+        The instant of the migration is stamped into schema_meta so a reader
+        can tell which rows predate it. That timestamp IS the boundary; without
+        it, "pre-v2" would itself be an inference.
+        """
+        try:
+            rows = self._conn.execute("PRAGMA table_info(tool_calls)").fetchall()
+        except sqlite3.DatabaseError:
+            return
+        if not rows:
+            return
+        # row: (cid, name, type, notnull, dflt_value, pk)
+        latency = next((r for r in rows if r[1] == "latency_ms"), None)
+        if latency is None or not latency[3]:
+            # Absent, or ALREADY nullable. A database that has never had the
+            # NOT NULL column has no pre-v2 era at all, so the boundary is the
+            # beginning of time — not "now". Stamping `now` here would classify
+            # every row written afterwards with an older timestamp (backfills,
+            # imports, and every test that inserts backdated rows) as pre-v2,
+            # which is how a fresh DB ends up reporting all of its own data as
+            # unverifiable. Caught by tests/test_sentinel.py's latency-spike
+            # test, which inserts rows dated three days back.
+            self._stamp_latency_boundary(0.0)
+            return
+
+        old_cols = [r[1] for r in rows]
+        try:
+            self._conn.execute("PRAGMA foreign_keys=OFF")
+            self._conn.execute("BEGIN")
+            self._conn.execute("ALTER TABLE tool_calls RENAME TO tool_calls_pre_v2")
+            self._conn.executescript(_SCHEMA_SQL_TABLES)
+            # The fresh CREATE TABLE carries only the columns declared in
+            # _SCHEMA_SQL_TABLES. Everything `_EXPECTED_COLUMNS` has ever added
+            # by ALTER (session_id, node_id, ...) exists on the OLD table and
+            # not yet on the new one, so re-run the additive migration before
+            # copying — otherwise the INSERT names a column the target does not
+            # have, and the whole rebuild aborts. (It did: "table tool_calls
+            # has no column named session_id".)
+            self._migrate_schema()
+            new_cols = {
+                r[1] for r in self._conn.execute("PRAGMA table_info(tool_calls)")
+            }
+            carried = [c for c in old_cols if c in new_cols]
+            dropped = [c for c in old_cols if c not in new_cols]
+            if dropped:
+                # Never silently: losing a column during a rebuild is data loss.
+                logger.error(
+                    "telemetry rebuild: column(s) %s exist on the old tool_calls "
+                    "and not on the new schema; their data will NOT be carried "
+                    "over. Aborting the rebuild rather than dropping them.",
+                    dropped,
+                )
+                raise sqlite3.DatabaseError(f"rebuild would drop columns: {dropped}")
+            col_list = ", ".join(carried)
+            self._conn.execute(
+                f"INSERT INTO tool_calls ({col_list}) "
+                f"SELECT {col_list} FROM tool_calls_pre_v2"
+            )
+            self._conn.execute("DROP TABLE tool_calls_pre_v2")
+            self._conn.execute("COMMIT")
+        except sqlite3.DatabaseError:
+            try:
+                self._conn.execute("ROLLBACK")
+            except sqlite3.DatabaseError:
+                pass
+            logger.exception(
+                "telemetry: could not relax latency_ms to nullable; leaving the "
+                "table as it was. Unmeasured latencies will keep being stored "
+                "as 0.0 and readers will keep tagging them `unknown`."
+            )
+            return
+        finally:
+            try:
+                self._conn.execute("PRAGMA foreign_keys=ON")
+            except sqlite3.DatabaseError:
+                pass
+        self._stamp_latency_boundary()
+
+    def _stamp_latency_boundary(self, when: float | None = None) -> None:
+        """Record when NULL became expressible. INSERT OR IGNORE — set once.
+
+        ``when=0.0`` means "there was never a pre-v2 era here" (a database
+        created at v2). ``when=None`` stamps the current instant, which is the
+        REBUILD case: rows already in the table predate it and cannot be told
+        apart from defaults.
+        """
+        stamp = time.time() if when is None else when
+        try:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO schema_meta (key, value) VALUES (?, ?)",
+                (self.LATENCY_NULLABLE_SINCE_KEY, str(stamp)),
+            )
+        except sqlite3.DatabaseError:
+            pass
+
+    def latency_boundary(self) -> float | None:
+        """Timestamp before which a stored latency cannot be trusted, or None."""
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM schema_meta WHERE key = ?",
+                (self.LATENCY_NULLABLE_SINCE_KEY,),
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return None
+        if row is None:
+            return None
+        try:
+            return float(row[0])
+        except (TypeError, ValueError):
+            return None
+
     def _migrate_schema(self) -> None:
         """Add any expected columns missing from existing tables.
 
@@ -528,7 +668,7 @@ class ToolCallTelemetry:
         tool_name: str,
         success: bool,
         retries: int = 0,
-        latency_ms: float = 0.0,
+        latency_ms: float | None = None,
         error_type: str | None = None,
         error_detail: str | None = None,
         *,
@@ -1656,8 +1796,8 @@ class ToolCallTelemetry:
         # doesn't list a fake "tool" and the totals aren't inflated by the loop
         # echo of every real tool call.
         query = (
-            "SELECT model, tool_name, success, retries, latency_ms, error_type"
-            " FROM tool_calls WHERE tool_name != ?"
+            "SELECT model, tool_name, success, retries, latency_ms, error_type,"
+            " timestamp FROM tool_calls WHERE tool_name != ?"
         )
         params: tuple = (SYNTHETIC_TOOL_NAME,)
         if since is not None:
@@ -1682,19 +1822,26 @@ class ToolCallTelemetry:
 
         total_denials = 0
 
-        for model, tool_name, success, retries, latency_ms, error_type in rows:
+        # Rows older than this cannot distinguish a measured zero from the
+        # pre-v2 NOT NULL DEFAULT. None (no boundary recorded) means the
+        # whole table predates v2, so every row is unknown.
+        boundary = self.latency_boundary()
+
+        for (model, tool_name, success, retries, latency_ms, error_type,
+             row_ts) in rows:
+            pre_v2 = boundary is None or (row_ts or 0.0) < boundary
             # per-model per-tool
             model_data = models.setdefault(model, {})
             mt = model_data.setdefault(
                 tool_name,
                 {"calls": 0, "successes": 0, "failures": 0, "denials": 0,
-                 "total_retries": 0, "total_latency_ms": 0.0},
+                 "total_retries": 0, "latency": LatencyAggregate()},
             )
             # per-tool
             td = tools.setdefault(
                 tool_name,
                 {"calls": 0, "successes": 0, "denials": 0, "total_retries": 0,
-                 "total_latency_ms": 0.0, "error_types": {}},
+                 "latency": LatencyAggregate(), "error_types": {}},
             )
 
             # D3: policy denials are surfaced as `denials`, not failures —
@@ -1719,12 +1866,12 @@ class ToolCallTelemetry:
             mt["successes"] += success
             mt["failures"] += 1 - success
             mt["total_retries"] += retries
-            mt["total_latency_ms"] += latency_ms
+            mt["latency"].add(latency_ms, pre_v2=pre_v2)
 
             td["calls"] += 1
             td["successes"] += success
             td["total_retries"] += retries
-            td["total_latency_ms"] += latency_ms
+            td["latency"].add(latency_ms, pre_v2=pre_v2)
             if error_type:
                 td["error_types"][error_type] = td["error_types"].get(error_type, 0) + 1
 
@@ -1734,16 +1881,18 @@ class ToolCallTelemetry:
                 c = mt["calls"]
                 mt["success_rate"] = mt["successes"] / c if c else 0.0
                 mt["avg_retries"] = mt["total_retries"] / c if c else 0.0
-                mt["avg_latency_ms"] = mt["total_latency_ms"] / c if c else 0.0
-                del mt["total_retries"], mt["total_latency_ms"]
+                # (value, source) — see telemetry/latency.py. `avg_latency_ms`
+                # can now be None, which means "no number to report", NOT zero.
+                mt["avg_latency_ms"], mt["avg_latency_source"] = mt["latency"].resolve()
+                del mt["total_retries"], mt["latency"]
 
         # Finalise per-tool
         for td in tools.values():
             c = td["calls"]
             td["success_rate"] = td["successes"] / c if c else 0.0
             td["avg_retries"] = td["total_retries"] / c if c else 0.0
-            td["avg_latency_ms"] = td["total_latency_ms"] / c if c else 0.0
-            del td["total_retries"], td["total_latency_ms"], td["successes"]
+            td["avg_latency_ms"], td["avg_latency_source"] = td["latency"].resolve()
+            del td["total_retries"], td["latency"], td["successes"]
 
         return {
             "models": models,
