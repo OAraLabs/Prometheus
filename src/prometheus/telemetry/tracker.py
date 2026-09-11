@@ -507,6 +507,44 @@ class ToolCallTelemetry:
     #: the old NOT NULL DEFAULT, which is what readers tag as `unknown`.
     LATENCY_NULLABLE_SINCE_KEY = "latency_nullable_since"
 
+    def _restore_pre_v2(self) -> None:
+        """Undo a half-applied rebuild: put ``tool_calls_pre_v2`` back.
+
+        The rebuild renames ``tool_calls`` aside, creates the new table, then
+        copies. Every step after the rename is past an implicit COMMIT (see
+        the caller), so a failure cannot be unwound by ROLLBACK — the database
+        is left with an empty ``tool_calls`` and the real rows in
+        ``tool_calls_pre_v2``, which no reader in this codebase looks at. That
+        is silent total data loss behind a guard whose comment promises the
+        opposite ("Aborting the rebuild rather than dropping them").
+
+        Idempotent and defensive: called only on the abort paths, and a
+        failure here is logged rather than raised, because it runs while
+        another exception is already being handled.
+        """
+        try:
+            names = {
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if "tool_calls_pre_v2" not in names:
+                return  # nothing was renamed, or it was already restored
+            if "tool_calls" in names:
+                # Partial or empty: pre_v2 is the source of truth here.
+                self._conn.execute("DROP TABLE tool_calls")
+            self._conn.execute(
+                "ALTER TABLE tool_calls_pre_v2 RENAME TO tool_calls"
+            )
+            self._conn.commit()
+        except sqlite3.DatabaseError:
+            log.exception(
+                "telemetry: could not restore tool_calls after an aborted "
+                "rebuild. The rows are in tool_calls_pre_v2 and must be "
+                "recovered by hand before this database is trusted."
+            )
+
     def _migrate_latency_nullable(self) -> None:
         """Relax `tool_calls.latency_ms` to NULL-able. Idempotent.
 
@@ -567,12 +605,14 @@ class ToolCallTelemetry:
             dropped = [c for c in old_cols if c not in new_cols]
             if dropped:
                 # Never silently: losing a column during a rebuild is data loss.
-                logger.error(
+                log.error(
                     "telemetry rebuild: column(s) %s exist on the old tool_calls "
                     "and not on the new schema; their data will NOT be carried "
                     "over. Aborting the rebuild rather than dropping them.",
                     dropped,
                 )
+                # Restored by the handler below via _restore_pre_v2 — the
+                # rename is already committed at this point (see there).
                 raise sqlite3.DatabaseError(f"rebuild would drop columns: {dropped}")
             col_list = ", ".join(carried)
             self._conn.execute(
@@ -586,7 +626,15 @@ class ToolCallTelemetry:
                 self._conn.execute("ROLLBACK")
             except sqlite3.DatabaseError:
                 pass
-            logger.exception(
+            # ROLLBACK IS NOT ENOUGH, and relying on it cost the whole table.
+            # `executescript()` issues an implicit COMMIT before it runs, so by
+            # the time _SCHEMA_SQL_TABLES has executed, the ALTER TABLE RENAME
+            # above is already durable. The BEGIN is gone and ROLLBACK has
+            # nothing left to undo — measured: tool_calls ends up empty with
+            # every row stranded in tool_calls_pre_v2, which nothing reads.
+            # Put it back explicitly.
+            self._restore_pre_v2()
+            log.exception(
                 "telemetry: could not relax latency_ms to nullable; leaving the "
                 "table as it was. Unmeasured latencies will keep being stored "
                 "as 0.0 and readers will keep tagging them `unknown`."
