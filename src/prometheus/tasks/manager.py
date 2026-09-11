@@ -27,6 +27,7 @@ import os
 import shlex
 import signal
 import time
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -91,6 +92,13 @@ class BackgroundTaskManager:
         self._waiters: dict[str, asyncio.Task[None]] = {}
         self._output_locks: dict[str, asyncio.Lock] = {}
         self._input_locks: dict[str, asyncio.Lock] = {}
+        # Per-task environment overlay — CREDENTIALS LIVE HERE, NOWHERE ELSE.
+        # In-memory by construction: there is no TaskRecord field for it, so
+        # _persist has nothing to write, TaskStore has no column, the REST
+        # serialisers have no key, and task_get has nothing to print. That is
+        # the perimeter — not a redaction pass over a field that holds the
+        # secret, but a shape in which the secret is never in that field.
+        self._task_env: dict[str, dict[str, str]] = {}
         self._generations: dict[str, int] = {}
         self._emitted: set[str] = set()
 
@@ -118,12 +126,18 @@ class BackgroundTaskManager:
         on_complete: OnComplete = "notify",
         reengage_prompt: str | None = None,
         timeout_seconds: int | None = None,
+        env_overlay: Mapping[str, str] | None = None,
     ) -> TaskRecord:
         """Start a background shell command and return its TaskRecord.
 
         Vets *command* through the SecurityGate at system trust before spawning.
         A denied command yields a ``failed`` record (error ``"blocked: ..."``)
         and NO process is launched.
+
+        ``env_overlay`` carries values into the child's ENVIRONMENT and is held
+        in memory only. It is never written to the TaskRecord, never persisted,
+        never serialised to REST, and never rendered into model context — which
+        is the whole reason it exists. See ``create_agent_task``.
         """
         blocked = self._vet_command(command)
         record = self._new_record(
@@ -150,6 +164,10 @@ class BackgroundTaskManager:
         self._tasks[record.id] = record
         self._output_locks[record.id] = asyncio.Lock()
         self._input_locks[record.id] = asyncio.Lock()
+        # Registered BEFORE _persist and before the process starts. _persist
+        # writes the record, which deliberately has nowhere to put this.
+        if env_overlay:
+            self._task_env[record.id] = dict(env_overlay)
         self._persist(record)
         await self._start_process(record.id)
         return record
@@ -170,17 +188,57 @@ class BackgroundTaskManager:
         reengage_prompt: str | None = None,
         timeout_seconds: int | None = None,
     ) -> TaskRecord:
-        """Start a Prometheus agent as a subprocess task."""
+        """Start a Prometheus agent as a subprocess task.
+
+        THE CREDENTIAL NEVER ENTERS ``command``.
+
+        This used to build::
+
+            cmd = ["python", "-m", "prometheus", "--headless",
+                   "--api-key", effective_api_key]
+            command = " ".join(shlex.quote(part) for part in cmd)
+
+        ``command`` is a persisted field. One ``sessions_spawn`` therefore wrote
+        the Anthropic key into the task database, into every REST list and get
+        response, and into the model's own context window via ``task_get``,
+        which prints ``command:`` verbatim.
+
+        `shlex.quote` was doing its job perfectly — the string was correctly
+        escaped, and correctly escaped is orthogonal to "must not be written
+        down". Nothing about quoting a secret stops it being stored.
+
+        There was a fourth sink nobody could have intended. Neither
+        ``--headless`` nor ``--api-key`` EXISTS on this CLI, so argparse
+        rejected the key as an invalid positional choice and echoed it back::
+
+            oara: error: argument command: invalid choice: 'sk-ant-...'
+
+        That message is the child's stderr, which is captured into the task's
+        output file and read back by ``task_get`` and the REST output endpoint.
+        The spawn path also never worked: every local_agent task died at
+        argument parsing.
+
+        Now the key travels in the child's ENVIRONMENT, via an overlay held in
+        memory and attached to nothing durable, and the bogus flags are gone.
+        The environment is where every other consumer of this key already
+        reads it — including this very process, whose ``os.environ`` is the
+        fallback source.
+        """
         if command is None:
             effective_api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
             if not effective_api_key:
                 raise ValueError(
                     "Local agent tasks require ANTHROPIC_API_KEY or an explicit command override"
                 )
-            cmd = ["python", "-m", "prometheus", "--headless", "--api-key", effective_api_key]
+            cmd = ["python", "-m", "prometheus"]
             if model:
                 cmd.extend(["--model", model])
             command = " ".join(shlex.quote(part) for part in cmd)
+            env_overlay = {"ANTHROPIC_API_KEY": effective_api_key}
+        else:
+            # An explicit command override is the caller's own string; it gets
+            # no credential injected into it, and inherits os.environ as before.
+            env_overlay = None
 
         record = await self.create_shell_task(
             command=command,
@@ -192,6 +250,7 @@ class BackgroundTaskManager:
             on_complete=on_complete,
             reengage_prompt=reengage_prompt,
             timeout_seconds=timeout_seconds,
+            env_overlay=env_overlay,
         )
         if record.status == "failed":
             return record
@@ -612,6 +671,14 @@ class BackgroundTaskManager:
         # stop_task / a timeout can kill the WHOLE job (e.g. a `wget` spawned by
         # the command), not just /bin/bash — otherwise children orphan and run
         # on. Same fix as tools/builtin/bash.py.
+        # The overlay is in-memory only (see create_shell_task). When absent —
+        # a task restarted after a daemon restart, say — the child simply
+        # inherits os.environ, which is where the key came from in the first
+        # place. Nothing silently swaps one credential for another: the overlay
+        # only ever holds what this process was given.
+        overlay = self._task_env.get(task_id)
+        env = {**os.environ, **overlay} if overlay else None
+
         process = await asyncio.create_subprocess_exec(
             "/bin/bash",
             "-lc",
@@ -621,6 +688,7 @@ class BackgroundTaskManager:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
+            env=env,
         )
         self._processes[task_id] = process
         self._waiters[task_id] = asyncio.create_task(
