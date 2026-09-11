@@ -44,7 +44,11 @@ browser = ["playwright>=1.40"]
 # never declared anywhere. The faster-whisper python API is the pip-
 # installable engine; the whisper/faster-whisper-xxl CLIs also work.
 voice = ["faster-whisper>=1.0"]
-mcp = ["mcp>=1.0"]
+# UPPER BOUND IS LOAD-BEARING — see tests/test_mcp_dependency_pin.py.
+# mcp 2.x moved ClientSession.list_tools to a keyword-only `params=`;
+# mcp/runtime.py calls it with `cursor=`, so 2.x is a TypeError on the
+# FIRST discovery call and every server connection dies there.
+mcp = ["mcp>=1.0,<2"]
 slack = ["slack-bolt>=1.18.0", "slack-sdk>=3.27.0"]
 # SPRINT G2: Discord gateway adapter. Optional so base installs stay slim
 # (discord.py pulls aiohttp); import-guarded exactly like the slack extra.
@@ -67,7 +71,7 @@ evals = [
 full = [
     "anthropic>=0.40",
     "playwright>=1.40",
-    "mcp>=1.0",
+    "mcp>=1.0,<2",  # upper bound load-bearing — see the `mcp` extra above
     "slack-bolt>=1.18.0",
     "slack-sdk>=3.27.0",
     "discord.py>=2.3.0",
