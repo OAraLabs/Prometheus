@@ -731,7 +731,12 @@ class ModelRouter:
         session_id = context.get("session_id")
         override = self.get_override_for_session(session_id)
         if override is not None:
-            return self._route_override(session_id)  # type: ignore[arg-type]
+            decision = self._route_override(session_id)  # type: ignore[arg-type]
+            # None means the override could not be built and has been dropped.
+            # Fall through to normal routing rather than raising: the turn is
+            # served, and by the model the router will now truthfully report.
+            if decision is not None:
+                return decision
 
         # 2. Retry escalation
         retry_count = context.get("retry_count", 0)
@@ -841,8 +846,12 @@ class ModelRouter:
         """
         return bool(self._overrides)
 
-    def _route_override(self, session_id: str) -> RouteDecision:
+    def _route_override(self, session_id: str) -> RouteDecision | None:
         """Build (or reuse cached) override provider+adapter for this session.
+
+        Returns ``None`` when the override CANNOT BE BUILT — see below. The
+        caller then continues with normal routing, so the turn is served by
+        whatever would have served it had no override been set.
 
         Phase 4: if ``router.overrides.sticky`` is False (one-shot mode), the
         override is cleared after building the decision so the next message
@@ -852,7 +861,56 @@ class ModelRouter:
         entry = self._overrides[session_id]
         if entry.provider is None:
             from prometheus.providers.registry import ProviderRegistry
-            entry.provider = ProviderRegistry.create(entry.provider_config)
+            try:
+                entry.provider = ProviderRegistry.create(entry.provider_config)
+            except Exception as exc:
+                # AN OVERRIDE THAT CANNOT BE BUILT IS NOT AN ACTIVE OVERRIDE.
+                #
+                # Selecting a cloud model whose credential is not configured
+                # raised here on EVERY turn. `agent_loop` caught it, logged a
+                # warning, and served the primary — while this router kept the
+                # entry, so `get_override_for_session` (and the REST surface
+                # that reads it) went on reporting the override as active.
+                # Measured before this change: three turns, three raises, and
+                # `get_override_for_session(...) is not None` still True.
+                #
+                # The user was told their override was in effect; the primary
+                # answered every message. Dropping the entry makes the reported
+                # state match what actually served — which is the whole point
+                # of reporting it.
+                #
+                # Deliberately NOT retried on later turns: the credential is
+                # read at build time from config, so a second attempt fails
+                # identically. Re-issuing /claude after fixing the config is
+                # the way back, and it is one command.
+                provider_name = entry.provider_config.get("provider", "unknown")
+                model_name = entry.provider_config.get("model", "unknown")
+                log.error(
+                    "Model override %s/%s for session %s CANNOT BE BUILT (%s: %s) "
+                    "— dropping the override and serving the primary. The "
+                    "override is no longer reported as active, because it is "
+                    "not. Re-issue the override command once the provider is "
+                    "configured.",
+                    provider_name, model_name, session_id,
+                    type(exc).__name__, exc,
+                )
+                # Drop it exactly the way clear_override does, including the
+                # backend-only persistence rule — a dropped override and a
+                # user-cleared one must leave the same state behind.
+                had = self._overrides.pop(session_id, None)
+                if (
+                    self.persist_override is not None
+                    and had is not None
+                    and _backend_of(had.provider_config)
+                ):
+                    try:
+                        self.persist_override(session_id, None)
+                    except Exception:  # noqa: BLE001
+                        log.exception(
+                            "backend override for %s could not be un-persisted",
+                            session_id,
+                        )
+                return None
             pname = entry.provider_config.get("provider", "")
             entry.adapter = _build_adapter_for(pname)
         decision = RouteDecision(
