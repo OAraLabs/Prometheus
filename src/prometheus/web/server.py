@@ -4162,10 +4162,29 @@ def create_app(
                 "system_prompt",
                 "You are Prometheus, a sovereign AI agent. Be concise and helpful.",
             )
+            # NO `tools=` ARGUMENT. This line used to read
+            #
+            #     tools=app.state.skill_registry.list_schemas() if ... else None
+            #
+            # and `SkillRegistry` has no `list_schemas` — that is a
+            # `ToolRegistry` method. Every request to this route died on
+            # `AttributeError: 'SkillRegistry' object has no attribute
+            # 'list_schemas'` before reaching the model, from 2026-06-27 (#71)
+            # until this change. Two registries confused at one call site,
+            # copied from `gateway/discord.py` where `self.tool_registry` is
+            # the right object.
+            #
+            # The argument is REMOVED rather than corrected, because
+            # `run_async` accepts `tools` and NEVER READS IT — it is in the
+            # signature and nowhere else in the body. The loop resolves its own
+            # catalog from `context.tool_loader` / `context.tool_registry`
+            # (agent_loop.py ~1100), which is exactly why `/api/chat/send` and
+            # every gateway adapter work. Passing the "right" registry here
+            # would have been a no-op that read like a fix and taught the next
+            # reader that this route selects its own tools. It does not.
             result = await agent_loop.run_async(
                 system_prompt=system_prompt,
                 messages=session.get_messages(),
-                tools=app.state.skill_registry.list_schemas() if app.state.skill_registry else None,
             )
             session.add_result_messages(result.messages, pre_len)
             return {
