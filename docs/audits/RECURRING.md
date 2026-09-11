@@ -325,9 +325,75 @@ need a *per-stage* status, spell the shell's own name for it (`$pipestatus` in
 zsh, `$PIPESTATUS` in bash) and read it on the very next line — but prefer
 restructuring so you never need it: capture into a variable, then test.
 
+### 4e. The revert that did not revert
+
+A mutation test has two halves. Everyone checks the first — *does the test fail
+when the fix is removed?* — and nobody checks the second: **was the fix actually
+removed?** If the revert silently no-ops, the suite runs against the unchanged
+code, passes, and reports that as the mutation's result. It is a green light
+with nothing behind it, and it reads exactly like a guard that works.
+
+Three instances, all measured, all in one session:
+
+**1. The shell ate the revert.** A Python mutation script was written inside
+double quotes: `python3 -c "... s.replace('`dropped`', ...) ..."`. Backticks
+inside double quotes are command substitution, so the pattern was replaced by
+the shell before Python ever saw it. The edit never happened. Both the "fails
+without the fix" and "passes with it" runs were the same run.
+
+**2. `git stash push -- <path>` on a clean path.** The file was committed, so
+there was nothing to stash: *"No local changes to save"*, **exit 0**. The `||`
+fallback never fired. Fifteen tests then "passed on main" — main still had the
+fix, because it had never been taken out.
+
+```
+=== the same tests against main (fix stashed out) ===
+15 passed in 3.69s      <- the fix was never removed
+```
+
+**3. `git checkout HEAD -- <path>` with the fix uncommitted.** This restores
+from the index, which held *main's* version — so it did not revert the mutation,
+it deleted the work. Sixty-one lines of an in-progress fix, gone, and the next
+mutation's result was then measuring main's code while claiming to measure the
+fix's.
+
+The three share one shape and it is §4a's: **the named mechanism was never
+verified to have operated.** In 1 the tool ran and edited nothing. In 2 the
+tool declined and said so in a message nobody read, while exiting 0. In 3 the
+tool did exactly what it is documented to do, against a different baseline than
+the one intended.
+
+**How:**
+
+- Make the harness **assert the mutation landed** before running anything —
+  anchor matched exactly once, new text present, old text absent — and abort
+  loudly when it did not. An aborted mutation must not be reportable as a
+  result.
+- **Assert the revert landed too**, by a property of the file rather than by the
+  command's exit code (`grep -c` for a symbol the fix introduces).
+- **Commit before mutating.** Then `git checkout HEAD -- <path>` restores the
+  fix rather than removing it, and a botched mutation costs nothing.
+- Never revert with a command whose no-op case exits 0. `git stash push` on a
+  clean path, `sed -i` with a pattern that does not match, and `patch -R` on an
+  already-reverted file all succeed at doing nothing.
+
+A harness that printed one line per mutation caught all three:
+
+```
+  [mutation verified present in tracker.py]
+  ABORT: anchor matched 0 times in tracker.py — mutation NOT applied
+  [restored; guard present again: 1]
+```
+
+The middle line is the one that matters. It fired on a real mutation whose
+indentation was wrong, and the `15 passed` that followed was correctly read as
+meaningless rather than as a surviving mutant.
+
 ---
 
-### The rule the four share
+---
+
+### The rule the five share
 
 **Verify that the named mechanism was actually operating.** In 4a the
 setting was one API call away and nobody asked, so a guess became a standing
@@ -335,7 +401,9 @@ rule — wrong in the direction that reads as diligence. In 4b the check ran
 correctly and answered a question adjacent to the one that mattered. In 4c
 the gate was never asked what it was measuring. In 4d the mechanism was
 never run in the shell it was prescribed for — one `(exit 7) | cat` would
-have shown it expanding to nothing.
+have shown it expanding to nothing. In 4e the revert command was trusted on
+its exit code, which reported that the command had run, not that it had done
+anything.
 
 A control you have not seen fail is not yet known to be a control. Prefer
 the version that can produce a *distinguishable* wrong answer — a tag with
