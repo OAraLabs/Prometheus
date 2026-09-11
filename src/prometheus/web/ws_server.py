@@ -525,6 +525,23 @@ class WebSocketBridge:
             from prometheus.gateway.media_cache import cache_image_from_bytes, extension_from_file_path
             img_ext = ext if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp") else extension_from_file_path(filename)
             cached_path = cache_image_from_bytes(data, ext=img_ext)
+            if cached_path is None:
+                # Not cached (low disk / write error). Degrade: the upload is
+                # announced to the model, the turn still happens. This used to
+                # receive a FABRICATED path and the vision path below failed on
+                # a file that was never written.
+                logger.warning(
+                    "upload: %s was not cached — carrying it as a note only",
+                    filename,
+                )
+                note = (
+                    f"[The user uploaded an image, {filename}; it could not be "
+                    f"stored for analysis]"
+                )
+                if caption:
+                    note = f"{note}\n{caption}"
+                await self._handle_send_message(session_id, note)
+                return
 
             # THE GATE. Ask the provider this turn will actually use — see
             # _turn_supports_vision for why that is the override and not the
@@ -587,6 +604,19 @@ class WebSocketBridge:
                 return
 
             cached_path = cache_document_from_bytes(data, filename)
+            if cached_path is None:
+                logger.warning(
+                    "upload: %s was not cached — carrying it as a note only",
+                    filename,
+                )
+                note = (
+                    f"[The user uploaded {filename}; it could not be stored, so "
+                    f"its content was not extracted]"
+                )
+                if caption:
+                    note = f"{caption}\n\n{note}"
+                await self._handle_send_message(session_id, note)
+                return
             extracted = extract_text(cached_path)
             if extracted:
                 user_text = f"[Content of {filename}]:\n{extracted}"
