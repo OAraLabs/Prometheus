@@ -145,8 +145,28 @@ def main() -> None:
     finally:
         shutdown_tracing()
 
-    # Exit code: 1 if any task errored
-    if any(r.error for r in results):
+    # Exit code: 1 if any task errored, OR if any task could not be scored.
+    #
+    # A judge outage used to leave this at 0. The metrics raised, the runner
+    # logged a warning and omitted them, the classifier read an empty metric
+    # map as "all metrics passed", and a run in which NOTHING WAS MEASURED
+    # reported success. `r.error` is not set on that path — the task itself ran
+    # fine; it is the scoring that did not happen — so the exit code has to ask
+    # about scoring separately.
+    unscored = [r for r in results if getattr(r, "unavailable_metrics", None)]
+    if unscored:
+        print(
+            f"\n{len(unscored)} task(s) could not be scored — a judge that "
+            f"cannot answer is not a pass:",
+            file=sys.stderr,
+        )
+        for r in unscored[:10]:
+            print(
+                f"  {r.task_id}: {', '.join(r.unavailable_metrics)}",
+                file=sys.stderr,
+            )
+
+    if any(r.error for r in results) or unscored:
         sys.exit(1)
 
 

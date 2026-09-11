@@ -35,6 +35,7 @@ class FailureCategory(str, Enum):
     INCOMPLETE = "model:incomplete"             # Started but didn't finish multi-step
 
     # Harness failures
+    JUDGE_UNAVAILABLE = "harness:judge_unavailable"  # A metric could not be evaluated
     TOOL_ERROR = "harness:tool_error"           # Tool execution returned is_error=True
     TOOL_CRASH = "harness:tool_crash"           # Task crashed during tool execution
     VALIDATION_FAIL = "harness:validation"      # Adapter rejected the tool call
@@ -60,6 +61,7 @@ def classify_failure(
     agent_output: str,
     error: str | None,
     metric_scores: dict[str, float],
+    unavailable_metrics: list[str] | None = None,
 ) -> FailureClassification:
     """Classify a task result as model issue, harness issue, or pass.
 
@@ -99,8 +101,43 @@ def classify_failure(
             detail=f"Crash: {error[:150]}",
         )
 
+    # --- A metric that could not be EVALUATED is not a metric that passed ---
+    #
+    # `unavailable_metrics` names the metrics whose judge call raised. The
+    # runner used to log a warning and simply omit them from `metric_scores`,
+    # so a judge outage produced an EMPTY map — and the line below read
+    # `if metric_scores else True`, which turned "nothing was measured" into
+    # "everything passed":
+    #
+    #     judge DOWN (all three metrics raised)
+    #       -> source=pass  category=none  detail='All metrics passed'
+    #
+    # Every task in the suite recorded PASS, with only a log warning to show
+    # for it, and the exit code stayed 0. An unanswerable judge is a HARNESS
+    # failure: it says nothing about the model, which is precisely why it must
+    # not be scored as if it had.
+    if unavailable_metrics:
+        return FailureClassification(
+            source=FailureSource.HARNESS,
+            category=FailureCategory.JUDGE_UNAVAILABLE,
+            detail=(
+                "could not be evaluated: "
+                + ", ".join(sorted(unavailable_metrics))
+                + " — this is not a pass"
+            ),
+        )
+
+    # An empty map with nothing declared unavailable means no metric ran and
+    # nobody said why. Unknown is not success; it is UNCLEAR.
+    if not metric_scores:
+        return FailureClassification(
+            source=FailureSource.UNCLEAR,
+            category=FailureCategory.UNKNOWN,
+            detail="no metrics were evaluated — nothing is known about this task",
+        )
+
     # --- Check if all metrics passed ---
-    all_passed = all(s >= 0.5 for s in metric_scores.values()) if metric_scores else True
+    all_passed = all(s >= 0.5 for s in metric_scores.values())
     if all_passed and not tool_errors:
         return FailureClassification(
             source=FailureSource.PASS,
