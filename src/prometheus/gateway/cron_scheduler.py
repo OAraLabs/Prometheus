@@ -460,6 +460,47 @@ def stop_scheduler() -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _record_run(name: str, *, success: bool, entry: dict[str, Any]) -> None:
+    """Persist the bookkeeping for one finished job. NEVER raises.
+
+    ⚠ WHAT THIS FIXES, AND — READ THIS — WHAT IT DOES NOT.
+    ------------------------------------------------------
+    FIXES: `mark_job_run` and `append_history` were called bare at all four
+    exit paths of `execute_job` (blocked / timeout / error / success). Either
+    can raise — `save_cron_jobs` on a full disk, `next_run_time` on an invalid
+    `gateway.cron_timezone` — and the exception escaped `execute_job` into the
+    scheduler's `asyncio.gather(..., return_exceptions=True)`. Two consequences:
+    the history row and the failure notification for that job were SKIPPED
+    (they come after `mark_job_run`), and the tick logged a bare "Unexpected
+    error executing cron job".
+
+    DOES NOT FIX: THE RE-EXECUTION. When `mark_job_run` fails, `next_run` is
+    not advanced in the store. The job is still due on the next tick and its
+    command RUNS AGAIN, every TICK_INTERVAL_SECONDS, for as long as the store
+    stays unwritable. Guarding the exception makes that loud instead of
+    silent; it does not stop it. Nothing in this function could — the state
+    that decides dueness lives on disk, and the disk is what failed.
+
+    The runaway is stopped separately, by the in-process occurrence memory in
+    `_already_fired_this_occurrence`. This commit is deliberately only half of
+    that fix, and says so rather than reading like the whole one.
+    """
+    try:
+        mark_job_run(name, success=success)
+    except Exception:
+        logger.exception(
+            "Job %r: could not persist last_run/next_run. The history row and "
+            "any failure notification below still happen, but next_run was NOT "
+            "advanced — this job remains DUE and will be re-dispatched until "
+            "the store is writable again.",
+            name,
+        )
+    try:
+        append_history(entry)
+    except Exception:
+        logger.exception("Job %r: could not append the history row", name)
+
+
 async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
     """Run a single cron job and return a history entry."""
     name = job["name"]
@@ -499,8 +540,7 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
             "stdout": "",
             "stderr": f"SecurityGate refused this command at system trust: {reason}",
         }
-        mark_job_run(name, success=False)
-        append_history(entry)
+        _record_run(name, success=False, entry=entry)
         await _maybe_notify_failure(entry)
         return entry
 
@@ -535,8 +575,7 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
             "stdout": "",
             "stderr": "Job timed out after 300s",
         }
-        mark_job_run(name, success=False)
-        append_history(entry)
+        _record_run(name, success=False, entry=entry)
         await _maybe_notify_failure(entry)
         return entry
     except Exception as exc:
@@ -551,8 +590,7 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
             "stdout": "",
             "stderr": str(exc),
         }
-        mark_job_run(name, success=False)
-        append_history(entry)
+        _record_run(name, success=False, entry=entry)
         await _maybe_notify_failure(entry)
         return entry
 
@@ -572,8 +610,7 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
             stderr.decode("utf-8", errors="replace")[-2000:] if stderr else ""
         ),
     }
-    mark_job_run(name, success=success)
-    append_history(entry)
+    _record_run(name, success=success, entry=entry)
     await _maybe_notify_failure(entry)
     logger.info(
         "Job %r finished: %s (rc=%s)", name, entry["status"], process.returncode
@@ -584,6 +621,117 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Scheduler loop
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# In-process occurrence memory — the thing that actually stops the runaway
+# ---------------------------------------------------------------------------
+#
+# ⚠ THIS IS IN-PROCESS STATE AND NOT DURABLE, DELIBERATELY.
+#
+# It does NOT survive a daemon restart, and that is correct rather than a
+# limitation to be fixed later. The durable record of what has run is the
+# store; a restart re-reads it and starts from what it says. This map exists
+# only to stop ONE process from dispatching the SAME scheduled occurrence
+# twice while the store is unwritable. Do not mistake it for persistence and
+# do not add persistence to it — a durable copy would need its own
+# reconciliation with the store, which is the problem it is standing in for.
+#
+# WHY IT IS NEEDED. `mark_job_run` advances `next_run` and saves. If the save
+# fails (full disk) or the recompute fails (invalid `gateway.cron_timezone`),
+# `next_run` in the store stays at the instant that made the job due. The job
+# is therefore still due on the next tick, and its COMMAND RUNS AGAIN — every
+# TICK_INTERVAL_SECONDS, indefinitely. Measured: 5 ticks, 5 executions.
+#
+# Guarding the exception (see `_record_run`) makes that loud. It does not stop
+# it, because the state that decides dueness is the state that failed to
+# write.
+#
+# THE KEY IS THE SCHEDULED FIRE TIME, NOT THE WALL CLOCK, AND NOT `next_run`.
+# Using the wall clock would suppress nothing (it differs every tick). Using
+# the stored `next_run` would suppress EVERYTHING after the first failure —
+# it is frozen precisely because persistence broke, so every later occurrence
+# would look like a repeat of the first and the job would never run again.
+# Deriving it from the cron expression gives one key per scheduled slot, which
+# is what "this occurrence already fired" actually means: a job whose store is
+# broken still runs once per slot, and never twice in one.
+_fired_occurrences: dict[str, str] = {}
+
+
+def _occurrence_key(job: dict[str, Any], now: datetime) -> str | None:
+    """The most recent scheduled instant at or before *now*, as an ISO string.
+
+    ``None`` when the schedule cannot be evaluated at all — the caller then
+    declines to suppress, because a key it could not compute is not evidence
+    that this occurrence already ran.
+    """
+    schedule = job.get("schedule", "")
+    if not schedule:
+        return None
+    try:
+        from croniter import croniter
+    except Exception:  # pragma: no cover - croniter is a hard dependency
+        return None
+
+    base = now
+    try:
+        from prometheus.gateway.cron_service import _default_cron_tz
+
+        base = now.astimezone(_default_cron_tz())
+    except Exception:
+        # An unresolvable `gateway.cron_timezone` is one of the two failures
+        # that CAUSE the runaway, so this key has to be computable without it.
+        # UTC is used only for DE-DUPLICATION: the key must be stable within a
+        # slot and different between slots, and it is, in any timezone.
+        #
+        # This is NOT a silent fallback for scheduling. `_default_cron_tz`
+        # still raises on the scheduling path and that behaviour is unchanged
+        # and documented — the loud failure stays loud.
+        base = now.astimezone(timezone.utc)
+
+    try:
+        return croniter(schedule, base).get_prev(datetime).isoformat()
+    except Exception:
+        return None
+
+
+def _suppress_already_fired(
+    due: list[dict[str, Any]], now: datetime
+) -> list[dict[str, Any]]:
+    """Drop jobs this process already dispatched for the same occurrence.
+
+    Suppression is LOGGED AT WARNING with the job and the occurrence key. It
+    is a symptom of a store that is not being written — silently swallowing a
+    symptom is how the next invisible defect gets planted.
+    """
+    keep: list[dict[str, Any]] = []
+    for job in due:
+        name = job.get("name", "")
+        key = _occurrence_key(job, now)
+        if key is not None and _fired_occurrences.get(name) == key:
+            logger.warning(
+                "Cron job %r SUPPRESSED for occurrence %s: this process already "
+                "dispatched that scheduled occurrence, but the job is still due "
+                "in the store. next_run was not advanced — the store is not "
+                "being written. The job will run again at its NEXT scheduled "
+                "occurrence; fix the store to restore normal scheduling.",
+                name, key,
+            )
+            continue
+        keep.append(job)
+    return keep
+
+
+def _remember_dispatch(job: dict[str, Any], now: datetime) -> None:
+    """Record the occurrence being dispatched. Called BEFORE execution.
+
+    Before, not after: a job that crashes mid-execution has still consumed its
+    occurrence, and re-running it on the next tick would be the same runaway
+    by a different route.
+    """
+    key = _occurrence_key(job, now)
+    if key is not None:
+        _fired_occurrences[job.get("name", "")] = key
 
 
 def _jobs_due(
@@ -656,8 +804,12 @@ async def run_scheduler_loop(*, once: bool = False, own_signals: bool = True) ->
             jobs = load_cron_jobs()
             due = _jobs_due(jobs, now)
 
+            due = _suppress_already_fired(due, now)
+
             if due:
                 logger.info("Tick: %d job(s) due", len(due))
+                for job in due:
+                    _remember_dispatch(job, now)
                 results = await asyncio.gather(
                     *(execute_job(job) for job in due), return_exceptions=True
                 )
