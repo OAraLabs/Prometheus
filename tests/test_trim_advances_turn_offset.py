@@ -148,3 +148,88 @@ def test_the_offset_advances_by_exactly_what_was_dropped():
 
     assert dropped == 7
     assert session._turn_index_offset == before_offset + dropped
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# THE SIGN-OFF GUARD
+#
+# `test_trim_shifts_watermark_with_positions` in
+# tests/test_session_persist_exact_once.py had to have an ASSERTION EDITED:
+# it asserted `turn_index == 3` for "m5", and that value IS the collision this
+# fix removes. Editing an existing assertion is the one change that can turn a
+# real regression into a green suite, so the edit does not stand alone.
+#
+# This test fails on the old behaviour in a way that edit cannot mask. It lives
+# in a different file, it never asserts a specific ordinal, and it counts the
+# REPEAT — the shape the reproduction actually produced:
+#
+#     durable rows written : 60
+#     distinct turn_index  : 51
+#     turn_index 50 written TEN times, for m50 ... m59
+#
+# If the edited assertion and this test do not BOTH fail against a reverted
+# `session.py`, one of them is not earning its place.
+# ───────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("extra", [2, 10, 25])
+def test_every_written_ordinal_is_distinct_and_ascending(extra):
+    """N persists produce N ordinals: all distinct, strictly ascending.
+
+    Parameterised past the window by three different amounts so the property
+    is asserted over the RUN, not over one arithmetic coincidence.
+
+    ⚠ `extra=1` IS DELIBERATELY ABSENT, AND WAS IN THE FIRST DRAFT. It passes
+    against the BROKEN code: a run of MAX+1 messages trims exactly once, and
+    the collision needs a persist AFTER a trim to land on a re-used position.
+    One trim with nothing following it cannot collide, so that parameter was a
+    green light measuring nothing. Verified — reverted, `[1]` passed while
+    `[10]` and `[25]` failed. See the boundary test below, which states that
+    property on purpose instead of smuggling it in as a passing case.
+    """
+    total = MAX_SESSION_MESSAGES + extra
+    engine = _drive(total)
+    indices = [t for t, _ in engine.rows]
+
+    assert len(indices) == total, (
+        f"{len(indices)} rows written for {total} messages — the harness is "
+        f"not persisting what this test assumes, so its verdict is worthless"
+    )
+
+    # Count the repeats explicitly: this is the number the reproduction
+    # reported, and the failure message should read like that reproduction.
+    from collections import Counter
+
+    counts = Counter(indices)
+    repeated = {idx: n for idx, n in counts.items() if n > 1}
+    worst = max(counts.values())
+
+    assert not repeated, (
+        f"{len(indices)} rows written, only {len(counts)} distinct turn_index "
+        f"values — one ordinal was re-used up to {worst} times.\n  "
+        + "\n  ".join(
+            f"turn_index {idx} written {n} times, for "
+            f"{[c for t, c in engine.rows if t == idx]}"
+            for idx, n in sorted(repeated.items())[:3]
+        )
+    )
+
+    assert indices == sorted(indices), (
+        f"turn_index went backwards; four store readers ORDER BY this column: "
+        f"{indices}"
+    )
+    assert len(set(indices)) == total
+
+
+def test_the_first_trim_alone_cannot_collide():
+    """The boundary, asserted as a fact rather than left as a silent pass.
+
+    A collision needs a persist that lands on a position a dropped message
+    already wrote. At exactly MAX+1 messages there is one trim and nothing
+    after it, so the ordinals are distinct on BROKEN code too.
+
+    This is recorded because it was nearly shipped as a parameter of the test
+    above, where it would have looked like evidence and been none.
+    """
+    engine = _drive(MAX_SESSION_MESSAGES + 1)
+    indices = [t for t, _ in engine.rows]
+    assert len(set(indices)) == len(indices) == MAX_SESSION_MESSAGES + 1
