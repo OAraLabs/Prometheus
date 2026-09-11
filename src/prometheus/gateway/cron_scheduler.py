@@ -460,6 +460,47 @@ def stop_scheduler() -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _record_run(name: str, *, success: bool, entry: dict[str, Any]) -> None:
+    """Persist the bookkeeping for one finished job. NEVER raises.
+
+    ⚠ WHAT THIS FIXES, AND — READ THIS — WHAT IT DOES NOT.
+    ------------------------------------------------------
+    FIXES: `mark_job_run` and `append_history` were called bare at all four
+    exit paths of `execute_job` (blocked / timeout / error / success). Either
+    can raise — `save_cron_jobs` on a full disk, `next_run_time` on an invalid
+    `gateway.cron_timezone` — and the exception escaped `execute_job` into the
+    scheduler's `asyncio.gather(..., return_exceptions=True)`. Two consequences:
+    the history row and the failure notification for that job were SKIPPED
+    (they come after `mark_job_run`), and the tick logged a bare "Unexpected
+    error executing cron job".
+
+    DOES NOT FIX: THE RE-EXECUTION. When `mark_job_run` fails, `next_run` is
+    not advanced in the store. The job is still due on the next tick and its
+    command RUNS AGAIN, every TICK_INTERVAL_SECONDS, for as long as the store
+    stays unwritable. Guarding the exception makes that loud instead of
+    silent; it does not stop it. Nothing in this function could — the state
+    that decides dueness lives on disk, and the disk is what failed.
+
+    The runaway is stopped separately, by the in-process occurrence memory in
+    `_already_fired_this_occurrence`. This commit is deliberately only half of
+    that fix, and says so rather than reading like the whole one.
+    """
+    try:
+        mark_job_run(name, success=success)
+    except Exception:
+        logger.exception(
+            "Job %r: could not persist last_run/next_run. The history row and "
+            "any failure notification below still happen, but next_run was NOT "
+            "advanced — this job remains DUE and will be re-dispatched until "
+            "the store is writable again.",
+            name,
+        )
+    try:
+        append_history(entry)
+    except Exception:
+        logger.exception("Job %r: could not append the history row", name)
+
+
 async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
     """Run a single cron job and return a history entry."""
     name = job["name"]
@@ -499,8 +540,7 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
             "stdout": "",
             "stderr": f"SecurityGate refused this command at system trust: {reason}",
         }
-        mark_job_run(name, success=False)
-        append_history(entry)
+        _record_run(name, success=False, entry=entry)
         await _maybe_notify_failure(entry)
         return entry
 
@@ -535,8 +575,7 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
             "stdout": "",
             "stderr": "Job timed out after 300s",
         }
-        mark_job_run(name, success=False)
-        append_history(entry)
+        _record_run(name, success=False, entry=entry)
         await _maybe_notify_failure(entry)
         return entry
     except Exception as exc:
@@ -551,8 +590,7 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
             "stdout": "",
             "stderr": str(exc),
         }
-        mark_job_run(name, success=False)
-        append_history(entry)
+        _record_run(name, success=False, entry=entry)
         await _maybe_notify_failure(entry)
         return entry
 
@@ -572,8 +610,7 @@ async def execute_job(job: dict[str, Any]) -> dict[str, Any]:
             stderr.decode("utf-8", errors="replace")[-2000:] if stderr else ""
         ),
     }
-    mark_job_run(name, success=success)
-    append_history(entry)
+    _record_run(name, success=success, entry=entry)
     await _maybe_notify_failure(entry)
     logger.info(
         "Job %r finished: %s (rc=%s)", name, entry["status"], process.returncode
