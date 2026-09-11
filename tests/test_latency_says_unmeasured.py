@@ -234,7 +234,11 @@ def test_the_migration_relaxes_the_column_and_keeps_every_row(tmp_path):
     info = telemetry._conn.execute("PRAGMA table_info(tool_calls)").fetchall()
     latency = next(r for r in info if r[1] == "latency_ms")
     assert latency[3] == 0, "latency_ms is still NOT NULL after the migration"
-    assert TELEMETRY_SCHEMA_VERSION == 2
+    # v2 is where latency became nullable; later versions must KEEP it that way,
+    # which the assertion above is what actually checks. Pinning equality here
+    # made this test fail on the next unrelated schema bump (#284's v3) while
+    # the property it cares about was still intact.
+    assert TELEMETRY_SCHEMA_VERSION >= 2
 
     rows = dict(
         telemetry._conn.execute("SELECT id, latency_ms FROM tool_calls").fetchall()

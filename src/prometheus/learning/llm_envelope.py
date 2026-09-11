@@ -177,7 +177,7 @@ class LLMCallEnvelope:
                     text_parts.append(event.text)
         except BaseException as exc:  # noqa: BLE001 — we re-raise per policy
             duration_ms = (time.time() - started) * 1000.0
-            self._record_failure(operation, exc, context, duration_ms, model)
+            self._record_failure(operation, exc, context, duration_ms, model, provider)
             log.exception(
                 "%s.%s: LLM call failed (on_failure=%s)",
                 self._subsystem, operation, self._on_failure,
@@ -191,7 +191,7 @@ class LLMCallEnvelope:
 
         text = "".join(text_parts)
         duration_ms = (time.time() - started) * 1000.0
-        self._record_success(operation, text, duration_ms, context, model)
+        self._record_success(operation, text, duration_ms, context, model, provider)
         if self._on_failure == "log_only":
             return LLMCallResult(text=text, error=None, duration_ms=duration_ms)
         return text
@@ -314,6 +314,7 @@ class LLMCallEnvelope:
                 session_id=session_id,
                 model=request.model,
                 thinking=thinking,
+                provider=provider,
             )
             raise
 
@@ -330,6 +331,7 @@ class LLMCallEnvelope:
                 session_id=session_id,
                 model=request.model,
                 thinking=thinking,
+                provider=provider,
             )
             return
 
@@ -353,6 +355,7 @@ class LLMCallEnvelope:
             session_id=session_id,
             model=request.model,
             thinking=thinking,
+            provider=provider,
         )
 
     def _record_usage_row(
@@ -370,10 +373,22 @@ class LLMCallEnvelope:
         thinking: bool | None,
         cached_input_tokens: int | None = None,
         cache_write_tokens: int | None = None,
+        provider: object | None = None,
     ) -> None:
-        """Best-effort ``subsystem_runs`` write with the F1 usage columns."""
+        """Best-effort ``subsystem_runs`` write with the F1 usage columns.
+
+        ``provider`` is the LIVE provider that served (or failed to serve) this
+        call, and it is here for one reason: it is the only thing that knows
+        which HOST the tokens were spent against. Resolving that later, from
+        configuration, answers a different question — "where would this model go
+        if it were called now" — and that answer changes under history's feet.
+
+        The host itself goes no further than the classification: what lands on
+        the row is the MODE. See ``telemetry/cost.billing_host_of``.
+        """
         if self._telemetry is None:
             return
+        billing_mode = self._billing_mode_of(model, provider)
         try:
             self._telemetry.record_run(
                 subsystem=self._subsystem,
@@ -389,6 +404,7 @@ class LLMCallEnvelope:
                 session_id=session_id,
                 model=model,
                 thinking=thinking,
+                billing_mode=billing_mode,
             )
         except Exception:
             log.debug(
@@ -451,6 +467,24 @@ class LLMCallEnvelope:
     # Internal — telemetry writes are best-effort, never raise
     # ------------------------------------------------------------------
 
+    def _billing_mode_of(self, model: str | None, provider: object | None) -> str | None:
+        """The billing mode for a row about to be written, or None.
+
+        Here rather than inline because THREE writers need it and only one of
+        them had it. `stream()` writes the full row; `call()` routes to the two
+        abbreviated writers below, which is the same split that left the six
+        call()-based subsystems with ~12,900 rows carrying no `model` (see the
+        comment in `_record_failure`). Stamping only `stream()` would have
+        recreated that asymmetry one column over, and this time it would have
+        been invisible: an unstamped row is indistinguishable from one written
+        before the column existed.
+        """
+        if provider is None:
+            return None
+        from prometheus.telemetry.cost import billing_stamp
+
+        return billing_stamp(model, provider)
+
     def _record_failure(
         self,
         operation: str,
@@ -458,6 +492,7 @@ class LLMCallEnvelope:
         context: dict[str, Any] | None,
         duration_ms: float,
         model: str | None = None,
+        provider: object | None = None,
     ) -> None:
         # THE ASYMMETRY, and why the fix is here and not at the call sites.
         #
@@ -495,6 +530,7 @@ class LLMCallEnvelope:
                 duration_ms=duration_ms,
                 summary={"exception_type": type(exc).__name__},
                 model=model,
+                billing_mode=self._billing_mode_of(model, provider),
             )
         except Exception:
             log.debug(
@@ -511,6 +547,7 @@ class LLMCallEnvelope:
         duration_ms: float,
         context: dict[str, Any] | None,
         model: str | None = None,
+        provider: object | None = None,
     ) -> None:
         if self._telemetry is None:
             return
@@ -525,6 +562,7 @@ class LLMCallEnvelope:
                 duration_ms=duration_ms,
                 summary=summary,
                 model=model,
+                billing_mode=self._billing_mode_of(model, provider),
             )
         except Exception:
             log.debug(

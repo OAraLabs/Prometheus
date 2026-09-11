@@ -107,7 +107,20 @@ SYNTHETIC_TOOL_NAME = "_loop_transition"
 # be recorded as absent rather than as 0.0. Requires a table REBUILD — the
 # additive `_migrate_schema` cannot relax a NOT NULL. See
 # `_migrate_latency_nullable` and docs/FOUNDATION.md.
-TELEMETRY_SCHEMA_VERSION = 2
+# v3 (2026-09-11): `subsystem_runs.billing_mode` records HOW a call was paid
+# for AT WRITE TIME. Billing was previously resolved at READ time from the
+# provider's CURRENT base_url, which makes it a property of the model rather
+# than of when the call happened — so repointing one env var silently
+# reclassified months of history. Additive; NULL means "not recorded", and
+# those rows still fall back to read-time inference (labelled as such).
+#
+# The bump is NOT bookkeeping for an additive column. `_stamp_billing_boundary`
+# is the migration step, and it is what a rolled-back v2 build would break: a
+# v2 writer knows nothing of `billing_mode`, so every row it wrote AFTER the
+# boundary would be unstamped and therefore indistinguishable from a genuine
+# pre-v3 row. Refusing to open is correct here in a way it would not be for a
+# column a rollback could merely ignore.
+TELEMETRY_SCHEMA_VERSION = 3
 
 
 class TelemetrySchemaError(RuntimeError):
@@ -311,6 +324,29 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("cache_write_tokens", "INTEGER"),
         # FOUNDATION 1.3 — same column, same meaning as on tool_calls.
         ("node_id", "TEXT"),
+        # HOW THIS CALL WAS PAID FOR, resolved when it was made.
+        #
+        # Billing is a property of WHEN a call happened, not of the model.
+        # `/api/usage` classified it at READ time from the provider's CURRENT
+        # base_url, so the live configuration *was* the historical record: the
+        # day `QWEN_BASE_URL` stops pointing at the flat-plan host, 280M
+        # already-spent tokens reclassify from `subscription` to `unknown`,
+        # retroactively, for months nobody touched.
+        #
+        # THE MODE, AND DELIBERATELY NOT THE HOST. Storing the resolved
+        # base_url alongside would keep the evidence rather than only the
+        # verdict, and that is a genuine loss — if `SUBSCRIPTION_HOST_MARKERS`
+        # gains an entry, history cannot be re-derived from a bare mode. It
+        # goes anyway: this column is written to a database that is backed up
+        # and copied between machines, and the conventions do not allow a real
+        # infrastructure identifier in anything that persists. Re-deriving the
+        # past from a stored host would also be revising it, which is the
+        # thing this column exists to stop.
+        #
+        # NULL = "not recorded" — rows written before this column existed.
+        # Those are still classified at read time, and `/api/usage` LABELS
+        # them as inferred rather than presenting them as history.
+        ("billing_mode", "TEXT"),
     ],
 }
 
@@ -444,6 +480,7 @@ class ToolCallTelemetry:
         self._conn.executescript(_SCHEMA_SQL_TABLES)
         self._migrate_schema()
         self._migrate_latency_nullable()
+        self._stamp_billing_boundary()
         self._conn.executescript(_SCHEMA_SQL_INDEXES)
         # A DB at or below the current version is stamped current — the
         # additive migration above IS the upgrade path. A legacy DB (no
@@ -506,6 +543,7 @@ class ToolCallTelemetry:
     #: nullable. Rows older than this cannot distinguish a measured zero from
     #: the old NOT NULL DEFAULT, which is what readers tag as `unknown`.
     LATENCY_NULLABLE_SINCE_KEY = "latency_nullable_since"
+    BILLING_RECORDED_SINCE_KEY = "billing_recorded_since"
 
     def _migrate_latency_nullable(self) -> None:
         """Relax `tool_calls.latency_ms` to NULL-able. Idempotent.
@@ -615,6 +653,52 @@ class ToolCallTelemetry:
             )
         except sqlite3.DatabaseError:
             pass
+
+    def _stamp_billing_boundary(self) -> None:
+        """Record when ``billing_mode`` started being written. Set once.
+
+        This is what separates a `recorded` label from a `backfilled` one, and
+        the separation is not cosmetic. A row stamped at write time says what
+        was true when the call was made. A row stamped by the one-shot backfill
+        says what a human concluded afterwards from a dated configuration —
+        defensible, but a different kind of claim, and only the boundary can
+        tell them apart once both are just strings in a column.
+
+        INSERT OR IGNORE: on a database that already has the boundary this is a
+        no-op, so reopening never moves it. A database opened for the first time
+        at v3 stamps `now`, which is correct — every row it goes on to write is
+        stamped by the writer, and there are no older rows to mislabel.
+        """
+        try:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO schema_meta (key, value) VALUES (?, ?)",
+                (self.BILLING_RECORDED_SINCE_KEY, str(time.time())),
+            )
+            self._conn.commit()
+        except sqlite3.DatabaseError:
+            pass
+
+    def billing_boundary(self) -> float | None:
+        """Timestamp from which ``billing_mode`` was written by the writer.
+
+        A stamped row OLDER than this got its label from the backfill, not from
+        the call. Returns None when the key is absent (pre-v3 database opened
+        read-only), which readers must treat as "cannot distinguish" rather
+        than as "everything is recorded".
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM schema_meta WHERE key = ?",
+                (self.BILLING_RECORDED_SINCE_KEY,),
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return None
+        if row is None:
+            return None
+        try:
+            return float(row[0])
+        except (TypeError, ValueError):
+            return None
 
     def latency_boundary(self) -> float | None:
         """Timestamp before which a stored latency cannot be trusted, or None."""
@@ -891,6 +975,7 @@ class ToolCallTelemetry:
         thinking: bool | None = None,
         cached_input_tokens: int | None = None,
         cache_write_tokens: int | None = None,
+        billing_mode: str | None = None,
     ) -> None:
         """Record one autonomous-subsystem cycle / pass / invocation.
 
@@ -909,6 +994,12 @@ class ToolCallTelemetry:
         default to ``None`` so every pre-existing caller is unchanged;
         ``thinking`` is stored as 1/0/NULL (NULL = the provider doesn't
         expose a thinking knob, e.g. stubs and cloud providers).
+
+        ``billing_mode`` (v3) states how the call was paid for AT THE MOMENT
+        IT WAS MADE. NULL means the caller did not know, which is deliberately
+        different from any particular mode: a reader must be able to tell
+        "nobody recorded this" from "this was metered". See the column comment
+        in ``_EXPECTED_COLUMNS``.
         """
         if outcome not in {"success", "partial", "failed", "skipped"}:
             outcome = "failed"
@@ -924,8 +1015,9 @@ class ToolCallTelemetry:
                    duration_ms, outcome, summary_json,
                    input_tokens, output_tokens, round_index,
                    session_id, model, thinking,
-                   cached_input_tokens, cache_write_tokens, node_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   cached_input_tokens, cache_write_tokens, node_id,
+                   billing_mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     uuid4().hex,
@@ -944,6 +1036,7 @@ class ToolCallTelemetry:
                     cached_input_tokens,
                     cache_write_tokens,
                     self._current_node_id(),
+                    billing_mode,
                 ),
             )
             self._conn.commit()
@@ -1122,6 +1215,16 @@ class ToolCallTelemetry:
         Returns raw counts only. Pricing and billing classification are applied by the caller, so
         this method has no opinion about money and stays correct when the pricing table changes.
 
+        ``billing`` is the v3 addition: one row per (model, recorded billing_mode),
+        so a caller can see that a model's tokens were NOT all paid for the same way. It is a
+        SEPARATE list rather than a regrouping of ``models`` on purpose — splitting ``models`` on
+        billing mode would turn one API row into two the day a plan lapses mid-model, and the
+        client rendering that surface is not watched closely enough to absorb a shape change.
+        ``models`` keeps exactly the shape it has always had.
+
+        A NULL ``billing_mode`` here means the row predates v3 and was never stamped; the caller
+        classifies those at read time and must say that it did.
+
         ``tracking_since`` is the first row that carried tokens — a dashboard must be able to say
         what window it is summing, because rows older than that exist and have no token data.
         """
@@ -1153,12 +1256,36 @@ class ToolCallTelemetry:
             first_ever = self._conn.execute(
                 "SELECT MIN(timestamp) FROM subsystem_runs WHERE input_tokens IS NOT NULL"
             ).fetchone()
+            billing = self._conn.execute(
+                "SELECT COALESCE(model, ''), billing_mode, COUNT(*), "
+                "COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), "
+                "MIN(timestamp), MAX(timestamp) "
+                f"FROM subsystem_runs {where} "
+                "GROUP BY COALESCE(model, ''), billing_mode "
+                "ORDER BY SUM(input_tokens) DESC",
+                tuple(params),
+            ).fetchall()
         except sqlite3.DatabaseError:
-            return {"tracking_since": None, "models": [], "daily": []}
+            return {"tracking_since": None, "models": [], "daily": [], "billing": []}
 
         return {
             "tracking_since": (first_ever[0] if first_ever else None),
             "window_days": days,
+            # Rows stamped BEFORE this got their label from the backfill.
+            "billing_recorded_since": self.billing_boundary(),
+            "billing": [
+                {
+                    "model": b[0],
+                    # None = never stamped (pre-v3). NOT the same as any mode.
+                    "billing_mode": b[1],
+                    "runs": b[2],
+                    "input_tokens": b[3],
+                    "output_tokens": b[4],
+                    "first_seen": b[5],
+                    "last_seen": b[6],
+                }
+                for b in billing
+            ],
             "models": [
                 {
                     "model": r[0],
