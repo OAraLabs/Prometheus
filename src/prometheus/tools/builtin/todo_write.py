@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from prometheus.permissions.path_schema import PATH_FIELD
+from prometheus.permissions.path_schema import PATH_FIELD_WRITE
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -16,7 +16,7 @@ class TodoWriteToolInput(BaseModel):
     item: str = Field(description="TODO item text.")
     checked: bool = Field(default=False, description="Mark as already completed.")
     path: str = Field(
-        json_schema_extra=PATH_FIELD,
+        json_schema_extra=PATH_FIELD_WRITE,
         default=".prometheus/TODO.md",
         description=(
             "Relative path to TODO file. Defaults to a runtime scratchpad "

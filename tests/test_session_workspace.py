@@ -327,15 +327,15 @@ class TestLoop:
         ws = tmp_path / "ws"; ws.mkdir()
         target = str(ws / "notes.md")
         gate = SecurityGate(workspace_root=str(boot))
-        assert gate.evaluate("write_file", file_path=target, origin="user").requires_confirmation
-        assert not gate.evaluate("write_file", file_path=target, origin="user", workspace_roots=(ws,)).requires_confirmation
+        assert gate.evaluate("write_file", file_path=target, origin="user", path_is_write=True).requires_confirmation
+        assert not gate.evaluate("write_file", file_path=target, origin="user", workspace_roots=(ws,), path_is_write=True).requires_confirmation
         # Through the loop: the tool executes (ALLOW) with the session workspace set.
         tool = _ProbeWriteTool()
         _drain(self._ctx(_Scripted({"path": target, "content": "x"}), tool, gate, boot_cwd=boot, workspace=ws))
         assert len(tool.seen) == 1
         # And the boundary moved WITH the session: a write back under the
         # daemon's root is now the one outside the workspace.
-        assert gate.evaluate("write_file", file_path=str(boot / "x.md"), origin="user", workspace_roots=(ws,)).requires_confirmation
+        assert gate.evaluate("write_file", file_path=str(boot / "x.md"), origin="user", workspace_roots=(ws,), path_is_write=True).requires_confirmation
 
     def test_project_section_is_swapped_for_the_workspace(self, tmp_path) -> None:
         from prometheus.context.prompt_assembler import project_files_section

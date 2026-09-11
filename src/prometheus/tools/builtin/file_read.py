@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from prometheus.permissions.path_schema import PATH_FIELD
+from prometheus.permissions.path_schema import PATH_FIELD_READ
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -21,7 +21,7 @@ class FileReadToolInput(BaseModel):
     """Arguments for the file read tool."""
 
     path: str = Field(
-        json_schema_extra=PATH_FIELD,description="Path of the file to read")
+        json_schema_extra=PATH_FIELD_READ,description="Path of the file to read")
     offset: int = Field(default=0, ge=0, description="Zero-based starting line")
     limit: int = Field(default=200, ge=1, le=2000, description="Number of lines to return")
 

@@ -300,6 +300,16 @@ def test_todo_write_confines_itself(tmp_path):
 #: What was wrong is that they were the ONLY coverage, so the gate's logic was
 #: proven while the caller that feeds it was not. This file is the other half.
 _DIRECT_EVALUATE_TESTS: dict[str, str] = {
+    "test_write_boundary_is_a_property.py":
+        "its BOUNDARY tests go through _execute_tool_call, as this file "
+        "requires — the one direct call is the OVER-REFUSAL probe, which "
+        "reproduces call shapes the agent loop cannot produce: a bash call "
+        "carrying cron's working directory, and a read whose caller omits "
+        "is_read_only. Those two are what made the naive 'carries a path and "
+        "is not read-only' predicate over-fire on 23 tests, so the probe has "
+        "to construct them directly; no tool dispatch produces them. "
+        "Registered rather than exempted: if that file stops calling evaluate "
+        "directly, this entry fails as a stale registration.",
     "test_permissions.py":
         "unit tests of the gate's decision table; the wiring they assume is "
         "now covered here through _execute_tool_call",

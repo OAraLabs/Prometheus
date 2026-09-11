@@ -96,8 +96,14 @@ class TestEvaluateDocstringIsTrue:
         # It "applies", but it asks. Recording the difference because the
         # floor below is the thing that refuses, and conflating the two is
         # how a speed bump gets described as a wall.
+        # path_is_write=True is how a caller declares that the path it is
+        # handing the gate is a WRITE target. The workspace boundary rules on
+        # declared writes only: `file_path` alone is not enough, because cron
+        # passes a working directory and the denied-path tests pass a read
+        # target, and both are paths on calls that are not read-only.
         assert _decision(gate, tool_name="write_file",
                          file_path="/home/testuser/elsewhere/x",
+                         path_is_write=True,
                          origin="user") == "APPROVE"
 
     @pytest.mark.parametrize("tool,path", [

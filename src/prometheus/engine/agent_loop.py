@@ -2544,6 +2544,10 @@ def _boundary_escapes(context, fmv, fmv_kw: dict) -> list[str]:
         try:
             decision = gate.evaluate(
                 "write_file", file_path=path, origin="user",
+                # This layer asks precisely "would a WRITE here have been
+                # permitted", about a path that already changed. Declared, not
+                # inferred — the boundary only rules on a declared write.
+                path_is_write=True,
                 **({"workspace_roots": _roots} if _roots else {}),
             )
         except Exception:
@@ -4121,7 +4125,10 @@ async def _execute_tool_call(
         # registered tool declares. The gate got None on every call, so
         # denied_paths and the workspace boundary were both skipped, from the
         # initial commit until 2026-08-13. See permissions/tool_paths.py.
-        from prometheus.permissions.tool_paths import gate_path_for
+        from prometheus.permissions.tool_paths import (
+            gate_path_for,
+            gate_path_is_write,
+        )
         # The tool's own schema says which params are paths (never guessed
         # from the name — that mistake has now been made three times), and
         # `base` is what a relative DIRECTORY root resolves against: the same
@@ -4148,6 +4155,11 @@ async def _execute_tool_call(
         _file_path, _path_unknown = gate_path_for(
             tool_name, tool_input, schema=_gate_schema, base=_run_cwd,
         )
+        # Whether that path gets WRITTEN to, from the parameter's own
+        # declaration. This is what the workspace boundary keys on; it used to
+        # key on a list of two tool names, and four writing tools were not in
+        # it. See permissions/tool_paths.gate_path_is_write.
+        _path_is_write = gate_path_is_write(tool_name, schema=_gate_schema)
         _command = str(tool_input.get("command", "")) or None
         # TRUST-CONTEXT: derive origin from the session_id already
         # threaded through LoopContext (agent_loop.py:538-542 convention).
@@ -4180,6 +4192,7 @@ async def _execute_tool_call(
                 file_path=_file_path,
                 command=_command,
                 origin=_origin,
+                path_is_write=_path_is_write,
                 **({"workspace_roots": _run_roots} if _run_roots else {}),
             )
         except TypeError:
@@ -4198,6 +4211,14 @@ async def _execute_tool_call(
                     type(context.permission_checker).__name__,
                 )
                 _LEGACY_PERMISSION_CHECKER_WARNED = True
+            # gate-path-context: legacy third-party gate, pre-`path_is_write`.
+            # This branch exists BECAUSE the gate rejected the modern kwargs,
+            # so it cannot pass `path_is_write` either — and the workspace
+            # boundary therefore does not apply to such a gate. That is the
+            # gate's own policy surface, not this loop's, and the one-shot
+            # WARNING above already names the deprecation. Noted rather than
+            # hidden: a legacy gate gets denied_paths and the always-denied
+            # floor, and does NOT get the workspace write boundary.
             decision = context.permission_checker.evaluate(
                 tool_name,
                 is_read_only=tool.is_read_only(parsed_input),

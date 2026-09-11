@@ -15,7 +15,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from prometheus.permissions.path_schema import DIR_FIELD
+from prometheus.permissions.path_schema import DIR_FIELD_READ
 from prometheus.tools.denied_prune import (
     is_denied,
     resolve_denied,
@@ -29,7 +29,7 @@ class GrepToolInput(BaseModel):
 
     pattern: str = Field(description="Regular expression to search for")
     root: str | None = Field(
-        json_schema_extra=DIR_FIELD,default=None, description="Search root directory")
+        json_schema_extra=DIR_FIELD_READ,default=None, description="Search root directory")
     file_glob: str = Field(
         default="**/*",
         description=(

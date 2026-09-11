@@ -323,8 +323,8 @@ class TestSecurityGateNowReadsItsConfig:
         repo_config({"security": {"workspace_root": [str(allowed)]}})
         gate = SecurityGate.from_config()
 
-        inside = gate.evaluate("write_file", file_path=str(allowed / "note.txt"))
-        outside = gate.evaluate("write_file", file_path=str(tmp_path / "elsewhere.txt"))
+        inside = gate.evaluate("write_file", file_path=str(allowed / "note.txt"), path_is_write=True)
+        outside = gate.evaluate("write_file", file_path=str(tmp_path / "elsewhere.txt"), path_is_write=True)
         assert inside.action == "ALLOW"
         assert outside.action == "APPROVE"
 
@@ -365,7 +365,7 @@ class TestSecurityGateNowReadsItsConfig:
         assert len(gate._grants) == 1
         assert gate.evaluate(
             "write_file", file_path=str(target / "x.txt")
-        ).action == "ALLOW"
+        , path_is_write=True).action == "ALLOW"
 
 
 class TestSecurityGateSelfProtection:
@@ -386,7 +386,7 @@ class TestSecurityGateSelfProtection:
 
         assert Path(gate._config_path).resolve() == path.resolve()
         assert gate.evaluate("read_file", file_path=str(path)).action == "DENY"
-        assert gate.evaluate("write_file", file_path=str(path)).action == "DENY"
+        assert gate.evaluate("write_file", file_path=str(path), path_is_write=True).action == "DENY"
 
     def test_persist_grant_writes_back_to_that_same_file(self, repo_config, tmp_path):
         """``_config_path`` is a WRITE target as well as a read one.
