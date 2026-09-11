@@ -826,6 +826,17 @@ def run_coding_task(args) -> int:
             pass
 
     task_id = args.task_id or f"c{_uuid4().hex[:8]}"
+    # The CONTAINER name is derived from this id (`_container_id_for_task`), and
+    # `--task-id` comes from the caller. Two runs with the same id therefore
+    # addressed the SAME container — the second either failed to create it or
+    # attached to the first run's, with the first run's clone still mounted.
+    #
+    # The task id stays exactly as given: it names the branch (`coding/<id>`)
+    # and every report field, and callers correlate on it. What gets a
+    # uniqueness guarantee is the SANDBOX INSTANCE id, which is what needs one.
+    # A caller may reuse a task id deliberately (a retry of the same logical
+    # task) and should still get a clean container.
+    sandbox_instance_id = f"{task_id}-{_uuid4().hex[:8]}"
     sandbox_parent = args.sandbox_parent or str(
         get_data_dir().parent / "coding"
     )
@@ -841,7 +852,7 @@ def run_coding_task(args) -> int:
             sandbox_parent,
             name=clone_name,
             backend=sandbox_backend,
-            task_id=task_id,
+            task_id=sandbox_instance_id,
             network_isolation=bool(coding_cfg.get("network_isolation", False)),
             image=coding_cfg.get("docker_image") or None,
         )
@@ -909,6 +920,32 @@ def run_coding_task(args) -> int:
             "sandbox_root": str(sandbox.root),
         }, indent=2))
         return 1
+    finally:
+        # ALWAYS RELEASE THE SANDBOX. `Sandbox.close()` existed on the
+        # interface and was called from NOWHERE in src/ — verified by grep.
+        # For ProcessSandbox it is a documented no-op; for DockerSandbox it is
+        # the only thing that stops the container. Every docker-backed run
+        # therefore left a sleeping container with the jail clone still
+        # bind-mounted, until the daemon restarted.
+        #
+        # In `finally` rather than after the success path: the failure paths
+        # are exactly when a container is most likely to be left behind, and
+        # they are the two that returned early.
+        #
+        # Never raises. A cleanup failure must not replace the run's verdict —
+        # the report is already printed by the time this runs, and turning a
+        # successful run into a non-zero exit because teardown hiccuped would
+        # be its own wrong answer.
+        try:
+            sandbox.close()
+        except Exception:  # noqa: BLE001 — reported, never fatal
+            import traceback as _tb2
+            print(
+                f"warning: sandbox cleanup failed for task {task_id}; a "
+                f"container or clone may be left behind at {sandbox.root}",
+                file=sys.stderr,
+            )
+            _tb2.print_exc()
 
 
 # ---------------------------------------------------------------------------

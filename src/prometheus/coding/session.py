@@ -111,6 +111,14 @@ class CodingRunReport:
         }
 
 
+class CodingGitError(RuntimeError):
+    """A git command inside the sandbox exited non-zero.
+
+    Raised rather than returned so a failed branch creation cannot be mistaken
+    for a successful one. See `CodingSession._git`.
+    """
+
+
 class CodingSession:
     """One coding run. See module docstring."""
 
@@ -152,9 +160,32 @@ class CodingSession:
     # Git plumbing (inside the sandbox, repo-local identity, never pushes)
     # ------------------------------------------------------------------
 
-    async def _git(self, *args: str) -> str:
+    async def _git(self, *args: str, check: bool = True) -> str:
+        """Run git in the sandbox. RAISES on a non-zero exit unless check=False.
+
+        ⚠ THIS USED TO RETURN `result.output` AND DISCARD `result.exit_code`.
+
+        A failed `git checkout -b` — the branch already exists, a dirty tree,
+        a detached HEAD — returned its error text as an ordinary string and the
+        run continued on whatever branch the repo happened to be on, while
+        `self._branch` went on naming the branch that was never created. The
+        report then described work that did not land where it said.
+
+        Reproduced: with `checkout -q -b` exiting 128, `_prepare_branch()`
+        returned normally and the session still reported
+        `branch='coding/t1'`.
+
+        `check=False` is for the calls where a non-zero exit is information
+        rather than failure — `diff --stat` over an empty range, for instance.
+        Each such call site states why.
+        """
         cmd = "git " + " ".join(args)
         result = await self._sandbox.run(cmd, timeout_seconds=60)
+        if check and result.exit_code != 0:
+            raise CodingGitError(
+                f"{cmd} failed (exit {result.exit_code}): "
+                f"{(result.output or '').strip()[:400]}"
+            )
         return result.output
 
     async def _prepare_branch(self) -> None:
@@ -167,7 +198,10 @@ class CodingSession:
             "commit", "-q", "--allow-empty",
             "-m", f"'coding task {self._task.task_id}: {status}'",
         )
-        return await self._git("diff", "--stat", "HEAD~1..HEAD")
+        # A diff over a range that does not exist yet (first commit, empty
+        # repo) exits non-zero and that is not a failure — the artifact
+        # summary is best-effort reporting, not a control.
+        return await self._git("diff", "--stat", "HEAD~1..HEAD", check=False)
 
     # ------------------------------------------------------------------
     # Ground truth
