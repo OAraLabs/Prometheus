@@ -905,17 +905,44 @@ def _allowed_image_roots() -> list[Path]:
     Deliberately tighter than SecurityGate's ``security.workspace_root`` — on
     this deployment that key is ``"~"`` (the whole home dir), i.e. the exact
     attack surface this guard exists to close (``~/.bashrc``, ``~/.ssh/...``).
-    Writing image bytes to an arbitrary path is never a legitimate need, so
-    outputs are confined to the Prometheus base dir ``~/.prometheus/`` (which
-    contains ``cache/images/``, ``files/``, ``data/`` and the default
-    ``workspace/``). The agent workspace is added explicitly in case
-    ``PROMETHEUS_WORKSPACE_DIR`` relocates it outside the base.
-    """
-    from prometheus.config.paths import get_config_dir, get_workspace_dir
 
-    roots: list[Path] = [get_config_dir()]
+    ⚠ AND TIGHTER THAN ``~/.prometheus/``, WHICH IS WHERE THIS USED TO STOP.
+    The base dir is not a safe floor: it is where the daemon keeps its STATE.
+    ``get_config_dir()`` as a root allowed an ``output_path`` of
+    ``data/lcm.db``, ``data/tasks.db``, ``data/devices.json`` or
+    ``telemetry.db`` — all inside the allow-list, all overwritten with image
+    bytes. Reproduced against this function; all four were clobbered and began
+    ``b'\xff\xd8\xff-PNG-BYTE'``.
+
+    "Writing image bytes to an arbitrary path is never a legitimate need" was
+    the right instinct; the roots just were not narrow enough to express it.
+    An image generator needs somewhere to put IMAGES, so the allow-list is now
+    the image directories and nothing else:
+
+      * ``cache/images/`` — where un-overridden output already goes
+      * ``<workspace>/images/`` — so a run can keep its pictures beside its work
+
+    Both are created on demand, so a first-time override does not fail on a
+    missing directory.
+
+    WHAT THIS REFUSES THAT IT USED TO ALLOW: any path under
+    ``~/.prometheus/`` that is not an image directory. That is the point. An
+    operator who wants images somewhere else relocates the workspace
+    (``PROMETHEUS_WORKSPACE_DIR``), which moves the allowed root with it — an
+    operator-chosen location, not a model-chosen one.
+    """
+    from prometheus.config.paths import get_workspace_dir
+    from prometheus.gateway.media_cache import image_cache_dir
+
+    roots: list[Path] = []
     try:
-        roots.append(get_workspace_dir())
+        roots.append(image_cache_dir())
+    except Exception:  # pragma: no cover - cache dir is best-effort
+        pass
+    try:
+        workspace_images = get_workspace_dir() / "images"
+        workspace_images.mkdir(parents=True, exist_ok=True)
+        roots.append(workspace_images)
     except Exception:  # pragma: no cover - workspace dir is best-effort
         pass
     return roots
