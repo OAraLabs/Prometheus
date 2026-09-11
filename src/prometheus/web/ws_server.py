@@ -253,6 +253,38 @@ class WebSocketBridge:
                     "(message too big); the frame was never processed",
                     _client_label(websocket), WS_MAX_FRAME_BYTES,
                 )
+            else:
+                # EVERY OTHER EXCEPTION USED TO END HERE IN SILENCE.
+                #
+                # The 1009 branch was added because oversized uploads vanished
+                # without a trace — but only 1009 was given a voice. An ordinary
+                # close (1000/1001) arrives here too, and so does a genuine
+                # fault in _handle_client_message: a malformed frame, a bug in a
+                # command handler, a serialisation error. All of them looked
+                # identical from the outside, namely a client that quietly
+                # stopped being handled.
+                #
+                # Level is deliberately split. A clean close is routine and logs
+                # at INFO; anything else is a fault and logs at WARNING with a
+                # traceback, because that is the case where someone needs the
+                # stack rather than a sentence.
+                close_code = (
+                    getattr(getattr(exc, "sent", None), "code", None)
+                    or getattr(getattr(exc, "rcvd", None), "code", None)
+                )
+                if close_code in (1000, 1001):
+                    logger.info(
+                        "Client %s closed the connection (code %s)",
+                        _client_label(websocket), close_code,
+                    )
+                else:
+                    logger.warning(
+                        "Client %s handler ended on an unhandled %s: %s "
+                        "(close code %s)",
+                        _client_label(websocket), type(exc).__name__, exc,
+                        close_code,
+                        exc_info=True,
+                    )
         finally:
             self._clients.discard(websocket)
             self._ws_identity.pop(websocket, None)
@@ -1599,7 +1631,21 @@ class WebSocketBridge:
             return
         raw = json.dumps(event)
         dead: list[Any] = []
-        for ws in self._clients:
+        # SNAPSHOT. `await ws.send(...)` below yields to the event loop, and
+        # `_handler` mutates this very set on both sides of a connection's
+        # life: `self._clients.add(websocket)` when one connects (line ~226)
+        # and `self._clients.discard(websocket)` in its `finally` when one goes
+        # away (line ~257). Either, landing mid-fan-out, made this loop raise
+        #     RuntimeError: Set changed size during iteration
+        # which propagated out of broadcast() into the turn. The caller catches
+        # broadly, so the turn ROLLED BACK and the user got an error frame —
+        # because somebody else opened a browser tab.
+        #
+        # A snapshot is also the right SEMANTICS, not merely a way to stop the
+        # raise: the recipients of an event are the clients connected when it
+        # was emitted. A client that connects halfway through a fan-out has not
+        # missed anything it was owed, and one that left is not owed anything.
+        for ws in tuple(self._clients):
             if not self._wants(ws, event):
                 continue  # subscribed elsewhere — a skip, never a drop
             try:
