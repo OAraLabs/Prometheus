@@ -85,6 +85,154 @@ fi
 
 BLOCKED=0
 
+# ---------------------------------------------------------------------------
+# THE ENGINE — POSIX ERE, and a scanner that must prove it can run
+#
+# ⚠ THIS HOOK SPENT ITS LIFE ON macOS REPORTING "All clean" WHILE EVALUATING
+#   NOTHING. Every pattern ran through `grep -nP`. BSD grep — which is the
+#   grep git invokes, whatever your interactive shell aliases — has no -P:
+#
+#       $ /usr/bin/grep -qP abc ; echo $?
+#       grep: invalid option -- P
+#       2
+#
+#   The old call was `... | grep -nP "$pattern" || true`. That `|| true`
+#   collapses grep's THREE outcomes into two: exit 1 "no matches" and exit 2
+#   "the scanner did not run" both became an empty `matches`, and the loop
+#   `continue`d. All nine patterns scanned nothing, BLOCKED stayed 0, and the
+#   hook printed "All clean. No sensitive data found in staged files." and
+#   exited 0 — with a real match staged. Verified by live probe before this
+#   change: 9 invalid-option errors, 0 blocks, exit 0.
+#
+#   CROSS-CUTTING §8 names this exact shape: fail-closed and fail-open are
+#   choices; fail-by-exception is the third state nobody chose. CONTRIBUTING
+#   calls this hook the only line of defense on this repo, and it is the
+#   mechanism behind the standing no-infrastructure-identifiers rule — the
+#   rule written after a chat id reached a public PR body. On macOS it was
+#   not a weak net. It was no net, announcing itself as clean.
+#
+# TWO SEPARATE FIXES, BECAUSE THE FLAG WAS NOT THE DEFECT
+# -------------------------------------------------------
+# 1. PORTABILITY. Patterns are POSIX ERE (`-E`), which BSD and GNU grep both
+#    implement, so no PCRE is required and no grep needs installing. The two
+#    PCRE-isms are gone: inline `(?i)` is now the -i flag (BSD grep happens to
+#    honour `(?i)` inside an ERE and GNU grep does not — depending on that
+#    difference is depending on undefined behaviour), and `\s` is
+#    `[[:space:]]`. Nothing else in the pattern set was PCRE-only.
+#
+# 2. THE FAILURE MODE, which is the part that actually matters. Swapping -P
+#    for -E makes it work today and leaves the defect intact: the next
+#    unavailable flag, missing binary, or unreadable blob would again read as
+#    "no matches". So grep's exit code is now a three-way contract —
+#
+#        0    matches found
+#        1    no matches
+#        >=2  THE SCANNER DID NOT RUN
+#
+#    — and >=2 REFUSES THE COMMIT, naming the pattern that could not be
+#    evaluated. "Scanner failed" and "no matches" can no longer render the
+#    same. Every grep in this file goes through scan()/scan_q(); none of them
+#    is followed by `|| true`.
+#
+# 3. THE SELF-TEST. Before scanning anything, the engine is made to prove it
+#    evaluates an ERE correctly: a positive control that must match, a
+#    negative control that must not, and a case-insensitive control. An engine
+#    that fails any of them refuses the commit rather than scanning with it.
+#    Run against the old `-P` form, this is what would have caught the bug on
+#    the first commit instead of some unknown number of commits later.
+#
+# NO NEW OVERRIDE. `git commit --no-verify` already exists and is the honest
+# escape; adding a second, quieter one for "the scanner is broken" would
+# recreate the hole this change closes.
+# ---------------------------------------------------------------------------
+GREP="${PROMETHEUS_PRECOMMIT_GREP:-grep}"
+
+scanner_failed() {
+    # The one exit path for "this hook could not do its job."
+    local label="$1"
+    local detail="$2"
+    {
+        printf '\n=== COMMIT REFUSED — THE SECRET SCANNER DID NOT RUN ===\n\n'
+        printf '  pattern : %s\n' "$label"
+        printf '  detail  : %s\n' "$detail"
+        printf '  grep    : %s\n' "$(command -v "$GREP" 2>/dev/null || printf '%s (not found)' "$GREP")"
+        printf '\n'
+        printf '  This is NOT "no secrets found". The scan did not happen, so\n'
+        printf '  nothing is known about what you are about to commit. This hook\n'
+        printf '  refuses rather than reporting a clean it cannot vouch for.\n'
+        printf '\n'
+        printf '  Patterns are POSIX ERE and need no special grep. If your grep\n'
+        printf '  cannot evaluate them, point the hook at one that can:\n'
+        printf '\n'
+        printf '      PROMETHEUS_PRECOMMIT_GREP=/path/to/grep git commit ...\n'
+        printf '\n'
+        printf '  Last resort, unchanged and still recorded as a bypass:\n'
+        printf '      git commit --no-verify\n'
+        printf '\n'
+    } >&2
+    exit 1
+}
+
+# scan <icase> <pattern> <content> — matching lines land in SCAN_OUT.
+# Returns grep's code verbatim. Callers MUST treat >=2 as scanner failure;
+# there is deliberately no `|| true` anywhere near it.
+#
+# CONTENT IS AN ARGUMENT, NOT STDIN, AND THAT IS LOAD-BEARING. Piping into
+# this function runs its body in a SUBSHELL, so SCAN_OUT would be assigned
+# there and come back EMPTY in the caller. The pattern would match, grep
+# would exit 0, and the reporting loop would then iterate over nothing — a
+# file that matched would read as clean. That is the same fail-open class
+# this change exists to remove, reintroduced one layer down. Caught by live
+# probe against a staged secret, not by reading.
+SCAN_OUT=""
+scan() {
+    local icase="$1"
+    local pattern="$2"
+    local content="$3"
+    local rc=0
+    if [ "$icase" = "1" ]; then
+        SCAN_OUT=$(printf '%s\n' "$content" | "$GREP" -niE -e "$pattern") || rc=$?
+    else
+        SCAN_OUT=$(printf '%s\n' "$content" | "$GREP" -nE -e "$pattern") || rc=$?
+    fi
+    return "$rc"
+}
+
+# scan_q <icase> <pattern> <content> — quiet predicate, same three-way contract.
+scan_q() {
+    local icase="$1"
+    local pattern="$2"
+    local content="$3"
+    local rc=0
+    if [ "$icase" = "1" ]; then
+        printf '%s\n' "$content" | "$GREP" -qiE -e "$pattern" || rc=$?
+    else
+        printf '%s\n' "$content" | "$GREP" -qE -e "$pattern" || rc=$?
+    fi
+    return "$rc"
+}
+
+# ── Engine self-test — prove the scanner works before trusting a clean ──────
+if ! command -v "$GREP" >/dev/null 2>&1; then
+    scanner_failed "(engine self-test)" "grep not found on PATH"
+fi
+
+_st_rc=0
+scan_q 0 'sentinel-[A-Za-z]+-[0-9]{3}' 'sentinel-AbC-123' || _st_rc=$?
+[ "$_st_rc" -eq 0 ] || scanner_failed "(engine self-test: positive control)" \
+    "an ERE that must match did not (grep exit $_st_rc)"
+
+_st_rc=0
+scan_q 0 'ThisMustNotMatch[0-9]{9}' 'sentinel-AbC-123' || _st_rc=$?
+[ "$_st_rc" -eq 1 ] || scanner_failed "(engine self-test: negative control)" \
+    "an ERE that must NOT match returned grep exit $_st_rc (expected 1)"
+
+_st_rc=0
+scan_q 1 'sentinel' 'SENTINEL' || _st_rc=$?
+[ "$_st_rc" -eq 0 ] || scanner_failed "(engine self-test: case-insensitive control)" \
+    "case-insensitive matching is not working (grep exit $_st_rc)"
+
+
 # Two scopes, because the dangerous classes and the noisy class differ.
 #
 # STAGED_ALL — everything except the hook itself (which necessarily contains
@@ -104,12 +252,23 @@ BLOCKED=0
 #   trains you to reach for --no-verify. Hostnames are also the mildest class
 #   here: MagicDNS names do not resolve outside the tailnet. IPs stay blocked
 #   everywhere, which is the control that actually matters.
+# Exit 1 from `grep -v` means "nothing left after filtering", which is a
+# legitimate empty list. Exit >=2 means the filter did not run — and an empty
+# STAGED_ALL short-circuits this hook to `exit 0` four lines down, scanning
+# nothing and reporting nothing. Same fail-open as the scan itself, so the
+# same three-way exit-code contract applies here.
+_rc=0
 STAGED_ALL=$(git diff --cached --name-only --diff-filter=ACM | \
-    grep -v '^\.githooks/' || true)
+    "$GREP" -v '^\.githooks/') || _rc=$?
+[ "$_rc" -lt 2 ] || scanner_failed "(staged file list)" \
+    "grep exited $_rc filtering the staged file list — the scan scope is unknown"
 
+_rc=0
 STAGED_CODE=$(printf '%s\n' "$STAGED_ALL" | \
-    grep -v '\.md$' | \
-    grep -v '^docs/' || true)
+    "$GREP" -v '\.md$' | \
+    "$GREP" -v '^docs/') || _rc=$?
+[ "$_rc" -lt 2 ] || scanner_failed "(staged code file list)" \
+    "grep exited $_rc filtering the code-scope file list"
 
 if [ -z "$STAGED_ALL" ]; then
     exit 0
@@ -153,7 +312,9 @@ ALLOWLIST_REGEX='oara-prometheus|100\.64\.0\.[0-9]{1,3}'
 # it, editing any provider test would block the commit — and a hook that cries
 # wolf trains you to reach for `--no-verify`, which is strictly worse than a
 # hook with one narrow, documented blind spot.
-PLACEHOLDER_REGEX='(?i)(test|fake|example|dummy|placeholder|sample|redacted|never|your[-_]?(key|token)|xxxx|0000)'
+#
+# Case-insensitivity is the -i FLAG, not an inline `(?i)`. See THE ENGINE below.
+PLACEHOLDER_REGEX='(test|fake|example|dummy|placeholder|sample|redacted|never|your[-_]?(key|token)|xxxx|0000)'
 
 check_pattern() {
     local label="$1"
@@ -161,29 +322,58 @@ check_pattern() {
     local skip_placeholders="${3:-0}"
     # scope: "all" (default — includes markdown/docs) or "code" (excludes them)
     local scope="${4:-all}"
+    # icase: 1 = match case-insensitively (replaces the old inline `(?i)`)
+    local icase="${5:-0}"
     local files="$STAGED_ALL"
     [ "$scope" = "code" ] && files="$STAGED_CODE"
 
+    local file match blob stripped rc
     while IFS= read -r file; do
         [ -f "$file" ] || continue
-        # Use git show to read the staged version, not the working copy
-        matches=$(git show ":$file" 2>/dev/null | grep -nP "$pattern" || true)
-        [ -n "$matches" ] || continue
+
+        # Read the STAGED version, not the working copy. Captured separately
+        # so a git failure is distinguishable from "the file has no matches" —
+        # under the old single pipeline it was not.
+        rc=0
+        blob=$(git show ":$file" 2>/dev/null) || rc=$?
+        [ "$rc" -eq 0 ] || scanner_failed "$label" \
+            "git show :$file failed (exit $rc) — the staged blob could not be read"
+
+        rc=0
+        scan "$icase" "$pattern" "$blob" || rc=$?
+        [ "$rc" -lt 2 ] || scanner_failed "$label" \
+            "grep exited $rc scanning $file — the pattern was not evaluated"
+        [ "$rc" -eq 0 ] || continue
+
         while IFS= read -r match; do
             [ -n "$match" ] || continue
+
             # Mask allowlisted tokens, then re-test: if the sensitive pattern no
             # longer matches, the only hit was an allowlisted false positive.
-            stripped=$(printf '%s' "$match" | sed -E "s/${ALLOWLIST_REGEX}//g")
-            printf '%s' "$stripped" | grep -qP "$pattern" || continue
-            if [ "$skip_placeholders" = "1" ] && \
-               printf '%s' "$match" | grep -qP "$PLACEHOLDER_REGEX"; then
-                continue
+            rc=0
+            stripped=$(printf '%s' "$match" | sed -E "s/${ALLOWLIST_REGEX}//g") || rc=$?
+            [ "$rc" -eq 0 ] || scanner_failed "$label" \
+                "sed exited $rc applying the allowlist — the re-test is unreliable"
+
+            rc=0
+            scan_q "$icase" "$pattern" "$stripped" || rc=$?
+            [ "$rc" -lt 2 ] || scanner_failed "$label" \
+                "grep exited $rc on the allowlist re-test — a real match could be dropped"
+            [ "$rc" -eq 0 ] || continue
+
+            if [ "$skip_placeholders" = "1" ]; then
+                rc=0
+                scan_q 1 "$PLACEHOLDER_REGEX" "$match" || rc=$?
+                [ "$rc" -lt 2 ] || scanner_failed "$label" \
+                    "grep exited $rc on the placeholder test — cannot tell a fixture from a secret"
+                [ "$rc" -eq 0 ] && continue
             fi
+
             echo "  BLOCKED  $file:$match"
             echo "           reason: $label"
             echo ""
             BLOCKED=1
-        done <<< "$matches"
+        done <<< "$SCAN_OUT"
     done <<< "$files"
 }
 
@@ -263,9 +453,11 @@ check_pattern "Account-identifying provider endpoint (Alibaba workspace host)" \
 #    carry no vendor prefix, so they are indistinguishable from random hex to
 #    GitHub's provider-pattern scanner — nothing upstream would stop them. Match
 #    on the ASSIGNMENT instead: a long opaque value bound to a secret-ish name.
+#    Case-insensitivity is the 5th arg (icase=1), not an inline `(?i)`; `\s` is
+#    `[[:space:]]`. Both were the only PCRE-only constructs in this file.
 check_pattern "Opaque secret assigned to a credential-named variable" \
-    '(?i)(api[_-]?key|api[_-]?token|auth[_-]?token|access[_-]?token|bearer|secret|password|passwd)["'"'"']?\s*[:=]\s*["'"'"']?[A-Za-z0-9+/=_-]{32,}' \
-    1
+    '(api[_-]?key|api[_-]?token|auth[_-]?token|access[_-]?token|bearer|secret|password|passwd)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9+/=_-]{32,}' \
+    1 all 1
 
 if [ "$BLOCKED" -eq 1 ]; then
     echo "=== COMMIT BLOCKED ==="

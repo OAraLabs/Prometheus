@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+
+pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from prometheus.context.budget import TokenBudget, resolve_effective_limit

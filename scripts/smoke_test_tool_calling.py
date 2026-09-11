@@ -131,7 +131,16 @@ def resolve_package_provenance() -> tuple[dict, str]:
         "service_src": None,
     }
     if root:
-        status = _git(root, "status", "--porcelain")
+        # TRACKED modifications only, deliberately — `--untracked-files=no`.
+        #
+        # scripts/deploy_guard.sh refuses on tracked changes and IGNORES
+        # untracked ones, at length and on purpose: "a stray scratch file must
+        # never be able to cause an outage." Counting untracked files here made
+        # the two controls disagree about the word "dirty", in the cry-wolf
+        # direction — the deploy clone reported `6 dirty file(s)` for six
+        # `config/prometheus.yaml.bak-*` scratch files while the guard that
+        # actually gates deploys considered the same tree clean.
+        status = _git(root, "status", "--porcelain", "--untracked-files=no")
         facts["dirty"] = len(status.splitlines()) if status is not None else None
 
     service_src = _service_tree()

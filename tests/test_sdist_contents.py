@@ -81,7 +81,54 @@ HOOK_PATTERN_FIXTURES: dict[str, tuple[int, str]] = {
 }
 
 
-def _hook_checks() -> tuple[list[tuple[str, str, str, str]], str, str]:
+POSIX_CLASSES = {
+    "[:alpha:]": "A-Za-z",
+    "[:digit:]": "0-9",
+    "[:alnum:]": "A-Za-z0-9",
+    "[:upper:]": "A-Z",
+    "[:lower:]": "a-z",
+    "[:space:]": " \\t\\n\\r\\f\\v",
+    "[:blank:]": " \\t",
+    "[:punct:]": "!-/:-@\\[-`{-~",
+    "[:xdigit:]": "0-9A-Fa-f",
+}
+
+
+def _ere_to_python(pattern: str) -> str:
+    """Translate a POSIX ERE into an equivalent Python `re` pattern.
+
+    WHY THIS EXISTS. The hook's patterns are POSIX ERE, because that is the
+    dialect BOTH BSD and GNU grep implement — the hook used to ask for PCRE
+    (`grep -P`), which BSD grep does not have, and the whole scanner silently
+    evaluated nothing on macOS as a result.
+
+    Python's `re` is neither dialect. It accepts `(?i)` (which PCRE has and
+    POSIX ERE does not) and REJECTS POSIX bracket classes: `[[:space:]]` is
+    read as a character class containing `[ : s p a c e`, followed by a
+    stray `]`. That compiles — with only a FutureWarning — and matches the
+    WRONG THING. So a replication that compiles the hook's pattern text
+    directly is not testing the hook; it is testing a different regex that
+    happens to share a spelling.
+
+    Unknown classes raise rather than pass through, because the failure they
+    would otherwise cause is silent under-matching — the same shape as the
+    defect this whole area exists to prevent.
+    """
+    out = pattern
+    for posix, body in POSIX_CLASSES.items():
+        out = out.replace(posix, body)
+    leftover = re.findall(r"\[:[a-z]+:\]", out)
+    assert not leftover, (
+        f"unknown POSIX character class(es) {sorted(set(leftover))} in a hook "
+        f"pattern. Python `re` cannot express them and will mis-compile them "
+        f"into a nested set that matches the wrong thing. Add them to "
+        f"POSIX_CLASSES rather than letting this replication drift from the "
+        f"hook it is supposed to mirror.\n\n  pattern: {pattern}"
+    )
+    return out
+
+
+def _hook_checks() -> tuple[list[tuple[str, str, str, str, str]], str, str]:
     """The hook's own patterns, resolved BY BASH.
 
     Bash is the only correct parser of bash quoting. A python-side regex over
@@ -96,7 +143,7 @@ def _hook_checks() -> tuple[list[tuple[str, str, str, str]], str, str]:
     """
     script = r"""
 set -uo pipefail
-check_pattern() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "${3:-0}" "${4:-all}"; }
+check_pattern() { printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "${3:-0}" "${4:-all}" "${5:-0}"; }
 eval "$(sed -n '/^PLACEHOLDER_REGEX=/p; /^ALLOWLIST_REGEX=/p' "$1")"
 eval "$(awk '/^check_pattern /{f=1} f{print} f && !/\\$/{f=0}' "$1")"
 printf 'PLACEHOLDER_REGEX\t%s\n' "$PLACEHOLDER_REGEX" >&2
@@ -108,7 +155,7 @@ printf 'ALLOWLIST_REGEX\t%s\n' "$ALLOWLIST_REGEX" >&2
         f"could not extract patterns from {HOOK}: {proc.stderr}")
     env = dict(l.split("\t", 1) for l in proc.stderr.splitlines() if "\t" in l)
     checks = [tuple(l.split("\t")) for l in proc.stdout.splitlines()
-              if l.count("\t") == 3]
+              if l.count("\t") == 4]
     assert len(checks) >= 8, f"only {len(checks)} patterns parsed — extractor is stale"
     return checks, env["PLACEHOLDER_REGEX"].replace("(?i)", ""), env["ALLOWLIST_REGEX"]
 
@@ -310,12 +357,13 @@ def test_built_sdist_has_no_hook_pattern_hits_outside_the_fixture_allowlist(
              and ".githooks/" not in str(p.relative_to(root))]
 
     hits: dict[str, list[str]] = {}
-    for label, pattern, skip_ph, scope in checks:
+    for label, pattern, skip_ph, scope, icase in checks:
         subject = files
         if scope == "code":
             subject = [p for p in files if p.suffix != ".md"
                        and not str(p.relative_to(root)).startswith("docs/")]
-        rx = re.compile(pattern)
+        rx = re.compile(_ere_to_python(pattern),
+                        re.IGNORECASE if icase == "1" else 0)
         for p in subject:
             try:
                 text = p.read_text(encoding="utf-8", errors="replace")
@@ -326,9 +374,10 @@ def test_built_sdist_has_no_hook_pattern_hits_outside_the_fixture_allowlist(
             for i, line in enumerate(text.splitlines(), 1):
                 if not rx.search(line):
                     continue
-                if not rx.search(re.sub(allowlist, "", line)):   # hook's own mask
+                if not rx.search(re.sub(_ere_to_python(allowlist), "", line)):  # hook's mask
                     continue
-                if skip_ph == "1" and re.search(placeholder, line, re.I):
+                if skip_ph == "1" and re.search(
+                        _ere_to_python(placeholder), line, re.I):
                     continue
                 hits.setdefault(str(p.relative_to(root)), []).append(f"{i}: {label}")
 

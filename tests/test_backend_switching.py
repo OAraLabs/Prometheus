@@ -34,6 +34,8 @@ if "prometheus.memory" not in sys.modules:  # pragma: no cover - import plumbing
         sys.modules["prometheus.memory"] = types.ModuleType("prometheus.memory")
 
 import pytest  # noqa: E402
+
+pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from prometheus.context.budget import resolve_effective_limit  # noqa: E402
