@@ -28,6 +28,7 @@ measured.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import sys
 import time
@@ -357,3 +358,179 @@ def test_a_migrated_database_does_stamp_the_migration_instant(tmp_path):
     assert td["avg_latency_source"] == LATENCY_UNKNOWN, (
         "rows that predate the rebuild were reported as measured"
     )
+
+
+# ── The rebuild's own failure reporters ───────────────────────────────────────
+#
+# Both error paths below called `logger.error` / `logger.exception` in a module
+# that binds `log`. `logger` was never defined, so each raised NameError at the
+# moment it tried to explain what had gone wrong.
+#
+# Lint caught it (ruff F821), which is the tell: NO TEST HAD EVER REACHED EITHER
+# LINE. They are the two reporters of a migration whose entire purpose is making
+# telemetry honest about what it does not know, and neither had a caller.
+#
+# The column-loss one was not merely silent. `log.error(...)` sits BEFORE its
+# `raise sqlite3.DatabaseError(...)`, so the NameError replaced the raise — and
+# NameError is not a DatabaseError, so `except sqlite3.DatabaseError` never ran,
+# no ROLLBACK happened, and the rebuild escaped the constructor having already
+# renamed the table. Measured on the unfixed branch:
+#
+#     AFTER : tables = [..., 'tool_calls', 'tool_calls_pre_v2']
+#       rows in tool_calls: 0
+#       rows in tool_calls_pre_v2: 1
+#
+# The guard against dropping data dropped the data. These tests exercise the
+# paths rather than the log text, so the next edit has to keep them working.
+
+
+def _v1_db_with_an_extra_column(path: Path) -> None:
+    """A pre-v2 DB carrying a column the new schema does not declare.
+
+    `legacy_junk` is the forcing condition for the column-loss branch: it exists
+    on the old table, is not in `_SCHEMA_SQL_TABLES`, and is not something
+    `_migrate_schema` re-adds — so `dropped` is non-empty and the rebuild must
+    abort rather than carry the table over without it.
+    """
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE tool_calls (
+            id TEXT PRIMARY KEY, timestamp REAL NOT NULL, model TEXT NOT NULL,
+            tool_name TEXT NOT NULL, success INTEGER NOT NULL,
+            retries INTEGER NOT NULL DEFAULT 0,
+            latency_ms REAL NOT NULL DEFAULT 0.0,
+            error_type TEXT, error_detail TEXT,
+            legacy_junk TEXT
+        );
+        INSERT INTO schema_meta VALUES ('schema_version','1');
+        INSERT INTO tool_calls
+            (id,timestamp,model,tool_name,success,latency_ms,legacy_junk)
+            VALUES ('a',1.0,'m','bash',1,7.5,'precious');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_a_rebuild_that_would_drop_a_column_aborts_and_keeps_the_data(tmp_path, caplog):
+    """The column-loss guard must abort the rebuild, not escape mid-rename."""
+    db = tmp_path / "telemetry.db"
+    _v1_db_with_an_extra_column(db)
+
+    with caplog.at_level(logging.ERROR, logger="prometheus.telemetry.tracker"):
+        telemetry = ToolCallTelemetry(db_path=db)  # must NOT raise
+
+    # The reporter ran and named the column that forced the abort.
+    assert any(
+        "legacy_junk" in r.getMessage() for r in caplog.records
+    ), (
+        "the rebuild dropped a column without saying which — this is the log "
+        f"line that raised NameError instead. Records: "
+        f"{[r.getMessage()[:80] for r in caplog.records]}"
+    )
+
+    # The abort left the ORIGINAL table in place, not a renamed husk.
+    tables = {
+        r[0]
+        for r in telemetry._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    assert "tool_calls_pre_v2" not in tables, (
+        "the rebuild left tool_calls_pre_v2 behind — the ROLLBACK did not run, "
+        "which is what happens when a non-DatabaseError escapes the try"
+    )
+
+    row = telemetry._conn.execute(
+        "SELECT latency_ms, legacy_junk FROM tool_calls WHERE id='a'"
+    ).fetchone()
+    assert row == (7.5, "precious"), (
+        f"the aborted rebuild lost data: {row}. On the unfixed code tool_calls "
+        f"was empty and the rows were stranded in tool_calls_pre_v2."
+    )
+
+    # Aborted means aborted: the column is still NOT NULL and the version stands.
+    info = telemetry._conn.execute("PRAGMA table_info(tool_calls)").fetchall()
+    latency = next(r for r in info if r[1] == "latency_ms")
+    assert latency[3] == 1, (
+        "the rebuild reported an abort but relaxed the column anyway"
+    )
+
+
+def test_a_failed_rebuild_reports_the_original_error_not_a_nameerror(
+    tmp_path, caplog, monkeypatch
+):
+    """The except handler must surface the DatabaseError that caused the abort.
+
+    A NameError raised *inside* an exception handler replaces the exception
+    being handled, so the operator is told the reporter is broken and never
+    told the migration failed. Asserting on `exc_info` is what distinguishes
+    "logged something" from "logged the right thing".
+    """
+    db = tmp_path / "telemetry.db"
+    _v1_db(db)
+
+    boom = sqlite3.DatabaseError("disk I/O error during rebuild")
+    real_migrate_schema = ToolCallTelemetry._migrate_schema
+
+    def _explode_only_inside_the_rebuild(self):
+        """Fail the _migrate_schema call the REBUILD makes, not the one __init__
+        makes first.
+
+        Keyed on the rename having happened (``tool_calls_pre_v2`` present),
+        which is exactly "we are past the point ROLLBACK can save us". A plain
+        unconditional patch fires on the constructor's earlier call, so the
+        DatabaseError escapes before the rebuild is ever entered and the test
+        proves nothing about the handler it claims to cover.
+        """
+        names = {
+            r[0]
+            for r in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "tool_calls_pre_v2" in names:
+            raise boom
+        return real_migrate_schema(self)
+
+    monkeypatch.setattr(
+        ToolCallTelemetry, "_migrate_schema", _explode_only_inside_the_rebuild
+    )
+
+    with caplog.at_level(logging.ERROR, logger="prometheus.telemetry.tracker"):
+        telemetry = ToolCallTelemetry(db_path=db)  # must NOT raise
+
+    failures = [r for r in caplog.records if r.exc_info]
+    assert failures, (
+        "the rebuild failed and nothing was logged with the exception attached"
+    )
+    exc_type, exc_value, _ = failures[-1].exc_info
+    assert exc_type is sqlite3.DatabaseError, (
+        f"the handler reported {exc_type.__name__} instead of the DatabaseError "
+        f"that actually failed the migration. NameError here would mean the "
+        f"reporter masked the cause."
+    )
+    assert exc_value is boom
+
+    # And the table is left exactly as it was, which is what the message
+    # promises — restored, not stranded under its rebuild name.
+    tables = {
+        r[0]
+        for r in telemetry._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    assert "tool_calls_pre_v2" not in tables, (
+        "the failed rebuild left the rows in tool_calls_pre_v2"
+    )
+    rows = dict(
+        telemetry._conn.execute("SELECT id, latency_ms FROM tool_calls").fetchall()
+    )
+    assert rows == {"a": 0.0, "b": 7.5}, (
+        f"the failed rebuild lost rows: {rows}"
+    )
+    info = telemetry._conn.execute("PRAGMA table_info(tool_calls)").fetchall()
+    latency = next(r for r in info if r[1] == "latency_ms")
+    assert latency[3] == 1, "the migration failed but the column changed anyway"
