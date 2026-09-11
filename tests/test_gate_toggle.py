@@ -37,13 +37,13 @@ class TestSetMode:
         # write_file outside workspace -> APPROVE in default mode
         decision = gate.evaluate(
             "write_file", file_path="/opt/outside.txt", origin="system"
-        )
+        , path_is_write=True)
         assert decision.action == "APPROVE"
         # toggle off -> same call is now ALLOWed
         gate.set_mode("autonomous")
         decision = gate.evaluate(
             "write_file", file_path="/opt/outside.txt", origin="system"
-        )
+        , path_is_write=True)
         assert decision.action == "ALLOW"
 
     def test_autonomous_mode_still_blocks(self):
@@ -59,7 +59,7 @@ class TestSetMode:
         assert gate.current_mode() == PermissionMode.DEFAULT
         decision = gate.evaluate(
             "write_file", file_path="/opt/outside.txt", origin="system"
-        )
+        , path_is_write=True)
         assert decision.action == "APPROVE"
 
 

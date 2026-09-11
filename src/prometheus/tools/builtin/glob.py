@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from prometheus.permissions.path_schema import DIR_FIELD
+from prometheus.permissions.path_schema import DIR_FIELD_READ
 from prometheus.tools.denied_prune import (
     is_denied,
     resolve_denied,
@@ -30,7 +30,7 @@ class GlobToolInput(BaseModel):
 
     pattern: str = Field(description="Glob pattern relative to the working directory")
     root: str | None = Field(
-        json_schema_extra=DIR_FIELD,default=None, description="Optional search root")
+        json_schema_extra=DIR_FIELD_READ,default=None, description="Optional search root")
     limit: int = Field(
         default=200, ge=1, le=5000,
         description="Maximum paths to return.",

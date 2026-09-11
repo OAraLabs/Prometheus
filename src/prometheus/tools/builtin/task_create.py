@@ -17,7 +17,7 @@ import os
 from pydantic import BaseModel, Field
 
 from prometheus.tasks.manager import get_task_manager
-from prometheus.permissions.path_schema import DIR_FIELD
+from prometheus.permissions.path_schema import DIR_FIELD_READ
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -33,7 +33,7 @@ class TaskCreateToolInput(BaseModel):
     prompt: str | None = Field(default=None, description="Agent prompt (local_agent only).")
     model: str | None = Field(default=None, description="Model override for agent tasks.")
     watch_dir: str | None = Field(
-        json_schema_extra=DIR_FIELD,
+        json_schema_extra=DIR_FIELD_READ,
         default=None, description="Directory to watch (file_watch only)."
     )
     watch_pattern: str | None = Field(

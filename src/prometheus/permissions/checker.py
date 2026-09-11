@@ -110,10 +110,31 @@ _READONLY_TOOLS: frozenset[str] = frozenset(
     {"read_file", "grep", "glob", "bash_read"}
 )
 
-# Tools that qualify for APPROVE (level 1) by default
-_APPROVE_TOOLS: frozenset[str] = frozenset(
-    {"write_file", "edit_file"}
-)
+# ⚠ RETIRED — THE WORKSPACE BOUNDARY IS NO LONGER A LIST OF TOOL NAMES.
+#
+# This was `_APPROVE_TOOLS = {"write_file", "edit_file"}`, and the gate's own
+# docstring promised that writes outside the workspace prompt for approval.
+# Four registered tools write to arbitrary caller-supplied paths and were not
+# on the list, so they crossed the boundary unprompted:
+#
+#     notebook_edit       path          rewrites any .ipynb
+#     download_file       destination   writes a remote body to any local file
+#     tts                 output_path   writes an audio file anywhere
+#     youtube_transcript  save_to       writes a transcript anywhere
+#
+# The path was reaching the gate correctly the whole time — permissions/
+# tool_paths.py already resolves each tool's own destination parameter. Only
+# the *decision* was keyed on a name, so the gate knew the target and declined
+# to rule on it.
+#
+# This is the FIFTH name enumeration to fail in this subsystem; path_schema.py
+# records the first three and tool_paths.py the fourth. The boundary is now a
+# property of the WRITE, declared per PARAMETER — see `_write_boundary_applies`
+# and `permissions.path_schema.declared_path_access`.
+#
+# The constant is kept, empty, ONLY as the anchor for this note; nothing reads
+# it. `test_write_boundary_is_a_property` fails the build if anything does.
+_APPROVE_TOOLS: frozenset[str] = frozenset()
 
 # Bash substrings that bump trust to APPROVE (network / destructive)
 _APPROVE_BASH_PATTERNS: list[str] = [
@@ -776,8 +797,17 @@ class SecurityGate:
         command: str | None = None,
         origin: str = ORIGIN_SYSTEM,
         workspace_roots: "tuple[Path, ...] | list[Path] | None" = None,
+        path_is_write: bool | None = None,
     ) -> PermissionDecision:
         """Evaluate whether a tool call is permitted.
+
+        ``path_is_write`` says whether ``file_path`` is a path this call WRITES
+        to, as declared by the tool's own parameter schema
+        (``permissions.tool_paths.gate_path_is_write``). It is what the
+        workspace boundary keys on. ``None`` means the caller did not say, and
+        the boundary falls back to ``not is_read_only`` — the per-call property
+        the gate already has. It never falls back to a list of tool names; that
+        list is what let four writing tools cross the boundary unprompted.
 
         ``workspace_roots`` (item W, 2026-09-01): the write boundary for THIS
         call, when the calling session has a workspace of its own. None keeps
@@ -908,15 +938,23 @@ class SecurityGate:
             self._remember_approve_target(reason, file_path=file_path, command=command)
             return PermissionDecision.approve(reason)
 
-        # --- LEVEL 1: write_file / edit_file outside workspace → APPROVE
+        # --- LEVEL 1: a WRITE outside the workspace → APPROVE
         # (both origins — this is the path-traversal guarantee) ---
-        if tool_name in _APPROVE_TOOLS:
+        # `file_path` first, and it is load-bearing. The old predicate was
+        # `tool_name in {"write_file","edit_file"}`, which excluded bash by
+        # construction; the new one is "this call writes", which does NOT —
+        # bash is not read-only either. Requiring a resolved path keeps the
+        # boundary about FILE writes, where it has always been, instead of
+        # silently pulling every command into strict-mode confirmation.
+        # (Dropping this cost 23 test failures across cron, denied-paths and
+        # the grant-floor invariant before it was put back.)
+        if file_path and self._write_boundary_applies(is_read_only, path_is_write):
             if self._mode == PermissionMode.STRICT:
                 reason = f"{tool_name} requires confirmation in strict mode"
                 self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason)
                 self._remember_approve_target(reason, file_path=file_path, command=command)
                 return PermissionDecision.approve(reason)
-            if file_path and not self._within_workspace(file_path, roots=workspace_roots):
+            if not self._within_workspace(file_path, roots=workspace_roots):
                 reason = f"{tool_name} targets path outside workspace: {file_path}"
                 self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason)
                 self._remember_approve_target(reason, file_path=file_path, command=command)
@@ -971,6 +1009,12 @@ class SecurityGate:
             result = gate.pre_tool_use('bash', {'command': 'rm -rf /'}, {})
             assert result.action == 'DENY'
         """
+        # NOTE: this key list is the acceptance-test entry point, NOT the
+        # production path. Real dispatch resolves the target through
+        # permissions/tool_paths.gate_path_for, which reads each tool's own
+        # schema — `destination`, `output_path` and `save_to` are all invisible
+        # to the three names below. Kept for the documented two-arg test shape;
+        # do not grow it into a second enumeration.
         command = tool_input.get("command") or tool_input.get("cmd")
         file_path = (
             tool_input.get("path")
@@ -993,6 +1037,58 @@ class SecurityGate:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # The write boundary
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _write_boundary_applies(
+        is_read_only: bool, path_is_write: bool | None
+    ) -> bool:
+        """Does the workspace boundary govern this call?
+
+        A PROPERTY OF THE WRITE, NOT A LIST OF TOOL NAMES. The predicate used
+        to be ``tool_name in {"write_file", "edit_file"}``, and four tools that
+        write to arbitrary caller-supplied paths were not named in it.
+
+        The answer comes from ``path_is_write`` — the tool's own PARAMETER
+        declaration, threaded in by the caller
+        (``permissions.tool_paths.gate_path_is_write``). That is the finest
+        unit available, and the only one that gets these right:
+
+            video_generate.image_path   the SOURCE image it reads
+            task_create.watch_dir       a directory a file_watch task watches
+            cron's file_path=cwd        a working directory, not a target
+
+        all of which are paths passed to the gate by callers that are NOT
+        read-only. Keying on the tool, or on ``not is_read_only``, prompts for
+        every one of them — measured: 23 test failures across cron,
+        denied-paths and the grant-floor invariant.
+
+        A PATH ON THE CALL SAYS ONLY THAT A PATH IS INVOLVED. cron hands this
+        gate the job's working directory so ``denied_paths`` can rule on where
+        the job runs; the denied-path tests hand it a read target. Neither is
+        a write, neither call is read-only, and nothing at runtime can tell
+        them apart from a real write without guessing — which is what every
+        previous failure in this subsystem did.
+
+        WHY AN UNDECLARED CALLER DOES NOT TRIP THE BOUNDARY, AND WHY THAT IS
+        NOT FAIL-OPEN. ``None`` means the caller passed a path without saying
+        whether it is written. At RUNTIME that cannot be resolved without
+        guessing, and guessing is what this whole area keeps getting wrong. So
+        it is resolved at BUILD time instead:
+        ``test_write_boundary_is_a_property`` fails if any call site in
+        ``src/`` passes ``file_path=`` without either declaring
+        ``path_is_write=`` or being registered with a reason. An undeclared
+        write is a broken build, not a silent pass — which is the fail-closed
+        property, moved to where it can actually be enforced.
+
+        ``is_read_only`` is accepted for signature symmetry and deliberately
+        unused; reading it here is what produced the over-refusals above.
+        """
+        del is_read_only
+        return bool(path_is_write)
 
     # ------------------------------------------------------------------
     # Approval grants

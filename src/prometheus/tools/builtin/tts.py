@@ -13,7 +13,7 @@ import tempfile
 
 from pydantic import BaseModel, Field
 
-from prometheus.permissions.path_schema import PATH_FIELD
+from prometheus.permissions.path_schema import PATH_FIELD_WRITE
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 
@@ -26,7 +26,7 @@ class TTSInput(BaseModel):
         description="Voice name (engine-specific, e.g. 'en-us+f3' for espeak-ng)",
     )
     output_path: str | None = Field(
-        json_schema_extra=PATH_FIELD,
+        json_schema_extra=PATH_FIELD_WRITE,
         default=None, description="Output file path; auto-generates a temp WAV if omitted"
     )
     engine: str | None = Field(
