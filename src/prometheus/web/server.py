@@ -1828,6 +1828,32 @@ def create_app(
         ``coverage`` exists so a client can say what share of tokens the dollar total actually
         accounts for. A cost headline that silently covers 12% of the traffic is worse than no
         headline.
+
+        BILLING IS A PROPERTY OF WHEN, NOT OF WHICH MODEL (#284). Pricing is still applied at
+        read time — a corrected price should fix history. Billing MODE is not, because it is not
+        a correction, it is a different fact: these tokens were paid for under the arrangement
+        that was live when they were spent. Resolving it from the CURRENT ``base_url`` made the
+        running configuration the historical record, so repointing one env var silently
+        reclassified 280M already-spent tokens from ``subscription`` to ``unknown``, months after
+        the fact, for rows nobody touched.
+
+        So each row now carries a ``billing_mode`` stamped when the call was made, and this
+        route PREFERS the stamp. Read-time classification survives only as the fallback for
+        unstamped rows, and says so. The HOST that produced the stamp is not stored and is not
+        returned here — the conventions keep real infrastructure identifiers out of anything
+        that persists, and this response is cached and screenshotted like any other.
+
+        ``billing_source`` per model, weakest-wins (the rule #450's latency source uses):
+          - ``recorded``   — stamped by the writer, at the moment of the call
+          - ``backfilled`` — stamped by the one-shot migration from a dated configuration
+          - ``inferred``   — not stamped; classified just now, from config that describes TODAY
+
+        ONE ROW PER MODEL, ALWAYS. A model whose tokens were not all paid for the same way
+        reports ``billing: "mixed"`` and carries the split in ``billing_breakdown``. Splitting
+        ``models`` into one row per billing period would change a shape every existing client
+        renders, and it would do it on the day a plan lapses — the worst day to hand a client a
+        shape it has never seen. ``billing_breakdown`` is additive: a client that ignores it is
+        exactly as correct as it was before, and a client that reads it gets the whole truth.
         """
         from datetime import datetime, timezone
 
@@ -1869,36 +1895,128 @@ def create_app(
                 return None
             return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+        # billing rows for this window, indexed by model. Each is one
+        # (model, recorded mode) group; a NULL mode means the row was never
+        # stamped and must be classified now, at read time.
+        by_model: dict[str, list[dict]] = {}
+        for b in raw.get("billing", []):
+            by_model.setdefault(b["model"], []).append(b)
+
+        boundary = raw.get("billing_recorded_since")
+
+        # Weakest-wins, exactly as #450's latency source does it: an aggregate
+        # that mixed provenances has already mixed them by the time anyone
+        # reads it, so reporting the strongest present would overstate it.
+        _SOURCE_RANK = {"inferred": 0, "backfilled": 1, "recorded": 2}
+
+        def _source_of(row: dict) -> str:
+            if not row.get("billing_mode"):
+                return "inferred"
+            if boundary is None:
+                # No boundary recorded: stamped, but we cannot say by whom.
+                return "backfilled"
+            first = row.get("first_seen") or 0.0
+            return "recorded" if first >= boundary else "backfilled"
+
+        def _price_for(name: str):
+            return PRICING.get(name) or next(
+                (PRICING[k] for k in PRICING if name.startswith(k)), None
+            )
+
+        def _cost_of(name: str, inp: int, out: int) -> float | None:
+            price = _price_for(name)
+            if price is None:
+                return None
+            return (inp * price[0] + out * price[1]) / 1_000_000
+
         models: list[dict] = []
         coverage: dict[str, dict] = {}
         total_cost = 0.0
         totals = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "runs": 0}
 
         for m in raw["models"]:
-            mode, reason = billing_for(m["model"], base_urls.get(m["model"]))
-            cost: float | None = None
-            if mode == "metered":
-                price = PRICING.get(m["model"]) or next(
-                    (PRICING[k] for k in PRICING if m["model"].startswith(k)), None
+            name = m["model"]
+            rows = by_model.get(name) or [{
+                "billing_mode": None,
+                "runs": m["runs"], "input_tokens": m["input_tokens"],
+                "output_tokens": m["output_tokens"], "first_seen": m["first_seen"],
+            }]
+
+            breakdown: list[dict] = []
+            modes_present: set[str] = set()
+            sources_present: set[str] = set()
+            model_cost: float | None = None
+
+            for row in rows:
+                source = _source_of(row)
+                if row.get("billing_mode"):
+                    mode = row["billing_mode"]
+                    reason = "recorded when the call was made"
+                else:
+                    # No stamp: today's configuration is the only thing left to
+                    # ask, and the answer describes NOW, not when this was spent.
+                    mode, reason = billing_for(name, base_urls.get(name))
+                    reason = f"{reason} — inferred from current config, not recorded"
+                modes_present.add(mode)
+                sources_present.add(source)
+                seg_cost = (
+                    _cost_of(name, row["input_tokens"], row["output_tokens"])
+                    if mode == "metered" else None
                 )
-                if price is not None:
-                    cost = (m["input_tokens"] * price[0] + m["output_tokens"] * price[1]) / 1_000_000
-                    total_cost += cost
+                if seg_cost is not None:
+                    model_cost = (model_cost or 0.0) + seg_cost
+                breakdown.append({
+                    "billing": mode,
+                    "billing_source": source,
+                    "billing_reason": reason,
+                    "runs": row["runs"],
+                    "input_tokens": row["input_tokens"],
+                    "output_tokens": row["output_tokens"],
+                    "cost_usd": None if seg_cost is None else round(seg_cost, 4),
+                })
+                bucket = coverage.setdefault(
+                    mode, {"models": 0, "input_tokens": 0, "output_tokens": 0}
+                )
+                bucket["input_tokens"] += row["input_tokens"]
+                bucket["output_tokens"] += row["output_tokens"]
+
+            # ONE ROW PER MODEL, always. A model whose tokens were not all paid
+            # for the same way reports "mixed" and carries the split in
+            # `billing_breakdown` — splitting `models` into two rows would
+            # change a shape every existing client renders, on the day a plan
+            # lapses, which is the worst possible day to change it.
+            mode = modes_present.pop() if len(modes_present) == 1 else "mixed"
+            source = min(sources_present, key=lambda x: _SOURCE_RANK.get(x, 0))
+            if mode == "mixed":
+                reason = (
+                    f"{len(breakdown)} billing periods: "
+                    + ", ".join(sorted({b["billing"] for b in breakdown}))
+                )
+            else:
+                reason = breakdown[0]["billing_reason"]
+
+            if model_cost is not None:
+                total_cost += model_cost
             models.append({
                 **m,
                 "billing": mode,
+                "billing_source": source,
                 "billing_reason": reason,
                 # null, NOT 0.0 — see the docstring. A client rendering this as $0.00 is a bug.
-                "cost_usd": None if cost is None else round(cost, 4),
+                "cost_usd": None if model_cost is None else round(model_cost, 4),
+                "billing_breakdown": breakdown,
                 "first_seen": iso(m["first_seen"]),
                 "last_seen": iso(m["last_seen"]),
             })
-            bucket = coverage.setdefault(mode, {"models": 0, "input_tokens": 0, "output_tokens": 0})
-            bucket["models"] += 1
-            bucket["input_tokens"] += m["input_tokens"]
-            bucket["output_tokens"] += m["output_tokens"]
             for k in ("input_tokens", "output_tokens", "cached_input_tokens", "runs"):
                 totals[k] += m[k]
+
+        for mode_name, bucket in coverage.items():
+            bucket["models"] = sum(
+                1 for mm in models
+                if mm["billing"] == mode_name
+                or any(b["billing"] == mode_name for b in mm["billing_breakdown"])
+            )
 
         metered_in = coverage.get("metered", {}).get("input_tokens", 0)
         return {

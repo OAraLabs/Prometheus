@@ -124,6 +124,58 @@ def billing_for(model: str, base_url: str | None = None) -> tuple[BillingMode, s
     return "unknown", "no pricing entry and no configured plan — classify it in PRICING or BILLING"
 
 
+def billing_host_of(provider: object) -> str | None:
+    """The bare HOST a provider talks to, or None if it does not expose one.
+
+    TRANSIENT. The return value is classified into a billing mode and then
+    dropped — it is never stored on a row, never returned by ``/api/usage``,
+    and must not become either. The conventions do not allow a real
+    infrastructure identifier in anything that persists, and a telemetry
+    database is copied between machines like any other file.
+
+    Host only — no scheme, no path, no query string, so that a value which
+    reaches a log line on the way past still cannot carry a credential
+    (Gemini's ``?key=``); ``api/turn_errors.py`` keeps ``_URL_QUERY_RE`` for
+    the same reason on the error path.
+
+    Reads the private ``_base_url`` because that is where every provider in this
+    repo actually keeps it (``OpenAICompatProvider``, ``LlamaCppProvider``); the
+    public spelling is checked first so a future provider can expose one.
+    Returns None rather than guessing — an unknown host is a recordable fact and
+    a fabricated one is not.
+    """
+    raw = getattr(provider, "base_url", None) or getattr(provider, "_base_url", None)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    rest = raw.split("//", 1)[-1]
+    host = rest.split("/", 1)[0].split("?", 1)[0].strip()
+    return host or None
+
+
+def billing_stamp(model: str | None, provider: object) -> str | None:
+    """The ``billing_mode`` for a call ABOUT TO BE RECORDED.
+
+    The write-time counterpart of :func:`billing_for`, which classifies at READ
+    time from whatever the configuration happens to say now. That read-time
+    answer is correct only for as long as the configuration does not move, and
+    it moved: a flat-plan host swapped for a metered one reclassifies every
+    historical row that model ever wrote.
+
+    Never raises — a telemetry row that cannot be stamped is written unstamped,
+    which readers report as inferred. Losing the row would be worse than losing
+    the label.
+
+    The host that produced the answer is deliberately NOT returned. See
+    :func:`billing_host_of` — it exists only long enough to be classified.
+    """
+    try:
+        host = billing_host_of(provider)
+        mode, _reason_withheld = billing_for(model or "", f"//{host}" if host else None)
+        return mode
+    except Exception:  # noqa: BLE001 — never break a call to label it
+        return None
+
+
 @dataclass
 class UsageRecord:
     """A single token usage entry."""
