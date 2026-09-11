@@ -389,11 +389,100 @@ The middle line is the one that matters. It fired on a real mutation whose
 indentation was wrong, and the `15 passed` that followed was correctly read as
 meaningless rather than as a surviving mutant.
 
+### 4f. Two runs on one commit, disagreeing
+
+A required check reported **`quality=FAILURE` and `quality=SUCCESS` at the same
+time, on the same head SHA.** Two workflow runs had been created one second
+apart, and the rollup listed both. The failing one was correct: the branch was
+based on a main that still carried an `F821`, and its gate was genuinely red.
+
+Merging on "a green check exists" would have merged it.
+
+The obvious patch — *verify the check ran against the current head, not an
+earlier one* — does not catch this. Both runs were on the current head. And
+the artifacts cannot settle which one a gate would honour:
+
+```
+failure : started 20:40:53   completed 20:41:02
+success : started 20:40:50   completed 20:41:25
+```
+
+The success **started earlier but completed later**, so "most recent" gives
+opposite answers depending on which timestamp is read.
+
+**GitHub does not document the resolution.** Its guidance is to *prevent* the
+situation — *"make sure that job names are unique across all workflows. Using
+the same job name in multiple workflows can cause ambiguous status check
+results"* — not to explain which wins. So branch protection cannot see the
+disagreement, and on the `completed_at` reading the spurious SUCCESS would have
+satisfied a required check and merged the branch red anyway.
+
+**The rule is not "the failure wins."** A genuine flake would make that wrong
+in the other direction, and a real failure and a flaky one are identical from
+the rollup. Disagreement means **unmeasured**.
+
+**How:**
+
+- Before merging, check that the runs on the head SHA **agree**, not merely
+  that a green one exists. `gh api repos/O/R/commits/<sha>/check-runs` and group
+  by name; more than one entry for a name is a stop, not a tiebreak.
+- Resolve a disagreement by **reading the failing run's log** and deciding which
+  is right. Never by preferring an outcome.
+- Branch protection is the floor under this rule, not a substitute for it.
+
+**And the same shape bit the tool written to enforce it.** A poll waiting for
+CI used `until [ <unfinished runs> = 0 ]`. Before any run had been created that
+count is zero, so it reported two PRs "COMPLETE" whose CI had not started.
+**Zero runs is not zero unfinished runs** — absent read as passing, ten minutes
+after the rule against it was written. The condition must require *at least one*
+run AND none unfinished.
+
+### 4g. Verifying the file a claim names is not verifying the claim
+
+A report arrived as: *"`benchmarks/runner.py` executes a full benchmark at
+import time — a blanket import probe triggered 26 network-bound task runs."*
+
+It was checked properly. `runner.py` parsed and scanned: a correct
+`if __name__ == "__main__":` guard at the bottom, no module-level execution.
+Same for `suite.py` and `__init__.py`. A direct import measured at 0.36s
+running nothing. Reported: **does not reproduce**, with the method shown.
+
+The behaviour was real. `src/prometheus/benchmarks/__main__.py` called `main()`
+at module level with no guard — and `__main__.py` was never opened, because the
+claim named `runner.py` and `runner.py` was where the checking went.
+
+The original report was **right about the behaviour and wrong about the file**.
+Checking the named file and finding it clean then confirmed a negative that was
+false — and did it with evidence attached, which made it more convincing than
+an unchecked assertion would have been.
+
+The question to ask was not *"is `runner.py` clean"* but **"what would a blanket
+import probe actually import"** — which is `__main__`.
+
+**How:**
+
+- Reproduce the **reported behaviour**, not the reported location. Run the probe
+  that produced the claim before reasoning about the file it accuses.
+- When a check comes back clean, ask whether the check was **capable** of seeing
+  the reported symptom. A scan of three modules cannot detect a fourth.
+- A negative needs its scope stated: *"`runner.py`, `suite.py` and `__init__.py`
+  are clean"* is true and survives; *"does not reproduce"* is a claim about the
+  whole phenomenon and did not.
+
+This one degraded through three hands, and each hand was doing something
+defensible: the first session reported a real behaviour under the wrong
+filename, the second verified that filename and reported a false negative, and
+the relay between them passed each finding on without checking either. No step
+was careless. The claim still ended up inverted, which is the argument for
+re-deriving a finding from the symptom rather than inheriting it.
+
+---
+
 ---
 
 ---
 
-### The rule the five share
+### The rule the seven share
 
 **Verify that the named mechanism was actually operating.** In 4a the
 setting was one API call away and nobody asked, so a guess became a standing
@@ -403,7 +492,10 @@ the gate was never asked what it was measuring. In 4d the mechanism was
 never run in the shell it was prescribed for — one `(exit 7) | cat` would
 have shown it expanding to nothing. In 4e the revert command was trusted on
 its exit code, which reported that the command had run, not that it had done
-anything.
+anything. In 4f a green check was trusted without asking whether the other
+runs on that commit agreed with it. In 4g a file was verified in place of the
+claim that named it, so a scan that could not have seen the defect was read as
+evidence of its absence.
 
 A control you have not seen fail is not yet known to be a control. Prefer
 the version that can produce a *distinguishable* wrong answer — a tag with
