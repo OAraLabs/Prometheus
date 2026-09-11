@@ -31,6 +31,8 @@ import asyncio
 from unittest.mock import MagicMock
 
 import pytest
+
+pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from prometheus.__main__ import create_tool_registry
