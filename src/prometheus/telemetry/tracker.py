@@ -22,7 +22,8 @@ import time
 import traceback as _traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, Callable
 from uuid import uuid4
 
 from prometheus.security.log_redaction import redact_capture as _redact
@@ -199,7 +200,16 @@ CREATE TABLE IF NOT EXISTS subsystem_runs (
     round_index     INTEGER,               -- loop turn number (0-based) for agent_loop rows
     session_id      TEXT,                  -- LoopContext.session_id for agent_loop rows
     model           TEXT,                  -- model id the call was made with
-    thinking        INTEGER                -- effective flag: 1 on, 0 suppressed, NULL unknown
+    thinking        INTEGER,               -- effective flag: 1 on, 0 suppressed, NULL unknown
+    -- #284: how these tokens were paid for, AS OF THE MOMENT OF THE CALL.
+    -- Billing was previously classified at READ time by resolving the
+    -- provider's CURRENT base_url, which makes it look like a property of the
+    -- MODEL. It is a property of WHEN the call happened: a flat plan that
+    -- lapses does not retroactively meter the tokens spent while it was live.
+    -- NULL means "not recorded" — the row predates this column, or nothing
+    -- could resolve it. Deliberately distinct from a recorded "unknown",
+    -- which means we looked and could not tell.
+    billing_mode    TEXT
 );
 
 -- SignalBus Persistence sprint: every emission on the in-process SignalBus
@@ -311,6 +321,9 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("cache_write_tokens", "INTEGER"),
         # FOUNDATION 1.3 — same column, same meaning as on tool_calls.
         ("node_id", "TEXT"),
+        # #284 — see the CREATE TABLE comment. Additive: existing rows keep
+        # NULL, which is the honest value for them.
+        ("billing_mode", "TEXT"),
     ],
 }
 
@@ -469,6 +482,38 @@ class ToolCallTelemetry:
         # (the entry points do that, at first run). NULL honestly until
         # an identity exists.
         self._node_id: str | None = None
+
+    #: Resolves a model name to its billing mode AS OF NOW. Set by the daemon
+    #: at wiring time; None on a bare tracker, which stores NULL and leaves the
+    #: row to read-time classification (the pre-#284 behaviour).
+    billing_resolver: "Callable[[str], str | None] | None" = None
+
+    def _billing_mode_now(self, model: str | None) -> str | None:
+        """The billing mode at WRITE time, or None if nobody can say.
+
+        This is the whole point of #284. Classifying at READ time resolves the
+        provider's CURRENT base_url, which makes billing look like a property
+        of the MODEL. It is a property of WHEN the call happened, and the
+        Alibaba Token Plan expiring 2026-09-14 is the dated event that proves
+        it: on that day the same 280M historical tokens either reclassify from
+        `subscription` to `unknown`, or keep a label for a plan that no longer
+        exists. Neither is true, because one field was describing two times.
+
+        Never raises: a resolver that throws must not cost the caller its
+        telemetry row. NULL is an honest answer — it means "not recorded", and
+        readers fall back to read-time classification for those rows only.
+        """
+        if not model or self.billing_resolver is None:
+            return None
+        try:
+            mode = self.billing_resolver(model)
+        except Exception:
+            log.warning(
+                "billing_resolver raised for model %r — recording the row with "
+                "billing_mode NULL", model, exc_info=True,
+            )
+            return None
+        return str(mode) if mode else None
 
     def _current_node_id(self) -> str | None:
         """The node ID to stamp on rows. Cached once found.
@@ -631,6 +676,85 @@ class ToolCallTelemetry:
             return float(row[0])
         except (TypeError, ValueError):
             return None
+
+    #: schema_meta key holding the dated record of what billing mode each
+    #: model was configured for. See :meth:`observe_billing_modes`.
+    BILLING_OBSERVED_KEY = "billing_modes_observed"
+
+    def observe_billing_modes(self, modes: "Mapping[str, str]") -> None:
+        """Record, with dates, what each model's billing mode is right now.
+
+        Rows written from here on carry their own ``billing_mode``. This exists
+        for the rows already in the table, which do not and never will.
+
+        Those rows are currently classified by resolving the provider's CURRENT
+        base_url — which means the configuration file is doing double duty as a
+        historical record, and stops being one the moment it changes. When the
+        Alibaba Token Plan lapses, 280M tokens already spent under it do not
+        become metered, or unknown; they were spent under a flat plan and that
+        is a fact about the past. Read-time classification would revise it.
+
+        So: don't rewrite the rows. Stamping a mode onto 280M tokens' worth of
+        history would encode an inference as though it were evidence, somewhere
+        permanent and irreversible. Write the evidence down instead, with the
+        date it was true, and let the reader label those rows `observed` rather
+        than `recorded`.
+
+        ``first_observed`` survives repeated boots and resets when the mode
+        changes, so the stored map is a coarse timeline rather than a snapshot
+        that forgets. Modes only — never hosts: this is persisted content, and
+        a resolved base_url is a real infrastructure identifier.
+
+        Never raises. Losing the observation must not cost the daemon its boot.
+        """
+        if not modes:
+            return
+        now = time.time()
+        merged: dict[str, dict[str, Any]] = {
+            k: dict(v) for k, v in self.observed_billing_modes().items() if isinstance(v, dict)
+        }
+        for model, mode in modes.items():
+            if not model or not mode:
+                continue
+            prev = merged.get(str(model))
+            if prev and prev.get("mode") == str(mode):
+                prev["last_observed"] = now
+            else:
+                merged[str(model)] = {
+                    "mode": str(mode),
+                    "first_observed": now,
+                    "last_observed": now,
+                }
+        try:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)",
+                (self.BILLING_OBSERVED_KEY, json.dumps(merged, sort_keys=True)),
+            )
+            self._conn.commit()
+        except sqlite3.DatabaseError:
+            log.warning("could not record the billing-mode observation", exc_info=True)
+
+    def observed_billing_modes(self) -> dict[str, dict[str, Any]]:
+        """The dated billing-mode record, ``{model: {mode, first_observed, last_observed}}``.
+
+        Empty on a database that has never seen a configured cloud provider —
+        which is an honest answer, not a failure. Callers fall back to
+        classifying against the live config, and must say that they did.
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM schema_meta WHERE key = ?",
+                (self.BILLING_OBSERVED_KEY,),
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return {}
+        if not row or not row[0]:
+            return {}
+        try:
+            loaded = json.loads(row[0])
+        except (TypeError, ValueError):
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
 
     def _migrate_schema(self) -> None:
         """Add any expected columns missing from existing tables.
@@ -924,8 +1048,9 @@ class ToolCallTelemetry:
                    duration_ms, outcome, summary_json,
                    input_tokens, output_tokens, round_index,
                    session_id, model, thinking,
-                   cached_input_tokens, cache_write_tokens, node_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   cached_input_tokens, cache_write_tokens, node_id,
+                   billing_mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     uuid4().hex,
@@ -944,6 +1069,7 @@ class ToolCallTelemetry:
                     cached_input_tokens,
                     cache_write_tokens,
                     self._current_node_id(),
+                    self._billing_mode_now(model),
                 ),
             )
             self._conn.commit()
@@ -1144,6 +1270,20 @@ class ToolCallTelemetry:
                 "ORDER BY SUM(input_tokens) DESC",
                 tuple(params),
             ).fetchall()
+            # Per (model, billing_mode). A model's history is NOT required to
+            # carry one billing mode: the whole point of recording the mode at
+            # write time is that it can change under the same model name. A
+            # rollup that collapses the split relabels the past every time the
+            # configuration moves. NULL groups are rows written before the
+            # column existed — the reader must classify those itself, and say
+            # that it did.
+            per_model_billing = self._conn.execute(
+                "SELECT COALESCE(model, ''), billing_mode, COUNT(*), "
+                "COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), "
+                "COALESCE(SUM(cached_input_tokens), 0) "
+                f"FROM subsystem_runs {where} GROUP BY COALESCE(model, ''), billing_mode",
+                tuple(params),
+            ).fetchall()
             daily = self._conn.execute(
                 "SELECT date(timestamp, 'unixepoch'), "
                 "COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COUNT(*) "
@@ -1154,11 +1294,29 @@ class ToolCallTelemetry:
                 "SELECT MIN(timestamp) FROM subsystem_runs WHERE input_tokens IS NOT NULL"
             ).fetchone()
         except sqlite3.DatabaseError:
-            return {"tracking_since": None, "models": [], "daily": []}
+            return {
+                "tracking_since": None,
+                "observed_billing_modes": {},
+                "models": [],
+                "daily": [],
+            }
+
+        segments: dict[str, list[dict[str, Any]]] = {}
+        for r in per_model_billing:
+            segments.setdefault(r[0], []).append({
+                # None means "not recorded" — deliberately distinct from a
+                # recorded "unknown", which means we looked and could not tell.
+                "billing_mode": r[1],
+                "runs": r[2],
+                "input_tokens": r[3],
+                "output_tokens": r[4],
+                "cached_input_tokens": r[5],
+            })
 
         return {
             "tracking_since": (first_ever[0] if first_ever else None),
             "window_days": days,
+            "observed_billing_modes": self.observed_billing_modes(),
             "models": [
                 {
                     "model": r[0],
@@ -1168,6 +1326,10 @@ class ToolCallTelemetry:
                     "cached_input_tokens": r[4],
                     "first_seen": r[5],
                     "last_seen": r[6],
+                    "billing_segments": sorted(
+                        segments.get(r[0], []),
+                        key=lambda s: (-s["input_tokens"], s["billing_mode"] or ""),
+                    ),
                 }
                 for r in per_model
             ],

@@ -1828,10 +1828,18 @@ def create_app(
         ``coverage`` exists so a client can say what share of tokens the dollar total actually
         accounts for. A cost headline that silently covers 12% of the traffic is worse than no
         headline.
+
+        THE SECOND CONTRACT (#284): ``billing_source`` says where the classification came from —
+        ``recorded`` (stamped on the row when the call was made), ``observed`` (the dated record of
+        what the config said, written while it was still true), ``inferred`` (the config as it
+        stands right now, which is a statement about today and not about the row), or ``mixed``.
+        Only ``recorded`` is a fact about the past. The other two are re-derived every time this
+        route is called, which means they change when an operator edits a yaml file — and a flat
+        plan lapsing must not retroactively re-bill the tokens spent while it was live.
         """
         from datetime import datetime, timezone
 
-        from prometheus.telemetry.cost import PRICING, billing_for
+        from prometheus.telemetry.cost import PRICING, billing_for, resolve_base_urls
         from prometheus.telemetry.tracker import get_telemetry_handle
 
         tel = get_telemetry_handle()
@@ -1841,28 +1849,11 @@ def create_app(
         capped_days = None if days is None else max(1, min(int(days), 365))
         raw = tel.usage_rollup(days=capped_days)
 
-        # model -> resolved base_url, from the CURRENT provider configuration. This is what makes
-        # "subscription" an evidenced answer rather than a guess: the Token Plan is identified by
-        # the host the box is actually pointed at, not by the model's name.
-        base_urls: dict[str, str] = {}
-        try:
-            from prometheus.providers.registry import CLOUD_DEFAULTS, _resolve_base_url
-
-            for name, spec in CLOUD_DEFAULTS.items():
-                # _resolve_base_url takes the PROVIDER's config block, not the app config —
-                # it reads config["base_url"] directly. Passing the whole app dict looked right
-                # and worked on this box only because the URL happens to come from the
-                # environment there; a base_url set in yaml would have silently missed.
-                prov_cfg = (config.get("providers", {}) or {}).get(name, {}) or {}
-                model_name = prov_cfg.get("model") or spec.get("model")
-                if not model_name:
-                    continue
-                try:
-                    base_urls[str(model_name)] = _resolve_base_url(prov_cfg, name)
-                except Exception:
-                    continue
-        except Exception:
-            pass  # classification degrades to name-only; never break the route over it
+        # model -> resolved base_url, from the CURRENT provider configuration. Used ONLY for rows
+        # that carry no recorded billing_mode, and labelled `inferred` when it is.
+        base_urls = resolve_base_urls(config)
+        # The dated record of what the configuration said, written while it was still true.
+        observed: dict = raw.get("observed_billing_modes") or {}
 
         def iso(ts: float | None) -> str | None:
             if not ts:
@@ -1874,29 +1865,98 @@ def create_app(
         total_cost = 0.0
         totals = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "runs": 0}
 
+        def classify(model: str, recorded: str | None) -> tuple[str, str, str]:
+            """(mode, source, reason) for one segment of one model's history.
+
+            The precedence is the entire point of #284. A mode recorded when the
+            call was made outranks anything derivable later, because it is the
+            only one of the three that is a statement about WHEN THE TOKENS WERE
+            SPENT. The other two are statements about the configuration file,
+            which is not a historical record and stops resembling one the moment
+            an operator edits it.
+            """
+            if recorded:
+                return recorded, "recorded", "recorded when the call was made"
+            seen = observed.get(model)
+            if isinstance(seen, dict) and seen.get("mode"):
+                when = iso(seen.get("last_observed")) or "an earlier boot"
+                return str(seen["mode"]), "observed", f"config observed as of {when}"
+            mode, reason = billing_for(model, base_urls.get(model))
+            return mode, "inferred", f"{reason} (current config, not the row's)"
+
+        def price_for(model: str) -> tuple[float, float] | None:
+            return PRICING.get(model) or next(
+                (PRICING[k] for k in PRICING if model.startswith(k)), None
+            )
+
         for m in raw["models"]:
-            mode, reason = billing_for(m["model"], base_urls.get(m["model"]))
+            segs = m.get("billing_segments") or [{
+                "billing_mode": None,
+                "runs": m["runs"],
+                "input_tokens": m["input_tokens"],
+                "output_tokens": m["output_tokens"],
+                "cached_input_tokens": m["cached_input_tokens"],
+            }]
+            breakdown: list[dict] = []
             cost: float | None = None
-            if mode == "metered":
-                price = PRICING.get(m["model"]) or next(
-                    (PRICING[k] for k in PRICING if m["model"].startswith(k)), None
+            for seg in segs:
+                mode, source, reason = classify(m["model"], seg.get("billing_mode"))
+                seg_cost: float | None = None
+                if mode == "metered":
+                    price = price_for(m["model"])
+                    if price is not None:
+                        seg_cost = (
+                            seg["input_tokens"] * price[0] + seg["output_tokens"] * price[1]
+                        ) / 1_000_000
+                        total_cost += seg_cost
+                        cost = (cost or 0.0) + seg_cost
+                breakdown.append({
+                    "billing": mode,
+                    "billing_source": source,
+                    "billing_reason": reason,
+                    "runs": seg["runs"],
+                    "input_tokens": seg["input_tokens"],
+                    "output_tokens": seg["output_tokens"],
+                    "cached_input_tokens": seg["cached_input_tokens"],
+                    "cost_usd": None if seg_cost is None else round(seg_cost, 4),
+                })
+                # Coverage is fed PER SEGMENT, not per model: a model whose tokens
+                # were half flat-plan and half metered belongs in both buckets, and
+                # attributing all of them to whichever mode currently wins is how a
+                # cost headline claims to cover traffic it never priced.
+                bucket = coverage.setdefault(
+                    mode, {"models": 0, "input_tokens": 0, "output_tokens": 0}
                 )
-                if price is not None:
-                    cost = (m["input_tokens"] * price[0] + m["output_tokens"] * price[1]) / 1_000_000
-                    total_cost += cost
+                bucket["input_tokens"] += seg["input_tokens"]
+                bucket["output_tokens"] += seg["output_tokens"]
+
+            # The headline mode is whichever carried the most tokens; the breakdown
+            # above is the honest answer and the reason `billing_source` exists.
+            dominant = max(breakdown, key=lambda b: b["input_tokens"])
+            sources = {b["billing_source"] for b in breakdown}
+            counted: set[str] = set()
+            for b in breakdown:
+                if b["billing"] not in counted:
+                    coverage[b["billing"]]["models"] += 1
+                    counted.add(b["billing"])
             models.append({
-                **m,
-                "billing": mode,
-                "billing_reason": reason,
+                **{k: v for k, v in m.items() if k != "billing_segments"},
+                # The headline: whichever mode carried the most tokens. A client that
+                # reads only this field gets a defensible single label — but a model
+                # whose plan lapsed mid-history genuinely has two, so `billing_modes`
+                # lists them all and a one-label UI can say so instead of picking.
+                "billing": dominant["billing"],
+                "billing_reason": dominant["billing_reason"],
+                "billing_modes": sorted({b["billing"] for b in breakdown}),
+                # Where the classification came from, NOT which mode won: `mixed`
+                # here means some rows were stamped and others had to be derived.
+                "billing_source": next(iter(sources)) if len(sources) == 1 else "mixed",
+                "billing_breakdown": breakdown,
                 # null, NOT 0.0 — see the docstring. A client rendering this as $0.00 is a bug.
                 "cost_usd": None if cost is None else round(cost, 4),
                 "first_seen": iso(m["first_seen"]),
                 "last_seen": iso(m["last_seen"]),
             })
-            bucket = coverage.setdefault(mode, {"models": 0, "input_tokens": 0, "output_tokens": 0})
-            bucket["models"] += 1
-            bucket["input_tokens"] += m["input_tokens"]
-            bucket["output_tokens"] += m["output_tokens"]
             for k in ("input_tokens", "output_tokens", "cached_input_tokens", "runs"):
                 totals[k] += m[k]
 

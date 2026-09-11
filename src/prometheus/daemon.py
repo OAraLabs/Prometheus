@@ -852,6 +852,27 @@ async def run_daemon(args: argparse.Namespace) -> None:
     from prometheus.telemetry.tracker import set_telemetry_handle
     set_telemetry_handle(telemetry)
 
+    # #284: billing is a property of WHEN a call happened, not of the model. Two
+    # wires, both pointed at the same problem — that classifying at read time
+    # makes the config file the historical record, a job it cannot hold, because
+    # the answer changes the moment an operator edits it.
+    #
+    #   1. Every row written from here on carries the mode as it was at the time.
+    #   2. The rows already in the table never will, so write down what the
+    #      config says today, dated, while it is still true.
+    #
+    # Modes only, never hosts: both of these persist.
+    try:
+        from prometheus.telemetry.cost import billing_modes_from_config
+
+        _billing_now = billing_modes_from_config(config)
+        telemetry.billing_resolver = _billing_now.get
+        telemetry.observe_billing_modes(_billing_now)
+    except Exception:
+        # A tracker with no resolver stores NULL and the reader classifies at read
+        # time — the pre-#284 behaviour, honestly labelled. Never a boot failure.
+        logger.warning("could not wire billing-mode recording", exc_info=True)
+
     # Repair-pair flywheel: every adapter repair / retry-success /
     # self-correction becomes a training pair in training.db. Local capture
     # defaults ON (recording-only); cloud_golden_capture defaults OFF.

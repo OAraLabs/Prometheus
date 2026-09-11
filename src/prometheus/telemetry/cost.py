@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -122,6 +123,56 @@ def billing_for(model: str, base_url: str | None = None) -> tuple[BillingMode, s
     if PRICING.get(name) or any(name.startswith(k) for k in PRICING):
         return "metered", "priced per token"
     return "unknown", "no pricing entry and no configured plan — classify it in PRICING or BILLING"
+
+
+def resolve_base_urls(config: Mapping[str, Any] | None) -> dict[str, str]:
+    """model name -> the base_url the box is CURRENTLY pointed at for it.
+
+    Lifted out of ``GET /api/usage`` so the daemon and the route agree by
+    construction. The subtlety worth keeping: ``_resolve_base_url`` takes the
+    PROVIDER's config block, not the app config — it reads ``config["base_url"]``
+    directly. Passing the whole app dict looks right and works on a box where
+    the URL comes from the environment; a ``base_url`` set in yaml would have
+    silently missed.
+
+    Never raises. Classification degrading to name-only is a worse answer, not
+    a broken route.
+    """
+    out: dict[str, str] = {}
+    try:
+        from prometheus.providers.registry import CLOUD_DEFAULTS, _resolve_base_url
+    except Exception:
+        return out
+    providers = ((config or {}).get("providers", {}) or {}) if config else {}
+    for name, spec in CLOUD_DEFAULTS.items():
+        prov_cfg = providers.get(name, {}) or {}
+        model_name = prov_cfg.get("model") or spec.get("model")
+        if not model_name:
+            continue
+        try:
+            out[str(model_name)] = _resolve_base_url(prov_cfg, name)
+        except Exception:
+            continue
+    return out
+
+
+def billing_modes_from_config(config: Mapping[str, Any] | None) -> dict[str, BillingMode]:
+    """model name -> billing mode, as the configuration stands RIGHT NOW.
+
+    Returns modes and nothing else. That is deliberate and load-bearing: this
+    is the one billing helper whose output is written to disk (the dated
+    observation in the telemetry DB, and the ``billing_mode`` stamped on every
+    new row), and the conventions say nothing that persists may carry a real
+    infrastructure identifier. ``billing_for`` builds its human reason out of
+    the resolved HOST — which is exactly such an identifier — so the reason is
+    dropped here rather than left to each caller to remember to drop.
+    """
+    base_urls = resolve_base_urls(config)
+    modes: dict[str, BillingMode] = {}
+    for model, url in base_urls.items():
+        mode, _reason_withheld = billing_for(model, url)
+        modes[model] = mode
+    return modes
 
 
 @dataclass
