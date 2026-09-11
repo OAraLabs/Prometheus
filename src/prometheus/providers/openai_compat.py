@@ -312,9 +312,23 @@ class OpenAICompatProvider(ModelProvider):
                     # response.aread()` before raise_for_status); this path was
                     # the one that did not.
                     await response.aread()
+                    # #321 CAPTURE. The status and body alone cannot separate
+                    # "retry in twenty seconds" from "retry in three days" —
+                    # only the rate/quota headers can, and the three real
+                    # exhaustion events on this box logged neither. Allowlisted
+                    # (a raw header dump leaks credentials) and the URL's query
+                    # is stripped, because Gemini's key rides in `?key=`.
+                    from prometheus.api.turn_errors import (
+                        quota_headers as _quota_headers,
+                        redact_url as _redact_url,
+                    )
+
                     log.error(
-                        "HTTP %d from %s: %s",
-                        response.status_code, url, response.text[:500],
+                        "HTTP %d from %s: %s | quota-headers: %s",
+                        response.status_code,
+                        _redact_url(url),
+                        response.text[:500],
+                        _quota_headers(response) or "(none present)",
                     )
                 response.raise_for_status()
 

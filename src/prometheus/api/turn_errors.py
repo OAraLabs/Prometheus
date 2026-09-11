@@ -172,6 +172,72 @@ def _hint(kind: str, provider: str, status: int | None) -> str:
     return "Check the daemon log for the full traceback."
 
 
+# ── Quota capture (#321) ─────────────────────────────────────────────────────
+#
+# WHY HEADERS AND NOT JUST THE BODY. A 429 alone cannot say whether the right
+# response is "wait twenty seconds" or "wait three days". Three real failures
+# against a flat-plan host on 2026-08-26/29/31 were logged as:
+#
+#     httpx.HTTPStatusError: Client error '429 Too Many Requests' for url '...'
+#
+# and nothing else. The retry ladder then ran (attempt 1/4, 2/4, 3/4 with 1.1s /
+# 2.1s / 4.1s backoff), the turn died, and the fallback never fired. The status
+# was captured; the thing that distinguishes the two cases was not, because
+# nobody logged the headers.
+#
+# This list is deliberately an ALLOWLIST. A response's headers can carry
+# `authorization`, `set-cookie` and provider request ids; dumping them all into
+# a log that is read by humans and shipped in bug reports trades one blind spot
+# for a credential leak.
+QUOTA_HEADERS: tuple[str, ...] = (
+    "retry-after",
+    "x-ratelimit-limit-requests",
+    "x-ratelimit-limit-tokens",
+    "x-ratelimit-remaining-requests",
+    "x-ratelimit-remaining-tokens",
+    "x-ratelimit-reset-requests",
+    "x-ratelimit-reset-tokens",
+    "x-ratelimit-reset",
+    "ratelimit-reset",
+    "ratelimit-remaining",
+    "ratelimit-limit",
+    "x-request-id",
+)
+
+
+def quota_headers(response: Any) -> dict[str, str]:
+    """The rate/quota headers present on *response*, lowercased, allowlisted.
+
+    Returns ``{}`` rather than raising for anything that is not a response —
+    this runs on the error path and must never become the reason a failure is
+    reported as a different failure.
+    """
+    try:
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            return {}
+        out: dict[str, str] = {}
+        for name in QUOTA_HEADERS:
+            value = headers.get(name)
+            if value is not None:
+                out[name] = str(value)[:200]
+        return out
+    except Exception:  # noqa: BLE001 — diagnostics must not raise
+        return {}
+
+
+def redact_url(url: str) -> str:
+    """Strip a URL's query string. Gemini puts its API key in ``?key=``.
+
+    The same ``_URL_QUERY_RE`` the message path uses, applied where a URL is
+    about to be written to a log rather than returned to a client.
+    """
+    try:
+        return _URL_QUERY_RE.sub(r"\1?<redacted>", str(url))
+    except Exception:  # noqa: BLE001
+        return "<unprintable url>"
+
+
 def classify_turn_error(exc: BaseException) -> dict[str, Any]:
     """Map a turn-killing exception to a structured, client-renderable payload.
 

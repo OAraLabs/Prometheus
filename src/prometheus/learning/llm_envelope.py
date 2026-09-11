@@ -105,6 +105,52 @@ class LLMCallResult:
     duration_ms: float
 
 
+def _failure_summary(exc: BaseException) -> dict[str, Any]:
+    """What a failed LLM call should leave behind in ``subsystem_runs`` (#321).
+
+    This row used to carry ``{"exception_type": "HTTPStatusError"}`` and nothing
+    else. Three real quota-exhaustion events against a flat-plan host sit in the
+    database under exactly that summary, and it answers none of the questions
+    anyone actually had: not the status, not the provider, not what the
+    classifier made of it — and the classifier's answer IS the decision, because
+    the fallback fires only on a terminal kind.
+
+    The journal held slightly more, but the journal is unstructured, ages out,
+    and cannot be queried by session. The durable row is the one that survives.
+
+    Never raises: a diagnostic that can fail the write it decorates is worse
+    than no diagnostic.
+    """
+    out: dict[str, Any] = {"exception_type": type(exc).__name__}
+    try:
+        from prometheus.api.turn_errors import classify_turn_error, quota_headers
+
+        detail = classify_turn_error(exc)
+        for key in ("kind", "status", "provider"):
+            value = detail.get(key)
+            if value is None:
+                continue
+            # `provider` is never empty — it falls back to the literal "the
+            # model provider" so the user-facing HINT reads as a sentence.
+            # That is a placeholder, and storing it in a durable row is noise
+            # shaped like data: a later query for "which provider failed"
+            # would get a string that names nothing. Absent is the honest
+            # record, and matches how the same field is treated in
+            # fallback.py, where the never-empty fallback made `or model`
+            # dead code.
+            if key == "provider" and value == "the model provider":
+                continue
+            out[key] = value
+        response = getattr(exc, "response", None)
+        if response is not None:
+            headers = quota_headers(response)
+            if headers:
+                out["quota_headers"] = headers
+    except Exception:  # noqa: BLE001 — diagnostics must not raise
+        pass
+    return out
+
+
 class LLMCallEnvelope:
     """Shared LLM invocation envelope. See module docstring."""
 
@@ -305,7 +351,7 @@ class LLMCallEnvelope:
                 operation=operation,
                 outcome="failed",
                 duration_ms=duration_ms,
-                summary={"exception_type": type(exc).__name__},
+                summary=_failure_summary(exc),
                 input_tokens=usage_in,
                 output_tokens=usage_out,
                 cached_input_tokens=usage_cached,
@@ -528,7 +574,7 @@ class LLMCallEnvelope:
                 operation=operation,
                 outcome="failed",
                 duration_ms=duration_ms,
-                summary={"exception_type": type(exc).__name__},
+                summary=_failure_summary(exc),
                 model=model,
                 billing_mode=self._billing_mode_of(model, provider),
             )

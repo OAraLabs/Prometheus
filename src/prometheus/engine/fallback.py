@@ -302,6 +302,20 @@ async def stream_round_with_fallback(
         from prometheus.api.turn_errors import classify_turn_error
 
         detail = classify_turn_error(exc)
+        # #321 CAPTURE. What the classifier CONCLUDED, at the point the
+        # conclusion is acted on. The status and body are logged a layer down
+        # by the provider; what was never recorded anywhere is which kind those
+        # produced and whether that kind is terminal — and `is_terminal` is the
+        # entire decision, because the fallback fires only when it is True.
+        #
+        # Without this, reconstructing "why did an exhausted quota get retried"
+        # means re-deriving the classifier's answer by hand from a body prefix,
+        # which is how a wire-format question stayed open for two weeks.
+        log.info(
+            "turn error classified: kind=%r terminal=%s status=%s provider=%r model=%r",
+            detail.get("kind"), is_terminal(detail.get("kind")),
+            detail.get("status"), detail.get("provider"), model,
+        )
         window, measured = window_for(target.model) if target is not None else (0, False)
         needed = estimate_tokens()
         decision_inputs = {"needed": needed, "window": window}
