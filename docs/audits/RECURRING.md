@@ -478,11 +478,88 @@ re-deriving a finding from the symptom rather than inheriting it.
 
 ---
 
+### 4h. A fix verified through one reader of the changed column
+
+**#307 shipped its write-side fix and the surface that motivated the issue
+kept lying.** `latency_ms` became nullable in schema v2, `record()` defaulted
+to `None`, the aggregate path (`report()`) got source-tagged averages — all
+tested, all merged, all deployed. And `/api/tools/recent`, the route that
+hydrates Beacon's Tool Feed (the exact client bug #307 was filed from, beacon
+#84), collapsed NULL straight back with `float(row[6] or 0.0)`. The store held
+NULL; the served payload said 0.0; Beacon rendered `0ms` for calls that never
+ran. One writer survived too: the loop's `validation_failed` path passed an
+explicit `latency_ms=0.0` past the fixed default — live data showed the only
+two post-boundary 0.0 rows in 22k were both from it.
+
+The verification was real and stopped at the layer that changed. Tests proved
+`record()` stores NULL and `report()` tags provenance. Nothing enumerated the
+*other* readers of the column, so the defect class the fix existed to kill
+consumed the fix one layer up — this month's whole audit theme ("a surface
+reporting a value the system does not hold") reproduced inside its own
+remediation.
+
+**#284 got this right by accident**: its check 4 ran at `/api/usage`, a read
+surface, so the billing fix was verified where the value is consumed. Same
+discipline, and the difference is only which layer the test happened to sit
+at.
+
+**The rule:** when a stored representation changes — nullability, units, a
+sentinel's meaning, an encoding — enumerate every reader of that column
+before claiming the fix, and verify through at least the surface that
+motivated the finding. Concretely:
+
+- `git grep` the column name across `src/`, not just the module you changed;
+  readers hide in dashboards, livestream tails, API routes and export scripts.
+- Grep the readers for the collapse idioms: `or 0`, `or 0.0`, `or ""`,
+  `COALESCE(x, 0)`, `float(x or ...)`. Each one turns "absent" back into a
+  number and undoes a write-side fix silently.
+- The regression test belongs at the PAYLOAD level — assert what the served
+  route returns, not what the function returns. A function-boundary test
+  re-commits the error: it passes while the surface still lies.
+- Pin both directions: unmeasured → NULL on the wire, and a genuine measured
+  zero → 0.0 on the wire. Mapping both to one value is a different collapse
+  with the same shape.
+
+**How it was caught:** not by the tests that shipped with the fix, but by a
+later session quoting the issue's own stated harms back and checking each
+against `main` and the live DB before closing it. "The fix is merged and
+deployed" was true; "the harm is gone" was not. That gap is the rule.
+
+**When the motivating surface lives in another repo.** The obligation does not
+become unfollowable just because the surface that motivated the finding is not
+in this tree — it becomes a *linked pin filed there at the same time*, not a
+skipped step. "I can't test Beacon from Prometheus" is true and is not a
+discharge of the rule; it is the cue to open the companion issue/PR in the
+other repo before this one merges. The cross-repo contract has two ends and
+each end pins its own side:
+
+- the side that *changed the representation* pins the wire value at its own
+  payload boundary (here: `/api/tools/recent` returns `latency_ms: null`);
+- the side that *consumes* it pins that the value survives its own reader to
+  the surface the user sees (here: `toolCallsFromApi(null latency)` → `—`).
+
+Neither end can see the other's collapse. A consumer-side guard that turns
+`null` back into `0` is invisible to the producer's tests, exactly as a
+producer collapsing NULL was invisible to the consumer's. So file both, link
+them, and check the consumer's *existing* coverage before filing — #85 here
+had a runtime guard and a `fmtLatency(undefined)` assertion but **no smoke
+driving `latency_ms: null` through `toolCallsFromApi`**, so the end-to-end path
+was true-but-unpinned and a `?? 0` refactor could silently reintroduce `0ms`
+with the producer green. That is the gap the companion pin closes.
+
+A type that declares the value cannot arrive when the wire now sends it is the
+same defect class one level up — `latency_ms?: number` (not `| null`) tells the
+next contributor that `r.latency_ms ?? 0` is correct per the signature and
+wrong on the data. Widening the type is part of the consumer-side pin, not a
+separate nicety.
+
+---
+
 ---
 
 ---
 
-### The rule the seven share
+### The rule the eight share
 
 **Verify that the named mechanism was actually operating.** In 4a the
 setting was one API call away and nobody asked, so a guess became a standing
@@ -495,7 +572,9 @@ its exit code, which reported that the command had run, not that it had done
 anything. In 4f a green check was trusted without asking whether the other
 runs on that commit agreed with it. In 4g a file was verified in place of the
 claim that named it, so a scan that could not have seen the defect was read as
-evidence of its absence.
+evidence of its absence. In 4h the changed layer was verified in place of the
+consumed one, so a fix was trusted to have reached a surface no test had ever
+asked about.
 
 A control you have not seen fail is not yet known to be a control. Prefer
 the version that can produce a *distinguishable* wrong answer — a tag with

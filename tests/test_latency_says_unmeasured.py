@@ -284,6 +284,70 @@ def test_an_unmeasured_call_is_stored_as_null(tmp_path):
     )
 
 
+def test_the_validation_failed_writer_in_the_loop_stores_null_too(tmp_path):
+    """The record() DEFAULT was fixed in v2; one writer still passed 0.0 explicitly.
+
+    `agent_loop.py`'s validation-retry path recorded `latency_ms=0.0` for a
+    call that never executed — the exact ambiguity v2 exists to remove, and
+    the last one: on the live DB the only post-boundary 0.0 rows were both
+    `validation_failed`. A default-only fix leaves explicit-zero writers
+    invisible, so this drives the REAL path (`_execute_tool_call` with input
+    that fails pydantic validation) and reads the stored row back.
+
+    Hand-calling `tel.record(error_type="validation_failed")` here would pin
+    the default, not the writer — the default already had a test above and the
+    writer sailed past it for a day. The trigger is a tool NAME too far from
+    any registered tool to repair: bad INPUT alone takes the sibling
+    `input_validation` path at :4100 (which never passed a latency, so the
+    default covered it); only the ValueError branch at :3913 had the explicit
+    `0.0`.
+    """
+    import asyncio
+
+    from pydantic import BaseModel
+
+    from prometheus.adapter import ModelAdapter
+    from prometheus.engine.agent_loop import LoopContext, _execute_tool_call
+    from prometheus.tools.base import BaseTool, ToolRegistry, ToolResult
+
+    class _EchoInput(BaseModel):
+        text: str
+
+    class _EchoTool(BaseTool):
+        name = "echo_tool"
+        description = "echoes"
+        input_model = _EchoInput
+
+        async def execute(self, arguments, context):  # noqa: ANN001
+            return ToolResult(output=f"echo: {arguments.text}")
+
+    reg = ToolRegistry()
+    reg.register(_EchoTool())
+    tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+    ctx = LoopContext(
+        provider=None, model="gemma-test", system_prompt="", max_tokens=256,
+        tool_registry=reg, adapter=ModelAdapter(tier=ModelAdapter.TIER_LIGHT),
+        telemetry=tel, session_id="telegram:42",
+    )
+
+    # name far from every registered tool → repair refuses → ValueError path
+    block = asyncio.run(
+        _execute_tool_call(ctx, "quantum_zzz_analyzer", "t1", {"x": 1})
+    )
+    assert block.is_error
+
+    rows = tel._conn.execute(
+        "SELECT latency_ms, error_type FROM tool_calls "
+        "WHERE error_type = 'validation_failed'"
+    ).fetchall()
+    assert rows, "the validation-retry path recorded no validation_failed row"
+    for latency_ms, _ in rows:
+        assert latency_ms is None, (
+            f"the loop's validation_failed writer stored {latency_ms!r} for a "
+            "call that never executed — unmeasured must be NULL, not 0.0"
+        )
+
+
 def test_rows_written_after_the_boundary_are_not_tagged_unknown(tmp_path):
     """The boundary must actually separate the two eras.
 

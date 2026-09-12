@@ -1411,7 +1411,13 @@ class ToolCallTelemetry:
                 "tool_name": row[3],
                 "success": bool(row[4]),
                 "retries": int(row[5] or 0),
-                "latency_ms": float(row[6] or 0.0),
+                # Pass NULL through — do NOT collapse it with `or 0.0`. This
+                # feeds /api/tools/recent → Beacon's Tool Feed, the surface
+                # #307 was filed from; `float(row[6] or 0.0)` re-created the
+                # exact ambiguity schema v2 removed, rendering every unmeasured
+                # call as "0ms". Beacon maps null → `—` (gateway-events.ts
+                # toolCallsFromApi), so absent is the honest wire value.
+                "latency_ms": None if row[6] is None else float(row[6]),
                 "error_type": row[7],
                 "error_detail": row[8],
                 "inputs": inputs,
