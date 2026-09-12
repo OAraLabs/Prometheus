@@ -95,7 +95,7 @@ MODULE_GATES: tuple[str, ...] = (
 # the runner's layout. `str(OSError)` is the concrete case — it interpolates the
 # offending path verbatim:
 #
-#     OSError: [Errno 30] Read-only file system: '/home/will/tmpcmze1bu3'
+#     OSError: [Errno 30] Read-only file system: '/home/someuser/tmpcmze1bu3'
 #
 # Measured, not assumed: reading a missing file under a home directory puts that
 # home directory in `str(exc)`. Three of this module's `unprobeable` details

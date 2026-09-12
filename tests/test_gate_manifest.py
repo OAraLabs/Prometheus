@@ -247,8 +247,8 @@ def test_manifest_carries_no_hostname_or_address() -> None:
 
 LEAK_SAMPLES = (
     # The measured case: str(OSError) interpolates the offending path verbatim.
-    "OSError: [Errno 30] Read-only file system: '/home/will/tmpcmze1bu3'",
-    "FileNotFoundError: [Errno 2] No such file or directory: '/home/will/x.yaml'",
+    "OSError: [Errno 30] Read-only file system: '/home/someuser/tmpcmze1bu3'",
+    "FileNotFoundError: [Errno 2] No such file or directory: '/home/someuser/x.yaml'",
     # Other machines' conventions — the redactor names a CLASS, not one host.
     "could not be run: [Errno 2] '/Users/bob/bin/aa-exec'",
     "probe failed at /root/.prometheus/config/prometheus.yaml",
@@ -271,7 +271,7 @@ def test_gate_detail_strips_absolute_paths_on_construction() -> None:
         assert "/root/" not in gate.detail, f"leaked through: {gate.detail!r}"
         assert "/tmp/" not in gate.detail, f"leaked through: {gate.detail!r}"
         assert "/mnt/" not in gate.detail, f"leaked through: {gate.detail!r}"
-        assert "will" not in gate.detail, (
+        assert "someuser" not in gate.detail, (
             f"username survived redaction: {gate.detail!r}"
         )
         assert "<path>" in gate.detail, (
@@ -302,7 +302,7 @@ def test_a_real_unprobeable_detail_cannot_carry_a_path() -> None:
 
     The three ``unprobeable`` sites interpolate an exception into the detail, and
     ``str(OSError)`` carries the offending path verbatim — measured, e.g.
-    ``FileNotFoundError: [Errno 2] …: '/home/will/.prometheus/x'``. This drives
+    ``FileNotFoundError: [Errno 2] …: '/home/someuser/.prometheus/x'``. This drives
     one of them for real and asserts the path does not survive into a Gate.
 
     The probe functions themselves return RAW detail; redaction is the Gate
@@ -316,7 +316,7 @@ def test_a_real_unprobeable_detail_cannot_carry_a_path() -> None:
 
     def exploding_import(name, *args, **kwargs):
         if name == "prometheus.permissions":
-            raise OSError(2, "No such file or directory", "/home/will/.prometheus/x")
+            raise OSError(2, "No such file or directory", "/home/someuser/.prometheus/x")
         return real_import(name, *args, **kwargs)
 
     builtins.__import__ = exploding_import
@@ -333,7 +333,7 @@ def test_a_real_unprobeable_detail_cannot_carry_a_path() -> None:
             assert value == "unprobeable", f"{name} -> {value}"
             gate = gm.Gate(name, value, detail)  # the chokepoint
             assert "/home/" not in gate.detail, f"{name} leaked: {gate.detail!r}"
-            assert "will" not in gate.detail, (
+            assert "someuser" not in gate.detail, (
                 f"{name} leaked a username: {gate.detail!r}"
             )
             assert "<path>" in gate.detail, (
