@@ -102,6 +102,25 @@ v2 allows NULL and the writer passes NULL when nothing was timed. `_migrate_sche
 
 So the boundary is reported instead of erased. Every reader that aggregates latency returns `(value, source)` — the same shape as `resolve_effective_limit` — where `source` is `measured`, `unmeasured`, or `unknown` for any aggregate that includes a pre-v2 row. The digest renders the source; it does not average across it and present one number. A window that is half guesswork says so.
 
+**Telemetry schema v3 (2026-09-11) — what a NULL `billing_mode` means.**
+
+A row carries `billing_mode` **iff it was written through `LLMCallEnvelope` with a live provider** — that is, iff the row represents an LLM call. NULL means *"this row is not an LLM call, so there is no billing mode to record"*, and it is a correct terminal state for those rows, not a stamp that failed.
+
+The rule is NOT "rows without tokens are unstamped", and the difference is load-bearing. Measured on the live store after the v3 restart:
+
+| rows | stamped? | why |
+|---|---|---|
+| `tool_registration/*` | no | bookkeeping; never an LLM call |
+| `agent_loop/tool_advertisement` | no | describes a call, written directly via `record_run`; no provider in hand |
+| `memory_extractor/extract_memory_batch` (no `input_tokens`) | **yes — `local`** | a real LLM call whose provider reported no usage numbers |
+| every tokened row | yes | 0 unstamped since the boundary |
+
+So token presence merely correlates. An LLM call that reports no usage is still stamped, because the provider — not the token count — is what knows how the call was paid for.
+
+**Therefore: a NULL on a row whose `operation` is an LLM call IS a defect**, and a NULL on a registration or advertisement row is not. A reader can tell which by the row's `subsystem`/`operation`; nothing else in the row distinguishes them.
+
+**Rows written before `billing_recorded_since` are a separate case.** They predate the column and are stamped only by `scripts/backfill_billing_mode.py`, which deliberately scopes to tokened rows of one named model. As of the 2026-09-11 backfill, 81 `qwen3.8-max` rows remain NULL — 72 `tool_advertisement` and 9 failed `loop_round`, all untokened, all before the boundary. They are in the first category: not LLM-call rows with a lost stamp, but rows to which billing mode does not apply.
+
 The telemetry DB path resolves through `get_config_dir()` like every other store. It did not always — the writer hardcoded the default while `reset-data` resolved properly, so a custom config dir split the DB from its eraser.
 
 ### 1.4 What is not covered
