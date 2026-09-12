@@ -553,13 +553,64 @@ next contributor that `r.latency_ms ?? 0` is correct per the signature and
 wrong on the data. Widening the type is part of the consumer-side pin, not a
 separate nicety.
 
----
+### 4i. The comparison trusted that both runs measured the same thing
+
+Two full-suite runs on **one tree** reported `7781 passed / 404 skipped` and
+`7742 passed / 441 skipped`. The collected total was constant at 8186 — nothing
+was added or dropped, 39 tests changed *category*. The diff was read as a
+result, and "no regression vs pristine main" became a claim about the tree when
+it was a claim about the host.
+
+What moved: the bwrap write-floor `skipif` runs a live probe at collection time,
+and its verdict tracks the root filesystem's mount state. That state was measured
+as `ro` in one execution context and `rw` in the other, **on the same machine,
+seconds apart**. Neither run's output recorded which it had been.
+
+The named mechanism — "diff the failure sets" — was operating correctly and
+answered the question it was asked. It was the wrong question. A failure set
+without the composition that produced it cannot be compared, because in the run
+where the floor tests *skipped*, their absence from the failures said nothing
+about whether they still passed. That is the dangerous direction: the security
+floors are precisely the tests whose silence should not be read as green.
+
+**Do not chase determinism in the probe.** The probe *should* depend on the
+environment — a floor test that executed where the floor cannot work would be
+worse than one that skips, and the skip reason already says so ("SKIPPED IS NOT
+PASSED: on this machine bash can write anywhere and these are live holes"). The
+mount flip is a property of the host, not of the tree. Stabilising the probe is
+either impossible or a lie.
+
+**Make the provenance visible so an incomparable comparison refuses.** A gate
+manifest records what gated the run; the comparison rule becomes *same manifest
+first, then same failure sets*, and a differing manifest exits non-zero as
+**VOID — not passed, not failed, unmeasured**. This is 4f one level up: there
+the question was whether the green run was the run a gate would honour, here it
+is whether two runs are the same kind of run at all.
+
+**Where this is enforceable, and where it is not.** A CI check comparing
+manifests would catch nothing: CI runs on clean ubuntu where the manifest is
+*stable*, so the check passes every time and costs a required check that never
+fires. The instability lives on the mini and in agent sessions, which is exactly
+where CI cannot see. So the binding is by review, on the evidence: **a report
+claiming "no regression vs main" must carry two manifests and the comparison
+verdict, not two failure sets.** The evidence is either in the report or it is
+not — that is what makes it reviewable.
+
+```bash
+pytest tests/ --gate-manifest=/tmp/before.json   # baseline tree
+pytest tests/ --gate-manifest=/tmp/after.json    # changed tree
+python3 scripts/compare_gate_manifests.py /tmp/before.json /tmp/after.json
+#   exit 0 → MATCH: the failure sets are comparable, diff them
+#   exit 1 → VOID: different gates, the comparison is unmeasured
+```
 
 ---
 
 ---
 
-### The rule the eight share
+---
+
+### The rule the nine share
 
 **Verify that the named mechanism was actually operating.** In 4a the
 setting was one API call away and nobody asked, so a guess became a standing
@@ -574,7 +625,8 @@ runs on that commit agreed with it. In 4g a file was verified in place of the
 claim that named it, so a scan that could not have seen the defect was read as
 evidence of its absence. In 4h the changed layer was verified in place of the
 consumed one, so a fix was trusted to have reached a surface no test had ever
-asked about.
+asked about. In 4i two runs were compared without establishing that they
+measured the same thing, so a host difference was read as a tree property.
 
 A control you have not seen fail is not yet known to be a control. Prefer
 the version that can produce a *distinguishable* wrong answer — a tag with

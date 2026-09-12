@@ -18,6 +18,7 @@ import warnings
 
 import pytest
 
+from tests.support import gate_manifest
 from tests.support.doubles import registry
 from tests.support.plumbing_allowlist import PLUMBING_TARGETS
 
@@ -196,3 +197,85 @@ def _hermetic_prometheus_env(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("QWEN_API_KEY", raising=False)
     monkeypatch.delenv("QWEN_BASE_URL", raising=False)
+
+
+# ── the gate manifest (#479) ───────────────────────────────────────────────
+# Two runs on one tree produced different pass/skip splits, and nothing in
+# either output said so. The probes that decide the split are RIGHT to depend on
+# live host state — a bwrap floor test that ran where bwrap cannot work would be
+# worse than one that skips — but a run that does not record what gated it makes
+# "no regression vs pristine main" an unearned claim. See
+# tests/support/gate_manifest.py for the full reasoning and the comparison rule:
+# same manifest FIRST, then same failure sets; different manifest → VOID.
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--gate-manifest",
+        action="store",
+        default=None,
+        metavar="PATH",
+        help=(
+            "write this run's gate manifest (JSON) to PATH, so a later run can "
+            "be compared against it with scripts/compare_gate_manifests.py. "
+            "The manifest records the host-state probes that decided which "
+            "tests ran vs skipped; two runs are only comparable when their "
+            "manifest hashes match."
+        ),
+    )
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Probe the gates ONCE, before collection, and say what they returned.
+
+    Before collection, because the `skipif` markers that consume these verdicts
+    are evaluated as test modules are imported — printing afterwards would
+    report a state that had already been superseded by the skips it explains.
+    """
+    session.config._gate_manifest = gate_manifest.as_dict()
+
+    path = session.config.getoption("--gate-manifest", default=None)
+    if path:
+        gate_manifest.write_manifest(path)
+
+
+def pytest_report_header(config: pytest.Config) -> str:
+    """The manifest at the top of every run, not only when it is asked for."""
+    manifest = getattr(config, "_gate_manifest", None)
+    if manifest is None:  # pragma: no cover - sessionstart always runs first
+        return ""
+    return gate_manifest.render(manifest)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config: pytest.Config) -> None:
+    """Repeat the manifest in the summary, and catch a gate that flipped mid-run.
+
+    Repeated because the summary is the part of the output that gets quoted into
+    an issue or a PR — a verdict without the state that produced it is how an
+    unearned "no regression" gets written down.
+
+    The floor gates are re-probed here, and if a verdict CHANGED during the run
+    the summary says so loudly: the manifest at the top would then be a record
+    of what the gates were before collection, not of what they were while the
+    tests ran, and printing it unqualified would be a lie of exactly the kind
+    this exists to prevent.
+    """
+    manifest = getattr(config, "_gate_manifest", None)
+    if manifest is None:  # pragma: no cover
+        return
+
+    terminalreporter.write_sep("=", "GATE MANIFEST — what gated this run")
+    terminalreporter.line(gate_manifest.render(manifest))
+
+    now = {g.name: g.value for g in gate_manifest.collect_gates()}
+    before = {n: g["value"] for n, g in manifest["gates"].items()}
+    flipped = {n: (before.get(n), now.get(n)) for n in before if before.get(n) != now.get(n)}
+    if flipped:
+        terminalreporter.write_sep("!", "GATE STATE CHANGED DURING THIS RUN")
+        for name, (was, is_now) in sorted(flipped.items()):
+            terminalreporter.line(f"  {name}: {was} → {is_now}")
+        terminalreporter.line(
+            "  The manifest above records the gates as they were BEFORE "
+            "collection. Tests collected after a flip were gated by the NEW "
+            "state, so this run's composition is not faithfully described by "
+            "either manifest and it is NOT comparable to any other run."
+        )
