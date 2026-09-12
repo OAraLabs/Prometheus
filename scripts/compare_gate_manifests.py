@@ -137,10 +137,10 @@ def compare(before_path: str, after_path: str) -> int:
         "\n"
         "To get an admissible comparison, re-run both trees under the same\n"
         "host state. For the bwrap/AppArmor floor gates that means the same\n"
-        "root-filesystem mount state (see root_mount_options / root_writable\n"
-        "above) — it is not a property of either tree, and it is not something\n"
-        "to fix by stabilizing the probe: a floor test that ran where the\n"
-        "floor cannot work would be worse than one that skips.\n",
+        "root-filesystem mount state (see root_mount_ro) — it is not a\n"
+        "property of either tree, and it is not something to fix by\n"
+        "stabilizing the probe: a floor test that ran where the floor cannot\n"
+        "work would be worse than one that skips.\n",
         file=sys.stderr,
     )
     return VOID_EXIT

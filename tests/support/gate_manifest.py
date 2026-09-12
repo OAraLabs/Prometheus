@@ -60,7 +60,14 @@ from pathlib import Path
 # Bump only on a change to what is COLLECTED (a gate added/removed/renamed),
 # never on a change of host state. Two manifests of different schema versions
 # are incomparable by definition and the comparison tool says so.
-SCHEMA = 1
+#
+# 2 — `root_writable` (an `os.access("/", W_OK)` uid probe that reported false on
+#     both a ro and an rw root) renamed and re-derived as `root_mount_ro`, the
+#     `ro` flag of `/proc/self/mounts`. Schema 1 manifests exist from this
+#     branch's own test runs and must compare VOID against schema 2, which is
+#     what this bump buys.
+# 1 — first version.
+SCHEMA = 2
 
 # Hostname of the DNS probe the network gate uses. A public name, not an
 # infrastructure identifier; recorded because the gate is meaningless without
