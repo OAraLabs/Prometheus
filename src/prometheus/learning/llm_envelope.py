@@ -434,7 +434,7 @@ class LLMCallEnvelope:
         """
         if self._telemetry is None:
             return
-        billing_mode = self._billing_mode_of(model, provider)
+        billing_mode, billing_marker = self._billing_of(model, provider)
         try:
             self._telemetry.record_run(
                 subsystem=self._subsystem,
@@ -451,6 +451,7 @@ class LLMCallEnvelope:
                 model=model,
                 thinking=thinking,
                 billing_mode=billing_mode,
+                billing_marker=billing_marker,
             )
         except Exception:
             log.debug(
@@ -513,8 +514,10 @@ class LLMCallEnvelope:
     # Internal — telemetry writes are best-effort, never raise
     # ------------------------------------------------------------------
 
-    def _billing_mode_of(self, model: str | None, provider: object | None) -> str | None:
-        """The billing mode for a row about to be written, or None.
+    def _billing_of(
+        self, model: str | None, provider: object | None
+    ) -> tuple[str | None, str | None]:
+        """(billing_mode, billing_marker) for a row about to be written.
 
         Here rather than inline because THREE writers need it and only one of
         them had it. `stream()` writes the full row; `call()` routes to the two
@@ -524,12 +527,17 @@ class LLMCallEnvelope:
         recreated that asymmetry one column over, and this time it would have
         been invisible: an unstamped row is indistinguishable from one written
         before the column existed.
+
+        The marker (#468) travels with the mode so the two are always computed
+        together and can never disagree — a row stamped `subscription` with no
+        marker, or a marker with no mode, would be a half-evidence. See
+        ``telemetry/cost.billing_stamp_full``.
         """
         if provider is None:
-            return None
-        from prometheus.telemetry.cost import billing_stamp
+            return None, None
+        from prometheus.telemetry.cost import billing_stamp_full
 
-        return billing_stamp(model, provider)
+        return billing_stamp_full(model, provider)
 
     def _record_failure(
         self,
@@ -562,6 +570,11 @@ class LLMCallEnvelope:
 
         if self._telemetry is None:
             return
+        # Bound ONCE, not two subscripts: _billing_of classifies from the live
+        # provider, and calling it twice could in principle return two answers
+        # if the provider's base_url moved between them — a mode and a marker
+        # from different instants. One call, one tuple, one row.
+        billing_mode, billing_marker = self._billing_of(model, provider)
         try:
             self._telemetry.record_silent_failure(
                 subsystem=self._subsystem,
@@ -576,7 +589,8 @@ class LLMCallEnvelope:
                 duration_ms=duration_ms,
                 summary=_failure_summary(exc),
                 model=model,
-                billing_mode=self._billing_mode_of(model, provider),
+                billing_mode=billing_mode,
+                billing_marker=billing_marker,
             )
         except Exception:
             log.debug(
@@ -597,6 +611,8 @@ class LLMCallEnvelope:
     ) -> None:
         if self._telemetry is None:
             return
+        # Bound once, same reason as _record_failure.
+        billing_mode, billing_marker = self._billing_of(model, provider)
         try:
             summary = {"output_chars": len(text)}
             if context:
@@ -608,7 +624,8 @@ class LLMCallEnvelope:
                 duration_ms=duration_ms,
                 summary=summary,
                 model=model,
-                billing_mode=self._billing_mode_of(model, provider),
+                billing_mode=billing_mode,
+                billing_marker=billing_marker,
             )
         except Exception:
             log.debug(

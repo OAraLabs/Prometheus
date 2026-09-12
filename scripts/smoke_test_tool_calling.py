@@ -252,7 +252,22 @@ except ImportError as _exc:
         print("  That is the tree above, not the one the service loads — the")
         print("  missing name almost certainly exists in the service's tree.")
         print(f"      PYTHONPATH={_facts['service_src']} python3 {sys.argv[0]} ...")
-    sys.exit(2)
+    # #467: sys.exit(2) HERE is a SystemExit raised at MODULE SCOPE. When this
+    # file is run as a script that is the correct, loud exit. But three things
+    # IMPORT this module (tests/test_smoke_declares_its_tree.py,
+    # tests/test_wiring.py via spec_from_file_location, and
+    # scripts/web_capability_audit.py — itself imported by tests/test_web_audit.py),
+    # and SystemExit does not inherit from Exception, so pytest does not treat
+    # it as a collection error: it escapes the collector as INTERNALERROR and a
+    # whole-suite run reports "113 errors" with NO VERDICT and a traceback
+    # pointing at this line instead of at the import that actually failed.
+    # Same class as #465 (benchmarks/__main__.py running main() at import).
+    # When run as a script: exit 2, as before. When imported: re-raise the
+    # ImportError so the importer — pytest included — sees a normal,
+    # attributable collection error naming the missing module.
+    if __name__ == "__main__":
+        sys.exit(2)
+    raise
 
 # Conditional imports — these may not exist yet or may be optional
 try:

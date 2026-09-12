@@ -460,3 +460,118 @@ def test_a_provider_that_cannot_be_classified_costs_the_label_not_the_row(tmp_pa
     asyncio.run(env.call(provider=_Hostile(), model=MODEL, prompt="p",
                          operation="_call_model"))
     assert _modes(tel) == [None], "a hostile provider cost the row, not just the label"
+
+
+# ── #468: store the matched marker, not the host ────────────────────────────
+#
+# The mode alone freezes today's classification rule into history: if
+# SUBSCRIPTION_HOST_MARKERS is ever revised, a bare `subscription` cannot be
+# re-derived. The marker is a codebase constant — persistable — while the host
+# that matched it is an account-scoped identifier that must never persist.
+
+def _markers(tel):
+    return [
+        r[0] for r in tel._conn.execute(
+            "SELECT billing_marker FROM subsystem_runs WHERE subsystem = 'curator'"
+        )
+    ]
+
+
+def test_the_envelope_stamps_the_matched_marker(tmp_path):
+    tel = ToolCallTelemetry(db_path=tmp_path / "t.db")
+    _drive_call(tel, PLAN_URL)
+    assert _markers(tel) == ["token-plan."], (
+        "the subscription row carries no marker — history cannot be "
+        "re-derived if the marker's meaning is ever revised (#468)"
+    )
+
+
+def test_the_marker_is_the_constant_not_the_host(tmp_path):
+    """The whole point: what persists is a codebase constant, nothing that
+    can be connected to."""
+    from prometheus.telemetry.cost import SUBSCRIPTION_HOST_MARKERS
+
+    tel = ToolCallTelemetry(db_path=tmp_path / "t.db")
+    _drive_call(tel, PLAN_URL)
+    marker = _markers(tel)[0]
+    assert marker in SUBSCRIPTION_HOST_MARKERS, (
+        f"{marker!r} is not a committed marker constant — if the stored value "
+        "is not one of these, what landed in the database is a host"
+    )
+    assert PLAN_HOST not in marker and marker != PLAN_HOST
+
+
+def test_non_subscription_rows_carry_no_marker(tmp_path):
+    """NULL on a local/metered row is itself the honest answer: the pricing
+    table (or the file path) decided, not a host."""
+    tel = ToolCallTelemetry(db_path=tmp_path / "t.db")
+    _drive_call(tel, METERED_URL)                 # unknown/metered via pricing
+    _drive_call(tel, METERED_URL, model="local-model.gguf")
+    assert _markers(tel) == [None, None], (
+        "a marker on a non-subscription row implies a host decided the "
+        "classification when it did not"
+    )
+
+
+def test_a_failed_call_stamps_the_marker_too(tmp_path):
+    """Same asymmetry guard as billing_mode: both abbreviated writers stamp."""
+    tel = ToolCallTelemetry(db_path=tmp_path / "t.db")
+    _drive_call(tel, PLAN_URL, fail=True)
+    assert _markers(tel) == ["token-plan."]
+
+
+def test_mode_and_marker_always_agree(tmp_path):
+    """A marker without mode `subscription`, or mode `subscription` without a
+    marker, is half-evidence. They are computed by ONE call now; pin it."""
+    tel = ToolCallTelemetry(db_path=tmp_path / "t.db")
+    _drive_call(tel, PLAN_URL)
+    _drive_call(tel, METERED_URL)
+    rows = tel._conn.execute(
+        "SELECT billing_mode, billing_marker FROM subsystem_runs "
+        "WHERE subsystem = 'curator' ORDER BY rowid"
+    ).fetchall()
+    for mode, marker in rows:
+        if marker is not None:
+            assert mode == "subscription", f"marker {marker!r} on mode {mode!r}"
+        if mode == "subscription":
+            assert marker is not None, "subscription mode with no marker"
+
+
+def test_the_column_is_additive_on_an_existing_database(tmp_path):
+    """A pre-marker database opens, gains the column, and old rows read NULL —
+    additive only, no version bump (a v2/v3 writer leaving it NULL adds no
+    rollback ambiguity)."""
+    import sqlite3
+
+    db = tmp_path / "t.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+        "INSERT INTO schema_meta VALUES ('schema_version','3');"
+    )
+    conn.commit()
+    conn.close()
+
+    tel = ToolCallTelemetry(db_path=db)
+    cols = [r[1] for r in tel._conn.execute(
+        "PRAGMA table_info(subsystem_runs)").fetchall()]
+    assert "billing_marker" in cols, "the additive migration did not add it"
+    assert tel._read_stored_schema_version() == 3, (
+        "a purely-additive informational column bumped the schema version"
+    )
+
+
+def test_billing_stamp_full_never_returns_a_host():
+    """The classifier's own contract, pinned: the second element is a marker
+    constant or None — never a host, never the URL."""
+    from prometheus.telemetry.cost import (
+        SUBSCRIPTION_HOST_MARKERS, billing_stamp_full,
+    )
+
+    class _P:
+        _base_url = PLAN_URL
+
+    mode, marker = billing_stamp_full(MODEL, _P())
+    assert mode == "subscription"
+    assert marker in SUBSCRIPTION_HOST_MARKERS
+    assert PLAN_HOST not in (marker or "")
