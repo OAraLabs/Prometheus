@@ -3915,7 +3915,12 @@ async def _execute_tool_call(
                     tool_name=tool_name,
                     success=False,
                     retries=retries_used,
-                    latency_ms=0.0,
+                    # NULL, not 0.0: this call never executed, so nothing was
+                    # measured (schema v2 / #307). An explicit 0.0 here is the
+                    # last writer still storing "unmeasured" as a number, and
+                    # live data proved it: the only post-v2 0.0 rows were both
+                    # validation_failed.
+                    latency_ms=None,
                     error_type="validation_failed",
                     error_detail=str(exc),
                     # forensics + future mining: the as-emitted call (D1 had

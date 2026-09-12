@@ -155,3 +155,54 @@ class TestApiToolsRecent:
         tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
         with _client(tel, monkeypatch) as client:
             assert client.get("/api/tools/recent").json() == []
+
+    def test_unmeasured_latency_is_null_in_the_payload_not_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#307 at the SURFACE, not at the function: the reader must not undo the schema.
+
+        Schema v2 stores an unmeasured call as NULL, but `recent_tool_calls()`
+        collapsed it with `float(row[6] or 0.0)` — so /api/tools/recent, the
+        route that hydrates Beacon's Tool Feed (the very surface #307 was filed
+        from, beacon #84), re-served "took 0ms" for a call that never ran. The
+        write-side fix was verified through `report()` and shipped while this
+        reader kept resurrecting the ambiguity. The pin is at the payload level
+        on purpose: a test asserting what the function returns would re-commit
+        the exact error — verifying one reader while the served surface lies.
+
+        Beacon maps null → `—` (gateway-events.ts `toolCallsFromApi`: a
+        non-finite latency_ms becomes undefined → fmtLatency renders `—`), so
+        NULL on the wire is the honest value AND the one the client expects.
+        """
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        tel.record(model="m", tool_name="bash", success=True, latency_ms=12.5)
+        # never executed — no measurement exists
+        tel.record(model="m", tool_name="grep", success=False,
+                   error_type="validation_failed")
+        with _client(tel, monkeypatch) as client:
+            rows = client.get("/api/tools/recent").json()
+            by_name = {r["tool_name"]: r for r in rows}
+            assert by_name["bash"]["latency_ms"] == 12.5
+            assert by_name["grep"]["latency_ms"] is None, (
+                "an unmeasured call was served as 0.0 — the reader collapsed "
+                "the NULL that schema v2 stored (the #307 ambiguity, reborn "
+                "one layer up)"
+            )
+
+    def test_a_genuine_zero_survives_as_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The other half: NULL and 0.0 must stay DIFFERENT on the wire.
+
+        If the reader mapped both to the same value it would be a different
+        collapse — "measured as instant" is a claim the system can hold, and
+        the feed must be able to show it.
+        """
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        tel.record(model="m", tool_name="fast", success=True, latency_ms=0.0)
+        tel.record(model="m", tool_name="never", success=False,
+                   error_type="unknown_tool")
+        with _client(tel, monkeypatch) as client:
+            by_name = {r["tool_name"]: r for r in client.get("/api/tools/recent").json()}
+            assert by_name["fast"]["latency_ms"] == 0.0
+            assert by_name["never"]["latency_ms"] is None
