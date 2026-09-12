@@ -525,6 +525,34 @@ later session quoting the issue's own stated harms back and checking each
 against `main` and the live DB before closing it. "The fix is merged and
 deployed" was true; "the harm is gone" was not. That gap is the rule.
 
+**When the motivating surface lives in another repo.** The obligation does not
+become unfollowable just because the surface that motivated the finding is not
+in this tree — it becomes a *linked pin filed there at the same time*, not a
+skipped step. "I can't test Beacon from Prometheus" is true and is not a
+discharge of the rule; it is the cue to open the companion issue/PR in the
+other repo before this one merges. The cross-repo contract has two ends and
+each end pins its own side:
+
+- the side that *changed the representation* pins the wire value at its own
+  payload boundary (here: `/api/tools/recent` returns `latency_ms: null`);
+- the side that *consumes* it pins that the value survives its own reader to
+  the surface the user sees (here: `toolCallsFromApi(null latency)` → `—`).
+
+Neither end can see the other's collapse. A consumer-side guard that turns
+`null` back into `0` is invisible to the producer's tests, exactly as a
+producer collapsing NULL was invisible to the consumer's. So file both, link
+them, and check the consumer's *existing* coverage before filing — #85 here
+had a runtime guard and a `fmtLatency(undefined)` assertion but **no smoke
+driving `latency_ms: null` through `toolCallsFromApi`**, so the end-to-end path
+was true-but-unpinned and a `?? 0` refactor could silently reintroduce `0ms`
+with the producer green. That is the gap the companion pin closes.
+
+A type that declares the value cannot arrive when the wire now sends it is the
+same defect class one level up — `latency_ms?: number` (not `| null`) tells the
+next contributor that `r.latency_ms ?? 0` is correct per the signature and
+wrong on the data. Widening the type is part of the consumer-side pin, not a
+separate nicety.
+
 ---
 
 ---
