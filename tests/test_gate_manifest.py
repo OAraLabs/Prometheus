@@ -237,6 +237,124 @@ def test_manifest_carries_no_hostname_or_address() -> None:
     )
 
 
+# The assertions above are necessary and NOT sufficient, and this file already
+# shipped them as though they were: they passed on a clean host only because no
+# path happened to appear. Nothing in them FORCED a leak, so a probe that
+# interpolated an absolute path into its detail would have sailed through. That
+# is the vacuous-test shape from the root_writable gate, one level down — a test
+# that agrees with a broken implementation on the host it happens to run on.
+# Everything below constructs the leak instead of waiting for the host to.
+
+LEAK_SAMPLES = (
+    # The measured case: str(OSError) interpolates the offending path verbatim.
+    "OSError: [Errno 30] Read-only file system: '/home/will/tmpcmze1bu3'",
+    "FileNotFoundError: [Errno 2] No such file or directory: '/home/will/x.yaml'",
+    # Other machines' conventions — the redactor names a CLASS, not one host.
+    "could not be run: [Errno 2] '/Users/bob/bin/aa-exec'",
+    "probe failed at /root/.prometheus/config/prometheus.yaml",
+    "bwrap: cannot bind /mnt/external/data",
+    "tmpdir /tmp/pytest-of-will/pytest-538/test_x0 leaked",
+)
+
+
+def test_gate_detail_strips_absolute_paths_on_construction() -> None:
+    """The chokepoint: NO Gate can carry a path, whoever builds it.
+
+    Pinned at construction rather than in ``as_dict`` so a future probe — or a
+    pass-through of bwrap/aa-exec stderr, which can echo a bind path — inherits
+    the guarantee without having to remember it.
+    """
+    for sample in LEAK_SAMPLES:
+        gate = gm.Gate("probe", "unprobeable", sample)
+        assert "/home/" not in gate.detail, f"leaked through: {gate.detail!r}"
+        assert "/Users/" not in gate.detail, f"leaked through: {gate.detail!r}"
+        assert "/root/" not in gate.detail, f"leaked through: {gate.detail!r}"
+        assert "/tmp/" not in gate.detail, f"leaked through: {gate.detail!r}"
+        assert "/mnt/" not in gate.detail, f"leaked through: {gate.detail!r}"
+        assert "will" not in gate.detail, (
+            f"username survived redaction: {gate.detail!r}"
+        )
+        assert "<path>" in gate.detail, (
+            f"the path was dropped rather than marked: {gate.detail!r}"
+        )
+
+
+def test_redaction_keeps_the_message_that_explains_the_failure() -> None:
+    """Redaction must not destroy the diagnostic the manifest exists to give.
+
+    ``bwrap: Failed to make / slave`` is the single most useful sentence in the
+    manifest — it names WHY the floor is unavailable. The redactor requires a
+    known top-level directory after the slash, so a lone ``/`` survives. If this
+    test fails, the fix over-redacted and the gate is noise again.
+    """
+    kept = gm._redact_paths("bwrap: Failed to make / slave: Permission denied")
+    assert kept == "bwrap: Failed to make / slave: Permission denied", kept
+
+    assert gm._redact_paths("resolved duckduckgo.com") == "resolved duckduckgo.com"
+    assert "prometheus-bash" in gm._redact_paths(
+        "aa-exec: ERROR: insufficient permissions to change to the profile "
+        "'prometheus-bash'"
+    )
+
+
+def test_a_real_unprobeable_detail_cannot_carry_a_path() -> None:
+    """End to end: make a probe actually blow up and read what the MANIFEST holds.
+
+    The three ``unprobeable`` sites interpolate an exception into the detail, and
+    ``str(OSError)`` carries the offending path verbatim — measured, e.g.
+    ``FileNotFoundError: [Errno 2] …: '/home/will/.prometheus/x'``. This drives
+    one of them for real and asserts the path does not survive into a Gate.
+
+    The probe functions themselves return RAW detail; redaction is the Gate
+    constructor's job (the single chokepoint), so this builds the Gate the way
+    ``collect_gates`` does and asserts on THAT. Testing the raw tuple would
+    assert a guarantee the design deliberately does not make at that layer.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def exploding_import(name, *args, **kwargs):
+        if name == "prometheus.permissions":
+            raise OSError(2, "No such file or directory", "/home/will/.prometheus/x")
+        return real_import(name, *args, **kwargs)
+
+    builtins.__import__ = exploding_import
+    try:
+        # Only these two import prometheus.permissions; _live_config_gate imports
+        # prometheus.config.defaults and so is untouched by this explosion (it
+        # returns "absent", and its detail is always empty).
+        for build in (
+            ("bwrap_write_floor", gm._write_floor_gate),
+            ("apparmor_read_floor", gm._read_floor_gate),
+        ):
+            name, probe = build
+            value, detail = probe()
+            assert value == "unprobeable", f"{name} -> {value}"
+            gate = gm.Gate(name, value, detail)  # the chokepoint
+            assert "/home/" not in gate.detail, f"{name} leaked: {gate.detail!r}"
+            assert "will" not in gate.detail, (
+                f"{name} leaked a username: {gate.detail!r}"
+            )
+            assert "<path>" in gate.detail, (
+                f"{name} dropped the path instead of marking it: {gate.detail!r}"
+            )
+    finally:
+        builtins.__import__ = real_import
+
+
+def test_live_config_gate_detail_is_always_empty() -> None:
+    """The one gate whose detail is a constant — pin that it stays that way.
+
+    ``live_repo_config`` reports presence only. If it ever grew a detail (a path,
+    a config value) it would become the one surface in the manifest not covered
+    by the path chokepoint's reason for existing, so the empty detail is pinned
+    rather than assumed.
+    """
+    _value, detail = gm._live_config_gate()
+    assert detail == ""
+
+
 def test_binary_gates_record_presence_not_location() -> None:
     for g in gm.collect_gates():
         if g.name.startswith("bin:"):

@@ -52,6 +52,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import shutil
 import socket
 from dataclasses import dataclass
@@ -89,6 +90,38 @@ MODULE_GATES: tuple[str, ...] = (
 )
 
 
+# Absolute paths are the one thing a probe's failure reason can carry that is an
+# infrastructure identifier: a path names a username, and on a CI runner it names
+# the runner's layout. `str(OSError)` is the concrete case — it interpolates the
+# offending path verbatim:
+#
+#     OSError: [Errno 30] Read-only file system: '/home/will/tmpcmze1bu3'
+#
+# Measured, not assumed: reading a missing file under a home directory puts that
+# home directory in `str(exc)`. Three of this module's `unprobeable` details
+# interpolated `{exc}` straight through, and the probe details are pass-through
+# stderr from bwrap/aa-exec, which can echo a bind path too.
+#
+# Redacted at ONE chokepoint (every detail, on its way out) rather than at each
+# call site, for the same reason the render env is an allowlist: a per-site
+# fix rots the moment someone adds a probe whose detail interpolates an
+# exception. The pattern names the path CLASS, not a denylist of bad paths.
+_PATH_RE = re.compile(
+    r"/(?:home|Users|root|tmp|var|mnt|media|opt|srv|run|etc|usr|dev/shm)"
+    r"(?:/[^\s'\"]*)?"
+)
+
+
+def _redact_paths(text: str) -> str:
+    """Replace absolute paths with ``<path>`` in a probe's reason text.
+
+    A lone ``/`` is deliberately NOT matched — ``bwrap: Failed to make / slave``
+    is the single most useful sentence in the whole manifest, and the pattern
+    requires a known top-level directory after the slash so it survives intact.
+    """
+    return _PATH_RE.sub("<path>", text)
+
+
 @dataclass(frozen=True)
 class Gate:
     """One condition a test's execution was gated on.
@@ -102,6 +135,20 @@ class Gate:
     name: str
     value: str
     detail: str = ""
+
+    def __post_init__(self) -> None:
+        """Redact any absolute path out of the detail, at construction.
+
+        Done HERE rather than at each call site or in ``as_dict`` so no Gate can
+        carry a username-bearing path no matter who builds it — a probe whose
+        failure reason interpolates ``str(exc)`` (which carries the path) is
+        cleaned by construction, and a future gate inherits the guarantee rather
+        than having to remember it. ``value`` is left alone: values are a fixed
+        vocabulary this module controls (present/absent/read-only/available/…),
+        never free-form probe text, and the hash covers values only.
+        """
+        if self.detail:
+            object.__setattr__(self, "detail", _redact_paths(self.detail))
 
 
 def _root_mount_ro_verdict(options: str) -> str:
