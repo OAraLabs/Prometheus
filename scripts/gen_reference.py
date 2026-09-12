@@ -317,7 +317,24 @@ def main() -> int:
         "--check", action="store_true",
         help="exit 1 if any file on disk differs from a fresh generation",
     )
+    parser.add_argument(
+        "--json", action="store_true",
+        help="print render_all() as JSON to stdout and exit; for callers that "
+             "must render in a CLEAN interpreter (the test guard does — see "
+             "tests/test_generated_reference.py). Renders, it does not compare.",
+    )
     args = parser.parse_args()
+
+    if args.json:
+        # stdout carries ONLY the JSON, so a caller can parse it without
+        # scraping. render_all() reads live app/registry state; running it in a
+        # fresh process is the point — the in-test-process render had been
+        # polluted by earlier tests' monkeypatching and reported false staleness.
+        import json
+
+        json.dump(render_all(), sys.stdout)
+        sys.stdout.write("\n")
+        return 0
 
     rendered = render_all()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
