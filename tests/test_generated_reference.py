@@ -31,6 +31,7 @@ was actually failing — is taken away from human memory.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -49,9 +50,75 @@ def _gen():
     return gen_reference
 
 
+GEN_SCRIPT = REPO / "scripts" / "gen_reference.py"
+
+
+def _clean_env() -> dict[str, str]:
+    """A MINIMAL environment for the render subprocess — the only thing it may
+    carry is what Python needs to execute (``PATH``, ``HOME``, ``LANG``).
+
+    WHY AN ALLOWLIST AND NOT A DENYLIST: the generated reference must be a pure
+    function of the SOURCE TREE — routes from the code, commands from the code,
+    config keys from the template file. ``create_app()`` reads ambient env to
+    decide part of its surface: ``server.py`` mounts ``/docs``, ``/redoc`` and
+    ``/openapi.json`` only when no API token is resolved
+    (``docs_url=None if _api_token else "/docs"``), and ``_api_token`` falls back
+    to ``os.environ["PROMETHEUS_API_TOKEN"]``. Tests all over the suite set that
+    var, and a module-scoped fixture spawns its subprocess at whatever moment a
+    prior test left it set — so the render came back with ZERO FastAPI built-ins
+    while the committed file has four, and the guard false-red on an unchanged
+    tree.
+
+    Stripping a denylist of ``PROMETHEUS_*`` names would rot the moment someone
+    adds a config var the generator reads — the same trap as snapshotting app
+    state. The allowlist is the inverse and cannot rot: it admits nothing
+    ambient, so no current or future env var can perturb the render. PATH is
+    needed to resolve ``sys.executable``'s interpreter and HOME/LANG for the
+    runtime; nothing else is load-bearing for a render that reads only files.
+    """
+    env = {k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ}
+    env["LANG"] = os.environ.get("LANG", "C.UTF-8")
+    return env
+
+
+def _render_in_subprocess() -> dict[str, str]:
+    """render_all() in a CLEAN interpreter AND a clean environment, as parsed JSON.
+
+    WHY A SUBPROCESS AT ALL — see ``_clean_env``: the in-test-process render
+    inherited both a polluted interpreter (earlier tests monkeypatch the live
+    app/registry state ``render_all()`` reads) and a polluted environment (a
+    leaked ``PROMETHEUS_API_TOKEN`` suppresses the FastAPI built-in routes). A
+    subprocess with a minimal env fixes both at once and makes the verdict a
+    function of the source tree alone. Reproduced two ways on an unchanged tree
+    before the fix: it failed in a full-suite run and passed isolated, and
+    passed/failed run-to-run as collection order shifted the ambient env. A
+    guard that false-reds is worse than no guard — the normal response is to
+    stop believing it, so the day it is right nobody looks.
+
+    WHY NOT SNAPSHOT/RESET app+env state instead: a snapshot silently rots the
+    moment someone adds a source or env var ``render_all()`` reads — the reset
+    list would have to track it, and the day it does not, the false red is back
+    and nobody knows why. A clean subprocess re-derives from live source every
+    time; there is nothing to keep in sync.
+    """
+    import json
+    import subprocess
+
+    proc = subprocess.run(
+        [sys.executable, str(GEN_SCRIPT), "--json"],
+        capture_output=True, text=True, cwd=str(REPO), timeout=180,
+        env=_clean_env(),
+    )
+    assert proc.returncode == 0, (
+        f"gen_reference.py --json failed (rc={proc.returncode}):\n"
+        f"{proc.stderr.strip()[:1000]}"
+    )
+    return json.loads(proc.stdout)
+
+
 @pytest.fixture(scope="module")
 def rendered() -> dict[str, str]:
-    return _gen().render_all()
+    return _render_in_subprocess()
 
 
 def test_every_generated_file_is_current(rendered: dict[str, str]) -> None:
@@ -80,47 +147,54 @@ def test_the_files_say_they_are_generated(rendered: dict[str, str]) -> None:
         assert "gen_reference.py" in head, f"{name} does not name its generator"
 
 
+def _check_in_subprocess() -> tuple[int, str]:
+    """Run ``gen_reference.py --check`` in a CLEAN interpreter.
+
+    Same reason as ``_render_in_subprocess``: ``--check`` calls ``render_all()``,
+    which reads live app state. The old version invoked ``main()`` in-process
+    with ``sys.argv`` swapped, so it inherited whatever the suite had already
+    polluted — the currency check could pass or fail depending on test order,
+    exactly the false-red the guard exists to never produce. ``--check`` is what
+    CI calls, and CI runs it as a subprocess; the test now matches that
+    invocation rather than a fragile in-process one.
+
+    Returns (exit_code, combined_output).
+    """
+    import subprocess
+
+    proc = subprocess.run(
+        [sys.executable, str(GEN_SCRIPT), "--check"],
+        capture_output=True, text=True, cwd=str(REPO), timeout=180,
+        env=_clean_env(),
+    )
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
 def test_check_mode_agrees_with_the_files_on_disk() -> None:
     """``--check`` is what CI would call; it must pass on a clean tree.
 
-    Asserted through the real entry point, because a --check that always
-    returned 0 would make a CI wiring look green while proving nothing.
+    Asserted through the real entry point in a clean subprocess — both because
+    a ``--check`` that always returned 0 would make the CI wiring look green
+    while proving nothing, and because an in-process call renders from
+    suite-polluted app state and false-reds. The subprocess IS the entry point
+    CI invokes, so this tests the real thing, not a stand-in.
     """
-    assert _gen().main.__module__  # imported, not shadowed
-    import contextlib
-    import io
-
-    argv = sys.argv
-    sys.argv = ["gen_reference.py", "--check"]
-    try:
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            code = _gen().main()
-    finally:
-        sys.argv = argv
-    assert code == 0, f"--check failed on a clean tree:\n{buf.getvalue()}"
+    code, out = _check_in_subprocess()
+    assert code == 0, f"--check failed on a clean tree:\n{out}"
+    assert "current" in out, f"--check did not report currency:\n{out}"
 
 
 def test_check_mode_actually_fails_when_a_file_is_stale(tmp_path) -> None:
     """The other direction — a --check that cannot fail gates nothing."""
-    gen = _gen()
     name = "routes.md"
     path = REFERENCE / name
     original = path.read_text(encoding="utf-8")
-    import contextlib
-    import io
-
-    argv = sys.argv
     try:
         path.write_text(original + "\n<!-- drift -->\n", encoding="utf-8")
-        sys.argv = ["gen_reference.py", "--check"]
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            code = gen.main()
-        assert code == 1, "--check passed on a file that had drifted"
-        assert name in buf.getvalue()
+        code, out = _check_in_subprocess()
+        assert code == 1, f"--check passed on a file that had drifted:\n{out}"
+        assert name in out, f"--check did not name the stale file:\n{out}"
     finally:
-        sys.argv = argv
         path.write_text(original, encoding="utf-8")
 
 
