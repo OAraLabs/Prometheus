@@ -97,14 +97,58 @@ class Gate:
     detail: str = ""
 
 
-def _root_mount_options() -> str:
-    """Mount options of ``/`` — the state that decides the bwrap floor probe.
+def _root_mount_ro_verdict(options: str) -> str:
+    """The ``ro`` flag of a mount-options string, as a gate verdict.
+
+    PURE — a function of the string only, no host access. That is deliberate:
+    the verdict must be testable against both mount states on a host that only
+    ever presents one of them. This host has ``/`` mounted ``ro`` for most
+    contexts, so any test that derives its expectation from the live mount
+    silently agrees with a broken implementation and proves nothing. (Measured:
+    a regression to ``os.access("/", W_OK)`` passed the whole suite here,
+    because as a non-root user that call returns false on a ro root too — the
+    two implementations agree exactly where they cannot be told apart.)
+
+    An unreadable or absent mount table yields ``unknown``, NOT a guessed
+    ``read-write``: this whole module exists so a run does not report a verdict
+    it cannot support, and "the mount state could not be read" is not evidence
+    of writability. ``unknown`` also means two runs that both failed to read the
+    table compare equal, which is correct — they were gated the same way, even
+    if neither of us knows how.
+    """
+    if not options or options == "absent" or options.startswith("unreadable"):
+        return "unknown"
+    return "read-only" if "ro" in set(options.split(",")) else "read-write"
+
+
+def _root_mount_gate() -> tuple[str, str]:
+    """Is ``/`` mounted read-only? The state that decides the bwrap floor probe.
 
     Read from ``/proc/self/mounts`` rather than by shelling out to ``findmnt``:
     a gate that records why another gate flipped must not itself depend on a
     binary being present, or it goes blank in exactly the degraded environments
     where it is most useful.
+
+    THE VALUE IS THE ``ro`` FLAG, NOT THE WHOLE OPTIONS STRING. The full string
+    goes in the detail, which the hash excludes by design: options like
+    ``relatime``/``noatime`` or ``nosuid`` can vary between two runs without
+    changing which tests run, and hashing them would void comparisons that are
+    actually admissible. Only ``ro`` flips the bwrap probe (it cannot make ``/``
+    slave), so only ``ro`` belongs in the verdict.
+
+    This replaced a ``root_writable`` gate that called ``os.access("/", W_OK)``.
+    Measured across two real artifacts, it reported ``false`` in both — one with
+    ``/`` mounted ``ro`` and one with ``rw`` — because the suite runs as a
+    non-root user, for whom ``/`` is never writable whatever the mount says. A
+    gate that cannot vary is noise in the hash, and one that reads as if it
+    measures the mount while measuring the uid is worse than absent.
     """
+    options = _root_mount_options()
+    return _root_mount_ro_verdict(options), options
+
+
+def _root_mount_options() -> str:
+    """Raw mount options of ``/``, e.g. ``ro,nosuid,nodev,relatime``."""
     try:
         for line in Path("/proc/self/mounts").read_text(encoding="utf-8").splitlines():
             parts = line.split()
@@ -113,22 +157,6 @@ def _root_mount_options() -> str:
     except OSError as exc:  # pragma: no cover - platform without /proc
         return f"unreadable: {exc.__class__.__name__}"
     return "absent"
-
-
-def _root_writable() -> tuple[str, str]:
-    """Is ``/`` writable? The other half of the floor probe's story.
-
-    ``bwrap: Failed to make / slave`` is what a read-only root produces, and
-    that message alone does not tell you whether the root was mounted ro or the
-    namespace was refused for another reason. Recording both makes the verdict
-    self-explaining in the manifest.
-    """
-    import os
-
-    try:
-        return ("true", "") if os.access("/", os.W_OK) else ("false", "root not writable")
-    except OSError as exc:  # pragma: no cover
-        return ("unknown", exc.__class__.__name__)
 
 
 def _network_gate() -> tuple[str, str]:
@@ -265,9 +293,8 @@ def collect_gates() -> tuple[Gate, ...]:
     gates.append(Gate("bwrap_write_floor", val, det))
     val, det = _read_floor_gate()
     gates.append(Gate("apparmor_read_floor", val, det))
-    gates.append(Gate("root_mount_options", _root_mount_options()))
-    val, det = _root_writable()
-    gates.append(Gate("root_writable", val, det))
+    val, det = _root_mount_gate()
+    gates.append(Gate("root_mount_ro", val, det))
     val, det = _network_gate()
     gates.append(Gate("network_dns", val, det))
     val, det = _symlink_gate()

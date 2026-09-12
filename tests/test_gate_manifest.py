@@ -37,14 +37,78 @@ def test_manifest_reports_the_gates_that_actually_decide_skips() -> None:
     for required in (
         "bwrap_write_floor",
         "apparmor_read_floor",
-        "root_mount_options",
-        "root_writable",
+        "root_mount_ro",
         "network_dns",
         "symlinks",
         "read_permission_revocable",
         "live_repo_config",
     ):
         assert required in names, f"gate {required!r} missing from the manifest"
+
+
+def test_root_mount_verdict_is_a_pure_function_of_the_ro_flag() -> None:
+    """Tested against BOTH mount states, on a host that only presents one.
+
+    This host has ``/`` mounted ``ro`` in most contexts, so any test deriving
+    its expectation from the live mount agrees with a broken implementation and
+    proves nothing. Measured: a regression to ``os.access("/", W_OK)`` passed
+    the entire suite here, because as a non-root user that call also returns
+    false on a ro root — the two implementations are indistinguishable exactly
+    where the distinction matters. So the verdict is a pure function of the
+    options string and both cases are pinned explicitly.
+    """
+    cases = {
+        "ro": "read-only",
+        "ro,nosuid,nodev,relatime": "read-only",
+        "ro,relatime": "read-only",
+        "rw": "read-write",
+        "rw,relatime": "read-write",
+        "rw,nosuid,nodev,relatime": "read-write",
+    }
+    for options, expected in cases.items():
+        assert gm._root_mount_ro_verdict(options) == expected, (
+            f"options {options!r} → expected {expected!r}"
+        )
+
+
+def test_root_mount_verdict_ignores_options_that_do_not_gate_anything() -> None:
+    """``nosuid``/``noatime``/``relatime`` must not change the verdict.
+
+    The hash covers the verdict only, so options that vary between two runs
+    without changing which tests run must not void a comparison that is actually
+    admissible.
+    """
+    assert (
+        gm._root_mount_ro_verdict("rw,relatime")
+        == gm._root_mount_ro_verdict("rw,nosuid,nodev,noatime")
+    )
+
+
+def test_root_mount_verdict_handles_the_degenerate_cases() -> None:
+    """An unreadable or absent mount table yields ``unknown``, not a guess.
+
+    This module exists so a run does not report a verdict it cannot support, so
+    "could not read the mount state" must NOT become ``read-write`` — that would
+    be the manifest asserting something it did not measure, which is the exact
+    defect it was written to remove. ``unknown`` also makes two runs that both
+    failed to read the table compare equal, which is right: they were gated the
+    same way.
+    """
+    assert gm._root_mount_ro_verdict("absent") == "unknown"
+    assert gm._root_mount_ro_verdict("") == "unknown"
+    assert gm._root_mount_ro_verdict("unreadable: OSError") == "unknown"
+
+
+def test_root_mount_gate_pairs_the_verdict_with_the_raw_options() -> None:
+    """The gate reads the live mount table and reports both halves.
+
+    Verdict from the ``ro`` flag (hashed); raw options as the detail (not
+    hashed, because it carries prose that varies without the gate changing).
+    """
+    verdict, detail = gm._root_mount_gate()
+    assert detail == gm._root_mount_options()
+    assert verdict in ("read-only", "read-write", "unknown")
+    assert verdict == gm._root_mount_ro_verdict(detail)
 
 
 def test_write_floor_gate_agrees_with_the_skipif_it_explains() -> None:
@@ -54,6 +118,11 @@ def test_write_floor_gate_agrees_with_the_skipif_it_explains() -> None:
     nothing. This calls the very function ``_floor_available`` in
     test_bash_write_floor.py calls, and asserts the two agree — so the manifest
     cannot start lying while the skip keeps working.
+
+    The host state this probes is volatile (that is #479's whole subject), so a
+    disagreement is only meaningful if the state held across both samples. If it
+    moved between them the comparison is UNMEASURED and says so, rather than
+    failing a test whose subject genuinely changed underneath it.
     """
     from prometheus.permissions import confinement as C
 
@@ -62,6 +131,16 @@ def test_write_floor_gate_agrees_with_the_skipif_it_explains() -> None:
     expected = "available" if ok else "unavailable"
 
     value, _ = gm._write_floor_gate()
+
+    ok_again, _ = C.write_preflight(force=True)
+    C.reset_write_cache()
+    if ("available" if ok_again else "unavailable") != expected:
+        pytest.skip(
+            "UNMEASURED: the host's bwrap write floor changed state between the "
+            f"two samples ({expected} → {'available' if ok_again else 'unavailable'}). "
+            "That is #479's subject, not a defect in the manifest — re-run to "
+            "measure it under a stable host."
+        )
     assert value == expected
 
 
@@ -81,11 +160,24 @@ def test_write_floor_probe_leaves_no_cached_verdict_behind() -> None:
     )
 
 
-def test_gates_are_sorted_so_two_identical_hosts_hash_equal() -> None:
-    """Reproducible hashing is the whole comparison mechanism."""
-    first = gm.collect_gates()
-    assert [g.name for g in first] == sorted(g.name for g in first)
-    assert gm.manifest_hash(first) == gm.manifest_hash(gm.collect_gates())
+def test_gates_are_sorted_and_hashing_is_a_pure_function() -> None:
+    """Reproducible hashing is the whole comparison mechanism.
+
+    Asserted as properties of the hash rather than by sampling the host twice:
+    two samples of a VOLATILE gate can legitimately differ (that is #479's
+    subject), so a test that compares them would false-red on a host whose state
+    moved. The real guarantees are that the gate order is stable and that the
+    hash depends only on its input.
+    """
+    gates = gm.collect_gates()
+    assert [g.name for g in gates] == sorted(g.name for g in gates), (
+        "gate order is not stable, so two identical host states could hash "
+        "differently and every comparison would be void"
+    )
+    # Same input -> same hash, every time. This is what makes the comparison
+    # decidable at all.
+    assert gm.manifest_hash(gates) == gm.manifest_hash(gates)
+    assert gm.manifest_hash(gates) == gm.manifest_hash(tuple(gates))
 
 
 def test_manifest_hash_ignores_the_reason_prose() -> None:
@@ -201,26 +293,77 @@ def test_manifest_is_repeated_in_the_terminal_summary(tmp_path: Path) -> None:
 def test_two_runs_on_one_tree_agree(tmp_path: Path) -> None:
     """The property the whole thing exists to make visible, asserted not assumed.
 
-    Same tree, same context, twice: identical hashes. If this fails the
-    manifest is recording something that moves within a single environment, and
-    every comparison built on it would be void by default — useless.
+    Same tree, same context, twice: identical hashes. If this fails while the
+    host state was STABLE, the manifest is recording something that moves for no
+    reason and every comparison built on it would be void by default — useless.
+
+    But if the host state genuinely MOVED between the two runs, the hashes
+    differing is the correct answer, and that is #479's subject rather than a
+    defect here. So the test distinguishes the two: it re-reads the gates that
+    differed and reports UNMEASURED when the difference is host state it can
+    name, and fails only when the manifests differ in a way the recorded gates
+    do not explain.
     """
     a, b = tmp_path / "a.json", tmp_path / "b.json"
     args = ["tests/test_generated_reference.py", "-q", "-p", "no:randomly"]
     assert _run_pytest([*args, f"--gate-manifest={a}"]).returncode == 0
     assert _run_pytest([*args, f"--gate-manifest={b}"]).returncode == 0
+
     ha = json.loads(a.read_text())["hash"]
     hb = json.loads(b.read_text())["hash"]
-    assert ha == hb, f"the manifest is not reproducible on one host: {ha} != {hb}"
+    if ha == hb:
+        return
+
+    # Hashes differ. Is it explained by a gate that moved? If so, UNMEASURED —
+    # the host changed, which is the phenomenon under study, not a bug here.
+    ga = json.loads(a.read_text())["gates"]
+    gb = json.loads(b.read_text())["gates"]
+    moved = sorted(
+        n for n in ga
+        if n in gb and ga[n]["value"] != gb[n]["value"]
+    )
+    if moved:
+        pytest.skip(
+            "UNMEASURED: the host state moved between the two runs "
+            f"({', '.join(moved)}). That is exactly what the manifest exists to "
+            "report (#479), so the hashes SHOULD differ. Re-run under a stable "
+            "host to measure reproducibility."
+        )
+    pytest.fail(
+        f"the manifest is not reproducible on one host and no recorded gate "
+        f"explains it: {ha} != {hb}. Something the hash covers moved without "
+        f"being recorded — which means the manifest is incomplete and a "
+        f"comparison built on it would be wrong in a way it cannot report."
+    )
 
 
 # ── the comparison tool: void, not passed ───────────────────────────────────
 
 
 def _manifest(**gate_overrides: str) -> dict:
-    """A real manifest with selected gate values overridden."""
+    """A real manifest with selected gate values FORCED to differ.
+
+    Deliberately NOT derived from live host state and then "overridden": this
+    test was first written that way and it FALSE-RED. The host's bwrap floor
+    flipped to ``available`` mid-run, so overriding the gate to ``available``
+    became a no-op, before equalled after, and the comparison correctly
+    reported MATCH. The tool was right and the test was host-state-dependent —
+    which is precisely the defect class this whole module exists to make
+    visible (#479), reproduced inside its own test suite.
+
+    A gate fixture that consults the host it runs on cannot test anything about
+    the comparison rule. So the two sides are built to differ by construction,
+    and the construction cannot be defeated by whatever the host happens to be
+    doing.
+    """
     data = gm.as_dict()
     for name, value in gate_overrides.items():
+        current = data["gates"][name]["value"]
+        assert value != current, (
+            f"test bug: overriding {name} to {value!r} is a no-op because the "
+            f"live host already reports that value. Pick a value that cannot "
+            f"collide with host state."
+        )
         data["gates"][name]["value"] = value
     data["hash"] = "overridden" + str(len(gate_overrides))
     return data
@@ -229,6 +372,26 @@ def _manifest(**gate_overrides: str) -> dict:
 def _write(path: Path, data: dict) -> Path:
     path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
     return path
+
+
+def test_the_differing_manifest_helper_refuses_a_no_op_override() -> None:
+    """The guard that exists because this test file false-red once.
+
+    Overriding a gate to the value the host ALREADY reports produces two
+    identical manifests, so the comparison legitimately reports MATCH and the
+    "differing gates are void" assertion fails — not because the tool is wrong
+    but because the fixture did not construct a difference. That happened for
+    real: the host's bwrap floor flipped to ``available`` mid-run, and the
+    override to ``available`` became a no-op.
+
+    The guard turns that into a named test bug instead of a confusing failure.
+    Pinned here, or it is decoration.
+    """
+    live = gm.as_dict()["gates"]["bwrap_write_floor"]["value"]
+    with pytest.raises(AssertionError, match="no-op"):
+        _manifest(bwrap_write_floor=live)
+    # And the sentinel the real test uses can never collide with host state.
+    _manifest(bwrap_write_floor="sentinel-not-a-host-state")
 
 
 def test_comparison_of_identical_manifests_is_admissible(tmp_path: Path) -> None:
@@ -245,14 +408,14 @@ def test_comparison_of_identical_manifests_is_admissible(tmp_path: Path) -> None
 
 
 def test_comparison_of_differing_gates_is_VOID_not_passed(tmp_path: Path) -> None:
-    """THE load-bearing assertion. The real observed flip must refuse.
+    """THE load-bearing assertion. A flipped gate must make the tool refuse.
 
-    Mutating the gate to "available" simulates the other host state (root
-    mounted rw) — the exact pair of runs that produced 7781/404 and 7742/441.
-    A tool that reported "no new failures" here would be the unearned claim.
+    The override value is one no host can report for a write floor, so the two
+    sides differ by construction rather than by whatever the host is doing —
+    see ``_manifest`` for the false-red that taught us that.
     """
-    before = _manifest()
-    after = _manifest(bwrap_write_floor="available")
+    before = gm.as_dict()
+    after = _manifest(bwrap_write_floor="sentinel-not-a-host-state")
     proc = subprocess.run(
         [sys.executable, str(COMPARE),
          str(_write(tmp_path / "a.json", before)),
