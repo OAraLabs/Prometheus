@@ -84,6 +84,25 @@ def main() -> int:
         return 3
 
     mode, reason = billing_for(args.model, f"//{host}")
+    # #474: redact the host to the matched marker before it reaches stdout.
+    # The classification reason already does this (cost.py), but this line
+    # prints the raw resolved host — stdout IS persisted state (terminal
+    # scrollback, shell history, any transcript this output is pasted into),
+    # and the host is a real infrastructure identifier. The marker prefix is
+    # the part that carries the meaning; the account-scoped remainder is what
+    # must not appear. `<redacted:host matches 'token-plan.'>` keeps the
+    # output verifiable ("yes, it classified from the subscription host")
+    # without publishing the identifier. When the host matches no marker the
+    # reason says why, and the host is withheld all the same — a non-matching
+    # host is still an address.
+    from prometheus.telemetry.cost import SUBSCRIPTION_HOST_MARKERS
+
+    _matched = next((m for m in SUBSCRIPTION_HOST_MARKERS if m in host), None)
+    host_display = (
+        f"<redacted: resolved host matches {_matched!r}>"
+        if _matched
+        else "<redacted: resolved host, matches no subscription marker>"
+    )
     conn = sqlite3.connect(args.db)
 
     row = conn.execute(
@@ -105,20 +124,57 @@ def main() -> int:
         f"COALESCE(SUM(input_tokens),0) FROM subsystem_runs {where}", params
     ).fetchone()
 
+    # #474: "rows to stamp: 0" meant two different things — the work is already
+    # done, or the predicate matched nothing (a typo'd --model produces a
+    # byte-identical report to a completed backfill, and a no-op reads as
+    # success: §4e's shape in a reporting path). Count both sides so the output
+    # says WHICH zero this is.
+    window_where = "WHERE model = ? AND timestamp < ? AND input_tokens IS NOT NULL"
+    already_stamped, no_mode_rows = conn.execute(
+        f"SELECT SUM(billing_mode IS NOT NULL), SUM(billing_mode IS NULL) "
+        f"FROM subsystem_runs {window_where}", params
+    ).fetchone()
+    already_stamped = already_stamped or 0
+    no_mode_rows = no_mode_rows or 0
+    # Rows outside the window for this model — a third explanation for a zero:
+    # the model has rows, but none before the boundary (nothing to backfill).
+    total_model_rows = conn.execute(
+        "SELECT COUNT(*) FROM subsystem_runs WHERE model = ?", (args.model,)
+    ).fetchone()[0]
+
     print(f"database      : {args.db}")
     print(f"model         : {args.model}")
-    print(f"host (from {args.env_var if not args.host else '--host'}): {host}")
+    # #474: the resolved host is a real infrastructure identifier and stdout is
+    # persisted state (terminal, shell history, pasted transcripts). Print the
+    # redaction, not the address — the marker says everything the reader needs
+    # ("yes, it classified from the subscription host").
+    print(f"host (from {args.env_var if not args.host else '--host'}): {host_display}")
     print(f"classified as : {mode}  ({reason})")
     print(f"boundary      : {until}")
+    print(f"already stamped : {already_stamped} rows carry a billing_mode in this window")
     print(f"rows to stamp : {n}   input_tokens: {toks}")
     print(f"window        : {first} .. {last}")
+    print(f"model rows outside the window: {total_model_rows - already_stamped - n}")
 
     if mode == "unknown":
         print("\nrefusing: the host does not classify. Stamping `unknown` "
               "records a conclusion nobody drew.", file=sys.stderr)
         return 5
     if n == 0:
-        print("\nnothing to do (already stamped, or no matching rows).")
+        # #474: name which zero this is. The old message admitted the ambiguity
+        # in a parenthetical instead of resolving it.
+        if already_stamped > 0:
+            print(f"\nalready done: {already_stamped} row(s) in the window carry "
+                  f"a billing_mode; nothing left to stamp.")
+        elif total_model_rows > 0:
+            print(f"\nnothing to do in this window: the model has "
+                  f"{total_model_rows} row(s) but all are outside the boundary "
+                  f"(written after the v3 writer took over) or lack "
+                  f"input_tokens. This is NOT 'already backfilled'.")
+        else:
+            print(f"\nmatched nothing: subsystem_runs has NO rows for model "
+                  f"{args.model!r} at all. Check the --model spelling — this "
+                  f"output is otherwise identical to a completed backfill.")
         return 0
     if not args.apply:
         print("\nDRY RUN — re-run with --apply to write.")

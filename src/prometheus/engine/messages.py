@@ -9,10 +9,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Annotated, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, TypeAdapter
+
+log = logging.getLogger(__name__)
 
 
 # Closed set of turn origins. "user" = a real human; everything else is a
@@ -411,5 +414,86 @@ def render_messages_for_model(
     Called at the model-call site so untrusted injected turns are fenced before
     the provider serializes them. Non-mutating: trusted messages pass through by
     identity, untrusted ones are replaced with banner-wrapped copies.
+
+    Also enforces the NO-ADJACENT-ASSISTANTS invariant (#457): the local
+    backend's chat template rejects a request outright with HTTP 400
+    ("Cannot have 2 or more assistant messages at the end of the list") when
+    two assistant messages sit next to each other — the turn is lost and the
+    user sees a generic transport error. The tail is assembled by the loop, not
+    the client, so an adjacency is always a construction defect upstream; this
+    layer MERGES the pair so the turn survives, and logs loudly so the
+    construction site stays findable. Merging here (the per-call projection)
+    leaves session/LCM history untouched — same contract as the banner above.
     """
-    return [render_message_for_model(m) for m in messages]
+    rendered = [render_message_for_model(m) for m in messages]
+    return _merge_adjacent_assistants(rendered)
+
+
+def _merge_adjacent_assistants(
+    messages: list[ConversationMessage],
+) -> list[ConversationMessage]:
+    """Collapse assistant→assistant adjacencies into one message (#457).
+
+    Only text-only assistants are merged. A message carrying ``tool_uses``
+    must keep its identity — the provider pairs each tool_use with the tool
+    result that follows it, and folding it into a neighbour would break that
+    pairing (the #396 invariant). An assistant WITH tool_uses sitting directly
+    against another assistant means an unanswered tool call reached the wire,
+    which is a louder bug than the 400 this guards: it is logged at ERROR and
+    left alone rather than papered over.
+
+    The merge concatenates content blocks in order; the first message's
+    provenance/is_trusted survive on the merged copy. Non-mutating: builds a
+    new list and (when merging) a new message — the inputs are never edited,
+    so history keeps the original turns.
+    """
+    out: list[ConversationMessage] = []
+    for msg in messages:
+        prev = out[-1] if out else None
+        if (
+            prev is not None
+            and prev.role == "assistant"
+            and msg.role == "assistant"
+        ):
+            if prev.tool_uses or msg.tool_uses:
+                # Do NOT merge — tool pairing outranks template shape. This
+                # adjacency means an unanswered tool_use is about to reach the
+                # provider, which is #396's invariant broken, not #457's.
+                log.error(
+                    "message-list invariant: adjacent assistant messages where "
+                    "at least one carries tool_uses (%d + %d blocks) — an "
+                    "unanswered tool call is about to reach the provider. "
+                    "Left unmerged; the provider may 400. Find the construction "
+                    "site (agent_loop turn-exit paths).",
+                    len(prev.content), len(msg.content),
+                )
+                out.append(msg)
+                continue
+            log.warning(
+                "message-list invariant (#457): merged two adjacent assistant "
+                "messages (%d + %d content blocks) at render time. The local "
+                "backend's chat template 400s on this shape, so the turn "
+                "survives — but the adjacency is a construction defect: "
+                "something appended a second assistant turn after one was "
+                "already committed. Search this log for the turn that produced "
+                "it.",
+                len(prev.content), len(msg.content),
+            )
+            out[-1] = prev.model_copy(
+                update={
+                    "content": [*prev.content, *msg.content],
+                    # WEAKEST TRUST WINS. The merged message inherits neither
+                    # side's flag alone: folding an untrusted block into a
+                    # message stamped trusted would launder it past every
+                    # downstream reader of is_trusted. Today untrusted
+                    # injections are user-role (from_injected) and the banner
+                    # does not apply to assistants, so this is a floor against
+                    # a future writer, not a live fence — but a merge that
+                    # could silently upgrade trust is not a merge this codebase
+                    # should ship.
+                    "is_trusted": bool(prev.is_trusted) and bool(msg.is_trusted),
+                }
+            )
+            continue
+        out.append(msg)
+    return out

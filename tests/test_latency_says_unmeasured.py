@@ -602,3 +602,129 @@ def test_a_failed_rebuild_reports_the_original_error_not_a_nameerror(
     info = telemetry._conn.execute("PRAGMA table_info(tool_calls)").fetchall()
     latency = next(r for r in info if r[1] == "latency_ms")
     assert latency[3] == 1, "the migration failed but the column changed anyway"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #470 — a v2-shaped table is NOT proof the database was born at v2
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _torn_copy_db(path: Path) -> None:
+    """The shape a torn `.db` copy produces: v2 table (nullable latency_ms),
+    rows present, schema_meta at v1, and NO `latency_nullable_since` boundary.
+
+    This is exactly what `cp telemetry.db` (without its `-wal` sidecar) yields
+    when the v2 rebuild's new table shape was checkpointed into the main file
+    while the boundary stamp was still in the WAL. The column reads nullable,
+    so the old early-return stamped 0.0 — a false "no pre-v2 era here" all-clear
+    over rows whose stored 0.0 is indistinguishable from the old NOT NULL
+    DEFAULT. See issue #470.
+    """
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE tool_calls (
+            id TEXT PRIMARY KEY, timestamp REAL NOT NULL, model TEXT NOT NULL,
+            tool_name TEXT NOT NULL, success INTEGER NOT NULL,
+            retries INTEGER NOT NULL DEFAULT 0,
+            latency_ms REAL,
+            error_type TEXT, error_detail TEXT
+        );
+        INSERT INTO schema_meta VALUES ('schema_version','1');
+        """
+    )
+    # Pre-v2 rows: a 0.0 that came from the OLD `NOT NULL DEFAULT 0.0` (an
+    # unmeasured call), and a genuine measured latency. Dated in the past.
+    past = time.time() - 86400
+    conn.execute(
+        "INSERT INTO tool_calls (id,timestamp,model,tool_name,success,latency_ms)"
+        " VALUES ('old0',?, 'm','bash',1, 0.0)", (past,),
+    )
+    conn.execute(
+        "INSERT INTO tool_calls (id,timestamp,model,tool_name,success,latency_ms)"
+        " VALUES ('old7',?, 'm','bash',1, 7.5)", (past + 1,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_a_torn_copy_does_not_get_the_all_clear(tmp_path, caplog):
+    """#470: v2-shaped + rows-present + no boundary key must NOT stamp 0.0.
+
+    0.0 means "born at v2, every stored 0.0 is a measured zero" — and that
+    inference is exactly what a torn copy breaks. The migration must instead
+    stamp NOW (the conservative rebuild-path reading), tag the pre-existing
+    rows unknown, and WARN that it could not prove the database was born v2.
+    """
+    db = tmp_path / "telemetry.db"
+    _torn_copy_db(db)
+
+    with caplog.at_level(logging.WARNING, logger="prometheus.telemetry.tracker"):
+        telemetry = ToolCallTelemetry(db_path=db)
+
+    boundary = telemetry.latency_boundary()
+    assert boundary is not None and boundary > 0.0, (
+        f"a torn copy stamped boundary={boundary!r} — 0.0 is the false "
+        "all-clear that tells readers every stored 0.0 was measured (#470)"
+    )
+    assert any("torn" in r.getMessage().lower() or "born at v2" in r.getMessage().lower()
+               for r in caplog.records), (
+        "the migration silently stamped a conservative boundary without saying "
+        "the database could not prove it was born at v2 — a quiet guess is the "
+        "defect; the WARNING is what makes it discoverable"
+    )
+    # The rows predate the freshly-stamped boundary, so they are untrustworthy.
+    td = telemetry.report()["tools"]["bash"]
+    assert td["avg_latency_source"] == LATENCY_UNKNOWN, (
+        f"the torn copy's pre-existing rows were reported as {td['avg_latency_source']!r}; "
+        "their stored 0.0 cannot be told from the old NOT NULL DEFAULT"
+    )
+    # No data lost.
+    assert telemetry._conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0] == 2
+
+
+def test_a_genuinely_fresh_v2_table_with_no_rows_still_gets_zero(tmp_path):
+    """Control for #470: the all-clear is HONEST when the table is empty —
+    nothing exists that could predate v2. This is the existing fresh-DB
+    contract (backdated rows written AFTER the stamp measure normally), and
+    the fix must not regress it."""
+    db = tmp_path / "telemetry.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE tool_calls (
+            id TEXT PRIMARY KEY, timestamp REAL NOT NULL, model TEXT NOT NULL,
+            tool_name TEXT NOT NULL, success INTEGER NOT NULL,
+            retries INTEGER NOT NULL DEFAULT 0, latency_ms REAL,
+            error_type TEXT, error_detail TEXT
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    telemetry = ToolCallTelemetry(db_path=db)
+    assert telemetry.latency_boundary() == 0.0, (
+        "an empty v2-shaped table must still get the born-at-v2 all-clear (0.0), "
+        "or a fresh database reports its own future backdated rows as unknown"
+    )
+
+
+def test_a_reopened_healthy_v2_database_does_not_re_warn(tmp_path, caplog):
+    """#470 idempotence: a database that already carries a boundary key (a real
+    rebuild, or a previously-repaired torn copy) must reopen quietly. The
+    WARNING fires on the AMBIGUOUS case only, not on every reopen of a healthy
+    migrated DB — otherwise it is cry-wolf noise nobody reads."""
+    db = tmp_path / "telemetry.db"
+    _v1_db(db)                       # real v1 → forces the rebuild path
+    ToolCallTelemetry(db_path=db)    # first open: rebuild stamps the boundary
+
+    with caplog.at_level(logging.WARNING, logger="prometheus.telemetry.tracker"):
+        ToolCallTelemetry(db_path=db)  # reopen
+
+    assert not any("born at v2" in r.getMessage().lower() or "torn" in r.getMessage().lower()
+                   for r in caplog.records), (
+        "reopening a database that already has a boundary key re-emitted the "
+        "#470 warning — it must fire only on the ambiguous (no-boundary) case"
+    )

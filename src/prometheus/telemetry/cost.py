@@ -118,7 +118,16 @@ def billing_for(model: str, base_url: str | None = None) -> tuple[BillingMode, s
     if name.endswith(".gguf") or name.startswith("/") or "/" in name:
         return "local", "served from a local model file"
     if base_url and any(marker in base_url for marker in SUBSCRIPTION_HOST_MARKERS):
-        return "subscription", f"flat plan ({base_url.split('//')[-1].split('/')[0]})"
+        # #474 / #468: name the MATCHED MARKER, not the host. The reason string
+        # is persisted output — it is returned as `billing_reason` from
+        # /api/usage to any authenticated client, and printed by
+        # scripts/backfill_billing_mode.py to a terminal, shell history and any
+        # transcript the output is pasted into. The resolved base_url is a real
+        # infrastructure identifier (account-scoped, region-scoped); the marker
+        # (`token-plan.`, `coding-intl.`) is a codebase constant already
+        # committed in this file that carries the entire meaning. Redact to it.
+        marker = next(m for m in SUBSCRIPTION_HOST_MARKERS if m in base_url)
+        return "subscription", f"flat plan (resolved host matches {marker!r})"
     if PRICING.get(name) or any(name.startswith(k) for k in PRICING):
         return "metered", "priced per token"
     return "unknown", "no pricing entry and no configured plan — classify it in PRICING or BILLING"
@@ -152,6 +161,48 @@ def billing_host_of(provider: object) -> str | None:
     return host or None
 
 
+def matched_subscription_marker(base_url: str | None) -> str | None:
+    """Which SUBSCRIPTION_HOST_MARKERS entry the URL matched, or None.
+
+    #468: this is the persistable HALF of the billing evidence. The marker is
+    a codebase constant committed in this file — nothing can be connected to
+    using one — while the host it matched inside is an account-scoped
+    infrastructure identifier that must not persist. A row stamped
+    (``subscription``, ``token-plan.``) can be re-evaluated if that marker's
+    meaning is ever revised, which a bare mode cannot.
+
+    What it does NOT recover: a marker ADDED later cannot re-classify rows
+    from the host it newly matches — those rows were stamped ``unknown`` at
+    the time and the thing that would identify them is precisely the
+    identifier we are declining to keep. That is the residue, and it is the
+    right residue to accept.
+    """
+    if not base_url:
+        return None
+    return next((m for m in SUBSCRIPTION_HOST_MARKERS if m in base_url), None)
+
+
+def billing_stamp_full(
+    model: str | None, provider: object
+) -> tuple[str | None, str | None]:
+    """``(billing_mode, billing_marker)`` for a call ABOUT TO BE RECORDED.
+
+    The marker is the matched ``SUBSCRIPTION_HOST_MARKERS`` entry (or None
+    when the verdict did not come from a host marker — local/metered/unknown
+    rows carry the mode alone). Never raises, same contract as
+    :func:`billing_stamp`: a row that cannot be labelled is written
+    unlabelled rather than lost.
+    """
+    try:
+        host = billing_host_of(provider)
+        url = f"//{host}" if host else None
+        mode, _reason_withheld = billing_for(model or "", url)
+        marker = matched_subscription_marker(url) if mode == "subscription" else None
+        return mode, marker
+    except Exception:  # noqa: BLE001 — never break a call to label it
+        return None, None
+
+
 def billing_stamp(model: str | None, provider: object) -> str | None:
     """The ``billing_mode`` for a call ABOUT TO BE RECORDED.
 
@@ -168,12 +219,10 @@ def billing_stamp(model: str | None, provider: object) -> str | None:
     The host that produced the answer is deliberately NOT returned. See
     :func:`billing_host_of` — it exists only long enough to be classified.
     """
-    try:
-        host = billing_host_of(provider)
-        mode, _reason_withheld = billing_for(model or "", f"//{host}" if host else None)
-        return mode
-    except Exception:  # noqa: BLE001 — never break a call to label it
-        return None
+    # Delegates to billing_stamp_full so the mode and the marker can never
+    # be computed by two drifting copies of the classification.
+    mode, _marker = billing_stamp_full(model, provider)
+    return mode
 
 
 @dataclass

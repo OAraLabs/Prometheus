@@ -347,6 +347,19 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # Those are still classified at read time, and `/api/usage` LABELS
         # them as inferred rather than presenting them as history.
         ("billing_mode", "TEXT"),
+        # #468 — the MATCHED MARKER, the persistable half of the billing
+        # evidence. `billing_mode` alone freezes today's classification rule
+        # into history: if `SUBSCRIPTION_HOST_MARKERS` gains or revises an
+        # entry, a bare `subscription` cannot be re-derived. This column stores
+        # WHICH marker fired (`token-plan.`, `coding-intl.`) — a codebase
+        # constant already committed in `telemetry/cost.py`, so a row stamped
+        # (subscription, "token-plan.") can be re-evaluated without anything on
+        # disk naming a machine. NULL when the verdict did not come from a host
+        # marker (local/metered/unknown), which is itself the honest answer:
+        # "the pricing table decided, not a host." Additive and purely
+        # informational — no schema_version bump, because unlike billing_mode's
+        # v3 it adds no rollback ambiguity (a v2 writer simply leaves it NULL).
+        ("billing_marker", "TEXT"),
     ],
 }
 
@@ -611,15 +624,55 @@ class ToolCallTelemetry:
         # row: (cid, name, type, notnull, dflt_value, pk)
         latency = next((r for r in rows if r[1] == "latency_ms"), None)
         if latency is None or not latency[3]:
-            # Absent, or ALREADY nullable. A database that has never had the
-            # NOT NULL column has no pre-v2 era at all, so the boundary is the
-            # beginning of time — not "now". Stamping `now` here would classify
-            # every row written afterwards with an older timestamp (backfills,
-            # imports, and every test that inserts backdated rows) as pre-v2,
-            # which is how a fresh DB ends up reporting all of its own data as
-            # unverifiable. Caught by tests/test_sentinel.py's latency-spike
-            # test, which inserts rows dated three days back.
-            self._stamp_latency_boundary(0.0)
+            # Absent, or ALREADY nullable. #470: the column being nullable is
+            # NOT by itself proof this database was born at v2, and treating it
+            # as proof was the defect — it stamped the all-clear (0.0, "no
+            # pre-v2 era, trust every stored 0.0") over rows that demonstrably
+            # predate v2. The cheap way to reach that state is a TORN COPY:
+            # `cp telemetry.db` without its `-wal` sidecar checkpoints the v2
+            # table shape into the main file while the schema_meta boundary is
+            # still in the WAL, so the file presents v2-shaped, v1-metadata,
+            # rows-present, boundary-absent. Opening it stamped 0.0 over 11,271
+            # rows whose 0.0 is indistinguishable from the old NOT NULL DEFAULT
+            # — the inference #450 refused to encode, reinstated in the opposite
+            # direction by the boundary stamp.
+            #
+            # So decide on EVIDENCE, not shape. A boundary key already present
+            # means a prior open stamped it — never move it (INSERT OR IGNORE
+            # below would no-op anyway; the explicit check keeps the WARNING
+            # from firing on every reopen of a healthy migrated DB).
+            if self.latency_boundary() is not None:
+                return
+            try:
+                n_rows = self._conn.execute(
+                    "SELECT COUNT(*) FROM tool_calls"
+                ).fetchone()[0]
+            except sqlite3.DatabaseError:
+                n_rows = 0
+            if n_rows == 0:
+                # Genuinely fresh: no row exists that could predate v2, so the
+                # all-clear is honest. Rows written LATER with older timestamps
+                # (backfills, imports, the sentinel latency-spike test) are then
+                # MEASURED, which is the existing fresh-DB contract.
+                self._stamp_latency_boundary(0.0)
+            else:
+                # v2-shaped table WITH rows and no proof it was born v2. Stamp
+                # NOW — the conservative reading, identical to the rebuild path:
+                # pre-existing rows tag `unknown` rather than being silently
+                # all-cleared, and rows written from here on measure normally.
+                self._stamp_latency_boundary()
+                log.warning(
+                    "latency boundary: a v2-shaped tool_calls table with %d "
+                    "row(s) but NO boundary key — this database cannot prove it "
+                    "was created at v2 (a torn `.db` copy taken without its "
+                    "`-wal` sidecar presents exactly this shape). Stamping the "
+                    "boundary at NOW so those %d pre-existing row(s) are tagged "
+                    "untrustworthy instead of all-cleared. If this database is "
+                    "known-good and was simply born at v2, its rows were written "
+                    "post-v2 and stay measured; only rows dated before this "
+                    "instant are affected.",
+                    n_rows, n_rows,
+                )
             return
 
         old_cols = [r[1] for r in rows]
@@ -1024,6 +1077,7 @@ class ToolCallTelemetry:
         cached_input_tokens: int | None = None,
         cache_write_tokens: int | None = None,
         billing_mode: str | None = None,
+        billing_marker: str | None = None,
     ) -> None:
         """Record one autonomous-subsystem cycle / pass / invocation.
 
@@ -1064,8 +1118,8 @@ class ToolCallTelemetry:
                    input_tokens, output_tokens, round_index,
                    session_id, model, thinking,
                    cached_input_tokens, cache_write_tokens, node_id,
-                   billing_mode)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   billing_mode, billing_marker)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     uuid4().hex,
@@ -1085,6 +1139,7 @@ class ToolCallTelemetry:
                     cache_write_tokens,
                     self._current_node_id(),
                     billing_mode,
+                    billing_marker,
                 ),
             )
             self._conn.commit()

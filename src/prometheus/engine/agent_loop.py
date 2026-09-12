@@ -1086,101 +1086,6 @@ async def _run_loop(
     )
     _force_spent = False
 
-    # Tool advertisement (feat/deferred-tools-tier-aware). Resolved ONCE here,
-    # before the round loop, and tool_schema is never reassigned below — the
-    # advertised catalog is frozen for the run. Changing it mid-run is the
-    # #120 prefix-mutation bug class (it invalidates the provider's cached
-    # prompt prefix from the tools block onward, i.e. everything).
-    #
-    # This call site previously used active_schemas() with no arguments, which
-    # could not see the adapter — so tier-aware ("auto") resolution was
-    # structurally impossible and every registered tool shipped every round
-    # (measured: 49 schemas, ~9.6k tokens, 60.7% of round 0 on the EMBERFALL
-    # baseline, of which 3 tools were used).
-    tool_schema: list[dict] = []
-    deferred_tools_active = False
-    deferred_source = "tools disabled"
-    if tools_enabled:
-        if context.tool_loader is not None and hasattr(context.tool_loader, "resolve_deferred"):
-            deferred_tools_active, deferred_source = (
-                context.tool_loader.resolve_deferred(context.adapter)
-            )
-            tool_schema = context.tool_loader.schemas_for_run(deferred_tools_active)
-        elif context.tool_loader is not None and hasattr(context.tool_loader, "active_schemas"):
-            # Duck-typed loaders (tests, plugins) without the tri-state API.
-            deferred_source = "legacy loader (no tri-state support)"
-            tool_schema = context.tool_loader.active_schemas()
-        elif context.tool_registry is not None and hasattr(context.tool_registry, "to_api_schema"):
-            deferred_source = "no tool loader (registry direct)"
-            tool_schema = context.tool_registry.to_api_schema()
-
-    # Agent profile filter (selector survey → wired). Applied HERE — after
-    # source resolution so it treats all three sources identically, before
-    # the freeze so the run stays prefix-stable, and before the telemetry row
-    # so "advertised" states what the model actually saw. Resolved per run:
-    # a /profile or Beacon switch affects the next run, not a restart.
-    active_profile = None
-    if tools_enabled and tool_schema and context.profile_resolver is not None:
-        try:
-            # Pass the run's session so a session-bound profile wins over the global
-            # one. BOTH ARITIES are supported deliberately: a resolver written before
-            # per-session binding takes no argument, and letting that raise would be
-            # caught below and silently advertise the UNFILTERED catalog — a profile
-            # mechanism disabled by a signature mismatch, which is precisely how the
-            # 2026-08-11 survey found this whole feature was a label. Narrow TypeError
-            # only, so a real error inside the resolver still surfaces.
-            try:
-                active_profile = context.profile_resolver(context.session_id)
-            except TypeError:
-                active_profile = context.profile_resolver()
-        except Exception:
-            log.warning("profile resolver failed — advertising unfiltered", exc_info=True)
-        if active_profile is not None:
-            from prometheus.config.profiles import filter_tools_by_profile
-
-            filtered = filter_tools_by_profile(tool_schema, active_profile)
-            if filtered:
-                tool_schema = filtered
-            else:
-                # A profile that filters the catalog to NOTHING is a config
-                # error wearing a quiet face — advertising zero tools is the
-                # vault_search failure shape (the model concludes the
-                # capability does not exist). Fail loud, run unfiltered.
-                log.error(
-                    "profile %r filtered all %d advertised tools — "
-                    "advertising unfiltered instead; fix the profile's tool "
-                    "names", active_profile.name, len(tool_schema),
-                )
-                active_profile = None
-
-    # A/B measurability: one row per run stating what was advertised and why,
-    # so deferred-vs-full comparisons come straight out of the DB instead of
-    # being reconstructed from token counts.
-    if context.telemetry is not None and tools_enabled:
-        try:
-            _registered_total = (
-                len(context.tool_registry.list_tools())
-                if context.tool_registry is not None
-                and hasattr(context.tool_registry, "list_tools")
-                else None
-            )
-            context.telemetry.record_run(
-                subsystem="agent_loop",
-                operation="tool_advertisement",
-                outcome="success",
-                session_id=getattr(context, "session_id", None),
-                model=getattr(context, "model", None),
-                summary={
-                    "deferred_active": deferred_tools_active,
-                    "source": deferred_source,
-                    "advertised": len(tool_schema),
-                    "registered_total": _registered_total,
-                    "profile": getattr(active_profile, "name", None),
-                },
-            )
-        except Exception:
-            log.debug("tool_advertisement telemetry write failed", exc_info=True)
-
     # Sprint 10 / Phase 2: route the first user message through ModelRouter.
     # The canonical router returns a RouteDecision with pre-instantiated
     # provider + adapter. For the default/primary path the decision's provider
@@ -1294,6 +1199,133 @@ async def _run_loop(
                     (latest_user or "")[:60],
                     exc_info=True,
                 )
+
+    # Tool advertisement (feat/deferred-tools-tier-aware). Resolved ONCE here,
+    # before the round loop, and tool_schema is never reassigned below — the
+    # advertised catalog is frozen for the run. Changing it mid-run is the
+    # #120 prefix-mutation bug class (it invalidates the provider's cached
+    # prompt prefix from the tools block onward, i.e. everything).
+    #
+    # DELIBERATELY AFTER the ModelRouter block (#462). The deferral decision and
+    # the profile filter both read ``context.adapter`` and ``context.model``,
+    # and the router REASSIGNS both at ~:1249 when a session routes to a named
+    # backend. Resolving the advertisement BEFORE routing described a model that
+    # was not the one about to be called: a session whose override sent it to
+    # the local GGUF inherited the cloud model's "deferral disabled" decision
+    # and shipped all 55 schemas into a 32,768-token window — a 34,020-token
+    # request that 400'd before any inference, on a two-message turn with no
+    # history to compact. The 40 withheld schemas were the whole overflow.
+    # Routing first, then advertising, means the catalog describes the model
+    # actually called. Still before the round loop, so the freeze holds.
+    #
+    # This call site previously used active_schemas() with no arguments, which
+    # could not see the adapter — so tier-aware ("auto") resolution was
+    # structurally impossible and every registered tool shipped every round
+    # (measured: 49 schemas, ~9.6k tokens, 60.7% of round 0 on the EMBERFALL
+    # baseline, of which 3 tools were used).
+    tool_schema: list[dict] = []
+    deferred_tools_active = False
+    deferred_source = "tools disabled"
+    if tools_enabled:
+        if context.tool_loader is not None and hasattr(context.tool_loader, "resolve_deferred"):
+            deferred_tools_active, deferred_source = (
+                context.tool_loader.resolve_deferred(context.adapter)
+            )
+            tool_schema = context.tool_loader.schemas_for_run(deferred_tools_active)
+        elif context.tool_loader is not None and hasattr(context.tool_loader, "active_schemas"):
+            # Duck-typed loaders (tests, plugins) without the tri-state API.
+            deferred_source = "legacy loader (no tri-state support)"
+            tool_schema = context.tool_loader.active_schemas()
+        elif context.tool_registry is not None and hasattr(context.tool_registry, "to_api_schema"):
+            deferred_source = "no tool loader (registry direct)"
+            tool_schema = context.tool_registry.to_api_schema()
+
+    # Agent profile filter (selector survey → wired). Applied HERE — after
+    # source resolution so it treats all three sources identically, before
+    # the freeze so the run stays prefix-stable, and before the telemetry row
+    # so "advertised" states what the model actually saw. Resolved per run:
+    # a /profile or Beacon switch affects the next run, not a restart.
+    active_profile = None
+    if tools_enabled and tool_schema and context.profile_resolver is not None:
+        try:
+            # Pass the run's session so a session-bound profile wins over the global
+            # one. BOTH ARITIES are supported deliberately: a resolver written before
+            # per-session binding takes no argument, and letting that raise would be
+            # caught below and silently advertise the UNFILTERED catalog — a profile
+            # mechanism disabled by a signature mismatch, which is precisely how the
+            # 2026-08-11 survey found this whole feature was a label. Narrow TypeError
+            # only, so a real error inside the resolver still surfaces.
+            #
+            # effective_session_id, NOT context.session_id (#458): on the web path
+            # the context is shared and its id is the routing namespace ("web"),
+            # not this turn's conversation. Resolving a session-bound profile
+            # under "web" looks up the wrong binding — the same substitution the
+            # telemetry row below had. DESCRIPTIVE READERS ONLY (see the
+            # effective_session_id definition above): never feed this to
+            # origin_from_session_id.
+            try:
+                active_profile = context.profile_resolver(effective_session_id)
+            except TypeError:
+                active_profile = context.profile_resolver()
+        except Exception:
+            log.warning("profile resolver failed — advertising unfiltered", exc_info=True)
+        if active_profile is not None:
+            from prometheus.config.profiles import filter_tools_by_profile
+
+            filtered = filter_tools_by_profile(tool_schema, active_profile)
+            if filtered:
+                tool_schema = filtered
+            else:
+                # A profile that filters the catalog to NOTHING is a config
+                # error wearing a quiet face — advertising zero tools is the
+                # vault_search failure shape (the model concludes the
+                # capability does not exist). Fail loud, run unfiltered.
+                log.error(
+                    "profile %r filtered all %d advertised tools — "
+                    "advertising unfiltered instead; fix the profile's tool "
+                    "names", active_profile.name, len(tool_schema),
+                )
+                active_profile = None
+
+    # A/B measurability: one row per run stating what was advertised and why,
+    # so deferred-vs-full comparisons come straight out of the DB instead of
+    # being reconstructed from token counts.
+    if context.telemetry is not None and tools_enabled:
+        try:
+            _registered_total = (
+                len(context.tool_registry.list_tools())
+                if context.tool_registry is not None
+                and hasattr(context.tool_registry, "list_tools")
+                else None
+            )
+            context.telemetry.record_run(
+                subsystem="agent_loop",
+                operation="tool_advertisement",
+                outcome="success",
+                # effective_session_id, NOT context.session_id (#458). The row
+                # describes THIS turn, which runs under effective_session_id; on
+                # the web path context.session_id is the shared routing
+                # namespace ("web"), not this conversation. A row filed under
+                # the wrong key is indistinguishable from one never written —
+                # querying subsystem_runs for the failed turn returned the
+                # failure and no advertisement row, reading as "never recorded"
+                # when it had been, one key over. Every other telemetry writer
+                # in this function uses effective_session_id; this was the one
+                # that did not. DESCRIPTIVE READER ONLY (see the definition
+                # above): never feed effective_session_id to origin_from_session_id.
+                session_id=effective_session_id,
+                model=getattr(context, "model", None),
+                summary={
+                    "deferred_active": deferred_tools_active,
+                    "source": deferred_source,
+                    "advertised": len(tool_schema),
+                    "registered_total": _registered_total,
+                    "profile": getattr(active_profile, "name", None),
+                },
+            )
+        except Exception:
+            log.debug("tool_advertisement telemetry write failed", exc_info=True)
+
 
     # Sprint 3: format tools + system prompt for the target model
     active_system_prompt = context.system_prompt
@@ -1685,6 +1717,70 @@ async def _run_loop(
             active_system_prompt = rewritten
 
         _degrade_announced = False
+
+        # #356 — DON'T SEND A PROMPT THAT CANNOT BE SERVED. n_ctx is a hard
+        # ceiling on the backend's command line; nothing upstream checked
+        # against it, so the daemon kept assembling prompts the local server
+        # could not tokenize and discovered the limit from the far side: a
+        # generic provider 400, the turn lost, `discarded=26` frames dropped,
+        # and the user told nothing actionable (one live loss was 31 tokens
+        # over 32768 — 0.09%, the failure mode of an UNCHECKED limit rather
+        # than a genuinely oversized conversation).
+        #
+        # The number is MEASURED, not configured twice: llama.cpp publishes
+        # n_ctx at /props, the daemon detects it at boot, and limit_for()
+        # resolves it. Gated on `measured` so a cloud session (no published
+        # window, configured floor) is never refused on a guess — refusing a
+        # turn that would have served is the same defect wearing the other
+        # face. The compactor has ALREADY run by this point, so this fires
+        # only when compaction could not get under the ceiling: the honest
+        # move is to end the turn and SAY which limit was hit, not to spend
+        # the request discovering it.
+        _window_now, _window_measured = _window_for(context.model)
+        if _window_measured and _window_now > 0:
+            _needed_now = _estimate_tokens()
+            if _needed_now > _window_now:
+                _overshoot = _needed_now - _window_now
+                log.error(
+                    "context pre-flight (#356): refusing to send — %d estimated "
+                    "tokens exceeds the %s window of %d (over by %d) after "
+                    "compaction. Ending the turn with an explanation instead of "
+                    "a provider 400. session=%s model=%s",
+                    _needed_now, "measured", _window_now, _overshoot,
+                    effective_session_id, context.model,
+                )
+                if context.telemetry is not None:
+                    try:
+                        context.telemetry.record_run(
+                            subsystem="agent_loop",
+                            operation="context_preflight_refusal",
+                            outcome="failed",
+                            session_id=effective_session_id,
+                            model=context.model,
+                            summary={
+                                "estimated_tokens": _needed_now,
+                                "window": _window_now,
+                                "overshoot": _overshoot,
+                                "window_is_measured": True,
+                            },
+                        )
+                    except Exception:
+                        log.debug("context pre-flight telemetry write failed",
+                                  exc_info=True)
+                error_msg = _make_assistant_msg(
+                    f"This conversation is too long for the local model — "
+                    f"~{_needed_now:,} estimated tokens against its "
+                    f"{_window_now:,}-token window (over by ~{_overshoot:,}), "
+                    f"and automatic compaction could not get under the limit. "
+                    f"Nothing was sent to the backend. Older turns need "
+                    f"compacting: /reset clears this session's context, or "
+                    f"continue in a new session. Retrying unchanged will fail "
+                    f"the same way."
+                )
+                messages.append(error_msg)
+                yield AssistantTurnComplete(message=error_msg, usage=usage), usage
+                return
+
         async for event in stream_round_with_fallback(
             envelope=loop_envelope,
             provider=context.provider,
@@ -4639,9 +4735,9 @@ class AgentLoop:
         user_message: str = "",
         *,
         messages: list[ConversationMessage] | None = None,
-        tools: list | None = None,
         session_id: str | None = None,
         session_state: object | None = None,
+        tool_choice: object | None = None,
     ) -> RunResult:
         """Run the agent loop asynchronously, return a RunResult.
 
@@ -4653,6 +4749,19 @@ class AgentLoop:
         object exposing ``drain_steers() -> str | None``). When supplied,
         the loop drains queued steers before each model call. None for
         contexts without a persistent session (benchmarks, evals, cron).
+
+        #454 — ``tools=`` was REMOVED, not honoured. It appeared in this
+        signature and nowhere in the body: the loop resolves its catalog from
+        ``context.tool_loader`` / ``context.tool_registry``, so a caller handing
+        over a restricted list silently got the FULL registry. Deleting it
+        converts that silent wrong answer into a loud TypeError. The lever that
+        actually restricts a turn is ``tool_choice`` — forwarded to
+        :func:`run_loop`, where ``"none"`` empties the schema AND sets
+        ``suppress_tools`` so the provider drops the grammar entirely. That is
+        what the ``/benchmark`` paths (which passed ``tools=[]`` wanting a
+        tool-free turn) should have been calling all along. ``None`` (the
+        default) leaves ``run_loop``'s own resolution untouched — byte-identical
+        to today for every caller that does not pass it.
         """
         if messages is not None:
             messages = list(messages)  # shallow copy — run_loop mutates in place
@@ -4714,7 +4823,9 @@ class AgentLoop:
         turns = 0
         self._tool_trace = []
 
-        async for event, usage in run_loop(context, messages):
+        async for event, usage in run_loop(
+            context, messages, tool_choice=tool_choice
+        ):
             if isinstance(event, AssistantTurnComplete):
                 last_text = event.message.text
                 last_usage = event.usage
@@ -4774,16 +4885,20 @@ class AgentLoop:
         user_message: str = "",
         *,
         messages: list[ConversationMessage] | None = None,
-        tools: list | None = None,
         session_id: str | None = None,
+        tool_choice: object | None = None,
     ) -> RunResult:
-        """Synchronous entry point — wraps run_async() via asyncio.run()."""
+        """Synchronous entry point — wraps run_async() via asyncio.run().
+
+        #454: ``tools=`` removed (it was never read); ``tool_choice`` is the
+        lever that actually restricts a turn. See :meth:`run_async`.
+        """
         return asyncio.run(
             self.run_async(
                 system_prompt,
                 user_message,
                 messages=messages,
-                tools=tools,
                 session_id=session_id,
+                tool_choice=tool_choice,
             )
         )

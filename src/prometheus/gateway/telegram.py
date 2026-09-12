@@ -1253,7 +1253,12 @@ class TelegramAdapter(BasePlatformAdapter):
             result = await self.agent_loop.run_async(
                 system_prompt="You are a helpful assistant. Be concise.",
                 user_message="What is 2+2? Reply with just the number.",
-                tools=[],
+                # #454: this used to pass tools=[] — which run_async accepted
+                # and NEVER READ, so the benchmark actually ran with the full
+                # registry. tool_choice="none" is the lever that empties the
+                # schema and sets suppress_tools, making the turn genuinely
+                # tool-free as this diagnostic always intended.
+                tool_choice="none",
                 # Phase 3.5: /benchmark is a diagnostic, not a user chat —
                 # use reserved "system" so it never inherits user overrides.
                 session_id="system",
@@ -1990,7 +1995,10 @@ class TelegramAdapter(BasePlatformAdapter):
             result = await self.agent_loop.run_async(
                 system_prompt=self.system_prompt,
                 messages=session.get_messages(),
-                tools=self.tool_registry.list_schemas(),
+                # #454: the old tools=... argument was accepted by run_async
+                # and never read — the loop resolves its own catalog (deferred
+                # loading included). Passing it suggested this call site chose
+                # the tools; it did not and does not.
                 # Phase 3.5: session_id = "telegram:<chat_id>" so any /claude,
                 # /gpt etc. overrides set via Phase 4 commands apply only to
                 # this chat and not other Telegram chats or Slack/CLI/web.
