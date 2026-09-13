@@ -606,11 +606,88 @@ python3 scripts/compare_gate_manifests.py /tmp/before.json /tmp/after.json
 
 ---
 
----
+### 4j. The measurement answered an adjacent question
+
+**Recorded 2026-09-12, from four in one session.** All four were self-caught, and
+one nearly produced a false report against a third party. They are not four
+mistakes; they are one mistake made four times, which is what makes the shape
+worth writing down.
+
+A `git log <remote-ref-name>` was used to ask what had been *pushed* to a
+repository. It answered what was on a *local branch of the same name*. A
+`grep 'ts\.net'` was used to ask whether an address was a tailnet MagicDNS name.
+It answered "this string contains those characters" — and matched
+`…gateway.mts.net`, an upstream maintainer's email in a third-party clone. A
+`cd <path>` that failed on case (`~/Projects` vs `~/projects`) was followed by a
+read, which read a *different repository's* file and returned it as the answer
+about the one named. A parse of an `X-OAuth-Scopes` header was used to ask which
+scopes were granted; it returned every string in the response, header names
+included, so `workflow` was reported absent from a list containing `ETag`.
+
+**Not one of them errored.** Each returned a plausible answer to a question
+nobody asked. This is the defect class of this whole file arriving in the
+*measuring instrument* rather than the system under test — the worst place for
+it, because it corrupts the thing you would otherwise use to detect it. A red
+test is a signal; a wrong measurement is silence wearing a signal's clothes.
+
+**Assert the shape of what came back, not merely that something came back.** A
+measurement that cannot distinguish its own failure from a real negative result
+has not measured anything. In practice:
+
+- **`cd X || exit 1`.** Never let a failed `cd` be followed by a read. This is
+  the cheapest of the four to fix and the one that produced the most confident
+  wrong answer, because the output was real — real text from a real file, just
+  not the file that was asked about. A `pwd` assertion after the `cd` would have
+  shown the repository name.
+- **Anchor patterns to the whole token, not a substring of it.** `ts\.net`
+  matched `mts.net`. The MagicDNS form is a *suffix of a hostname*, so the
+  pattern has to say so — a boundary or an explicit shape — rather than naming
+  four characters that happen to be distinctive in the sample you looked at.
+- **When you name a ref, resolve it and check you got the ref you named.**
+  `git rev-parse --verify` and compare, *before* reasoning about its contents.
+  A name that silently resolves to something else is the failure mode here:
+  remote and local refs share spelling, so `git log origin/x` and `git log x`
+  are different questions with identical-looking commands.
+- **When you parse a structure, assert both directions.** One member you know
+  should be present is present, **and** one you know should be absent is absent.
+  The scope parse would have died instantly on "is `admin:public_key` absent?" —
+  it would have answered *yes* for the wrong reason, and the `ETag` sitting in
+  the list would have been visible.
+
+**The negative control is the part that is easy to skip.** A check that can only
+return "found" or "not found" cannot tell you that its "not found" means
+anything. When this session reported *zero* clones carrying an embedded
+credential, the honest reading was not "clean" — the pattern had been written to
+match only `user:pass@` and the tokens in question were `token@host`, the common
+shape. The zero was real and the measurement was wrong. Asserting the shape
+(`https?://[^/[:space:]]*@`, both forms) turned it into a count of two, and both
+were then scrubbed. **A zero is a result that requires the same scrutiny as a
+hit**, because it is the one that lets you stop looking.
+
+**Retroactive application.** Any finding that rests on a measurement of these
+shapes needs re-derivation, not re-reading. Two figures produced this session
+by the broken `git log` sweep — a count of identities on one repository and a
+much larger count on another — were retracted rather than corrected, because
+they had conflated local refs with pushed ones and the corrected measurement
+was a different number, not a refinement. The retraction is worth more than the
+figures: a wrong number that gets repeated becomes a fact someone else plans
+around.
+
+```bash
+# The shape assertions, as commands rather than as intentions.
+cd "$dir" || exit 1                      # never read after a failed cd
+pwd                                      # and say where you actually are
+git rev-parse --verify "$ref"            # did the name resolve to the ref named?
+git for-each-ref 'refs/backup/**'        # ** not * — a single star does not
+                                         # match nested paths, and printed nothing
+grep -cE 'https?://[^/[:space:]]*@'      # both credential shapes, not one
+```
 
 ---
 
-### The rule the nine share
+---
+
+### The rule the ten share
 
 **Verify that the named mechanism was actually operating.** In 4a the
 setting was one API call away and nobody asked, so a guess became a standing
@@ -626,7 +703,11 @@ claim that named it, so a scan that could not have seen the defect was read as
 evidence of its absence. In 4h the changed layer was verified in place of the
 consumed one, so a fix was trusted to have reached a surface no test had ever
 asked about. In 4i two runs were compared without establishing that they
-measured the same thing, so a host difference was read as a tree property.
+measured the same thing, so a host difference was read as a tree property. In
+4j the instrument itself answered an adjacent question, so a failed `cd`, a
+substring pattern and a mis-resolved ref each returned a plausible answer to a
+question nobody asked — and the only thing that would have caught any of them
+was an assertion about the *shape* of the result rather than its existence.
 
 A control you have not seen fail is not yet known to be a control. Prefer
 the version that can produce a *distinguishable* wrong answer — a tag with
