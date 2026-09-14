@@ -17,6 +17,7 @@ from prometheus.hooks.file_mutation_verifier import (
     FileMutationVerifier,
     _extract_bash_paths,
     make_default_verifier,
+    redirect_without_target,
 )
 
 
@@ -1017,3 +1018,118 @@ class TestNoSpaceRedirectIsADeliberateFalseNegative:
         """What the trade buys. Loosening the lookbehind reintroduces this."""
         assert _extract_bash_paths("const f = (s) => /^smoke:/.test(s)") == []
         assert _extract_bash_paths("if a <= b: pass") == []
+
+
+class TestUnresolvedTargetIsBlindnessNotAMissingFile:
+    """An unexpanded variable in a redirect is a write whose name was LOST.
+
+    `> "$LOG"` is blanked by dequoting and vanishes; `> /tmp/x.log` tracks
+    normally; `> $LOG` — unquoted — survived into the patterns and was captured by
+    `\\S+` as a literal filename. It can never be stat'd as existing, so every turn
+    containing one emitted a permanent `⚠ CLAIMED but FILE ABSENT` about a file
+    that was never named.
+
+    The fix routes it to the #275 blindness contract rather than blocklisting `$`:
+    one honest row saying *a write happened here and I could not name the
+    destination*, in place of a false row saying *this file is missing*. Adding `$`
+    to `_NOT_A_PATH` would have dropped the target SILENTLY — reproducing exactly
+    the failure the no-space redirect has, and making it the fifth extension of a
+    blocklist with a documented floor.
+
+    Measured on 7,200 real commands from telemetry `tool_calls` before shipping:
+    13 false FILE ABSENT rows removed, 2 blindness rows added, 0.028% of commands
+    affected. A control that fires constantly is the failure this file is about;
+    these numbers are why this ships rather than becoming a finding.
+    """
+
+    def test_an_unresolved_redirect_target_is_blind_and_untracked(self, tmp_path: Path):
+        """BOTH directions in one test, so neither can be bought with the other."""
+        v = FileMutationVerifier(enabled=True)
+
+        # (a) NEGATIVE: the unresolved target is not tracked as a phantom file...
+        assert _extract_bash_paths("echo x > $LOG") == []
+        assert _extract_bash_paths("echo x > $UNKNOWN") == []
+        assert _extract_bash_paths("echo x > ${LOG_DIR}/out.txt") == []
+        # ...and it IS reported, not silent. This is the whole point of routing it
+        # to the blindness contract instead of blocklisting the character.
+        assert redirect_without_target("echo x > $LOG") is True
+        assert redirect_without_target("echo x > ${LOG_DIR}/out.txt") is True
+
+        # (b) POSITIVE: a literal destination still tracks AND stays non-blind, so
+        # this did not pass by making every redirect blind.
+        real = tmp_path / "real.log"
+        assert _extract_bash_paths(f"echo x > {real}") == [
+            (str(real), "redirect_write")
+        ]
+        assert redirect_without_target(f"echo x > {real}") is False
+
+    def test_an_unresolved_target_beats_an_fd_sibling(self):
+        """`> $LOG 2>&1` must be BLIND, not excused by its fd duplicate.
+
+        The order of the two rules inside `redirect_without_target` matters: the
+        sink/fd rule says "nothing to audit here", which would otherwise swallow the
+        unresolved-target signal and make the turn look clean.
+        """
+        assert redirect_without_target("cmd > $LOG 2>&1") is True
+
+    def test_a_pure_fd_duplicate_is_still_not_blind(self):
+        """The #275 distinction must survive: `2>&1` alone is genuinely nothing."""
+        assert redirect_without_target("echo hi 2>&1") is False
+        assert redirect_without_target("cmd > out.txt 2>&1") is False
+
+    def test_a_device_sink_is_still_not_blind(self):
+        """And #198's case: `/dev/null` is not a lost name, it is no file at all."""
+        assert redirect_without_target("cmd > /dev/null") is False
+        assert _extract_bash_paths("cmd > /dev/null") == []
+
+    def test_no_phantom_absent_row_reaches_the_summary(self):
+        """End to end: the false `CLAIMED but FILE ABSENT` row is gone."""
+        v = FileMutationVerifier(enabled=True)
+        cmd = "echo x > $LOG"
+        v.pre_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        v.post_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        out = v.post_turn(turn_key="k")
+        assert out is not None, "the turn went silent — blindness must speak up"
+        assert "no nameable target" in out
+        assert "$LOG" not in out.split("—")[0], "a phantom path was tracked"
+        assert "CLAIMED but FILE ABSENT" not in out
+
+
+class TestUnresolvedOperandOutsideARedirectIsTheOpenGap:
+    """PINNED AS A KNOWN GAP, not as correct behaviour. See #484.
+
+    The blindness contract only fires on clauses carrying a REDIRECT operator. A
+    mutation operator with an unresolved operand — `cp a /tmp/bak-$(date +%s)`,
+    `mkdir -p $HOME/x` — now drops the operand and produces NO row at all: neither
+    tracked nor blind.
+
+    **What changed here, stated honestly, because it is not purely an improvement.**
+    On `origin/main` these were not silent either — they tracked a PHANTOM path
+    (`/tmp/bak-$(date`, `$HOME/x`) that could never be stat'd as existing, so they
+    emitted a false `⚠ CLAIMED but FILE ABSENT`. This change removes the false row
+    without adding a blindness row, so the command goes from *wrongly reported* to
+    *unreported*. Trading a lie for silence is not automatically a win; it is the
+    lesser evil here because a false row trains the reader to skim every row, and
+    the 7 affected commands in 7,200 are backup/mkdir operations whose real
+    destinations the instrument never had.
+
+    Routing them to a blindness row means extending `redirect_without_target` beyond
+    redirects, which is a change of contract rather than a bug fix, and belongs in the
+    lexer rewrite where clause structure is known instead of guessed. This test exists
+    so the gap is a decision with a receipt: if it ever starts reporting these, the
+    test moves on purpose.
+    """
+
+    def test_unresolved_operand_in_a_non_redirect_command_is_silent(self):
+        assert _extract_bash_paths("cp a.txt /tmp/bak-$(date +%s).txt") == []
+        assert redirect_without_target("cp a.txt /tmp/bak-$(date +%s).txt") is False
+        assert _extract_bash_paths("mkdir -p $HOME/x") == []
+        assert redirect_without_target("mkdir -p $HOME/x") is False
+
+    def test_a_literal_operand_in_the_same_command_still_tracks(self):
+        """The control: the gap is about the UNRESOLVED operand only."""
+        assert _extract_bash_paths("cp src.txt dst.txt") == [("dst.txt", "copy")]
+        assert _extract_bash_paths("mkdir -p /tmp/x && touch /tmp/x/y") == [
+            ("/tmp/x", "mkdir"),
+            ("/tmp/x/y", "touch"),
+        ]
