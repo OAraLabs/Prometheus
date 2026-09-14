@@ -711,3 +711,185 @@ class TestSilenceIsNotAnAudit:
 
         assert _extract_bash_paths('echo "a -> b" > out.txt') == [("out.txt", "redirect_write")]
         assert _extract_bash_paths('grep -r "a>b" .') == []
+
+
+class TestShellSyntaxIsNotAFilePath:
+    """A command that answers an adjacent question (RECURRING.md §4j).
+
+    Four false-positive classes were observed on real turns, all of them the same
+    shape: the instrument reported a plausible file that was never the subject of the
+    command. Each had a different mechanism, and each is pinned here.
+
+    The two controls are asserted IN ONE TEST per class. "Make the warnings go away"
+    is trivially achievable by weakening extraction into uselessness, so a test that
+    only checks the noise disappeared would pass on a verifier that tracks nothing.
+    Every negative control below is paired with the positive case it must not break.
+    """
+
+    # The fixtures are real: each came from a command in this session's history.
+
+    def test_quoted_prose_with_a_semicolon_is_not_split_into_commands(self):
+        """`echo "… does not touch them."` reported a missing file named `them.`
+
+        Splitting on `;` before dequoting cut a quoted string in half; each half then
+        carried an unbalanced quote, so `_dequote` could not pair it, the prose
+        survived as bare text, and a sentence-ending period became a filename.
+        """
+        cmd = (
+            'echo "  refs are permanent unless deleted; reflog expiry does not '
+            'touch them."'
+        )
+        # NEGATIVE control: no fragment of the sentence is a claimed path.
+        assert _extract_bash_paths(cmd) == []
+        # POSITIVE control: a real write in the same shape is still caught, so this
+        # did not pass by stopping extraction of quoted-adjacent clauses altogether.
+        assert _extract_bash_paths('echo "  a; b" > out.txt') == [
+            ("out.txt", "redirect_write")
+        ]
+
+    def test_a_flag_left_by_a_blanked_quoted_target_is_not_a_file(self):
+        """`rm -f "$P"` claimed a file named `-f`.
+
+        Blanking the quoted target leaves nothing for `(\\S+)` to match, so
+        `(?:-\\w+\\s+)*` backtracks to zero matches and the flag itself becomes the
+        operand. Same mechanism produced `2>/dev/null` as a claimed `touch` target.
+        """
+        # NEGATIVE control.
+        assert _extract_bash_paths('rm -f "$PROBE"') == []
+        assert _extract_bash_paths('mkdir -p "$gd/hooks"') == []
+        assert _extract_bash_paths(
+            'if touch "$PROBE" 2>/dev/null; then rm -f "$PROBE"; fi'
+        ) == []
+        # POSITIVE control: the same commands with a literal target are tracked.
+        assert _extract_bash_paths("rm -f node_modules") == [
+            ("node_modules", "delete")
+        ]
+        assert _extract_bash_paths("mkdir -p a/b && touch a/b/x.md") == [
+            ("a/b", "mkdir"),
+            ("a/b/x.md", "touch"),
+        ]
+
+    def test_an_arrow_function_is_not_a_redirect(self):
+        """`(s) => /^smoke:/.test(s)` claimed a file `/^smoke:/.test(s))`.
+
+        The `>` in `=>` is JavaScript, not a redirect. `(?<![<>])` did not cover it —
+        that lookbehind exists to keep the single-redirect pattern off the first char
+        of `>>`, and says nothing about an `=` before the `>`. The operator position
+        guard from `_REDIRECT_OP` is what distinguishes them.
+        """
+        # NEGATIVE control.
+        assert _extract_bash_paths("const f = (s) => /^smoke:/.test(s)") == []
+        assert _extract_bash_paths(
+            "const smokes = Object.keys(pkg.scripts).filter((s) => /^smoke:/.test(s))"
+        ) == []
+        # POSITIVE control: real redirects in every legal operator position still
+        # match. This is the assertion that stops the guard being tuned so tight that
+        # it drops genuine writes.
+        assert _extract_bash_paths("cmd > out.txt") == [
+            ("out.txt", "redirect_write")
+        ]
+        assert _extract_bash_paths("cmd >> out.txt") == [
+            ("out.txt", "redirect_append")
+        ]
+        assert _extract_bash_paths("echo hi 2> err.txt") == [
+            ("err.txt", "redirect_write")
+        ]
+        assert _extract_bash_paths("cmd > out.txt 2>&1") == [
+            ("out.txt", "redirect_write")
+        ]
+
+    def test_a_function_definition_is_not_a_touch(self):
+        """`say() { … }` and `touch nothing` inside a quoted span, after a real write."""
+        cmd = 'cat > /tmp/f.sh <<\'EOF\'\nsay() { echo hi; }\nEOF'
+        assert _extract_bash_paths(cmd) == [("/tmp/f.sh", "redirect_write")]
+        # The heredoc body contributes nothing of its own.
+        assert _extract_bash_paths("say() { echo hi; }") == []
+
+
+class TestDeletionSemantics:
+    """Absence is the outcome a deletion asks for, not evidence it failed.
+
+    The condition this satisfies is the inverted one: for a delete, absent-after is
+    SUCCESS. Both directions are in one test, because fixing only the noisy direction
+    is the cheap way to pass.
+    """
+
+    def test_a_delete_of_an_absent_file_is_a_noop_success_not_a_failure(
+        self, tmp_path: Path
+    ):
+        gone = tmp_path / "never-existed.txt"
+        v = FileMutationVerifier(enabled=True)
+        seen = f"rm -f {gone}"
+        v.pre_tool_use("bash", {"command": seen}, "t1", turn_key="k")
+        v.post_tool_use("bash", {"command": seen}, "t1", turn_key="k")
+        out = v.post_turn(turn_key="k")
+        assert "CLAIMED but FILE ABSENT" not in out, (
+            "a successful no-op delete was reported as a failed claim"
+        )
+        assert "✓" in out and "already absent" in out
+
+    def test_a_delete_that_actually_removed_something_is_still_recorded(
+        self, tmp_path: Path
+    ):
+        target = tmp_path / "real.txt"
+        target.write_text("content\n")
+        v = FileMutationVerifier(enabled=True)
+        cmd = f"rm -f {target}"
+        v.pre_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        target.unlink()
+        v.post_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        out = v.post_turn(turn_key="k")
+        assert "deleted" in out and "✓" in out
+        assert "already absent" not in out, (
+            "a real deletion was reported as a no-op — the fix over-corrected"
+        )
+
+    def test_a_write_that_never_landed_still_warns(self, tmp_path: Path):
+        """The rule this file exists for must survive the deletion fix.
+
+        A claimed WRITE with nothing on disk is still `CLAIMED but FILE ABSENT`.
+        Scoping the no-op tag to `delete` is what keeps this true.
+        """
+        v = FileMutationVerifier(enabled=True)
+        cmd = f"echo x > {tmp_path}/set-ok.txt"
+        v.pre_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        # Deliberately do NOT create the file — the write never happened.
+        v.post_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        out = v.post_turn(turn_key="k")
+        assert "CLAIMED but FILE ABSENT" in out, (
+            "the deletion fix silenced the write case too — the instrument is gone"
+        )
+
+    def test_a_failed_rm_is_not_laundered_into_a_success(self, tmp_path: Path):
+        """An `rm` that exited non-zero still reports ✗, not the no-op tag."""
+        gone = tmp_path / "absent.txt"
+        v = FileMutationVerifier(enabled=True)
+        cmd = f"rm {gone}"  # no -f: exits 1 when the file is absent
+        v.pre_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        v.post_tool_use(
+            "bash", {"command": cmd}, "t1", turn_key="k",
+            output="rm: cannot remove: No such file or directory", is_error=True,
+        )
+        out = v.post_turn(turn_key="k")
+        assert "✗" in out
+        assert "already absent" not in out
+
+
+class TestPerPathActionIsNotAJoinedVerb:
+    """One bash call can claim a delete AND a write; they cannot share one label."""
+
+    def test_mixed_actions_get_their_own_claim(self, tmp_path: Path):
+        stale = tmp_path / "stale.txt"   # absent — delete becomes a no-op success
+        fresh = tmp_path / "fresh.txt"   # absent — write becomes FILE ABSENT
+        v = FileMutationVerifier(enabled=True)
+        cmd = f"rm -f {stale} && echo x > {fresh}"
+        v.pre_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        v.post_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        out = v.post_turn(turn_key="k")
+        # The delete is a no-op success...
+        assert "already absent" in out
+        # ...and the write in the SAME command still warns. If both paths had been
+        # stamped with the joined "delete/redirect_write" label, the delete branch
+        # would have matched for `fresh.txt` too and the write warning would have
+        # been swallowed — which is the failure this test exists to prevent.
+        assert "CLAIMED but FILE ABSENT" in out

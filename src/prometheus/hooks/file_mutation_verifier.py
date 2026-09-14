@@ -91,10 +91,20 @@ _BASH_FS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # on the last meant `cmd > file.txt 2>&1` saw only the `2>&1` — so the REAL write
     # went untracked and, once `&N` was correctly classified as not-a-file (#274), the
     # whole turn went unaudited with no row at all (issue #275).
-    # `(?!>)` keeps the single-redirect pattern off the first char of `>>`, which the
-    # `$` anchor used to do by accident.
-    (re.compile(r'(?<![<>])>(?!>)\s*(\S+)'),                            'redirect_write'),
-    (re.compile(r'>>\s*(\S+)'),                                         'redirect_append'),
+    #
+    # The operator lookbehind `(?:(?<=\s)|(?<=^)|(?<=\d)|(?<=&))` is the SAME one
+    # _REDIRECT_OP uses, and it must stay identical to it: a redirect is legal after
+    # whitespace, at clause start, after an fd digit, or after `&`. Anywhere else the
+    # `>` is an operator of another language. Without it, the `>` in a JS/TS arrow
+    # function matched and claimed a file:
+    #
+    #     const f = (s) => /^smoke:/.test(s)      ->  '/^smoke:/.test(s))'
+    #
+    # `(?<![<>])` alone did not cover this — it stops `=>` from matching the `=` of
+    # `<=`-style forms and keeps the single pattern off the first char of `>>`, which
+    # is a different job. It says nothing about the `=` before `>`.
+    (re.compile(r'(?:(?<=\s)|(?<=^)|(?<=\d)|(?<=&))>(?!>)\s*(\S+)'),     'redirect_write'),
+    (re.compile(r'(?:(?<=\s)|(?<=^)|(?<=\d)|(?<=&))>>\s*(\S+)'),        'redirect_append'),
 ]
 
 
@@ -127,7 +137,7 @@ class _Mutation:
     """One tracked filesystem touch this turn."""
     tool: str
     path: str
-    claimed_action: str           # "write", "edit", "delete", "create", ...
+    claimed_action: str           # per-path: "delete", "redirect_write", "write", …
     before: _Snapshot
     after: _Snapshot
     error: str | None = None      # populated when the tool itself reported failure
@@ -230,6 +240,59 @@ def _dequote(clause: str) -> str:
     return _QUOTED.sub(lambda m: " " * len(m.group(0)), clause)
 
 
+_CLAUSE_SPLIT = re.compile(r"\s*(?:;|&&|\|\|)\s*")
+
+
+def _clauses(command: str) -> list[str]:
+    """Split a command into clauses, DEQUOTING FIRST.
+
+    The order is load-bearing, and getting it backwards was a live false-positive
+    generator. Splitting on `;` is quote-blind, so a semicolon *inside* a quoted
+    string cuts that string in half; each half then carries an UNBALANCED quote,
+    which `_QUOTED` cannot pair, so `_dequote` blanks nothing and the prose inside
+    the string survives as bare shell text to be matched against the patterns.
+
+    Observed on a real turn:
+
+        echo "  … reflog expiry does not touch them."
+
+    split into `echo "  …` and `touch them."`. The second clause parsed as a
+    claimed `touch` of a file named `them.`, which of course did not exist, and was
+    reported as `⚠ them. — touch: CLAIMED but FILE ABSENT`. A sentence ended in a
+    period and the instrument read it as a missing file.
+
+    Dequoting first removes the quoted span entirely, so no semicolon inside it can
+    cut anything and no word inside it can look like a command.
+    """
+    return [c for c in _CLAUSE_SPLIT.split(_dequote(command or "")) if c.strip()]
+
+
+# A captured operand that is not a path. Three shapes reach a `(\S+)` capture group
+# and are all shell syntax rather than a file:
+#
+#   -f, -p, --recursive   a flag. `rm -f "$P"` leaves nothing after the blanked
+#                         quote, so `(?:-\w+\s+)*` BACKTRACKS to zero matches and
+#                         `(\S+)` grabs the flag itself — then reports `-f` as a
+#                         file that was never written.
+#   2>/dev/null           a redirect, reached for the same reason: `touch "$P"
+#                         2>/dev/null` blanks `$P` and `\S+` takes the next token.
+#   &1                    an fd duplicate (already covered by _is_device_sink).
+#
+# Rejected by PREFIX rather than by a whitelist of what a path may contain, because
+# a path may legitimately contain almost anything. The cost is a real file whose
+# name begins with `-`; that needs `--` to address in shell anyway, which these
+# patterns do not parse. False negatives are the accepted direction in this file —
+# it is a reporter, not a floor.
+_NOT_A_PATH = re.compile(r"^(?:-|\d*[<>&])")
+
+
+def _is_trackable(target: str) -> bool:
+    """True when a captured operand is worth snapshotting."""
+    if not target or _NOT_A_PATH.match(target):
+        return False
+    return not _is_device_sink(target)
+
+
 def redirect_without_target(command: str) -> bool:
     """Does this command redirect somewhere we could not name?
 
@@ -241,11 +304,10 @@ def redirect_without_target(command: str) -> bool:
     `2>&1` alone is not blindness: the fd duplicate is correctly not-a-file, and a
     clause whose only redirect is one is genuinely nothing to audit.
     """
-    for clause in re.split(r"\s*(?:;|&&|\|\|)\s*", command or ""):
-        bare = _dequote(clause)
-        if not _REDIRECT_OP.search(bare):
+    for clause in _clauses(command):
+        if not _REDIRECT_OP.search(clause):
             continue
-        targets = _targets_in(bare)
+        targets = _targets_in(clause)
         if targets and all(_is_device_sink(t) for t in targets):
             continue  # every target was /dev/... or an fd — nothing to audit
         if not targets:
@@ -272,11 +334,10 @@ def _extract_bash_paths(command: str) -> list[tuple[str, str]]:
     Compound commands (``a && b``, ``foo; bar``) are scanned per-clause
     so an ``mkdir foo && touch foo/x.md`` reports two tracked paths.
 
-    Quoted spans are blanked first — see _dequote.
+    Quoted spans are blanked BEFORE splitting — see :func:`_clauses`.
     """
     out: list[tuple[str, str]] = []
-    for raw_clause in re.split(r"\s*(?:;|&&|\|\|)\s*", command or ""):
-        clause = _dequote(raw_clause)
+    for clause in _clauses(command):
         for pat, action in _BASH_FS_PATTERNS:
             for m in pat.finditer(clause):
                 # mv/cp: groups (src, dst) — track dst (the new home).
@@ -286,7 +347,7 @@ def _extract_bash_paths(command: str) -> list[tuple[str, str]]:
                 target = m.group(m.lastindex or 1)
                 # Strip quotes that survive shell-style argv splitting.
                 target = _expand_user(target.strip("'\""))
-                if target and not _is_device_sink(target):
+                if _is_trackable(target):
                     out.append((target, action))
     return out
 
@@ -417,6 +478,7 @@ class FileMutationVerifier:
             if not paths:
                 return
             claim = self._claim_from(tool_name, tool_input)
+            per_path = self._claim_map(tool_name, tool_input)
             err = (output or "")[:200] if is_error else None
             with self._lock:
                 turn = self._record(turn_key)
@@ -430,7 +492,7 @@ class FileMutationVerifier:
                     turn.mutations.append(_Mutation(
                         tool=tool_name,
                         path=p,
-                        claimed_action=claim,
+                        claimed_action=per_path.get(p, claim),
                         before=before,
                         after=_snapshot(p),
                         error=err,
@@ -546,6 +608,26 @@ class FileMutationVerifier:
             return "/".join(sorted(set(actions)))
         return tool_name
 
+    def _claim_map(
+        self, tool_name: str, tool_input: dict[str, Any],
+    ) -> dict[str, str]:
+        """Per-path action, so one bash call is not described by one joined verb.
+
+        ``_claim_from`` collapses every action in a command into one string, which
+        is right for a file tool (one path, one verb) and wrong for bash. A single
+        ``rm -f stale.txt && echo x > out.txt`` claims a DELETE of one path and a
+        WRITE of another; stamping both with ``"delete/redirect_write"`` makes the
+        deletion rule below undecidable, because the tag cannot tell whether the
+        absent-file case it is looking at was a delete or a write.
+        """
+        if tool_name != "bash":
+            return {}
+        command = str(tool_input.get("command", ""))
+        out: dict[str, str] = {}
+        for path, action in _extract_bash_paths(command):
+            out.setdefault(path, action)
+        return out
+
     def _format_summary(self, muts: list[_Mutation], blind: list[str] | None = None) -> str:
         """Render the per-turn list into a single string. Truncates.
 
@@ -596,6 +678,21 @@ class FileMutationVerifier:
         status = _classify(m.before, m.after)
         if m.error:
             return status, "✗"
+        if status == "missing" and m.claimed_action == "delete":
+            # A DELETE whose file was already absent is a SUCCESS, not a failure:
+            # absence is the outcome a deletion asks for, so the post-state already
+            # matches the claim. Reporting it as "CLAIMED but FILE ABSENT" read the
+            # result of the operation as evidence the operation had failed — exactly
+            # inverted. `rm -f x` on a missing `x` exited 0 and did what was asked.
+            #
+            # Scoped to deletes only. For a write, edit or redirect, absent-before
+            # plus absent-after is still the real defect this verifier exists for, and
+            # still warns below.
+            #
+            # An `rm` WITHOUT `-f` on a missing file exits non-zero, so it arrives
+            # with ``m.error`` set and is caught by the branch above as ✗ — this
+            # cannot mask a deletion that actually refused to happen.
+            return "deleted (no-op: already absent)", "✓"
         if status == "no_change":
             # The load-bearing silent-failure case: claimed write, no disk change.
             return "CLAIMED but NO CHANGE ON DISK", "⚠"
