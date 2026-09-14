@@ -608,10 +608,11 @@ python3 scripts/compare_gate_manifests.py /tmp/before.json /tmp/after.json
 
 ### 4j. The measurement answered an adjacent question
 
-**Recorded 2026-09-12, from four in one session.** All four were self-caught, and
-one nearly produced a false report against a third party. They are not four
-mistakes; they are one mistake made four times, which is what makes the shape
-worth writing down.
+**Recorded 2026-09-12, from four in one session — and a fifth, found in a
+different toolchain while the rule was still being written.** All five were
+self-caught, and one nearly produced a false report against a third party. They
+are not five mistakes; they are one mistake made five times, which is what makes
+the shape worth writing down.
 
 A `git log <remote-ref-name>` was used to ask what had been *pushed* to a
 repository. It answered what was on a *local branch of the same name*. A
@@ -629,6 +630,18 @@ nobody asked. This is the defect class of this whole file arriving in the
 *measuring instrument* rather than the system under test — the worst place for
 it, because it corrupts the thing you would otherwise use to detect it. A red
 test is a signal; a wrong measurement is silence wearing a signal's clothes.
+
+**And it is not a property of shells or of git.** A browser tool was asked to
+open a pull request. It returned success. The browser was not running. The tool
+had reported *"I issued the command,"* not *"the page loaded"* — a fifth
+instance, found while the rule was still being written, in a different toolchain
+from the four above. That is what makes the shape general rather than a list of
+git and grep mishaps: **any interface that reports on its own invocation rather
+than on its effect is in this class.** Which is §3 and 4e restated at the level
+of the tooling itself — an exit code says a process ran, a success response says
+a call was made, and neither one says the thing you wanted to happen happened.
+The only defence is to ask the effect and not the invocation: does the page have
+the content, does the ref hold the commit, does the file exist.
 
 **Assert the shape of what came back, not merely that something came back.** A
 measurement that cannot distinguish its own failure from a real negative result
@@ -679,11 +692,35 @@ cd "$dir" || exit 1                      # never read after a failed cd
 pwd                                      # and say where you actually are
 git rev-parse --verify "$ref"            # did the name resolve to the ref named?
 git for-each-ref 'refs/backup/**'        # ** not * — a single star does not
-                                         # match nested paths, and printed nothing
+                                         # match nested paths, and prints nothing
 grep -cE 'https?://[^/[:space:]]*@'      # both credential shapes, not one
 ```
 
----
+**What the backup refs are, and why the inventory lives here.** The command
+above is how someone *checks*; this is what it finds. Written down because a ref
+under `refs/` that is not under `refs/heads/` is invisible to the command anyone
+would actually reach for — `git branch --list 'backup*'` returns nothing while
+`for-each-ref 'refs/backup/**'` returns three. That is not a curiosity, it is how
+a future session loses them: the first verification of these refs *did* fail,
+using the single-star form, and the correct reading was "the backups were not
+created" rather than "the query could not see them." A ref nobody can find is a
+ref nobody can restore from.
+
+Created **2026-09-12**, local only — `refs/backup/**` is an invalid push refspec,
+so it cannot be propagated by accident, and a ref is reachable, so `git gc` will
+not collect it. They are safety nets under a branch deletion on
+**OAraLabs/Prometheus**, performed the same day:
+
+| ref (under `refs/backup/2026-09-12/`) | commit | what it was |
+|---|---|---|
+| `feat/docker-sandbox` | `edd3452` | DockerSandbox + 13 tests; main is a superset (`comm -23` empty), so this is redundant |
+| `fix/test-config-env-isolation` | `5857f90` | the `_clean_mapped_env` autouse fixture — **the only one holding unmerged work.** PR #190 closed unmerged and the fixture is absent from main |
+| `fix/verifier-ignores-dev-sinks` | `bf98d66` | `_is_device_sink` for `/dev/*` redirect targets; landed via #198, redundant |
+
+All three also survive in `refs/pull/N/head` on the remote, since GitHub retains
+a pull-request head ref whether or not the PR merged. **So these are
+belt-and-braces, not the only copy** — except that they are the only copy a
+local reader can see without asking the remote.
 
 ---
 
