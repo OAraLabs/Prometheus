@@ -286,35 +286,6 @@ def _clauses(command: str) -> list[str]:
 _NOT_A_PATH = re.compile(r"^(?:-|\d*[<>&])")
 
 
-def _is_trackable(target: str) -> bool:
-    """True when a captured operand is worth snapshotting."""
-    if not target or _NOT_A_PATH.match(target):
-        return False
-    return not _is_device_sink(target)
-
-
-def redirect_without_target(command: str) -> bool:
-    """Does this command redirect somewhere we could not name?
-
-    True when a clause carries a redirect operator but yields no trackable file
-    target — a quoted destination, an unusual form, or a construct the patterns do
-    not know. It is the signal that the verifier may be BLIND on this turn rather
-    than that the turn was clean, and post_turn speaks up on it (issue #275).
-
-    `2>&1` alone is not blindness: the fd duplicate is correctly not-a-file, and a
-    clause whose only redirect is one is genuinely nothing to audit.
-    """
-    for clause in _clauses(command):
-        if not _REDIRECT_OP.search(clause):
-            continue
-        targets = _targets_in(clause)
-        if targets and all(_is_device_sink(t) for t in targets):
-            continue  # every target was /dev/... or an fd — nothing to audit
-        if not targets:
-            return True
-    return False
-
-
 def _targets_in(clause: str) -> list[str]:
     """Raw redirect targets in an already-dequoted clause, sinks included."""
     found: list[str] = []
@@ -367,6 +338,87 @@ def _is_device_sink(target: str) -> bool:
     if re.fullmatch(r"&\d+", target):
         return True
     return target.startswith("/dev/") and not target.startswith("/dev/shm/")
+
+
+# An unexpanded parameter or command substitution: `$VAR`, `${VAR}`, `$(…)`.
+# Deliberately NOT `$1`/`$@`/`$?`/`$$`-style positional and special parameters,
+# which never begin a path in practice, and NOT a bare `$` at end of string.
+_UNRESOLVED = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\$\(")
+
+
+def _is_unresolved(target: str) -> bool:
+    """True when a redirect/operand target still carries a shell substitution.
+
+    ``_dequote`` blanks QUOTED spans, so ``> "$LOG"`` loses the variable entirely —
+    invisible, and handled elsewhere. But an UNQUOTED ``> $LOG`` survives into the
+    patterns, and ``\\S+`` captures ``$LOG`` as if it were a filename. It can never
+    be stat'd as existing, so every turn containing one emits a permanent
+    ``⚠ CLAIMED but FILE ABSENT``: a false row, forever, about a file that was
+    never named.
+
+    This is NOT "a shape to filter out". ``echo x > $LOG`` is **a write whose
+    destination this instrument cannot name** — which is precisely what the #275
+    blindness contract exists for. So the predicate has two call sites and the
+    second is the point:
+
+      * :func:`_is_trackable` stops TRACKING it (no false FILE ABSENT row), and
+      * :func:`redirect_without_target` stops counting it as a NAMEABLE target, so
+        a clause whose only destination is unresolved has an operator and nothing
+        to name, and the existing contract emits a blindness row.
+
+    The result is one honest row saying *"a write happened here and I could not
+    name the destination"* in place of a false row saying *"this file is missing."*
+    The first is true and actionable; the second is noise that trains the reader to
+    skim.
+
+    Adding ``$`` to ``_NOT_A_PATH`` instead would have dropped the target SILENTLY —
+    the same failure mode as the no-space redirect, freshly reproduced, and the
+    fourth extension of a blocklist that #484 documents as having a floor.
+    """
+    return bool(_UNRESOLVED.search(target or ""))
+
+
+def _is_trackable(target: str) -> bool:
+    """True when a captured operand is worth snapshotting.
+
+    Rejected: shell syntax (flags, fd digits, redirect chars), device sinks, and
+    targets still carrying an unexpanded substitution — see :func:`_is_unresolved`.
+    """
+    if not target or _NOT_A_PATH.match(target):
+        return False
+    if _is_unresolved(target):
+        return False
+    return not _is_device_sink(target)
+
+
+def redirect_without_target(command: str) -> bool:
+    """Does this command redirect somewhere we could not name?
+
+    True when a clause carries a redirect operator but yields no trackable file
+    target — a quoted destination, an unresolved variable, an unusual form, or a
+    construct the patterns do not know. It is the signal that the verifier may be
+    BLIND on this turn rather than that the turn was clean, and post_turn speaks up
+    on it (issue #275).
+
+    `2>&1` alone is not blindness: the fd duplicate is correctly not-a-file, and a
+    clause whose only redirect is one is genuinely nothing to audit. That is a
+    different case from `> $LOG`, which IS blindness — something was written and
+    the name was lost. The two are told apart by :func:`_is_unresolved`.
+    """
+    for clause in _clauses(command):
+        if not _REDIRECT_OP.search(clause):
+            continue
+        targets = _targets_in(clause)
+        if not targets:
+            return True
+        # An unresolved destination is the blindness case: a real write whose name
+        # this instrument could not recover. Checked BEFORE the sink rule so that
+        # `> $LOG 2>&1` is blind rather than excused by its sibling fd duplicate.
+        if any(_is_unresolved(t) for t in targets):
+            return True
+        if all(_is_device_sink(t) for t in targets):
+            continue  # every target was /dev/... or an fd — nothing to audit
+    return False
 
 
 class FileMutationVerifier:
