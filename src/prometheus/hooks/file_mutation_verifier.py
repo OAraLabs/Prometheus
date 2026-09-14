@@ -625,7 +625,19 @@ class FileMutationVerifier:
         command = str(tool_input.get("command", ""))
         out: dict[str, str] = {}
         for path, action in _extract_bash_paths(command):
-            out.setdefault(path, action)
+            # LAST write wins, not first. A path can be claimed twice in one
+            # command — `rm -f x && echo y > x` yields delete then redirect_write
+            # for the same x — and the final on-disk state is the outcome of the
+            # LAST operation against it. Judging that state against the first
+            # claim is how a failed write gets laundered into a clean ✓:
+            #
+            #   delete + absent->absent        -> "deleted (no-op)", ✓
+            #   redirect_write + absent->absent -> "CLAIMED but FILE ABSENT", ⚠
+            #
+            # so `setdefault` here turned a write that never landed into a
+            # successful deletion. Overwriting keeps the claim that the
+            # observed state should actually be measured against.
+            out[path] = action
         return out
 
     def _format_summary(self, muts: list[_Mutation], blind: list[str] | None = None) -> str:

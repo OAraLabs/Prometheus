@@ -893,3 +893,127 @@ class TestPerPathActionIsNotAJoinedVerb:
         # would have matched for `fresh.txt` too and the write warning would have
         # been swallowed — which is the failure this test exists to prevent.
         assert "CLAIMED but FILE ABSENT" in out
+
+
+class TestLastClaimWinsForAPath:
+    """The mirror of `test_a_failed_rm_is_not_laundered_into_a_success`.
+
+    That test pins the case where a delete is judged correctly. This one pins the
+    case where a path is claimed TWICE in one command and the wrong claim is the
+    one kept — a delete followed by a write to the same path, where the write fails
+    and the file ends up absent.
+
+    The last operation against a path is what the final on-disk state should be
+    judged against. Keeping the first (`dict.setdefault`) turned a write that never
+    landed into a reported successful no-op deletion, because the deletion branch
+    and the write branch disagree about the very same evidence:
+
+        delete         + absent->absent  -> "deleted (no-op: already absent)"  ✓
+        redirect_write + absent->absent  -> "CLAIMED but FILE ABSENT"          ⚠
+    """
+
+    def test_a_failed_write_is_not_laundered_by_a_preceding_delete_of_the_same_path(
+        self, tmp_path: Path
+    ):
+        victim = tmp_path / "x"          # never created: the write does not land
+        v = FileMutationVerifier(enabled=True)
+        cmd = f"rm -f {victim} && echo y > {victim}"
+        v.pre_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        v.post_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        out = v.post_turn(turn_key="k")
+        assert "CLAIMED but FILE ABSENT" in out, (
+            "a write that never landed was reported as a clean no-op delete — "
+            "the first claim for this path was kept instead of the last"
+        )
+        assert "already absent" not in out
+
+    def test_claim_map_keeps_the_last_action_per_path(self):
+        """Direct assertion on the mapping, so the rule is pinned by name."""
+        v = FileMutationVerifier(enabled=True)
+        cmd = "rm -f x && echo y > x"
+        assert v._claim_map("bash", {"command": cmd}) == {"x": "redirect_write"}
+
+    def test_a_delete_that_is_the_last_claim_still_reads_as_a_noop(self, tmp_path: Path):
+        """Reversed order: the delete is now the last claim, so the ✓ is correct.
+
+        This is the control on the control — pinning last-wins must not become
+        "always prefer the write", which would break the original fix.
+        """
+        gone = tmp_path / "y"            # absent, and stays absent
+        v = FileMutationVerifier(enabled=True)
+        cmd = f"touch {gone} && rm -f {gone}"
+        v.pre_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        gone.touch()                     # touch lands...
+        gone.unlink()                    # ...and the delete removes it
+        v.post_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        out = v.post_turn(turn_key="k")
+        assert "deleted" in out and "✓" in out
+        assert "CLAIMED but FILE ABSENT" not in out
+
+
+class TestNoSpaceRedirectIsADeliberateFalseNegative:
+    """PINNED ON PURPOSE. Do not "fix" this without reading the trade below.
+
+    `echo hi>out.txt` and `cmd>>app.log` are NOT tracked. That is a real false
+    negative, accepted deliberately, and this test exists so that it stays a
+    decision with a receipt rather than becoming an accident nobody knows about.
+
+    WHY IT IS GIVEN UP. The `>` of a redirect and the `>` of a JS/TS arrow
+    function are the same character. The only thing separating them in shell text
+    is what comes immediately before: whitespace, clause start, an fd digit, or
+    `&`. `echo hi>out.txt` has an `i` before the `>`, and so does `(s) =>`:
+
+        echo hi>out.txt      <- `i` before `>`   a real redirect
+        const f = (s) => …   <- `=` before `>`   JavaScript
+
+    Any lookbehind permissive enough to admit the first admits forms of the second.
+    Loosening it to `(?<=[A-Za-z0-9_])` would track `hi>out.txt` and would equally
+    track `a>b` inside a heredoc body, which dequoting cannot blank.
+
+    WHAT IT COSTS, MEASURED RATHER THAN ASSUMED. The untracked write is also NOT
+    reported blind: `_REDIRECT_OP` carries the same lookbehind, so it does not even
+    see an operator in `hi>out.txt`, `redirect_without_target` returns False, and
+    the turn is recorded as clean. The gap is silent, not flagged. That is a
+    deliberate acceptance for a reporter — and it is the single strongest argument
+    for the lexer rewrite, where clause structure is known instead of guessed.
+
+    If the no-space form must be tracked, the fix is a real lexer (shlex), not a
+    looser lookbehind. See the rewrite issue.
+    """
+
+    def test_no_space_redirect_is_not_tracked(self):
+        from prometheus.hooks.file_mutation_verifier import redirect_without_target
+
+        # The false negative, pinned.
+        assert _extract_bash_paths("echo hi>out.txt") == []
+        assert _extract_bash_paths("cmd>>app.log") == []
+
+        # AND the honest part: it is silent, not flagged. This assertion is here so
+        # that if a future change starts reporting the no-space form as blind, the
+        # change is deliberate and this test gets updated on purpose rather than
+        # the docstring quietly going stale.
+        assert redirect_without_target("echo hi>out.txt") is False
+
+    def test_every_spaced_and_fd_prefixed_form_is_still_tracked(self):
+        """The positive control. Tightening the lookbehind must not have cost
+        any legal form — this is what stops the trade being paid for twice."""
+        assert _extract_bash_paths("echo hi > out.txt") == [
+            ("out.txt", "redirect_write")
+        ]
+        assert _extract_bash_paths("cmd >> app.log") == [
+            ("app.log", "redirect_append")
+        ]
+        assert _extract_bash_paths("echo hi 2> err.log") == [
+            ("err.log", "redirect_write")
+        ]
+        assert _extract_bash_paths("echo hi 2>> err.log") == [
+            ("err.log", "redirect_append")
+        ]
+        assert _extract_bash_paths("cmd > out.txt 2>&1") == [
+            ("out.txt", "redirect_write")
+        ]
+
+    def test_the_arrow_function_stays_unmatched(self):
+        """What the trade buys. Loosening the lookbehind reintroduces this."""
+        assert _extract_bash_paths("const f = (s) => /^smoke:/.test(s)") == []
+        assert _extract_bash_paths("if a <= b: pass") == []
