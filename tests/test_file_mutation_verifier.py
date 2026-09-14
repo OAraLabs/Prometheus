@@ -1181,3 +1181,90 @@ class TestUnresolvedOperandOutsideARedirectIsReported:
         out = v.post_turn(turn_key="k")
         assert out is not None, "the turn went silent — blindness must speak up"
         assert "no nameable target" in out
+
+
+class TestVerbInArgumentPositionIsAKnownFalsePositive:
+    """PINNED AS A DEFECT, not as correct behaviour. See #484.
+
+    `echo touch $FOO` mutates nothing, yet this reports it blind: the pattern table
+    matches the mutation verb wherever it appears in the clause, so a verb sitting in
+    ARGUMENT position looks like a command, and the unresolved token after it looks
+    like a lost destination.
+
+        echo touch $FOO      -> blind True    WRONG: nothing is mutated
+        grep touch $FILE     -> blind True    WRONG: nothing is mutated
+        echo "touch $FOO"    -> blind False   correct: quoting blanks it first
+
+    Both are silent on `main`, so this is a false positive **introduced by the
+    generalization in this PR** rather than inherited — the old contract only fired on
+    redirect clauses, and `echo touch $FOO` has no redirect.
+
+    WHY IT IS NOT FIXED HERE. The structural fix is to anchor mutation patterns to the
+    clause's command word, since a verb mid-clause is an argument. That needs an
+    allowance for legal prefixes — `sudo`, `env VAR=x`, `time`, `do`, `then` — and the
+    moment that list is being written it is a blocklist of prefixes, which is the fifth
+    extension of the same shape this file has already lost to four times. **A token
+    stream says which token is the command word; nothing has to guess.** That is #484,
+    and this test is here so the shape is recorded as known rather than merged silently.
+
+    MEASURED FREQUENCY, because "is it worth closing" is a question about rate, not
+    principle. Across 7,252 real commands from telemetry `tool_calls`, the 12 rows this
+    generalization produces classify as **11 real, 0 false** — the verb-in-argument
+    shape does not occur in that corpus at all. The one extra row was the verifier's own
+    commit-message heredoc, which telemetry recorded live from this very session (see
+    `TestCorpusSelfContamination`). So this is a theoretical gap with a measured
+    frequency of zero on real commands, and a reproducible one on synthetic shapes.
+
+    Do not "fix" this by loosening or tightening the pattern table. If it starts being
+    reported correctly, this test moves on purpose.
+    """
+
+    def test_a_verb_in_argument_position_is_reported_blind_today(self):
+        """The defect, pinned. Both directions: false positive here, correct there."""
+        # WRONG today — a verb in argument position is not a mutation.
+        assert command_has_unnameable_target("echo touch $FOO") is True
+        assert command_has_unnameable_target("grep touch $FILE") is True
+        assert command_has_unnameable_target("echo cp $A $B") is True
+        assert command_has_unnameable_target("cat rm $X") is True
+
+        # Correct today, and must stay correct: quoting blanks the span first, so the
+        # verb never reaches the patterns. This is the control on the control — if a
+        # future fix makes the four above False by blanking more aggressively, these
+        # must not silently break with them.
+        assert command_has_unnameable_target('echo "touch $FOO"') is False
+        assert command_has_unnameable_target('echo "rm -rf $HOME"') is False
+        assert command_has_unnameable_target("test -f $CONFIG && echo yes") is False
+
+    def test_a_real_verb_in_command_position_is_unaffected_by_that_distinction(self):
+        """The shapes the generalization exists FOR must stay blind."""
+        for cmd in (
+            "touch $FOO",
+            "mkdir -p $BAR",
+            "do mkdir -p inspect-$r",   # shell keyword prefix
+            "sudo rm -f $X",            # privilege prefix
+            "env FOO=1 touch $X",       # env prefix
+        ):
+            assert command_has_unnameable_target(cmd) is True, cmd
+
+
+class TestCorpusSelfContamination:
+    """The corpus that justified this change measures itself.
+
+    `tool_calls` records every bash command the daemon runs, **live**. The commands
+    that probe this verifier are themselves bash commands, so a measurement taken over
+    that table includes the probes that produced it — and a heredoc containing
+    `cp a /tmp/bak-$(date +%s).txt` as *prose* is recorded as a command and classified
+    as a mutation.
+
+    That is exactly what happened: a twelfth blindness row appeared during review whose
+    content was this PR's own commit message. It is recorded here because it is the
+    measurement hazard, not because it is fixable in this file — any future number
+    quoted from `tool_calls` needs the same check, or it silently counts its own
+    instruments. A corpus that grows while you measure it is not a fixed sample.
+    """
+
+    def test_heredoc_prose_containing_a_mutation_shape_is_blind(self):
+        """The contamination case, pinned: prose inside a heredoc reads as a command."""
+        cmd = "git commit -q -F - <<MSG\nfix: cp a /tmp/bak-$(date +%s).txt\nMSG"
+        assert command_has_unnameable_target(cmd) is True
+        assert _extract_bash_paths(cmd) == []
