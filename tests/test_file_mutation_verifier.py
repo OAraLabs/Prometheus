@@ -17,7 +17,7 @@ from prometheus.hooks.file_mutation_verifier import (
     FileMutationVerifier,
     _extract_bash_paths,
     make_default_verifier,
-    redirect_without_target,
+    command_has_unnameable_target,
 )
 
 
@@ -973,7 +973,7 @@ class TestNoSpaceRedirectIsADeliberateFalseNegative:
 
     WHAT IT COSTS, MEASURED RATHER THAN ASSUMED. The untracked write is also NOT
     reported blind: `_REDIRECT_OP` carries the same lookbehind, so it does not even
-    see an operator in `hi>out.txt`, `redirect_without_target` returns False, and
+    see an operator in `hi>out.txt`, `command_has_unnameable_target` returns False, and
     the turn is recorded as clean. The gap is silent, not flagged. That is a
     deliberate acceptance for a reporter — and it is the single strongest argument
     for the lexer rewrite, where clause structure is known instead of guessed.
@@ -983,7 +983,7 @@ class TestNoSpaceRedirectIsADeliberateFalseNegative:
     """
 
     def test_no_space_redirect_is_not_tracked(self):
-        from prometheus.hooks.file_mutation_verifier import redirect_without_target
+        from prometheus.hooks.file_mutation_verifier import command_has_unnameable_target
 
         # The false negative, pinned.
         assert _extract_bash_paths("echo hi>out.txt") == []
@@ -993,7 +993,7 @@ class TestNoSpaceRedirectIsADeliberateFalseNegative:
         # that if a future change starts reporting the no-space form as blind, the
         # change is deliberate and this test gets updated on purpose rather than
         # the docstring quietly going stale.
-        assert redirect_without_target("echo hi>out.txt") is False
+        assert command_has_unnameable_target("echo hi>out.txt") is False
 
     def test_every_spaced_and_fd_prefixed_form_is_still_tracked(self):
         """The positive control. Tightening the lookbehind must not have cost
@@ -1052,8 +1052,8 @@ class TestUnresolvedTargetIsBlindnessNotAMissingFile:
         assert _extract_bash_paths("echo x > ${LOG_DIR}/out.txt") == []
         # ...and it IS reported, not silent. This is the whole point of routing it
         # to the blindness contract instead of blocklisting the character.
-        assert redirect_without_target("echo x > $LOG") is True
-        assert redirect_without_target("echo x > ${LOG_DIR}/out.txt") is True
+        assert command_has_unnameable_target("echo x > $LOG") is True
+        assert command_has_unnameable_target("echo x > ${LOG_DIR}/out.txt") is True
 
         # (b) POSITIVE: a literal destination still tracks AND stays non-blind, so
         # this did not pass by making every redirect blind.
@@ -1061,25 +1061,25 @@ class TestUnresolvedTargetIsBlindnessNotAMissingFile:
         assert _extract_bash_paths(f"echo x > {real}") == [
             (str(real), "redirect_write")
         ]
-        assert redirect_without_target(f"echo x > {real}") is False
+        assert command_has_unnameable_target(f"echo x > {real}") is False
 
     def test_an_unresolved_target_beats_an_fd_sibling(self):
         """`> $LOG 2>&1` must be BLIND, not excused by its fd duplicate.
 
-        The order of the two rules inside `redirect_without_target` matters: the
+        The order of the two rules inside `command_has_unnameable_target` matters: the
         sink/fd rule says "nothing to audit here", which would otherwise swallow the
         unresolved-target signal and make the turn look clean.
         """
-        assert redirect_without_target("cmd > $LOG 2>&1") is True
+        assert command_has_unnameable_target("cmd > $LOG 2>&1") is True
 
     def test_a_pure_fd_duplicate_is_still_not_blind(self):
         """The #275 distinction must survive: `2>&1` alone is genuinely nothing."""
-        assert redirect_without_target("echo hi 2>&1") is False
-        assert redirect_without_target("cmd > out.txt 2>&1") is False
+        assert command_has_unnameable_target("echo hi 2>&1") is False
+        assert command_has_unnameable_target("cmd > out.txt 2>&1") is False
 
     def test_a_device_sink_is_still_not_blind(self):
         """And #198's case: `/dev/null` is not a lost name, it is no file at all."""
-        assert redirect_without_target("cmd > /dev/null") is False
+        assert command_has_unnameable_target("cmd > /dev/null") is False
         assert _extract_bash_paths("cmd > /dev/null") == []
 
     def test_no_phantom_absent_row_reaches_the_summary(self):
@@ -1095,41 +1095,176 @@ class TestUnresolvedTargetIsBlindnessNotAMissingFile:
         assert "CLAIMED but FILE ABSENT" not in out
 
 
-class TestUnresolvedOperandOutsideARedirectIsTheOpenGap:
-    """PINNED AS A KNOWN GAP, not as correct behaviour. See #484.
+class TestUnresolvedOperandOutsideARedirectIsReported:
+    """A mutation operator with an unresolved operand is blindness, not silence.
 
-    The blindness contract only fires on clauses carrying a REDIRECT operator. A
-    mutation operator with an unresolved operand — `cp a /tmp/bak-$(date +%s)`,
-    `mkdir -p $HOME/x` — now drops the operand and produces NO row at all: neither
-    tracked nor blind.
+    THE GAP THIS CLASS USED TO PIN IS CLOSED, and the test moved on purpose — which
+    is what its own docstring said would happen.
 
-    **What changed here, stated honestly, because it is not purely an improvement.**
-    On `origin/main` these were not silent either — they tracked a PHANTOM path
-    (`/tmp/bak-$(date`, `$HOME/x`) that could never be stat'd as existing, so they
-    emitted a false `⚠ CLAIMED but FILE ABSENT`. This change removes the false row
-    without adding a blindness row, so the command goes from *wrongly reported* to
-    *unreported*. Trading a lie for silence is not automatically a win; it is the
-    lesser evil here because a false row trains the reader to skim every row, and
-    the 7 affected commands in 7,200 are backup/mkdir operations whose real
-    destinations the instrument never had.
+    #485 stopped tracking the phantom path these produced (`/tmp/bak-$(date`,
+    `$HOME/x`), which removed a false `⚠ CLAIMED but FILE ABSENT` row but left the
+    command emitting NO row at all, because `command_has_unnameable_target` only
+    inspected clauses carrying a REDIRECT operator. Trading a lie for silence is not
+    automatically a win, and it was pinned as a known gap rather than shipped quietly.
 
-    Routing them to a blindness row means extending `redirect_without_target` beyond
-    redirects, which is a change of contract rather than a bug fix, and belongs in the
-    lexer rewrite where clause structure is known instead of guessed. This test exists
-    so the gap is a decision with a receipt: if it ever starts reporting these, the
-    test moves on purpose.
+    Closing it is not a new contract. `_extract_bash_paths` already KNEW it had
+    dropped an operand — `_is_trackable` returned False and the caller discarded it.
+    `_raw_operands` reads that same unfiltered capture, so the drop site now reports
+    the decision the code was already making and throwing away.
+
+    Measured before shipping, on 7,232 real commands from telemetry `tool_calls`:
+    2 blindness rows before, 9 after. **Seven new rows, 0.124% of the corpus** — not
+    the hundreds a naive widening of `mkdir -p $SOMETHING` might have cost. That
+    measurement was the gate on whether this ships as a fix or gets handed to #484 as
+    a finding; it came out a fix.
     """
 
-    def test_unresolved_operand_in_a_non_redirect_command_is_silent(self):
-        assert _extract_bash_paths("cp a.txt /tmp/bak-$(date +%s).txt") == []
-        assert redirect_without_target("cp a.txt /tmp/bak-$(date +%s).txt") is False
-        assert _extract_bash_paths("mkdir -p $HOME/x") == []
-        assert redirect_without_target("mkdir -p $HOME/x") is False
+    def test_an_unresolved_operand_in_a_mutation_command_is_reported_blind(self):
+        """BOTH directions: reported blind, and still not tracked as a phantom."""
+        for cmd in (
+            "cp a.txt /tmp/bak-$(date +%s).txt",
+            "mkdir -p $HOME/x",
+            "rm -f inspect-$r",
+            "touch /tmp/smoke-$s.log",
+        ):
+            assert _extract_bash_paths(cmd) == [], (
+                f"{cmd!r} tracked a phantom path that can never be stat'd"
+            )
+            assert command_has_unnameable_target(cmd) is True, (
+                f"{cmd!r} dropped an operand and reported nothing"
+            )
 
     def test_a_literal_operand_in_the_same_command_still_tracks(self):
-        """The control: the gap is about the UNRESOLVED operand only."""
+        """The control: only the UNRESOLVED operand goes blind."""
         assert _extract_bash_paths("cp src.txt dst.txt") == [("dst.txt", "copy")]
+        assert command_has_unnameable_target("cp src.txt dst.txt") is False
         assert _extract_bash_paths("mkdir -p /tmp/x && touch /tmp/x/y") == [
             ("/tmp/x", "mkdir"),
             ("/tmp/x/y", "touch"),
         ]
+        assert command_has_unnameable_target("mkdir -p /tmp/x && touch /tmp/x/y") is False
+
+    def test_a_command_that_touches_nothing_is_not_blind(self):
+        """The over-widening control. Generalising must not make every command blind,
+        or the blindness row stops meaning anything — the failure this whole file is
+        about, reintroduced from the other direction."""
+        for cmd in (
+            "ls -la /tmp",
+            "echo hello",
+            "git status --short | head -5",
+            "grep -rn 'pattern' src/",
+            "cat README.md",
+        ):
+            assert command_has_unnameable_target(cmd) is False, (
+                f"{cmd!r} was reported blind but touches nothing unnameable"
+            )
+
+    def test_the_no_space_redirect_gap_is_still_open(self):
+        """STILL a gap, and pinned so closing it is deliberate. See #484.
+
+        `echo hi>out.txt` is neither tracked nor reported: `_REDIRECT_OP` shares the
+        operator-position lookbehind that keeps `=>` from claiming a file, so it does
+        not see an operator there at all. Widening it to fire would reopen that false
+        positive, which is a lexer's job rather than a regex's.
+        """
+        assert _extract_bash_paths("echo hi>out.txt") == []
+        assert command_has_unnameable_target("echo hi>out.txt") is False
+        assert _extract_bash_paths("cmd>>app.log") == []
+        assert command_has_unnameable_target("cmd>>app.log") is False
+
+    def test_blindness_reaches_the_summary(self, tmp_path: Path):
+        """End to end: a cp to an unresolved destination produces a row."""
+        v = FileMutationVerifier(enabled=True)
+        cmd = "cp a.txt /tmp/bak-$(date +%s).txt"
+        v.pre_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        v.post_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
+        out = v.post_turn(turn_key="k")
+        assert out is not None, "the turn went silent — blindness must speak up"
+        assert "no nameable target" in out
+
+
+class TestVerbInArgumentPositionIsAKnownFalsePositive:
+    """PINNED AS A DEFECT, not as correct behaviour. See #484.
+
+    `echo touch $FOO` mutates nothing, yet this reports it blind: the pattern table
+    matches the mutation verb wherever it appears in the clause, so a verb sitting in
+    ARGUMENT position looks like a command, and the unresolved token after it looks
+    like a lost destination.
+
+        echo touch $FOO      -> blind True    WRONG: nothing is mutated
+        grep touch $FILE     -> blind True    WRONG: nothing is mutated
+        echo "touch $FOO"    -> blind False   correct: quoting blanks it first
+
+    Both are silent on `main`, so this is a false positive **introduced by the
+    generalization in this PR** rather than inherited — the old contract only fired on
+    redirect clauses, and `echo touch $FOO` has no redirect.
+
+    WHY IT IS NOT FIXED HERE. The structural fix is to anchor mutation patterns to the
+    clause's command word, since a verb mid-clause is an argument. That needs an
+    allowance for legal prefixes — `sudo`, `env VAR=x`, `time`, `do`, `then` — and the
+    moment that list is being written it is a blocklist of prefixes, which is the fifth
+    extension of the same shape this file has already lost to four times. **A token
+    stream says which token is the command word; nothing has to guess.** That is #484,
+    and this test is here so the shape is recorded as known rather than merged silently.
+
+    MEASURED FREQUENCY, because "is it worth closing" is a question about rate, not
+    principle. Across 7,252 real commands from telemetry `tool_calls`, the 12 rows this
+    generalization produces classify as **11 real, 0 false** — the verb-in-argument
+    shape does not occur in that corpus at all. The one extra row was the verifier's own
+    commit-message heredoc, which telemetry recorded live from this very session (see
+    `TestCorpusSelfContamination`). So this is a theoretical gap with a measured
+    frequency of zero on real commands, and a reproducible one on synthetic shapes.
+
+    Do not "fix" this by loosening or tightening the pattern table. If it starts being
+    reported correctly, this test moves on purpose.
+    """
+
+    def test_a_verb_in_argument_position_is_reported_blind_today(self):
+        """The defect, pinned. Both directions: false positive here, correct there."""
+        # WRONG today — a verb in argument position is not a mutation.
+        assert command_has_unnameable_target("echo touch $FOO") is True
+        assert command_has_unnameable_target("grep touch $FILE") is True
+        assert command_has_unnameable_target("echo cp $A $B") is True
+        assert command_has_unnameable_target("cat rm $X") is True
+
+        # Correct today, and must stay correct: quoting blanks the span first, so the
+        # verb never reaches the patterns. This is the control on the control — if a
+        # future fix makes the four above False by blanking more aggressively, these
+        # must not silently break with them.
+        assert command_has_unnameable_target('echo "touch $FOO"') is False
+        assert command_has_unnameable_target('echo "rm -rf $HOME"') is False
+        assert command_has_unnameable_target("test -f $CONFIG && echo yes") is False
+
+    def test_a_real_verb_in_command_position_is_unaffected_by_that_distinction(self):
+        """The shapes the generalization exists FOR must stay blind."""
+        for cmd in (
+            "touch $FOO",
+            "mkdir -p $BAR",
+            "do mkdir -p inspect-$r",   # shell keyword prefix
+            "sudo rm -f $X",            # privilege prefix
+            "env FOO=1 touch $X",       # env prefix
+        ):
+            assert command_has_unnameable_target(cmd) is True, cmd
+
+
+class TestCorpusSelfContamination:
+    """The corpus that justified this change measures itself.
+
+    `tool_calls` records every bash command the daemon runs, **live**. The commands
+    that probe this verifier are themselves bash commands, so a measurement taken over
+    that table includes the probes that produced it — and a heredoc containing
+    `cp a /tmp/bak-$(date +%s).txt` as *prose* is recorded as a command and classified
+    as a mutation.
+
+    That is exactly what happened: a twelfth blindness row appeared during review whose
+    content was this PR's own commit message. It is recorded here because it is the
+    measurement hazard, not because it is fixable in this file — any future number
+    quoted from `tool_calls` needs the same check, or it silently counts its own
+    instruments. A corpus that grows while you measure it is not a fixed sample.
+    """
+
+    def test_heredoc_prose_containing_a_mutation_shape_is_blind(self):
+        """The contamination case, pinned: prose inside a heredoc reads as a command."""
+        cmd = "git commit -q -F - <<MSG\nfix: cp a /tmp/bak-$(date +%s).txt\nMSG"
+        assert command_has_unnameable_target(cmd) is True
+        assert _extract_bash_paths(cmd) == []

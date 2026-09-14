@@ -286,18 +286,6 @@ def _clauses(command: str) -> list[str]:
 _NOT_A_PATH = re.compile(r"^(?:-|\d*[<>&])")
 
 
-def _targets_in(clause: str) -> list[str]:
-    """Raw redirect targets in an already-dequoted clause, sinks included."""
-    found: list[str] = []
-    for pat, action in _BASH_FS_PATTERNS:
-        if not action.startswith("redirect"):
-            continue
-        for m in pat.finditer(clause):
-            t = _expand_user((m.group(m.lastindex or 1) or "").strip("'\""))
-            if t:
-                found.append(t)
-    return found
-
 
 def _extract_bash_paths(command: str) -> list[tuple[str, str]]:
     """Return ``(path, claimed_action)`` tuples extracted from a bash line.
@@ -362,7 +350,7 @@ def _is_unresolved(target: str) -> bool:
     second is the point:
 
       * :func:`_is_trackable` stops TRACKING it (no false FILE ABSENT row), and
-      * :func:`redirect_without_target` stops counting it as a NAMEABLE target, so
+      * :func:`command_has_unnameable_target` stops counting it as a NAMEABLE target, so
         a clause whose only destination is unresolved has an operator and nothing
         to name, and the existing contract emits a blindness row.
 
@@ -391,33 +379,77 @@ def _is_trackable(target: str) -> bool:
     return not _is_device_sink(target)
 
 
-def redirect_without_target(command: str) -> bool:
-    """Does this command redirect somewhere we could not name?
+def _raw_operands(clause: str) -> list[tuple[str, str]]:
+    """Every operand the patterns capture in one clause, BEFORE trackability filtering.
 
-    True when a clause carries a redirect operator but yields no trackable file
-    target — a quoted destination, an unresolved variable, an unusual form, or a
-    construct the patterns do not know. It is the signal that the verifier may be
-    BLIND on this turn rather than that the turn was clean, and post_turn speaks up
-    on it (issue #275).
+    `_extract_bash_paths` applies that filter and discards what fails it, which is
+    correct for the tracked-path list and wrong for the blindness question: the
+    discarded operand is exactly the information that says *this clause touched
+    something whose name was lost*. Reading the unfiltered capture is how the drop
+    site can report the decision it is already making.
+    """
+    out: list[tuple[str, str]] = []
+    for pat, action in _BASH_FS_PATTERNS:
+        for m in pat.finditer(clause):
+            t = _expand_user((m.group(m.lastindex or 1) or "").strip("'\""))
+            if t:
+                out.append((t, action))
+    return out
+
+
+def command_has_unnameable_target(command: str) -> bool:
+    """Does this command touch something whose destination we could not name?
+
+    True when a clause carries a redirect or mutation operator but yields no
+    trackable file target — a quoted destination, an unresolved variable, an unusual
+    form, or a construct the patterns do not know. It is the signal that the verifier
+    may be BLIND on this turn rather than that the turn was clean, and `post_turn`
+    speaks up on it (issue #275).
+
+    RENAMED from `redirect_without_target` when the contract was generalised past
+    redirects. The old name described less than the function did, which is the same
+    defect this file exists to remove: `cp a /tmp/bak-$(date +%s).txt` drops an
+    unresolved operand and used to emit no row at all, because this function only
+    inspected clauses carrying a REDIRECT operator. `_extract_bash_paths` already knew
+    it had dropped something — `_is_trackable` returned False and the caller discarded
+    it — so reporting it is not a new contract, it is reporting a decision the code was
+    already making and throwing away. Measured before shipping: 7 new rows on a
+    7,232-command corpus, 0.124%, not the hundreds a naive widening might have cost.
 
     `2>&1` alone is not blindness: the fd duplicate is correctly not-a-file, and a
     clause whose only redirect is one is genuinely nothing to audit. That is a
-    different case from `> $LOG`, which IS blindness — something was written and
-    the name was lost. The two are told apart by :func:`_is_unresolved`.
+    different case from `> $LOG` and from `mkdir -p $HOME/x`, which ARE blindness —
+    something was touched and the name was lost. The three are told apart by
+    :func:`_is_unresolved` and :func:`_is_device_sink`.
+
+    STILL A GAP, deliberately not closed here: the no-space redirect
+    (`echo hi>out.txt`) is neither tracked nor reported, because `_REDIRECT_OP` shares
+    the operator-position lookbehind that keeps `=>` from claiming a file. Widening it
+    to fire there would reopen that false positive, which is a lexer's job (#484).
     """
     for clause in _clauses(command):
-        if not _REDIRECT_OP.search(clause):
-            continue
-        targets = _targets_in(clause)
-        if not targets:
+        operands = _raw_operands(clause)
+
+        if _REDIRECT_OP.search(clause):
+            targets = [t for t, a in operands if a.startswith("redirect")]
+            if not targets:
+                return True
+            # An unresolved destination is the blindness case: a real write whose name
+            # this instrument could not recover. Checked BEFORE the sink rule so that
+            # `> $LOG 2>&1` is blind rather than excused by its sibling fd duplicate.
+            if any(_is_unresolved(t) for t in targets):
+                return True
+            if all(_is_device_sink(t) for t in targets):
+                continue  # every target was /dev/... or an fd — nothing to audit
+
+        # Non-redirect mutation operators: an operand dropped for carrying an
+        # unresolved substitution is a touch whose destination was lost, not a
+        # clause with nothing in it.
+        if any(
+            _is_unresolved(t) and not _NOT_A_PATH.match(t) and not _is_device_sink(t)
+            for t, _ in operands
+        ):
             return True
-        # An unresolved destination is the blindness case: a real write whose name
-        # this instrument could not recover. Checked BEFORE the sink rule so that
-        # `> $LOG 2>&1` is blind rather than excused by its sibling fd duplicate.
-        if any(_is_unresolved(t) for t in targets):
-            return True
-        if all(_is_device_sink(t) for t in targets):
-            continue  # every target was /dev/... or an fd — nothing to audit
     return False
 
 
@@ -499,7 +531,7 @@ class FileMutationVerifier:
             # no row at all, indistinguishable from a clean turn.
             if tool_name == "bash":
                 command = str(tool_input.get("command", ""))
-                if redirect_without_target(command):
+                if command_has_unnameable_target(command):
                     with self._lock:
                         self._record(turn_key).blind.append(command[:200])
             if not paths:
