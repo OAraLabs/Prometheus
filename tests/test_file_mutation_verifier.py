@@ -94,6 +94,39 @@ class TestPathExtraction:
         # means "nothing was looked at" cannot be the same signal.
         assert _extract_bash_paths("cmd > file.txt 2>&1") == [("file.txt", "redirect_write")]
 
+    def test_an_fd_duplicate_piped_without_spaces_is_not_a_path(self):
+        """`2>&1|head` — the fd duplicate immediately followed by a pipe.
+
+        Observed live in a turn's verifier summary, which reported SIX rows of
+        `⚠ &1|head — redirect_write: CLAIMED but FILE ABSENT` and one of `&1|tail`.
+        The pre-#483 code captured `&1|head` as a redirect target because
+        `_is_device_sink` uses `re.fullmatch(r"&\\d+", ...)`, and the `|head` suffix
+        makes that fail — so the fd duplicate stopped looking like a sink and became
+        a filename. It is a *fifth* shape, not one of the four #483 fixed: #274 pinned
+        `>&1` and `2>&1`, both of which end at the digit.
+
+        Correct on merged main because `_NOT_A_PATH` rejects a leading `&`, which is
+        an independent mechanism from the sink filter — so this test exists to pin
+        the behaviour rather than to change it. It was unpinned: the suite covered the
+        spaced forms (`cmd 2>&1`, `cmd > file.txt 2>&1`) and not this one, and a
+        correct-but-untested behaviour is one regression away from being wrong again.
+
+        Both directions, so tightening the fd handling cannot silently trade this
+        away: the spaced form, the no-space form, and a real write in the same clause.
+        """
+        # The shape that fired in the live summary.
+        assert _extract_bash_paths("cmd 2>&1|head -3") == []
+        assert _extract_bash_paths("cmd 2>&1|tail -2") == []
+        assert _extract_bash_paths("cmd 2>&1|head") == []
+        # No blindness row either: an fd duplicate is genuinely nothing to audit,
+        # which is the #275 distinction. A lost NAME is blindness; this is not one.
+        assert command_has_unnameable_target("cmd 2>&1|head -3") is False
+        # POSITIVE control: a real write sharing the clause is still tracked, so this
+        # did not pass by making the fd handling swallow its neighbours.
+        assert _extract_bash_paths("cmd > out.txt 2>&1|head -3") == [
+            ("out.txt", "redirect_write")
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle: pre / post / post_turn
