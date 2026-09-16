@@ -652,4 +652,4 @@ MIT — see [LICENSE](LICENSE). Upstream copyright notices for adapted code are 
 
 ## Credits
 
-Built by [OAra Labs](https://github.com/OAraLabs), starting from early scaffolding in [OpenHarness](https://github.com/HKUDS/OpenHarness). Design informed by Andrej Karpathy's [LLM Wiki concept](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), [Lossless-Claw](https://github.com/Martian-Engineering/lossless-claw), and [Sigrid Jin's](https://github.com/instructkr) analysis of Claude Code's agent-loop patterns. Full lineage and upstream licenses: [NOTICE](NOTICE).
+Built by [OAra Labs](https://github.com/OAraLabs), starting with early scaffolding from [OpenHarness](https://github.com/HKUDS/OpenHarness). Design informed by Andrej Karpathy's [LLM Wiki concept](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), [Lossless-Claw](https://github.com/Martian-Engineering/lossless-claw), and [Sigrid Jin's](https://github.com/instructkr) analysis of Claude Code's agent-loop patterns. Full lineage and upstream licenses: [NOTICE](NOTICE).
