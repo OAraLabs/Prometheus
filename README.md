@@ -80,12 +80,6 @@ A passing test proves the code runs. It does not prove anything calls it. Every 
 
 The last one is there because its absence shipped: a control suite whose every case asked "does disabling this let something bad through?" and none asked "does this let the permitted things through?" went green while the document surface silently degraded to PDF-only — 19 of 20 advertised types refused, including two the allowlist explicitly permitted. Over-refusal looks exactly like the control working.
 
-### Provenance
-
-**Provenance.** Prometheus is OAra Labs' code. It began in April 2026 as a scaffold renamed from the MIT-licensed [OpenHarness](https://github.com/HKUDS/OpenHarness) — the tool base class, the bash tool, the cron scheduler and the first agent loop — and has been built out from there: today 31 of 348 source files (about 9% of the lines) carry an OpenHarness header, and those files have been extended far beyond what was imported. A handful of files adapt or port specific pieces from the [Hermes Agent](https://github.com/NousResearch/hermes-agent) (the xAI OAuth sign-in, the memory tool, Slack-adapter and skill-curator patterns) and [OpenClaw](https://github.com/openclaw/openclaw) (the memory extractor's cadence, MCP naming and transport patterns); the skill-learning pipeline was ported from OAra's own skillforge-engine. Every adapted file names its source in a header comment, and [NOTICE](NOTICE) reproduces the upstream licences. The gateways, LSP integration and teacher escalation were designed by studying prior art and implemented clean-room; design influences with no code copied are listed in Credits below.
-
----
-
 ## The Problem Nobody Else Solves
 
 Open models are getting good at conversation. They're still terrible at *doing things*. Ask Qwen to call a tool and it hallucinates the tool name. Ask Gemma to return JSON and it wraps it in markdown. Ask Llama to chain three tool calls and it drops a required parameter on the second one.
@@ -658,4 +652,4 @@ MIT — see [LICENSE](LICENSE). Upstream copyright notices for adapted code are 
 
 ## Credits
 
-Built by [OAra Labs](https://github.com/OAraLabs). Its design was informed by Andrej Karpathy's [LLM Wiki concept](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), [Lossless-Claw](https://github.com/Martian-Engineering/lossless-claw), and [Sigrid Jin's](https://github.com/instructkr) analysis of Claude Code's agent-loop patterns. Code lineage and upstream notices: see [Provenance](#provenance) above and [NOTICE](NOTICE).
+Built by [OAra Labs](https://github.com/OAraLabs), starting from early scaffolding in [OpenHarness](https://github.com/HKUDS/OpenHarness). Design informed by Andrej Karpathy's [LLM Wiki concept](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), [Lossless-Claw](https://github.com/Martian-Engineering/lossless-claw), and [Sigrid Jin's](https://github.com/instructkr) analysis of Claude Code's agent-loop patterns. Full lineage and upstream licenses: [NOTICE](NOTICE).
