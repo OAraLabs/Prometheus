@@ -778,9 +778,97 @@ the whole file keeps reaching for, pointed at the starting gun: **verify the
 named mechanism was actually operating** — here, verify the field the issue says
 to add isn't already sent, before adding it.
 
+### 4l. A single run is not a verdict for a flaky test
+
+**Verifying a PR, the failure sets of two full-suite runs — one on the branch,
+one on `origin/master` — were diffed.** One test failed on the baseline and not
+on the branch, and that difference was attributed to an *already-merged* PR
+from the same session: it was in master, master was failing, so it had
+introduced the failure. A merged PR was named as the cause of a defect it had
+nothing to do with.
+
+Measured afterwards on `origin/master` with that test **alone**, unchanged
+tree:
+
+```
+oara-voice  test_voice_route_keeps_its_envelope_and_adds_overlap_aware_timings
+
+  20 runs, origin/master, unchanged tree : 7 passed, 13 FAILED
+  every failure                          : assert 73 <= 72
+```
+
+The test fails more often than it passes, on the baseline, with nothing
+changed. The two comparison runs had landed on opposite sides of its coin, and
+that is the entire difference the diff reported.
+
+**The attribution is the whole of the error.** A difference between two runs was
+assigned to the only variable under examination, because the branch was the
+thing being examined and a difference has to come from somewhere. Nothing asked
+whether the difference was a property of the *tree* before deciding which change
+in the tree produced it. "Is this test capable of failing on its own?" was never
+asked; twelve runs answer it in six seconds.
+
+**Unlike 4j, the instrument was not mis-aimed.** `pytest` ran exactly the test it
+was asked to run, on exactly the tree it was pointed at, and reported truthfully
+what happened *that time*. No shape assertion would have caught this, because
+nothing about the result was malformed. What was missing was **n**.
+
+**This is the failure that survives 4i.** Run under 4i's rule the comparison
+passes: same gates, same composition, manifests match, comparison declared
+comparable. That is 4i working correctly. Comparability establishes that two
+runs are the same *kind* of run; it never establishes that either is
+*repeatable*, and two runs of the same kind still disagree when the
+disagreement lives inside a test.
+
+**And it is 4f from the other side.** There, two disagreeing runs on one commit
+were both visible in the rollup, and the rule was that disagreement means
+unmeasured. Here the disagreement was just as real and invisible — because only
+one run existed per side for it to disagree with.
+
+**The dangerous direction is the clean one.** Had this test landed green on both
+sides, the diff would have been empty and "no regression vs master" reported
+with the same confidence and the same absence of evidence. A failure-set diff
+built from n=1 cannot distinguish *no regression* from *the flakes happened to
+agree this time*, so an empty diff needs the scrutiny a non-empty one gets.
+
+**How:**
+
+- A failure-set diff is a **candidate list, not a verdict.** Each entry must be
+  promoted from *differs* to *differs reproducibly* before it says anything
+  about the tree.
+- Promote it by re-running the differing test on the **unchanged baseline**,
+  alone, and counting:
+
+```bash
+p=0; f=0
+for i in $(seq 1 12); do
+  python3 -m pytest "$NODEID" -q >/dev/null 2>&1 && p=$((p+1)) || f=$((f+1))
+done
+echo "baseline alone: $p passed, $f failed"   # any f>0 -> not evidence, either way
+```
+
+- **Any non-zero failure count on the unchanged baseline ends the attribution**,
+  in both directions.
+- **Run it alone *and* the way the suite ran it.** Alone isolates the test's own
+  variance; in-suite catches ordering and cross-test coupling — a different
+  defect with the same symptom. Stable alone and unstable in the suite is not
+  cleared.
+- **Retract where the claim was made.** This attribution had been stated, and it
+  named a merged PR as the cause of a live failure. A wrong finding that is
+  silently abandoned survives in whatever it was written into; withdraw it with
+  the count that withdraws it.
+
+**The test's own defect is a separate report, not this rule.** `stage_ms.ttfa` is
+`stt_ms + ttfa_ms`, where the fixture's fake transcriber returns a constant `42`
+and sleeps for none of it, while `duration_ms` is a real `time.monotonic()` span
+across a route containing no real STT. The assertion compares fabricated
+milliseconds against a real total, which is why every failure misses by exactly
+one. That is a bug filed against the test. The rule here is about what the
+comparison was allowed to conclude *before* anyone had looked at the test at all.
+
 ---
 
-### The rule the eleven share
+### The rule the twelve share
 
 **Verify that the named mechanism was actually operating.** In 4a the
 setting was one API call away and nobody asked, so a guess became a standing
@@ -805,6 +893,13 @@ In 4k the issue body — tier-0 evidence, a report describing a real mechanism �
 prescribed a fix the code did not need, naming a field the daemon already sent;
 only checking both ends before writing showed the prescription was redundant,
 and following it would have added a second honest key beside the first.
+
+In 4l a single run was taken as a verdict on a test that fails more than half
+the time on its own, so one run per side and a difference in the failure sets
+was attributed first to the branch and then to an already-merged PR. Nothing was
+mis-aimed — the run measured the tree it was pointed at and reported it
+truthfully; what was missing was a second run of the same test on the same tree,
+which 4i's comparability check does not ask for and cannot supply.
 
 A control you have not seen fail is not yet known to be a control. Prefer
 the version that can produce a *distinguishable* wrong answer — a tag with
