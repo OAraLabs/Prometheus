@@ -107,6 +107,35 @@ class LCMConversationStore:
                 updated_at REAL NOT NULL
             );
 
+            -- Correlation ids for optimistic client rows (audit P9.6 / Beacon#144).
+            --
+            -- A client writes an optimistic row keyed by its own client_msg_id when it sends,
+            -- then re-keys it to the durable rowid when the WS user-echo arrives. MISS that
+            -- echo -- a socket drop between the send returning 200 and the echo, or a client
+            -- restart in that window -- and nothing ever retires the optimistic row: reconcile
+            -- inserts the confirmed row under str(row_id), a DIFFERENT primary key, so both
+            -- persist and the duplicate renders forever (row_id IS NULL sorts last). This table
+            -- is the mapping that lets reconcile do the same retirement deterministically.
+            --
+            -- Content-matching is not an alternative and was retired on purpose: two identical
+            -- sends are legitimately two messages, so matching on text would merge them.
+            --
+            -- Kept OUT of lcm_messages deliberately. client_msg_id is a transport correlation
+            -- token, not conversation content -- lcm_messages rows are serialized into
+            -- content_json, returned by every history read, and rendered into model context.
+            -- A wire token does not belong in a prompt. Side table, same reasoning as
+            -- session_titles (a rename never rewrites history).
+            CREATE TABLE IF NOT EXISTS message_client_ids (
+                session_id    TEXT NOT NULL,
+                row_id        INTEGER NOT NULL,
+                client_msg_id TEXT NOT NULL,
+                created_at    REAL NOT NULL,
+                PRIMARY KEY (session_id, row_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_message_client_ids_lookup
+                ON message_client_ids (session_id, client_msg_id);
+
             -- Pinned sessions. A pin is a property OF the conversation, not of
             -- the client that set it: Beacon Desktop already pins, but stores it
             -- in its own local settings, so a pin never reached the phone and two
@@ -837,7 +866,7 @@ class LCMConversationStore:
             #    here, not a silent survivor.
             for table in ("session_titles", "session_profiles", "session_pins",
                           "session_tombstones", "session_forks", "session_workspaces",
-                          "session_backends"):
+                          "session_backends", "message_client_ids"):
                 counts[table] = self._conn.execute(
                     f"DELETE FROM {table} WHERE session_id = ?", (session_id,)
                 ).rowcount if self._table_exists(table) else 0
@@ -1127,6 +1156,46 @@ class LCMConversationStore:
             "SELECT title FROM session_titles WHERE session_id = ?", (session_id,)
         ).fetchone()
         return row["title"] if row else None
+
+    # ------------------------------------------------------------------
+    # Optimistic-row correlation (audit P9.6 / Beacon#144)
+    # ------------------------------------------------------------------
+
+    def set_message_client_id(
+        self, session_id: str, row_id: int | None, client_msg_id: str | None
+    ) -> None:
+        """Record the correlation id a client sent with the message now durable at ``row_id``.
+
+        Called by the WS send path immediately after the user turn is persisted, where both
+        halves are already in hand. Best-effort BY CONTRACT: a failure here costs the ability to
+        retire a stranded optimistic row after a missed echo, and must never cost the turn
+        itself -- so it no-ops on a blank id or a missing rowid rather than raising.
+
+        INSERT OR REPLACE, not INSERT OR IGNORE: a rowid is durable and unique, so a second write
+        for the same rowid is a correction of the first, and keeping the stale id would strand
+        the row that actually correlates to it.
+        """
+        cid = (client_msg_id or "").strip()
+        if not cid or row_id is None:
+            return
+        self._conn.execute(
+            "INSERT OR REPLACE INTO message_client_ids"
+            " (session_id, row_id, client_msg_id, created_at) VALUES (?, ?, ?, ?)",
+            (session_id, int(row_id), cid, time.time()),
+        )
+        self._conn.commit()
+
+    def get_message_client_ids(self, session_id: str) -> dict[int, str]:
+        """``row_id -> client_msg_id`` for a session, so a history read can return them.
+
+        ONE query for the whole session rather than one per row: history fetches are paginated
+        and a per-message lookup would turn a single read into N.
+        """
+        rows = self._conn.execute(
+            "SELECT row_id, client_msg_id FROM message_client_ids WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+        return {int(r["row_id"]): r["client_msg_id"] for r in rows}
 
     # ------------------------------------------------------------------
     # Lifecycle
