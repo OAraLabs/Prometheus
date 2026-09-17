@@ -18,14 +18,23 @@ TaskType = Literal[
     "file_watch",
     "poll",
 ]
-TaskStatus = Literal["pending", "running", "completed", "failed", "killed"]
+# "blocked" is a REFUSAL, not a failure: the SecurityGate denied the command and
+# no process was ever launched. It is terminal exactly like "failed" and is
+# deliberately distinct from it — "the gate did its job" and "the command ran and
+# broke" are different states, repaired by different actions (grant approval or
+# narrow the command, versus debug), so a tally that merges them answers neither.
+TaskStatus = Literal[
+    "pending", "running", "completed", "failed", "killed", "blocked"
+]
 
 # What to do when a managed task resolves. Notification ALWAYS fires (heartbeat);
 # ``on_complete`` only gates re-engagement of the agent.
 OnComplete = Literal["notify", "reengage", "both"]
 
-# Statuses that mean the task has stopped running.
-TERMINAL_STATUSES = frozenset({"completed", "failed", "killed"})
+# Statuses that mean the task has stopped running. "blocked" belongs here because
+# a refused task is as finished as a failed one: the supervisor must not resume or
+# reap it on restart, and a reader asking "is this still going?" must get "no".
+TERMINAL_STATUSES = frozenset({"completed", "failed", "killed", "blocked"})
 
 
 @dataclass
@@ -59,7 +68,9 @@ class TaskRecord:
     timeout_seconds: int | None = None
     # For file_watch: the matched file. For process: an optional declared artifact.
     artifact_path: str | None = None
-    # Failure reason ("timeout", "blocked", "daemon_restart", or an exception str).
+    # Why the task ended without succeeding. For status "blocked" this is the
+    # gate's own "blocked: <reason>" text; for "failed" it is "timeout",
+    # "daemon_restart", or an exception string.
     error: str | None = None
     # Detector parameters for non-process kinds:
     #   file_watch: {"dir": str, "pattern": str}

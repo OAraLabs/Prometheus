@@ -189,9 +189,12 @@ class TaskCreateTool(BaseTool):
         except ValueError as exc:
             return ToolResult(output=str(exc), is_error=True)
 
-        if task.status == "failed":
+        # "blocked" is the SecurityGate refusing; "failed" is a launch that did not
+        # take. Neither started, so neither may report as started.
+        if task.status in ("blocked", "failed"):
+            verb = "refused" if task.status == "blocked" else "rejected"
             return ToolResult(
-                output=f"Task rejected ({task.id}): {task.error or 'unknown reason'}",
+                output=f"Task {verb} ({task.id}): {task.error or 'unknown reason'}",
                 is_error=True,
             )
 

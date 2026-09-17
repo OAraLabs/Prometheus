@@ -131,8 +131,10 @@ class BackgroundTaskManager:
         """Start a background shell command and return its TaskRecord.
 
         Vets *command* through the SecurityGate at system trust before spawning.
-        A denied command yields a ``failed`` record (error ``"blocked: ..."``)
-        and NO process is launched.
+        A denied command yields a ``blocked`` record (error ``"blocked: ..."``)
+        and NO process is launched. ``blocked`` is terminal but is NOT ``failed``:
+        nothing ran, so there is nothing to debug — the repair is to approve or
+        narrow the command. Callers must treat both as "did not start".
 
         ``env_overlay`` carries values into the child's ENVIRONMENT and is held
         in memory only. It is never written to the TaskRecord, never persisted,
@@ -152,7 +154,7 @@ class BackgroundTaskManager:
             timeout_seconds=timeout_seconds,
         )
         if blocked is not None:
-            record.status = "failed"
+            record.status = "blocked"
             record.error = blocked
             record.ended_at = time.time()
             self._tasks[record.id] = record
@@ -252,7 +254,9 @@ class BackgroundTaskManager:
             timeout_seconds=timeout_seconds,
             env_overlay=env_overlay,
         )
-        if record.status == "failed":
+        # A refusal ("blocked") or a launch that failed outright — either way no
+        # process is attached, so there is no stdin to write the prompt to.
+        if record.status in ("blocked", "failed"):
             return record
         updated = replace(record, prompt=prompt)
         self._tasks[record.id] = updated
@@ -326,7 +330,7 @@ class BackgroundTaskManager:
             spec={"predicate_cmd": poll_predicate},
         )
         if blocked is not None:
-            record.status = "failed"
+            record.status = "blocked"
             record.error = blocked
             record.ended_at = time.time()
             self._tasks[record.id] = record
@@ -633,6 +637,10 @@ class BackgroundTaskManager:
         if task.id in self._emitted:
             return
         self._emitted.add(task.id)
+        # Only two frame kinds exist on the wire, so every non-"completed"
+        # terminal status rides "task_failed". A refusal still has to reach the
+        # operator — surfacing it under the legacy kind is the safe default, and
+        # the payload's own ``status`` field is what tells the two apart.
         kind = "task_completed" if task.status == "completed" else "task_failed"
         try:
             from prometheus.sentinel.signals import ActivitySignal

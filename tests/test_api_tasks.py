@@ -97,6 +97,50 @@ def test_counts_are_the_full_histogram_regardless_of_filter(client):
     assert body["counts"] == {"completed": 1, "failed": 1, "running": 1}
 
 
+def test_a_refusal_counts_separately_from_a_failure(client):
+    """#489 pinned where it is READ, not where it is written.
+
+    `counts` is the histogram Beacon's mission view renders ("N failed"), so this
+    is the surface the issue was filed from. A function-boundary test would pass
+    while this payload still reported a working permission boundary as breakage —
+    RECURRING 4h, the fix verified through one reader of the changed column.
+    """
+    c, _ = client([
+        _rec(id="ok", status="completed"),
+        _rec(id="broke", status="failed", return_code=1, error="boom"),
+        _rec(id="refused", status="blocked", return_code=None, ended_at=1002.0,
+             error="blocked: Command requires approval: 'npm install'"),
+    ])
+    body = c.get("/api/tasks").json()
+
+    # Three states, three buckets. `failed` now means only the thing that ran.
+    assert body["counts"] == {"completed": 1, "failed": 1, "blocked": 1}
+
+    refused = next(t for t in body["tasks"] if t["id"] == "refused")
+    assert refused["status"] == "blocked"
+    # Terminal on the wire: a client must not render a refusal as a live spinner.
+    assert refused["running"] is False
+    # The reason survives to the client, so "awaiting approval" is renderable.
+    assert refused["error"].startswith("blocked: ")
+    # ...and nothing ran, so there is no exit code to imply one did.
+    assert refused["return_code"] is None
+
+
+def test_the_blocked_filter_addresses_refusals_without_parsing_prose(client):
+    """`?status=blocked` is what makes a refusal actionable separately.
+
+    Before #489 the only way to list refusals was to fetch everything and match
+    `error.startswith("blocked: ")` client-side — an inference that rots the
+    moment the message is reworded.
+    """
+    c, _ = client([
+        _rec(id="broke", status="failed", error="boom"),
+        _rec(id="refused", status="blocked", error="blocked: Command requires approval"),
+    ])
+    assert [t["id"] for t in c.get("/api/tasks?status=blocked").json()["tasks"]] == ["refused"]
+    assert [t["id"] for t in c.get("/api/tasks?status=failed").json()["tasks"]] == ["broke"]
+
+
 def test_newest_first_and_capped(client):
     recs = [_rec(id=f"t{i}", created_at=float(i)) for i in range(10)]
     c, _ = client(recs)
