@@ -220,6 +220,36 @@ a permanently closed PR. Before merging, check whether the head is another
 PR's base (`gh pr list --json number,baseRefName`) and merge such a stack in
 immediate succession.
 
+**#476 asked for this to become an enforced control. It cannot be one in CI,
+and that was measured rather than argued.** The attempt and its three dead
+ends are recorded here so the next person does not re-run them:
+
+| attempt | result |
+|---|---|
+| `gh api repos/$GITHUB_REPOSITORY --jq .delete_branch_on_merge` under the default `GITHUB_TOKEN` (`contents: read`, `metadata: read`) | field **ABSENT** from the response — not `false`, not `true`, missing. Run `35235908879` |
+| adding `administration: read` to the job's `permissions:` | **invalid workflow file**; the run fails at startup with no jobs. `administration` is a fine-grained PAT scope, not one of the Actions `permissions:` scopes. Run `35236097803` |
+| unauthenticated read (Prometheus is public) | field **ABSENT** for both repos |
+
+`delete_branch_on_merge` is an administrative field, returned only to a
+credential with push access. `GITHUB_TOKEN` never has it and no workflow
+permission grants it, so **there is no CI form of this check** short of a
+standing PAT secret — which trades a new always-valid credential for a check
+on a setting that has never drifted, and is the worse risk.
+
+**What would actually control the vector.** The toggle was never the
+mechanism — §4a's own measurement says auto-delete was already `false` both
+times, and both losses came from an explicit `--delete-branch`. A repository
+**ruleset with a `deletion` rule targeting all branches** does block that
+invocation, at the platform, for every actor including an agent. `main`
+already carries exactly that rule. Extending it to `~ALL` is the only
+mechanism found that matches the failure; the cost is that no branch can be
+deleted without bypassing the ruleset, which this section already argues is
+the cheap side of the trade. It is a repository settings decision, so it is
+named here rather than taken.
+
+Until then 4a remains discipline, and honestly labelled as such: a rule, not
+a control, with two recorded failures and no enforcement.
+
 ### 4b. The check named the wrong dependency
 
 Sequencing five PRs the same day, the merge order was computed from
