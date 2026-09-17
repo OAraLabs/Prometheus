@@ -137,8 +137,16 @@ class LSPClient:
         self._diagnostics: dict[str, list[Diagnostic]] = {}
         self._open_files: dict[str, int] = {}  # path → version
         self._reader_task: asyncio.Task | None = None
+        self._stderr_task: asyncio.Task | None = None
         self._initialized: bool = False
         self._server_capabilities: dict[str, Any] = {}
+        #: Set when the stdout reader loop exits for ANY reason — EOF (server
+        #: died) or a malformed frame. Part of ``is_alive``: a client whose
+        #: reader is gone can never answer another request, and before this
+        #: flag existed it kept reporting alive while every call waited out
+        #: the full 30 s timeout. The orchestrator reuses clients gated on
+        #: ``is_alive``, so this flag is also what makes it respawn instead.
+        self._reader_dead: bool = False
 
     @property
     def is_alive(self) -> bool:
@@ -146,6 +154,7 @@ class LSPClient:
             self._process is not None
             and self._process.returncode is None
             and self._initialized
+            and not self._reader_dead
         )
 
     # -- lifecycle ------------------------------------------------
@@ -160,6 +169,12 @@ class LSPClient:
             cwd=str(self.project_root),
         )
         self._reader_task = asyncio.create_task(self._reader_loop())
+        # Every language server logs to stderr. A PIPE nobody reads fills at
+        # 64 KiB and blocks the server mid-write — it stops answering stdout
+        # too, so every later LSP call waits out the full 30 s timeout while
+        # the process still looks alive. Drain it continuously; the lines are
+        # the server's own diagnostics, so keep them in our log at debug.
+        self._stderr_task = asyncio.create_task(self._stderr_loop())
 
         root_uri = _path_to_uri(self.project_root)
         result = await self._send_request("initialize", {
@@ -216,6 +231,13 @@ class LSPClient:
             self._reader_task.cancel()
             try:
                 await self._reader_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
             except asyncio.CancelledError:
                 pass
 
@@ -402,6 +424,33 @@ class LSPClient:
         header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
         self._process.stdin.write(header + body)
 
+    async def _stderr_loop(self) -> None:
+        """Drain the server's stderr so its 64 KiB pipe buffer never fills.
+
+        A language server that blocks writing to a full stderr pipe stops
+        reading stdin and stops answering on stdout — an undrained PIPE turns
+        a chatty server into a dead one. Lines are logged at debug: they are
+        the server's own diagnostics, useful when an LSP call misbehaves.
+        """
+        assert self._process is not None
+        stream = self._process.stderr
+        if stream is None:
+            return
+        try:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    return  # EOF — server exited
+                log.debug(
+                    "LSP stderr (%s): %s",
+                    self.server_def.language_id,
+                    line.decode("utf-8", errors="replace").rstrip(),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.debug("LSP stderr drain ended", exc_info=True)
+
     async def _reader_loop(self) -> None:
         """Read and dispatch messages from the server's stdout."""
         assert self._process and self._process.stdout
@@ -448,16 +497,34 @@ class LSPClient:
                         "jsonrpc": "2.0", "id": msg["id"], "result": None,
                     })
         except asyncio.CancelledError:
-            return
+            raise
         except asyncio.IncompleteReadError:
-            log.debug("LSP reader: server closed stdout")
+            log.warning(
+                "LSP reader (%s): server closed stdout mid-frame",
+                self.server_def.language_id,
+            )
         except Exception:
-            log.debug("LSP reader loop error", exc_info=True)
+            log.warning(
+                "LSP reader (%s): loop died — client marked not-alive",
+                self.server_def.language_id, exc_info=True,
+            )
         finally:
-            # Cancel all pending futures
+            # The reader is gone: no response can ever arrive again. Mark the
+            # client dead so is_alive is False (the orchestrator will respawn
+            # instead of reusing a corpse), and fail every waiter with an
+            # LSPError they can catch. cancel() was the old behaviour and it
+            # leaked CancelledError — a BaseException — through the callers'
+            # `except Exception` handlers and aborted the whole user turn.
+            # A deliberate stop() cancels the TASK; CancelledError re-raises
+            # through here (finally still runs), leaving the dying client
+            # marked dead and its waiters holding a catchable LSPError —
+            # correct, because the client is going away either way.
+            self._reader_dead = True
             for future in self._pending.values():
                 if not future.done():
-                    future.cancel()
+                    future.set_exception(
+                        LSPError({"message": "LSP server connection lost"}),
+                    )
             self._pending.clear()
 
     def _handle_notification(self, method: str, params: dict) -> None:

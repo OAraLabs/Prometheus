@@ -415,3 +415,144 @@ async def test_client_server_request_gets_null_reply(server_def, mock_process, t
         if b'"id": 99' in data or b'"id":99' in data:
             assert b'"result": null' in data or b'"result":null' in data
             break
+
+
+# ------------------------------------------------------------------
+# P8.8 — stderr is drained, never fills its 64 KiB pipe buffer
+# ------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stderr_loop_drains_every_line(server_def, mock_process, tmp_path):
+    """A chatty server's stderr is fully consumed by _stderr_loop.
+
+    The defect: stderr was piped with no reader, so the OS pipe buffer filled
+    at 64 KiB and blocked the server mid-write — it stopped answering stdout
+    too. Draining it line-by-line is what keeps that buffer empty. Feed well
+    over 64 KiB and assert the loop reads all of it to EOF (a blocked buffer
+    would leave the loop hung, which the await would surface as a timeout).
+    """
+    err = asyncio.StreamReader()
+    # 1500 lines x ~80 bytes = ~120 KiB, comfortably past the 64 KiB buffer.
+    for i in range(1500):
+        err.feed_data(f"[pyright] verbose diagnostic line number {i} padding padding\n".encode())
+    err.feed_eof()
+
+    client = LSPClient(server_def, tmp_path)
+    client._process = mock_process
+    client._process.stderr = err
+
+    # Must reach EOF and return — not hang on a full buffer.
+    await asyncio.wait_for(client._stderr_loop(), timeout=2.0)
+    assert err.at_eof()
+
+
+@pytest.mark.asyncio
+async def test_stderr_loop_tolerates_missing_stderr(server_def, mock_process, tmp_path):
+    """No stderr stream (DEVNULL config) is a clean no-op, not a crash."""
+    client = LSPClient(server_def, tmp_path)
+    client._process = mock_process
+    client._process.stderr = None
+    await asyncio.wait_for(client._stderr_loop(), timeout=1.0)  # returns immediately
+
+
+@pytest.mark.asyncio
+async def test_start_spawns_stderr_drain_task(server_def, mock_process, tmp_path):
+    """start() wires up _stderr_task alongside the reader task."""
+    init_response = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"capabilities": {}}}).encode()
+    header = f"Content-Length: {len(init_response)}\r\n\r\n".encode("ascii")
+
+    stdout = asyncio.StreamReader()
+    stdout.feed_data(header + init_response)
+    stderr = asyncio.StreamReader()
+    stderr.feed_eof()
+    mock_process.stdout = stdout
+    mock_process.stderr = stderr
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+        client = LSPClient(server_def, tmp_path)
+        await client.start()
+        try:
+            assert client._stderr_task is not None
+            assert not client._stderr_task.done() or stderr.at_eof()
+        finally:
+            await client.stop()
+
+
+# ------------------------------------------------------------------
+# P8.9 — a dead reader marks the client not-alive and fails waiters
+#        with a catchable LSPError, not an escaping CancelledError
+# ------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_reader_death_marks_client_not_alive(server_def, mock_process, tmp_path):
+    """When stdout hits EOF the reader is gone, so is_alive must go False.
+
+    Before the fix is_alive stayed True (it only checked process.returncode
+    and _initialized), so the orchestrator kept handing out a corpse and every
+    later call waited the full 30 s timeout.
+    """
+    stdout = asyncio.StreamReader()
+    stdout.feed_eof()  # server died
+
+    client = LSPClient(server_def, tmp_path)
+    client._process = mock_process
+    client._process.stdout = stdout
+    client._initialized = True
+    assert client.is_alive  # alive before the reader runs
+
+    client._reader_task = asyncio.create_task(client._reader_loop())
+    await client._reader_task  # runs to EOF and exits
+
+    assert not client.is_alive  # reader death is now visible
+
+
+@pytest.mark.asyncio
+async def test_pending_request_fails_with_lsperror_not_cancellederror(
+    server_def, mock_process, tmp_path,
+):
+    """A waiter in flight when the reader dies gets LSPError, catchable.
+
+    The old code called future.cancel(), so the awaiter saw CancelledError —
+    a BaseException that sails through the `except Exception` handlers up the
+    stack and aborts the user's whole turn. It must be an LSPError now.
+    """
+    stdout = asyncio.StreamReader()  # stays open, no response fed yet
+
+    client = LSPClient(server_def, tmp_path)
+    client._process = mock_process
+    client._process.stdout = stdout
+    client._reader_task = asyncio.create_task(client._reader_loop())
+
+    waiter = asyncio.create_task(client._send_request("textDocument/hover", {}))
+    await asyncio.sleep(0)  # let the request register in _pending
+
+    stdout.feed_eof()  # kill the reader while the request is outstanding
+    await client._reader_task
+
+    with pytest.raises(LSPError, match="connection lost"):
+        await waiter
+
+
+@pytest.mark.asyncio
+async def test_malformed_frame_marks_dead_and_does_not_leak_cancel(
+    server_def, mock_process, tmp_path,
+):
+    """A frame that breaks the parser exits the loop loudly, is_alive False,
+    and any pending waiter receives a catchable LSPError."""
+    stdout = asyncio.StreamReader()
+    client = LSPClient(server_def, tmp_path)
+    client._process = mock_process
+    client._process.stdout = stdout
+    client._reader_task = asyncio.create_task(client._reader_loop())
+
+    waiter = asyncio.create_task(client._send_request("initialize", {}))
+    await asyncio.sleep(0)
+
+    # A header that readexactly cannot satisfy -> IncompleteReadError path.
+    stdout.feed_data(b"Content-Length: 9999\r\n\r\n")
+    stdout.feed_eof()
+    await client._reader_task
+
+    assert not client.is_alive
+    with pytest.raises(LSPError):
+        await waiter
