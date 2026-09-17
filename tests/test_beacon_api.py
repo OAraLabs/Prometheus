@@ -281,6 +281,76 @@ class TestWebSocketBridgeEventRouting:
     async def _noop(self):
         pass
 
+    @pytest.mark.asyncio
+    async def test_task_lifecycle_signals_become_typed_events(self):
+        """task_completed/task_failed are promoted out of the generic sentinel_signal.
+
+        This is the half that was missing (audit P9.7 / Beacon#128): the manager emitted these
+        kinds and Beacon listened for exactly these type names, but with no entry in _on_signal's
+        promotion chain the frame left as ``sentinel_signal`` with the kind nested in
+        ``payload.kind`` — so Beacon's ``maybeNotifyTask`` gate matched nothing and the background
+        -task notification + Mission Control ticker had never fired. Each repo's own tests passed
+        while the feature did nothing, which is why the promotion itself needs pinning here.
+
+        The assertion that does the work is ``type == kind`` AND that it is NOT the default
+        ``sentinel_signal`` — the latter is what fails if this elif is removed, so the test pins the
+        fix rather than merely exercising the path.
+        """
+        from prometheus.web.ws_server import WebSocketBridge
+
+        for kind, status in (("task_completed", "completed"), ("task_failed", "failed")):
+            captured: list[dict] = []
+            bridge = WebSocketBridge()
+
+            async def fake_broadcast(event):
+                captured.append(event)
+
+            bridge.broadcast = fake_broadcast
+
+            signal = MagicMock()
+            signal.kind = kind
+            signal.payload = {"task_id": "abc123", "status": status, "description": "build the thing"}
+            signal.timestamp = 100.0
+            signal.source = "task_supervisor"
+
+            await bridge._on_signal(signal)
+            assert len(captured) == 1
+            assert captured[0]["type"] == kind, f"{kind} must be promoted to a first-class type"
+            assert captured[0]["type"] != "sentinel_signal", (
+                f"{kind} left as the generic sentinel_signal — Beacon's gate on ev.type would miss it"
+            )
+            assert captured[0]["payload"]["task_id"] == "abc123"
+
+    @pytest.mark.asyncio
+    async def test_unpromoted_signal_still_wraps_as_sentinel_signal(self):
+        """The refusal direction: a kind with NO promotion entry still leaves nested, unchanged.
+
+        Without this, a change that promoted EVERYTHING (event["type"] = signal.kind
+        unconditionally) would pass the test above while breaking every consumer that legitimately
+        reads sentinel_signal — the activity feed's categorize() buckets sentinel_*/dream_*/skill_*
+        as 'signal'. One arbitrary unlisted kind pins that the default path is intact.
+        """
+        from prometheus.web.ws_server import WebSocketBridge
+
+        captured: list[dict] = []
+        bridge = WebSocketBridge()
+
+        async def fake_broadcast(event):
+            captured.append(event)
+
+        bridge.broadcast = fake_broadcast
+
+        signal = MagicMock()
+        signal.kind = "idle_start"  # a real bus kind that is deliberately NOT promoted
+        signal.payload = {"foo": "bar"}
+        signal.timestamp = 100.0
+        signal.source = "sentinel"
+
+        await bridge._on_signal(signal)
+        assert captured[0]["type"] == "sentinel_signal"
+        assert captured[0]["payload"]["kind"] == "idle_start"
+        assert captured[0]["payload"]["payload"] == {"foo": "bar"}
+
 
 # ---------------------------------------------------------------------------
 # Static frontend mounted by the launcher
