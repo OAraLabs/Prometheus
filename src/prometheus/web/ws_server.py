@@ -1574,6 +1574,28 @@ class WebSocketBridge:
         elif signal.kind in ("coding_round", "coding_complete", "coding_stream_error"):
             event["type"] = signal.kind
             event["payload"] = signal.payload
+        # Background-task lifecycle (audit P9.7 / Beacon#128). The manager HAS emitted these since
+        # the managed-tasks sprint (tasks/manager.py::_emit_completion), and Beacon has listened for
+        # both names the whole time (main/index.ts::maybeNotifyTask gates on exactly these; the
+        # Mission Control ticker branches on `type === 'task_failed'`). But without an entry here the
+        # frame left as the generic `sentinel_signal` with the kind nested in `payload.kind`, so
+        # Beacon's gate matched nothing and the path had NEVER fired — for any real frame, ever.
+        #
+        # That silence is why this needs a test rather than a comment: an empty ticker reads as "no
+        # tasks running", which is a plausible state, so nothing downstream ever complained. Each
+        # repo's tests passed while the feature did nothing — Beacon's could assert the handler's
+        # behaviour GIVEN a task_completed frame, and ours could assert the manager emits the signal,
+        # and neither could see the missing promotion between them (RECURRING §4h: verify the
+        # consumed layer, not the changed one).
+        #
+        # Promoting here is safe for the in-process consumers, and that is worth stating because it
+        # is the part that is easy to get wrong: tasks/completion_handler.py and
+        # coding/livestream.py subscribe to the SignalBus BY KIND, which is upstream of this method.
+        # This only renames the frame handed to WS clients, so re-engagement and the coding
+        # livestream are untouched.
+        elif signal.kind in ("task_completed", "task_failed"):
+            event["type"] = signal.kind
+            event["payload"] = signal.payload
 
         await self.broadcast(event)
 
