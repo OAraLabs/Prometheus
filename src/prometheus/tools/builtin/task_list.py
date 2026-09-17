@@ -13,7 +13,7 @@ class TaskListToolInput(BaseModel):
 
     status: str | None = Field(
         default=None,
-        description="Optional status filter: running, completed, failed, killed.",
+        description="Optional status filter: running, completed, failed, killed, blocked.",
     )
 
 

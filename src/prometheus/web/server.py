@@ -4809,8 +4809,10 @@ def create_app(
             )
         except Exception as exc:
             return JSONResponse(status_code=500, content={"error": str(exc)})
-        if record.status == "failed":
-            # SecurityGate rejected the command at registration — surface it.
+        if record.status in ("blocked", "failed"):
+            # SecurityGate refused the command at registration ("blocked"), or the
+            # launch did not take ("failed"). Either way no run exists to stream,
+            # so this must not return a task_id the client will poll forever.
             return JSONResponse(status_code=400, content={
                 "error": record.error or "task rejected at registration"
             })

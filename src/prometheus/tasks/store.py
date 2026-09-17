@@ -13,12 +13,15 @@ mirrors the Kanban + LCM stores. Single-operator, low-traffic.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 from prometheus.config.paths import get_tasks_db_path
 from prometheus.tasks.types import TaskRecord, TaskStatus
+
+_log = logging.getLogger(__name__)
 
 # TaskRecord fields persisted as TEXT-JSON (everything else maps to a column).
 _JSON_FIELDS = ("metadata", "spec")
@@ -32,6 +35,7 @@ class TaskStore:
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._apply_schema()
+        self._backfill_blocked_status()
 
     def _apply_schema(self) -> None:
         self._conn.executescript(
@@ -66,6 +70,38 @@ class TaskStore:
             """
         )
         self._conn.commit()
+
+    def _backfill_blocked_status(self) -> None:
+        """Re-label rows a SecurityGate refusal wrote as ``failed`` before #489.
+
+        The tally an operator reads ("N failed") is LIFETIME, so shipping the new
+        status forward-only would leave every historical refusal still counted as
+        breakage — the exact harm this fixes. These rows are recoverable because
+        the reason was already stored: ``_vet_command`` is the only writer of an
+        ``error`` beginning ``"blocked: "`` (its two return statements are the
+        only sources in ``src/``), so the match is exact, not a guess.
+
+        This is the string-matching inference #489 objects to, used once, in the
+        one place it is sound: a migration reads messages written by code that
+        already shipped, so it cannot rot the way a *runtime* inference does —
+        which is the whole reason the status column now carries the state instead.
+
+        Idempotent: after the first run no row matches. Best-effort — a store that
+        cannot relabel history is still a usable store.
+        """
+        try:
+            cur = self._conn.execute(
+                "UPDATE tasks SET status = 'blocked' "
+                "WHERE status = 'failed' AND error LIKE 'blocked: %'"
+            )
+            self._conn.commit()
+            if cur.rowcount:
+                _log.info(
+                    "TaskStore: relabelled %d gate-refused task(s) failed -> blocked",
+                    cur.rowcount,
+                )
+        except Exception:
+            _log.warning("TaskStore: blocked-status backfill failed", exc_info=True)
 
     # ── CRUD ───────────────────────────────────────────────────────────
 
