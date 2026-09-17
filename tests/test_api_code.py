@@ -31,7 +31,17 @@ class _StubManager:
 
     def _record(self, status: str, error: str | None = None) -> TaskRecord:
         out = self._tmp / "task-output.log"
-        out.write_text('{"status": "success", "branch": "coding/x"}')
+        # A realistic report: acceptance_exit/diff_stat/sandbox_root are REQUIRED fields on
+        # CodingRunReport (no defaults), so every real run prints them. parse_coding_report keys on
+        # those markers to tell the report apart from other JSON a subprocess prints — a stub
+        # without them would be testing against a shape that never occurs.
+        out.write_text(_json.dumps({
+            "status": "success",
+            "branch": "coding/x",
+            "acceptance_exit": 0,
+            "diff_stat": " src/a.py | 2 +-",
+            "sandbox_root": "/tmp/sandbox/a12345678",
+        }))
         rec = TaskRecord(
             id="a12345678",
             type="local_agent",
@@ -140,6 +150,178 @@ def test_status_read_includes_output_tail(monkeypatch, tmp_path, repo):
     assert body["status"] == "running"
     assert '"branch": "coding/x"' in body["output_tail"]
     assert c.get("/api/code/nope").status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# The report is returned as its own field — Beacon#130 / audit P9.10
+# --------------------------------------------------------------------------- #
+
+
+def test_report_field_parsed_from_full_output(monkeypatch, tmp_path, repo):
+    """`report` arrives pre-parsed, so a client never digs it out of a tail.
+
+    The stub's output is a valid report-shaped object; the endpoint must return
+    it structured. Without parse_coding_report wired in, `report` would not be
+    in the body at all and this fails on the KeyError below.
+    """
+    mgr = _StubManager(tmp_path)
+    c = _client_with(monkeypatch, mgr)
+    c.post("/api/code", json={
+        "repo": str(repo), "description": "x", "acceptance_command": "y",
+    })
+    body = c.get("/api/code/a12345678").json()
+    assert body["report"]["status"] == "success"
+    assert body["report"]["branch"] == "coding/x"
+    # output_tail is still there and still a tail — additive, nothing lost.
+    assert '"branch": "coding/x"' in body["output_tail"]
+
+
+def test_report_larger_than_the_tail_still_arrives(monkeypatch, tmp_path, repo):
+    """THE BUG. A report bigger than the 4000-byte tail used to be unrecoverable.
+
+    The endpoint sliced `output[-4_000:]`, and the report is the LAST JSON
+    object — so a report larger than the cap started mid-object, no client-side
+    parser could recover it, and a FINISHED run rendered as "No report". This is
+    reachable, not theoretical: `acceptance_output_tail` is capped at 3000 chars
+    and `diff_stat` is uncapped (one line per changed file), so a run touching
+    many files overflows 4000.
+
+    Measured against 124 real task logs before writing this: the largest report
+    was 2.1 KB, so the ceiling had not been hit in practice — which is exactly
+    why it needed a structural fix rather than a bigger constant.
+
+    Asserts BOTH halves: the report arrives whole, AND the tail genuinely does
+    not contain it (so the test would fail if someone "fixed" it by raising the
+    cap instead of parsing the full output).
+    """
+    big_report = {
+        "task_id": "a12345678",
+        "status": "success",
+        "reason": "acceptance command exited 0",
+        "rounds_used": 7,
+        "episodes": 2,
+        "wall_seconds": 210.5,
+        "acceptance_exit": 0,
+        # 3000 is the producer's own cap (_finalize), so this is a realistic shape.
+        "acceptance_output_tail": "z" * 3000,
+        "branch": "coding/feature-x",
+        # Uncapped in the producer: one line per changed file. 400 files is an
+        # ordinary refactor and is what pushes the report past the tail.
+        "diff_stat": "\n".join(f" src/module_{i}.py | {i} +-" for i in range(400)),
+        "sandbox_root": "/tmp/sandbox/a12345678",
+    }
+    blob = _json.dumps(big_report)
+    assert len(blob) > 4000, f"test premise: report must exceed the tail (got {len(blob)})"
+
+    class _BigReportManager(_StubManager):
+        def _record(self, status, error=None):
+            rec = super()._record(status, error)
+            # Log noise first, then the report LAST — the real output shape.
+            rec.output_file.write_text("round 1 output\n" * 400 + blob + "\n")
+            return rec
+
+    mgr = _BigReportManager(tmp_path)
+    c = _client_with(monkeypatch, mgr)
+    c.post("/api/code", json={
+        "repo": str(repo), "description": "x", "acceptance_command": "y",
+    })
+    body = c.get("/api/code/a12345678").json()
+
+    # The whole report, parsed server-side from the FULL output.
+    assert body["report"]["status"] == "success"
+    assert body["report"]["rounds_used"] == 7
+    assert body["report"]["diff_stat"] == big_report["diff_stat"]
+    assert body["report"]["acceptance_output_tail"] == "z" * 3000
+
+    # And the tail does NOT contain the report — proving the old client-side
+    # path was genuinely broken here, and that raising the cap was not the fix.
+    # Precisely: the tail holds the report's LAST 4000 bytes (so its trailing
+    # keys — sandbox_root, the end of diff_stat — are visible), but NOT its
+    # opening brace or leading keys. A fragment with no opening brace is
+    # unparseable by construction, which is what made the finished run render as
+    # "No report".
+    assert len(body["output_tail"]) == 4000
+    assert not body["output_tail"].lstrip().startswith("{")
+    for leading_key in ("task_id", "status", "rounds_used", "acceptance_output_tail"):
+        assert f'"{leading_key}"' not in body["output_tail"], (
+            f"{leading_key} leaked into the tail — the report would be smaller than the cap "
+            f"and this test would not be exercising the overflow case"
+        )
+    # The fragment the tail DOES hold is not valid JSON on its own.
+    with pytest.raises(ValueError):
+        _json.loads(body["output_tail"])
+
+
+def test_report_is_null_when_no_report_printed_yet(monkeypatch, tmp_path, repo):
+    """A run still in progress has no report — null, not a fabricated object.
+
+    This is the state the client previously could not distinguish from a
+    truncated report (both rendered "No report"). Now: null means "not printed
+    yet", a present object means "here it is".
+    """
+    class _NoReportManager(_StubManager):
+        def _record(self, status, error=None):
+            rec = super()._record(status, error)
+            rec.output_file.write_text("cloning repo...\nround 1: thinking\n")
+            return rec
+
+    mgr = _NoReportManager(tmp_path)
+    c = _client_with(monkeypatch, mgr)
+    c.post("/api/code", json={
+        "repo": str(repo), "description": "x", "acceptance_command": "y",
+    })
+    body = c.get("/api/code/a12345678").json()
+    assert body["report"] is None
+    # The tail still carries the diagnostic end of the log.
+    assert "round 1: thinking" in body["output_tail"]
+
+
+def test_report_not_confused_by_other_json_in_output(monkeypatch, tmp_path, repo):
+    """Only a report-shaped object is returned — not any JSON the run printed.
+
+    A subprocess prints plenty of JSON (tool results, pytest --json, a config
+    dump). Returning the last one of those as "the report" would be worse than
+    returning null, because it would render as a finished run with invented
+    fields. The markers + a required `status` are what prevent it.
+    """
+    class _DecoyManager(_StubManager):
+        def _record(self, status, error=None):
+            rec = super()._record(status, error)
+            rec.output_file.write_text(
+                '{"status": "ok", "unrelated": true}\n'          # has status, no markers
+                '[{"status": "passed"}]\n'                        # array, not object
+                '{"tool": "bash", "output": "{not json"}\n'       # tool result with braces
+                "Traceback (most recent call last):\n  File x\n"  # a traceback, the common tail
+            )
+            return rec
+
+    mgr = _DecoyManager(tmp_path)
+    c = _client_with(monkeypatch, mgr)
+    c.post("/api/code", json={
+        "repo": str(repo), "description": "x", "acceptance_command": "y",
+    })
+    body = c.get("/api/code/a12345678").json()
+    assert body["report"] is None, "a JSON object with a status but no report markers is not the report"
+
+
+def test_report_missing_output_file_is_null_not_500(monkeypatch, tmp_path, repo):
+    """An unreadable output file degrades to report:null + empty tail, never a 500.
+
+    The old code wrapped the read in `except OSError: pass` for exactly this
+    reason; the parse must inherit that rather than reintroduce the failure.
+    """
+    mgr = _StubManager(tmp_path)
+    c = _client_with(monkeypatch, mgr)
+    c.post("/api/code", json={
+        "repo": str(repo), "description": "x", "acceptance_command": "y",
+    })
+    rec = mgr.get_task("a12345678")
+    rec.output_file.unlink()  # gone between launch and read
+    r = c.get("/api/code/a12345678")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["report"] is None
+    assert body["output_tail"] == ""
 
 
 # --------------------------------------------------------------------------- #
