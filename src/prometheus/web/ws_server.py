@@ -928,6 +928,28 @@ class WebSocketBridge:
             turn_index = session.add_user_message(content)
         row_id = session.last_persisted_row_id()
 
+        # Record the correlation id against the durable rowid (audit P9.6 / Beacon#144). Both halves
+        # are in hand exactly here and nowhere else: the id came in on the request, the rowid came
+        # out of the persist. Without it, a client that MISSES the WS echo below -- a socket drop
+        # between the send returning 200 and the echo, or a client restart in that window -- can
+        # never retire its optimistic row: reconcile inserts the confirmed row under str(row_id), a
+        # different primary key, so both persist and the duplicate renders forever. Returning it on
+        # GET history lets the client do that retirement deterministically.
+        #
+        # Best-effort, like every other write on this path: a failure costs a stranded-row cleanup,
+        # never the user's turn. The store is reached the same duck-typed way as the title writer,
+        # because a session fake may have no lcm_engine at all.
+        #
+        # NOT in run_turn_awaited, which also persists a user turn and also has a row_id: that
+        # method takes no client_msg_id, so there is nothing to correlate. This block belongs only
+        # where a client id actually arrived.
+        try:
+            _store = getattr(getattr(session, "lcm_engine", None), "conversation_store", None)
+            if _store is not None and client_msg_id and row_id is not None:
+                _store.set_message_client_id(session_id, row_id, client_msg_id)
+        except Exception:
+            logger.debug("client_msg_id correlation write failed", exc_info=True)
+
         # Broadcast the user message. message_id is the durable, restart-stable LCM rowid
         # — the SAME canonical id GET /api/sessions/{id}/messages reports — so a client can
         # correlate its optimistic client_msg_id to the real row. ordinal (turn_index) is a

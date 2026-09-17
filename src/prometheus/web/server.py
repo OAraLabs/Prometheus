@@ -1270,6 +1270,15 @@ def create_app(
             has_more = len(parts) > cap
             if has_more:
                 parts = parts[:cap]
+        # Correlation ids for optimistic client rows (audit P9.6 / Beacon#144), fetched in ONE
+        # query for the whole page rather than one per row — history is paginated and a per-message
+        # lookup would turn a single read into N. Empty dict when unwired or nothing recorded, so
+        # the field below is simply omitted and older clients see a byte-identical response.
+        try:
+            client_ids = store.get_message_client_ids(session_id)
+        except Exception:
+            logger.debug("client_msg_id lookup failed", exc_info=True)
+            client_ids = {}
         messages = [
             {
                 "message_id": p.row_id,
@@ -1278,6 +1287,11 @@ def create_app(
                 "role": p.role,
                 "content": p.content,
                 "content_json": p.content_json,
+                # Omitted, not null, when this row has no id — same omit-don't-null contract as
+                # row_id on chat_done, so an older client's decoder is unchanged and a newer one
+                # can tell "no id recorded" from "id is the empty string" (which is never stored).
+                **({"client_msg_id": client_ids[p.row_id]}
+                   if client_ids.get(p.row_id) else {}),
                 # Who actually originated this turn. ``role`` alone cannot say:
                 # the runtime injects several user-ROLE turns that no human
                 # typed (file-mutation-verifier summaries, periodic nudges,
