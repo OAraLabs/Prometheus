@@ -132,6 +132,28 @@ def _build_openai_messages(
                 )
 
         if msg.role == "assistant":
+            if image_parts:
+                # This branch reads text_parts and tool_calls and NOTHING ELSE, so
+                # an ImageBlock on an assistant turn was collected above and then
+                # dropped on the floor — silently, and only on the assistant path:
+                # both other branches hand image_parts to _user_content.
+                #
+                # Latent today (uploads attach to a USER turn — ws_server.py), which
+                # is why nothing caught it. It is still the exact shape this module
+                # raises for everywhere else, and the reason given there applies
+                # unchanged: "A picture silently dropped on the way to the model is
+                # the failure shape this sprint exists to remove."
+                #
+                # Raising rather than dropping is also the honest answer to the wire
+                # format: the OpenAI shape accepts image parts on user messages only,
+                # so there is no assistant entry that could carry this. A caller that
+                # means to send it must move it to a user turn.
+                raise UnsupportedContentBlock(
+                    f"{len(image_parts)} image block(s) on an ASSISTANT message have "
+                    "no OpenAI-compatible wire shape (image parts ride user messages "
+                    "only). Carry the picture on a user turn rather than letting it "
+                    "be dropped here."
+                )
             entry: dict[str, Any] = {"role": "assistant"}
             if text_parts:
                 entry["content"] = " ".join(text_parts)

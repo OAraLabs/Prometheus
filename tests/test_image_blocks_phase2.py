@@ -176,3 +176,94 @@ def test_no_openai_compat_preset_declares_vision_without_evidence():
 
     declared = {k for k, v in OVERRIDE_PRESETS.items() if v.get("vision")}
     assert declared == {"claude"}, f"undocumented vision declarations: {declared - {'claude'}}"
+
+
+# ── 2d: the assistant branch, which read neither image_parts nor raised ─────
+#
+# Found while reading this builder for #355 (an unrelated media-marker 400). Not
+# that bug — noted here so the provenance is not mistaken for a diagnosis.
+
+def _assistant_turn_with_a_picture() -> ApiMessageRequest:
+    return ApiMessageRequest(
+        model="m",
+        messages=[
+            ConversationMessage(
+                role="assistant",
+                content=[
+                    TextBlock(text="here is what I found"),
+                    ImageBlock(
+                        media_type="image/png",
+                        data=PNG_B64,
+                        source_path="/cache/from-an-assistant.png",
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+def test_an_image_on_an_assistant_turn_raises_instead_of_vanishing():
+    """The assistant branch read text_parts and tool_calls and nothing else.
+
+    So an ImageBlock on an assistant message was collected into `image_parts` and
+    then never read — dropped on the floor, and ONLY on this path: the user and
+    tool-result branches both hand `image_parts` to `_user_content`.
+
+    Latent today, because uploads attach to a USER turn (`ws_server.py`), which is
+    why nothing caught it. It is still the exact shape 2b tests hardest everywhere
+    else, and the reason given there applies unchanged.
+    """
+    with pytest.raises(UnsupportedContentBlock) as exc:
+        _build_openai_messages(_assistant_turn_with_a_picture(), allow_images=True)
+
+    # The operator has to be able to act on it: which turn, and what to do.
+    assert "ASSISTANT" in str(exc.value)
+    assert "user messages only" in str(exc.value)
+
+
+def test_the_assistant_image_can_never_become_a_clean_looking_output():
+    """Pin the FAILURE the raise replaces, not just the raise.
+
+    Written the way 2b's mislabelling test is: if a future change stops raising,
+    the wrong-shaped output must still be impossible to produce. A message that
+    serialises without error and without the picture is the silent drop — it looks
+    entirely healthy, which is what makes it expensive.
+    """
+    try:
+        out = _build_openai_messages(_assistant_turn_with_a_picture(), allow_images=True)
+    except UnsupportedContentBlock:
+        return
+
+    serialised = repr(out)
+    assert PNG_B64 in serialised, (
+        f"the assistant turn serialised cleanly and the picture is gone: {out}"
+    )
+
+
+def test_a_user_turn_with_the_same_picture_still_carries_it():
+    """The other direction — the guard must not become a ban on images.
+
+    Without this, 'raise on every ImageBlock' would satisfy the two tests above
+    and break the capability 2b exists to deliver.
+    """
+    req = ApiMessageRequest(
+        model="m",
+        messages=[
+            ConversationMessage(
+                role="user",
+                content=[
+                    TextBlock(text="what is this?"),
+                    ImageBlock(
+                        media_type="image/png",
+                        data=PNG_B64,
+                        source_path="/cache/from-a-user.png",
+                    ),
+                ],
+            )
+        ],
+    )
+    out = _build_openai_messages(req, allow_images=True)
+    assert len(out) == 1 and out[0]["role"] == "user"
+    kinds = [part["type"] for part in out[0]["content"]]
+    assert kinds == ["text", "image_url"]
+    assert PNG_B64 in out[0]["content"][1]["image_url"]["url"]
