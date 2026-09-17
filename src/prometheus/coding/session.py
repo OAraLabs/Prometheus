@@ -20,6 +20,7 @@ output. Never merges, never pushes.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -477,3 +478,76 @@ class CodingSession:
             self._policy.rounds_used, episodes, wall,
         )
         return report
+
+
+# ---------------------------------------------------------------------------
+# Report recovery from a run's output (audit P9.7 follow-up / Beacon#130)
+# ---------------------------------------------------------------------------
+
+#: Fields that only a :class:`CodingRunReport` carries. Used to tell the real
+#: report apart from any other JSON object a subprocess may have printed.
+_REPORT_MARKERS = ("acceptance_exit", "sandbox_root", "diff_stat")
+
+#: How many bytes from the END of a run's output to scan for its report. See parse_coding_report.
+_REPORT_SCAN_BYTES = 256 * 1024
+
+
+def parse_coding_report(output: str) -> dict[str, Any] | None:
+    """Extract the run's report JSON from its captured stdout, or None.
+
+    WHY THIS EXISTS. ``GET /api/code/{task_id}`` returned ``output[-4_000:]`` and
+    left the client to dig the report out of that tail. The report is the LAST
+    JSON object in the output — but the cap slices from the FRONT, so any report
+    larger than 4000 bytes begins mid-object and no client-side parser can
+    recover it. That is reachable, not theoretical: ``acceptance_output_tail`` is
+    capped at 3000 chars (see ``_finalize``) and ``diff_stat`` is UNCAPPED (one
+    line per changed file), so a run touching many files exceeds the cap. The
+    client then shows "No report" for a run that finished and printed one.
+
+    Reading the whole file server-side and returning the parsed object removes
+    the size dependency entirely — the tail stops being a transport for
+    structured data and goes back to being a diagnostic tail.
+
+    Scans BACKWARDS: the report is the last JSON object, so a reverse walk over
+    ``{`` positions finds it immediately and stops. That matters because output
+    files are not bounded by anything here — a 34 MB one exists on disk — and a
+    forward scan would be quadratic on it.
+
+    ``json.JSONDecoder.raw_decode`` is used rather than brace-matching because
+    the report's ``acceptance_output_tail`` and ``diff_stat`` routinely contain
+    braces, quotes and newlines; only a real JSON parser can tell where the
+    object ends. A candidate that fails to parse is skipped, not an error.
+
+    Returns the parsed dict, or None when no report-shaped object is present
+    (a run still in progress, or one killed before it printed).
+    """
+    if not output:
+        return None
+    # Bounded scan window, measured from the END. The report is the last JSON object, so only the
+    # file's tail can contain it — and its own fields are bounded upstream (acceptance_output_tail
+    # is capped at 3000 chars in _finalize; the rest are scalars plus diff_stat, one line per
+    # changed file). 256 KiB is ~80x the largest report observed on disk (2.1 KB across 124 real
+    # task logs) and still 64x the old 4000-byte tail, so this is not a re-introduction of the
+    # ceiling that caused the bug — it is a bound on how much of an UNBOUNDED log we scan.
+    # Measured: an unbounded reverse scan of a 34 MB output file took 865 ms inside an async route;
+    # bounded, it is sub-millisecond, and the answer is identical.
+    window = output[-_REPORT_SCAN_BYTES:] if len(output) > _REPORT_SCAN_BYTES else output
+    decoder = json.JSONDecoder()
+    # Reverse over '{' positions; the first candidate that parses AND looks like
+    # a report is the one (they are emitted once, at the end).
+    for start in range(len(window) - 1, -1, -1):
+        if window[start] != "{":
+            continue
+        try:
+            obj, _end = decoder.raw_decode(window, start)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        status = obj.get("status")
+        if not isinstance(status, str) or not status:
+            continue
+        if not any(marker in obj for marker in _REPORT_MARKERS):
+            continue
+        return obj
+    return None

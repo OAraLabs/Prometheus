@@ -4852,18 +4852,27 @@ def create_app(
 
     @app.get("/api/code/{task_id}")
     async def get_coding_run(task_id: str):
+        from prometheus.coding.session import parse_coding_report
         from prometheus.tasks.manager import get_task_manager
 
         record = get_task_manager().get_task(task_id)
         if record is None:
             return JSONResponse(status_code=404, content={"error": "no such task"})
-        output_tail = ""
+        output = ""
         try:
-            output_tail = record.output_file.read_text(
-                encoding="utf-8", errors="replace"
-            )[-4_000:]
+            output = record.output_file.read_text(encoding="utf-8", errors="replace")
         except OSError:
             pass
+        # The report is parsed server-side from the FULL output and returned as its own field
+        # (Beacon#130 / audit P9.10). It used to be recoverable only from output_tail, but the
+        # tail slices the file's last 4000 bytes while the report is its LAST JSON OBJECT — so any
+        # report larger than the cap began mid-object and no client could parse it. That is
+        # reachable: acceptance_output_tail is capped at 3000 and diff_stat is uncapped, so a run
+        # touching many files overflows. A finished run then rendered as "No report".
+        report = parse_coding_report(output)
+        # output_tail stays, and stays a TAIL: it is the diagnostic end of the log (tracebacks,
+        # the last tool output), not a transport for structured data. Nothing that read it before
+        # loses anything — this is purely additive.
         return {
             "task_id": record.id,
             "status": record.status,
@@ -4873,7 +4882,8 @@ def create_app(
             "ended_at": record.ended_at,
             "return_code": record.return_code,
             "error": record.error,
-            "output_tail": output_tail,
+            "report": report,
+            "output_tail": output[-4_000:],
         }
 
     @app.post("/api/code/{task_id}/stop")
