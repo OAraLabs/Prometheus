@@ -722,9 +722,65 @@ a pull-request head ref whether or not the PR merged. **So these are
 belt-and-braces, not the only copy** — except that they are the only copy a
 local reader can see without asking the remote.
 
+### 4k. The issue named a fix the code did not need
+
+**Prometheus#127** (filed against Beacon as #127, the Live-coding freeze) was
+diagnosed correctly and prescribed wrongly. The body established the real
+mechanism — `round_index` restarts at 0 every episode, so de-duping rounds on it
+alone drops episode 2's round 0 as a duplicate of episode 1's — and then said
+what to do about it:
+
+> Either the daemon includes an episode/run ordinal in the `coding_round` payload
+> and Beacon de-dupes on `(episode, roundIndex)`, or Beacon treats a
+> `round_index` that goes backwards as the start of a new episode…
+
+The daemon **already** sends that ordinal. Every `coding_round` frame carries
+`seq`, the `subsystem_runs` rowid, monotonic across the whole run — and
+`coding/livestream.py` says so in a comment beside the field: *"round_index
+restarts at 0 every EPISODE… seq is the rowid: monotonic across the whole run —
+the key a client can safely use for a round card."* The honest key was on the
+wire and the client wasn't reading it.
+
+Implementing the issue as written would have added an episode ordinal **beside**
+`seq` — a second monotonic key for the same fact. Two keys that both claim to
+order the run drift the first time one is wrong, and then nothing says which to
+believe. The fix the issue described was a regression against the fix that was
+available.
+
+What caught it was checking **both ends before writing**: the Beacon reducer that
+drops the frame, and the daemon payload that already carries the answer. Either
+end alone confirms the issue — the reducer really does collide on `round_index`,
+the daemon really does restart it — and only the two together show that the
+prescription is redundant.
+
+**An issue body is tier-0 evidence. So is a PR body.** Both are a report
+*describing* evidence, written at diagnosis time, by someone who may have read
+the code or may have inferred it from a symptom — and they carry a prescription,
+which is what makes them more dangerous than a comment. A comment misleads
+someone reading the code. An issue misleads someone **starting work**, which is
+the first move of every session, made before any code has been read. The
+prescription arrives pre-justified by a mechanism that was real, so it does not
+read as a guess to verify; it reads as the task.
+
+**The rule in one line: the issue tells you where to look, not what is true.**
+It is a pointer to a file, a line, a symptom — all of which earn their keep. The
+*shape of the fix* it proposes is a hypothesis to be checked against the code on
+both ends, exactly like a reader's first-pass reading in §4g. Read the
+prescription, then go look; do not let it become the spec. When the code already
+holds the answer the prescription reaches for, the prescription is not a
+fallback — it is the worse option, and following it adds the thing that was
+already there.
+
+This is the most actionable instance in the file because of *when* it lands. 4a–4j
+are controls that misfire mid-work; 4k fires on the first tool call of a session,
+before there is any code in context to contradict it. The defence is the same one
+the whole file keeps reaching for, pointed at the starting gun: **verify the
+named mechanism was actually operating** — here, verify the field the issue says
+to add isn't already sent, before adding it.
+
 ---
 
-### The rule the ten share
+### The rule the eleven share
 
 **Verify that the named mechanism was actually operating.** In 4a the
 setting was one API call away and nobody asked, so a guess became a standing
@@ -745,6 +801,10 @@ measured the same thing, so a host difference was read as a tree property. In
 substring pattern and a mis-resolved ref each returned a plausible answer to a
 question nobody asked — and the only thing that would have caught any of them
 was an assertion about the *shape* of the result rather than its existence.
+In 4k the issue body — tier-0 evidence, a report describing a real mechanism —
+prescribed a fix the code did not need, naming a field the daemon already sent;
+only checking both ends before writing showed the prescription was redundant,
+and following it would have added a second honest key beside the first.
 
 A control you have not seen fail is not yet known to be a control. Prefer
 the version that can produce a *distinguishable* wrong answer — a tag with
