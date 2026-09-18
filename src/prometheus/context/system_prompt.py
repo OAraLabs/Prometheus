@@ -207,7 +207,7 @@ def _format_documents_section() -> str:
         '("From Documents…").\n'
         "- When the user asks to save a drafted doc for later — a LOOP.md or "
         "TASKS.md loop contract, a sprint plan, a spec — write it with "
-        f"file_write under {loops_dir}/ (absolute path; create the "
+        f"write_file under {loops_dir}/ (absolute path; create the "
         "subdirectory if needed) so it is reachable from Beacon."
     )
 
