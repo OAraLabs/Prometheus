@@ -57,7 +57,12 @@ class TestBuiltinProfiles:
         store = ProfileStore(custom_dir=Path("/tmp/empty_profiles_dir_test"))
         research = store.get("research")
         assert research is not None
-        assert "file_write" not in (research.tools or [])
+        # write_file, not file_write: file_write is the MODULE name
+        # (tools/builtin/file_write.py), and the tool it registers is write_file. Asserting
+        # the absence of a name no profile could ever contain is a guard that guards nothing —
+        # it passed unchanged while the profile was free to include the real write tool.
+        assert "write_file" not in (research.tools or [])
+        assert "edit_file" not in (research.tools or [])
         assert "bash" not in (research.tools or [])
 
     def test_each_profile_has_description(self) -> None:

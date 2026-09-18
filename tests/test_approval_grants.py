@@ -116,7 +116,7 @@ class TestCmdGrants:
         gate.add_grant(Grant(kind="command_prefix", value="pytest",
                              tool_name="bash", scope="persistent"))
         gate.add_grant(Grant(kind="path_prefix", value="/tmp/x",
-                             tool_name="file_write", scope="until_restart"))
+                             tool_name="write_file", scope="until_restart"))
         text = cmds.cmd_grants(queue)
         assert "pytest" in text
         assert "/tmp/x" in text
@@ -139,14 +139,14 @@ class TestGrantMatching:
         assert not g.matches("bash", None, "echo hi")
 
     def test_path_prefix_resolves_traversal(self):
-        g = Grant(kind="path_prefix", value="/tmp/safe", tool_name="file_write")
-        assert g.matches("file_write", "/tmp/safe/x.txt", None)
-        assert not g.matches("file_write", "/tmp/safe/../evil.txt", None)
-        assert not g.matches("file_write", "/tmp/other.txt", None)
+        g = Grant(kind="path_prefix", value="/tmp/safe", tool_name="write_file")
+        assert g.matches("write_file", "/tmp/safe/x.txt", None)
+        assert not g.matches("write_file", "/tmp/safe/../evil.txt", None)
+        assert not g.matches("write_file", "/tmp/other.txt", None)
 
     def test_tool_kind_matches_tool_name(self):
-        g = Grant(kind="tool", value="", tool_name="file_write")
-        assert g.matches("file_write", "/anything", None)
+        g = Grant(kind="tool", value="", tool_name="write_file")
+        assert g.matches("write_file", "/anything", None)
         assert not g.matches("bash", None, "ls")
 
     def test_dedup_on_add(self):
