@@ -92,3 +92,38 @@ def test_prompt_contains_no_transposed_tool_name(tool_names: set[str]) -> None:
     assert not offenders, "the prompt names tools that do not exist: " + ", ".join(
         f"{bad!r} (did you mean {good!r}?)" for bad, good in sorted(offenders)
     )
+
+# The task-list regex Beacon's @shared/loop.ts `parseTasks` uses, transcribed. If these two ever
+# disagree the prompt teaches a format the renderer cannot read, which is the whole failure this
+# pins — and it is not hypothetical: the first real plan a model wrote under this instruction came
+# back as `1.` numbered steps and rendered as 0/0, an empty checklist indistinguishable from
+# "no plan".
+_BEACON_TASK_RE = re.compile(r"^(\s*)([-*+])\s+\[([ xX])\]\s?(.*)$")
+
+
+def test_plan_format_example_parses_as_a_beacon_task_line() -> None:
+    """The checkbox example in the prompt must actually parse as a Beacon task-list item.
+
+    Asserting the prompt merely CONTAINS the words "task-list" would pass on a malformed example.
+    This takes the backticked example out of the section and runs the renderer's own regex over it.
+    """
+    from prometheus.context.system_prompt import _format_documents_section
+
+    section = _format_documents_section()
+    examples = re.findall(r"`([^`]+)`", section)
+    task_like = [e for e in examples if _BEACON_TASK_RE.match(e)]
+    assert task_like, (
+        "no backticked example in the documents section parses as a GFM task line; the prompt "
+        f"would be teaching a format Beacon's parseTasks cannot read. Examples found: {examples!r}"
+    )
+
+
+def test_plan_format_instruction_is_present() -> None:
+    """The section must actually ask for the tickable format, not merely permit it."""
+    from prometheus.context.system_prompt import _format_documents_section
+
+    section = _format_documents_section().lower()
+    assert "task-list" in section or "task list" in section, (
+        "the documents section no longer asks for GFM task-list items; a plan saved as prose "
+        "renders as an empty checklist"
+    )
