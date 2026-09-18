@@ -208,7 +208,11 @@ def _format_documents_section() -> str:
         "- When the user asks to save a drafted doc for later — a LOOP.md or "
         "TASKS.md loop contract, a sprint plan, a spec — write it with "
         f"write_file under {loops_dir}/ (absolute path; create the "
-        "subdirectory if needed) so it is reachable from Beacon."
+        "subdirectory if needed) so it is reachable from Beacon.\n"
+        "- Write a plan's steps as GFM task-list items — `- [ ] step text` — one per "
+        "step, not a numbered list. Beacon renders those as a live checklist the user "
+        "ticks off; prose and headings around them are fine and are left alone. A plan "
+        "written as `1.` steps still saves, but arrives with nothing tickable."
     )
 
 
