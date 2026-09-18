@@ -275,7 +275,14 @@ def build_runtime_system_prompt(
     model_cfg = config.get("model", {})
     env.model_name = model_cfg.get("model", "")
     env.model_provider = model_cfg.get("provider", "")
-    static_prompt = build_system_prompt(custom_prompt=custom_prompt, env=env)
+    # Resolve the documents root the SAME way /api/documents does (config key first),
+    # so the path the model is told to write to is the path the Board actually serves.
+    _docs_root = (config.get("documents", {}) or {}).get("root")
+    static_prompt = build_system_prompt(
+        custom_prompt=custom_prompt,
+        env=env,
+        documents_root=Path(_docs_root).expanduser() if _docs_root else None,
+    )
     static_sections.append(static_prompt)
 
     # ------------------------------------------------------------------
