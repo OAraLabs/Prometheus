@@ -158,12 +158,31 @@ def apply_env_overrides(config: dict) -> dict:
         value = os.environ.get(env_var)
         if value:
             _set_nested(config, path, value)
-            # Mask secrets in log output
-            if "token" in env_var.lower() or "key" in env_var.lower():
-                masked = value[:4] + "..." + value[-4:] if len(value) > 12 else "***"
-            else:
-                masked = value
-            applied.append(f"{env_var}={masked}")
+            # NAMES ONLY — never a value, not even a fragment.
+            #
+            # This used to log `NAME=first4...last4` for anything whose NAME contained "token" or
+            # "key", and the value verbatim otherwise. Both halves were wrong.
+            #
+            # The fragment half was worse than logging nothing AND worse than logging the raw
+            # value, which reads backwards until you look at what catches secrets here:
+            # security/log_redaction.py is installed on every entry point precisely so no secret
+            # survives the logging stack, and its patterns need contiguous runs
+            # (`sk-[A-Za-z0-9_-]{16,}`, `\d{5,}:[A-Za-z0-9_-]{30,}`). An 11-character string with
+            # dots through the middle matches none of them. So the mask did not protect the value;
+            # it disguised it from the one control that would have scrubbed it, and the line then
+            # rode a coding run's output_tail onto the WS, into Beacon's activity feed, and into
+            # telemetry.db's signal_events durably. A raw value would have been caught.
+            #
+            # The other half: the predicate matched the NAME, not the secret. Of the 20 entries in
+            # ENV_OVERRIDES, 6 fell to the `else` and were logged in full — including
+            # PROMETHEUS_TRUST_LEVEL and PROMETHEUS_PERMISSION_MODE, which put the daemon's
+            # security posture on the same wire. A future PROMETHEUS_WEBHOOK_SECRET would have
+            # printed complete, because "secret" was never in the predicate.
+            #
+            # Names answer the diagnostic question completely — "which config keys did the
+            # environment override" — and match what this codebase already does on the other
+            # config wire (web/server.py::_sanitize_config emits ***REDACTED***, never fragments).
+            applied.append(env_var)
 
     if applied:
         logger.info("Applied env overrides: %s", ", ".join(applied))
