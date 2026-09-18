@@ -22,6 +22,20 @@ from prometheus.engine import loop_watchdog as _loop_watchdog
 
 logger = logging.getLogger(__name__)
 
+
+def _coding_frame_kinds() -> tuple[str, ...]:
+    """The coding tailer's own declaration of every kind it emits.
+
+    Deferred, like every other coding import in the web layer (``server.py``'s create_app does the
+    same for ``CodingLiveStream``): importing ``prometheus.coding`` runs its package ``__init__``,
+    which pulls the sandbox and the whole tool registry — ~220ms — and this module must stay
+    importable without them. By the time any signal is routed, ``create_app`` has already imported
+    ``coding.livestream``, so this is a ``sys.modules`` hit and never that cost.
+    """
+    from prometheus.coding.livestream import CODING_FRAME_KINDS
+
+    return CODING_FRAME_KINDS
+
 # Close code for an unauthenticated / failed-auth WebSocket. 4000–4999 is the
 # application-private range; 4401 mirrors HTTP 401 for "unauthorized". Beacon
 # and the static UI key their auth-failure UX off this exact code.
@@ -1588,12 +1602,19 @@ class WebSocketBridge:
         elif signal.kind == "curator_report":
             event["type"] = "curator_report"
             event["payload"] = signal.payload
-        # Coding live-stream (feat/coding-livestream): per-round progression,
-        # the terminal verdict, and a non-fatal stream-interruption marker.
-        # Same first-class-type pattern so Beacon's Live view routes them; the
-        # payload carries session_id for client-side run scoping (these, like
-        # every signal event, broadcast to all authed clients).
-        elif signal.kind in ("coding_round", "coding_complete", "coding_stream_error"):
+        # Coding live-stream (feat/coding-livestream): per-round progression, per-tool frames,
+        # the ground-truth acceptance verdict, the terminal verdict, and a non-fatal
+        # stream-interruption marker. Same first-class-type pattern so Beacon's Live view routes
+        # them; the payload carries session_id for client-side run scoping (these, like every
+        # signal event, broadcast to all authed clients).
+        #
+        # The membership test reads the EMITTER's own declaration rather than a list copied to
+        # here. This line used to name three kinds while livestream.py emitted five, so
+        # coding_acceptance and coding_tool left as generic sentinel_signal and every Beacon gate
+        # keyed on ev.type missed them — the identical defect the #494 comment below diagnoses for
+        # task_completed/task_failed, sitting one screen above it the whole time. A hardcoded list
+        # here can drift from its producer; CODING_FRAME_KINDS cannot.
+        elif signal.kind in _coding_frame_kinds():
             event["type"] = signal.kind
             event["payload"] = signal.payload
         # Background-task lifecycle (audit P9.7 / Beacon#128). The manager HAS emitted these since

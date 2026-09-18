@@ -351,6 +351,96 @@ class TestWebSocketBridgeEventRouting:
         assert captured[0]["payload"]["kind"] == "idle_start"
         assert captured[0]["payload"]["payload"] == {"foo": "bar"}
 
+    @pytest.mark.asyncio
+    async def test_every_coding_stream_kind_is_promoted(self):
+        """Every kind the coding tailer can emit leaves as its own frame type, not sentinel_signal.
+
+        The half that was missing (observed 2026-09-18, run coding:ca4c63d84): livestream.py emitted
+        five kinds while the promotion named three, so 6 ``coding_tool`` frames and 1
+        ``coding_acceptance`` frame arrived at Beacon wrapped as generic ``sentinel_signal`` with the
+        real kind nested at ``payload.kind``. Nothing errored and nothing was dropped — every client
+        gate keyed on ``ev.type`` simply matched nothing, exactly as #494 describes for
+        task_completed/task_failed one screen below.
+
+        Iterating CODING_FRAME_KINDS pins ws_server TO the emitter's declaration. It cannot, on its
+        own, notice a kind deleted from that tuple — the loop would just get shorter. That direction
+        is covered by ``test_coding_frame_kinds_matches_every_emit_site``, and the two together close
+        producer -> wire.
+        """
+        from prometheus.coding.livestream import CODING_FRAME_KINDS
+        from prometheus.web.ws_server import WebSocketBridge
+
+        assert CODING_FRAME_KINDS, "the emitter must declare at least one kind"
+        for kind in CODING_FRAME_KINDS:
+            captured: list[dict] = []
+            bridge = WebSocketBridge()
+
+            async def fake_broadcast(event):
+                captured.append(event)
+
+            bridge.broadcast = fake_broadcast
+
+            signal = MagicMock()
+            signal.kind = kind
+            # An OPAQUE payload on purpose: the promotion is a kind -> type mapping and passes the
+            # payload through untouched. Asserting a realistic shape here would invent a contract
+            # this function does not have.
+            signal.payload = {"session_id": "coding:cafe1234", "opaque": 1}
+            signal.timestamp = 100.0
+            signal.source = "coding_mode"
+
+            await bridge._on_signal(signal)
+            assert len(captured) == 1, f"{kind} produced {len(captured)} frames"
+            assert captured[0]["type"] == kind, f"{kind} must be promoted to a first-class type"
+            assert captured[0]["type"] != "sentinel_signal", (
+                f"{kind} left as generic sentinel_signal — every Beacon gate on ev.type would miss it"
+            )
+            assert captured[0]["payload"] == {"session_id": "coding:cafe1234", "opaque": 1}
+
+    def test_coding_frame_kinds_matches_every_emit_site(self):
+        """CODING_FRAME_KINDS is exactly the set of kinds livestream.py actually emits.
+
+        This is the anchor. Without it the promotion test above is satisfiable by deleting a kind
+        from the tuple: the loop shortens, every remaining kind still promotes, green. Parsing the
+        module's own ``self._emit(...)`` call sites means the tuple cannot drift from the emitter in
+        EITHER direction — a new emit that forgets to declare fails here, and a declaration whose
+        emit was removed fails here too.
+
+        AST, not grep: a literal in a comment or docstring must not count as an emit site.
+        """
+        import ast
+        from pathlib import Path
+
+        from prometheus.coding import livestream
+        from prometheus.coding.livestream import CODING_FRAME_KINDS
+
+        source = Path(livestream.__file__).read_text(encoding="utf-8")
+        emitted: set[str] = set()
+        non_literal = 0
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute) and func.attr == "_emit"):
+                continue
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                emitted.add(node.args[0].value)
+            else:
+                non_literal += 1
+
+        assert emitted, "found no self._emit(...) call sites — the AST walk is broken, not the code"
+        assert non_literal == 0, (
+            f"{non_literal} _emit call(s) pass a computed kind; this test can no longer see every "
+            "emitted kind and must be replaced rather than relaxed"
+        )
+        assert emitted == set(CODING_FRAME_KINDS), (
+            "CODING_FRAME_KINDS has drifted from livestream.py's emit sites.\n"
+            f"  emitted but not declared: {sorted(emitted - set(CODING_FRAME_KINDS))}\n"
+            f"  declared but not emitted: {sorted(set(CODING_FRAME_KINDS) - emitted)}\n"
+            "A kind that is emitted but not declared ships as generic sentinel_signal and every "
+            "client gate on ev.type silently misses it."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Static frontend mounted by the launcher
