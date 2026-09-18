@@ -5016,10 +5016,31 @@ def create_app(
             return JSONResponse(status_code=404, content={"error": "no such task"})
         report = _load_coding_report(record.output_file)
         if report is None:
-            return {"ready": False, "diff": "", "branch": None}
+            return {"ready": False, "diff": "", "branch": None, "reason": "the run has not reported yet"}
         sandbox_root = report.get("sandbox_root")
         if not isinstance(sandbox_root, str) or not sandbox_root:
             return JSONResponse(status_code=422, content={"error": "report has no sandbox_root"})
+        # No branch, no artifact — and therefore no diff to show.
+        #
+        # The diff range is HEAD~1..HEAD, which assumes _commit_artifact left an artifact commit on
+        # top of the base. A run that died BEFORE creating its branch (the report is then
+        # failed_error with a sandbox_root and no `branch`) leaves a clone sitting on the source
+        # repo's tip, so that range resolves to THE SOURCE REPO'S LAST COMMIT — somebody else's
+        # work, returned as this run's artifact with ready:true.
+        #
+        # Observed 2026-09-18 on task aa0db5661 (run c16ac96c9, which failed at `git checkout -b`
+        # because the sandbox image had no git): the range yielded ` LOOP.md | 3 +--`, a human's
+        # commit from 2026-07-10. A wrong answer delivered confidently is worse than no answer, so
+        # this returns the not-ready shape instead — with a `reason`, because "finished with no
+        # artifact" and "still running" are different facts that both render as not-ready.
+        branch = report.get("branch")
+        if not isinstance(branch, str) or not branch:
+            return {
+                "ready": False,
+                "diff": "",
+                "branch": None,
+                "reason": "the run produced no artifact branch",
+            }
         root = Path(sandbox_root).resolve()
         coding_root = _coding_sandbox_root()
         if not (root == coding_root or root.is_relative_to(coding_root)) or not (root / ".git").is_dir():
@@ -5037,7 +5058,7 @@ def create_app(
             diff = diff[:_CODING_DIFF_CAP]
         return {
             "ready": True,
-            "branch": report.get("branch"),
+            "branch": branch,
             "diff": diff,
             "truncated": truncated,
         }
