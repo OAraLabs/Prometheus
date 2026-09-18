@@ -15,9 +15,17 @@ section assembled by :mod:`prometheus.context.prompt_assembler`.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from prometheus.config.paths import get_documents_dir
 from prometheus.context.environment import EnvironmentInfo, get_environment_info
+
+#: The label the dispatch route stamps on a story's chat message
+#: (web/server.py: ``f"_Task ID: {story['story_id']}_"``). The prompt must teach the
+#: filename convention using THIS wording, because it is the only wording the model
+#: ever sees — the schema, the card and Beacon's resolver all say "story_id", which
+#: the model is never shown. test_plan_filename_convention.py pins the two together.
+_TASK_ID_LABEL = "Task ID"
 
 
 SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "--- SYSTEM_PROMPT_DYNAMIC_BOUNDARY ---"
@@ -188,16 +196,22 @@ def _format_environment_section(env: EnvironmentInfo) -> str:
     return "\n".join(lines)
 
 
-def _format_documents_section() -> str:
+def _format_documents_section(documents_root: Path | None = None) -> str:
     """Format the documents-library conventions section.
 
     The documents root is the confined tree shared with Beacon's Documents
     editor and Loop Manager (the daemon's ``/api/documents`` surface). The
-    RESOLVED path is injected — the root is repointable via
-    ``PROMETHEUS_DOCUMENTS_DIR`` / ``documents.root`` — so the guidance stays
-    correct on any deployment.
+    RESOLVED path is injected so the guidance stays correct on any deployment.
+
+    ``documents_root`` MUST be passed whenever the caller has the config, because
+    the two resolvers disagree: ``/api/documents`` honours the config key
+    ``documents.root`` (web/server.py), while :func:`get_documents_dir` reads only
+    ``PROMETHEUS_DOCUMENTS_DIR``. It cannot read the key — it is a pure path helper
+    and the config lives on ``app.state`` at runtime. They agree today only because
+    no deployment sets the key; setting it would tell the model to write where the
+    Board cannot read, with no error anywhere. Passing the resolved root closes that.
     """
-    docs_dir = get_documents_dir()
+    docs_dir = documents_root or get_documents_dir()
     loops_dir = docs_dir / "loops"
     return (
         "# Documents library\n"
@@ -212,7 +226,16 @@ def _format_documents_section() -> str:
         "- Write a plan's steps as GFM task-list items — `- [ ] step text` — one per "
         "step, not a numbered list. Beacon renders those as a live checklist the user "
         "ticks off; prose and headings around them are fine and are left alone. A plan "
-        "written as `1.` steps still saves, but arrives with nothing tickable."
+        "written as `1.` steps still saves, but arrives with nothing tickable.\n"
+        "- NAME the plan file after the task. A dispatched task arrives with a line "
+        f"reading `_{_TASK_ID_LABEL}: BC-4_`; when you see one, save the plan as "
+        "`BC-4-<slug>.md` — the id exactly as written, then a hyphen, then any "
+        "descriptive slug (`BC-4-sprint-plan.md`). Beacon's board joins a task to its "
+        "plan on that leading `BC-4-` prefix, so a plan saved under any other name is "
+        "invisible on that task's card. Two cautions: keep the id's own spelling and "
+        "case, and do not start the slug with digits (`BC-4-001-draft.md` reads as "
+        f"task BC-4-001, not BC-4). With no {_TASK_ID_LABEL} in the task, any "
+        "descriptive name is fine."
     )
 
 
@@ -220,6 +243,7 @@ def build_system_prompt(
     custom_prompt: str | None = None,
     env: EnvironmentInfo | None = None,
     cwd: str | None = None,
+    documents_root: Path | None = None,
 ) -> str:
     """Build the static section of the system prompt.
 
@@ -227,6 +251,9 @@ def build_system_prompt(
         custom_prompt: If provided, replaces the base system prompt entirely.
         env: Pre-built EnvironmentInfo. If None, auto-detects.
         cwd: Working directory override (only used when env is None).
+        documents_root: Resolved documents root. Pass it whenever the caller holds
+            the config — see :func:`_format_documents_section` for why omitting it
+            can point the model at a directory the Board does not read.
 
     Returns:
         The assembled *static* system prompt string (without the dynamic
@@ -237,6 +264,6 @@ def build_system_prompt(
 
     base = custom_prompt if custom_prompt is not None else _BASE_SYSTEM_PROMPT
     env_section = _format_environment_section(env)
-    docs_section = _format_documents_section()
+    docs_section = _format_documents_section(documents_root)
 
     return f"{base}\n\n{env_section}\n\n{docs_section}"
