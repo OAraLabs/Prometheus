@@ -577,6 +577,77 @@ def test_diff_not_ready_while_running(monkeypatch, tmp_path):
     assert r.json()["ready"] is False
 
 
+def _make_failed_clone(coding_root: Path, name: str) -> Path:
+    """A clone as a run that died BEFORE creating its branch leaves it.
+
+    Two commits from the SOURCE repo and no coding/ branch — so HEAD~1..HEAD resolves to the
+    source repo's own last commit, which is the whole defect.
+    """
+    root = coding_root / name
+    root.mkdir(parents=True)
+    git = lambda *a: subprocess.run(  # noqa: E731
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *a], cwd=root, check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    (root / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    git("add", "."); git("commit", "-qm", "base")
+    # The human's own last commit on the source repo — what the buggy range returned.
+    (root / "NOTES.md").write_text("HUMAN_COMMIT_CANARY\n")
+    git("add", "."); git("commit", "-qm", "loop contract: acceptance line format")
+    return root
+
+
+def test_diff_refuses_a_report_with_no_branch(monkeypatch, tmp_path):
+    """A run that never made an artifact branch must not be handed somebody else's commit.
+
+    Observed 2026-09-18 (task aa0db5661 / run c16ac96c9, which failed at `git checkout -b` because
+    the sandbox image had no git): the report carried a sandbox_root and no branch, the clone sat
+    on the source repo's tip, and HEAD~1..HEAD returned ` LOOP.md | 3 +--` — a human's commit from
+    2026-07-10, delivered as the run's artifact with ready:true.
+
+    The canary assertion is the one that does the work. Asserting only `ready is False` would pass
+    against a fix that returned not-ready for the wrong reason; asserting the source commit's
+    content is ABSENT pins that no foreign diff escapes.
+    """
+    coding_root = tmp_path / "coding"
+    clone = _make_failed_clone(coding_root, "failedrun")
+    out = tmp_path / "out.log"
+    out.write_text(_json.dumps({
+        "status": "failed_error",
+        "reason": "uncaught CodingGitError: git checkout -q -b coding/x failed (exit 127)",
+        "sandbox_root": str(clone),
+    }))
+
+    monkeypatch.setattr("prometheus.web.server._coding_sandbox_root", lambda: coding_root.resolve())
+    monkeypatch.setattr("prometheus.tasks.manager.get_task_manager", lambda: _DiffManager(out))
+    c = TestClient(create_app({"coding": {"enabled": True}}))
+
+    r = c.get("/api/code/d1/diff")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ready"] is False, "a run with no artifact branch is not a ready diff"
+    assert body["branch"] is None
+    assert "HUMAN_COMMIT_CANARY" not in _json.dumps(body), (
+        "the source repo's own commit escaped as this run's artifact diff"
+    )
+    assert "NOTES.md" not in _json.dumps(body)
+    assert body["reason"] == "the run produced no artifact branch"
+
+
+def test_diff_not_ready_reasons_distinguish_running_from_no_artifact(monkeypatch, tmp_path):
+    """Both not-ready cases carry a reason, because they are different facts.
+
+    "still running" and "finished, produced nothing" both render as ready:false, and a client that
+    cannot tell them apart says "no diff yet" about a run that will never have one.
+    """
+    out = tmp_path / "out.log"
+    out.write_text("starting…\nno report yet\n")
+    monkeypatch.setattr("prometheus.tasks.manager.get_task_manager", lambda: _DiffManager(out))
+    c = TestClient(create_app({"coding": {"enabled": True}}))
+    assert c.get("/api/code/d1/diff").json()["reason"] == "the run has not reported yet"
+
+
 def test_diff_unknown_task_404(monkeypatch, tmp_path):
     out = tmp_path / "out.log"
     out.write_text("{}")
