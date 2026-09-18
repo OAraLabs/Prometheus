@@ -2,14 +2,15 @@
 
 Catches silent failures where a tool *claims* a write succeeded but the
 side effect didn't land on disk: Gemma saying "wrote 47 lines to foo.py"
-while the editor returns success but the file is unchanged; bash exiting
+while the editor returns success but the file is unchanged
+bash exiting
 0 without the side effect; permission-denied surfacing as "success" in a
 buggy tool wrapper. These are the Adapter Layer's blind spot — the
 *response shape* was fine, but the bytes on disk disagree.
 
 How it works:
   - Pre-tool-use: for any FS-touching tool call, ``os.stat`` the target
-    path (or each match from the bash regex) and stash the result on the
+    path (or each path the bash lexer extracts) and stash the result on the
     in-flight turn record.
   - Post-tool-use: ``os.stat`` again. Diff with the snapshot. Tag the
     mutation as ``created``, ``modified``, ``deleted``, ``failed``, or
@@ -46,6 +47,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shlex
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -77,35 +79,51 @@ _FS_TOOLS = frozenset({
     "notebook_edit",
 })
 
-# Bash command patterns whose side effect is a path mutation. The verifier
-# is heuristic — if a pattern doesn't match (compound commands, complex
-# pipelines, custom aliases), the mutation just doesn't get tracked. That
-# is preferable to false positives.
-_BASH_FS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r'(?<![A-Za-z0-9_])mv\s+(?:-\w+\s+)*(\S+)\s+(\S+)'),   'move'),
-    (re.compile(r'(?<![A-Za-z0-9_])rm\s+(?:-\w+\s+)*(\S+)'),            'delete'),
-    (re.compile(r'(?<![A-Za-z0-9_])cp\s+(?:-\w+\s+)*(\S+)\s+(\S+)'),    'copy'),
-    (re.compile(r'(?<![A-Za-z0-9_])touch\s+(\S+)'),                     'touch'),
-    (re.compile(r'(?<![A-Za-z0-9_])mkdir\s+(?:-\w+\s+)*(\S+)'),         'mkdir'),
-    # Redirects. NO trailing anchor: a clause can carry more than one, and anchoring
-    # on the last meant `cmd > file.txt 2>&1` saw only the `2>&1` — so the REAL write
-    # went untracked and, once `&N` was correctly classified as not-a-file (#274), the
-    # whole turn went unaudited with no row at all (issue #275).
-    #
-    # The operator lookbehind `(?:(?<=\s)|(?<=^)|(?<=\d)|(?<=&))` is the SAME one
-    # _REDIRECT_OP uses, and it must stay identical to it: a redirect is legal after
-    # whitespace, at clause start, after an fd digit, or after `&`. Anywhere else the
-    # `>` is an operator of another language. Without it, the `>` in a JS/TS arrow
-    # function matched and claimed a file:
-    #
-    #     const f = (s) => /^smoke:/.test(s)      ->  '/^smoke:/.test(s))'
-    #
-    # `(?<![<>])` alone did not cover this — it stops `=>` from matching the `=` of
-    # `<=`-style forms and keeps the single pattern off the first char of `>>`, which
-    # is a different job. It says nothing about the `=` before `>`.
-    (re.compile(r'(?:(?<=\s)|(?<=^)|(?<=\d)|(?<=&))>(?!>)\s*(\S+)'),     'redirect_write'),
-    (re.compile(r'(?:(?<=\s)|(?<=^)|(?<=\d)|(?<=&))>>\s*(\S+)'),        'redirect_append'),
-]
+# Bash command words whose side effect is a path mutation, mapped to the
+# claimed-action tag reported for them.
+#
+# Keyed by the clause's COMMAND WORD — the token the shell would actually
+# execute — not matched anywhere in the clause text. `echo touch $FOO` mutates
+# nothing, but a pattern table matching the verb wherever it appeared read the
+# unresolved token after it as a lost destination and reported the clause blind.
+# #486 pinned that as a known false positive rather than fixing it, because the
+# structural fix needs a token stream. This is that fix.
+#
+# The value says which operands carry the mutation:
+#   "last" — mv/cp: the destination is the new home.
+#   "all"  — rm/touch/mkdir: every non-flag operand is a target.
+_MUTATION_VERBS: dict[str, tuple[str, str]] = {
+    "mv":    ("move",   "last"),
+    "cp":    ("copy",   "last"),
+    "rm":    ("delete", "all"),
+    "touch": ("touch",  "all"),
+    "mkdir": ("mkdir",  "all"),
+}
+
+# Wrappers that keep the FOLLOWING word in command position: `sudo rm -f x`
+# deletes, and so does `env FOO=1 touch x`.
+#
+# READ THIS BEFORE EXTENDING IT. The rewrite issue (#484) says "a token stream
+# says which token is the command word; nothing has to guess", and for finding
+# token 0 that is true. It is NOT true for wrappers: `sudo rm $X` and
+# `echo rm $X` are structurally identical token streams — verb at index 1,
+# another word at index 0 — and no amount of lexing distinguishes them. Only
+# knowing that `sudo` execs its argument and `echo` prints it does. So a list is
+# unavoidable here, and pretending otherwise would be the fifth repeat of this
+# file's documented failure mode.
+#
+# What makes it safe is the DIRECTION it fails in. An unlisted wrapper
+# (`nice rm -f $X`) leaves the verb in argument position, so the clause reports
+# nothing — a false negative, which is this file's accepted direction and the
+# same outcome as any command it does not model. An over-long list is the
+# dangerous direction: adding `echo` here would invent mutations. Add a name only
+# when it genuinely execs a following command word.
+_COMMAND_WRAPPERS = frozenset({
+    "sudo", "doas", "env", "time", "nohup", "command", "exec", "builtin",
+    "nice", "ionice", "stdbuf", "setsid", "xargs", "timeout",
+    # shell keywords that precede a command word rather than being one
+    "do", "then", "else", "elif", "if", "while", "until", "!", "{",
+})
 
 
 @dataclass
@@ -151,6 +169,12 @@ class _TurnRecord:
     # the opposite: the places it knows it could not look. post_turn speaks up on
     # these so silence never has to mean two different things (issue #275).
     blind: list[str] = field(default_factory=list)
+    # Commands this hook could not TOKENIZE at all — an unbalanced quote, usually.
+    # Kept apart from ``blind`` because they are different admissions: "I parsed this
+    # and could not name the destination" versus "I could not parse this, so I do not
+    # know whether it wrote anything." Folding the second into the first would
+    # overstate what was measured (issue #484, criterion 3).
+    unaudited: list[str] = field(default_factory=list)
     # Map turn-scoped pre-snapshots by (tool_use_id, path) so post_tool_use
     # can pair them up even when one tool call touches multiple paths.
     _pending: dict[tuple[str, str], _Snapshot] = field(default_factory=dict)
@@ -159,7 +183,8 @@ class _TurnRecord:
 def _expand_user(path: str) -> str:
     """Expand a leading ``~`` the way the shell already did.
 
-    The shell expands ``~/.ssh/x`` before the write lands; ``os.stat`` does
+    The shell expands ``~/.ssh/x`` before the write lands
+    ``os.stat`` does
     not. Snapshotting the unexpanded literal stats a path that can never
     exist, so before/after is absent->absent, ``_classify`` returns
     "missing", and a mutation that really happened is reported as nothing at
@@ -212,103 +237,603 @@ def _extract_paths(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
     out: list[str] = []
     # file_write / file_edit / notebook_edit all use ``file_path`` (or
     # ``path``) — the Prometheus convention.
+    #
+    # Every key, not the first one found: this used to ``break`` on the first hit, so
+    # a tool call carrying more than one path key was only PARTLY audited and the
+    # unaudited half was silent — the same failure this file exists to remove, one
+    # layer up from the bash extraction. Order preserved, duplicates dropped, so a
+    # call naming the same path twice does not snapshot it twice.
     for key in ("file_path", "path", "notebook_path"):
         val = tool_input.get(key)
         if isinstance(val, str) and val:
-            out.append(_expand_user(val))
-            break
+            expanded = _expand_user(val)
+            if expanded not in out:
+                out.append(expanded)
     return out
 
 
-_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
-
-# A shell redirect operator: at a clause start, after whitespace, or after the fd
-# digit / `&` that qualifies it. Deliberately NOT any bare '>' — `-> ` in prose and
-# `a>b` inside a grep pattern are not redirects, and treating them as one is the
-# false-positive class #198 and #274 both existed to remove.
-_REDIRECT_OP = re.compile(r"(?:(?<=\s)|(?<=^)|(?<=\d)|(?<=&))>{1,2}")
-
-
-def _dequote(clause: str) -> str:
-    """Blank out quoted spans so their contents cannot look like redirects.
-
-    `echo "a -> b" > out.txt` must yield `out.txt` and nothing else. Widening the
-    redirect patterns without this would have read the arrow inside the string as a
-    redirect and claimed `b` — trading one silent failure for a noisy wrong one.
-    Replaced with spaces rather than removed so offsets and word boundaries survive.
-    """
-    return _QUOTED.sub(lambda m: " " * len(m.group(0)), clause)
-
-
-_CLAUSE_SPLIT = re.compile(r"\s*(?:;|&&|\|\|)\s*")
-
-
-def _clauses(command: str) -> list[str]:
-    """Split a command into clauses, DEQUOTING FIRST.
-
-    The order is load-bearing, and getting it backwards was a live false-positive
-    generator. Splitting on `;` is quote-blind, so a semicolon *inside* a quoted
-    string cuts that string in half; each half then carries an UNBALANCED quote,
-    which `_QUOTED` cannot pair, so `_dequote` blanks nothing and the prose inside
-    the string survives as bare shell text to be matched against the patterns.
-
-    Observed on a real turn:
-
-        echo "  … reflog expiry does not touch them."
-
-    split into `echo "  …` and `touch them."`. The second clause parsed as a
-    claimed `touch` of a file named `them.`, which of course did not exist, and was
-    reported as `⚠ them. — touch: CLAIMED but FILE ABSENT`. A sentence ended in a
-    period and the instrument read it as a missing file.
-
-    Dequoting first removes the quoted span entirely, so no semicolon inside it can
-    cut anything and no word inside it can look like a command.
-    """
-    return [c for c in _CLAUSE_SPLIT.split(_dequote(command or "")) if c.strip()]
-
-
-# A captured operand that is not a path. Three shapes reach a `(\S+)` capture group
-# and are all shell syntax rather than a file:
+# ---------------------------------------------------------------------------
+# Tokenizer — the extraction floor
+# ---------------------------------------------------------------------------
 #
-#   -f, -p, --recursive   a flag. `rm -f "$P"` leaves nothing after the blanked
-#                         quote, so `(?:-\w+\s+)*` BACKTRACKS to zero matches and
-#                         `(\S+)` grabs the flag itself — then reports `-f` as a
-#                         file that was never written.
-#   2>/dev/null           a redirect, reached for the same reason: `touch "$P"
-#                         2>/dev/null` blanks `$P` and `\S+` takes the next token.
-#   &1                    an fd duplicate (already covered by _is_device_sink).
+# WHAT THIS REPLACED AND WHY. Extraction used to be a table of regexes run over
+# text whose quoted spans had first been blanked to spaces. That mechanism
+# discarded the data it existed to read: `touch "my file.txt"` — a path written the
+# only way a path with a space CAN be written — was blanked along with the prose the
+# blanking existed to protect against, and the patterns then groped around the hole.
+# `rm -f "$P"` reported a claimed write to a file named `-f`, because the operand had
+# been blanked and `(\S+)` reached past it to the flag.
 #
-# Rejected by PREFIX rather than by a whitelist of what a path may contain, because
-# a path may legitimately contain almost anything. The cost is a real file whose
-# name begins with `-`; that needs `--` to address in shell anyway, which these
-# patterns do not parse. False negatives are the accepted direction in this file —
-# it is a reporter, not a floor.
+# Four patches (#198, #274, #483, #485) each removed the shape that had been reported
+# and left the next one open, because a filter extended against known-bad shapes can
+# only ever be complete with respect to shapes someone has already met. A lexer is not
+# a fifth filter: clause structure, flags, command words and redirect operators stop
+# being approximated by lookbehinds and become properties of the token stream.
+#
+# THE INVARIANT this exists to establish:
+#
+#     No write form may be both untracked and unreported. Every clause containing a
+#     SHELL-LEVEL redirect or mutation verb either resolves to a tracked path, or
+#     produces a blindness row. Silence is a failure of the contract.
+#
+# "SHELL-LEVEL" is load-bearing and is a correction to the way #484 states it. An
+# unqualified reading is not achievable by any lexer: `python -c "os.remove(p)"`,
+# `make`, `npm ci` and `git checkout` all mutate the filesystem with no shell operator
+# anywhere in the command. Scoping the contract to shell syntax is the difference
+# between a contract with an undocumented hole and one with a stated boundary — and
+# inside that boundary it is held absolutely, with the single exception of a device
+# sink, where nothing reaches disk at all.
+#
+# WHY posix=False. The lexer must be able to tell a quoted `'>'` from an operator. In
+# posix mode shlex resolves quoting during tokenization, so `grep -rn '>' src/ > out`
+# arrives with a bare `>` where the search pattern was, the following `src/` is read as
+# a redirect target, and a directory the command only READ is reported as written.
+# The same erasure turns a quoted `'#'` into a comment introducer and a quoted `"|"`
+# into a clause separator. Non-posix keeps the quote characters ON the token, so
+# quoting is a fact the walker can consult; :func:`_unquote` resolves it afterwards,
+# which is what keeps `touch "my file.txt"` tracked.
+
+_LEX_PUNCTUATION = "();<>|&\n"
+
+# Characters that, alone or in a run, end a clause. shlex merges consecutive
+# punctuation into ONE token, so `;` before a newline arrives as `;\n` and a blank line
+# arrives as `\n\n`. Membership testing against a fixed set of spellings missed every
+# one of those: the clause did not split, and for a `which == "all"` verb every
+# surviving token became a claimed path — `rm -f a.txt;\nrm -f b.txt` reported deleting
+# a file literally named `;\n`. Classify by CHARACTER CONTENT, not by spelling.
+_SEPARATOR_CHARS = frozenset(";&|()\n")
+
+# The characters a redirect operator can be built from. `=` is deliberately NOT a
+# punctuation char: making it one does merge `=>` into a single harmless token, but it
+# also shatters every operand containing `=` (`rm -f a=b.txt` became three claimed
+# paths) and, worse, `FOO= rm -f x` merged the assignment with the VERB, so the
+# command word became `FOO=rm` and a real delete went silent. `=>` and `>=` are
+# neutralised in :func:`_preprocess` instead, where quote state is known.
+_OPERATOR_CHARS = frozenset("<>&|")
+
+_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_DIGITS = re.compile(r"^\d+$")
+
+# A token that is not a path. Under the lexer this is a much smaller job than it was:
+# operators and quoted spans no longer leak into operands, so what is left is a flag
+# (`-f`, `--recursive`) and the stray fd digit forms. Rejected by PREFIX rather than by
+# a whitelist of what a path may contain, because a path may legitimately contain
+# almost anything. The cost is a real file whose name begins with `-`, which needs `--`
+# to address in shell anyway.
 _NOT_A_PATH = re.compile(r"^(?:-|\d*[<>&])")
 
 
+class _Unlexable(Exception):
+    """The command could not be tokenized — an unbalanced quote, usually.
+
+    NOT suppressed. `shlex` raising here is a feature: a command this instrument
+    cannot parse must be reported as *unaudited*, exactly the way an unnameable
+    redirect target is reported blind. A parse that fails loudly beats a regex that
+    succeeds wrongly, which is `docs/audits/RECURRING.md` 4j applied to the file 4j
+    was written about.
+    """
+
+
+_SUBSTITUTION_MARKER = "$__prometheus_subst__"
+
+
+def _preprocess(command: str) -> str:
+    """Quote-aware pre-pass, run before the lexer sees the text.
+
+    Every transform here MUST track quote state. An earlier draft did these with
+    regexes over raw text and each one reintroduced exactly the defect the rewrite
+    exists to retire — a quote-blind scan:
+
+      * `gh pr create --body "use <<EOF for stdin"` matched a heredoc start inside
+        quoted prose, found no terminator, and swallowed the REST OF THE COMMAND,
+        including an `rm -rf` on the next line. Silent, and catastrophic.
+      * ``echo '```' >> a.md`` paired the first backtick of a markdown fence with one
+        three lines later and deleted everything between them.
+
+    Three transforms, in one pass:
+
+    1. LINE CONTINUATIONS. `\\` before a newline is deleted by the shell, so the
+       command is one clause. shlex in non-posix mode leaves both characters, and the
+       newline then splits the clause: `rm -rf \\<nl> build` lost `build` entirely.
+    2. HEREDOC BODIES. A body is DATA — the shell never executes it. Left in the
+       stream it is read as commands, and not merely as noise: `cat <<EOF` followed by
+       `echo hi > /tmp/x` extracted `/tmp/x` as a claimed write and emitted a
+       permanent false "CLAIMED but FILE ABSENT" about a file nobody named.
+    3. SUBSTITUTIONS. `$(…)`, backticks and process substitutions `<(…)` / `>(…)`
+       collapse to one opaque token. `cp a.txt /tmp/bak-$(date +%s).txt` otherwise
+       lexes to `/tmp/bak-$(date` and `+%s).txt`, and the last-operand rule would
+       track a file literally named `+%s).txt` — a fabricated path in an audit trail.
+       The marker matches :data:`_UNRESOLVED`, so the clause routes to the blindness
+       contract instead, which is the honest answer.
+    """
+    out: list[str] = []
+    i, n = 0, len(command or "")
+    quote: str | None = None
+    pending_heredocs: list[tuple[str, bool]] = []   # (delimiter, strip_tabs)
+
+    while i < n:
+        ch = command[i]
+
+        if quote is not None:
+            out.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                out.append(command[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+
+        if ch in ("'", '"'):
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+
+        if ch == "\\" and i + 1 < n:
+            if command[i + 1] == "\n":
+                i += 2
+                continue                    # line continuation: delete both
+            out.append(ch)
+            out.append(command[i + 1])
+            i += 2
+            continue
+
+        if ch == "\n":
+            out.append(ch)
+            i += 1
+            # Consume the body of every heredoc opened on the line just ended.
+            while pending_heredocs:
+                delimiter, strip_tabs = pending_heredocs.pop(0)
+                i, terminated = _skip_heredoc_body(command, i, delimiter, strip_tabs)
+                if not terminated:
+                    # The body ran to the end of the command without its terminator,
+                    # so everything after the `<<` is data of unknown extent and any
+                    # command in it is unreadable. Bash accepts an indented terminator
+                    # only for `<<-`, so `  EOF` closing a plain `<<EOF` lands here.
+                    # Reporting this as a clean turn would hide whatever followed;
+                    # `unaudited` says what is true — this could not be parsed.
+                    raise _Unlexable(f"unterminated heredoc: {delimiter}")
+            continue
+
+        two = command[i:i + 2]
+        if two in ("=>", ">="):
+            # Not shell. `(s) => /^smoke:/.test(s)` is the JS/TS arrow that #483
+            # existed to stop claiming a file, and `>=` is a comparison. Both put a
+            # bare `>` in front of an operand, which any redirect rule must then read
+            # as a write. Neutralised HERE, outside quotes, so the token stream never
+            # carries a `>` that was not an operator — rather than by a lookbehind
+            # that has to guess from the preceding character.
+            #
+            # ACCEPTED FALSE NEGATIVE, stated rather than discovered later: bash does
+            # parse `a=>b` as the assignment `a=` plus a redirect to `b`, and that
+            # redirect is lost here. `main` loses it too (its lookbehind refuses a `>`
+            # preceded by `=`), so this is not a regression, and no such form has been
+            # observed in agent-issued bash.
+            out.append("  ")
+            i += 2
+            continue
+
+        if ch == "`":
+            close = command.find("`", i + 1)
+            if close == -1:
+                out.append(ch)
+                i += 1
+                continue
+            out.append(_SUBSTITUTION_MARKER)
+            i = close + 1
+            continue
+
+        two = command[i:i + 2]
+        if two in ("$(", "<(", ">(") :
+            end = _match_paren(command, i + 1)
+            if end is None:
+                out.append(ch)
+                i += 1
+                continue
+            out.append(_SUBSTITUTION_MARKER)
+            i = end + 1
+            continue
+
+        if command[i:i + 3] == "<<<":
+            # A herestring, not a heredoc. Consumed whole: emitting one `<` and
+            # re-entering left `<<yes` looking like a heredoc opened with the
+            # delimiter `yes`, which never terminates — so everything after it,
+            # including the next line's `rm -rf`, was swallowed as body.
+            out.append("<<<")
+            i += 3
+            continue
+
+        if two == "<<":
+            j = i + 2
+            strip_tabs = j < n and command[j] == "-"
+            if strip_tabs:
+                j += 1
+            while j < n and command[j] in " \t":
+                j += 1
+            opened, j = _read_heredoc_delimiter(command, j)
+            if opened is None:
+                out.append(ch)
+                i += 1
+                continue
+            out.append(two)
+            if strip_tabs:
+                out.append("-")
+            out.append(" " + opened)
+            pending_heredocs.append((opened, strip_tabs))
+            i = j
+            continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
+
+
+def _match_paren(text: str, open_index: int) -> int | None:
+    """Index of the `)` matching the `(` at ``open_index``, or None."""
+    depth, j, n = 0, open_index, len(text)
+    while j < n:
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return None
+
+
+def _read_heredoc_delimiter(text: str, j: int) -> tuple[str | None, int]:
+    """Read a heredoc delimiter at ``j``. Handles `EOF`, `'EOF'`, `"EOF"`, `\\EOF`."""
+    n = len(text)
+    if j < n and text[j] in "'\"":
+        quote = text[j]
+        close = text.find(quote, j + 1)
+        if close == -1:
+            return None, j
+        return text[j + 1:close], close + 1
+    if j < n and text[j] == "\\":
+        j += 1
+    start = j
+    while j < n and (text[j].isalnum() or text[j] == "_"):
+        j += 1
+    return (text[start:j], j) if j > start else (None, j)
+
+
+def _skip_heredoc_body(
+    text: str, i: int, delimiter: str, strip_tabs: bool
+) -> tuple[int, bool]:
+    """Return (index just past the body and its terminator, was it terminated).
+
+    The terminator must be the delimiter ALONE on its line. Bash allows leading tabs
+    only for the `<<-` form
+    accepting arbitrary indentation for a plain `<<` ends the
+    body early and spills the rest back into the command stream.
+    """
+    n = len(text)
+    while i < n:
+        line_end = text.find("\n", i)
+        stop = n if line_end == -1 else line_end
+        line = text[i:stop]
+        candidate = line.lstrip("\t") if strip_tabs else line
+        if candidate == delimiter:
+            return (n if line_end == -1 else line_end + 1), True
+        i = n if line_end == -1 else line_end + 1
+    return n, False
+
+
+def _lex(command: str) -> list[str]:
+    """Tokenize one bash command. Raises :class:`_Unlexable` if it cannot.
+
+    ``commenters`` is cleared deliberately. `#` is legal in a filename and shlex's
+    comment handling is not word-anchored: with it on, `touch a#b.txt` lexes to
+    `['touch', 'a']` — a claim about a different, plausible file, which is worse than
+    any comment gap. Comments are dropped in :func:`_clause_token_lists`, where a `#`
+    that begins its own UNQUOTED token can be told from one inside a path.
+    """
+    lexer = shlex.shlex(
+        _preprocess(command or ""),
+        posix=False,
+        punctuation_chars=_LEX_PUNCTUATION,
+    )
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    lexer.whitespace = " \t\r"          # NOT \n — it is a clause separator token
+    try:
+        return list(lexer)
+    except ValueError as exc:           # "No closing quotation"
+        raise _Unlexable(str(exc)) from exc
+
+
+def _is_quoted(token: str) -> bool:
+    """True when the token carries its own quotes, so it is a WORD whatever it spells.
+
+    This is the whole reason for ``posix=False``. A quoted token can spell `>` or `|`
+    or `#` and none of them are operators.
+    """
+    return len(token) >= 2 and token[0] == token[-1] and token[0] in "'\""
+
+
+def _unquote(token: str) -> str:
+    """Resolve quoting for a token the walker has decided is an operand.
+
+    Done HERE rather than by the lexer so the operator/word decision is made while the
+    quotes are still visible. `touch "my file.txt"` therefore yields `my file.txt` —
+    the floor row #484 exists to raise — without a quoted `'>'` ever being mistaken for
+    a redirect.
+    """
+    out, i, n = [], 0, len(token)
+    while i < n:
+        ch = token[i]
+        if ch in "'\"":
+            close = token.find(ch, i + 1)
+            if close == -1:
+                out.append(token[i + 1:])
+                break
+            out.append(token[i + 1:close])
+            i = close + 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            out.append(token[i + 1])
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _is_separator(token: str) -> bool:
+    """True for `;`, `&&`, `|`, `(`, `)`, a newline — and any RUN of them.
+
+    Classified by character content because shlex merges consecutive punctuation:
+    `
+    \\n`, `&&\\n`, `\\n\\n`, `
+    \\n` and `|&` are all single tokens, and a set of
+    literal spellings missed every one.
+    """
+    return (
+        not _is_quoted(token)
+        and bool(token)
+        and all(ch in _SEPARATOR_CHARS for ch in token)
+    )
+
+
+def _redirect_kind(token: str) -> str | None:
+    """Classify a token as an output redirect operator, or None."""
+    if not token or _is_quoted(token) or _is_separator(token):
+        return None
+    if any(ch not in _OPERATOR_CHARS for ch in token):
+        return None                     # `=>`, `<=`, `a>b`, any word
+    if ">" not in token:
+        return None                     # `<`, `<<` — input, not a write
+    return "redirect_append" if ">>" in token else "redirect_write"
+
+
+def _clause_token_lists(tokens: list[str]) -> list[list[str]]:
+    """Split a token stream into clauses on separator TOKENS, dropping comments.
+
+    Quote-blind `re.split` on `;` is what turned `echo "… does not touch them."` into a
+    claimed `touch` of a file named `them.`: the split cut the quoted span in half,
+    each half carried an unbalanced quote, and the prose survived as bare shell text. A
+    separator that is a token cannot be inside a quoted span, so that cascade is not
+    merely fixed — it is unreachable.
+    """
+    clauses: list[list[str]] = []
+    current: list[str] = []
+    skipping = False
+    for token in tokens:
+        newline = not _is_quoted(token) and "\n" in token
+        if skipping and not newline:
+            continue
+        skipping = False
+        if _is_separator(token):
+            if current:
+                clauses.append(current)
+            current = []
+            continue
+        if token == "#":                # an UNQUOTED bare `#` opens a comment
+            skipping = True
+            if current:
+                clauses.append(current)
+            current = []
+            continue
+        current.append(token)
+    if current:
+        clauses.append(current)
+    return clauses
+
+
+def _command_word_index(words: list[str]) -> tuple[int | None, bool]:
+    """Index of the token the shell would execute, and whether a wrapper was skipped.
+
+    Skips `VAR=value` assignment prefixes and the wrappers in
+    :data:`_COMMAND_WRAPPERS`. The second return value is what makes an UNRESOLVED
+    wrapper safe: `sudo -u postgres rm -rf /x` skips `sudo`, then `-u` as a flag, and
+    lands on `postgres` — a flag ARGUMENT mistaken for the command word, because
+    nothing here knows which flags take one. Rather than grow a list of those, the
+    caller is told a wrapper was involved and reports blindness when a mutation verb
+    is sitting in the clause unexplained.
+    """
+    i, n, saw_wrapper = 0, len(words), False
+    while i < n:
+        word = words[i]
+        if _ASSIGNMENT.match(word) and not _is_quoted(word):
+            i += 1
+            continue
+        if word in _COMMAND_WRAPPERS:
+            saw_wrapper = True
+            i += 1
+            continue
+        if word.startswith("-"):
+            saw_wrapper = True          # a flag here belongs to a wrapper we skipped
+            i += 1
+            continue
+        return i, saw_wrapper
+    return None, saw_wrapper
+
+
+# `find … -exec rm …` and `find … -delete` run a mutation the clause's command word
+# does not name, and `-t DIR` inverts cp/mv's destination-last argument order. Neither
+# can be resolved to a path here, so both route to the blindness contract rather than
+# being guessed at or ignored.
+_DEFERRED_EXECUTORS = frozenset({"-exec", "-execdir", "-delete"})
+_TARGET_DIRECTORY_FLAGS = frozenset({"-t", "--target-directory"})
+_SHELL_INTERPRETERS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+
+@dataclass(frozen=True)
+class _BashAudit:
+    """What one bash command yielded: tracked paths, blindness, auditability."""
+    tracked: list[tuple[str, str]]
+    blind: bool
+    unaudited: str | None = None        # reason, when the command could not be lexed
+
+
+def _analyze_clause(tokens: list[str], depth: int = 0) -> tuple[list[tuple[str, str]], bool]:
+    """One clause -> (tracked paths, blind).
+
+    The invariant is enforced HERE, as a disjunction rather than a list of cases: every
+    redirect target and every mutation operand either becomes a tracked path or sets
+    ``blind``. The one documented exception is a device sink (`/dev/null`, an fd
+    duplicate), where nothing reaches disk — the absence of a write, not silence
+    about one.
+    """
+    tracked: list[tuple[str, str]] = []
+    blind = False
+    words: list[str] = []
+
+    i, n = 0, len(tokens)
+    while i < n:
+        token = tokens[i]
+        kind = _redirect_kind(token)
+        if kind is None:
+            words.append(token)
+            i += 1
+            continue
+        target = tokens[i + 1] if i + 1 < n else None
+        # `2> err.log` lexes the fd as its own word. Only a SINGLE digit is treated as
+        # one: `mkdir -p 2024 > /dev/null` popped `2024` as a phantom fd and lost the
+        # directory, and on a destination-last verb `cp a.txt 42 > /dev/null` shifted
+        # the claim onto the SOURCE file.
+        if words and len(words[-1]) == 1 and words[-1].isdigit():
+            words.pop()
+        if token.endswith("&") and target is not None and _DIGITS.match(target):
+            # `2>&1` — an fd duplicate. Not a file, and correctly not blindness:
+            # nothing was written anywhere this hook could look. The digit check is
+            # what keeps `make >& build.log` — a real write — out of this branch.
+            i += 2
+            continue
+        if target is None or _redirect_kind(target) is not None or _is_separator(target):
+            blind = True                # a redirect with nothing to name
+        else:
+            resolved = _expand_user(_unquote(target))
+            if _is_device_sink(resolved):
+                pass
+            elif _is_trackable(resolved):
+                tracked.append((resolved, kind))
+            else:
+                blind = True
+        i += 2
+
+    bare = [w for w in words if not _is_quoted(w)]
+    index, saw_wrapper = _command_word_index(words)
+    if index is None:
+        return tracked, blind
+    verb = os.path.basename(_unquote(words[index]))
+
+    # `sh -c '<script>'` hides an entire command inside one operand. Audit it rather
+    # than reporting the clause as clean: the script is ordinary shell, so the same
+    # walker applies. Depth-bounded so a pathological nesting cannot recurse away.
+    if verb in _SHELL_INTERPRETERS and depth < 3 and "-c" in bare:
+        after = words[index + 1:]
+        for j, word in enumerate(after):
+            if word == "-c" and j + 1 < len(after):
+                inner = _unquote(after[j + 1])
+                try:
+                    for clause in _clause_token_lists(_lex(inner)):
+                        inner_tracked, inner_blind = _analyze_clause(clause, depth + 1)
+                        tracked.extend(inner_tracked)
+                        blind = blind or inner_blind
+                except _Unlexable:
+                    blind = True
+                return tracked, blind
+
+    entry = _MUTATION_VERBS.get(verb)
+    if entry is None:
+        # Not a mutation command. `echo touch $FOO` lands here: the verb is in ARGUMENT
+        # position, so nothing is mutated and the clause is not blind. #486 reported
+        # exactly this shape blind and pinned it as a known false positive; the command
+        # word is what closes it.
+        if _DEFERRED_EXECUTORS & set(bare):
+            return tracked, True        # find -exec / -delete: a mutation we cannot name
+        if saw_wrapper and any(os.path.basename(w) in _MUTATION_VERBS for w in bare):
+            # A wrapper whose own flags we could not parse is standing between us and a
+            # mutation verb. Report it rather than letting the verb hide behind an
+            # unrecognised flag argument.
+            return tracked, True
+        return tracked, blind
+
+    action, which = entry
+    operands = [w for w in words[index + 1:] if _is_quoted(w) or not w.startswith("-")]
+    if not operands:
+        # `find … | xargs rm -f` — the targets arrive on stdin, so the verb mutates
+        # something this hook cannot see. Silence here would be the invariant's
+        # purest break: a delete with no row at all.
+        return tracked, True
+    if which == "last" and (_TARGET_DIRECTORY_FLAGS & set(bare)):
+        return tracked, True            # -t DIR inverts the argument order
+    for operand in (operands[-1:] if which == "last" else operands):
+        resolved = _expand_user(_unquote(operand))
+        if _is_device_sink(resolved):
+            continue
+        if _is_trackable(resolved):
+            tracked.append((resolved, action))
+        else:
+            blind = True
+    return tracked, blind
+
+
+def audit_bash_command(command: str) -> _BashAudit:
+    """Extract tracked paths and decide auditability for one bash command."""
+    try:
+        tokens = _lex(command)
+    except _Unlexable as exc:
+        return _BashAudit(tracked=[], blind=False, unaudited=str(exc))
+    tracked: list[tuple[str, str]] = []
+    blind = False
+    for clause in _clause_token_lists(tokens):
+        clause_tracked, clause_blind = _analyze_clause(clause)
+        tracked.extend(clause_tracked)
+        blind = blind or clause_blind
+    return _BashAudit(tracked=tracked, blind=blind)
+
 
 def _extract_bash_paths(command: str) -> list[tuple[str, str]]:
-    """Return ``(path, claimed_action)`` tuples extracted from a bash line.
-
-    Compound commands (``a && b``, ``foo; bar``) are scanned per-clause
-    so an ``mkdir foo && touch foo/x.md`` reports two tracked paths.
-
-    Quoted spans are blanked BEFORE splitting — see :func:`_clauses`.
-    """
-    out: list[tuple[str, str]] = []
-    for clause in _clauses(command):
-        for pat, action in _BASH_FS_PATTERNS:
-            for m in pat.finditer(clause):
-                # mv/cp: groups (src, dst) — track dst (the new home).
-                # For mv we also want the src "deleted" effect; tracking
-                # the dst alone is conservative but captures the
-                # creation. False negatives < false positives.
-                target = m.group(m.lastindex or 1)
-                # Strip quotes that survive shell-style argv splitting.
-                target = _expand_user(target.strip("'\""))
-                if _is_trackable(target):
-                    out.append((target, action))
-    return out
+    """Return ``(path, claimed_action)`` tuples extracted from a bash line."""
+    return audit_bash_command(command).tracked
 
 
 def _is_device_sink(target: str) -> bool:
@@ -328,21 +853,34 @@ def _is_device_sink(target: str) -> bool:
     return target.startswith("/dev/") and not target.startswith("/dev/shm/")
 
 
-# An unexpanded parameter or command substitution: `$VAR`, `${VAR}`, `$(…)`.
-# Deliberately NOT `$1`/`$@`/`$?`/`$$`-style positional and special parameters,
-# which never begin a path in practice, and NOT a bare `$` at end of string.
-_UNRESOLVED = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\$\(")
+# An unexpanded parameter or command substitution: `$VAR`, `${VAR}`, `$(…)`, and
+# the positional/special parameters `$1`, `$@`, `$?`, `$$`.
+#
+# The positional forms were EXCLUDED under the pattern table, on measured grounds:
+# across 7,244 real commands, 239 contained one somewhere and 0 had one tracked as a
+# phantom path, so widening the regex would have been a blocklist growing without a
+# reason. Under the lexer the reason arrives: `$1` in an operand position is a token
+# the stream identifies as an operand, so including it costs no new machinery and
+# removes three standing false positives — `echo x > $1` used to track a file
+# literally named `$1` and emit a permanent `⚠ CLAIMED but FILE ABSENT` about it.
+# A phantom path replaced by an honest blindness row is the trade this file is built
+# on. NOT a bare `$` at end of string, which names nothing.
+_UNRESOLVED = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\$\(|\$[0-9@*#?$!-]")
 
 
 def _is_unresolved(target: str) -> bool:
     """True when a redirect/operand target still carries a shell substitution.
 
-    ``_dequote`` blanks QUOTED spans, so ``> "$LOG"`` loses the variable entirely —
-    invisible, and handled elsewhere. But an UNQUOTED ``> $LOG`` survives into the
-    patterns, and ``\\S+`` captures ``$LOG`` as if it were a filename. It can never
-    be stat'd as existing, so every turn containing one emits a permanent
-    ``⚠ CLAIMED but FILE ABSENT``: a false row, forever, about a file that was
-    never named.
+    ``> $LOG`` names a real destination this instrument cannot resolve. Stat'd as the
+    literal string it can never exist, so TRACKING it emits a permanent
+    ``⚠ CLAIMED but FILE ABSENT``: a false row, forever, about a file never named.
+
+    QUOTING IS NOT AN INPUT HERE, deliberately. The pattern table blanked quoted spans
+    before matching, so ``> "$LOG"`` vanished entirely while ``> $LOG`` survived — two
+    spellings of one write got opposite treatment, and the quoted one was reported as a
+    CLEAN TURN. Under the lexer both arrive as the operand ``$LOG`` and both are blind.
+    A predicate that answered differently for them would carry an exception whose only
+    evidence is typography.
 
     This is NOT "a shape to filter out". ``echo x > $LOG`` is **a write whose
     destination this instrument cannot name** — which is precisely what the #275
@@ -356,7 +894,8 @@ def _is_unresolved(target: str) -> bool:
 
     The result is one honest row saying *"a write happened here and I could not
     name the destination"* in place of a false row saying *"this file is missing."*
-    The first is true and actionable; the second is noise that trains the reader to
+    The first is true and actionable
+    the second is noise that trains the reader to
     skim.
 
     Adding ``$`` to ``_NOT_A_PATH`` instead would have dropped the target SILENTLY —
@@ -379,86 +918,49 @@ def _is_trackable(target: str) -> bool:
     return not _is_device_sink(target)
 
 
-def _raw_operands(clause: str) -> list[tuple[str, str]]:
-    """Every operand the patterns capture in one clause, BEFORE trackability filtering.
-
-    `_extract_bash_paths` applies that filter and discards what fails it, which is
-    correct for the tracked-path list and wrong for the blindness question: the
-    discarded operand is exactly the information that says *this clause touched
-    something whose name was lost*. Reading the unfiltered capture is how the drop
-    site can report the decision it is already making.
-    """
-    out: list[tuple[str, str]] = []
-    for pat, action in _BASH_FS_PATTERNS:
-        for m in pat.finditer(clause):
-            t = _expand_user((m.group(m.lastindex or 1) or "").strip("'\""))
-            if t:
-                out.append((t, action))
-    return out
-
-
 def command_has_unnameable_target(command: str) -> bool:
     """Does this command touch something whose destination we could not name?
 
     True when a clause carries a redirect or mutation operator but yields no
-    trackable file target — a quoted destination, an unresolved variable, an unusual
-    form, or a construct the patterns do not know. It is the signal that the verifier
-    may be BLIND on this turn rather than that the turn was clean, and `post_turn`
-    speaks up on it (issue #275).
+    trackable target — an unresolved substitution, a form the lexer cannot resolve
+    to a filename — or when the command could not be tokenized at all. It is the
+    signal that the verifier may be BLIND on this turn rather than that the turn was
+    clean, and ``post_turn`` speaks up on it (issue #275).
 
-    RENAMED from `redirect_without_target` when the contract was generalised past
-    redirects. The old name described less than the function did, which is the same
-    defect this file exists to remove: `cp a /tmp/bak-$(date +%s).txt` drops an
-    unresolved operand and used to emit no row at all, because this function only
-    inspected clauses carrying a REDIRECT operator. `_extract_bash_paths` already knew
-    it had dropped something — `_is_trackable` returned False and the caller discarded
-    it — so reporting it is not a new contract, it is reporting a decision the code was
-    already making and throwing away. Measured before shipping: 7 new rows on a
-    7,232-command corpus, 0.124%, not the hundreds a naive widening might have cost.
+    WHAT THE LEXER CHANGED HERE. This used to walk clause TEXT, re-run the pattern
+    table to recover the operands the tracker had discarded, and then reason about
+    operator position with a lookbehind. Every one of those steps was a place for the
+    next unmet shape to slip through, and three did:
 
-    `2>&1` alone is not blindness: the fd duplicate is correctly not-a-file, and a
-    clause whose only redirect is one is genuinely nothing to audit. That is a
-    different case from `> $LOG` and from `mkdir -p $HOME/x`, which ARE blindness —
-    something was touched and the name was lost. The three are told apart by
-    :func:`_is_unresolved` and :func:`_is_device_sink`.
+      * `echo hi>out.txt` was neither tracked nor reported, because the lookbehind
+        that keeps `=>` from claiming a file also refuses to see an operator after
+        `i`. The operator is now a token, so the shape is simply gone (#484's
+        headline break).
+      * `echo touch $FOO` was reported blind although nothing is mutated, because a
+        verb matched wherever it sat in the clause. The command word decides now.
+      * heredoc prose was read as commands, so `cat <<EOF ... echo x > /tmp/p ... EOF`
+        claimed `/tmp/p` as a written file. The body is stripped before lexing.
 
-    STILL A GAP, deliberately not closed here: the no-space redirect
-    (`echo hi>out.txt`) is neither tracked nor reported, because `_REDIRECT_OP` shares
-    the operator-position lookbehind that keeps `=>` from claiming a file. Widening it
-    to fire there would reopen that false positive, which is a lexer's job (#484).
+    `2>&1` alone is still not blindness: an fd duplicate is correctly not-a-file, and
+    a clause whose only redirect is one has nothing to audit. That is a different case
+    from `> $LOG` and `mkdir -p $HOME/x`, which ARE blindness — something was touched
+    and the name was lost.
+
+    An UNPARSEABLE command counts as unnameable too. That is criterion 3 of #484: a
+    command the instrument cannot tokenize must not read as a clean turn. ``post_turn``
+    renders it under its own heading, since "I could not parse this" and "I parsed this
+    and could not name the target" are different admissions.
     """
-    for clause in _clauses(command):
-        operands = _raw_operands(clause)
-
-        if _REDIRECT_OP.search(clause):
-            targets = [t for t, a in operands if a.startswith("redirect")]
-            if not targets:
-                return True
-            # An unresolved destination is the blindness case: a real write whose name
-            # this instrument could not recover. Checked BEFORE the sink rule so that
-            # `> $LOG 2>&1` is blind rather than excused by its sibling fd duplicate.
-            if any(_is_unresolved(t) for t in targets):
-                return True
-            if all(_is_device_sink(t) for t in targets):
-                continue  # every target was /dev/... or an fd — nothing to audit
-
-        # Non-redirect mutation operators: an operand dropped for carrying an
-        # unresolved substitution is a touch whose destination was lost, not a
-        # clause with nothing in it.
-        if any(
-            _is_unresolved(t) and not _NOT_A_PATH.match(t) and not _is_device_sink(t)
-            for t, _ in operands
-        ):
-            return True
-    return False
-
+    audit = audit_bash_command(command)
+    return audit.blind or audit.unaudited is not None
 
 class FileMutationVerifier:
     """Per-turn tracker for claimed vs actual filesystem mutations.
 
     ONE instance is shared process-wide (see ``run_daemon``), so every entry
     point takes a ``turn_key`` identifying which in-flight turn it belongs to.
-    Keys are minted per ``run_loop`` invocation; omitting one falls back to
+    Keys are minted per ``run_loop`` invocation
+    omitting one falls back to
     :data:`DEFAULT_TURN_KEY`, which is correct only for single-threaded callers.
 
     Lifecycle:
@@ -531,7 +1033,11 @@ class FileMutationVerifier:
             # no row at all, indistinguishable from a clean turn.
             if tool_name == "bash":
                 command = str(tool_input.get("command", ""))
-                if command_has_unnameable_target(command):
+                audit = audit_bash_command(command)
+                if audit.unaudited is not None:
+                    with self._lock:
+                        self._record(turn_key).unaudited.append(command[:200])
+                elif audit.blind:
                     with self._lock:
                         self._record(turn_key).blind.append(command[:200])
             if not paths:
@@ -596,11 +1102,12 @@ class FileMutationVerifier:
         a boundary violation — nothing escaped.
 
         Ground truth, unlike anything available before dispatch. For ``bash``
-        the pre-execution path guess is the regex heuristic in
-        ``_BASH_FS_PATTERNS``, which is deliberately incomplete ("False
-        negatives < false positives") because it is a reporter. This is the
-        after-the-fact diff, so a redirect that the heuristic DID catch is
-        confirmed by bytes rather than by pattern.
+        the pre-execution path guess comes from the lexer in
+        :func:`audit_bash_command`, which is deliberately incomplete — it models
+        SHELL syntax, so a mutation performed by a program the shell invokes
+        (``make``, ``npm ci``, ``python -c "os.remove(p)"``) is outside what any
+        lexer can see. This is the after-the-fact diff, so a write the walker DID
+        name is confirmed by bytes rather than by parse.
 
         ⚠ HONEST LIMIT, and it decides what the caller may do with this:
         ``_Snapshot`` holds ``exists``/``size``/``mtime``/``mode`` and NO
@@ -626,9 +1133,9 @@ class FileMutationVerifier:
         """
         with self._lock:
             turn = self._turns.pop(self._key(turn_key), None)
-        if turn is None or (not turn.mutations and not turn.blind):
+        if turn is None or not (turn.mutations or turn.blind or turn.unaudited):
             return None
-        return self._format_summary(turn.mutations, turn.blind)
+        return self._format_summary(turn.mutations, turn.blind, turn.unaudited)
 
     def discard_turn(self, *, turn_key: str | None = None) -> None:
         """Drop a turn's record without rendering. Idempotent — safe to call
@@ -724,7 +1231,12 @@ class FileMutationVerifier:
             out[path] = action
         return out
 
-    def _format_summary(self, muts: list[_Mutation], blind: list[str] | None = None) -> str:
+    def _format_summary(
+        self,
+        muts: list[_Mutation],
+        blind: list[str] | None = None,
+        unaudited: list[str] | None = None,
+    ) -> str:
         """Render the per-turn list into a single string. Truncates.
 
         A turn with no mutations still renders when something was BLIND: silence used
@@ -733,10 +1245,10 @@ class FileMutationVerifier:
         making (issue #275).
         """
         blind = blind or []
-        if not muts and blind:
+        unaudited = unaudited or []
+        if not muts and (blind or unaudited):
             lines = ["[FILE MUTATION VERIFIER]", "Nothing trackable this turn, but NOT a clean audit:"]
-            for cmd in blind[: self._truncate_n]:
-                lines.append(f"   ? redirect with no nameable target — {cmd}")
+            lines.extend(self._blindness_lines(blind, unaudited))
             lines.append("   (this turn may have written files this hook could not see)")
             return "\n".join(lines)
         lines = ["[FILE MUTATION VERIFIER]", "Files touched this turn:"]
@@ -761,12 +1273,28 @@ class FileMutationVerifier:
                 f"   ... and {len(muts) - self._truncate_n} more "
                 f"(truncated at {self._truncate_n})"
             )
-        for cmd in blind[: self._truncate_n]:
-            # A partial audit must say it is partial. Listing what WAS seen while
-            # staying quiet about what could not be is the same misleading silence,
-            # just harder to notice because the row looks complete.
-            lines.append(f"   ? redirect with no nameable target — {cmd}")
+        # A partial audit must say it is partial. Listing what WAS seen while
+        # staying quiet about what could not be is the same misleading silence,
+        # just harder to notice because the row looks complete.
+        lines.extend(self._blindness_lines(blind, unaudited))
         return "\n".join(lines)
+
+    def _blindness_lines(self, blind: list[str], unaudited: list[str]) -> list[str]:
+        """Render the two not-a-clean-audit kinds, each under its own wording.
+
+        The blindness row no longer says "redirect": the contract was generalised
+        past redirects in #486 and again by the lexer, so `mkdir -p $HOME/x` reaches
+        it with no redirect anywhere in the clause. The phrase "no nameable target"
+        is kept verbatim because it is the contract's public wording.
+        """
+        lines = []
+        for cmd, count in _dedupe_with_counts(blind)[: self._truncate_n]:
+            suffix = f" (×{count})" if count > 1 else ""
+            lines.append(f"   ? no nameable target — {cmd}{suffix}")
+        for cmd, count in _dedupe_with_counts(unaudited)[: self._truncate_n]:
+            suffix = f" (×{count})" if count > 1 else ""
+            lines.append(f"   ? UNAUDITED, could not parse this command — {cmd}{suffix}")
+        return lines
 
     @staticmethod
     def _tag(m: _Mutation) -> tuple[str, str]:
@@ -797,6 +1325,27 @@ class FileMutationVerifier:
         return status, "✓"
 
 
+def _dedupe_with_counts(commands: list[str]) -> list[tuple[str, int]]:
+    """Collapse repeats of the same command into one row with a count.
+
+    The volume of blindness rows went UP with the lexer: a mutation operand that could
+    not be named now reports whether or not it was quoted, and `rm -f "$PROBE"` is a
+    shape a probe loop can issue dozens of times in one turn. Nothing deduplicated
+    before — a turn that retried one probe eight times rendered eight identical
+    200-character lines, which was already true and is worse now.
+
+    Deduplicating HERE rather than in the predicate is the point. The contract governs
+    the RECORD — every unnameable write produces one — and the renderer governs the
+    LINE. Suppressing the record to keep the report short would be trading a true
+    signal for a quiet one, which is the #275 defect with better manners. Order of
+    first appearance is preserved so the summary still reads chronologically.
+    """
+    counts: OrderedDict[str, int] = OrderedDict()
+    for command in commands:
+        counts[command] = counts.get(command, 0) + 1
+    return list(counts.items())
+
+
 def make_default_verifier(config: dict[str, Any] | None = None) -> "FileMutationVerifier":
     """Build a verifier from a (possibly partial) config block.
 
@@ -809,7 +1358,8 @@ def make_default_verifier(config: dict[str, Any] | None = None) -> "FileMutation
     ``show_in_telegram`` was specified in SPRINT-2 WS2 and implemented as far
     as an attribute, but no code ever read it — the summary has always been
     model-facing only, on every surface. It is gone rather than left as a
-    setting that silently does nothing; an unrecognised key here is ignored,
+    setting that silently does nothing
+    an unrecognised key here is ignored,
     so a config that still carries it keeps loading.
     """
     cfg = (
