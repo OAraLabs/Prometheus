@@ -41,6 +41,26 @@ DEFAULT_DB_PATH = "~/.prometheus/telemetry.db"
 DEFAULT_POLL_INTERVAL_S = 0.3
 _CODING_SESSION_PREFIX = "coding:"
 
+#: Every SignalBus kind this tailer can emit — the ONE declaration, and the source
+#: ``web.ws_server`` promotes from. A kind reaches a WS client only if ws_server turns it into a
+#: first-class frame type; without an entry it still ships, wrapped as a generic ``sentinel_signal``
+#: with the real kind nested at ``payload.kind``, so every client gate keyed on ``ev.type`` silently
+#: matches nothing and nobody sees an error. That is not hypothetical: ``coding_acceptance`` and
+#: ``coding_tool`` shipped that way from the enrichment until 2026-09-18, one screen above the #494
+#: comment diagnosing the identical defect for ``task_completed``/``task_failed``.
+#:
+#: Promoting FROM this tuple is what stops it happening a third time: a new kind added beside its
+#: ``_emit`` call is on the wire by construction, with no second edit in another repo's file to
+#: forget. ``test_coding_frame_kinds_matches_every_emit_site`` pins the tuple to the emit sites and
+#: ``test_every_coding_stream_kind_is_promoted`` pins ws_server to the tuple.
+CODING_FRAME_KINDS = (
+    "coding_round",
+    "coding_acceptance",
+    "coding_tool",
+    "coding_complete",
+    "coding_stream_error",
+)
+
 # The per-round columns a Live view renders. round_index/outcome/tokens/thinking/
 # duration come straight from the row; stop_reason is parsed out of summary_json.
 #
