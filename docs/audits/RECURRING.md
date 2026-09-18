@@ -244,11 +244,42 @@ invocation, at the platform, for every actor including an agent. `main`
 already carries exactly that rule. Extending it to `~ALL` is the only
 mechanism found that matches the failure; the cost is that no branch can be
 deleted without bypassing the ruleset, which this section already argues is
-the cheap side of the trade. It is a repository settings decision, so it is
-named here rather than taken.
+the cheap side of the trade.
 
-Until then 4a remains discipline, and honestly labelled as such: a rule, not
-a control, with two recorded failures and no enforcement.
+**TAKEN 2026-09-17 (#476).** `no-branch-deletion` now exists on Prometheus and
+beacon-desktop: target `~ALL`, one rule (`deletion`), enforcement `active`,
+**zero bypass actors**. That last field is what decides whether this is a control
+or a decoration — an admin bypass would make it neither, and it is the first
+thing to check if this section is ever doubted.
+
+It is a SECOND ruleset on purpose. Retargeting `protect-main` to `~ALL` would
+have dragged `pull_request` and `required_linear_history` onto every branch,
+so no feature branch could be pushed to without a PR — a control that stops the
+work it protects gets switched off within a week.
+
+Verified by trying, not by reading the settings page. A throwaway branch was
+created on each repo and then deleted:
+
+```
+DELETE /repos/OAraLabs/Prometheus/git/refs/heads/test/4a-deletion-control
+  422  Repository rule violations found — Cannot delete this branch
+
+DELETE /repos/OAraLabs/beacon-desktop/git/refs/heads/test/4a-deletion-control
+  422  Repository rule violations found — Cannot delete this branch
+```
+
+Both test branches are still there, and that is not untidiness: they **cannot**
+be deleted, which is the standing proof. Removing them would mean disabling the
+control, and this section's own argument covers the cost — branches accumulate
+cheaply beside a permanently closed PR.
+
+So the vector that actually caused both losses is closed, rather than the one the
+rule named. `delete_branch_on_merge=false` remains true on both repos and remains
+not the mechanism; `gh pr merge --delete-branch` is now refused by the platform
+for every actor — an agent, an admin, a mistake.
+
+The three CI dead ends above are deliberately NOT deleted. Someone will otherwise
+try `administration: read` again.
 
 ### 4b. The check named the wrong dependency
 
