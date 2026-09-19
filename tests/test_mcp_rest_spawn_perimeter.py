@@ -139,6 +139,15 @@ DEFINITION = {"name": "docs", "command": "npx", "args": ["-y", "docs-mcp"],
               "env": {"DOCS_TOKEN": ENV_SECRET,
                       UNREDACTED_ENV_NAME: UNREDACTED_ENV_VALUE}}
 
+#: An http/sse definition. The header VALUE is deliberately not
+#: ``Bearer …``-shaped, for the reason UNREDACTED_ENV_NAME exists: the
+#: redactor masks ``Bearer <x>`` on its own, so a value in that shape would
+#: pass whether or not the route sends it. This one only stays out of the
+#: trail if the route's projection keeps it out.
+UNREDACTED_HEADER_VALUE = "ha-access-value-that-must-never-be-logged"
+HTTP_DEFINITION = {"name": "ha", "url": "http://ha.invalid/api/mcp",
+                   "headers": {"Authorization": UNREDACTED_HEADER_VALUE}}
+
 
 # --------------------------------------------------------------------------- #
 # WHO
@@ -407,6 +416,22 @@ class TestAuditTrail:
         assert UNREDACTED_ENV_VALUE not in summary, summary
         assert UNREDACTED_ENV_VALUE not in both_sinks, both_sinks
         assert ENV_SECRET not in both_sinks
+
+    def test_the_trail_records_header_names_but_never_header_values(self, rig) -> None:
+        """The other credential-carrying map, same stance as env. The route's
+        projection is the only thing between the value and the log."""
+        client = rig.build()
+        resp = client.post("/api/mcp/servers", json=HTTP_DEFINITION,
+                           headers=_auth(GLOBAL_TOKEN))
+        assert resp.status_code == 200, resp.text
+
+        rows = [r for r in self._rows()
+                if r["tool_name"] == "mcp.rest_define_server"]
+        assert len(rows) == 1, rows
+        assert "Authorization" in rows[0]["tool_input_summary"]   # the name
+        both_sinks = json.dumps(self._rows()) + json.dumps(self._db_rows())
+        assert UNREDACTED_HEADER_VALUE not in both_sinks, both_sinks
+        assert UNREDACTED_HEADER_VALUE not in resp.text            # nor the echo
 
     def test_a_refused_request_spawns_nothing_to_record(self, rig) -> None:
         client = rig.build()
