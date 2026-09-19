@@ -188,7 +188,7 @@ Why this only works here: a screen recording of you doing your job is among the 
 
 - Dynamic tool discovery from any MCP server, in the daemon and the CLI alike
 - Collision-free naming (`mcp__{server}__{tool}`), stdio transport today (HTTP/SSE planned), config fingerprinting
-- Scoped and gated: per-server `allowed_tools` allowlists (enforced at discovery *and* at call time), and tools a server doesn't declare read-only require confirmation before they run
+- Scoped and gated: per-server `allowed_tools` allowlists (enforced at discovery *and* at call time); every MCP tool call requires confirmation before it runs — a server's `readOnlyHint` is recorded and shown, never trusted to skip the prompt
 - Managed over REST as well as config: `/api/mcp/servers` adds, edits and removes servers live (Beacon's Connectors tab is its client); a server added at runtime is advertised to the model and reaches the llama.cpp grammar on the next turn, or the add fails loudly
 - Context7 is a two-line config away for up-to-date library documentation
 - **Packs** — the extension contract at the boundary: a pack declares its tools, skills and panels; skills arrive quarantined, panels are discoverable, and nothing a pack ships is trusted before it is declared ([FOUNDATION](docs/FOUNDATION.md) Part 2)

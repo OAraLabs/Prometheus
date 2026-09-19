@@ -918,21 +918,49 @@ class SecurityGate:
                 )
                 return PermissionDecision.allow(level=TrustLevel.AUTO)
 
-        # --- LEVEL 1: third-party MCP tools (FOUNDATION 2.3a) → APPROVE
-        # unless the server declares the tool read-only. Both origins: a
-        # present human asked for the TASK, not for whatever a third-party
-        # server does with it. Placed after grants, so the operator's
-        # "/approve always <id>" (a "tool"-kind grant) silences the prompt
-        # for exactly that tool; AUTONOMOUS mode returned above and waives
-        # this tier like every other APPROVE. Before this rule, every MCP
-        # call fell through to auto-allow: the adapter hardcoded
-        # is_read_only=True, declared no path params the gate could see,
-        # and carried no command — three misses that compose to "the
-        # sanctioned third-party surface is the ungated one".
-        if tool_name.startswith("mcp__") and not is_read_only:
+        # --- LEVEL 1: third-party MCP tools (FOUNDATION 2.3a) → APPROVE,
+        # every call. Both origins: a present human asked for the TASK, not
+        # for whatever a third-party server does with it. Placed after
+        # grants, so a `security.grants` entry of kind "tool" silences the
+        # prompt for exactly that tool; AUTONOMOUS mode returned above and
+        # waives this tier like every other APPROVE.
+        #
+        # ⚠ WHAT THIS DOES NOT DO. `/approve always` on an MCP request
+        # approves ONCE and remembers NOTHING. The request carries no path
+        # and no command, so derive_grant (approval_queue.py, rule 4) has
+        # no extent to describe and mints no grant — the reply says so.
+        # This comment claimed the opposite from #315 until 2026-09-18. The
+        # unit of remembered consent for an MCP tool is undecided design
+        # work, not a missing line; do not "fix" it here by minting the
+        # widest grant in the system from the least information.
+        #
+        # THE SERVER'S readOnlyHint IS NOT TRUSTED TO SKIP THE PROMPT (ruled
+        # 2026-09-18). It is a third party's self-declaration with no check
+        # beneath it: the adapter's input model declares no fields, so the
+        # gate never sees an MCP argument — denied_paths, the workspace
+        # boundary and the exfiltration detector all key off values that
+        # are None on this path. For a builtin, "read-only" is backed by
+        # the floor (read_file on ~/.ssh is DENIED before this tier); for an
+        # MCP tool it is backed by nothing, and a "read-only" tool that
+        # returns ~/.ssh/id_rsa into model context is exactly what the floor
+        # exists to stop. Honouring the hint was the trust-the-success-
+        # message shape, at the security boundary. The hint is still
+        # recorded (McpCatalogTool.read_only_hint, the REST card) and named
+        # in the reason so the operator sees what the server claimed.
+        #
+        # Before #315, every MCP call fell through to auto-allow: the
+        # adapter hardcoded is_read_only=True, declared no path params the
+        # gate could see, and carried no command — three misses that
+        # composed to "the sanctioned third-party surface is the ungated one".
+        if tool_name.startswith("mcp__"):
+            claim = (
+                "the server declares it read-only; the hint is not trusted "
+                "to skip confirmation" if is_read_only
+                else "not declared read-only by its server"
+            )
             reason = (
-                f"Third-party MCP tool {tool_name} is not declared "
-                "read-only by its server"
+                f"Third-party MCP tool {tool_name} requires confirmation "
+                f"({claim})"
             )
             self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason)
             self._remember_approve_target(reason, file_path=file_path, command=command)
