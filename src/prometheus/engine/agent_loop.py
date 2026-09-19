@@ -63,6 +63,10 @@ log = logging.getLogger(__name__)
 # True the first time the TypeError fallback fires per process so the
 # deprecation surfaces without spamming logs every tool call.
 _LEGACY_PERMISSION_CHECKER_WARNED: bool = False
+#: One-shot deprecation notice for a `permission_prompt` that cannot accept
+#: the call's arguments. Module-level so a legacy prompt does not log on
+#: every single tool call.
+_LEGACY_PERMISSION_PROMPT_WARNED: bool = False
 
 PermissionPrompt = Callable[[str, str], Awaitable[bool]]
 AskUserPrompt = Callable[[str], Awaitable[str]]
@@ -4230,6 +4234,7 @@ async def _execute_tool_call(
             gate_path_for,
             gate_path_is_write,
         )
+        from prometheus.permissions.computer_extent import computer_extent_for
         # The tool's own schema says which params are paths (never guessed
         # from the name — that mistake has now been made three times), and
         # `base` is what a relative DIRECTORY root resolves against: the same
@@ -4262,6 +4267,13 @@ async def _execute_tool_call(
         # it. See permissions/tool_paths.gate_path_is_write.
         _path_is_write = gate_path_is_write(tool_name, schema=_gate_schema)
         _command = str(tool_input.get("command", "")) or None
+        # The computer-use extent, from the tool's OWN schema — the same
+        # bargain gate_path_for makes, for the same reason. Two channels: an
+        # extent the gate can rule on, or a reason it could not be assembled.
+        # `_computer_unknown` must never read as "not a computer action".
+        _computer_action, _computer_unknown = computer_extent_for(
+            tool_name, tool_input, schema=_gate_schema,
+        )
         # TRUST-CONTEXT: derive origin from the session_id already
         # threaded through LoopContext (agent_loop.py:538-542 convention).
         # User-initiated calls (telegram:/cli/web) skip the
@@ -4294,6 +4306,8 @@ async def _execute_tool_call(
                 command=_command,
                 origin=_origin,
                 path_is_write=_path_is_write,
+                computer_action=_computer_action,
+                computer_unknown=_computer_unknown,
                 **({"workspace_roots": _run_roots} if _run_roots else {}),
             )
         except TypeError:
@@ -4326,6 +4340,30 @@ async def _execute_tool_call(
                 file_path=_file_path,
                 command=_command,
             )
+            # gate-computer-context: a legacy gate cannot be told this is a
+            # desktop action, and a desktop action carries no path and no
+            # command — so such a gate would ALLOW it on the strength of
+            # knowing nothing about it. That is the auto-allow this change
+            # exists to close, and it must not reopen through the
+            # compatibility branch. Force the prompt here instead.
+            if (_computer_action is not None or _computer_unknown) and decision.allowed:
+                from prometheus.permissions.checker import PermissionDecision
+                decision = PermissionDecision.approve(
+                    _computer_unknown or
+                    f"{tool_name} acts on the desktop: "
+                    f"{_computer_action.describe()} — the configured "
+                    f"permission checker predates computer-use extents, so "
+                    f"this cannot be remembered"
+                )
+        if _computer_unknown and decision.allowed:
+            # Exactly the `_path_unknown` shape below, and deliberately ONLY
+            # for the unknown case. An UNKNOWN extent must never be allowed —
+            # the gate could not rule on it. A KNOWN extent may legitimately
+            # be allowed, because a remembered `computer_action` grant is how
+            # an operator stops being asked; overriding that too would make
+            # every grant inert and the consent unit meaningless.
+            from prometheus.permissions.checker import PermissionDecision
+            decision = PermissionDecision.approve(_computer_unknown)
         if _path_unknown and decision.allowed:
             # A path exists and could not be resolved to an absolute one
             # (relative target, or a tool nobody mapped). The gate could not
@@ -4344,7 +4382,30 @@ async def _execute_tool_call(
             if _prompt is None and context.permission_checker is not None:
                 _prompt = getattr(context.permission_checker, "request_approval", None)
             if decision.requires_confirmation and _prompt is not None:
-                confirmed = await _prompt(tool_name, decision.reason)
+                # THE ARGUMENTS ARE PART OF THE ASK. For a desktop action the
+                # reason names the app and the verb; only the arguments say
+                # what is actually being typed or clicked, and an approval
+                # given without them is not consent to anything in particular.
+                #
+                # Passed as a keyword with a TypeError fallback, matching the
+                # convention the evaluate() call above already uses: a
+                # third-party `permission_prompt` with the old two-arg shape
+                # keeps working and simply shows less.
+                try:
+                    confirmed = await _prompt(
+                        tool_name, decision.reason, arguments=tool_input,
+                    )
+                except TypeError:
+                    global _LEGACY_PERMISSION_PROMPT_WARNED
+                    if not _LEGACY_PERMISSION_PROMPT_WARNED:
+                        log.warning(
+                            "permission_prompt accepted as legacy signature "
+                            "(no `arguments` kwarg); the operator will not be "
+                            "shown the arguments being approved. Logging this "
+                            "once per process.",
+                        )
+                        _LEGACY_PERMISSION_PROMPT_WARNED = True
+                    confirmed = await _prompt(tool_name, decision.reason)
                 if not confirmed:
                     if context.telemetry is not None:
                         context.telemetry.record(

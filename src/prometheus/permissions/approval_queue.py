@@ -12,7 +12,13 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 from uuid import uuid4
+
+from prometheus.permissions.argument_view import (
+    format_arguments,
+    redact_arguments,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +66,15 @@ class PendingAction:
     created_at: float = field(default_factory=time.time)
     grant_file_path: str | None = None
     grant_command: str | None = None
+    #: The computer-use extent, when this is a desktop action. Third member of
+    #: the structured-target family above; see permissions/computer_extent.py.
+    grant_computer_action: "Any | None" = None
+    #: THE ARGUMENTS BEING APPROVED, redacted and truncated at the point of
+    #: capture. Not decoration: for `type_text` the arguments ARE the decision,
+    #: and approving a keystroke without seeing it is not consent. Kept as a
+    #: mapping rather than pre-rendered text so each surface (Telegram prose,
+    #: Beacon's card) formats it for its own width.
+    arguments: "dict[str, Any] | None" = None
     _event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _result: ApprovalResult = ApprovalResult.TIMEOUT
 
@@ -158,6 +173,40 @@ def derive_grant(
     from pathlib import Path as _Path
 
     from prometheus.permissions.checker import Grant
+    from prometheus.permissions.computer_extent import COMPUTER_ACTION_KIND
+
+    extent = action.grant_computer_action
+    if extent is not None:
+        # NOT REMEMBERABLE WHEN THE CALL CARRIES A PAYLOAD, and this is the
+        # whole reason the check lives here rather than at the prompt: the
+        # prompt renders from prospective_extents(), which renders from THIS
+        # function, so a payload-bearing action offers no lasting scope on any
+        # surface without a second place to keep in step.
+        #
+        # `firefox:type_text:background` would mean "type ANY text into
+        # Firefox, forever" — minted from a prompt that showed one string.
+        # That is the narrow-prompt/wide-grant inversion rule 4 below exists
+        # to refuse, arriving from a new direction. The extent has no term for
+        # the payload and one cannot be added: the only stable handles Cua
+        # offers are snapshot-bound element tokens, which die on the next
+        # observation. So the honest answer is the same one: approve once.
+        if not extent.rememberable:
+            return None
+        if root:
+            # A directory root is meaningless for a desktop action. Returning
+            # the path grant instead would silently answer a different
+            # question, so refuse rather than guess.
+            return None
+        return Grant(
+            kind=COMPUTER_ACTION_KIND,
+            value=extent.value,
+            tool_name=action.tool_name,
+            request_id=action.request_id,
+            # An app:verb:delivery extent covers exactly itself. There is no
+            # wider version of it to opt into, so `… here` cannot widen it.
+            widened=False,
+            scope=stored_scope_for(verb),
+        )
 
     if root:
         return Grant(
@@ -351,6 +400,10 @@ class ApprovalQueue:
             "created_at": action.created_at,
             "expires_at": self.expires_at(action),
             "extents": prospective_extents(action),
+            # Already redacted and truncated (see PendingAction.arguments).
+            # None means "this call had no arguments worth showing", which is
+            # different from {} and Beacon may render the difference.
+            "arguments": action.arguments,
         }
 
     async def _emit(self, kind: str, payload: dict) -> None:
@@ -403,6 +456,8 @@ class ApprovalQueue:
         chat_id: int | None = None,
         grant_file_path: str | None = None,
         grant_command: str | None = None,
+        grant_computer_action: Any | None = None,
+        arguments: dict[str, Any] | None = None,
     ) -> ApprovalResult:
         """Queue an action for user approval.
 
@@ -442,6 +497,13 @@ class ApprovalQueue:
             description=description,
             grant_file_path=grant_file_path,
             grant_command=grant_command,
+            grant_computer_action=grant_computer_action,
+            # Redacted and truncated HERE, once, at the point the request is
+            # created — so every surface (Telegram, Beacon's card, the audit
+            # row) renders the same already-safe mapping and none of them can
+            # forget to scrub. Storing the raw dict and scrubbing per surface
+            # is how one surface ends up echoing a secret.
+            arguments=redact_arguments(arguments),
         )
         self.pending[request_id] = action
         await self._emit("approval_pending", self.serialize_pending(action))
@@ -478,6 +540,17 @@ class ApprovalQueue:
                 "Permission requested:",
                 f"Tool: {tool_name}",
                 f"Action: {description}",
+            ]
+            # THE ARGUMENTS BEING APPROVED. Above the verbs, not below them:
+            # for `type_text` the arguments ARE the decision, and a prompt
+            # that puts the answer options before the thing being decided
+            # invites the reflex answer. Already redacted and truncated at
+            # construction — `action.arguments` is never raw.
+            arg_lines = format_arguments(action.arguments)
+            if arg_lines:
+                lines.append("With:")
+                lines.extend(arg_lines)
+            lines += [
                 "",
                 "/approve — approve this ONCE (or /deny)",
             ]
