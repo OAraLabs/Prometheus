@@ -1,16 +1,21 @@
 """MCP calls reach the SecurityGate — FOUNDATION 2.3a, prerequisite 2.
 
-Before this, every MCP call bypassed the gate in full: the adapter
+Before #315, every MCP call bypassed the gate in full: the adapter
 hardcoded is_read_only=True, its input model declared no fields so path
 extraction saw nothing, and there was no command — three misses composing
-to auto-allow for arbitrary third-party code. These tests pin the new
-posture: a non-read-only ``mcp__*`` call requires confirmation; a tool the
-server declares read-only does not; AUTONOMOUS mode waives the prompt like
-every other APPROVE tier (never the floor).
+to auto-allow for arbitrary third-party code. These tests pin the posture
+since 2026-09-18: EVERY ``mcp__*`` call requires confirmation. A server's
+``readOnlyHint`` is recorded and named in the reason but never trusted to
+skip the prompt — the gate still sees no MCP argument (the adapter's input
+model declares no fields), so nothing beneath the hint could catch a
+"read-only" tool that reads ``~/.ssh``. An operator grant of kind ``tool``
+silences the prompt; AUTONOMOUS mode waives it like every other APPROVE
+tier (never the floor).
 
 Deliberately NO ``mcp`` SDK import anywhere here: the gate rule keys on
-the tool NAME, so these tests run in CI, where the mcp extra is not
-installed and the SDK-dependent tests skip.
+the tool NAME. (CI has installed the ``mcp`` extra since 2026-08-28 —
+``.github/workflows/ci.yml`` — so the SDK-dependent files run there too;
+this file simply does not need it.)
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ from prometheus.context.dynamic_tools import DynamicToolLoader
 from prometheus.engine.agent_loop import LoopContext, run_loop
 from prometheus.engine.messages import ConversationMessage, TextBlock, ToolUseBlock
 from prometheus.engine.usage import UsageSnapshot
-from prometheus.permissions.checker import PermissionMode, SecurityGate
+from prometheus.permissions.checker import Grant, PermissionMode, SecurityGate
 from prometheus.providers.base import ApiMessageCompleteEvent, ModelProvider
 from prometheus.tools.base import BaseTool, ToolRegistry, ToolResult
 
@@ -62,10 +67,28 @@ class TestGateRule:
         assert decision.requires_confirmation
         assert "mcp__srv__write_thing" in decision.reason
 
-    def test_read_only_hinted_mcp_is_allowed(self) -> None:
+    def test_read_only_hint_does_not_skip_the_prompt(self) -> None:
+        # Ruled 2026-09-18: the hint is a third party's self-declaration
+        # with no check beneath it — the gate never sees an MCP argument.
+        # It is recorded and named in the reason, not trusted.
         gate = SecurityGate()
         decision = gate.evaluate("mcp__srv__lookup", is_read_only=True)
-        assert decision.action == "ALLOW"
+        assert decision.action == "APPROVE"
+        assert decision.requires_confirmation
+        assert "read-only" in decision.reason
+        assert "not trusted" in decision.reason
+
+    def test_an_operator_tool_grant_silences_the_prompt(self) -> None:
+        # The one thing that does, today: a `security.grants` entry of kind
+        # "tool" — hand-written, because /approve always cannot mint one for
+        # an MCP request (tests/test_mcp_doc_claims.py pins that). Grants
+        # are checked before this tier, so it is honoured for exactly the
+        # named tool and nothing else.
+        gate = SecurityGate(
+            grants=[Grant(kind="tool", value="", tool_name="mcp__srv__lookup")]
+        )
+        assert gate.evaluate("mcp__srv__lookup", is_read_only=True).action == "ALLOW"
+        assert gate.evaluate("mcp__srv__other", is_read_only=True).action == "APPROVE"
 
     @pytest.mark.parametrize("origin", ["user", "system"])
     def test_both_origins_prompt(self, origin: str) -> None:
@@ -123,7 +146,28 @@ class TestMcpToolInALiveLoop:
     """Acceptance (FOUNDATION Part 4): an MCP tool is *called* in a live
     loop — run_loop, real registry, real gate — not merely registered."""
 
-    def test_read_only_mcp_tool_executes_through_the_loop(self) -> None:
+    def test_mcp_tool_executes_through_the_loop_under_an_operator_grant(self) -> None:
+        tool = _McpShapedTool("mcp__srv__lookup", read_only=True)
+        registry = ToolRegistry()
+        registry.register(tool)
+        provider = _ScriptedProvider(tool.name)
+        ctx = LoopContext(
+            provider=provider,
+            model="stub",
+            system_prompt="",
+            max_tokens=128,
+            tool_registry=registry,
+            permission_checker=SecurityGate(
+                grants=[Grant(kind="tool", value="", tool_name=tool.name)]
+            ),
+        )
+        _run(ctx)
+        assert tool.calls, "the MCP tool never executed"
+        assert len(provider.requests) >= 2, "no round followed the tool call"
+
+    def test_read_only_hinted_mcp_tool_is_stopped_by_the_gate(self) -> None:
+        # The case that used to execute unprompted. Same rig as the grant
+        # test above minus the grant: the hint alone must not get it run.
         tool = _McpShapedTool("mcp__srv__lookup", read_only=True)
         registry = ToolRegistry()
         registry.register(tool)
@@ -137,8 +181,9 @@ class TestMcpToolInALiveLoop:
             permission_checker=SecurityGate(),
         )
         _run(ctx)
-        assert tool.calls, "the MCP tool never executed"
-        assert len(provider.requests) >= 2, "no round followed the tool call"
+        assert tool.calls == [], (
+            "a read-only-hinted MCP tool executed without confirmation"
+        )
 
     def test_non_read_only_mcp_tool_is_stopped_by_the_gate(self) -> None:
         tool = _McpShapedTool("mcp__srv__write_thing", read_only=False)

@@ -57,15 +57,20 @@ class McpToolAdapter(BaseTool):
         # every MCP call fall through the SecurityGate as auto-allow — a
         # third-party tool that writes files or sends money was "read-only"
         # by assertion. Now: only an explicit readOnlyHint=True from the
-        # server counts; undeclared means NOT read-only, and the gate
-        # requires confirmation for it (checker.evaluate's mcp__ rule).
+        # server counts; undeclared means NOT read-only.
         #
-        # Trust decision, stated: the hint is the server's own claim. It is
-        # honoured for confirmation-skipping because the operator already
-        # opted into the server (and can scope it with allowed_tools) —
-        # a server that lies about read-onlyness has the same power as any
-        # tool the operator allowlisted. The floor (denied paths, blocked
-        # commands) never keyed off this flag.
+        # WHAT THIS VALUE IS FOR, since 2026-09-18: reporting, not consent.
+        # It is the server's own claim, carried honestly to the REST card
+        # and named in the gate's reason so the operator sees what the
+        # server said. The gate does NOT honour it to skip confirmation —
+        # every mcp__ call prompts (checker.evaluate's mcp__ rule, which
+        # states why). The earlier note here argued the hint could be
+        # trusted because the operator opted into the server; that missed
+        # that the floor never sees an MCP argument (this class's input
+        # model declares no fields), so a lying "read-only" tool had nothing
+        # beneath it — unlike a builtin, whose read-only status is backed by
+        # denied_paths. The flag still feeds the loop's read-only/mutating
+        # partition and the repeat detector, which is where it is harmless.
         return self._tool_info.read_only_hint is True
 
     def to_api_schema(self) -> dict[str, Any]:

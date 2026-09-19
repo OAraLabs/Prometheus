@@ -263,6 +263,17 @@ then found (Part 4): a deferred MCP tool is reachable by the loop but a local mo
 will not call a tool absent from its advertised list (#369), and tools registered by a
 server added over REST are not in the boot-time GBNF grammar (#370).
 
+**Status, 2026-09-18.** The `readOnlyHint` half of prerequisite 2 was reversed: every
+`mcp__` call now requires confirmation, hinted or not. The hint is a third party's
+self-declaration with no check beneath it — the gate never sees an MCP argument
+(`McpToolAdapter.input_model` declares no fields), so denied paths, the workspace
+boundary and the exfiltration detector are all inert on this path, and a "read-only"
+tool that reads `~/.ssh` had nothing between it and model context. The hint is still
+recorded and named in the prompt. Corrected the same day: `/approve always` has never
+remembered an MCP approval (no describable extent → no grant, and the reply says so),
+and the advertise default has been *advertise* since #369. Current wording lives in
+`docs/guide/features.md`, gated by `tests/test_mcp_doc_claims.py`.
+
 Known limit, accepted: the client's HTTP/SSE transport is unimplemented (stdio only).
 Local subprocess servers are the third-party story at v3; remote servers are not a
 prerequisite, they are future work.
@@ -425,7 +436,7 @@ Before Beacon ships, each of these is independently confirmed, not assumed. Owne
 
 - [x] MCP runtime constructed in the daemon path, not only the CLI — #315, `src/prometheus/daemon.py:845-852`. Live 2026-09-01 on `ccbde1c`: boot log `MCP connected: context7 (2 tools)` before both loop builds; `GET /api/mcp/servers` → `wired: true`.
 - [x] An MCP tool from a configured server is *called* in a live loop, and per-server `allowed_tools` filtering demonstrably excludes a tool the server offers — at discovery and at `call_tool`. Live 2026-09-01: `mcp__context7__resolve_library_id` executed in session `smoke:mcp-live-forced-20260901` (`tool_calls` row `c903502f…`, real context7 answer `/websites/fastapi_tiangolo`), forced via `tool_choice` — under `auto` the local model declined to call a deferred tool it had just loaded with `tool_search` (#369). Discovery exclusion, live: a REST-added `c7allow` with `allowed_tools: [resolve-library-id]` logged `allowed_tools excluded 1 of 2 offered tool(s)`, registered one tool, and forcing the excluded name was refused at ingress (`400 unknown tool … not a registered tool`). `call_tool` exclusion: `tests/test_mcp_allowlist.py` against the real runtime (`src/prometheus/mcp/runtime.py:371-375`). Caveat: the REST-added server's surviving tool could not be forced — its name is not in the boot grammar (#370).
-- [x] A non-read-only MCP call reaches the SecurityGate and requires confirmation; a `readOnlyHint` tool does not. Live 2026-09-01, the `readOnlyHint` half: `[AUDIT] ALLOW: mcp__context7__resolve_library_id - Auto-allowed (user-initiated)`, no confirmation raised. The confirmation half: `tests/test_mcp_gating.py:121-160` drives a real `run_loop` against a real `SecurityGate` and stops the non-read-only call; context7 offers no non-read-only tool to exercise it live.
+- [x] A non-read-only MCP call reaches the SecurityGate and requires confirmation; a `readOnlyHint` tool does not. Live 2026-09-01, the `readOnlyHint` half: `[AUDIT] ALLOW: mcp__context7__resolve_library_id - Auto-allowed (user-initiated)`, no confirmation raised. The confirmation half: `tests/test_mcp_gating.py:121-160` drives a real `run_loop` against a real `SecurityGate` and stops the non-read-only call; context7 offers no non-read-only tool to exercise it live. *(Superseded 2026-09-18 — see the Status paragraph in 2.3a: a `readOnlyHint` tool now prompts too.)*
 - [ ] Pack loader exists, discovers a fixture pack, and its skill is *promoted and then used in a live loop*, not merely discovered
 - [ ] A pack declaring `pack_api: 999` is refused at load, with both versions named in the error — asserted by a fixture pack that declares it
 - [ ] A pack whose `provides` block disagrees with its contents is refused, asserted by a fixture pack that lies
