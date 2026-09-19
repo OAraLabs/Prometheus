@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from prometheus.hooks.file_mutation_verifier import (
+    audit_bash_command,
     FileMutationVerifier,
     _extract_bash_paths,
     make_default_verifier,
@@ -708,7 +709,11 @@ class TestSilenceIsNotAnAudit:
         """A quoted destination cannot be named — so say so, rather than return None
         and let it read as a clean audit."""
         v = self._verifier()
-        cmd = 'cmd > "some file.txt"'
+        # NOTE: this used to be `cmd > "some file.txt"`. Under the lexer a quoted
+        # destination is NAMEABLE — that was the floor #484 set out to raise — so it
+        # is now tracked rather than flagged, and no longer exercises this contract.
+        # An unresolved variable is what genuinely cannot be named.
+        cmd = "cmd > $LOG"
         v.pre_tool_use("bash", {"command": cmd}, "t1", turn_key="k")
         out = v.post_turn(turn_key="k")
         assert out is not None, "blind turn stayed silent — indistinguishable from clean"
@@ -729,7 +734,7 @@ class TestSilenceIsNotAnAudit:
         v = self._verifier()
         target = tmp_path / "seen.txt"
         seen = f"echo a > {target}"
-        unseen = 'echo b > "un seen.txt"'
+        unseen = "echo b > $UNSEEN"      # quoted paths are nameable now; a variable is not
         v.pre_tool_use("bash", {"command": seen}, "t1", turn_key="k")
         target.write_text("a\n")
         v.post_tool_use("bash", {"command": seen}, "t1", turn_key="k")
@@ -766,8 +771,10 @@ class TestShellSyntaxIsNotAFilePath:
         """`echo "… does not touch them."` reported a missing file named `them.`
 
         Splitting on `;` before dequoting cut a quoted string in half; each half then
-        carried an unbalanced quote, so `_dequote` could not pair it, the prose
-        survived as bare text, and a sentence-ending period became a filename.
+        carried an unbalanced quote, nothing could pair it, the prose survived as bare
+        text, and a sentence-ending period became a filename. A separator that is a
+        TOKEN cannot fall inside a quoted span, so the cascade is now unreachable
+        rather than merely guarded against.
         """
         cmd = (
             'echo "  refs are permanent unless deleted; reflog expiry does not '
@@ -806,10 +813,11 @@ class TestShellSyntaxIsNotAFilePath:
     def test_an_arrow_function_is_not_a_redirect(self):
         """`(s) => /^smoke:/.test(s)` claimed a file `/^smoke:/.test(s))`.
 
-        The `>` in `=>` is JavaScript, not a redirect. `(?<![<>])` did not cover it —
-        that lookbehind exists to keep the single-redirect pattern off the first char
-        of `>>`, and says nothing about an `=` before the `>`. The operator position
-        guard from `_REDIRECT_OP` is what distinguishes them.
+        The `>` in `=>` is JavaScript, not a redirect. Under the regex this needed a
+        lookbehind on the preceding character, which could never admit `hi>out.txt`
+        and reject `(s) =>` at the same time. The lexer removes the dilemma: `=>` is
+        neutralised before tokenizing, so no `>` reaches the walker that was not an
+        operator, and both forms are handled correctly rather than traded off.
         """
         # NEGATIVE control.
         assert _extract_bash_paths("const f = (s) => /^smoke:/.test(s)") == []
@@ -985,48 +993,45 @@ class TestLastClaimWinsForAPath:
         assert "CLAIMED but FILE ABSENT" not in out
 
 
-class TestNoSpaceRedirectIsADeliberateFalseNegative:
-    """PINNED ON PURPOSE. Do not "fix" this without reading the trade below.
+class TestNoSpaceRedirectIsTrackedByTheLexer:
+    """WAS a deliberate false negative. Closed by the lexer rewrite (#484).
 
-    `echo hi>out.txt` and `cmd>>app.log` are NOT tracked. That is a real false
-    negative, accepted deliberately, and this test exists so that it stays a
-    decision with a receipt rather than becoming an accident nobody knows about.
-
-    WHY IT IS GIVEN UP. The `>` of a redirect and the `>` of a JS/TS arrow
-    function are the same character. The only thing separating them in shell text
-    is what comes immediately before: whitespace, clause start, an fd digit, or
-    `&`. `echo hi>out.txt` has an `i` before the `>`, and so does `(s) =>`:
+    THE TRADE THAT USED TO BE HERE. The `>` of a redirect and the `>` of a JS/TS
+    arrow function are the same character. Under a regex the only thing separating
+    them is what comes immediately before — whitespace, clause start, an fd digit,
+    or `&` — and `echo hi>out.txt` has an `i` before the `>`, exactly as `(s) =>`
+    has an `=`:
 
         echo hi>out.txt      <- `i` before `>`   a real redirect
         const f = (s) => …   <- `=` before `>`   JavaScript
 
-    Any lookbehind permissive enough to admit the first admits forms of the second.
-    Loosening it to `(?<=[A-Za-z0-9_])` would track `hi>out.txt` and would equally
-    track `a>b` inside a heredoc body, which dequoting cannot blank.
+    Any lookbehind permissive enough to admit the first admitted forms of the
+    second, so the no-space redirect was given up to keep `=>` from claiming a
+    file. Worse, the gap was SILENT rather than flagged: the blindness predicate
+    carried the same lookbehind, so it did not see an operator there either and the
+    turn was recorded clean.
 
-    WHAT IT COSTS, MEASURED RATHER THAN ASSUMED. The untracked write is also NOT
-    reported blind: `_REDIRECT_OP` carries the same lookbehind, so it does not even
-    see an operator in `hi>out.txt`, `command_has_unnameable_target` returns False, and
-    the turn is recorded as clean. The gap is silent, not flagged. That is a
-    deliberate acceptance for a reporter — and it is the single strongest argument
-    for the lexer rewrite, where clause structure is known instead of guessed.
-
-    If the no-space form must be tracked, the fix is a real lexer (shlex), not a
-    looser lookbehind. See the rewrite issue.
+    WHY THE LEXER IS NOT JUST A LOOSER LOOKBEHIND. Both horns came from deciding
+    operator-ness by the preceding CHARACTER. A lexer decides it by TOKEN: `>` is
+    emitted as an operator wherever it legally is one, and `=>` never reaches the
+    walker at all because it is neutralised in the quote-aware pre-pass. So the
+    break closes and the false positive stays closed — the tests below assert both
+    halves, because a fix that only bought one of them would be a swap.
     """
 
-    def test_no_space_redirect_is_not_tracked(self):
-        from prometheus.hooks.file_mutation_verifier import command_has_unnameable_target
+    def test_no_space_redirect_is_tracked(self):
+        """The break, closed. It is TRACKED — not merely reported blind.
 
-        # The false negative, pinned.
-        assert _extract_bash_paths("echo hi>out.txt") == []
-        assert _extract_bash_paths("cmd>>app.log") == []
-
-        # AND the honest part: it is silent, not flagged. This assertion is here so
-        # that if a future change starts reporting the no-space form as blind, the
-        # change is deliberate and this test gets updated on purpose rather than
-        # the docstring quietly going stale.
-        assert command_has_unnameable_target("echo hi>out.txt") is False
+        Naming the file is the point. A rewrite that satisfied the invariant by
+        calling this blind would have honoured the letter of the contract and given
+        up the thing the contract exists to produce.
+        """
+        assert _extract_bash_paths("echo hi>out.txt") == [("out.txt", "redirect_write")]
+        assert _extract_bash_paths("cmd>>app.log") == [("app.log", "redirect_append")]
+        # The spacing dimension in full: the operator is a token now, so where the
+        # whitespace falls stopped being a thing the extractor can be wrong about.
+        assert _extract_bash_paths("echo hi> out.txt") == [("out.txt", "redirect_write")]
+        assert _extract_bash_paths("echo hi >out.txt") == [("out.txt", "redirect_write")]
 
     def test_every_spaced_and_fd_prefixed_form_is_still_tracked(self):
         """The positive control. Tightening the lookbehind must not have cost
@@ -1140,10 +1145,12 @@ class TestUnresolvedOperandOutsideARedirectIsReported:
     inspected clauses carrying a REDIRECT operator. Trading a lie for silence is not
     automatically a win, and it was pinned as a known gap rather than shipped quietly.
 
-    Closing it is not a new contract. `_extract_bash_paths` already KNEW it had
-    dropped an operand — `_is_trackable` returned False and the caller discarded it.
-    `_raw_operands` reads that same unfiltered capture, so the drop site now reports
-    the decision the code was already making and throwing away.
+    Closing it is not a new contract. The extractor already KNEW it had dropped an
+    operand — `_is_trackable` returned False and the caller discarded it — so
+    reporting it is the drop site admitting a decision the code was already making
+    and throwing away. Under the lexer the drop site is `_analyze_clause`, where the
+    same operand either becomes a tracked path or sets `blind`, which is the
+    invariant written as one branch rather than inferred across two functions.
 
     Measured before shipping, on 7,232 real commands from telemetry `tool_calls`:
     2 blindness rows before, 9 after. **Seven new rows, 0.124% of the corpus** — not
@@ -1192,18 +1199,24 @@ class TestUnresolvedOperandOutsideARedirectIsReported:
                 f"{cmd!r} was reported blind but touches nothing unnameable"
             )
 
-    def test_the_no_space_redirect_gap_is_still_open(self):
-        """STILL a gap, and pinned so closing it is deliberate. See #484.
+    def test_the_no_space_redirect_gap_is_closed(self):
+        """The gap this class used to hold open, now closed. See #484.
 
-        `echo hi>out.txt` is neither tracked nor reported: `_REDIRECT_OP` shares the
-        operator-position lookbehind that keeps `=>` from claiming a file, so it does
-        not see an operator there at all. Widening it to fire would reopen that false
-        positive, which is a lexer's job rather than a regex's.
+        It closed WITHOUT reopening the `=>` false positive it was traded against,
+        which was the open question: an operator is a token now, not a character
+        identified by what precedes it, so `>` and `=>` are told apart by the lexer
+        rather than by a lookbehind that could only ever admit one of them. The
+        second pair of assertions is that half of the trade, and it is the reason
+        this is a fix rather than a swap.
         """
-        assert _extract_bash_paths("echo hi>out.txt") == []
+        assert _extract_bash_paths("echo hi>out.txt") == [("out.txt", "redirect_write")]
         assert command_has_unnameable_target("echo hi>out.txt") is False
-        assert _extract_bash_paths("cmd>>app.log") == []
+        assert _extract_bash_paths("cmd>>app.log") == [("app.log", "redirect_append")]
         assert command_has_unnameable_target("cmd>>app.log") is False
+        # The false positive that the gap was the price of — still rejected.
+        assert _extract_bash_paths("const f = (s) => /^smoke:/.test(s)") == []
+        assert command_has_unnameable_target("const f = (s) => /^smoke:/.test(s)") is False
+        assert _extract_bash_paths("if a <= b: pass") == []
 
     def test_blindness_reaches_the_summary(self, tmp_path: Path):
         """End to end: a cp to an unresolved destination produces a row."""
@@ -1216,8 +1229,8 @@ class TestUnresolvedOperandOutsideARedirectIsReported:
         assert "no nameable target" in out
 
 
-class TestVerbInArgumentPositionIsAKnownFalsePositive:
-    """PINNED AS A DEFECT, not as correct behaviour. See #484.
+class TestVerbInArgumentPositionIsNotACommand:
+    """WAS a known false positive (#486). Closed by the command word (#484).
 
     `echo touch $FOO` mutates nothing, yet this reports it blind: the pattern table
     matches the mutation verb wherever it appears in the clause, so a verb sitting in
@@ -1252,13 +1265,13 @@ class TestVerbInArgumentPositionIsAKnownFalsePositive:
     reported correctly, this test moves on purpose.
     """
 
-    def test_a_verb_in_argument_position_is_reported_blind_today(self):
-        """The defect, pinned. Both directions: false positive here, correct there."""
-        # WRONG today — a verb in argument position is not a mutation.
-        assert command_has_unnameable_target("echo touch $FOO") is True
-        assert command_has_unnameable_target("grep touch $FILE") is True
-        assert command_has_unnameable_target("echo cp $A $B") is True
-        assert command_has_unnameable_target("cat rm $X") is True
+    def test_a_verb_in_argument_position_is_not_a_mutation(self):
+        """The defect, closed. A verb mid-clause is an argument, and the token
+        stream says which token the shell would actually execute."""
+        assert command_has_unnameable_target("echo touch $FOO") is False
+        assert command_has_unnameable_target("grep touch $FILE") is False
+        assert command_has_unnameable_target("echo cp $A $B") is False
+        assert command_has_unnameable_target("cat rm $X") is False
 
         # Correct today, and must stay correct: quoting blanks the span first, so the
         # verb never reaches the patterns. This is the control on the control — if a
@@ -1296,8 +1309,309 @@ class TestCorpusSelfContamination:
     instruments. A corpus that grows while you measure it is not a fixed sample.
     """
 
-    def test_heredoc_prose_containing_a_mutation_shape_is_blind(self):
-        """The contamination case, pinned: prose inside a heredoc reads as a command."""
+    def test_heredoc_prose_containing_a_mutation_shape_is_not_a_command(self):
+        """The contamination case, closed at the parser rather than at the corpus.
+
+        A heredoc body is DATA — the shell never executes it — so prose inside one is
+        not a mutation and must not be reported as anything. The measurement hazard in
+        the docstring above is unchanged: a count taken from a live `tool_calls` still
+        counts its own instruments. What changed is that this file no longer
+        MISREADS the prose once it is counted.
+        """
         cmd = "git commit -q -F - <<MSG\nfix: cp a /tmp/bak-$(date +%s).txt\nMSG"
-        assert command_has_unnameable_target(cmd) is True
+        assert command_has_unnameable_target(cmd) is False
         assert _extract_bash_paths(cmd) == []
+
+    def test_a_heredoc_body_cannot_contribute_a_claimed_path(self):
+        """The worse half of the same hazard, and it was live on `main`.
+
+        Prose in a heredoc did not merely raise a spurious blindness row — a redirect
+        written inside a body was extracted as a REAL claimed path, producing a
+        permanent `⚠ CLAIMED but FILE ABSENT` about a file nobody ever named:
+
+            cat <<EOF          on main -> [('/tmp/EVIL', 'redirect_write')]
+            echo hi > /tmp/EVIL
+            EOF
+        """
+        assert _extract_bash_paths("cat <<EOF\necho hi > /tmp/EVIL\nEOF") == []
+        assert _extract_bash_paths(
+            "git commit -F - <<MSG\nfix: rewrote > docs/out.md\nMSG"
+        ) == []
+        # The command line around the heredoc is still read normally.
+        assert _extract_bash_paths("cat > /tmp/real.sh <<EOF\nanything > /tmp/EVIL\nEOF") == [
+            ("/tmp/real.sh", "redirect_write")
+        ]
+
+
+# ---------------------------------------------------------------------------
+# The invariant, as a property (issue #484 acceptance criterion 1)
+# ---------------------------------------------------------------------------
+
+
+def _generated_clause_shapes() -> list[tuple[str, str]]:
+    """Every combination of the dimensions the extractor has historically lost to.
+
+    Returns ``(label, command)``. The dimensions are the ones named in #484 —
+    mutation operator, redirect operator, quoted/unquoted, resolved/unresolved
+    operand, spaced/unspaced, fd-prefixed/bare — crossed rather than enumerated,
+    because a hand-written list of cases can only ever cover the shapes someone has
+    already met. Four patches to this file were each correct and each left the next
+    shape open; that is what this function exists to stop.
+    """
+    # (operand text, does it name a real path?)
+    operands = [
+        ("out.txt", True),
+        ("a/b/out.txt", True),
+        ('"my out.txt"', True),          # quoted: invisible to the old blanking
+        ("'my out.txt'", True),
+        ("$LOG", False),                 # unresolved: a name that was lost
+        ("${LOG_DIR}/out.txt", False),
+        ("$(date +%s).txt", False),      # substitution split across tokens
+        ("$1", False),                   # positional
+    ]
+    redirect_ops = [">", ">>"]
+    fd_prefixes = ["", "2"]
+    spacings = ["", " "]
+    verbs = ["touch", "rm -f", "mkdir -p", "cp src.txt", "mv src.txt"]
+    prefixes = ["", "sudo ", "env FOO=1 ", "do "]
+
+    shapes: list[tuple[str, str]] = []
+    for operand, _ in operands:
+        for op in redirect_ops:
+            for fd in fd_prefixes:
+                for lead in spacings:
+                    for trail in spacings:
+                        shapes.append((
+                            f"redirect fd={fd!r} op={op} lead={lead!r} trail={trail!r} operand={operand}",
+                            f"echo hi{lead}{fd}{op}{trail}{operand}",
+                        ))
+        for verb in verbs:
+            for prefix in prefixes:
+                shapes.append((
+                    f"mutation prefix={prefix!r} verb={verb} operand={operand}",
+                    f"{prefix}{verb} {operand}",
+                ))
+    return shapes
+
+
+class TestTheInvariantHoldsOverGeneratedShapes:
+    """NO WRITE FORM MAY BE BOTH UNTRACKED AND UNREPORTED.
+
+    This is #484's acceptance criterion 1, and it is a property rather than a corpus
+    because a corpus is what this file has lost to four times. #198 added `/dev/*`,
+    #274 added fd duplicates, #483 added flags and operator position, #485 added
+    unresolved targets, #486 added mutation operands. Each was correct. Each left the
+    next shape open, because a filter extended against the shapes already reported
+    will keep missing the one that has not been reported yet.
+
+    The corpus tests elsewhere in this file are the regression suite. THIS is what
+    tells you the corpus is incomplete: the day a new combination of dimensions
+    becomes reachable, it fails here, on the commit that introduced it, instead of
+    being found three months later by someone reading a turn's output.
+
+    THE ONE EXEMPTION, stated rather than hidden: a device sink (`/dev/null`, an fd
+    duplicate) is neither tracked nor blind, because nothing reaches disk. That is
+    the absence of a write, not silence about one, so it is not a break — and it is
+    deliberately not generated here, so the disjunction below stays total.
+    """
+
+    def test_every_generated_shape_is_tracked_or_blind(self):
+        shapes = _generated_clause_shapes()
+        assert len(shapes) > 200, (
+            f"the generator collapsed to {len(shapes)} shapes — it is supposed to "
+            "cross its dimensions, and a property over a handful of inputs is a "
+            "corpus wearing a property's clothes"
+        )
+        breaks = []
+        for label, command in shapes:
+            audit = audit_bash_command(command)
+            if not (audit.tracked or audit.blind or audit.unaudited):
+                breaks.append(f"{label}\n      {command!r}")
+        assert not breaks, (
+            f"{len(breaks)} of {len(shapes)} generated shapes were both UNTRACKED and "
+            "UNREPORTED — each one is a write this instrument would record as a clean "
+            "turn:\n   - " + "\n   - ".join(breaks[:20])
+        )
+
+    def test_a_resolvable_operand_is_actually_TRACKED_not_merely_reported_blind(self):
+        """The other half, and the reason the disjunction above is not a free pass.
+
+        A degenerate implementation satisfies "tracked OR blind" by reporting
+        everything blind and tracking nothing. This pins the half that costs
+        something: when the operand names a real path, it must be NAMED.
+        """
+        for label, command in _generated_clause_shapes():
+            if "operand=$" in label or "operand=%" in label:
+                continue                      # unresolved by construction
+            audit = audit_bash_command(command)
+            assert audit.tracked, (
+                f"a nameable operand was not tracked — {label}\n   {command!r}\n"
+                "   (reporting it blind instead would satisfy the invariant while "
+                "giving up the name, which is the thing worth having)"
+            )
+
+
+class TestShapesFoundByRunningTheLexerRatherThanReasoningAboutIt:
+    """Shapes an adversarial sweep found by EXECUTING candidate commands.
+
+    Every row here was a real defect in the first draft of the lexer rewrite, found by
+    running the tokenizer over generated shell rather than by reading the code. They
+    are grouped by the root cause they share, because the causes are the reusable part:
+    a fix aimed at one row of a group left the rest of the group broken.
+
+    This is the same lesson as the file's patch history, arriving one layer up. The
+    first draft replaced a table of regexes with a lexer and then did its heredoc
+    stripping, its substitution collapsing and its comment handling with REGEXES OVER
+    RAW TEXT — reintroducing quote-blindness, the exact defect the rewrite existed to
+    retire, in the pre-pass. `gh pr create --body "use <<EOF for stdin"` matched a
+    heredoc start inside quoted prose, found no terminator, and swallowed an `rm -rf`
+    on the following line. Silently.
+    """
+
+    # --- shlex merges RUNS of punctuation into one token -------------------------
+    @pytest.mark.parametrize("command,expected", [
+        ("rm -f a.txt;\nrm -f b.txt",              ["a.txt", "b.txt"]),
+        ("touch a.txt\n\ntouch b.txt",             ["a.txt", "b.txt"]),
+        ("mkdir -p dist &&\ntouch dist/.keep",     ["dist", "dist/.keep"]),
+        ("test -f x ||\n  touch x",                ["x"]),
+        ("#!/bin/bash\nset -e\n\nmkdir -p dist\ntouch dist/x", ["dist", "dist/x"]),
+        ("case $x in\n  a) touch /tmp/a;;\n  b) rm -rf /tmp/b;;\nesac", ["/tmp/a", "/tmp/b"]),
+        ("ls |& rm -rf /tmp/junk",                 ["/tmp/junk"]),
+    ])
+    def test_a_run_of_separator_characters_still_splits_the_clause(self, command, expected):
+        """`;` before a newline arrives as the single token `;\\n`, a blank line as
+        `\\n\\n`, a trailing `&&` as `&&\\n`. Matching separators by literal spelling
+        missed all of them: the clause never split, and for `rm` — a verb whose every
+        operand is a target — the verifier claimed to have deleted a file literally
+        named `;\\n`. Separators are classified by character CONTENT for this reason.
+        """
+        assert [p for p, _ in _extract_bash_paths(command)] == expected
+
+    # --- the pre-pass must respect quoting ---------------------------------------
+    @pytest.mark.parametrize("command,expected", [
+        ('gh pr create --body "use <<EOF for stdin"\nrm -rf /tmp/wip', ["/tmp/wip"]),
+        ('grep -rn "<<EOF" scripts/\nrm -f /tmp/stale',                ["/tmp/stale"]),
+        ("echo '```' >> a.md\nrm -rf /tmp/build\necho '```' >> b.md",  ["a.md", "/tmp/build", "b.md"]),
+        ("grep -q ok <<<yes\nrm -rf /tmp/build",                       ["/tmp/build"]),
+    ])
+    def test_a_quoted_heredoc_or_backtick_does_not_swallow_the_next_command(self, command, expected):
+        """Each of these lost a REAL mutation to a quote-blind pre-pass.
+
+        The markdown case is the sharpest: a fenced code block is three backticks, so
+        writing one paired the fence's first backtick with one three lines later and
+        deleted everything between — including the `rm -rf`.
+        """
+        assert [p for p, _ in _extract_bash_paths(command)] == expected
+
+    # --- posix=False: a quoted token is a WORD whatever it spells ----------------
+    @pytest.mark.parametrize("command,expected", [
+        ("grep -rn '>' src/ > /tmp/hits.txt",     ["/tmp/hits.txt"]),
+        ("grep -c '#' notes.md > /tmp/count.txt", ["/tmp/count.txt"]),
+        ("echo '>' >> notes.md",                  ["notes.md"]),
+    ])
+    def test_a_quoted_operator_is_not_an_operator(self, command, expected):
+        """Resolving quotes DURING tokenization erases the only thing separating a
+        search pattern from a redirect. Under posix mode `grep -rn '>' src/ > out`
+        reported `src/` — a directory the command only READ — as written to.
+        """
+        assert [p for p, _ in _extract_bash_paths(command)] == expected
+
+    # --- adjacency the punctuation lexer destroys --------------------------------
+    def test_a_multi_digit_operand_is_not_mistaken_for_a_file_descriptor(self):
+        """`2>` and `2 >` lex identically, so the fd is recovered by popping a
+        preceding digit — but only a SINGLE digit. `mkdir -p 2024 > /dev/null` popped
+        `2024` as a phantom fd and lost the directory entirely.
+        """
+        assert _extract_bash_paths("mkdir -p 2024 > /dev/null") == [("2024", "mkdir")]
+        assert _extract_bash_paths("echo hi 2> err.log") == [("err.log", "redirect_write")]
+
+    def test_a_redirect_ending_in_ampersand_is_only_an_fd_dup_when_a_digit_follows(self):
+        """`2>&1` duplicates a descriptor; `make >& build.log` writes a FILE. Both
+        operators end in `&`, so the branch is decided by what follows."""
+        assert _extract_bash_paths("make >& build.log") == [("build.log", "redirect_write")]
+        assert _extract_bash_paths("cmd 2>&1") == []
+
+    def test_an_equals_sign_inside_an_operand_does_not_shatter_it(self):
+        """Making `=` a punctuation char merged `=>` into one harmless token, but broke
+        `rm -f a=b.txt` into three claimed paths and merged `FOO= rm -f x` into the
+        command word `FOO=rm`, losing a real delete. `=>` is neutralised in the
+        quote-aware pre-pass instead."""
+        assert _extract_bash_paths("rm -f a=b.txt") == [("a=b.txt", "delete")]
+        assert [p for p, _ in _extract_bash_paths("FOO= rm -f x")] == ["x"]
+        assert _extract_bash_paths("const f = (s) => /^smoke:/.test(s)") == []
+
+    # --- subshells ---------------------------------------------------------------
+    @pytest.mark.parametrize("command,expected", [
+        ("(cd frontend && rm -rf node_modules)", ["node_modules"]),
+        ("( cd /tmp && rm -rf work )",           ["work"]),
+        ("(mv a.txt b.txt)",                     ["b.txt"]),
+    ])
+    def test_subshell_parentheses_do_not_glue_onto_a_path_or_a_verb(self, command, expected):
+        """With parens outside the punctuation set they glued to the adjacent word:
+        the tight form tracked a file named `node_modules)`, the spaced form tracked
+        one named `)`, and `(mv a.txt b.txt)` made the command word `(mv` — not a
+        mutation verb — so a real move went silent."""
+        assert [p for p, _ in _extract_bash_paths(command)] == expected
+
+    # --- mutations the command word alone cannot reach ---------------------------
+    @pytest.mark.parametrize("command", [
+        "find . -name '*.tmp' | xargs rm -f",
+        r"find . -name '*.pyc' -exec rm -f {} \;",
+        "find . -name '*.log' -delete",
+        "sudo -u postgres rm -rf /var/lib/x",
+        "timeout 5 rm -rf build",
+        "cp -t backup/ a.txt b.txt",
+    ])
+    def test_a_mutation_the_lexer_cannot_name_is_reported_rather_than_dropped(self, command):
+        """The invariant's hardest cases, and the ones a command-word rule alone gets
+        WRONG by being silent rather than by being loud.
+
+        `xargs rm -f` resolves its command word to `rm` and then finds no operands —
+        the targets arrive on stdin. `find -exec` runs a second argv the clause's
+        command word does not name. `sudo -u postgres rm` puts a flag ARGUMENT where
+        the command word should be, because nothing here knows which flags take one.
+        `cp -t DIR` inverts the destination-last order. None can be resolved to a path,
+        so each produces a blindness row — which is the contract, not a consolation.
+        """
+        audit = audit_bash_command(command)
+        assert audit.blind, f"{command!r} reported a clean turn for an unnameable mutation"
+        assert not audit.tracked, f"{command!r} guessed a path it could not know"
+
+    def test_a_script_passed_to_sh_c_is_audited_rather_than_treated_as_one_operand(self):
+        """`sh -c '<script>'` hides a whole command inside a single operand. The
+        script is ordinary shell, so the same walker applies to it."""
+        assert _extract_bash_paths("sudo sh -c 'rm -rf /tmp/x'") == [("/tmp/x", "delete")]
+        assert _extract_bash_paths('bash -c "touch /tmp/made.txt"') == [
+            ("/tmp/made.txt", "touch")
+        ]
+
+    # --- heredoc termination -----------------------------------------------------
+    def test_an_unterminated_heredoc_is_unaudited_rather_than_silently_eating_the_rest(self):
+        """Bash accepts an indented terminator only for `<<-`, so `  EOF` does not
+        close a plain `<<EOF`: the body runs to the end of the command and whatever
+        followed is data of unknown extent. Reporting that as a clean turn would hide
+        it; `unaudited` says the true thing."""
+        audit = audit_bash_command(
+            "cat > /tmp/f.txt <<EOF\nhello\n  EOF\nrm -f /tmp/real.txt"
+        )
+        assert audit.unaudited is not None
+        assert not audit.tracked
+
+    def test_a_correctly_terminated_heredoc_still_reads_the_command_around_it(self):
+        assert [p for p, _ in _extract_bash_paths(
+            "cat > /tmp/f <<'EOF'\nbody\nEOF\n\nrm -rf /tmp/old"
+        )] == ["/tmp/f", "/tmp/old"]
+        assert [p for p, _ in _extract_bash_paths(
+            "cat <<-EOF\nbody\n\tEOF\nrm -f /tmp/z"
+        )] == ["/tmp/z"]
+
+    # --- line continuations ------------------------------------------------------
+    def test_a_backslash_line_continuation_is_one_clause(self):
+        """The shell deletes a backslash-newline; shlex leaves the newline, which then
+        split the clause and stranded every operand after the break."""
+        assert [p for p, _ in _extract_bash_paths("rm -rf \\\n  build \\\n  dist")] == [
+            "build", "dist"
+        ]
+        assert _extract_bash_paths("mv old/report.md \\\n   archive/report.md") == [
+            ("archive/report.md", "move")
+        ]
