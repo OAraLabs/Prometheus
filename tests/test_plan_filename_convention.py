@@ -89,6 +89,47 @@ def test_the_prompts_two_cautions_are_the_real_hazards() -> None:
     assert not _beacon_claims("BC-5-plan.md", "BC-4")
 
 
+# ── the agent ticks its own steps (2026-09-19) ───────────────────────────────────────────────
+# Beacon's TAG_RE, transcribed: a trailing "[Tag]" is stripped into its own field, and setTaskDone
+# rewrites ONLY the first "[ ]" cell — so a "[by:agent]" suffix survives a human tick byte-for-byte.
+_TAG_RE = re.compile(r"\s*\[([^\[\]]+)\]\s*$")
+# Beacon's TASK_RE (src/shared/loop.ts), transcribed alongside it.
+_BEACON_TASK_RE = re.compile(r"^(\s*)([-*+])\s+\[([ xX])\]\s?(.*)$")
+
+
+def test_the_prompt_tells_the_agent_to_tick_and_how() -> None:
+    prompt = build_system_prompt()
+    assert "TICK YOUR OWN STEPS" in prompt
+    # The REGISTERED tool name, never the module name file_edit — that transposition is what made
+    # the documents tree unreachable for weeks.
+    assert "edit_file" in prompt and "file_edit" not in prompt
+    assert "[by:agent]" in prompt, "the provenance marker must be named, not implied"
+
+
+def test_the_prompt_forbids_the_failure_the_probe_actually_found() -> None:
+    """A live dispatch ticked a step it could not do AND reworded it to match what it did.
+
+    That is the failure mode — not a lazy tick, but moving the acceptance criteria and then
+    meeting them. Both halves of the instruction are pinned because either alone permits it.
+    """
+    prompt = build_system_prompt()
+    assert "never rewrite the step's wording" in prompt
+    assert "leave it unticked" in prompt
+    assert "never rewrite the whole file with write_file" in prompt
+
+
+def test_the_prompts_tick_example_parses_under_beacons_rules() -> None:
+    """The worked example must survive Beacon's parser, tag slot included."""
+    line = "- [x] Wire the reader [by:agent]"
+    assert line in build_system_prompt(), "the example must be present verbatim"
+    m = _BEACON_TASK_RE.match(line)
+    assert m is not None and m.group(3).lower() == "x", "the example is not a ticked task line"
+    text = m.group(4)
+    tag = _TAG_RE.search(text)
+    assert tag is not None and tag.group(1) == "by:agent", "the provenance tag does not land in the tag slot"
+    assert text[: tag.start()].strip() == "Wire the reader", "the step text is polluted by the tag"
+
+
 def test_documents_root_override_is_honoured() -> None:
     """The prompt resolves the root the way /api/documents does when the caller has the config.
 
@@ -125,3 +166,42 @@ def test_the_override_is_actually_WIRED_not_merely_supported() -> None:
     plain = build_runtime_system_prompt(cwd="/tmp", config={})
     assert "/srv/custom-docs" not in plain
     assert "/loops/" in plain
+
+
+def test_the_prompt_says_how_to_tick_when_two_steps_read_the_same() -> None:
+    """The gap the uniqueness fix opens, and the reason it is closed HERE.
+
+    edit_file now refuses an ambiguous old_str — correct, and the whole point. But its
+    refusal advises "or set replace_all to change every occurrence", which is generic
+    advice that is ACTIVELY WRONG for this caller: on a plan, replace_all ticks every
+    matching step, including ones the agent has not done. The caller and the refusal
+    ship together, so the guidance that overrides that advice has to ship with them.
+    """
+    prompt = build_system_prompt()
+    assert "TWO STEPS READ THE SAME" in prompt, "the duplicate-step case is unaddressed"
+    assert "ABOVE OR BELOW" in prompt, "no disambiguation method is given"
+    assert "NEVER reach for replace_all on a plan" in prompt, (
+        "the prompt does not countermand the refusal's own replace_all suggestion — "
+        "an agent following the error message literally would tick a step it never did"
+    )
+
+
+def test_the_refusal_message_is_what_the_prompt_is_countermanding() -> None:
+    """A control: if edit_file stops suggesting replace_all, the warning above is
+    answering a message nobody sends, and should be re-read rather than left to rot."""
+    from prometheus.tools.builtin.file_edit import FileEditTool, FileEditToolInput
+    from prometheus.tools.base import ToolExecutionContext
+    import asyncio, tempfile, pathlib
+
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    f = tmp / "plan.md"
+    f.write_text("- [ ] Same\n- [ ] Same\n", encoding="utf-8")
+    res = asyncio.run(
+        FileEditTool().execute(
+            FileEditToolInput(path=str(f), old_str="- [ ] Same", new_str="- [x] Same"),
+            ToolExecutionContext(cwd=tmp),
+        )
+    )
+    assert res.is_error and "replace_all" in res.output, (
+        "the refusal no longer suggests replace_all — the prompt's countermand may be stale"
+    )
