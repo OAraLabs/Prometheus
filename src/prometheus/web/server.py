@@ -2190,12 +2190,13 @@ def create_app(
         surface built to answer "what was allowed to run, and on whose
         authority" did not know this route existed.
 
-        ⚠ ``env`` VALUES ARE NEVER PASSED HERE, and that is load-bearing rather
-        than tidy. ``env`` is where an MCP server's own API keys live, and the
-        audit trail is read back into model context by ``audit_query``. Sending
-        credentials into that sink would create the leak this record exists to
-        make visible. Only the env NAMES go in — the same public_view stance
-        the GET side takes.
+        ⚠ ``env`` AND ``headers`` VALUES ARE NEVER PASSED HERE, and that is
+        load-bearing rather than tidy. ``env`` is where an MCP server's own
+        API keys live and ``headers`` is where an http/sse server's bearer
+        lives, and the audit trail is read back into model context by
+        ``audit_query``. Sending credentials into that sink would create the
+        leak this record exists to make visible. Only the NAMES go in — the
+        same public_view stance the GET side takes.
         """
         try:
             from prometheus.permissions.audit import AuditDecision, AuditLogger
@@ -2215,6 +2216,7 @@ def create_app(
                            or definition.get("workingDirectory"),
                     "url": definition.get("url"),
                     "env_names": sorted(definition.get("env") or {}),
+                    "header_names": sorted(definition.get("headers") or {}),
                 },
                 user_id=getattr(identity, "id", None) or "global-token",
             )

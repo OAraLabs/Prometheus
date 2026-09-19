@@ -14,9 +14,14 @@ Two sources of MCP servers, deliberately separate:
   shadowed remotely.
 
 Secrets: a server's ``env`` map may carry credentials for the subprocess
-(API keys the MCP server itself needs). They are stored here (0600 file)
-and NEVER echoed — readers get ``env_names`` only, same write-only stance
-as the provider-key endpoints.
+(API keys the MCP server itself needs), and an http/sse server's
+``headers`` map may carry the bearer that authenticates to it. Both are
+stored here (0600 file) and NEVER echoed — readers get ``env_names`` and
+``header_names`` only, same write-only stance as the provider-key
+endpoints. ``headers`` was echoed verbatim until 2026-09-18: ``public_view``
+stripped ``env`` and nothing else, so a stored ``Authorization`` header
+came back on GET to any device token. Latent only because the HTTP
+transport never connects; closed before it does.
 
 Source: Prometheus (OAra Labs)
 License: MIT
@@ -51,6 +56,13 @@ _ALLOWED_KEYS = {
     "connectionTimeoutMs", "url", "headers", "transport",
     "allowed_tools", "enabled",
 }
+
+# The per-server maps whose VALUES are credentials — ``env`` for a stdio
+# subprocess's own API keys, ``headers`` for an http/sse server's bearer —
+# and the name public_view() reports their KEYS under. A map admitted to
+# _ALLOWED_KEYS that can carry a secret goes here too: ``headers`` was
+# admitted without this entry and echoed verbatim for three weeks.
+_SECRET_MAPS = {"env": "env_names", "headers": "header_names"}
 
 # ── WHAT THIS VALIDATION DOES AND DOES NOT CLAIM ───────────────────────
 #
@@ -267,13 +279,14 @@ class McpServerStore:
 
     @staticmethod
     def public_view(definition: dict[str, Any]) -> dict[str, Any]:
-        """The definition with secrets stripped: env VALUES never leave the
-        daemon — readers learn the names and that they are set, nothing
-        more (the provider-keys stance)."""
-        out = {k: v for k, v in definition.items() if k != "env"}
-        env = definition.get("env")
-        if isinstance(env, dict):
-            out["env_names"] = sorted(env)
+        """The definition with secrets stripped: env and header VALUES never
+        leave the daemon — readers learn the names and that they are set,
+        nothing more (the provider-keys stance)."""
+        out = {k: v for k, v in definition.items() if k not in _SECRET_MAPS}
+        for key, names_key in _SECRET_MAPS.items():
+            values = definition.get(key)
+            if isinstance(values, dict):
+                out[names_key] = sorted(values)
         return out
 
 

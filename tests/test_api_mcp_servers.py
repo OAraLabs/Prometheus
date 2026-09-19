@@ -13,6 +13,7 @@ credential value.
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -33,6 +34,11 @@ from prometheus.tools.base import ToolRegistry  # noqa: E402
 from prometheus.web.server import create_app  # noqa: E402
 
 SECRET = "sk-mcp-super-secret-value-1234"
+# An http/sse server's credential. Deliberately NOT ``Bearer …``-shaped: the
+# audit redactor masks that shape by itself, and a leak assertion that the
+# redactor satisfies measures the redactor, not the projection under test
+# (tests/test_mcp_rest_spawn_perimeter.py records the same trap for env).
+HEADER_SECRET = "ha-long-lived-access-value-that-must-never-be-echoed"
 
 
 def _offered(name: str, read_only: bool = True) -> SimpleNamespace:
@@ -128,6 +134,14 @@ class TestStore:
         view = McpServerStore.public_view(loaded)
         assert "env" not in view
         assert view["env_names"] == ["KEY"]
+        # The other credential-carrying map. ``headers`` was accepted (#332)
+        # and echoed verbatim until 2026-09-18 — public_view stripped env only.
+        store.upsert("s2", {"url": "http://ha.invalid/api/mcp",
+                            "headers": {"Authorization": HEADER_SECRET}})
+        view = McpServerStore.public_view(store.load()["s2"])
+        assert "headers" not in view
+        assert view["header_names"] == ["Authorization"]
+        assert HEADER_SECRET not in json.dumps(view)
         store.patch("s1", {"allowed_tools": ["a"]})
         assert store.load()["s1"]["allowed_tools"] == ["a"]
         assert store.delete("s1") is True
@@ -174,6 +188,39 @@ class TestRoutes:
         }
         # The yaml server rides along, marked config-managed.
         assert cards["yaml-srv"]["source"] == "config"
+
+    def test_get_never_leaks_an_http_header_value(self, rig) -> None:
+        """A stored ``Authorization`` header came back on GET — to any device
+        token — until 2026-09-18: public_view stripped ``env`` and nothing
+        else. Latent only because the HTTP transport never connects; the
+        Home Assistant path is the one that would have lit it."""
+        client, runtime, registry = rig
+        resp = client.post("/api/mcp/servers", json={
+            "name": "ha", "url": "http://ha.invalid/api/mcp",
+            "headers": {"Authorization": HEADER_SECRET},
+        })
+        assert resp.status_code == 200, resp.text
+        assert HEADER_SECRET not in resp.text
+        assert resp.json()["server"]["header_names"] == ["Authorization"]
+        assert "headers" not in resp.json()["server"]
+        # HTTP is unimplemented: stored, and honestly not live.
+        assert resp.json()["applies"] != "live"
+
+        listing = client.get("/api/mcp/servers")
+        assert HEADER_SECRET not in listing.text
+        card = {s["name"]: s for s in listing.json()["servers"]}["ha"]
+        assert card["header_names"] == ["Authorization"]
+        assert "headers" not in card
+        assert card["health"]["state"] == "failed"      # "not yet implemented"
+
+        # The yaml-managed side renders through the same projection.
+        app = create_app({"mcp_servers": {"ha-yaml": {
+            "url": "http://ha.invalid/api/mcp",
+            "headers": {"Authorization": HEADER_SECRET},
+        }}})
+        text = TestClient(app).get("/api/mcp/servers").text
+        assert HEADER_SECRET not in text
+        assert "header_names" in text
 
     def test_card_reports_the_name_the_registry_actually_holds(self, rig, monkeypatch) -> None:
         """FOUNDATION §4 live run, 2026-09-01: the card said
