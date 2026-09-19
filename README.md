@@ -96,7 +96,7 @@ The result: open models that reliably call tools, chain multi-step tasks, and ru
 
 Prometheus isn't a wrapper around `ollama.chat()`. It's a complete agent operating system with novel systems that don't exist in other harnesses:
 
-**The Model Adapter Layer is the core innovation.** Four cascading extraction strategies handle whatever mess the model produces. A retry engine feeds specific schema errors back to the model. Grammar-constrained decoding at the llama.cpp level makes invalid JSON structurally impossible, with Prometheus supplying the grammar on paths the server doesn't cover. Telemetry tracks success rates per model per tool so you know exactly where your model struggles. Nothing else does this — other harnesses either assume clean output or crash.
+**The Model Adapter Layer is what makes local models work in a tool loop.** Four cascading extraction strategies handle whatever mess the model produces. A retry engine feeds specific schema errors back to the model. Grammar-constrained decoding at the llama.cpp level makes invalid JSON structurally impossible, with Prometheus supplying the grammar on paths the server doesn't cover. Telemetry tracks success rates per model per tool so you know exactly where your model struggles. It is tier-selected: `strictness: NONE` switches it off for cloud APIs that already emit clean tool calls, so the repair path is exercised exactly where it is needed.
 
 **Lossless Context Management means your agent never forgets.** Every message is persisted to SQLite. When context fills up, a two-tier compression system kicks in: Tier 1 strips `tool_result` content from old messages (free — the output was already acted on). Tier 2 uses LLM-powered batch summarization when pruning alone isn't enough. But the originals are always recoverable — old messages get summarized into a DAG structure, and the agent can expand any summary back to full detail on demand. Full-text search across your entire conversation history. And memory isn't just storage: extracted facts ride back into each turn via passive recall, matched against what you just said.
 
@@ -620,12 +620,15 @@ prometheus/
 - [x] Core agent loop with Model Adapter Layer (validation, repair, GBNF, retry, telemetry)
 - [x] Lossless Context Management (DAG compression, FTS5 search) + passive recall
 - [x] Security (4-level trust, audit, exfiltration, approval queue)
-- [x] Telegram + Slack + Discord gateways at parity
+- [x] Telegram gateway — commands, media, mid-turn `/steer` and `/queue`
+- [ ] Slack + Discord gateways — *one shared command layer, CI-enforced at parity; neither has ever run in production*
 - [x] Wiki knowledge system (Karpathy-inspired, Obsidian-compatible)
 - [x] SENTINEL proactive layer (observer + AutoDream)
-- [x] Coding Mode v2 — sandboxed iterate-to-green + mid-run supervision + live streaming
+- [x] Coding Mode v2 — sandboxed iterate-to-green (Docker) + live streaming
+- [ ] Coding-mode mid-run supervision (pause / inject / resume) — *6 control events ever, all failed, 2026-06; nothing since*
 - [x] Beacon desktop app — pairing wizard, Mission Control, Loop Manager, Documents, Kanban
-- [x] Cloud expansion — DeepSeek/Kimi/GLM/MiMo + WAN image + Kling video
+- [x] WAN image generation
+- [ ] Cloud expansion — DeepSeek / Kimi / GLM / MiMo + Kling video — *provider classes ship and register at boot; none has ever been invoked*
 - [x] xAI SuperGrok subscription OAuth
 - [x] Model router with fallback chains + divergence detection
 - [x] Evaluation framework with local LLM judge + fine-tuning gym (dual scoring)
@@ -640,7 +643,7 @@ prometheus/
 - [x] OpenAI-compatible `/v1` surface; `oara` console script
 - [x] Streaming TTS + hands-free voice (OAra Voice bridge + Beacon)
 - [x] Multi-backend — a registry of every local inference box, `/4090`-style per-chat switching with probe-before-switch, per-backend context windows, Beacon desktop + iOS pickers
-- [x] Beacon: attach to running coding runs, pause/inject/resume from the UI
+- [ ] Beacon: attach to running coding runs, pause/inject/resume from the UI — *the daemon endpoints exist; the UI does not call them*
 - [x] Secrets redacted at every log handler and at capture time; logs rotate
 - [ ] Fine-tuning flywheel (LoRA on collected traces) — *capture/export pipeline shipped; training loop pending*
 - [ ] PyPI release + published Beacon builds — *`oara` is claimed on PyPI; the publish gate opens with the install path*
