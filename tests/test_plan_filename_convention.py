@@ -166,3 +166,42 @@ def test_the_override_is_actually_WIRED_not_merely_supported() -> None:
     plain = build_runtime_system_prompt(cwd="/tmp", config={})
     assert "/srv/custom-docs" not in plain
     assert "/loops/" in plain
+
+
+def test_the_prompt_says_how_to_tick_when_two_steps_read_the_same() -> None:
+    """The gap the uniqueness fix opens, and the reason it is closed HERE.
+
+    edit_file now refuses an ambiguous old_str — correct, and the whole point. But its
+    refusal advises "or set replace_all to change every occurrence", which is generic
+    advice that is ACTIVELY WRONG for this caller: on a plan, replace_all ticks every
+    matching step, including ones the agent has not done. The caller and the refusal
+    ship together, so the guidance that overrides that advice has to ship with them.
+    """
+    prompt = build_system_prompt()
+    assert "TWO STEPS READ THE SAME" in prompt, "the duplicate-step case is unaddressed"
+    assert "ABOVE OR BELOW" in prompt, "no disambiguation method is given"
+    assert "NEVER reach for replace_all on a plan" in prompt, (
+        "the prompt does not countermand the refusal's own replace_all suggestion — "
+        "an agent following the error message literally would tick a step it never did"
+    )
+
+
+def test_the_refusal_message_is_what_the_prompt_is_countermanding() -> None:
+    """A control: if edit_file stops suggesting replace_all, the warning above is
+    answering a message nobody sends, and should be re-read rather than left to rot."""
+    from prometheus.tools.builtin.file_edit import FileEditTool, FileEditToolInput
+    from prometheus.tools.base import ToolExecutionContext
+    import asyncio, tempfile, pathlib
+
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    f = tmp / "plan.md"
+    f.write_text("- [ ] Same\n- [ ] Same\n", encoding="utf-8")
+    res = asyncio.run(
+        FileEditTool().execute(
+            FileEditToolInput(path=str(f), old_str="- [ ] Same", new_str="- [x] Same"),
+            ToolExecutionContext(cwd=tmp),
+        )
+    )
+    assert res.is_error and "replace_all" in res.output, (
+        "the refusal no longer suggests replace_all — the prompt's countermand may be stale"
+    )
