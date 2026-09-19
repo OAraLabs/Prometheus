@@ -50,8 +50,28 @@ class FileEditTool(BaseTool):
             return ToolResult(output=f"File not found: {path}", is_error=True)
 
         original = path.read_text(encoding="utf-8")
-        if arguments.old_str not in original:
+        # The advertised schema has long promised that "the edit fails if old_str is not
+        # unique". It never did: the code replaced the FIRST match and reported success, so an
+        # ambiguous edit silently changed the wrong place. The description was added deliberately
+        # — its own test calls replace_all "a correctness question, not merely an efficiency one"
+        # — which made the advertisement true-sounding and left the behaviour wrong.
+        #
+        # The caller that makes this urgent is an agent ticking its own checklist: plan steps share
+        # phrasing constantly ("- [ ] Add smoke tests"), so first-match-wins ticks the wrong box
+        # with no signal to anyone. Semantics and wording match code_str_replace, the primitive in
+        # this repo that has always got it right.
+        count = original.count(arguments.old_str)
+        if count == 0:
             return ToolResult(output="old_str was not found in the file", is_error=True)
+        if count > 1 and not arguments.replace_all:
+            return ToolResult(
+                output=(
+                    f"{count} MATCHES in {arguments.path}: old_str is ambiguous. "
+                    f"Nothing was changed. Include more surrounding lines in old_str "
+                    f"until it is unique, or set replace_all to change every occurrence."
+                ),
+                is_error=True,
+            )
 
         if arguments.replace_all:
             updated = original.replace(arguments.old_str, arguments.new_str)
