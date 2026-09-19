@@ -377,11 +377,33 @@ class ApprovalQueue:
     def serialize_pending(self, action: PendingAction) -> dict:
         """The canonical wire shape of one pending request.
 
-        THE one serializer: ``GET /api/approvals`` (server.py) and the
-        ``approval_pending`` WS signal both return THIS dict. Two transports,
-        one shape — they cannot drift, the same property SPRINT-CONSENT
-        enforced for grant extents. Any new transport takes this, never
-        re-derives.
+        THE one serializer. THREE consumers take this dict — they cannot
+        drift, the same property SPRINT-CONSENT enforced for grant extents,
+        and any new consumer takes this rather than re-deriving:
+
+          1. ``GET /api/approvals`` (server.py) — pull, bearer-gated.
+          2. the ``approval_pending`` WS signal — push to connected clients.
+          3. ⚠ **APNs**, via ``push.PushDispatcher.on_signal``, which the
+             launcher subscribes to ``"*"`` on the SignalBus when
+             ``push.enabled``. It fans out to EVERY registered device,
+             unconditionally and off-box.
+
+        ⚠ (3) IS NOT LIKE (1) AND (2), and this docstring said "two
+        transports" until 2026-09-19, which undercounted exactly the consumer
+        whose reach is widest. The first two are answered to someone already
+        holding a token or a socket; the third is unsolicited delivery to
+        every phone that ever registered, through Apple. Two consequences a
+        reader needs before touching either end:
+
+          * ``_push_approval`` builds its OWN body and today reads only
+            ``tool_name``, ``description``, ``request_id`` and
+            ``expires_at`` — so ``arguments`` do NOT reach APNs. Adding a
+            field to THAT body ships it to every device.
+            ``test_approval_push_body_stays_narrow`` fails the build if the
+            set changes, so the decision is deliberate rather than noticed
+            later.
+          * "ephemeral, never persisted" is therefore NOT a property the
+            daemon can promise on its own about anything in this dict.
 
         PROVENANCE: ``extents`` is the COMPUTED extent of each scope verb —
         the same dict Telegram formats into prose, from ``prospective_extents``
