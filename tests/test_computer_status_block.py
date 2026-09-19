@@ -389,3 +389,62 @@ def test_no_computer_test_reads_the_hosts_own_session():
         + "\nBuild the substrate instead (see the `substrate` fixture): "
           "monkeypatch driver.X11_SOCKET_DIR and pass XDG_RUNTIME_DIR."
     )
+
+
+# ── THE TWO BLOCKS AGREE, CHECKED AGAINST THE REAL ONE ──────────────────────
+
+def test_the_substrate_block_matches_the_deployment_block_convention(substrate):
+    """Compared against the REAL `deployment` block, not against prose.
+
+    `deployment` (#518) and `computer.substrate` sit on one endpoint and both
+    answer "is this thing healthy, and on which axis is it not". An operator
+    should not have to learn a second vocabulary halfway down one payload, so
+    this asserts the shared shape against the actual merged function rather
+    than against a description of it that could drift.
+    """
+    from prometheus.context.environment import deployment_freshness
+
+    deployment = deployment_freshness("unknown")
+    ours = substrate(act="ok", observe="unavailable")
+
+    # 1. A rollup `state`, as a string.
+    for block, label in ((deployment, "deployment"), (ours, "substrate")):
+        assert isinstance(block["state"], str), f"{label}.state is not a string"
+        assert not isinstance(block["state"], bool)
+
+    # 2. A block-level `detail` sentence naming the remedy or consequence.
+    for block, label in ((deployment, "deployment"), (ours, "substrate")):
+        assert block.get("detail"), f"{label} has no block-level detail"
+        assert len(block["detail"].split()) >= 5, (
+            f"{label}.detail is not a sentence: {block['detail']!r}"
+        )
+
+    # 3. `unknown` in both vocabularies, spelled identically.
+    assert STATE_UNKNOWN == "unknown"
+    assert deployment_freshness("unknown")["state"] == STATE_UNKNOWN, (
+        "the two blocks spell their third answer differently"
+    )
+
+
+def test_every_substrate_state_has_a_remedy_sentence():
+    """A state name without an action is a puzzle, not a signal.
+
+    #518's own words about `_FRESHNESS_DETAIL`; the same bar applies here, and
+    a state added without a sentence would render `detail: null`.
+    """
+    for state in (STATE_READY, STATE_ACT_ONLY, STATE_OBSERVE_ONLY,
+                  STATE_UNAVAILABLE, STATE_UNKNOWN):
+        assert cstatus._SUBSTRATE_DETAIL.get(state), (
+            f"rollup state {state!r} has no detail sentence"
+        )
+
+
+def test_the_dangerous_state_says_what_it_means_in_the_payload():
+    """`act_only` is the one an operator will not have seen before."""
+    from prometheus.computer.driver import STATE_ACT_ONLY as _S
+
+    detail = cstatus._SUBSTRATE_DETAIL[_S].lower()
+    assert "empty" in detail and "nothing" in detail, (
+        f"act_only's sentence does not convey that actions would report "
+        f"success and do nothing: {detail!r}"
+    )

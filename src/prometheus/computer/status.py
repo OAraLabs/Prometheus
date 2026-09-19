@@ -43,6 +43,34 @@ from prometheus.computer.driver import (
 
 logger = logging.getLogger(__name__)
 
+#: One sentence per rollup state, naming the REMEDY or the CONSEQUENCE.
+#: Lifted verbatim as a convention from ``_FRESHNESS_DETAIL`` in
+#: context/environment.py, whose comment says it best: the rollup is read by
+#: people at 2am, and a state name without an action is a puzzle rather than a
+#: signal. Two blocks on one endpoint should not answer that differently.
+_SUBSTRATE_DETAIL: dict[str, str] = {
+    "ready": (
+        "Both halves answered: input can dispatch and observation would "
+        "return a real tree."
+    ),
+    "act_only": (
+        "Input would dispatch but observation would return an EMPTY TREE — "
+        "actions would report success and do nothing. Steps are refused in "
+        "this state; check the accessibility bus."
+    ),
+    "observe_only": (
+        "The accessibility tree is readable but no display accepts input — "
+        "restart the daemon from inside a graphical session."
+    ),
+    "unavailable": (
+        "Neither half answered; this process has no usable desktop."
+    ),
+    "unknown": (
+        "The substrate could NOT be determined; this is not the same as "
+        "usable."
+    ),
+}
+
 #: Prefix every wrapped desktop tool carries. Used only to COUNT what is
 #: registered — never to decide whether a call is a computer action, which is
 #: answered by the schema (``x-prometheus-computer-verb``). A name prefix
@@ -101,6 +129,9 @@ def render(result: PreconditionResult) -> dict[str, Any]:
         # ready | act_only | observe_only | unavailable | unknown.
         # `unknown` outranks everything — see PreconditionResult.state.
         "state": result.state,
+        # The same affordance the `deployment` block gives: a state name plus
+        # one sentence saying what to do about it.
+        "detail": _SUBSTRATE_DETAIL.get(result.state),
     }
 
 
@@ -124,7 +155,8 @@ def _unknown_substrate(detail: str) -> dict[str, Any]:
     """
     unknown = {"state": STATE_UNKNOWN, "component": None, "detail": detail}
     return {"act": dict(unknown), "observe": dict(unknown),
-            "state": STATE_UNKNOWN}
+            "state": STATE_UNKNOWN,
+            "detail": _SUBSTRATE_DETAIL[STATE_UNKNOWN]}
 
 
 def _registered_count(tool_registry: Any) -> Any:
