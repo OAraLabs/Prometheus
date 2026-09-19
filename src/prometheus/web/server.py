@@ -608,7 +608,16 @@ def create_app(
     # alerting silently. The new axis ships beside it instead, with its own
     # vocabulary and — crucially — its own `unknown`.
     def _deployment() -> dict[str, Any]:
-        return deployment_freshness(getattr(app.state, "boot_sha", "unknown"))
+        # The fetcher's state is the operand the staleness gate rules on.
+        # ⚠ Passing the STATE, never the fetcher: a status read must never be
+        # able to trigger a fetch. `deployment_freshness` reads git locally
+        # and reaches no network — pinned by
+        # `test_the_status_route_never_fetches`.
+        fetcher = getattr(app.state, "origin_fetcher", None)
+        return deployment_freshness(
+            getattr(app.state, "boot_sha", "unknown"),
+            fetch_state=getattr(fetcher, "state", None),
+        )
 
     # ── Root ────────────────────────────────────────────────────────
 

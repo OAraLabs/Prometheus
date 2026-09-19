@@ -17,6 +17,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -291,6 +292,7 @@ def _count_commits(range_expr: str, repo_dir: str | Path | None) -> int | None:
 def deployment_freshness(
     running_sha: str,
     repo_dir: str | Path | None = None,
+    fetch_state: Any | None = None,
 ) -> dict[str, object]:
     """Both axes of "is what is running what was merged?", as one block.
 
@@ -326,9 +328,44 @@ def deployment_freshness(
     else:
         process_vs_tree = "behind"
 
+    # ── THE STALENESS GATE ──────────────────────────────────────────────
+    #
+    # ⚠ `origin` above is a LOCAL CACHED COPY of the other side, refreshed
+    # only by a fetch. On the deploy clone the only thing that fetched was a
+    # deploy — so the cache refreshed exactly when the clone became up to
+    # date, and this axis could report `in_sync` and nothing else,
+    # indefinitely. Measured on production 2026-09-19: the block said
+    # `current` with a merged commit unpulled; a bare fetch flipped it to
+    # `behind_origin` with nothing else changed.
+    #
+    # Publishing `origin_ref_age_seconds` was necessary and NOT SUFFICIENT: a
+    # block that labels its own evidence stale and lets the conclusion stand
+    # has still asserted the conclusion. So the age is now ACTED ON.
+    #
+    # Evidence freshness is the FRESHER of two independent facts, because
+    # each is positive evidence and neither is complete on its own:
+    #   * the fetcher's own last SUCCESS — the operand that moves even when
+    #     origin is quiet;
+    #   * the ref's last MOVEMENT — proof a fetch happened then, including a
+    #     manual one by an operator or a deploy.
+    # ⚠ The ref age alone will NOT do: it reads the reflog, so it measures
+    # movement rather than fetch recency, and a quiet repository would look
+    # identical to a dead fetch. Verified: 766 s before a successful fetch and
+    # 766 s after.
+    evidence_age = _evidence_age_seconds(repo_dir, fetch_state)
+    stale_after = getattr(fetch_state, "stale_after_seconds", None)
+    evidence_stale = (
+        stale_after is not None
+        and (evidence_age is None or evidence_age > stale_after)
+    )
+
     ahead: int | None = None
     behind: int | None = None
-    if tree == "unknown" or origin == "unknown":
+    if evidence_stale:
+        # The cached ref may be arbitrarily old. "Cannot tell" — never the
+        # healthy answer on evidence we have just called stale.
+        tree_vs_origin = "unknown"
+    elif tree == "unknown" or origin == "unknown":
         tree_vs_origin = "unknown"
     elif tree == origin:
         tree_vs_origin, ahead, behind = "in_sync", 0, 0
@@ -369,8 +406,53 @@ def deployment_freshness(
         "ahead_of_origin": ahead,
         "behind_origin": behind,
         "origin_ref_age_seconds": origin_ref_age_seconds(repo_dir),
+        # How old the FRESHEST evidence about origin/main is — the number the
+        # staleness gate actually rules on. Distinct from the ref age above,
+        # which only moves when origin does.
+        "origin_evidence_age_seconds": evidence_age,
+        # ⚠ A FAILING REFRESH IS VISIBLE HERE, not only in a log. Silence
+        # about the refresh is how this class of defect recurs: the previous
+        # version failed by never running, and nothing anywhere said so.
+        "origin_fetch": _fetch_block(fetch_state),
         "detail": _FRESHNESS_DETAIL[state],
     }
+
+
+def _fetch_block(fetch_state: Any | None) -> dict[str, Any] | None:
+    """The refresh's own report, or None when there is no refresh to report.
+
+    ``None`` is meaningful: it says this process has no independent refresh at
+    all, which is the state the whole change exists to make visible rather
+    than silent.
+    """
+    if fetch_state is None or not hasattr(fetch_state, "block"):
+        return None
+    try:
+        return dict(fetch_state.block())
+    except Exception:  # noqa: BLE001 - a status read must not raise
+        return None
+
+
+def _evidence_age_seconds(
+    repo_dir: str | Path | None, fetch_state: Any | None
+) -> int | None:
+    """Seconds since origin/main was last CONFIRMED, by any means.
+
+    The fresher of the fetcher's last success and the ref's last movement.
+    ``None`` when neither is available, which the caller treats as stale.
+    """
+    ages: list[int] = []
+    if fetch_state is not None:
+        try:
+            age = fetch_state.success_age_seconds()
+        except Exception:  # noqa: BLE001 - a status read must not raise
+            age = None
+        if age is not None:
+            ages.append(int(age))
+    ref_age = origin_ref_age_seconds(repo_dir)
+    if ref_age is not None:
+        ages.append(int(ref_age))
+    return min(ages) if ages else None
 
 
 #: One sentence per state, naming the REMEDY. The rollup is read by people at
@@ -381,5 +463,9 @@ _FRESHNESS_DETAIL: dict[str, str] = {
     "behind_origin": "origin/main has commits this clone has not pulled — git pull --ff-only, then restart.",
     "ahead_of_origin": "This clone has commits that are not on origin/main; the boot guard REFUSES to start here.",
     "diverged": "This clone and origin/main have forked — this is not a fast-forward gap.",
-    "unknown": "Freshness could NOT be determined; this is not the same as up to date.",
+    "unknown": (
+        "Freshness could NOT be determined; this is not the same as up to "
+        "date. If origin_fetch is failing or disabled, the comparison "
+        "against origin/main is the part that cannot be trusted."
+    ),
 }
