@@ -52,6 +52,15 @@ from typing import Any, Protocol
 from prometheus.computer.types import Observation
 
 
+#: Where X11 puts its unix sockets. A named constant rather than a literal
+#: because it is an ENVIRONMENT ASSUMPTION, and a test that wants to exercise
+#: the real ``connect()`` needs somewhere it can actually create a socket.
+#: Tests point this at a tmp dir and bind a real listener there — which is the
+#: only way to test the connect path without depending on the host having a
+#: display, and depending on the host is how a test ends up measuring the box
+#: instead of the code.
+X11_SOCKET_DIR = "/tmp/.X11-unix"
+
 #: The three answers a half can give. ``unknown`` is a THIRD ANSWER and never
 #: collapses into ``ok`` — a check that cannot see a problem must say so
 #: rather than report clean. Same ruling #518 applied to the tracking ref.
@@ -250,13 +259,13 @@ def _check_observe_half(env: dict[str, str]) -> HalfResult:
 
 
 def _x11_socket_path(display: str) -> str | None:
-    """``:0`` / ``:0.1`` -> ``/tmp/.X11-unix/X0``. None for remote displays."""
+    """``:0`` / ``:0.1`` -> ``<X11_SOCKET_DIR>/X0``. None for remote displays."""
     if not display.startswith(":"):
         return None
     number = display[1:].split(".", 1)[0]
     if not number.isdigit():
         return None
-    return f"/tmp/.X11-unix/X{number}"
+    return os.path.join(X11_SOCKET_DIR, f"X{number}")
 
 
 class Driver(Protocol):

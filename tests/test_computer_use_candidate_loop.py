@@ -225,8 +225,40 @@ def test_the_driver_refuses_a_stale_snapshot_even_if_everything_else_passes():
 
 
 # ── THE SUBSTRATE CHECK ─────────────────────────────────────────────────────
+#
+# ⚠ THESE WERE HOST-DEPENDENT AND PASSED BY ACCIDENT. The first version of
+# `test_a_missing_display_blocks_the_step` called the real
+# `check_preconditions()` against the REAL environment and asserted "blocked".
+# It passed in CI and in a plain shell — because neither has a DISPLAY — and
+# FAILED the moment the suite ran from a graphical terminal.
+#
+# That is worse than flaky. This is the test for the cold-path refusal, the
+# single most important safety property of the module, and it was proving it
+# only because the machine happened to have no display. Had the refusal broken
+# entirely, every headless runner — which is every CI runner — would still
+# have gone green.
+#
+# So the environment is now BUILT, never read: `DISPLAY` is removed from the
+# process env and `X11_SOCKET_DIR` points at an empty tmp dir, so the answer
+# is the same on a graphical workstation and a headless runner.
 
-def test_a_missing_display_blocks_the_step_rather_than_doing_nothing():
+
+@pytest.fixture
+def no_display(tmp_path, monkeypatch):
+    """A process that genuinely has no reachable display, on any host."""
+    from prometheus.computer import driver as _driver
+
+    empty = tmp_path / "X11-unix"
+    empty.mkdir()
+    monkeypatch.setattr(_driver, "X11_SOCKET_DIR", str(empty))
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "rt"))
+    (tmp_path / "rt" / "at-spi").mkdir(parents=True)
+    (tmp_path / "rt" / "at-spi" / "bus").write_text("")
+    return tmp_path
+
+
+def test_a_missing_display_blocks_the_step_rather_than_doing_nothing(no_display):
     """The measured failure mode on the reference deployment: the a11y bus
     stays up with the lingering user manager while the X server is gone, so
     observation answers and input lands nowhere. Refuse; do not report
@@ -241,23 +273,47 @@ def test_a_missing_display_blocks_the_step_rather_than_doing_nothing():
     assert driver.dispatched == []
 
 
-def test_display_set_but_dead_is_still_refused():
+def test_display_set_but_dead_is_still_refused(tmp_path, monkeypatch):
     """DISPLAY being SET is not evidence of a display — that is the mistake."""
+    from prometheus.computer import driver as _driver
     from prometheus.computer.driver import check_preconditions
 
+    empty = tmp_path / "X11-unix"
+    empty.mkdir()
+    monkeypatch.setattr(_driver, "X11_SOCKET_DIR", str(empty))
     result = check_preconditions({
-        "DISPLAY": ":99", "XDG_RUNTIME_DIR": "/run/user/1000",
+        "DISPLAY": ":0", "XDG_RUNTIME_DIR": str(tmp_path),
     })
     assert not result.ok
     assert "stale" in result.reason or "does not exist" in result.reason
 
 
-def test_a_live_display_with_no_a11y_bus_is_refused():
+def test_a_live_display_with_no_a11y_bus_is_refused(tmp_path, monkeypatch):
     """The half-up case, named explicitly: input would dispatch, observation
-    would return nothing, and the step would look successful."""
-    from prometheus.computer.driver import check_preconditions
+    would return nothing, and the step would look successful.
 
-    result = check_preconditions({
-        "DISPLAY": ":0", "XDG_RUNTIME_DIR": "/nonexistent-runtime-dir",
-    })
-    assert not result.ok
+    The display here is a REAL listening socket, so this exercises the real
+    connect() rather than relying on the host having one.
+    """
+    import socket
+
+    from prometheus.computer import driver as _driver
+    from prometheus.computer.driver import STATE_ACT_ONLY, check_preconditions
+
+    x11 = tmp_path / "X11-unix"
+    x11.mkdir()
+    monkeypatch.setattr(_driver, "X11_SOCKET_DIR", str(x11))
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(x11 / "X7"))
+    sock.listen(1)
+    try:
+        result = check_preconditions({
+            "DISPLAY": ":7", "XDG_RUNTIME_DIR": str(tmp_path / "no-such-rt"),
+        })
+        assert not result.ok
+        assert result.act.ok, "the live display half should have answered"
+        assert result.state == STATE_ACT_ONLY, (
+            "the dangerous mixed state was not named"
+        )
+    finally:
+        sock.close()

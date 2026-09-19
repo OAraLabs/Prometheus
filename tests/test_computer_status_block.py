@@ -25,9 +25,11 @@ THE THREE PROPERTIES THESE TESTS HOLD
 from __future__ import annotations
 
 import inspect
+import socket
 
 import pytest
 
+from prometheus.computer import driver
 from prometheus.computer import status as cstatus
 from prometheus.computer.driver import (
     HALF_OK,
@@ -41,23 +43,90 @@ from prometheus.computer.driver import (
     check_preconditions,
 )
 
-LIVE = {"DISPLAY": ":0", "XDG_RUNTIME_DIR": "/run/user/1000"}
+#: The two spellings of "this test is reading the machine". Assembled from
+#: fragments so this definition does not trip the guard that reads it.
+HOST_SESSION_PATHS = ("/run/" + "user/", "/tmp/.X11" + "-unix")
+
+# ── HERMETIC SUBSTRATE ──────────────────────────────────────────────────────
+#
+# ⚠ THESE TESTS BUILD THEIR OWN DISPLAY AND THEIR OWN BUS. An earlier version
+# used the host's real `DISPLAY=:0` and `/run/user/1000` — it passed locally
+# and failed every one of these assertions in CI, because CI has no display.
+#
+# That is worse than a flaky test. It was MEASURING THE BOX, not the code: the
+# "ok" answers were true because this particular machine had a session up, and
+# a change that broke the probe entirely would still have gone green here. A
+# test whose result depends on the host is evidence about the host.
+#
+# So: a real AF_UNIX listener stands in for the X display (the probe really
+# connects to it — that is the property under test), and a real file stands in
+# for the accessibility bus socket. Both live in tmp_path. Nothing reads the
+# host's session, so these answer the same way on any machine.
 
 
-def _sub(env):
-    return cstatus.render(check_preconditions(env))
+@pytest.fixture
+def substrate(tmp_path, monkeypatch):
+    """Build a substrate. Returns a callable: substrate(act=..., observe=...)."""
+    x11_dir = tmp_path / "X11-unix"
+    x11_dir.mkdir()
+    monkeypatch.setattr(driver, "X11_SOCKET_DIR", str(x11_dir))
+    listeners: list[socket.socket] = []
+    # A fresh display NUMBER per build: one test exercises several substrates,
+    # and rebinding the same socket path raises EADDRINUSE.
+    counter = {"n": 0}
+
+    def build(act: str = "ok", observe: str = "ok") -> dict:
+        counter["n"] += 1
+        n = counter["n"]
+        # ── the ACT half ────────────────────────────────────────────────
+        if act == "ok":
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.bind(str(x11_dir / f"X{n}"))
+            sock.listen(1)
+            listeners.append(sock)
+            display = f":{n}"
+        elif act == "unavailable":
+            display = f":{n}"       # named, never created -> stale display
+        elif act == "missing":
+            display = ""            # no DISPLAY at all
+        elif act == "unknown":
+            display = "remotehost:0"
+        else:  # pragma: no cover
+            raise ValueError(act)
+
+        # ── the OBSERVE half ────────────────────────────────────────────
+        runtime = tmp_path / f"rt-{n}-{observe}"
+        if observe == "ok":
+            (runtime / "at-spi").mkdir(parents=True, exist_ok=True)
+            (runtime / "at-spi" / "bus").write_text("")
+        elif observe == "unavailable":
+            runtime.mkdir(exist_ok=True)     # exists, no at-spi/bus
+        elif observe == "unknown":
+            return cstatus.render(check_preconditions(
+                {"DISPLAY": display} if display else {}))
+        else:  # pragma: no cover
+            raise ValueError(observe)
+
+        env = {"XDG_RUNTIME_DIR": str(runtime)}
+        if display:
+            env["DISPLAY"] = display
+        return cstatus.render(check_preconditions(env))
+
+    yield build
+    for s_ in listeners:
+        s_.close()
 
 
 # ── 1. BOTH HALVES, INDEPENDENTLY ───────────────────────────────────────────
 
-def test_a_dead_display_still_reports_the_observe_half():
+def test_a_dead_display_still_reports_the_observe_half(substrate):
     """THE REGRESSION. The old code returned as soon as the X half failed.
 
     A box with no display never learned whether its accessibility bus was up,
     which made two controls on two transports look like one control with one
     answer.
     """
-    block = _sub({"DISPLAY": ":99", "XDG_RUNTIME_DIR": "/run/user/1000"})
+    block = substrate(act="unavailable", observe="ok")
     assert block["act"]["state"] == HALF_UNAVAILABLE
     assert block["observe"]["state"] != HALF_UNKNOWN, (
         "the observe half was not evaluated because the act half failed "
@@ -65,15 +134,15 @@ def test_a_dead_display_still_reports_the_observe_half():
     )
 
 
-def test_no_display_at_all_still_reports_the_observe_half():
-    block = _sub({"XDG_RUNTIME_DIR": "/run/user/1000"})
+def test_no_display_at_all_still_reports_the_observe_half(substrate):
+    block = substrate(act="missing", observe="ok")
     assert block["act"]["state"] == HALF_UNAVAILABLE
     assert block["observe"]["state"] == HALF_OK
 
 
-def test_the_mixed_state_has_its_own_name():
+def test_the_mixed_state_has_its_own_name(substrate):
     """`act_only` is the field to alert on: input dispatches, tree is empty."""
-    block = _sub({"DISPLAY": ":0", "XDG_RUNTIME_DIR": "/nonexistent-rt"})
+    block = substrate(act="ok", observe="unavailable")
     assert block["act"]["state"] == HALF_OK
     assert block["observe"]["state"] == HALF_UNAVAILABLE
     assert block["state"] == STATE_ACT_ONLY, (
@@ -82,27 +151,27 @@ def test_the_mixed_state_has_its_own_name():
     )
 
 
-def test_the_other_mixed_state_is_distinguishable():
-    block = _sub({"DISPLAY": ":99", "XDG_RUNTIME_DIR": "/run/user/1000"})
+def test_the_other_mixed_state_is_distinguishable(substrate):
+    block = substrate(act="unavailable", observe="ok")
     assert block["state"] == STATE_OBSERVE_ONLY
     assert block["state"] != STATE_ACT_ONLY
 
 
-def test_both_down_is_unavailable_not_a_mixed_state():
-    block = _sub({"XDG_RUNTIME_DIR": "/nonexistent-rt"})
+def test_both_down_is_unavailable_not_a_mixed_state(substrate):
+    block = substrate(act="missing", observe="unavailable")
     assert block["state"] == STATE_UNAVAILABLE
 
 
 # ── 2. UNKNOWN IS A THIRD ANSWER ────────────────────────────────────────────
 
-def test_unknown_outranks_a_known_good_half():
+def test_unknown_outranks_a_known_good_half(substrate):
     """An unknown half means the rollup cannot be trusted.
 
     Reporting `act_only` when the observe half merely could not be REACHED
     would assert something unestablished — the failure this vocabulary exists
     to prevent, one level up.
     """
-    block = _sub({"DISPLAY": "remotehost:0", "XDG_RUNTIME_DIR": "/run/user/1000"})
+    block = substrate(act="unknown", observe="ok")
     assert block["act"]["state"] == HALF_UNKNOWN
     assert block["observe"]["state"] == HALF_OK
     assert block["state"] == STATE_UNKNOWN, (
@@ -110,14 +179,12 @@ def test_unknown_outranks_a_known_good_half():
     )
 
 
-def test_unknown_never_renders_as_the_healthy_value():
-    for env in (
-        {"DISPLAY": "remotehost:0", "XDG_RUNTIME_DIR": "/run/user/1000"},
-        {"DISPLAY": ":0"},  # no XDG_RUNTIME_DIR -> bus not locatable
-    ):
-        block = _sub(env)
+def test_unknown_never_renders_as_the_healthy_value(substrate):
+    for act, observe in (("unknown", "ok"), ("ok", "unknown")):
+        block = substrate(act=act, observe=observe)
         assert block["state"] != STATE_READY, (
-            f"{env} rendered as ready despite an unestablished half"
+            f"act={act} observe={observe} rendered as ready despite an "
+            f"unestablished half"
         )
 
 
@@ -147,9 +214,9 @@ def test_substrate_block_never_raises(monkeypatch):
 
 # ── 3. IT CONNECTS ──────────────────────────────────────────────────────────
 
-def test_display_set_but_dead_is_not_ok():
+def test_display_set_but_dead_is_not_ok(substrate):
     """`DISPLAY` being SET is not evidence of a display. That is the mistake."""
-    block = _sub({"DISPLAY": ":99", "XDG_RUNTIME_DIR": "/run/user/1000"})
+    block = substrate(act="unavailable", observe="ok")
     assert block["act"]["state"] != HALF_OK
 
 
@@ -168,20 +235,19 @@ def test_the_act_probe_actually_opens_a_socket():
 
 # ── NO LOCATIONS ON THE WIRE ────────────────────────────────────────────────
 
-@pytest.mark.parametrize("env", [
-    LIVE,
-    {"DISPLAY": ":99", "XDG_RUNTIME_DIR": "/run/user/1000"},
-    {"DISPLAY": ":0", "XDG_RUNTIME_DIR": "/nonexistent-rt"},
-    {"XDG_RUNTIME_DIR": "/run/user/1000"},
+@pytest.mark.parametrize("act,observe", [
+    ("ok", "ok"), ("unavailable", "ok"), ("ok", "unavailable"),
+    ("missing", "ok"), ("unknown", "ok"),
 ])
-def test_the_block_leaks_no_path_or_display_number(env):
+def test_the_block_leaks_no_path_or_display_number(substrate, act, observe):
     """`component` NAMES the thing; it does not locate it.
 
     The locations involved are a uid-bearing runtime path and a display
     number, and /api/status's whole audience is someone already worried.
     """
-    blob = str(_sub(env))
-    for leak in ("/run/user/", "/tmp/.X11-unix", "at-spi/bus", ":99", ":0"):
+    blob = str(substrate(act=act, observe=observe))
+    for leak in ("/run/user/", "/tmp/", "at-spi/bus", ":0",  # host-path-ok: asserting ABSENCE
+                 "remotehost"):
         assert leak not in blob, (
             f"the status block leaked {leak!r}: {blob}"
         )
@@ -189,26 +255,26 @@ def test_the_block_leaks_no_path_or_display_number(env):
 
 # ── THE SHAPE AGREES WITH ITS NEIGHBOUR ─────────────────────────────────────
 
-def test_axes_are_strings_not_booleans():
+def test_axes_are_strings_not_booleans(substrate):
     """Same convention as the `deployment` block: per-axis STRINGS plus a
     rollup, so an operator does not learn a second vocabulary halfway down
     one payload."""
-    block = _sub(LIVE)
+    block = substrate()
     for axis in ("act", "observe"):
         assert isinstance(block[axis]["state"], str)
         assert not isinstance(block[axis]["state"], bool)
     assert isinstance(block["state"], str)
 
 
-def test_every_rollup_state_is_reachable():
+def test_every_rollup_state_is_reachable(substrate):
     """A vocabulary with an unreachable member is a vocabulary nobody can
     trust the meaning of."""
     seen = {
-        _sub(LIVE)["state"],
-        _sub({"DISPLAY": ":0", "XDG_RUNTIME_DIR": "/nonexistent-rt"})["state"],
-        _sub({"DISPLAY": ":99", "XDG_RUNTIME_DIR": "/run/user/1000"})["state"],
-        _sub({"XDG_RUNTIME_DIR": "/nonexistent-rt"})["state"],
-        _sub({"DISPLAY": "h:0", "XDG_RUNTIME_DIR": "/run/user/1000"})["state"],
+        substrate(act="ok", observe="ok")["state"],
+        substrate(act="ok", observe="unavailable")["state"],
+        substrate(act="unavailable", observe="ok")["state"],
+        substrate(act="missing", observe="unavailable")["state"],
+        substrate(act="unknown", observe="ok")["state"],
     }
     assert seen == {STATE_READY, STATE_ACT_ONLY, STATE_OBSERVE_ONLY,
                     STATE_UNAVAILABLE, STATE_UNKNOWN}
@@ -282,4 +348,44 @@ def test_targets_report_binding_without_exposing_connection_settings():
     assert "CANARY-CONNECTION" not in str(out), (
         "a target's connection settings reached the status payload; they are "
         "opaque by construction and must not leave the process"
+    )
+
+
+# ── THE GUARD ON THE GUARDS ─────────────────────────────────────────────────
+
+def test_no_computer_test_reads_the_hosts_own_session():
+    """Computer-use tests must BUILD a substrate, never read the box's.
+
+    This exists because two of them did, and both passed for the wrong
+    reason. The status tests asserted `ok` against the host's real `:0` — true
+    on this workstation, false on every CI runner. And the cold-path refusal
+    test asserted `blocked` against the real environment — true on every
+    headless runner, false from a graphical terminal, and therefore inert
+    exactly where it was supposed to be load-bearing.
+
+    Both spellings of the mistake are the same: a literal host path. A test
+    that names one is reading the machine, and its result is evidence about
+    the machine rather than about the code.
+    """
+    from pathlib import Path
+
+    # An exemption must ANNOUNCE ITSELF on the line it exempts — the same
+    # bargain `PATH_PARAM_EXEMPT` makes in permissions/tool_paths.py. The only
+    # legitimate uses are assertions that a path is ABSENT, and those read
+    # obviously as such next to the marker.
+    marker = "host-path-" + "ok:"        # host-path-ok: the marker itself
+    here = Path(__file__).resolve().parent
+    offenders: list[str] = []
+    for path in sorted(here.glob("test_computer_*.py")):
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            if line.lstrip().startswith("#") or marker in line:
+                continue
+            for literal in HOST_SESSION_PATHS:
+                if literal in line:
+                    offenders.append(f"{path.name}:{lineno} -> {literal}")
+    assert not offenders, (
+        "computer-use test(s) reference a host session path:\n  "
+        + "\n  ".join(offenders)
+        + "\nBuild the substrate instead (see the `substrate` fixture): "
+          "monkeypatch driver.X11_SOCKET_DIR and pass XDG_RUNTIME_DIR."
     )
