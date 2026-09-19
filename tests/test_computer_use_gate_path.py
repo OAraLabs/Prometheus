@@ -53,7 +53,7 @@ SNAP = "snap-1"
 
 def _observation() -> Observation:
     return Observation(
-        app="scratchapp", pid=4242, window_id=7, snapshot_id=SNAP,
+        target="box", app="scratchapp", pid=4242, window_id=7, snapshot_id=SNAP,
         elements=(
             Element(0, "tok-send", "push button", "Send"),
             Element(1, "tok-field", "text", "Search", editable=True),
@@ -92,7 +92,7 @@ def _call(ctx, tool: str, args: dict):
 
 def _click_args(**over):
     args = {
-        "app": "scratchapp", "pid": 4242, "window_id": 7,
+        "target": "box", "app": "scratchapp", "pid": 4242, "window_id": 7,
         "snapshot_id": SNAP, "element_token": "tok-send",
         "delivery_mode": "background",
     }
@@ -194,7 +194,7 @@ def test_a_matching_grant_silences_the_prompt():
     prompted: list = []
     ctx, driver, gate = _ctx(prompted)
     gate.add_grant(Grant(
-        kind=COMPUTER_ACTION_KIND, value="scratchapp:click:background",
+        kind=COMPUTER_ACTION_KIND, value="box:scratchapp:click:background",
         tool_name="computer_click",
     ))
     _call(ctx, "computer_click", _click_args())
@@ -211,7 +211,7 @@ def test_a_grant_for_another_app_does_not_carry_over():
     prompted: list = []
     ctx, _, gate = _ctx(prompted)
     gate.add_grant(Grant(
-        kind=COMPUTER_ACTION_KIND, value="mail:click:background",
+        kind=COMPUTER_ACTION_KIND, value="box:mail:click:background",
         tool_name="computer_click",
     ))
     _call(ctx, "computer_click", _click_args())
@@ -229,7 +229,7 @@ def test_a_background_grant_does_not_cover_foreground():
     prompted: list = []
     ctx, _, gate = _ctx(prompted)
     gate.add_grant(Grant(
-        kind=COMPUTER_ACTION_KIND, value="scratchapp:click:background",
+        kind=COMPUTER_ACTION_KIND, value="box:scratchapp:click:background",
         tool_name="computer_click",
     ))
     _call(ctx, "computer_click", _click_args(delivery_mode="foreground"))
@@ -292,3 +292,76 @@ def test_no_test_here_calls_evaluate_by_hand():
         f"{offenders}); drive _execute_tool_call instead"
     )
     assert "_execute_tool_call(" in Path(__file__).read_text()
+
+
+# ── THE TARGET TERM: A GRANT NEVER SPANS MACHINES ───────────────────────────
+
+def test_a_grant_for_another_machine_does_not_carry_over():
+    """Will's amendment, 2026-09-19, through the real dispatch path.
+
+    "Allow clicks in Mail on this box" and "allow clicks in Mail on my laptop"
+    are different grants and an operator would give exactly one. Same app,
+    same verb, same delivery — only the machine differs.
+    """
+    from prometheus.permissions.checker import Grant
+    from prometheus.permissions.computer_extent import COMPUTER_ACTION_KIND
+
+    prompted: list = []
+    ctx, driver, gate = _ctx(prompted)
+    gate.add_grant(Grant(
+        kind=COMPUTER_ACTION_KIND, value="laptop:scratchapp:click:background",
+        tool_name="computer_click",
+    ))
+    _call(ctx, "computer_click", _click_args())   # target="box"
+    assert prompted, (
+        "a grant for ANOTHER MACHINE silenced this one — a grant that spans "
+        "machines is the widening shape the target term exists to prevent"
+    )
+
+
+def test_a_pre_target_grant_matches_nothing():
+    """A three-term value cannot be rescued by padding; it must not match.
+
+    Nothing should ever construct one — from_config_dict refuses it on load.
+    This pins the in-memory half: even if one is injected directly, the
+    machine it was granted on is unknowable and it authorises nothing.
+    """
+    from prometheus.permissions.checker import Grant
+    from prometheus.permissions.computer_extent import COMPUTER_ACTION_KIND
+
+    prompted: list = []
+    ctx, _, gate = _ctx(prompted)
+    gate.add_grant(Grant(
+        kind=COMPUTER_ACTION_KIND, value="scratchapp:click:background",
+        tool_name="computer_click",
+    ))
+    _call(ctx, "computer_click", _click_args())
+    assert prompted, (
+        "a pre-target grant authorised a call — its machine is unknowable, so "
+        "it must authorise nothing rather than everything"
+    )
+
+
+def test_the_reason_names_the_machine():
+    prompted: list = []
+    ctx, _, _ = _ctx(prompted)
+    _call(ctx, "computer_click", _click_args())
+    reason = prompted[0]["reason"]
+    assert "box" in reason, (
+        f"the target machine is not in the approval reason: {reason!r} — the "
+        f"operator cannot tell which machine they are approving an action on"
+    )
+
+
+def test_an_action_naming_no_machine_is_refused_not_defaulted():
+    """An empty target must be UNKNOWN, never the empty string.
+
+    A blank term still renders four segments (':scratchapp:click:background')
+    and would match any other call that also failed to name a machine — a
+    cross-machine grant by accident, which is the thing the term prevents.
+    """
+    prompted: list = []
+    ctx, driver, _ = _ctx(prompted, approve=False)
+    result = _call(ctx, "computer_click", _click_args(target=""))
+    assert result.is_error, "an action with no target machine was not refused"
+    assert driver.dispatched == []

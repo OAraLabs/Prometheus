@@ -164,8 +164,17 @@ class Driver(Protocol):
     ``execute_javascript`` because the loop has nowhere to call it.
     """
 
-    def observe(self, app: str, pid: int, window_id: int) -> Observation:
-        """Fresh snapshot. Every call supersedes the previous one's tokens."""
+    def observe(
+        self, target: str, app: str, pid: int, window_id: int
+    ) -> Observation:
+        """Fresh snapshot. Every call supersedes the previous one's tokens.
+
+        ``target`` is passed even though a bound driver already knows which
+        machine it reaches: the Observation it returns carries the target into
+        every candidate built from it, and a driver silently stamping its own
+        idea of the name would let a registry mis-binding produce actions
+        labelled for one machine and executed on another.
+        """
         ...
 
     def act(self, verb: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -215,8 +224,18 @@ class FixtureDriver:
         #: Every action that reached the driver, in order. Assert on THIS.
         self.dispatched: list[tuple[str, dict[str, Any]]] = []
 
-    def observe(self, app: str, pid: int, window_id: int) -> Observation:
+    def observe(
+        self, target: str, app: str, pid: int, window_id: int
+    ) -> Observation:
         obs = self._observations[min(self._cursor, len(self._observations) - 1)]
+        if obs.target != target:
+            # A fixture labelled for another machine is a test-authoring
+            # mistake, but it is the same mistake a mis-bound registry would
+            # make in production, so it is refused rather than accommodated.
+            raise DriverUnavailable(
+                f"fixture observation is for target {obs.target!r}, not "
+                f"{target!r}"
+            )
         self._cursor += 1
         self._current_snapshot = obs.snapshot_id
         return obs

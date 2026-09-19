@@ -31,6 +31,7 @@ from prometheus.config.shipped_defaults import (
 from prometheus.permissions.audit import AuditDecision, AuditLogger
 from prometheus.permissions.computer_extent import (
     COMPUTER_ACTION_KIND,
+    EXTENT_TERMS,
     ComputerExtent,
 )
 from prometheus.permissions.exfiltration import ExfiltrationDetector
@@ -407,6 +408,25 @@ class Grant:
         if kind not in ("path_prefix", "command_prefix", "tool",
                         COMPUTER_ACTION_KIND):
             return None
+        if kind == COMPUTER_ACTION_KIND:
+            # REFUSE a value that does not carry every term, rather than
+            # padding one in. A three-term row predates the target term, so
+            # the machine it was granted on is not knowable from the record —
+            # and both available guesses are wrong in the dangerous
+            # direction: assume the local machine and a remote grant is
+            # silently narrowed (merely annoying), assume "any" and one
+            # machine's consent silently covers another (the widening). A
+            # dropped grant costs one prompt; a mis-read one costs the
+            # property the term was added for.
+            value = str(d.get("value", ""))
+            if len(value.split(":")) != EXTENT_TERMS:
+                log.warning(
+                    "dropping a stored computer_action grant whose value %r "
+                    "does not carry %d terms (target:app:verb:delivery) — it "
+                    "cannot be interpreted safely; re-grant it",
+                    value, EXTENT_TERMS,
+                )
+                return None
         # scope is hardcoded, not read: anything in the config file IS
         # persistent by definition, so a missing or stale value cannot mislabel it.
         return cls(
@@ -470,17 +490,30 @@ class Grant:
             what = f"any bash command starting with {self.value!r}"
         elif self.kind == COMPUTER_ACTION_KIND:
             # Rendered from the STORED value, not from a live ComputerExtent:
-            # a grant read back from config has only its three terms, and the
+            # a grant read back from config has only its four terms, and the
             # description an operator is shown on revoke must be the same
             # sentence they consented to. Wide grants have to READ wide — see
             # computer_extent.ComputerExtent.describe, whose phrasing this
             # mirrors deliberately.
-            app, _, rest = self.value.partition(":")
-            verb, _, delivery = rest.partition(":")
-            from prometheus.permissions.computer_extent import (
-                ComputerExtent as _CE,
-            )
-            what = _CE(app=app, verb=verb, delivery=delivery).describe()
+            terms = self.value.split(":")
+            if len(terms) != EXTENT_TERMS:
+                # Should be unreachable: from_config_dict refuses such a row
+                # and derive_grant cannot build one. Described rather than
+                # guessed anyway, because the alternative is a sentence that
+                # silently names the wrong machine.
+                what = (
+                    f"a desktop action recorded as {self.value!r}, which this "
+                    f"build cannot interpret ({len(terms)} terms, expected "
+                    f"{EXTENT_TERMS}) — revoke it and grant again"
+                )
+            else:
+                from prometheus.permissions.computer_extent import (
+                    ComputerExtent as _CE,
+                )
+                target, app, verb, delivery = terms
+                what = _CE(
+                    target=target, app=app, verb=verb, delivery=delivery
+                ).describe()
         else:  # pragma: no cover - kind is validated at construction
             what = f"{self.kind} {self.value}"
         return f"{what} — {duration}"

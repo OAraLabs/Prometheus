@@ -31,7 +31,8 @@ from prometheus.permissions.checker import PermissionMode, SecurityGate
 
 def _obs(snapshot="s1") -> Observation:
     return Observation(
-        app="scratchapp", pid=1, window_id=2, snapshot_id=snapshot,
+        target="box", app="scratchapp", pid=1, window_id=2,
+        snapshot_id=snapshot,
         elements=(
             Element(0, f"tok-send-{snapshot}", "push button", "Send"),
             Element(1, f"tok-cancel-{snapshot}", "push button", "Cancel"),
@@ -71,7 +72,7 @@ def test_the_chooser_never_sees_arguments_or_tool_names():
 def test_an_unusable_observation_refuses_rather_than_returning_nothing():
     """Empty-because-dead and empty-because-idle must not look the same."""
     dead = Observation(
-        app="a", pid=1, window_id=2, snapshot_id="s",
+        target="box", app="a", pid=1, window_id=2, snapshot_id="s",
         unusable_reason="no AT-SPI bus; the tree would be empty",
     )
     with pytest.raises(UnusableObservation):
@@ -152,8 +153,8 @@ def _loop(chooser, *, approve=True, driver=None):
 
 def _run(loop, **kw):
     return asyncio.run(loop.step(
-        goal=kw.pop("goal", "press send"), app="scratchapp", pid=1,
-        window_id=2, **kw,
+        goal=kw.pop("goal", "press send"), target="box", app="scratchapp",
+        pid=1, window_id=2, **kw,
     ))
 
 
@@ -165,7 +166,7 @@ def test_one_action_goes_through_the_whole_path():
     assert result.candidate is not None
     assert "Send" in result.candidate.description
     assert prompted, "the action executed without ever reaching the gate"
-    assert result.extent == "scratchapp:click:background"
+    assert result.extent == "box:scratchapp:click:background"
     assert driver.dispatched, "nothing reached the driver"
     verb, args = driver.dispatched[0]
     assert verb == "click"
@@ -218,7 +219,7 @@ def test_a_chooser_that_matches_nothing_abstains_rather_than_guessing():
 def test_the_driver_refuses_a_stale_snapshot_even_if_everything_else_passes():
     """The third independent refusal. Belt, braces, and the driver's own rule."""
     driver = FixtureDriver([_obs("s1")])
-    driver.observe("scratchapp", 1, 2)
+    driver.observe("box", "scratchapp", 1, 2)
     with pytest.raises(StaleSnapshot):
         driver.act("click", {"snapshot_id": "s-old", "element_token": "t"})
 

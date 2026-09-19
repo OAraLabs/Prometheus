@@ -27,12 +27,30 @@ THE EXTENT, AND WHAT IT DELIBERATELY CANNOT SAY
 ------------------------------------------------
 Ruled by Will 2026-09-19: the unit of remembered consent is
 
-    app : verb : delivery_mode          e.g. ``firefox:click:background``
+    target : app : verb : delivery_mode    e.g. ``mini:firefox:click:background``
 
-Hermes keys the same idea as ``cua:<action>:<background|foreground>``. The
-APP term is the difference and it is the whole argument: "allow clicks" and
-"allow clicks in Mail" are different grants and only one of them is something
-a person would give.
+Hermes keys the same idea as ``cua:<action>:<background|foreground>``. The APP
+and TARGET terms are the difference, and each earns its place the same way:
+"allow clicks", "allow clicks in Mail", and "allow clicks in Mail on my
+laptop" are three different grants, and an operator would give exactly one of
+them.
+
+TARGET IS FIRST, AND THE ORDER IS NOT COSMETIC. Scope decreases left to
+right — machine contains app contains verb contains delivery — so the string
+groups the way a person would group it when reviewing or revoking ("everything
+granted on that machine" is a leading-segment question). ⚠ That grouping is a
+HUMAN-FACING operation only. Authorization compares the whole value EXACTLY
+(``Grant.matches``); the two must never be unified into one prefix matcher,
+because a prefix test that is convenient for listing is a privilege escalation
+for matching.
+
+WHY THE TARGET TERM COULD NOT BE ADDED LATER. The moment a second machine
+exists, a stored three-term ``firefox:click:background`` is ambiguous: it
+either means "on the machine where it was granted" — provenance the record
+does not carry — or "on any machine", which is the widening. There is no safe
+reading, only a choice between discarding every stored grant and guessing. So
+the term goes in before anything is stored, and ``Grant.from_config_dict``
+REFUSES a value that does not carry it rather than padding one in.
 
 Two terms are ABSENT ON PURPOSE, and their absence is load-bearing:
 
@@ -62,12 +80,14 @@ The verb sits on the model, the other terms sit next to the fields::
 
     class ClickInput(BaseModel):
         model_config = ConfigDict(json_schema_extra=computer_verb("click"))
+        target: str = Field(..., json_schema_extra=COMPUTER_TARGET_FIELD)
         app: str = Field(..., json_schema_extra=COMPUTER_APP_FIELD)
         delivery_mode: str = Field("background",
                                    json_schema_extra=COMPUTER_DELIVERY_FIELD)
 
     class TypeTextInput(BaseModel):
         model_config = ConfigDict(json_schema_extra=computer_verb("type_text"))
+        target: str = Field(..., json_schema_extra=COMPUTER_TARGET_FIELD)
         app: str = Field(..., json_schema_extra=COMPUTER_APP_FIELD)
         text: str = Field(..., json_schema_extra=COMPUTER_PAYLOAD_FIELD)
 """
@@ -81,9 +101,23 @@ from typing import Any
 #: Namespaced and ``x-`` prefixed exactly like ``x-prometheus-path``.
 COMPUTER_VERB_KEY = "x-prometheus-computer-verb"
 
-#: Field keys. Which argument names the target app, and which selects the
-#: delivery mode. Declared per-field for the reason path_schema.py records at
-#: length: a name pattern would be the fourth enumeration to get this wrong.
+#: Field keys. Which argument names the target MACHINE, which names the target
+#: app, and which selects the delivery mode. Declared per-field for the reason
+#: path_schema.py records at length: a name pattern would be the fourth
+#: enumeration to get this wrong.
+#:
+#: THE TARGET IS A LOGICAL NAME FROM CONFIG, NEVER A HOSTNAME OR ADDRESS.
+#: Two reasons, and both are load-bearing:
+#:
+#:   1. Grants are PERSISTED, and the extent is rendered into the approval
+#:      prompt, the audit row and the config file. A connection identifier in
+#:      any of those violates the standing rule against real infrastructure
+#:      identifiers in persisted content.
+#:   2. A connection detail must never be able to re-point a grant. If the
+#:      extent carried an address, moving a machine would either silently
+#:      invalidate every grant for it or — far worse — silently transfer them
+#:      to whatever now answers at that address.
+COMPUTER_TARGET_KEY = "x-prometheus-computer-target"
 COMPUTER_APP_KEY = "x-prometheus-computer-app"
 COMPUTER_DELIVERY_KEY = "x-prometheus-computer-delivery"
 
@@ -93,6 +127,7 @@ COMPUTER_DELIVERY_KEY = "x-prometheus-computer-delivery"
 COMPUTER_PAYLOAD_KEY = "x-prometheus-computer-payload"
 
 #: Drop-in ``Field(json_schema_extra=...)`` values.
+COMPUTER_TARGET_FIELD: dict[str, Any] = {COMPUTER_TARGET_KEY: True}
 COMPUTER_APP_FIELD: dict[str, Any] = {COMPUTER_APP_KEY: True}
 COMPUTER_DELIVERY_FIELD: dict[str, Any] = {COMPUTER_DELIVERY_KEY: True}
 COMPUTER_PAYLOAD_FIELD: dict[str, Any] = {COMPUTER_PAYLOAD_KEY: True}
@@ -140,6 +175,11 @@ def _field_declaring(schema: dict[str, Any] | None, key: str) -> str | None:
         if isinstance(spec, dict) and spec.get(key) is True:
             return name
     return None
+
+
+def declared_target_param(schema: dict[str, Any] | None) -> str | None:
+    """Which argument names the target machine."""
+    return _field_declaring(schema, COMPUTER_TARGET_KEY)
 
 
 def declared_app_param(schema: dict[str, Any] | None) -> str | None:

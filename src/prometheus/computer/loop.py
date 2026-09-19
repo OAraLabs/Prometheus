@@ -93,6 +93,7 @@ class ComputerUseLoop:
     async def step(
         self,
         goal: str,
+        target: str,
         app: str,
         pid: int,
         window_id: int,
@@ -110,7 +111,7 @@ class ComputerUseLoop:
                 return StepResult(status="blocked", reason=pre.reason)
 
         # 1. OBSERVE ---------------------------------------------------------
-        observation = self._driver.observe(app, pid, window_id)
+        observation = self._driver.observe(target, app, pid, window_id)
 
         # 2. BUILD -----------------------------------------------------------
         try:
@@ -210,7 +211,7 @@ class ComputerUseLoop:
             )
 
         # 7. VERIFY — against FRESH state, not against the return value ------
-        verified = self._verify(candidate, app, pid, window_id)
+        verified = self._verify(candidate, target, app, pid, window_id)
         return StepResult(
             status="executed",
             candidate=candidate,
@@ -223,7 +224,8 @@ class ComputerUseLoop:
         )
 
     def _verify(
-        self, candidate: Candidate, app: str, pid: int, window_id: int
+        self, candidate: Candidate, target: str, app: str, pid: int,
+        window_id: int,
     ) -> bool | None:
         """Did the action land? Asked of a NEW observation.
 
@@ -234,7 +236,7 @@ class ComputerUseLoop:
         which is honest and distinguishable from False.
         """
         try:
-            after = self._driver.observe(app, pid, window_id)
+            after = self._driver.observe(target, app, pid, window_id)
         except Exception:
             log.warning("computer-use: post-action observe failed", exc_info=True)
             return None

@@ -36,16 +36,26 @@ from prometheus.permissions.computer_schema import (
     declared_computer_verb,
     declared_delivery_param,
     declared_payload_params,
+    declared_target_param,
 )
 
 #: Grant kind. Parallel to "path_prefix" / "command_prefix".
 COMPUTER_ACTION_KIND = "computer_action"
+
+#: Terms in an extent value: target:app:verb:delivery. Asserted rather than
+#: assumed wherever a stored value is parsed — a three-term value is a
+#: pre-target record whose machine is unknowable, and guessing one is the
+#: widening this term exists to prevent.
+EXTENT_TERMS = 4
 
 
 @dataclass(frozen=True)
 class ComputerExtent:
     """One computer-use action, in the terms consent is granted in."""
 
+    #: Logical machine name from config. NEVER a hostname or address — see
+    #: computer_schema.COMPUTER_TARGET_KEY for why both halves of that matter.
+    target: str
     app: str
     verb: str
     delivery: str
@@ -54,8 +64,8 @@ class ComputerExtent:
 
     @property
     def value(self) -> str:
-        """The grant value: ``app:verb:delivery``."""
-        return f"{self.app}:{self.verb}:{self.delivery}"
+        """The grant value: ``target:app:verb:delivery``."""
+        return f"{self.target}:{self.app}:{self.verb}:{self.delivery}"
 
     @property
     def rememberable(self) -> bool:
@@ -76,8 +86,8 @@ class ComputerExtent:
             else "in the foreground (raising the window, taking focus)"
         )
         return (
-            f"Prometheus may {_verb_phrase(self.verb)} in {self.app}, "
-            f"{where}"
+            f"Prometheus may {_verb_phrase(self.verb)} in {self.app} "
+            f"on {self.target}, {where}"
         )
 
     def why_not_rememberable(self) -> str:
@@ -86,8 +96,8 @@ class ComputerExtent:
         return (
             f"no lasting grant is offered: the value of {args} cannot be part "
             f"of a remembered grant, so remembering this would mean "
-            f"'{_verb_phrase(self.verb)} in {self.app}' — approve it once "
-            f"instead, each time"
+            f"'{_verb_phrase(self.verb)} in {self.app} on {self.target}' — "
+            f"approve it once instead, each time"
         )
 
 
@@ -135,6 +145,27 @@ def computer_extent_for(
     if verb is None:
         return None, None  # an ordinary tool; nothing to say
 
+    # TARGET FIRST, and an absent one is UNKNOWN rather than blank. A blank
+    # term would render as ``:firefox:click:background`` — still four
+    # segments, still a valid-looking grant, and it would match any other
+    # call that also failed to name a machine. "Which machine" resolving to
+    # the empty string is precisely the cross-machine grant the term exists
+    # to make impossible, so it fails loud instead.
+    target_param = declared_target_param(schema)
+    if target_param is None:
+        return None, (
+            f"{tool_name} declares the computer verb {verb!r} but no argument "
+            f"declaring the target machine — the security gate cannot rule "
+            f"on it"
+        )
+    raw_target = tool_input.get(target_param)
+    target = str(raw_target).strip() if raw_target is not None else ""
+    if not target:
+        return None, (
+            f"{tool_name} did not name a target machine (argument "
+            f"{target_param!r} is empty) — the security gate cannot rule on it"
+        )
+
     app_param = declared_app_param(schema)
     if app_param is None:
         return None, (
@@ -169,7 +200,8 @@ def computer_extent_for(
 
     return (
         ComputerExtent(
-            app=_normalise_app(app),
+            target=_normalise_term(target),
+            app=_normalise_term(app),
             verb=verb,
             delivery=delivery,
             payload_params=declared_payload_params(schema),
@@ -178,14 +210,16 @@ def computer_extent_for(
     )
 
 
-def _normalise_app(app: str) -> str:
-    """Fold an app identifier to one spelling.
+def _normalise_term(term: str) -> str:
+    """Fold one extent term to a single spelling.
 
     ``Firefox``, ``firefox`` and ``FireFox`` must not become three separate
     grants — an operator who granted one would be asked again for the next and
     would reasonably read the second prompt as a bug. Colons are stripped
-    because the grant value is colon-delimited and an app name containing one
-    would forge a different extent (``evil:click:background`` inside the app
-    field). That is a small thing that would be a real one later.
+    because the grant value is colon-delimited and a term containing one would
+    forge a different extent — an app called ``x:click:background`` would turn
+    a four-term value into seven segments, and the same trick in the TARGET
+    field could make a call on one machine parse as a grant for another. That
+    is a small thing here and a real one the moment two machines exist.
     """
-    return app.replace(":", "_").strip().lower()
+    return term.replace(":", "_").strip().lower()

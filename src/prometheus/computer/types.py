@@ -68,8 +68,16 @@ class Element:
 
 @dataclass(frozen=True)
 class Observation:
-    """One window snapshot: the facts a candidate table is built from."""
+    """One window snapshot: the facts a candidate table is built from.
 
+    ``target`` rides on the observation rather than being passed alongside it
+    so that every candidate built from a snapshot inherits the machine the
+    snapshot came FROM. Threading it separately would make it possible — via
+    one wrong argument — to build an action for machine B out of machine A's
+    element tokens, which the gate would then rule on as B.
+    """
+
+    target: str
     app: str
     pid: int
     window_id: int

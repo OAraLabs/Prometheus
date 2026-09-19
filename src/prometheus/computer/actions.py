@@ -56,6 +56,7 @@ from prometheus.permissions.computer_schema import (
     COMPUTER_APP_FIELD,
     COMPUTER_DELIVERY_FIELD,
     COMPUTER_PAYLOAD_FIELD,
+    COMPUTER_TARGET_FIELD,
     DELIVERY_BACKGROUND,
     computer_verb,
 )
@@ -63,15 +64,30 @@ from prometheus.permissions.computer_schema import (
 # ---------------------------------------------------------------------------
 # Shared fields
 #
-# `app` is the consent term, so it is REQUIRED on every action: an action that
-# could not name its app would resolve to "extent unknown" and prompt forever.
-# `pid`/`window_id`/`snapshot_id`/`element_token` are driver plumbing.
+# `target` and `app` are consent terms, so both are REQUIRED on every action:
+# an action that could not name its machine or its app resolves to "extent
+# unknown" and prompts forever. `pid`/`window_id`/`snapshot_id`/
+# `element_token` are driver plumbing.
+#
+# WHY `target` IS ON THE ACTION AND NOT AMBIENT STATE. A per-session "current
+# machine" would make the gate's subject depend on when the call happened
+# rather than on what the call says — the same defect as resolving a relative
+# path against the process's working directory, which permissions/ has now
+# rejected twice. The action names its own machine.
 # ---------------------------------------------------------------------------
 
 
 class _ActionBase(BaseModel):
     """Fields every desktop action carries."""
 
+    target: str = Field(
+        ...,
+        description=(
+            "Target machine: a logical name declared in config, never a "
+            "hostname or address."
+        ),
+        json_schema_extra=COMPUTER_TARGET_FIELD,
+    )
     app: str = Field(
         ...,
         description="Target application (the consent term).",
@@ -98,6 +114,7 @@ class ObserveInput(BaseModel):
 
     model_config = ConfigDict(json_schema_extra=computer_verb("observe"))
 
+    target: str = Field(..., json_schema_extra=COMPUTER_TARGET_FIELD)
     app: str = Field(..., json_schema_extra=COMPUTER_APP_FIELD)
     pid: int
     window_id: int
@@ -138,9 +155,10 @@ class TypeTextInput(_ActionBase):
 
     ⚠ ``text`` IS DECLARED AS A PAYLOAD, and that declaration is the whole
     safety property of this tool. It makes the call NOT REMEMBERABLE: the
-    extent ``app:verb:delivery`` has no term for a string, so a remembered
-    grant would mean "type ANY text into this app, forever" — minted from a
-    prompt that showed one string. See permissions/computer_schema.py.
+    extent ``target:app:verb:delivery`` has no term for a string, so a
+    remembered grant would mean "type ANY text into this app on this machine,
+    forever" — minted from a prompt that showed one string. See
+    permissions/computer_schema.py.
     """
 
     model_config = ConfigDict(json_schema_extra=computer_verb("type_text"))
@@ -177,6 +195,7 @@ class VerifyInput(BaseModel):
 
     model_config = ConfigDict(json_schema_extra=computer_verb("observe"))
 
+    target: str = Field(..., json_schema_extra=COMPUTER_TARGET_FIELD)
     app: str = Field(..., json_schema_extra=COMPUTER_APP_FIELD)
     pid: int
     window_id: int

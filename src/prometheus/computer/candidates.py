@@ -66,6 +66,7 @@ def build_candidates(
         raise UnusableObservation(observation.unusable_reason)
 
     base = {
+        "target": observation.target,
         "app": observation.app,
         "pid": observation.pid,
         "window_id": observation.window_id,

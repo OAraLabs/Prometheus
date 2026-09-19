@@ -1,16 +1,26 @@
 """The unit of remembered consent for a desktop action, and its hard limit.
 
-RULED BY WILL 2026-09-19: the extent is ``app:verb:delivery_mode``.
+RULED BY WILL 2026-09-19, amended the same day to add the TARGET term:
 
-The app term is the argument. Hermes keys the same idea as
-``cua:<action>:<background|foreground>``; "allow clicks" and "allow clicks in
-Mail" are different grants and only one of them is something a person would
-give, and a key without the app cannot tell them apart.
+    target:app:verb:delivery_mode
+
+Hermes keys the same idea as ``cua:<action>:<background|foreground>``. Each of
+the two extra terms earns its place the same way: "allow clicks", "allow
+clicks in Mail", and "allow clicks in Mail on that machine" are three
+different grants, and an operator would give exactly one. A key missing either
+term cannot tell them apart — and a grant that silently spans machines is the
+widening shape.
+
+The target term could not have been added later. The moment a second machine
+exists, a stored three-term value is ambiguous: it means either "where it was
+granted" (provenance the record does not carry) or "anywhere" (the widening).
+``Grant.from_config_dict`` therefore REFUSES a value that does not carry it,
+rather than padding one in.
 
 THE LIMIT, ESTABLISHED BEFORE IT COULD BE DISCOVERED AT A PROMPT
 -----------------------------------------------------------------
-``app:verb:delivery_mode`` **cannot** express "type THIS text into THAT
-field", and no amount of adding terms fixes it:
+The extent **cannot** express "type THIS text into THAT field", and no amount
+of adding terms fixes it:
 
 * the field — the only stable handle a driver offers is a snapshot-bound
   element token, which dies at the next observation. An extent keyed on one
@@ -22,8 +32,8 @@ field", and no amount of adding terms fixes it:
 So a payload-bearing action is NOT REMEMBERABLE AT ALL. That is the honest
 answer and it is the same one SPRINT-CONSENT rule 4 already gives: consent
 that cannot be described cannot be informed. The alternative — offering
-``firefox:type_text:background`` off a prompt that showed one string — is the
-narrow-prompt/wide-grant inversion that ``derive_grant`` was rewritten to
+``box:firefox:type_text:background`` off a prompt that showed one string — is
+the narrow-prompt/wide-grant inversion that ``derive_grant`` was rewritten to
 refuse (approving ONE file in $HOME once granted write_file across ALL of it).
 """
 
@@ -43,7 +53,8 @@ from prometheus.permissions.computer_extent import (
 )
 
 CLICK_ARGS = {
-    "app": "Firefox", "pid": 1, "window_id": 2, "snapshot_id": "s",
+    "target": "box", "app": "Firefox", "pid": 1, "window_id": 2,
+    "snapshot_id": "s",
     "element_token": "t", "delivery_mode": "background",
 }
 
@@ -66,9 +77,9 @@ def _pending(extent, tool="computer_click") -> PendingAction:
 
 # ── THE EXTENT ──────────────────────────────────────────────────────────────
 
-def test_the_extent_is_app_verb_delivery():
+def test_the_extent_is_target_app_verb_delivery():
     extent = _extent(ClickInput, CLICK_ARGS)
-    assert extent.value == "firefox:click:background"
+    assert extent.value == "box:firefox:click:background"
 
 
 def test_the_app_is_case_folded_so_one_grant_covers_one_app():
@@ -83,11 +94,11 @@ def test_the_app_is_case_folded_so_one_grant_covers_one_app():
 def test_a_colon_in_an_app_name_cannot_forge_an_extent():
     """`app` is operator-influenced; the value is colon-delimited."""
     extent = _extent(ClickInput, {**CLICK_ARGS, "app": "evil:click:background"})
-    assert extent.value.count(":") == 2, (
+    assert extent.value.count(":") == 3, (
         f"an app name containing colons forged a different extent: "
         f"{extent.value!r}"
     )
-    assert extent.value.startswith("evil_click_background:")
+    assert extent.value == "box:evil_click_background:click:background"
 
 
 # ── THE LIMIT: A PAYLOAD IS NOT REMEMBERABLE ────────────────────────────────
@@ -130,7 +141,7 @@ def test_a_click_DOES_offer_a_lasting_scope():
     grant = derive_grant(action, verb="always")
     assert grant is not None
     assert grant.kind == COMPUTER_ACTION_KIND
-    assert grant.value == "firefox:click:background"
+    assert grant.value == "box:firefox:click:background"
     assert prospective_extents(action), "no scope was offered for a click"
 
 
@@ -153,7 +164,7 @@ def test_the_description_reads_as_wide_as_the_grant_actually_is():
     the defect the whole consent sprint exists to remove.
     """
     grant = Grant(
-        kind=COMPUTER_ACTION_KIND, value="firefox:click:background",
+        kind=COMPUTER_ACTION_KIND, value="box:firefox:click:background",
         tool_name="computer_click", scope="persistent",
     )
     text = grant.describe()
@@ -167,9 +178,9 @@ def test_the_description_reads_as_wide_as_the_grant_actually_is():
 
 
 def test_foreground_and_background_describe_differently():
-    bg = Grant(kind=COMPUTER_ACTION_KIND, value="firefox:click:background",
+    bg = Grant(kind=COMPUTER_ACTION_KIND, value="box:firefox:click:background",
                tool_name="computer_click").describe()
-    fg = Grant(kind=COMPUTER_ACTION_KIND, value="firefox:click:foreground",
+    fg = Grant(kind=COMPUTER_ACTION_KIND, value="box:firefox:click:foreground",
                tool_name="computer_click").describe()
     assert bg != fg
     assert "focus" in fg, f"the foreground sentence does not mention focus: {fg!r}"
@@ -188,12 +199,16 @@ def test_the_refusal_explains_why_nothing_can_be_remembered():
 # ── MATCHING IS EXACT ───────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("stored,candidate,should_match", [
-    ("firefox:click:background", "firefox:click:background", True),
-    ("firefox:click:background", "firefox:click:foreground", False),
-    ("firefox:click:background", "mail:click:background", False),
-    ("firefox:click:background", "firefox:type_text:background", False),
-    ("firefox:click:", "firefox:click:background", False),
-    ("firefox:click:background", None, False),
+    ("box:firefox:click:background", "box:firefox:click:background", True),
+    ("box:firefox:click:background", "box:firefox:click:foreground", False),
+    ("box:firefox:click:background", "box:mail:click:background", False),
+    ("box:firefox:click:background", "box:firefox:type_text:background", False),
+    ("box:firefox:click:", "box:firefox:click:background", False),
+    ("box:firefox:click:background", None, False),
+    # THE AMENDMENT: the same app, verb and delivery on ANOTHER machine.
+    ("box:firefox:click:background", "laptop:firefox:click:background", False),
+    # And a pre-target value must never match anything.
+    ("firefox:click:background", "box:firefox:click:background", False),
 ])
 def test_grant_matching_is_exact_not_prefix(stored, candidate, should_match):
     """`firefox:click:` must not match every delivery mode.
@@ -209,7 +224,7 @@ def test_grant_matching_is_exact_not_prefix(stored, candidate, should_match):
 
 
 def test_a_stored_desktop_grant_survives_a_config_round_trip():
-    grant = Grant(kind=COMPUTER_ACTION_KIND, value="firefox:click:background",
+    grant = Grant(kind=COMPUTER_ACTION_KIND, value="box:firefox:click:background",
                   tool_name="computer_click")
     back = Grant.from_config_dict(grant.to_config_dict())
     assert back is not None, (
@@ -217,7 +232,8 @@ def test_a_stored_desktop_grant_survives_a_config_round_trip():
         "be silently dropped on restart and the operator re-asked forever"
     )
     assert back.kind == COMPUTER_ACTION_KIND
-    assert back.matches("computer_click", None, None, "firefox:click:background")
+    assert back.matches("computer_click", None, None,
+                        "box:firefox:click:background")
 
 
 # ── UNKNOWN IS LOUD ─────────────────────────────────────────────────────────
