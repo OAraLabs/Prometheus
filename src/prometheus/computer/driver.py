@@ -45,7 +45,9 @@ nothing. The check CONNECTS.
 from __future__ import annotations
 
 import os
+import shutil
 import socket
+import subprocess
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -231,17 +233,33 @@ def _check_observe_half(env: dict[str, str]) -> HalfResult:
     Separate transport from the act half, and that is the point: the session
     bus outlives a dead graphical session, so this half can answer while the
     other has no server at all.
+
+    ⚠ ASK THE BUS FOR ITS ADDRESS; DO NOT GUESS THE PATH.
+
+    This probed ``$XDG_RUNTIME_DIR/at-spi/bus`` and was WRONG on a live box.
+    AT-SPI suffixes the socket with the DISPLAY NUMBER: on an X11 session at
+    ``:1`` the socket is ``at-spi/bus_1``, and only a Wayland session that
+    happened to be display ``:0`` produced the unsuffixed name this code was
+    written against. Measured 2026-09-19 after a reboot changed the session
+    type: the probe reported "the accessibility bus socket is absent" while
+    the tree was fully readable — 13 applications enumerated through it.
+
+    It failed CLOSED, so nothing was damaged. It was still a false statement
+    on an endpoint whose whole job is to be believed when something is wrong.
+
+    So the address is now OBTAINED rather than assembled: ``org.a11y.Bus``
+    answers ``GetAddress`` over the session bus, which is immune to a naming
+    scheme nobody documented. Path probing remains as a FALLBACK for a box
+    with no D-Bus tooling — and when it fires it SAYS SO in the detail, so a
+    guess is never mistaken for an answer.
     """
     component = "at-spi-bus"
-    runtime = env.get("XDG_RUNTIME_DIR", "")
-    if not runtime:
-        return HalfResult(
-            HALF_UNKNOWN, component,
-            "no XDG_RUNTIME_DIR — the accessibility bus cannot be located, "
-            "so whether it would answer is not established.",
-        )
+    address, how = _a11y_bus_address(env)
+    if address is None:
+        return HalfResult(HALF_UNKNOWN, component, how)
+
     try:
-        present = os.path.exists(os.path.join(runtime, "at-spi", "bus"))
+        present = os.path.exists(address)
     except Exception as exc:  # noqa: BLE001
         return HalfResult(
             HALF_UNKNOWN, component,
@@ -253,9 +271,95 @@ def _check_observe_half(env: dict[str, str]) -> HalfResult:
             HALF_UNAVAILABLE, component,
             "the accessibility bus socket is absent — observation would "
             "return an empty tree while input still dispatched. That "
-            "combination reports success and does nothing.",
+            "combination reports success and does nothing." + how,
         )
-    return HalfResult(HALF_OK, component, "")
+    return HalfResult(HALF_OK, component, how.strip() or "")
+
+
+#: How long to wait for the session bus to answer. The call is local IPC; a
+#: bus that has not answered in this long is not going to.
+A11Y_ADDRESS_TIMEOUT_SECONDS = 5
+
+#: Appended to the detail when the address came from probing rather than from
+#: asking. ⚠ A FALLBACK THAT FIRES SILENTLY IS THE SAME DEFECT ONE LEVEL
+#: DOWN — the guess would be back, just harder to see.
+_GUESSED_SUFFIX = (
+    " [address GUESSED from XDG_RUNTIME_DIR — the session bus could not be "
+    "asked, so a display-suffixed socket name may be missed]"
+)
+
+
+def _a11y_bus_address(env: dict[str, str]) -> tuple[str | None, str]:
+    """The a11y bus socket path, and a note about how it was obtained.
+
+    Returns ``(path, note)``; ``path`` is None when neither route produced
+    one, and ``note`` then explains why. The note is appended to the
+    operator-facing detail so the PROVENANCE of the answer travels with it.
+    """
+    address = _ask_the_bus(env)
+    if address is not None:
+        return address, ""
+
+    runtime = env.get("XDG_RUNTIME_DIR", "")
+    if not runtime:
+        return None, (
+            "the session bus could not be asked for the accessibility bus "
+            "address and there is no XDG_RUNTIME_DIR to fall back on, so "
+            "whether observation would work is not established."
+        )
+    # The fallback tries BOTH spellings, because the display-suffixed one is
+    # what a real X11 session produces and the bare one is what a `:0`
+    # session produces. Neither is "the" name.
+    display = env.get("DISPLAY", "")
+    candidates = [os.path.join(runtime, "at-spi", "bus")]
+    number = display[1:].split(".", 1)[0] if display.startswith(":") else ""
+    if number.isdigit():
+        candidates.insert(0, os.path.join(runtime, "at-spi", f"bus_{number}"))
+    for candidate in candidates:
+        try:
+            if os.path.exists(candidate):
+                return candidate, _GUESSED_SUFFIX
+        except Exception:  # noqa: BLE001
+            continue
+    # Report the most likely name so the detail names something real.
+    return candidates[0], _GUESSED_SUFFIX
+
+
+def _ask_the_bus(env: dict[str, str]) -> str | None:
+    """``org.a11y.Bus.GetAddress`` over the session bus, or None.
+
+    Shelling out to ``gdbus`` rather than importing a binding: this module is
+    imported by ``/api/status`` on every read and must stay dependency-free,
+    and the probe already runs on a worker thread.
+    """
+    bus = env.get("DBUS_SESSION_BUS_ADDRESS", "")
+    if not bus:
+        return None
+    exe = shutil.which("gdbus")
+    if exe is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [exe, "call", "--session", "--dest", "org.a11y.Bus",
+             "--object-path", "/org/a11y/bus",
+             "--method", "org.a11y.Bus.GetAddress"],
+            capture_output=True, text=True,
+            timeout=A11Y_ADDRESS_TIMEOUT_SECONDS, check=False,
+            env={**env, "PATH": env.get("PATH", "/usr/bin:/bin")},
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    # ('unix:path=/run/user/1000/at-spi/bus_1,guid=...',)
+    out = proc.stdout.strip()
+    marker = "unix:path="
+    if marker not in out:
+        return None
+    tail = out.split(marker, 1)[1]
+    for stop in (",", "'", '"', ")"):
+        tail = tail.split(stop, 1)[0]
+    return tail or None
 
 
 def _x11_socket_path(display: str) -> str | None:
