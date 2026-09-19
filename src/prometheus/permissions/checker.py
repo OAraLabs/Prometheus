@@ -29,6 +29,11 @@ from prometheus.config.load import load_config_file
 from prometheus.config.shipped_defaults import (
     resolve_denied_paths, resolve_workspace_root)
 from prometheus.permissions.audit import AuditDecision, AuditLogger
+from prometheus.permissions.computer_extent import (
+    COMPUTER_ACTION_KIND,
+    EXTENT_TERMS,
+    ComputerExtent,
+)
 from prometheus.permissions.exfiltration import ExfiltrationDetector
 from prometheus.permissions.modes import PermissionMode, TrustLevel
 # The ONE denied-path matcher. Imported from security/ (a leaf that checker
@@ -37,6 +42,11 @@ from prometheus.permissions.modes import PermissionMode, TrustLevel
 from prometheus.security.path_guard import denied_entry_matches
 
 log = logging.getLogger(__name__)
+
+#: One-shot deprecation notice for an approval queue whose
+#: request_approval predates the arguments payload. Module-level so a
+#: legacy queue does not log once per approval.
+_LEGACY_APPROVAL_QUEUE_WARNED: bool = False
 
 # ---------------------------------------------------------------------------
 # Blocked command patterns (applied before prometheus.yaml denied_commands)
@@ -266,9 +276,12 @@ class Grant:
                          chained command through).
       "tool"           — the tool itself, any target (produced by strict-mode
                          approvals whose reason carries no target).
+      "computer_action"— a desktop action matching ``app:verb:delivery``
+                         EXACTLY. No prefix semantics, deliberately: see
+                         ``matches()``.
     """
 
-    kind: str  # "path_prefix" | "command_prefix" | "tool"
+    kind: str  # "path_prefix" | "command_prefix" | "tool" | "computer_action"
     value: str
     tool_name: str
     # SPRINT-CONSENT: "session" renamed to "until_restart".
@@ -328,9 +341,32 @@ class Grant:
         if not self.created_at:
             self.created_at = time.time()
 
-    def matches(self, tool_name: str, file_path: str | None, command: str | None) -> bool:
+    def matches(
+        self,
+        tool_name: str,
+        file_path: str | None,
+        command: str | None,
+        computer_extent: str | None = None,
+    ) -> bool:
         if self.kind == "tool":
             return tool_name == self.tool_name
+        if self.kind == COMPUTER_ACTION_KIND:
+            # EXACT match, not a prefix. Every other kind here is a prefix
+            # because paths and commands nest — /a/b is "inside" /a in a way an
+            # operator can picture. `app:verb:delivery` does NOT nest: a prefix
+            # rule would make the grant `firefox:click:background` match
+            # `firefox:click:background_and_worse` if a verb were ever spelled
+            # that way, and — worse — `firefox:click:` would match every
+            # delivery mode, silently folding the foreground variant into a
+            # background grant. The delivery term exists precisely to keep
+            # those apart, so the comparison has to be exact.
+            #
+            # tool_name is NOT compared. The extent already carries the verb,
+            # and it is the verb the operator consented to; binding the grant
+            # to the tool's registered name as well would mean a rename of the
+            # wrapper silently revoked every stored grant — the same
+            # name-coupling this whole change exists to stop relying on.
+            return bool(computer_extent) and computer_extent == self.value
         if self.kind == "path_prefix":
             if tool_name != self.tool_name or not file_path:
                 return False
@@ -369,8 +405,28 @@ class Grant:
     @classmethod
     def from_config_dict(cls, d: dict) -> Grant | None:
         kind = d.get("kind")
-        if kind not in ("path_prefix", "command_prefix", "tool"):
+        if kind not in ("path_prefix", "command_prefix", "tool",
+                        COMPUTER_ACTION_KIND):
             return None
+        if kind == COMPUTER_ACTION_KIND:
+            # REFUSE a value that does not carry every term, rather than
+            # padding one in. A three-term row predates the target term, so
+            # the machine it was granted on is not knowable from the record —
+            # and both available guesses are wrong in the dangerous
+            # direction: assume the local machine and a remote grant is
+            # silently narrowed (merely annoying), assume "any" and one
+            # machine's consent silently covers another (the widening). A
+            # dropped grant costs one prompt; a mis-read one costs the
+            # property the term was added for.
+            value = str(d.get("value", ""))
+            if len(value.split(":")) != EXTENT_TERMS:
+                log.warning(
+                    "dropping a stored computer_action grant whose value %r "
+                    "does not carry %d terms (target:app:verb:delivery) — it "
+                    "cannot be interpreted safely; re-grant it",
+                    value, EXTENT_TERMS,
+                )
+                return None
         # scope is hardcoded, not read: anything in the config file IS
         # persistent by definition, so a missing or stale value cannot mislabel it.
         return cls(
@@ -432,6 +488,32 @@ class Grant:
                 )
         elif self.kind == "command_prefix":
             what = f"any bash command starting with {self.value!r}"
+        elif self.kind == COMPUTER_ACTION_KIND:
+            # Rendered from the STORED value, not from a live ComputerExtent:
+            # a grant read back from config has only its four terms, and the
+            # description an operator is shown on revoke must be the same
+            # sentence they consented to. Wide grants have to READ wide — see
+            # computer_extent.ComputerExtent.describe, whose phrasing this
+            # mirrors deliberately.
+            terms = self.value.split(":")
+            if len(terms) != EXTENT_TERMS:
+                # Should be unreachable: from_config_dict refuses such a row
+                # and derive_grant cannot build one. Described rather than
+                # guessed anyway, because the alternative is a sentence that
+                # silently names the wrong machine.
+                what = (
+                    f"a desktop action recorded as {self.value!r}, which this "
+                    f"build cannot interpret ({len(terms)} terms, expected "
+                    f"{EXTENT_TERMS}) — revoke it and grant again"
+                )
+            else:
+                from prometheus.permissions.computer_extent import (
+                    ComputerExtent as _CE,
+                )
+                target, app, verb, delivery = terms
+                what = _CE(
+                    target=target, app=app, verb=verb, delivery=delivery
+                ).describe()
         else:  # pragma: no cover - kind is validated at construction
             what = f"{self.kind} {self.value}"
         return f"{what} — {duration}"
@@ -798,6 +880,8 @@ class SecurityGate:
         origin: str = ORIGIN_SYSTEM,
         workspace_roots: "tuple[Path, ...] | list[Path] | None" = None,
         path_is_write: bool | None = None,
+        computer_action: ComputerExtent | None = None,
+        computer_unknown: str | None = None,
     ) -> PermissionDecision:
         """Evaluate whether a tool call is permitted.
 
@@ -906,7 +990,8 @@ class SecurityGate:
         if self._grants:
             matched = next(
                 (g for g in self._grants
-                 if g.matches(tool_name, file_path, command)),
+                 if g.matches(tool_name, file_path, command,
+                              computer_action.value if computer_action else None)),
                 None,
             )
             if matched is not None:
@@ -952,6 +1037,51 @@ class SecurityGate:
         # adapter hardcoded is_read_only=True, declared no path params the
         # gate could see, and carried no command — three misses that
         # composed to "the sanctioned third-party surface is the ungated one".
+        # --- LEVEL 1: a COMPUTER-USE action → APPROVE (both origins) ---
+        #
+        # ⚠ THIS RULE IS WHY THE WRAPPED TOOLSET IS NOT A REGRESSION. Measured
+        # on origin/main BEFORE it existed, with the real gate:
+        #
+        #     mcp__cua__click     -> PROMPT   (the mcp__ prefix rule below)
+        #     computer_click      -> ALLOW    reason ''
+        #     computer_type_text  -> ALLOW
+        #     computer_kill_app   -> ALLOW
+        #
+        # A click carries no file_path and no command, so every tier below is
+        # skipped and `evaluate` falls through to "Auto-allowed" at the tail.
+        # The ONLY thing holding a third-party desktop action in front of a
+        # human was the `mcp__` NAME PREFIX — and wrapping a driver as a
+        # first-party toolset, the change that lets the gate read arguments at
+        # all, deletes that prefix. The protection lived in the name, and the
+        # refactor credited with improving it would have removed it.
+        #
+        # So: a computer action is recognised by its SCHEMA (the tool declares
+        # `x-prometheus-computer-verb`), never by its name, and it lands here
+        # rather than in the tail. Placed after the grants check above, so a
+        # remembered `computer_action` grant still silences the prompt, and
+        # after every DENY tier, so it can never resurrect a block.
+        if computer_unknown:
+            # Declared a verb, extent could not be assembled. UNKNOWN PROMPTS —
+            # it must never read as "not a computer action" and fall through.
+            self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, computer_unknown)
+            self._remember_approve_target(computer_unknown, file_path=None, command=None)
+            return PermissionDecision.approve(computer_unknown)
+        if computer_action is not None:
+            reason = (
+                f"{tool_name} acts on the desktop: "
+                f"{computer_action.describe()}"
+            )
+            if not computer_action.rememberable:
+                # Named in the reason so the operator is told WHY no lasting
+                # grant is on offer, rather than silently not being offered one.
+                reason = f"{reason} — {computer_action.why_not_rememberable()}"
+            self._audit_log(tool_name, AuditDecision.CONFIRM_PENDING, reason)
+            self._remember_approve_target(
+                reason, file_path=file_path, command=command,
+                computer_action=computer_action,
+            )
+            return PermissionDecision.approve(reason)
+
         if tool_name.startswith("mcp__"):
             claim = (
                 "the server declares it read-only; the hint is not trusted "
@@ -1123,17 +1253,25 @@ class SecurityGate:
     # ------------------------------------------------------------------
 
     def _remember_approve_target(
-        self, reason: str, file_path: str | None, command: str | None
+        self, reason: str, file_path: str | None, command: str | None,
+        computer_action: ComputerExtent | None = None,
     ) -> None:
         """Keep the structured target behind an APPROVE reason so the
         approval queue can derive a Grant without parsing free text."""
-        self._approve_targets[reason] = {"file_path": file_path, "command": command}
+        self._approve_targets[reason] = {
+            "file_path": file_path,
+            "command": command,
+            "computer_action": computer_action,
+        }
         if len(self._approve_targets) > 128:  # bounded; oldest entries drop
             for key in list(self._approve_targets)[:32]:
                 self._approve_targets.pop(key, None)
 
-    def approve_target_for(self, reason: str) -> dict[str, str | None]:
-        return self._approve_targets.get(reason, {"file_path": None, "command": None})
+    def approve_target_for(self, reason: str) -> dict[str, Any]:
+        return self._approve_targets.get(
+            reason,
+            {"file_path": None, "command": None, "computer_action": None},
+        )
 
     def add_grant(self, grant: Grant) -> Grant:
         """Register a grant. Returns the EFFECTIVE grant (new or upgraded).
@@ -1344,7 +1482,12 @@ class SecurityGate:
                 return f"Command matches deny list entry: {denied!r}"
         return ""
 
-    async def request_approval(self, tool_name: str, reason: str) -> bool:
+    async def request_approval(
+        self,
+        tool_name: str,
+        reason: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> bool:
         """Ask the operator to sanction one APPROVE decision. True = go ahead.
 
         THE MISSING HOP. ``daemon.py`` has assigned ``_approval_queue`` since
@@ -1360,6 +1503,10 @@ class SecurityGate:
         Fails CLOSED and says why: no queue, or a queue that raises, means the
         answer is no. A permission prompt that degrades to "yes" when its
         transport breaks is worse than having none (CROSS-CUTTING §8).
+
+        ``arguments`` are the call's actual inputs, shown to the operator.
+        They are scrubbed by the QUEUE at construction, not here, so every
+        producer gets the same treatment and none can skip it.
         """
         queue = getattr(self, "_approval_queue", None)
         if queue is None:
@@ -1367,11 +1514,39 @@ class SecurityGate:
         target = self.approve_target_for(reason)
         try:
             from prometheus.permissions.approval_queue import ApprovalResult
-            result = await queue.request_approval(
-                tool_name, reason,
-                grant_file_path=target.get("file_path"),
-                grant_command=target.get("command"),
-            )
+            try:
+                result = await queue.request_approval(
+                    tool_name, reason,
+                    grant_file_path=target.get("file_path"),
+                    grant_command=target.get("command"),
+                    grant_computer_action=target.get("computer_action"),
+                    arguments=arguments,
+                )
+            except TypeError:
+                # A queue predating the computer-use extent / the arguments
+                # payload. WITHOUT this branch the TypeError is caught by the
+                # outer handler and becomes "refusing" — so an older queue
+                # would not merely show less, it would deny EVERY approval on
+                # every surface, and the only symptom would be one WARNING
+                # line per refusal. Failing closed is right for a transport
+                # error; it is not right for a signature mismatch we can
+                # simply retry in the older shape.
+                global _LEGACY_APPROVAL_QUEUE_WARNED
+                if not _LEGACY_APPROVAL_QUEUE_WARNED:
+                    log.warning(
+                        "%s.request_approval accepted as legacy signature "
+                        "(no `arguments` / `grant_computer_action`): the "
+                        "operator will not be shown the arguments being "
+                        "approved, and a desktop action cannot be remembered. "
+                        "Logging this once per process.",
+                        type(queue).__name__,
+                    )
+                    _LEGACY_APPROVAL_QUEUE_WARNED = True
+                result = await queue.request_approval(
+                    tool_name, reason,
+                    grant_file_path=target.get("file_path"),
+                    grant_command=target.get("command"),
+                )
         except Exception:
             log.warning(
                 "approval request for %s failed; refusing", tool_name,

@@ -162,11 +162,24 @@ class AuditLogger:
                 "CREATE INDEX IF NOT EXISTS idx_audit_tool ON permission_audit(tool_name)"
             )
 
-    def _redact(self, text: str) -> str:
-        """Redact potential secrets from text before logging."""
-        for pattern, replacement in self._REDACT_PATTERNS:
+    @classmethod
+    def redact(cls, text: str) -> str:
+        """Redact potential secrets from text. THE redactor for this system.
+
+        Promoted from the private instance method so the approval prompt can
+        reuse it without constructing a logger — see
+        ``permissions/argument_view.py``. Deliberately not a copy: both layers
+        here are incomplete by construction (the class comment says so at
+        length), and a parallel redactor elsewhere would drift from this one
+        with nothing to notice the drift.
+        """
+        for pattern, replacement in cls._REDACT_PATTERNS:
             text = pattern.sub(replacement, text)
         return text
+
+    def _redact(self, text: str) -> str:
+        """Redact potential secrets from text before logging."""
+        return self.redact(text)
 
     def _scrub(self, text: str, limit: int) -> str:
         """Redact, then bound. The only way text enters a stored field.
