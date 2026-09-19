@@ -6,9 +6,10 @@ through — a catalog-only filter is bypassable by the registry's lucky-guess
 execution path). tool_count stays the OFFERED count; allowed_count says
 what survived.
 
-Follows tests/test_mcp_adapter.py's convention: importorskip("mcp") — the
-SDK is an optional extra CI does not install; these run wherever the mcp
-extra is present (the operator's boxes, and any `--extra mcp` env).
+Follows tests/test_mcp_adapter.py's convention: importorskip("mcp") so a
+bare install collects cleanly. CI has installed the ``mcp`` extra since
+2026-08-28 (``.github/workflows/ci.yml``), so these run there — this
+docstring claimed the opposite until 2026-09-18.
 """
 
 from __future__ import annotations

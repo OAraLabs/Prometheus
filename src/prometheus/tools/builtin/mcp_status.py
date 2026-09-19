@@ -67,7 +67,10 @@ class McpStatusTool(BaseTool):
             lines.append("")
             lines.append(f"Available MCP Tools ({len(tools)}):")
             for t in tools:
-                lines.append(f"  mcp__{t.safe_server_name}__{t.tool_name}")
+                # The registry name, never a concatenation of the raw
+                # tool_name — registration sanitises and may suffix, and
+                # this line is what the agent copies into its next call.
+                lines.append(f"  {t.registry_name}")
                 if t.description:
                     lines.append(f"    {t.description[:80]}")
 
