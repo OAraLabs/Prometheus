@@ -749,6 +749,52 @@ def create_app(
             # render as "nothing is wrong".
             return {"error": f"floor state unavailable: {exc}", "dark": None}
 
+    async def _computer_state() -> dict:
+        """The ``computer`` block, probed off the loop like the bash floors.
+
+        THREE DISCIPLINES, COPIED FROM ``_floor_state`` RATHER THAN REINVENTED:
+
+        1. OFF THE EVENT LOOP. The substrate probe opens a unix socket with a
+           2s timeout; a status call must not block the loop on it.
+        2. A BROKEN PROBE MUST NOT TAKE ``/api/status`` DOWN. The fallback is
+           a DIFFERENT, cheaper call — registry reads only, no I/O — not a
+           retry of the thing that just failed. Retrying inside the handler
+           is how a failing probe takes the endpoint with it.
+        3. UNKNOWN IS NOT FALSE. A substrate that could not be probed reports
+           ``state: "unknown"``, never ``unavailable`` and never a healthy
+           default. Status is what an operator reaches for when something is
+           wrong, and "we could not tell" must not render as "nothing is
+           wrong".
+
+        WHY THIS BLOCK EXISTS AT ALL: until now the precondition result
+        reached no surface — not a log, not a metric, not an endpoint. It
+        appeared only as a blocked ``StepResult.reason``, and only when a step
+        was attempted. This is the first place the answer exists.
+        """
+        from prometheus.computer import status as _cstatus
+
+        # The SAME path every other block uses to reach the live registry
+        # (bridge -> loop_context -> tool_registry), rather than a second
+        # accessor that could drift from it.
+        _bridge = getattr(app.state, "ws_bridge", None)
+        _ctx = getattr(_bridge, "loop_context", None) if _bridge else None
+        tool_registry = getattr(_ctx, "tool_registry", None)
+        # No target registry is constructed on the daemon yet — nothing
+        # wires one. `None` says exactly that, and is distinguishable from
+        # `[]` ("a registry exists and declares no target").
+        target_registry = getattr(app.state, "computer_targets", None)
+        try:
+            substrate = await asyncio.to_thread(_cstatus.substrate_block)
+        except Exception as exc:  # noqa: BLE001 — status must still render
+            logger.warning("computer substrate unavailable: %s", exc)
+            substrate = _cstatus._unknown_substrate(
+                f"probe unavailable: {exc.__class__.__name__}")
+        return {
+            "registered": _cstatus._registered_count(tool_registry),
+            "targets": _cstatus._targets(target_registry),
+            "substrate": substrate,
+        }
+
     def _registry() -> Any | None:
         reg = getattr(app.state, "backend_registry", None)
         if reg is not None:
@@ -857,6 +903,21 @@ def create_app(
             # `dark` is the field to alert on: asked for, not happening, and
             # bash running anyway.
             "security": await _floor_state(),
+            # COMPUTER USE — the substrate, probed, both halves separately.
+            # Same law as `security` above: a key saying a capability is on is
+            # not evidence it is on. Stronger here, because the two halves
+            # fail on DIFFERENT transports — input is XTEST over X11,
+            # observation is AT-SPI over D-Bus — and the session bus outlives
+            # a dead graphical session. So the mixed state is reachable, it
+            # looks exactly like the healthy one from inside, and
+            # `substrate.state: "act_only"` is the field to alert on: input
+            # would dispatch and observation would come back empty.
+            #
+            # `registered` is the other half of the honest answer. It is 0 on
+            # a running daemon today by design — `register_computer_tools` has
+            # no call site — so a healthy substrate does NOT mean a model can
+            # click.
+            "computer": await _computer_state(),
             "gateway": gateway_block,
             # The context window actually in force, resolved through
             # prometheus.context.budget — the SAME call /api/lcm makes, so

@@ -1,0 +1,450 @@
+"""The ``computer`` block on /api/status — the first surface this answer has.
+
+Until this block, ``check_preconditions``' result reached NOWHERE: not a log
+line, not a metric, not an endpoint. It appeared only as a blocked
+``StepResult.reason``, and only when a step was actually attempted. So "can
+computer use act right now?" could only be answered by trying it — the worst
+way to learn the answer is no, because the failing case is the one that looks
+like success.
+
+THE THREE PROPERTIES THESE TESTS HOLD
+--------------------------------------
+1. **Both halves independently.** Input is XTEST over X11; observation is
+   AT-SPI over D-Bus. They fail on different axes, the session bus outlives a
+   dead graphical session, and the mixed state is reachable. A single boolean
+   cannot say "input would dispatch and observation would return an empty
+   tree" — which is exactly the state that reports success having done
+   nothing.
+2. **``unknown`` is a third answer and never reads as healthy.** Same ruling
+   the tracking-ref axis applies one block over.
+3. **It connects.** ``DISPLAY`` being set is not evidence of a display: on the
+   reference deployment it is set, inherited from a lingering ``systemd
+   --user`` manager, and may point at a session that ended.
+"""
+
+from __future__ import annotations
+
+import inspect
+import socket
+
+import pytest
+
+from prometheus.computer import driver
+from prometheus.computer import status as cstatus
+from prometheus.computer.driver import (
+    HALF_OK,
+    HALF_UNAVAILABLE,
+    HALF_UNKNOWN,
+    STATE_ACT_ONLY,
+    STATE_OBSERVE_ONLY,
+    STATE_READY,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+    check_preconditions,
+)
+
+#: The two spellings of "this test is reading the machine". Assembled from
+#: fragments so this definition does not trip the guard that reads it.
+HOST_SESSION_PATHS = ("/run/" + "user/", "/tmp/.X11" + "-unix")
+
+# ── HERMETIC SUBSTRATE ──────────────────────────────────────────────────────
+#
+# ⚠ THESE TESTS BUILD THEIR OWN DISPLAY AND THEIR OWN BUS. An earlier version
+# used the host's real `DISPLAY=:0` and `/run/user/1000` — it passed locally
+# and failed every one of these assertions in CI, because CI has no display.
+#
+# That is worse than a flaky test. It was MEASURING THE BOX, not the code: the
+# "ok" answers were true because this particular machine had a session up, and
+# a change that broke the probe entirely would still have gone green here. A
+# test whose result depends on the host is evidence about the host.
+#
+# So: a real AF_UNIX listener stands in for the X display (the probe really
+# connects to it — that is the property under test), and a real file stands in
+# for the accessibility bus socket. Both live in tmp_path. Nothing reads the
+# host's session, so these answer the same way on any machine.
+
+
+@pytest.fixture
+def substrate(tmp_path, monkeypatch):
+    """Build a substrate. Returns a callable: substrate(act=..., observe=...)."""
+    x11_dir = tmp_path / "X11-unix"
+    x11_dir.mkdir()
+    monkeypatch.setattr(driver, "X11_SOCKET_DIR", str(x11_dir))
+    listeners: list[socket.socket] = []
+    # A fresh display NUMBER per build: one test exercises several substrates,
+    # and rebinding the same socket path raises EADDRINUSE.
+    counter = {"n": 0}
+
+    def build(act: str = "ok", observe: str = "ok") -> dict:
+        counter["n"] += 1
+        n = counter["n"]
+        # ── the ACT half ────────────────────────────────────────────────
+        if act == "ok":
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.bind(str(x11_dir / f"X{n}"))
+            sock.listen(1)
+            listeners.append(sock)
+            display = f":{n}"
+        elif act == "unavailable":
+            display = f":{n}"       # named, never created -> stale display
+        elif act == "missing":
+            display = ""            # no DISPLAY at all
+        elif act == "unknown":
+            display = "remotehost:0"
+        else:  # pragma: no cover
+            raise ValueError(act)
+
+        # ── the OBSERVE half ────────────────────────────────────────────
+        runtime = tmp_path / f"rt-{n}-{observe}"
+        if observe == "ok":
+            (runtime / "at-spi").mkdir(parents=True, exist_ok=True)
+            (runtime / "at-spi" / "bus").write_text("")
+        elif observe == "unavailable":
+            runtime.mkdir(exist_ok=True)     # exists, no at-spi/bus
+        elif observe == "unknown":
+            return cstatus.render(check_preconditions(
+                {"DISPLAY": display} if display else {}))
+        else:  # pragma: no cover
+            raise ValueError(observe)
+
+        env = {"XDG_RUNTIME_DIR": str(runtime)}
+        if display:
+            env["DISPLAY"] = display
+        return cstatus.render(check_preconditions(env))
+
+    yield build
+    for s_ in listeners:
+        s_.close()
+
+
+# ── 1. BOTH HALVES, INDEPENDENTLY ───────────────────────────────────────────
+
+def test_a_dead_display_still_reports_the_observe_half(substrate):
+    """THE REGRESSION. The old code returned as soon as the X half failed.
+
+    A box with no display never learned whether its accessibility bus was up,
+    which made two controls on two transports look like one control with one
+    answer.
+    """
+    block = substrate(act="unavailable", observe="ok")
+    assert block["act"]["state"] == HALF_UNAVAILABLE
+    assert block["observe"]["state"] != HALF_UNKNOWN, (
+        "the observe half was not evaluated because the act half failed "
+        "first — the halves are not independent"
+    )
+
+
+def test_no_display_at_all_still_reports_the_observe_half(substrate):
+    block = substrate(act="missing", observe="ok")
+    assert block["act"]["state"] == HALF_UNAVAILABLE
+    assert block["observe"]["state"] == HALF_OK
+
+
+def test_the_mixed_state_has_its_own_name(substrate):
+    """`act_only` is the field to alert on: input dispatches, tree is empty."""
+    block = substrate(act="ok", observe="unavailable")
+    assert block["act"]["state"] == HALF_OK
+    assert block["observe"]["state"] == HALF_UNAVAILABLE
+    assert block["state"] == STATE_ACT_ONLY, (
+        f"the dangerous mixed state rendered as {block['state']!r} — it must "
+        f"be nameable, not hidden inside a generic failure"
+    )
+
+
+def test_the_other_mixed_state_is_distinguishable(substrate):
+    block = substrate(act="unavailable", observe="ok")
+    assert block["state"] == STATE_OBSERVE_ONLY
+    assert block["state"] != STATE_ACT_ONLY
+
+
+def test_both_down_is_unavailable_not_a_mixed_state(substrate):
+    block = substrate(act="missing", observe="unavailable")
+    assert block["state"] == STATE_UNAVAILABLE
+
+
+# ── 2. UNKNOWN IS A THIRD ANSWER ────────────────────────────────────────────
+
+def test_unknown_outranks_a_known_good_half(substrate):
+    """An unknown half means the rollup cannot be trusted.
+
+    Reporting `act_only` when the observe half merely could not be REACHED
+    would assert something unestablished — the failure this vocabulary exists
+    to prevent, one level up.
+    """
+    block = substrate(act="unknown", observe="ok")
+    assert block["act"]["state"] == HALF_UNKNOWN
+    assert block["observe"]["state"] == HALF_OK
+    assert block["state"] == STATE_UNKNOWN, (
+        "an unknown half collapsed into a confident rollup"
+    )
+
+
+def test_unknown_never_renders_as_the_healthy_value(substrate):
+    for act, observe in (("unknown", "ok"), ("ok", "unknown")):
+        block = substrate(act=act, observe=observe)
+        assert block["state"] != STATE_READY, (
+            f"act={act} observe={observe} rendered as ready despite an "
+            f"unestablished half"
+        )
+
+
+def test_a_broken_probe_degrades_to_unknown_not_unavailable():
+    """A probe that broke tells us nothing about the substrate.
+
+    Claiming it is DOWN is an assertion we did not establish — the same
+    discipline the halves themselves follow.
+    """
+    block = cstatus._unknown_substrate("probe failed: RuntimeError")
+    assert block["state"] == STATE_UNKNOWN
+    assert block["act"]["state"] == HALF_UNKNOWN
+    assert block["observe"]["state"] == HALF_UNKNOWN
+
+
+def test_substrate_block_never_raises(monkeypatch):
+    def boom(_env=None):
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(cstatus, "check_preconditions", boom)
+    block = cstatus.substrate_block()
+    assert block["state"] == STATE_UNKNOWN, (
+        "a broken probe propagated instead of degrading — it would take "
+        "/api/status down with it"
+    )
+
+
+# ── 3. IT CONNECTS ──────────────────────────────────────────────────────────
+
+def test_display_set_but_dead_is_not_ok(substrate):
+    """`DISPLAY` being SET is not evidence of a display. That is the mistake."""
+    block = substrate(act="unavailable", observe="ok")
+    assert block["act"]["state"] != HALF_OK
+
+
+def test_the_act_probe_actually_opens_a_socket():
+    """Pinned structurally: a future 'optimisation' to read the variable
+    instead would pass every behavioural test above on this box, because
+    :0 happens to be live here."""
+    from prometheus.computer import driver
+
+    src = inspect.getsource(driver._check_act_half)
+    assert "socket.socket" in src and "connect(" in src, (
+        "the act probe no longer connects — it would report a stale "
+        "inherited DISPLAY as healthy"
+    )
+
+
+# ── NO LOCATIONS ON THE WIRE ────────────────────────────────────────────────
+
+@pytest.mark.parametrize("act,observe", [
+    ("ok", "ok"), ("unavailable", "ok"), ("ok", "unavailable"),
+    ("missing", "ok"), ("unknown", "ok"),
+])
+def test_the_block_leaks_no_path_or_display_number(substrate, act, observe):
+    """`component` NAMES the thing; it does not locate it.
+
+    The locations involved are a uid-bearing runtime path and a display
+    number, and /api/status's whole audience is someone already worried.
+    """
+    blob = str(substrate(act=act, observe=observe))
+    for leak in ("/run/user/", "/tmp/", "at-spi/bus", ":0",  # host-path-ok: asserting ABSENCE
+                 "remotehost"):
+        assert leak not in blob, (
+            f"the status block leaked {leak!r}: {blob}"
+        )
+
+
+# ── THE SHAPE AGREES WITH ITS NEIGHBOUR ─────────────────────────────────────
+
+def test_axes_are_strings_not_booleans(substrate):
+    """Same convention as the `deployment` block: per-axis STRINGS plus a
+    rollup, so an operator does not learn a second vocabulary halfway down
+    one payload."""
+    block = substrate()
+    for axis in ("act", "observe"):
+        assert isinstance(block[axis]["state"], str)
+        assert not isinstance(block[axis]["state"], bool)
+    assert isinstance(block["state"], str)
+
+
+def test_every_rollup_state_is_reachable(substrate):
+    """A vocabulary with an unreachable member is a vocabulary nobody can
+    trust the meaning of."""
+    seen = {
+        substrate(act="ok", observe="ok")["state"],
+        substrate(act="ok", observe="unavailable")["state"],
+        substrate(act="unavailable", observe="ok")["state"],
+        substrate(act="missing", observe="unavailable")["state"],
+        substrate(act="unknown", observe="ok")["state"],
+    }
+    assert seen == {STATE_READY, STATE_ACT_ONLY, STATE_OBSERVE_ONLY,
+                    STATE_UNAVAILABLE, STATE_UNKNOWN}
+
+
+# ── REGISTERED IS THE OTHER HALF OF THE HONEST ANSWER ───────────────────────
+
+def test_no_registry_reports_none_not_zero():
+    """`None` ("nothing to ask") and `0` ("asked; none") are different facts."""
+    assert cstatus._registered_count(None) is None
+    assert cstatus._targets(None) is None
+
+
+def test_an_empty_registry_reports_zero():
+    from prometheus.tools.base import ToolRegistry
+
+    assert cstatus._registered_count(ToolRegistry()) == 0
+
+
+def test_registered_counts_only_wrapped_desktop_tools():
+    from prometheus.computer.tools import build_computer_tools
+    from prometheus.tools.base import ToolRegistry
+
+    reg = ToolRegistry()
+    for t in build_computer_tools(None):
+        reg.register(t)
+    assert cstatus._registered_count(reg) == len(build_computer_tools(None))
+
+
+def test_the_daemon_registers_none_today():
+    """A healthy substrate must not read as "a model can click".
+
+    `register_computer_tools` has no call site by design; this pins that the
+    status block would say so rather than implying otherwise.
+    """
+    import prometheus.computer.tools as tools
+    from pathlib import Path
+
+    root = Path(tools.__file__).resolve().parents[1]
+    hits = [
+        f"{p}:{i}"
+        for p in root.rglob("*.py")
+        for i, line in enumerate(p.read_text().splitlines(), 1)
+        if "register_computer_tools(" in line and "def " not in line
+    ]
+    assert not hits, (
+        f"register_computer_tools now has call site(s) {hits} — a model can "
+        f"click. That is a deliberate decision; update this test and say so."
+    )
+
+
+# ── TARGETS EXPOSE NAMES, NEVER CONNECTIONS ─────────────────────────────────
+
+def test_targets_report_binding_without_exposing_connection_settings():
+    from prometheus.computer.driver import FixtureDriver
+    from prometheus.computer.targets import Target, TargetRegistry
+    from prometheus.computer.types import Element, Observation
+
+    reg = TargetRegistry()
+    reg.declare(Target(name="box", kind="local"),
+                FixtureDriver([Observation(
+                    target="box", app="a", pid=1, window_id=2, snapshot_id="s",
+                    elements=(Element(0, "t", "push button", "Go"),))]))
+    reg.declare(Target(name="other", kind="remote",
+                       connection={"endpoint": "CANARY-CONNECTION"}))
+
+    out = cstatus._targets(reg)
+    assert {t["name"] for t in out} == {"box", "other"}
+    assert [t for t in out if t["name"] == "box"][0]["driver_bound"] is True
+    assert [t for t in out if t["name"] == "other"][0]["driver_bound"] is False
+    assert "CANARY-CONNECTION" not in str(out), (
+        "a target's connection settings reached the status payload; they are "
+        "opaque by construction and must not leave the process"
+    )
+
+
+# ── THE GUARD ON THE GUARDS ─────────────────────────────────────────────────
+
+def test_no_computer_test_reads_the_hosts_own_session():
+    """Computer-use tests must BUILD a substrate, never read the box's.
+
+    This exists because two of them did, and both passed for the wrong
+    reason. The status tests asserted `ok` against the host's real `:0` — true
+    on this workstation, false on every CI runner. And the cold-path refusal
+    test asserted `blocked` against the real environment — true on every
+    headless runner, false from a graphical terminal, and therefore inert
+    exactly where it was supposed to be load-bearing.
+
+    Both spellings of the mistake are the same: a literal host path. A test
+    that names one is reading the machine, and its result is evidence about
+    the machine rather than about the code.
+    """
+    from pathlib import Path
+
+    # An exemption must ANNOUNCE ITSELF on the line it exempts — the same
+    # bargain `PATH_PARAM_EXEMPT` makes in permissions/tool_paths.py. The only
+    # legitimate uses are assertions that a path is ABSENT, and those read
+    # obviously as such next to the marker.
+    marker = "host-path-" + "ok:"        # host-path-ok: the marker itself
+    here = Path(__file__).resolve().parent
+    offenders: list[str] = []
+    for path in sorted(here.glob("test_computer_*.py")):
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            if line.lstrip().startswith("#") or marker in line:
+                continue
+            for literal in HOST_SESSION_PATHS:
+                if literal in line:
+                    offenders.append(f"{path.name}:{lineno} -> {literal}")
+    assert not offenders, (
+        "computer-use test(s) reference a host session path:\n  "
+        + "\n  ".join(offenders)
+        + "\nBuild the substrate instead (see the `substrate` fixture): "
+          "monkeypatch driver.X11_SOCKET_DIR and pass XDG_RUNTIME_DIR."
+    )
+
+
+# ── THE TWO BLOCKS AGREE, CHECKED AGAINST THE REAL ONE ──────────────────────
+
+def test_the_substrate_block_matches_the_deployment_block_convention(substrate):
+    """Compared against the REAL `deployment` block, not against prose.
+
+    `deployment` (#518) and `computer.substrate` sit on one endpoint and both
+    answer "is this thing healthy, and on which axis is it not". An operator
+    should not have to learn a second vocabulary halfway down one payload, so
+    this asserts the shared shape against the actual merged function rather
+    than against a description of it that could drift.
+    """
+    from prometheus.context.environment import deployment_freshness
+
+    deployment = deployment_freshness("unknown")
+    ours = substrate(act="ok", observe="unavailable")
+
+    # 1. A rollup `state`, as a string.
+    for block, label in ((deployment, "deployment"), (ours, "substrate")):
+        assert isinstance(block["state"], str), f"{label}.state is not a string"
+        assert not isinstance(block["state"], bool)
+
+    # 2. A block-level `detail` sentence naming the remedy or consequence.
+    for block, label in ((deployment, "deployment"), (ours, "substrate")):
+        assert block.get("detail"), f"{label} has no block-level detail"
+        assert len(block["detail"].split()) >= 5, (
+            f"{label}.detail is not a sentence: {block['detail']!r}"
+        )
+
+    # 3. `unknown` in both vocabularies, spelled identically.
+    assert STATE_UNKNOWN == "unknown"
+    assert deployment_freshness("unknown")["state"] == STATE_UNKNOWN, (
+        "the two blocks spell their third answer differently"
+    )
+
+
+def test_every_substrate_state_has_a_remedy_sentence():
+    """A state name without an action is a puzzle, not a signal.
+
+    #518's own words about `_FRESHNESS_DETAIL`; the same bar applies here, and
+    a state added without a sentence would render `detail: null`.
+    """
+    for state in (STATE_READY, STATE_ACT_ONLY, STATE_OBSERVE_ONLY,
+                  STATE_UNAVAILABLE, STATE_UNKNOWN):
+        assert cstatus._SUBSTRATE_DETAIL.get(state), (
+            f"rollup state {state!r} has no detail sentence"
+        )
+
+
+def test_the_dangerous_state_says_what_it_means_in_the_payload():
+    """`act_only` is the one an operator will not have seen before."""
+    from prometheus.computer.driver import STATE_ACT_ONLY as _S
+
+    detail = cstatus._SUBSTRATE_DETAIL[_S].lower()
+    assert "empty" in detail and "nothing" in detail, (
+        f"act_only's sentence does not convey that actions would report "
+        f"success and do nothing: {detail!r}"
+    )

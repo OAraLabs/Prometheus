@@ -52,13 +52,102 @@ from typing import Any, Protocol
 from prometheus.computer.types import Observation
 
 
+#: Where X11 puts its unix sockets. A named constant rather than a literal
+#: because it is an ENVIRONMENT ASSUMPTION, and a test that wants to exercise
+#: the real ``connect()`` needs somewhere it can actually create a socket.
+#: Tests point this at a tmp dir and bind a real listener there — which is the
+#: only way to test the connect path without depending on the host having a
+#: display, and depending on the host is how a test ends up measuring the box
+#: instead of the code.
+X11_SOCKET_DIR = "/tmp/.X11-unix"
+
+#: The three answers a half can give. ``unknown`` is a THIRD ANSWER and never
+#: collapses into ``ok`` — a check that cannot see a problem must say so
+#: rather than report clean. Same ruling #518 applied to the tracking ref.
+HALF_OK = "ok"
+HALF_UNAVAILABLE = "unavailable"
+HALF_UNKNOWN = "unknown"
+
+#: Rollup states. ``act_only`` is the one this whole module exists for.
+STATE_READY = "ready"
+STATE_ACT_ONLY = "act_only"
+STATE_OBSERVE_ONLY = "observe_only"
+STATE_UNAVAILABLE = "unavailable"
+STATE_UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class HalfResult:
+    """One half of the substrate: what it is, and whether it answered.
+
+    ``component`` NAMES the thing rather than locating it. The status payload
+    renders these verbatim, and the locations involved are a uid-bearing
+    runtime path and a display number — neither belongs on an endpoint whose
+    whole job is to be read by someone who is worried. The paths stay in the
+    logs, where the person reading them is already on the box.
+    """
+
+    state: str
+    component: str
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.state == HALF_OK
+
+
 @dataclass(frozen=True)
 class PreconditionResult:
-    """Whether the desktop is usable, and which half failed if not."""
+    """Both halves, reported INDEPENDENTLY, plus a rollup.
 
-    ok: bool
+    ⚠ THE HALVES ARE EVALUATED SEPARATELY AND NEITHER SHORT-CIRCUITS THE
+    OTHER. An earlier version returned as soon as the X half failed, so a box
+    with no display never learned whether its accessibility bus was up. That
+    made the two halves look like one control with one answer — and the whole
+    reason this module exists is that they fail on DIFFERENT AXES and the
+    dangerous case is the MIXED one, which a single boolean cannot express.
+    """
+
+    act: HalfResult
+    observe: HalfResult
     display: str = ""
-    reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        """Both halves answered. Anything else refuses."""
+        return self.act.ok and self.observe.ok
+
+    @property
+    def state(self) -> str:
+        """The rollup, by remedy urgency — and UNKNOWN OUTRANKS EVERYTHING.
+
+        An unknown half means the rollup cannot be trusted, so it is reported
+        as unknown rather than as the worse of the two known answers. Saying
+        ``act_only`` when the observe half merely could not be reached would
+        be asserting something we did not establish — which is the failure
+        this vocabulary exists to prevent, one level up.
+        """
+        if HALF_UNKNOWN in (self.act.state, self.observe.state):
+            return STATE_UNKNOWN
+        if self.act.ok and self.observe.ok:
+            return STATE_READY
+        if self.act.ok:
+            # ⚠ THE DANGEROUS ONE. Input dispatches; the tree comes back
+            # empty. An empty tree is shaped exactly like a working one, so a
+            # loop that shrugs at "no candidates" reports success having done
+            # nothing. Named separately so it can never hide inside a generic
+            # failure.
+            return STATE_ACT_ONLY
+        if self.observe.ok:
+            return STATE_OBSERVE_ONLY
+        return STATE_UNAVAILABLE
+
+    @property
+    def reason(self) -> str:
+        """Why a step is refused. Empty when both halves answered."""
+        parts = [h.detail for h in (self.act, self.observe)
+                 if h.state != HALF_OK and h.detail]
+        return " / ".join(parts)
 
     def __bool__(self) -> bool:
         return self.ok
@@ -69,90 +158,114 @@ def check_preconditions(env: dict[str, str] | None = None) -> PreconditionResult
 
     Deliberately does not import Cua, start anything, or take a screenshot —
     it answers "could an action possibly land?" and nothing more. Returning a
-    reason rather than raising keeps it usable as a diagnostic (``oara
-    doctor``) as well as a gate.
+    result rather than raising keeps it usable as a diagnostic (``oara
+    doctor``, ``GET /api/status``) as well as a gate.
     """
     env = dict(os.environ if env is None else env)
-
     display = env.get("DISPLAY", "")
-    if not display:
-        return PreconditionResult(
-            ok=False,
-            reason=(
-                "no DISPLAY in this process's environment — the daemon was "
-                "started without a graphical session (a lingering systemd "
-                "--user manager starts at boot, before any login, and a later "
-                "login does not reach an already-running process). Restart "
-                "the daemon from inside a graphical session."
-            ),
-        )
+    # Evaluated independently — see PreconditionResult's docstring.
+    return PreconditionResult(
+        act=_check_act_half(display),
+        observe=_check_observe_half(env),
+        display=display,
+    )
 
-    # CONNECT, do not trust the variable. A stale DISPLAY from a dead session
-    # is indistinguishable from a live one until something opens the socket.
+
+def _check_act_half(display: str) -> HalfResult:
+    """XTEST over X11: could an input event land anywhere?
+
+    ⚠ CONNECTS. It does not read the variable and believe it. On the
+    reference deployment ``DISPLAY`` is set, inherited from a lingering
+    ``systemd --user`` manager, and may point at a session that has ended —
+    so the variable being present is not evidence of a display, and checking
+    it is exactly the mistake.
+    """
+    component = "x11-display"
+    if not display:
+        return HalfResult(
+            HALF_UNAVAILABLE, component,
+            "no DISPLAY in this process's environment — the daemon was "
+            "started without a graphical session. A lingering systemd --user "
+            "manager starts at boot, before any login, and a later login does "
+            "not reach an already-running process. Restart the daemon from "
+            "inside a graphical session.",
+        )
     sock_path = _x11_socket_path(display)
     if sock_path is None:
-        return PreconditionResult(
-            ok=False, display=display,
-            reason=(
-                f"DISPLAY={display!r} is not a local socket display; remote X "
-                f"is not supported by this precondition check"
-            ),
+        # A remote display might well work; this check cannot tell, and
+        # saying "unavailable" would assert something unestablished.
+        return HalfResult(
+            HALF_UNKNOWN, component,
+            "DISPLAY is not a local socket display; this check cannot "
+            "establish whether a remote X server would accept input.",
         )
     if not os.path.exists(sock_path):
-        return PreconditionResult(
-            ok=False, display=display,
-            reason=(
-                f"DISPLAY={display!r} is set but {sock_path} does not exist — "
-                f"a stale display inherited from a session that has ended. "
-                f"Nothing would be typed or clicked; actions would be "
-                f"dispatched into a dead server."
-            ),
+        return HalfResult(
+            HALF_UNAVAILABLE, component,
+            "DISPLAY is set but its socket does not exist — a stale display "
+            "inherited from a session that has ended. Nothing would be typed "
+            "or clicked; actions would dispatch into a dead server.",
         )
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(2.0)
             s.connect(sock_path)
     except OSError as exc:
-        return PreconditionResult(
-            ok=False, display=display,
-            reason=(
-                f"DISPLAY={display!r} exists but refused a connection "
-                f"({exc.__class__.__name__}: {exc}) — the X server is not "
-                f"accepting clients."
-            ),
+        return HalfResult(
+            HALF_UNAVAILABLE, component,
+            f"the display socket exists but refused a connection "
+            f"({exc.__class__.__name__}) — the X server is not accepting "
+            f"clients.",
         )
+    except Exception as exc:  # noqa: BLE001 - a probe must not raise upward
+        return HalfResult(
+            HALF_UNKNOWN, component,
+            f"the display could not be probed ({exc.__class__.__name__}).",
+        )
+    return HalfResult(HALF_OK, component, "")
 
-    # The OTHER half. An accessibility bus that is absent means observation
-    # returns nothing, and "nothing" must not read as "no work to do".
+
+def _check_observe_half(env: dict[str, str]) -> HalfResult:
+    """AT-SPI over D-Bus: would an observation return a real tree?
+
+    Separate transport from the act half, and that is the point: the session
+    bus outlives a dead graphical session, so this half can answer while the
+    other has no server at all.
+    """
+    component = "at-spi-bus"
     runtime = env.get("XDG_RUNTIME_DIR", "")
-    a11y = os.path.join(runtime, "at-spi", "bus") if runtime else ""
     if not runtime:
-        return PreconditionResult(
-            ok=False, display=display,
-            reason="no XDG_RUNTIME_DIR — the accessibility bus cannot be located",
+        return HalfResult(
+            HALF_UNKNOWN, component,
+            "no XDG_RUNTIME_DIR — the accessibility bus cannot be located, "
+            "so whether it would answer is not established.",
         )
-    if not os.path.exists(a11y):
-        return PreconditionResult(
-            ok=False, display=display,
-            reason=(
-                f"the X display is live but the AT-SPI bus socket ({a11y}) is "
-                f"absent — observation would return an empty tree while input "
-                f"still dispatched. That combination reports success and does "
-                f"nothing, so it is refused here."
-            ),
+    try:
+        present = os.path.exists(os.path.join(runtime, "at-spi", "bus"))
+    except Exception as exc:  # noqa: BLE001
+        return HalfResult(
+            HALF_UNKNOWN, component,
+            f"the accessibility bus could not be probed "
+            f"({exc.__class__.__name__}).",
         )
-
-    return PreconditionResult(ok=True, display=display)
+    if not present:
+        return HalfResult(
+            HALF_UNAVAILABLE, component,
+            "the accessibility bus socket is absent — observation would "
+            "return an empty tree while input still dispatched. That "
+            "combination reports success and does nothing.",
+        )
+    return HalfResult(HALF_OK, component, "")
 
 
 def _x11_socket_path(display: str) -> str | None:
-    """``:0`` / ``:0.1`` -> ``/tmp/.X11-unix/X0``. None for remote displays."""
+    """``:0`` / ``:0.1`` -> ``<X11_SOCKET_DIR>/X0``. None for remote displays."""
     if not display.startswith(":"):
         return None
     number = display[1:].split(".", 1)[0]
     if not number.isdigit():
         return None
-    return f"/tmp/.X11-unix/X{number}"
+    return os.path.join(X11_SOCKET_DIR, f"X{number}")
 
 
 class Driver(Protocol):
