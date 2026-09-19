@@ -15,6 +15,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from prometheus.mcp.names import TOOL_NAME_SEPARATOR, sanitize_tool_name
+
 
 # ---------------------------------------------------------------------------
 # Catalog types (from pi-bundle-mcp-types.ts)
@@ -57,6 +59,26 @@ class McpCatalogTool:
     # the REST card once did exactly that and reported a name nothing
     # accepted (FOUNDATION §4 acceptance run, 2026-09-01).
     registered_as: str | None = None
+
+    @property
+    def registry_name(self) -> str:
+        """The name to CALL this tool by — the one surface that answers it.
+
+        ``registered_as`` once registration has happened; before that (a
+        disabled server's card, a status line rendered mid-registration)
+        the sanitised base name registration WOULD produce absent a
+        collision suffix. Never ``mcp__{server}__{tool_name}`` by
+        concatenation: the REST card reported that until #372, and the
+        ``mcp_status`` tool — the agent's own view — until 2026-09-18, so
+        for the reference deployment's one server the agent was told to
+        call ``mcp__context7__resolve-library-id``, which nothing accepts.
+        """
+        if self.registered_as:
+            return self.registered_as
+        return (
+            f"mcp{TOOL_NAME_SEPARATOR}{self.safe_server_name}"
+            f"{TOOL_NAME_SEPARATOR}{sanitize_tool_name(self.tool_name)}"
+        )
 
 
 @dataclass
