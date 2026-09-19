@@ -43,6 +43,7 @@ async def launch_web(
     local_model: str | None = None,
     detected_kv_cache: dict[str, Any] | None = None,
     backend_registry: Any | None = None,
+    origin_fetcher: Any | None = None,
     api_host: str = "0.0.0.0",
     api_port: int = 8005,
     ws_host: str = "0.0.0.0",
@@ -122,6 +123,11 @@ async def launch_web(
     # registry says a tool exists and the grammar cannot produce it.
     app.state.on_tools_changed = on_tools_changed
     app.state.checkpoint_store = checkpoint_store
+    # The independent refresh behind `deployment.tree_vs_origin`.
+    # None here means the axis has no evidence of its own and will
+    # degrade to unknown once the cached ref goes stale — which is
+    # the intended behaviour, not a gap.
+    app.state.origin_fetcher = origin_fetcher
 
     # Create WebSocket bridge. The WS uses the SAME token as the REST
     # middleware (config.web.api_token or PROMETHEUS_API_TOKEN); empty => auth

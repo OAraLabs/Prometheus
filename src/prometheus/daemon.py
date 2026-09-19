@@ -33,6 +33,7 @@ from prometheus.config.paths import (
     set_wiki_root,
 )
 from prometheus.context.environment import git_head_sha
+from prometheus.context.origin_fetch import fetcher_from_config
 from prometheus.engine.agent_loop import AgentLoop
 from prometheus.config.divergence import warn_on_divergence
 from prometheus.config.shipped_defaults import resolve_max_tool_iterations, resolve_max_tool_iterations_cloud
@@ -1652,6 +1653,23 @@ async def run_daemon(args: argparse.Namespace) -> None:
     heartbeat_task = asyncio.create_task(heartbeat.run_forever())
     tasks.append(heartbeat_task)
 
+    # ── The origin refresh behind `deployment.tree_vs_origin` ───────────
+    #
+    # `origin_main_sha` reads a LOCAL CACHED COPY of origin/main, updated only
+    # by a fetch — and on the deploy clone the only thing that fetched was a
+    # deploy. So the cache refreshed precisely when the clone became up to
+    # date, and the axis could report `in_sync` and nothing else. Measured on
+    # production 2026-09-19: the block said `current` with a merged commit
+    # unpulled; a bare fetch flipped it to `behind_origin`.
+    #
+    # This task is the independent refresh. It is registered in `tasks` like
+    # every other long-running one so shutdown cancels and awaits it — the
+    # watchdog was once the one that was not, and logged "Task was destroyed
+    # but it is pending".
+    origin_fetcher = fetcher_from_config(config)
+    origin_fetch_task = asyncio.create_task(origin_fetcher.run_forever())
+    tasks.append(origin_fetch_task)
+
     # ── Cron command vetting: UNCONDITIONAL ─────────────────────────────
     # Vet cron commands through the SAME SecurityGate as the agent, at system
     # (restricted) trust, before they run unattended (see cron_scheduler).
@@ -2605,6 +2623,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 web_task = asyncio.create_task(launch_web(
                     config=config,
                     boot_sha=boot_sha,
+                    origin_fetcher=origin_fetcher,
                     signal_bus=signal_bus if "signal_bus" in dir() else None,
                     session_mgr=session_manager,
                     telemetry=telemetry,
