@@ -4138,7 +4138,8 @@ def create_app(
         # An empty ``extents`` is meaningful, not missing: it means the
         # request carries no describable target, so no remembered grant is on
         # offer and the UI must not present one.
-        # One serializer, two transports (see ApprovalQueue.serialize_pending):
+        # One serializer, THREE consumers — REST (here), the WS signal, and
+        # APNs fan-out (see ApprovalQueue.serialize_pending):
         # the WS ``approval_pending`` signal returns the SAME dict, so the REST
         # list and the push frame cannot drift. Provenance of the fields lives
         # on the serializer's docstring, where it is actually used.

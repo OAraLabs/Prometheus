@@ -82,6 +82,21 @@ class PushDispatcher:
             logger.warning("push dispatch failed", exc_info=True)
 
     async def _push_approval(self, payload: dict) -> None:
+        """Fan one pending approval out to EVERY registered device.
+
+        ⚠ THE WIDEST READER OF ``ApprovalQueue.serialize_pending``'s dict, and
+        the one its docstring omitted until 2026-09-19. The REST and WS
+        surfaces answer someone already holding a token or a socket; this one
+        delivers unsolicited to every phone that ever registered, through
+        Apple.
+
+        So the body below is a DELIBERATE NARROW SUBSET, not a projection that
+        happens to be small. ``payload`` also carries ``arguments`` (redacted
+        and truncated, but still the literal text a tool was about to type)
+        and ``extents``; neither is read here and neither should be.
+        ``test_approval_push_body_stays_narrow`` fails the build if this set
+        changes, so widening it is a decision someone makes on purpose.
+        """
         body = {
             "aps": {
                 "alert": {
