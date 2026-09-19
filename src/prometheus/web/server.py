@@ -27,7 +27,11 @@ from prometheus.web.strict_query import StrictQueryRoute
 
 from prometheus.config.node_identity import get_instance_id, get_node_pubkey
 from prometheus.config.paths import get_wiki_root
-from prometheus.context.environment import booted_from as _booted_from, git_head_sha
+from prometheus.context.environment import (
+    booted_from as _booted_from,
+    deployment_freshness,
+    git_head_sha,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -593,6 +597,19 @@ def create_app(
         stale = running != "unknown" and tree != "unknown" and running != tree
         return running, tree, stale
 
+    # ── Deployment freshness (the SECOND axis) ──────────────────────
+    # `stale` above answers ONE question: is this process behind the tree it
+    # booted from? It is structurally blind to the tree being behind
+    # origin/main, which is how `stale: false` was reported on 2026-09-19
+    # with two merged commits undeployed.
+    #
+    # `stale` KEEPS ITS MEANING. It is on the unauthenticated /health that
+    # external monitors poll, and redefining it would move someone else's
+    # alerting silently. The new axis ships beside it instead, with its own
+    # vocabulary and — crucially — its own `unknown`.
+    def _deployment() -> dict[str, Any]:
+        return deployment_freshness(getattr(app.state, "boot_sha", "unknown"))
+
     # ── Root ────────────────────────────────────────────────────────
 
     @app.get("/")
@@ -645,6 +662,11 @@ def create_app(
             # Bare staleness bool for external monitors — no SHA leaked on this
             # unauthenticated endpoint (full SHAs are on bearer-gated /api/status).
             "stale": _staleness()[2],
+            # Rollup STRING, no SHAs — same reason `stale` leaks none here.
+            # A monitor that only knows the bool still sees `stale`; one that
+            # reads this also sees behind-origin, and sees `unknown` as its
+            # own answer rather than as "fine".
+            "deployment_state": _deployment()["state"],
             # config_pins: COUNTS ONLY. This endpoint is unauthenticated, and
             # the pinned values include a backend URL and model names — the
             # same reason no SHA is exposed here. Keys and values are on
@@ -815,6 +837,9 @@ def create_app(
             # environment.booted_from for the incident.
             "checkout": _booted_from(),
             "stale": stale,
+            # Full two-axis freshness. `stale` is the process-vs-tree axis
+            # restated; `tree_vs_origin` is the one it could never see.
+            "deployment": _deployment(),
             "compaction": {
                 "enabled": comp is not None,
                 "lcm_wired": lcm is not None,
