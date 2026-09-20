@@ -208,6 +208,37 @@ def _hermetic_prometheus_env(monkeypatch):
 # tests/support/gate_manifest.py for the full reasoning and the comparison rule:
 # same manifest FIRST, then same failure sets; different manifest → VOID.
 
+# --------------------------------------------------------------------------- #
+# GC ATTRIBUTION — turning a timing-dependent unraisable into a named one
+#
+# `BaseSubprocessTransport.__del__` calls `self._loop.call_soon(...)`. When the
+# transport outlives its loop, that raises `RuntimeError: Event loop is closed`
+# from inside a finaliser — an UNRAISABLE exception. pytest reports it as a
+# PytestUnraisableExceptionWarning attributed to whichever test was running at
+# GC time, which is usually NOT the test that created the transport.
+#
+# That is why the count swings 0-5 per CI run with no code change: it is
+# garbage-collection timing, nothing else. It also means the failure-level
+# annotations it produces land on innocent tests, which makes "nothing else
+# moved" unprovable by inspection on any CI receipt this repo produces.
+#
+# Forcing a collection at the END OF EVERY TEST removes the timing variable:
+# the finaliser runs while pytest still has the owning test on the stack, so
+# the warning names its owner. Function-scoped rather than session-scoped on
+# purpose — a single collect at session end is deterministic too, but it
+# attributes everything to the last test and names nothing.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def _gc_attribution(request):
+    yield
+    if request.config.getoption("--gc-attribute", default=False):
+        import gc
+
+        gc.collect()
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--gate-manifest",
@@ -220,6 +251,21 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "The manifest records the host-state probes that decided which "
             "tests ran vs skipped; two runs are only comparable when their "
             "manifest hashes match."
+        ),
+    )
+
+
+    parser.addoption(
+        "--gc-attribute",
+        action="store_true",
+        default=False,
+        help=(
+            "force a gc.collect() after every test, so an unraisable "
+            "exception from a finaliser is attributed to the test that "
+            "CREATED the object rather than to whichever test happened to be "
+            "running when GC fired. Off by default because it costs real time "
+            "over 8k tests; turn it on to hunt a nondeterministic "
+            "'Event loop is closed' and it becomes deterministic."
         ),
     )
 
