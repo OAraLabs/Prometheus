@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from prometheus.permissions.checker import SecurityGate
 
 
 class _Bus:
@@ -34,7 +35,7 @@ class _TG:
 def _queue(tmp_path, bus=None):
     from prometheus.permissions.approval_queue import ApprovalQueue
 
-    q = ApprovalQueue(telegram_adapter=_TG(), timeout_seconds=300)
+    q = ApprovalQueue(security_gate=SecurityGate(), telegram_adapter=_TG(), timeout_seconds=300)
     q.signal_bus = bus
     return q
 

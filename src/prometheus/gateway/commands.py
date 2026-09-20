@@ -2603,12 +2603,12 @@ async def approve_detail(
     if scope == "once" or action is None:
         return ApproveOutcome(f"Approved: {request_id}", resolved=True)
 
-    if gate is None:
-        return ApproveOutcome(
-            f"Approved: {request_id} — but no security gate is attached to "
-            f"the approval queue, so the {scope} grant could not be recorded.",
-            resolved=True,
-        )
+    # The "no gate attached" branch that stood here is GONE, not relocated.
+    # It returned "Approved ... could not be recorded" -- success prose over a
+    # silent no-op -- and it is now unreachable twice over: the gate is a
+    # required constructor argument, and ApprovalQueue.approve raises above
+    # for a grant-bearing scope without one. A branch that can only be
+    # reached by defeating both would be dead code claiming a success.
     if grant is None:
         # Rule 4: no target, so no describable extent. Approve ONCE and say
         # why nothing was remembered — silently minting the widest grant in

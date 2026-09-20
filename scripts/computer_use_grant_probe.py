@@ -16,11 +16,12 @@ THE TWO SILENT FAILURE MODES THIS EXISTS TO SEPARATE
 Both look identical from outside a running system:
 
   1. The grant NEVER MATCHES: every call prompts forever. Safe, useless, and
-     indistinguishable from a gate that is simply working. --unwired
-     reproduces it from its real cause — ApprovalQueue.approve does NOT
-     call add_grant; the only call site is cmd_approve, which reaches
-     the gate through queue._security_gate, a field daemon.py sets at
-     one line and nothing else on any surface sets at all.
+     indistinguishable from a gate that is simply working. Its real cause was
+     that ApprovalQueue.approve does NOT call add_grant — the only call site
+     is cmd_approve, which reaches the gate through queue._security_gate, a
+     field daemon.py set at one line and nothing else on any surface set at
+     all. That field is a REQUIRED CONSTRUCTOR ARGUMENT now, so --unwired can
+     no longer build the broken queue: it asserts the refusal instead.
   2. The grant MATCHES WIDER than the operator was shown. Probes C and D are
      the ones that would catch it.
 
@@ -144,15 +145,28 @@ async def _run(args) -> int:
 
     audit = _CapturingAudit()
     telegram = _CapturingTelegram()
-    queue = ApprovalQueue(telegram_adapter=telegram, default_chat_id=1,
-                          timeout_seconds=20)
     gate = SecurityGate(mode=PermissionMode.DEFAULT, audit_logger=audit,
                         config_path=THROWAWAY_CONFIG)
 
-    # THE TWO HOPS, AND THE WHOLE POINT OF --unwired.
-    gate._approval_queue = queue          # gate -> operator (request_approval)
-    if not args.unwired:
-        queue._security_gate = gate       # operator -> gate (cmd_approve/add_grant)
+    # --unwired NO LONGER REPRODUCES THE DEFECT -- it demonstrates that the
+    # defect has no constructor. The gateless queue this flag was written to
+    # build is refused at construction now, so the flag asserts the refusal
+    # instead of showing the silence it used to.
+    if args.unwired:
+        try:
+            ApprovalQueue(security_gate=None, telegram_adapter=telegram)
+        except ValueError as exc:
+            _banner("--unwired: THE CONSTRUCTOR REFUSES, WHICH IS THE FIX")
+            print(exc)
+            return 0
+        raise AssertionError(
+            "--unwired built a gateless queue: the constructor stopped "
+            "refusing and the silent-grant defect is reachable again"
+        )
+
+    queue = ApprovalQueue(security_gate=gate, telegram_adapter=telegram,
+                          default_chat_id=1, timeout_seconds=20)
+    gate._approval_queue = queue          # the late-bound, fail-CLOSED hop
 
     driver = CuaDriverAdapter(target=args.target)
     driver.start()

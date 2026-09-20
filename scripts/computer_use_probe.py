@@ -60,9 +60,9 @@ def _banner(title: str) -> None:
 
 async def _run(args: argparse.Namespace) -> int:
     telegram = _CapturingTelegram()
-    queue = ApprovalQueue(telegram_adapter=telegram, default_chat_id=1,
-                          timeout_seconds=30)
     gate = SecurityGate(mode=PermissionMode.DEFAULT, audit_logger=None)
+    queue = ApprovalQueue(security_gate=gate, telegram_adapter=telegram,
+                          default_chat_id=1, timeout_seconds=30)
     gate._approval_queue = queue  # the hop SecurityGate.request_approval uses
 
     async def approve(tool_name, reason, arguments=None):

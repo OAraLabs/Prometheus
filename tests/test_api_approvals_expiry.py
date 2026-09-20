@@ -27,11 +27,12 @@ from prometheus.permissions.approval_queue import (  # noqa: E402
     approve_verbs,
 )
 from prometheus.web.server import create_app  # noqa: E402
+from prometheus.permissions.checker import SecurityGate  # noqa: E402
 
 
 def _queue_with_pending(timeout_seconds=None, **action_kw):
     kw = {} if timeout_seconds is None else {"timeout_seconds": timeout_seconds}
-    q = ApprovalQueue(**kw)
+    q = ApprovalQueue(security_gate=SecurityGate(), **kw)
     action = PendingAction(
         request_id="abc12345",
         tool_name="write_file",
@@ -101,7 +102,7 @@ class TestExpiresAtIsServed:
         assert remaining < DEFAULT_APPROVAL_TIMEOUT_SECONDS - 500
 
     def test_empty_queue_serves_no_rows(self):
-        assert _client(ApprovalQueue()).get("/api/approvals").json() == []
+        assert _client(ApprovalQueue(security_gate=SecurityGate())).get("/api/approvals").json() == []
 
     def test_existing_fields_are_untouched(self):
         q, _ = _queue_with_pending()
@@ -115,10 +116,10 @@ class TestQueueOwnsTheComputation:
     """One source: the queue holds the window, so the queue does the maths."""
 
     def test_timeout_seconds_exposes_the_instance_value(self):
-        assert ApprovalQueue(timeout_seconds=42).timeout_seconds == 42
+        assert ApprovalQueue(security_gate=SecurityGate(), timeout_seconds=42).timeout_seconds == 42
 
     def test_timeout_seconds_defaults_to_the_constant(self):
-        assert ApprovalQueue().timeout_seconds == DEFAULT_APPROVAL_TIMEOUT_SECONDS
+        assert ApprovalQueue(security_gate=SecurityGate()).timeout_seconds == DEFAULT_APPROVAL_TIMEOUT_SECONDS
 
     def test_expires_at_matches_what_the_wait_would_use(self):
         q, action = _queue_with_pending(timeout_seconds=77)

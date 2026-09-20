@@ -31,6 +31,7 @@ import pytest
 
 from prometheus.permissions.approval_queue import PendingAction, derive_grant
 from prometheus.permissions.checker import Grant
+from prometheus.permissions.checker import SecurityGate
 
 pytestmark = pytest.mark.integration
 
@@ -329,7 +330,7 @@ class TestTheAuditRowItself:
 
         gate = SecurityGate(workspace_root=str(tmp_path / "ws"),
                             audit_logger=AuditLogger(data_dir=tmp_path / "audit"))
-        q = ApprovalQueue()
+        q = ApprovalQueue(security_gate=SecurityGate())
         q._security_gate = gate
         action = _action(str(tmp_path / "target" / "x.txt"))
         grant = derive_grant(action, verb=verb)

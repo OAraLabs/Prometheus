@@ -52,11 +52,8 @@ def _gate():
 
 
 def _wire(gate):
-    """A queue that can record grants. ONE place, so the constructor change
-    that makes an unwired queue unconstructable touches a single line."""
-    queue = ApprovalQueue()
-    queue._security_gate = gate
-    return queue
+    """A queue that can record grants -- now simply a queue."""
+    return ApprovalQueue(security_gate=gate)
 
 
 def _pending(queue, **kw):
@@ -167,15 +164,15 @@ class TestApprovedButNothingStored:
         assert body["remembered"] is False
         assert not gate.list_grants()
 
-    def test_an_unwired_queue_does_not_claim_to_have_remembered(self):
-        queue = ApprovalQueue()          # deliberately no gate
-        _pending(queue, grant_file_path="/tmp/target.txt")
-        body = _approve(queue)
-        assert body["remembered"] is False, (
-            "this is the state that returned ok:true with the failure living "
-            "only in prose no client reads"
-        )
-        assert body["grant_id"] is None
+    def test_an_unwired_queue_cannot_be_BUILT_any_more(self):
+        """This case used to be reachable, and was the whole defect: a queue
+        with no gate answered an always-scope with ok:true, stored nothing,
+        and wrote no audit row. The gate is a required constructor argument
+        now, so the state that produced it has no constructor."""
+        with pytest.raises(TypeError):
+            ApprovalQueue()
+        with pytest.raises(ValueError, match="requires a SecurityGate"):
+            ApprovalQueue(security_gate=None)
 
     def test_scope_once_is_never_remembered(self):
         gate = _gate()

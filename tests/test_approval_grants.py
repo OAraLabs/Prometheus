@@ -16,7 +16,7 @@ _CHAINED_BAD = "ls -la /tmp; " + "rm " + "-rf /"
 
 
 def _make_queue() -> ApprovalQueue:
-    queue = ApprovalQueue(timeout_seconds=5)
+    queue = ApprovalQueue(security_gate=SecurityGate(), timeout_seconds=5)
     queue._security_gate = SecurityGate(approval_queue=queue)
     return queue
 
@@ -95,16 +95,37 @@ class TestCmdApproveScopes:
         await queue.deny(rid)  # clean up background task
 
     @pytest.mark.asyncio
-    async def test_scope_without_gate_falls_back_to_once(self):
-        queue = ApprovalQueue(timeout_seconds=5)  # no _security_gate
+    async def test_a_grant_bearing_scope_with_no_gate_RAISES(self):
+        """It used to fall back to "once" and explain itself in prose.
+
+        That fallback IS the defect: a grant-bearing scope that answers
+        "Approved" while storing nothing and writing no resolution row. The
+        queue can no longer be built without a gate, so reaching this at all
+        means defeating the constructor the way a duck-typed double would --
+        which is the only thing the raise is still here for.
+        """
+        queue = ApprovalQueue(security_gate=SecurityGate(), timeout_seconds=5)
         rid = await _request(queue, grant_command="ls -la")
-        text = await cmds.cmd_approve(queue, f"session {rid}")
-        assert rid in text or "security gate" in text.lower()
+        queue._security_gate = None                  # the bypass, made explicit
+        with pytest.raises(RuntimeError, match="no SecurityGate"):
+            await cmds.cmd_approve(queue, f"session {rid}")
+        assert rid in queue.pending, (
+            "the raise fires BEFORE any mutation, so the request stays "
+            "pending and times out into a denial rather than half-resolving"
+        )
+        await queue.deny(rid)                        # release the waiter
 
 
 class TestCmdGrants:
-    def test_no_gate_lists_nothing(self):
-        queue = ApprovalQueue(timeout_seconds=5)
+    def test_a_gate_with_no_grants_lists_nothing(self):
+        queue = ApprovalQueue(security_gate=SecurityGate(), timeout_seconds=5)
+        assert "No approval grants recorded" in cmds.cmd_grants(queue)
+
+    def test_a_queue_with_no_gate_at_all_still_says_so(self):
+        """cmd_grants takes any object carrying the attribute, so its
+        gateless branch stays reachable by a double and stays pinned."""
+        queue = ApprovalQueue(security_gate=SecurityGate(), timeout_seconds=5)
+        queue._security_gate = None
         assert "No security gate" in cmds.cmd_grants(queue)
 
     def test_none_queue(self):
@@ -185,7 +206,7 @@ def _queue_with(n: int) -> ApprovalQueue:
     """A queue holding *n* pending requests, oldest first."""
     from prometheus.permissions.approval_queue import PendingAction
 
-    q = ApprovalQueue()
+    q = ApprovalQueue(security_gate=SecurityGate())
     for i in range(n):
         rid = f"{i:08x}"
         q.pending[rid] = PendingAction(
@@ -207,7 +228,7 @@ class TestBareApprove:
         assert _result_of(q, "00000000") is ApprovalResult.APPROVED
 
     def test_bare_approve_with_nothing_pending_says_so(self):
-        out = _asyncio.run(cmd_approve(ApprovalQueue(), ""))
+        out = _asyncio.run(cmd_approve(ApprovalQueue(security_gate=SecurityGate()), ""))
         assert "No pending approval requests." == out
 
     def test_bare_approve_with_several_lists_them_and_approves_nothing(self):
@@ -267,7 +288,7 @@ class TestApproveAll:
         gate.persist_grant.assert_not_called()
 
     def test_approve_all_with_empty_queue(self):
-        out = _asyncio.run(cmd_approve(ApprovalQueue(), "all"))
+        out = _asyncio.run(cmd_approve(ApprovalQueue(security_gate=SecurityGate()), "all"))
         assert "No pending approval requests." == out
 
 
@@ -286,4 +307,4 @@ class TestBareDeny:
         assert len(q.pending) == 2
 
     def test_bare_deny_with_nothing_pending(self):
-        assert _asyncio.run(cmd_deny(ApprovalQueue(), "")) == "No pending approval requests."
+        assert _asyncio.run(cmd_deny(ApprovalQueue(security_gate=SecurityGate()), "")) == "No pending approval requests."
