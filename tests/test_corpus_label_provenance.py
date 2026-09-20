@@ -143,3 +143,29 @@ def test_the_mix_counts_none_correct_rows_too(tmp_path):
         label_source=LABEL_HUMAN, none_correct_reason=REASON_NOT_ACHIEVABLE_HERE,
     )
     assert load_corpus(store).label_mix() == {LABEL_HUMAN: 1}
+
+
+def test_a_container_opening_answer_is_counted_and_flagged(tmp_path):
+    """Over half the correct answers being "open a container" is a warning
+    about the GOALS, not a result about the chooser."""
+    from prometheus.computer.corpus import LABEL_MODEL
+
+    store = _store(tmp_path)
+    for i in range(3):
+        rid = f"m{i}"
+        rec = TableRecord(goal="g", target="box", app="a", window_id=1)
+        rec.record_id = rid
+
+        class _M:
+            candidate_id = "click-9"
+            description = "Click the push button 'Main menu'"
+
+        rec.note_candidates([_M()])
+        assert store.capture(rec)
+        store.record_annotation(rid, "click-9", annotated_by="claude",
+                                label_source=LABEL_MODEL)
+
+    corpus = load_corpus(store)
+    assert corpus.menu_opening_share() == (3, 3)
+    assert "OVER HALF" in corpus.summary()
+    assert "too coarse for one bounded step" in corpus.summary()

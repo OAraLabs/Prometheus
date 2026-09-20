@@ -325,6 +325,66 @@ accessibility bus. That it is absent from the set is a fact about the code; how
 much of a prefs pane it accounts for is not yet measured and should be, during
 the real harvest, before any decision to widen.
 
+### ⚠ HALT — widening the role set retroactively widens every stored grant
+
+**Demonstrated, not argued.** The extent is `target:app:verb:delivery_mode` and
+carries **no role-set term**. Grants match by exact whole-value compare. So:
+
+```
+BEFORE adding 'table cell'        AFTER adding 'table cell'
+  click-0  'Open'                   click-0  'Open'
+                                    click-1  'tax-return-2025.pdf'
+                                    click-2  'passwords.kdbx'
+  extent: mini:…nautilus:click:background   ← IDENTICAL
+```
+
+A grant stored for `mini:org.gnome.nautilus:click:background` — "click anything
+in Nautilus" — silently starts meaning "select files", **with no new prompt**.
+The grant was given when the offered set was buttons; it is honoured after the
+set includes file rows.
+
+This is the milestone-1 target-term argument in a new place: *the extent must
+name every term that changes what is authorised.* It named `target` because one
+grant should not span machines. It does not name the role set, and the role set
+is what decides which elements become clickable.
+
+**Two ways to close it, and the choice is Will's:**
+
+| option | what it costs | what it buys |
+|---|---|---|
+| **Version the role set into the extent** — `mini:nautilus:click:background:r3` | every role-set change invalidates grants for that version; the value gets longer and less readable at the prompt | the grant states what it covered; old grants keep their original meaning rather than being reinterpreted |
+| **Invalidate stored click grants on a set change** | a re-prompt for every app after any change | the extent stays four terms and readable; the blast radius is visible at the moment of change |
+
+The second is simpler and matches "a note is not a guard" — it makes the
+consequence happen rather than recording it. The first is more precise and
+survives a set that changes often. I have **not** picked.
+
+**`page tab` is exempt, and the exemption is written down here so the next
+addition cannot inherit it.** `_CLICKABLE_ROLES` contains `tab`, which AT-SPI
+never emits; correcting it to `page tab` restores what the entry was always
+meant to cover rather than extending the set to a new class of control. That
+reasoning applies to a **dead-string correction only**. `combo box`,
+`table cell`, `tree item` and every other candidate role are genuine additions
+and none of them inherits this exemption.
+
+### Dead entries in the offered set — audited 2026-09-20
+
+| entry | status | fix |
+|---|---|---|
+| `tab` | **DEAD** — AT-SPI emits `page tab` | correct the string (exempt, above) |
+| `button` | **DEAD** — AT-SPI emits `push button` / `toggle button` / `radio button`, all three already present | delete it; redundant as well as dead, and removing it offers strictly less |
+| `link`, `list item`, `menu item`, `check box`, `radio button`, `push button`, `toggle button` | live | — |
+| all of `_EDITABLE_ROLES` | live | — |
+
+Pinned by `tests/test_clickable_roles_are_live.py`, which interrogates AT-SPI's
+own enum rather than a second copy of the names, and holds both dead entries in
+a `KNOWN_DEAD` ratchet — new dead entries fail, and fixing one means deleting
+its line.
+
+⚠ That test **skips where the AT-SPI bindings are absent**, which includes the
+project venv and CI. Skipped is not passed: it is a real guard only where it can
+run, and it caught both entries the first time it did.
+
 ### Why this precedes the real harvest
 
 Forty states collected against the current role set would understate

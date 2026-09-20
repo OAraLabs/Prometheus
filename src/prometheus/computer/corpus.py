@@ -236,6 +236,13 @@ CREATE TABLE IF NOT EXISTS tables (
     snapshot_id           TEXT,
     candidates_json       TEXT NOT NULL,   -- chooser_view() output, VERBATIM
     history_json          TEXT NOT NULL DEFAULT '[]',
+    -- Every OBSERVED element, including the ones build_candidates rejected.
+    -- Without this a `role_not_clickable` answer is unverifiable from a stored
+    -- row: the corpus would record what WAS offered and never what was seen
+    -- and dropped. Established the hard way — row 5's cause could only be
+    -- settled by re-observing the live app, which worked by luck because the
+    -- window had not changed. 120 harvest rows will not be that lucky.
+    elements_json         TEXT NOT NULL DEFAULT '[]',
 
     target                TEXT NOT NULL,
     app                   TEXT NOT NULL,
@@ -411,6 +418,8 @@ class TableRecord:
     snapshot_id: str | None = None
     unusable_reason: str | None = None
     candidates: list[dict[str, str]] = field(default_factory=list)
+    #: Every observed element, offered or not. See the schema comment.
+    elements: list[dict[str, Any]] = field(default_factory=list)
 
     #: DETERMINISTIC — always runs, authoritative wherever it answers.
     deterministic_chooser: str = ""
@@ -452,6 +461,24 @@ class TableRecord:
     def note_observation(self, observation: Any) -> None:
         self.snapshot_id = getattr(observation, "snapshot_id", None)
         self.unusable_reason = getattr(observation, "unusable_reason", None)
+        self.note_elements(observation)
+
+    def note_elements(self, observation: Any) -> None:
+        """Record every OBSERVED element, including the rejected ones.
+
+        The candidate table says what was offered. This says what was seen —
+        and the difference between them is the only evidence that a
+        ``role_not_clickable`` answer is right.
+        """
+        self.elements = [
+            {
+                "index": e.element_index,
+                "role": e.role,
+                "label": e.label,
+                "editable": bool(e.editable),
+            }
+            for e in getattr(observation, "elements", ())
+        ]
 
     def note_candidates(self, candidates: list[Any]) -> None:
         """Store the chooser's view of the table, VERBATIM.
@@ -559,10 +586,40 @@ class CorpusStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    #: Columns added after a corpus may already exist on disk. ``CREATE TABLE
+    #: IF NOT EXISTS`` does not alter an existing table, so a file written by
+    #: an earlier build keeps the old shape and every reader that assumes the
+    #: new one raises KeyError. Additive only, with a default — a column that
+    #: needs backfilling is not migratable this way and needs a real migration
+    #: plus a schema_version bump.
+    _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+        ("tables", "elements_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("tables", "none_correct_reason", "TEXT"),
+        ("tables", "label_source", "TEXT"),
+        ("annotations", "none_correct_reason", "TEXT"),
+        ("annotations", "label_source", "TEXT NOT NULL DEFAULT 'human'"),
+    )
+
+    def _migrate_additive(self, conn: sqlite3.Connection) -> None:
+        for table, column, decl in self._ADDITIVE_COLUMNS:
+            have = {
+                r["name"]
+                for r in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if not have:          # table not created yet; _SCHEMA will do it
+                continue
+            if column not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+                log.info(
+                    "computer-use corpus: added missing column %s.%s to %s",
+                    table, column, self._db_path,
+                )
+
     def _ensure_schema(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            self._migrate_additive(conn)
             row = conn.execute(
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()
@@ -590,6 +647,7 @@ class CorpusStore:
                     INSERT INTO tables (
                         record_id, captured_at, schema_version,
                         goal, snapshot_id, candidates_json, history_json,
+                        elements_json,
                         target, app, window_id, pid, candidate_count,
                         deterministic_chooser, deterministic_id,
                         deterministic_confidence, deterministic_abstained,
@@ -601,7 +659,7 @@ class CorpusStore:
                         driver_kind, goal_source, harvest_session,
                         table_fingerprint, code_fingerprint,
                         unusable_reason, status, reason, extent, exception
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         record.record_id, time.time(), CORPUS_SCHEMA_VERSION,
@@ -609,6 +667,7 @@ class CorpusStore:
                         record.goal, record.snapshot_id,
                         json.dumps(record.candidates, ensure_ascii=False),
                         json.dumps(record.history, ensure_ascii=False),
+                        json.dumps(record.elements, ensure_ascii=False),
                         record.target, record.app, record.window_id,
                         record.pid, len(record.candidates),
                         record.deterministic_chooser, record.deterministic_id,
@@ -665,6 +724,26 @@ class CorpusStore:
         An id that is not in the record's own table is refused too. A typo that
         lands as a valid-looking answer is unrecoverable later — nothing
         downstream can tell it from a real judgment.
+
+        ⚠⚠ THE LABEL IS RELATIVE TO THE OBSERVATION, NOT TO THE APP.
+
+        The correct answer is the best action given WHAT WAS OBSERVED — not
+        given ground truth about what the application can do. A GTK popover's
+        contents do not exist in the accessibility tree until it is opened, so
+        "the menu contains Undo" is unknowable to the chooser at the moment it
+        decides. Labelling against facts the chooser could not have had would
+        score it on information it never received.
+
+        So "open the container because the target plausibly lives inside it" is
+        a CORRECT label, and it stays correct even if the container turns out
+        not to contain it. Exploratory is not wrong; the next observation is
+        where that gets resolved, which is exactly what one-bounded-step-then-
+        re-observe is for.
+
+        This governs the real harvest more than it governs the pilot: most
+        desktop state is behind closed containers — menus, popovers, expanders,
+        unselected tabs — and a corpus labelled against app knowledge rather
+        than tree contents would systematically mark correct exploration wrong.
 
         ⚠ ``correct_candidate_id`` is the correct NEXT ACTION for this goal,
         not a candidate that completes the goal on its own. The loop takes one
@@ -862,6 +941,7 @@ class CorpusStore:
             d = dict(row)
             d["candidates"] = json.loads(d.pop("candidates_json"))
             d["history"] = json.loads(d.pop("history_json") or "[]")
+            d["elements"] = json.loads(d.pop("elements_json") or "[]")
             out.append(d)
         return out
 
@@ -1091,6 +1171,37 @@ class ScorableCorpus:
             out[src] = out.get(src, 0) + 1
         return out
 
+    #: Descriptions whose target is a container-opening control rather than the
+    #: thing itself. Substring match on the DESCRIPTION, which is all a label
+    #: carries — deliberately crude, because the number is a smell test.
+    _MENU_ISH = ("menu", "main menu", "hamburger", "more options", "view")
+
+    def menu_opening_share(self) -> tuple[int, int]:
+        """How many correct answers are just "open a container".
+
+        Returns (menu-ish, total-answered). A HIGH share is a warning about the
+        GOALS, not about the chooser: if most correct next actions are "open
+        the menu", the goals are too coarse for one bounded step and the corpus
+        is measuring container-opening rather than task selection.
+        """
+        answered = [
+            r for r in self.answered
+            if r.get("correct_candidate_id")
+        ]
+        if not answered:
+            return (0, 0)
+        by_id = 0
+        for r in answered:
+            cid = r["correct_candidate_id"]
+            desc = next(
+                (c["description"] for c in r.get("candidates", [])
+                 if c["id"] == cid),
+                "",
+            ).lower()
+            if any(m in desc for m in self._MENU_ISH):
+                by_id += 1
+        return (by_id, len(answered))
+
     def score_noun(self) -> str:
         """What a number over these rows MAY be called.
 
@@ -1137,6 +1248,20 @@ class ScorableCorpus:
                     "\n  ⚠ NOT ACCURACY. Some labels were proposed by a model, "
                     "so a number over them measures how alike two models are. "
                     "Only rows labelled by a human grade as accuracy."
+                )
+        menu_n, menu_total = self.menu_opening_share()
+        if menu_total:
+            pct = 100 * menu_n // menu_total
+            base += (
+                f"\n  correct answers that just OPEN A CONTAINER: "
+                f"{menu_n}/{menu_total} ({pct}%)"
+            )
+            if pct > 50:
+                base += (
+                    "\n  ⚠ OVER HALF. The goals are too coarse for one bounded "
+                    "step — this corpus is measuring container-opening rather "
+                    "than task selection. Split the goals, do not tune the "
+                    "chooser against this."
                 )
         by_reason = self.none_correct_by_reason()
         if by_reason:
