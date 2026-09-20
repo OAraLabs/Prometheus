@@ -31,7 +31,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from prometheus.computer.chooser import RuleChooser  # noqa: E402
+from prometheus.computer.chooser import RuleChooser
+from prometheus.computer.corpus import CorpusStore
+from prometheus.config.paths import get_computer_corpus_db_path  # noqa: E402
 from prometheus.computer.driver import check_preconditions  # noqa: E402
 from prometheus.computer.loop import ComputerUseLoop  # noqa: E402
 from prometheus.computer.status import render  # noqa: E402
@@ -94,6 +96,17 @@ async def _run(args: argparse.Namespace) -> int:
         driver.start()
         registry.bind(args.target, driver)
 
+    # CAPTURE. Opt-in, because a corpus row is a permanent artifact built from
+    # accessibility text scraped off a live desktop — that should never start
+    # happening because someone ran the probe. With --capture the table is kept
+    # whatever the step does; without it the probe prints and drops, as before.
+    corpus = None
+    if args.capture:
+        corpus = CorpusStore(
+            args.corpus_db or get_computer_corpus_db_path()
+        )
+        print(f"capturing tables to {corpus.db_path}")
+
     loop = ComputerUseLoop(
         driver=driver or _NoDriver(),
         chooser=RuleChooser(prefer=tuple(args.prefer)),
@@ -101,12 +114,14 @@ async def _run(args: argparse.Namespace) -> int:
         approve=approve,
         origin="system",
         skip_preconditions=False,   # ⚠ never skipped on a real run
+        corpus=corpus,
     )
 
     _banner("THE STEP")
     result = await loop.step(
         goal=args.goal, target=args.target, app=args.app,
         pid=args.pid, window_id=args.window_id,
+        goal_source=args.goal_source, harvest_session=args.harvest_session,
     )
     print(f"status            : {result.status}")
     print(f"reason            : {result.reason}")
@@ -114,6 +129,19 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"candidates offered: {result.candidates_offered}")
     print(f"verified          : {result.verified}")
     print(f"driver result     : {result.driver_result}")
+
+    if corpus is not None:
+        rows = corpus.all_tables()
+        if rows:
+            latest = rows[-1]
+            print(f"captured record   : {latest['record_id']} "
+                  f"({latest['candidate_count']} candidates, "
+                  f"status {latest['status']})")
+            print("  annotate it with: prometheus-corpus annotate "
+                  f"{latest['record_id']} <candidate-id|none_correct|table_unusable>")
+        else:
+            # Say so rather than let a silent no-op read as a capture.
+            print("captured record   : NONE — the corpus write did not land")
 
     _banner("THE APPROVAL PROMPT, AS AN OPERATOR WOULD SEE IT")
     if telegram.messages:
@@ -158,6 +186,17 @@ def main() -> int:
     p.add_argument("--cold", action="store_true",
                    help="expect the substrate check to refuse")
     p.add_argument("--act", action="store_true", help="the successful path")
+    p.add_argument("--capture", action="store_true",
+                   help="persist the candidate table to the corpus database")
+    p.add_argument("--corpus-db", default=None,
+                   help="write to this file instead of the default corpus db")
+    # Defaults to "unknown" rather than "human": a row that merely forgot the
+    # flag must not read as one a person vouched for.
+    p.add_argument("--goal-source", choices=("human", "derived", "unknown"),
+                   default="unknown",
+                   help="did a person write this goal without seeing the table?")
+    p.add_argument("--harvest-session", default="",
+                   help="groups rows harvested under the same discipline")
     args = p.parse_args()
     if not args.cold and not args.act:
         p.error("choose --cold or --act")

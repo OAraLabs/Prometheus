@@ -191,6 +191,36 @@ def get_lcm_db_path() -> Path:
     return get_data_dir() / _LCM_DB_NAME
 
 
+# ---------------------------------------------------------------------------
+# COMPUTER-USE CORPUS DATABASE — THE single resolution point.
+#
+# A dataset, not telemetry. It goes in its own file for the reason
+# ``gym/store.py`` and ``learning/pair_capture.py`` already give for theirs: a
+# corpus holds deliberately-imperfect runs and hand-written judgments, and
+# mixing that into ``telemetry.db`` would distort the live observability path.
+#
+# Under ``data/`` rather than the config root so it is covered by the nightly
+# ``VACUUM INTO`` snapshot, which discovers every ``*.db`` with no registration
+# step (``jobs/db_snapshot.discover_databases``). A corpus costs human hours to
+# annotate; it should not be the one artifact with no backup.
+#
+# Named here once. ``tests/test_computer_corpus_path_resolution.py`` fails the
+# build on a re-derived path, for the reason the LCM block above records at
+# length.
+# ---------------------------------------------------------------------------
+
+_COMPUTER_CORPUS_DB_NAME = "computer_corpus.db"
+
+
+def get_computer_corpus_db_path() -> Path:
+    """Return the computer-use corpus database (``<data dir>/computer_corpus.db``).
+
+    Callers that need a different file — tests, a throwaway harvest — pass
+    ``db_path`` explicitly. This is only the default.
+    """
+    return get_data_dir() / _COMPUTER_CORPUS_DB_NAME
+
+
 def get_legacy_lcm_db_path() -> Path:
     """Return the pre-2026-08-12 config-root ``lcm.db``.
 

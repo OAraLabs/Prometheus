@@ -34,6 +34,7 @@ from prometheus.computer.candidates import (
     build_choice_request,
     validate_choice,
 )
+from prometheus.computer.corpus import CorpusStore, TableRecord
 from prometheus.computer.driver import Driver, StaleSnapshot, check_preconditions
 from prometheus.computer.types import Candidate
 from prometheus.permissions.computer_extent import computer_extent_for
@@ -78,12 +79,18 @@ class ComputerUseLoop:
         approve: Callable[..., Awaitable[bool]] | None = None,
         origin: str = "system",
         skip_preconditions: bool = False,
+        corpus: CorpusStore | None = None,
     ) -> None:
         self._driver = driver
         self._chooser = chooser
         self._gate = gate
         self._approve = approve
         self._origin = origin
+        #: Optional. When None the loop behaves exactly as it did before the
+        #: corpus existed — no file is created and no work is done per step.
+        #: Capture is opt-in because a corpus row is a permanent artifact built
+        #: from desktop text, and that should never start happening by default.
+        self._corpus = corpus
         # Only a FixtureDriver legitimately skips the substrate check — it has
         # no substrate. A real driver that skipped it is the silent-failure
         # shape this whole check exists to refuse, so the flag is explicit
@@ -92,6 +99,81 @@ class ComputerUseLoop:
 
     async def step(
         self,
+        goal: str,
+        target: str,
+        app: str,
+        pid: int,
+        window_id: int,
+        *,
+        text_to_type: str | None = None,
+        history: list[str] | None = None,
+        goal_source: str = "unknown",
+        harvest_session: str = "",
+    ) -> StepResult:
+        """Run one bounded step, and capture it if a corpus is wired in.
+
+        A thin wrapper on purpose. ``_run_step`` has NINE ``return`` sites and
+        several uncaught ``raise`` paths, and what is in scope differs at every
+        one of them — there is no single point inside it where a record could be
+        emitted for all outcomes. Putting the emit in a ``finally`` here is the
+        only placement that covers the early refusals, the abstains, the
+        operator declining, a stale snapshot, AND a crash mid-step.
+
+        That matters for the corpus specifically: the rows worth having are
+        disproportionately the ones where something did NOT go to plan, and a
+        recorder that only saw the success path would capture exactly the rows
+        that teach the least.
+        """
+        record = TableRecord(
+            goal=goal, target=target, app=app, window_id=window_id, pid=pid,
+            # Part of the REPLAY SURFACE — build_choice_request passes this
+            # straight to the chooser, so a row without it replays a different
+            # ChoiceRequest than the one that was actually answered. Copied,
+            # not aliased: the caller's list is mutated between steps.
+            history=list(history or []),
+            driver_kind=self._driver_kind(),
+            goal_source=goal_source, harvest_session=harvest_session,
+        ) if self._corpus is not None else None
+        try:
+            result = await self._run_step(
+                record, goal, target, app, pid, window_id,
+                text_to_type=text_to_type, history=history,
+            )
+            if record is not None:
+                record.note_result(result)
+            return result
+        except BaseException as exc:
+            if record is not None:
+                record.note_exception(exc)
+            raise
+        finally:
+            if record is not None and self._corpus is not None:
+                # CorpusStore.capture never raises; belt and braces because a
+                # finally that throws would replace the real exception with a
+                # bookkeeping one.
+                try:
+                    self._corpus.capture(record)
+                except Exception:  # pragma: no cover - defence in depth
+                    log.warning("computer-use: corpus write failed", exc_info=True)
+
+    def _driver_kind(self) -> str:
+        """Name the substrate the table came from, DERIVED not declared.
+
+        A caller-supplied label would eventually be wrong, and the row it is
+        wrong on is a fixture row that reads as real. That is the failure
+        ``tests/fixtures/divergence_traces.py`` forbids in its opening
+        paragraph: a calibration that cannot tell recorded from synthetic is
+        calibrating against its own author.
+        """
+        name = type(self._driver).__name__
+        return {
+            "CuaDriverAdapter": "cua",
+            "FixtureDriver": "fixture",
+        }.get(name, name)
+
+    async def _run_step(
+        self,
+        record: TableRecord | None,
         goal: str,
         target: str,
         app: str,
@@ -112,6 +194,8 @@ class ComputerUseLoop:
 
         # 1. OBSERVE ---------------------------------------------------------
         observation = self._driver.observe(target, app, pid, window_id)
+        if record is not None:
+            record.note_observation(observation)
 
         # 2. BUILD -----------------------------------------------------------
         try:
@@ -124,9 +208,14 @@ class ComputerUseLoop:
                 reason="no bounded action was available in this window",
             )
 
+        if record is not None:
+            record.note_candidates(candidates)
+
         # 3. SELECT ----------------------------------------------------------
         request = build_choice_request(goal, observation, candidates, history)
         choice = self._chooser.choose(request)
+        if record is not None:
+            record.note_choice(choice)
 
         # 4. VALIDATE — fail closed, never coerce --------------------------
         try:
@@ -172,11 +261,15 @@ class ComputerUseLoop:
             computer_unknown=unknown,
         )
         extent_value = extent.value if extent else ""
+        if record is not None:
+            record.note_gate(decision)
         if not decision.allowed:
             if decision.requires_confirmation and self._approve is not None:
                 confirmed = await self._call_approve(
                     candidate.tool_name, decision.reason, arguments
                 )
+                if record is not None:
+                    record.note_approval(confirmed)
                 if not confirmed:
                     return StepResult(
                         status="refused",
