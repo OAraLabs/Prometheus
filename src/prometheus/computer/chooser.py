@@ -59,12 +59,26 @@ Four rules govern that map.
    model. Abstaining degrades to the deterministic path, which is the whole
    design; refusing would make a backend limitation look like a policy decision
    to the caller, and shrinking the table would let the *model* dictate which
-   actions a human is offered. The counter exists because an optimisation that
-   silently never runs is indistinguishable from one that runs and helps.
-   ⚠ Measured on this box: a ``gnome-calculator`` window builds **37**
-   candidates. A 26-letter alphabet overflows on a pocket calculator, and even
-   A–Z plus 0–9 leaves 36 against a cap of 40. This is the common case, not the
-   edge case.
+   actions a human is offered. **``max_candidates`` is Prometheus's safety
+   property and lowering it to fit a backend is the tail wagging the dog** —
+   that argument does not depend on any backend's numbers and does not change
+   when they do.
+
+   ⚠ **INSURANCE, NOT A CONDITION THAT FIRES TODAY.** SimpleJev's alphabet is
+   **50** labels, not the 36 an earlier draft of this docstring asserted:
+   ``CHOICE_LABELS = string.ascii_uppercase + string.ascii_lowercase[:24]``
+   (``common/prompt_builder.py``), with the source comment "Fifty
+   case-sensitive labels match the schema's maximum candidate count". Against
+   ``max_candidates = 40`` that is ten labels of headroom, and the 37-candidate
+   ``gnome-calculator`` window cited as proof of overflow fits with thirteen to
+   spare.
+
+   The earlier claim that overflow is "the common case, not the edge case" was
+   **false**, and came from assuming A–Z plus 0–9 rather than reading the
+   constant. The guard stays because it costs nothing and 40-against-50 is a
+   thin margin against a future cap change — but a guard documented as firing
+   commonly, which never fires, is the same shape as a green test that never
+   runs. It is documented here as the insurance it is.
 
 4. **Test the DECODE against a shuffled table — not the validation.** This is
    the one failure in the whole design that produces a *wrong action* rather

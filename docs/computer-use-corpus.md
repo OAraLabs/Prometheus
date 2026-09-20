@@ -39,9 +39,14 @@ and applying this repo's own `_CLICKABLE_ROLES`, `_EDITABLE_ROLES` and
 
 Two consequences, both load-bearing elsewhere:
 
-- A pocket calculator builds **37** candidates — three short of `max_candidates`
-  and *above* a 36-label single-token alphabet (A–Z + 0–9). The alphabet
-  overflow ruled on in `chooser.py` is the common case, not an edge case.
+- A pocket calculator builds **37** candidates — three short of
+  `max_candidates`. ⚠ An earlier version of this line claimed that also
+  overflowed a 36-label alphabet. **That was wrong.** SimpleJev's
+  `CHOICE_LABELS` is `string.ascii_uppercase + string.ascii_lowercase[:24]` =
+  **50** labels, so 37 fits with thirteen to spare and 40 fits with ten. The
+  36 came from assuming A–Z + 0–9 instead of reading the constant. The
+  abstain-on-overflow guard in `chooser.py` stays as insurance against a future
+  cap change; it does not fire today.
 - Windows below ~10 candidates exist and are mostly trivial.
 
 ### 2.2 Table size is NOT what makes a table discriminating
