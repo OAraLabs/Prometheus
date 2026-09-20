@@ -1,5 +1,66 @@
 # The computer-use candidate-table corpus — harvest spec
 
+> ## ⛔ DEFERRED 2026-09-20 — the corpus is not harvestable on a working machine
+>
+> ### The structural finding
+>
+> **A corpus of real desktop accessibility trees, harvested on a machine in
+> use, carries user data BY CONSTRUCTION.** The tree's purpose is to expose
+> what is on screen. There is no filter that separates "the control" from "the
+> content it is showing", because to the accessibility layer they are the same
+> kind of node.
+>
+> The evidence is not that some apps leaked. It is *which* apps did not: after
+> a full privacy scan of a 25-table harvest, the only survivors were
+> **gnome-calculator** and **gnome-system-monitor** — the two applications
+> displaying no user content at all. A calculator has no documents. A process
+> monitor's rows never reach the tree. Everything that had something to show,
+> showed it.
+>
+> **This is a property of the method, not of `gnome-logs`.**
+>
+> ### Corollary
+>
+> **A publishable desktop corpus requires a dedicated rig with synthetic
+> content — not a filtered harvest from a working box.** Filtering is a losing
+> game played one app at a time, and the scan history below is what losing it
+> looks like. The rig needs: a clean user account, seeded synthetic documents
+> with invented names, no real bookmarks, no mail, no logs from a machine
+> anyone uses.
+>
+> ### The three-level scan, because the escalation is the lesson
+>
+> | | scanned | found | why it was missed |
+> |---|---|---|---|
+> | **L1** | candidates only | *"clean"* — **wrong** | the leak was not in the field I looked at |
+> | **L2** | + `page tab` | a real filename | a role I had classified as *chrome, no user data*; a tab label is a document title |
+> | **L3** | + `elements_json` | sudo auth records, `/etc` paths, backup paths, username | the field I added myself — to make `role_not_clickable` verifiable — and then did not check |
+>
+> **I built the door and then didn't check it.**
+>
+> Each level was reached only because the previous "clean" was challenged
+> rather than accepted. A byte-level `strings` check also caught a delete that
+> had silently rolled back (`VACUUM` inside the transaction), which the logical
+> re-scan would have reported as success.
+>
+> ### What survives, and what does not
+>
+> **KEPT** — none of it depends on this data: the corpus schema and store, the
+> completeness guard, the role-set fingerprint and grant invalidation, the
+> `none_correct` taxonomy with `none_correct_reason`, label provenance, the
+> one-step labelling protocol, the observation-relative rule, and the power
+> method.
+>
+> **DROPPED**: the harvested tables (deleted and byte-verified), the harvest
+> volume targets below, and the calibration protocol — which assumed ~100
+> tables and is meaningless at this scale.
+>
+> **The corpus resumes on a clean rig when Jev comes off the shelf, after v1.**
+> Everything below this box is retained as the method, not as a plan.
+
+---
+
+
 A corpus of real candidate tables, each annotated with the answer a human says
 is correct, so that a chooser can be *scored* rather than trusted.
 
@@ -160,80 +221,85 @@ Harvest from **clean instances opened for the purpose**, closed afterwards. A
 corpus row is a permanent artifact; a window opened on real work is not a safe
 thing to make permanent.
 
-### 4.2 Volume — CORRECTED 2026-09-20 to what this box can actually produce
+⛔ **THIS LIST IS NOT A HARVEST LIST ON A WORKING BOX — see the DEFERRED box at
+the top.** Every app above was opened clean, for the purpose, and closed
+afterwards, exactly as this section prescribes. It was not enough, and the
+reason is the one that generalises: *an app opened clean still shows what it is
+for.* `gnome-logs` opened on an empty desktop displays that desktop's auth
+records. `gnome-text-editor` opened clean shows the last document's name in its
+tab. Only `gnome-calculator` and `gnome-system-monitor` survived, because they
+have no user content to show at all.
 
-⚠ **An earlier version of this section targeted ~100 tables. That target is not
-achievable here, and leaving it in the spec would have left a number nobody
-could hit.**
+The two do-not-harvest entries below were right, and were right for too narrow a
+reason: they name the apps where personal data is *obvious*. The finding is that
+obviousness is not the criterion.
 
-Measured: **five** installed apps clear the N ≥ 10 floor, **eight** if the
-content roles are added. At ~5 goals per app that is:
+### 4.2 Volume — TARGET WITHDRAWN 2026-09-20. The METHOD is what is kept.
 
-| | apps ≥ N10 | tables |
-|---|---:|---:|
-| today | 5 | **~25** |
-| + chrome roles | 5 | ~25 |
-| + content roles | **8** | **~40** |
+⛔ **There is no harvest target in this spec any more.** Successive versions of
+this section said ~100 tables, then ~40, then ~25; the privacy scan then took
+the survivable set to **9 tables across 2 apps**, and those have been deleted.
+A number here would be a number nobody can hit, which is worse than none.
 
-`gnome-control-center` never reaches the accessibility bus and cannot be
-measured. `baobab`, `eog`, `evince` and `clocks` never cross regardless — they
-are genuinely sparse, not role-limited.
+What is kept is the way a target is *derived*, because it is correct and does
+not depend on any of that data.
 
-**~40 is the ceiling a GNOME desktop gives, and installing apps to raise it was
-declined: a corpus harvested from a box changed to produce it is a measurement
-of the change.**
+#### The sizing method — KEPT
 
-#### RULED 2026-09-20 — no content roles. Harvest at ~25 tables.
+Size the corpus by the question it must answer, never by how much is available.
 
-Reasons, in order, and none of them is the power math:
+1. The region under measurement is where the deterministic chooser **abstains**.
+   Everywhere it answers, it is authoritative (§8), so a classifier's accuracy
+   there changes nothing.
+2. The null is **guessing within the offered table**: chance = 1/N at the
+   median table size, not 50%. At the measured median N = 18 that is 5.6%, so
+   0.67 correct out of 12 is what guessing predicts.
+3. Test one-sample binomial against that floor, and state the **critical value
+   and the power curve before collecting**, not after.
 
-1. **Regression is unanswerable at 40 and stays so.** The 25→40 jump buys
-   coverage rows for a question already answerable, not the question that is
-   blocked.
-2. **Reversible one way only.** Adding roles later costs one re-harvest.
-   Un-writing filenames costs the corpus, because replay requires verbatim
-   descriptions.
-3. **A corpus containing real filenames can never be published or shared.**
-   That constraint outlives the power math.
-4. Adding roles also invalidates every stored click grant (§8).
-
-#### What ~25 tables powers — sized to 12, not to 20
-
-At the measured abstain rate, ~25 tables is roughly **12 abstain rows**, not 20.
-Computed at the measured median table size N = 18, so chance = 1/18 = 5.6% and
-0.67 correct is the expectation from guessing:
+Worked at 12 abstain rows, retained as the worked example:
 
 | | |
 |---|---|
 | critical value | **3 of 12 correct** rejects "no better than chance", p = 0.026 |
-| power at true p = 0.30 | **0.75** |
-| power at true p = 0.40 | **0.92** |
-| power at true p = 0.50 | **0.98** |
+| power at true p = 0.30 | 0.75 |
+| power at true p = 0.40 | 0.92 |
+| power at true p = 0.50 | 0.98 |
 | power at true p = 0.20 | 0.44 — the blind spot |
 
-**12 rows clears the chance floor decisively for any classifier worth having.**
-The claim it supports is: *detects a classifier at ≥30% accuracy in the abstain
-region with 75% power, and at ≥40% with 92%.* It is NOT "measures accuracy
-precisely", and it would miss a classifier scraping 20% more often than not.
+The claim such a corpus supports is *"detects a classifier at ≥30% accuracy in
+the abstain region with 75% power"* — **not** "measures its accuracy". A
+classifier at 20% in a region where the baseline is **zero** is marginal by
+construction, and the go/no-go question is "does it beat doing nothing".
 
-For comparison, 20 rows would give 0.89 at p = 0.30 — about fourteen points,
-and nothing at all at p ≥ 0.40. That is the size of what the content-role trade
-would have bought on this question.
+#### Two ceilings that are properties of the BOX, not of the method
 
-A 20% classifier in a region where the current baseline is **zero** is marginal
-by construction, and the go/no-go question is "does it beat doing nothing", not
-"what exactly is its accuracy".
+Both were measured here and both survive as constraints on the rig:
 
-#### The regression ceiling is a property of the BOX
+* **Table supply.** Five installed apps clear the N ≥ 10 floor; eight would with
+  content roles. `gnome-control-center` never reaches the accessibility bus at
+  all. More goals cannot lift this, because the limit is **distinct tables**.
+* **Regression.** Neither figure reaches the ~25 discordant pairs McNemar needs.
+  **A regression verdict needs a second machine with a different application
+  set** — its own decision, not something a harvest can be tuned into providing.
 
-Not of the method, and not a harvest parameter. Five apps clear the N ≥ 10
-floor here; eight would with content roles. Neither reaches the ~25 discordant
-pairs McNemar needs, and more goals cannot fix it because the limit is
-**distinct tables**.
+And the rule that governed the app list still governs the rig: **a corpus
+harvested from a box changed to produce it is a measurement of the change.** On
+a synthetic rig that cuts the other way — the rig is built for this and is not
+in use for anything else, which is precisely what makes its content safe to keep.
 
-**A regression verdict needs a second machine with a different application
-set.** That is its own decision, to be taken on its own terms — not something a
-harvest can be tuned into providing.
+#### The content-role ruling stands, for the reason that outlived the numbers
+
+Content roles (`table cell`, `table row`) were declined on 2026-09-20. Three of
+the four reasons were about power and app counts and are now moot. The fourth
+was not, and the scan proved it:
+
+> **Un-writing filenames costs the corpus, because replay requires verbatim
+> descriptions. A corpus containing real filenames can never be published.**
+
+That is the general finding restated one role at a time — and `page tab`, which
+was classified as harmless chrome, leaked a filename anyway. Widening also
+invalidates every stored click grant (§8), which remains true on any machine.
 
 ### 4.3 Goals
 
@@ -399,6 +465,14 @@ process-list view.
 
 **This comes back to Will. It is not a coverage decision dressed as a role
 decision.**
+
+**RESOLVED 2026-09-20 — declined, then overtaken.** Will declined the content
+roles on privacy grounds. The scan that followed showed the grounds were wider
+than the roles: `page tab`, classified in the table above as *chrome, no user
+data*, carried a filename. The split above is still the right measurement to
+take on a rig — it says the gain is all in content — but it can no longer be
+read as "chrome is safe". **The role's category predicts where the COVERAGE is.
+It does not predict where the DATA is.**
 
 ## 6. The correct answer is not the executed answer
 
@@ -664,6 +738,14 @@ measured on how alike they are.
 
 ### Harvest order — do not reorder
 
+⛔ **CANCELLED 2026-09-20.** The order assumed ~100 tables. At the achievable
+scale a 20-row cold calibration set would be the entire corpus, with nothing
+held out for it to validate. When the corpus resumes on a rig, Will labels all
+of them, `label_source=human` throughout — which removes the anchoring problem,
+the agreement computation and the label-mix reporting at once.
+
+The original order, retained because it is right at a scale that supports it:
+
 1. **Will hand-labels ~20 tables COLD**, before any model proposal exists. This
    is the calibration set and it must not see a suggestion first — that is what
    makes it a control rather than a confirmation.
@@ -702,7 +784,24 @@ decision, not a formatting one.
   arguments. The chooser's view — `{id, description}` — is the whole record.
 - Never store a typed payload. `text_to_type` is the caller's, not the table's.
 - Apply the project's existing redaction before writing, not after.
-- The app allowlist in §4.1 is the primary control; redaction is the backstop.
+- ⛔ **"The app allowlist is the primary control" was the false belief.** It is
+  stated here as it was written, because the correction is the point: an
+  allowlist selects *applications*, and what leaks is *what an application is
+  displaying*, which is not a property the allowlist can see. The scan found a
+  filename in `gnome-text-editor`'s tab and sudo records in `gnome-logs` —
+  both allowlisted, both opened clean.
+- ⛔ **And redaction cannot be the backstop, because §6's replay ruling forbids
+  it.** Descriptions are stored verbatim; a redacted description is a different
+  input and scores a different question. The two controls this section named are
+  one that cannot see the problem and one the design rules out.
+- **The control that remains is NOT CAPTURING THE STATE** — `REFUSE_STATE` in
+  `scripts/harvest_corpus.py` — and on a working box that set is unbounded. On a
+  dedicated rig it is bounded, because nothing on the rig has anything to leak.
+- **Scan the STORED BYTES, not the logical rows.** A `VACUUM` inside a
+  transaction rolled the deletes back and a logical re-scan reported success;
+  `strings` on the file caught it. And scan every field that persists, including
+  the ones you added yourself — `elements_json` was the worst leak and it was
+  added, by me, to make `role_not_clickable` verifiable, then never checked.
 
 ## 12. What this spec does not cover
 

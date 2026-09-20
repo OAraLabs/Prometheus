@@ -1,5 +1,29 @@
 """Harvest real candidate tables into the corpus. OBSERVE ONLY — never acts.
 
+⛔ DEFERRED 2026-09-20 — DO NOT RUN THIS ON A MACHINE IN USE
+------------------------------------------------------------
+A harvest was run, scanned, and DELETED. The finding is structural, not a bug
+in this script:
+
+    A corpus of real desktop accessibility trees, harvested on a machine in
+    use, carries user data BY CONSTRUCTION. The tree's purpose is to expose
+    what is on screen. The only apps that survived a privacy scan were the two
+    displaying no user content at all.
+
+The scan escalated three times — candidates only said "clean" (wrong);
+`page tab` carried a filename; `elements_json` carried sudo auth records and
+real paths. Each level was reached only because the previous "clean" was
+challenged. See docs/computer-use-corpus.md, the box at the top.
+
+This script is kept because it is correct: goals-as-literals-before-observation,
+NEVER_HARVEST, REFUSE_STATE, observe-only, and the capture-mode completeness
+gate are all right. What it needs is a **dedicated rig with synthetic content**
+— a clean account, invented document names, no real mail, logs or bookmarks —
+not a filtered harvest from a working box. Filtering is a losing game played one
+app at a time.
+
+Resumes when Jev comes off the shelf, which is after v1.
+
 WHY IT DOES NOT ACT
 -------------------
 Milestone 2 authorised ONE real click. Nothing authorises a hundred. And a
