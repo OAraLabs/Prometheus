@@ -103,3 +103,30 @@ def test_an_empty_history_changes_nothing():
     a = rc.choose(build_choice_request("save the document", obs, cands, []))
     b = rc.choose(build_choice_request("save the document", obs, cands, None))
     assert a.candidate_id == b.candidate_id != CANDIDATE_ABSTAIN
+
+
+def test_the_exclusion_is_only_safe_while_scroll_is_unreachable():
+    """A constraint that depends on another module staying put.
+
+    "Never repeat" is right for click/type/press_key and WRONG for scroll —
+    scrolling twice is how you reach the bottom of a page. It is safe only
+    because `build_candidates` never emits scroll. If that changes and nobody
+    revisits the chooser, scroll-needing goals become silently unreachable: the
+    chooser abstains and it looks like a coverage gap rather than a rule
+    misfiring.
+
+    This test fails the moment scroll becomes emittable, pointing at the note.
+    """
+    import inspect
+
+    from prometheus.computer import candidates as C
+
+    src = inspect.getsource(C.build_candidates)
+    emitted = {n for n in ("computer_scroll", "computer_invoke_menu")
+               if n in src}
+    assert not emitted, (
+        f"build_candidates now emits {sorted(emitted)}, and RuleChooser's "
+        f"zero-repeat exclusion is no longer correct — repeating a scroll is "
+        f"normal. See the ⚠⚠ note beside `tried` in chooser.py: replace the "
+        f"exclusion with a rolling-window cap rather than deleting it."
+    )

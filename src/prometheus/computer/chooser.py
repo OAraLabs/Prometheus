@@ -170,6 +170,30 @@ class RuleChooser:
         # Descriptions, not ids: an id is snapshot-bound and dies at the next
         # observation, so the same button is a different id one step later.
         # The description is what survives, and it is what `history` carries.
+        #
+        # ⚠⚠ THIS RULE IS WRONG ONCE `scroll` IS REACHABLE. READ BEFORE ADDING IT.
+        #
+        # "Never repeat an already-tried action" is correct for the three verbs
+        # `build_candidates` offers TODAY — click, type_text, press_key on
+        # return/tab/escape — where repeating is almost always a stuck loop.
+        #
+        # It is plainly wrong for `scroll`: scrolling twice is how you reach the
+        # bottom of a page, and repeated Down is how you walk a list. A
+        # zero-repeat rule would make those goals unreachable, and it would do
+        # it SILENTLY — the chooser would abstain and look like a coverage gap
+        # rather than a rule misfiring.
+        #
+        # `scroll` and `invoke_menu` are declared in ACTION_MODELS and are
+        # currently unreachable because nothing emits them (see
+        # docs/computer-use-corpus.md §7). That is the only reason this is safe.
+        # Whoever makes scroll reachable will be editing `candidates.py` and has
+        # no reason to come here, which is exactly why the constraint is written
+        # beside the code rather than left in a design thread.
+        #
+        # The fix when that happens is NOT to delete the exclusion: a
+        # rolling-window cap (LONGHAUL used 3 repeats in a window, not zero) is
+        # the shape that keeps the anti-stuck property while allowing the verbs
+        # for which repetition is normal.
         tried = set(request.history or ())
         best, best_score = None, -1.0
         for entry in request.candidates:

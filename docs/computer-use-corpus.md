@@ -251,8 +251,60 @@ Raising the baseline first is the same argument as the embeddings baseline:
 *"beats RuleChooser" means nothing if RuleChooser was weaker than it needed to
 be.* A repeat-refusal is deterministic, free, and needs no model.
 
-⚠ The pilot's 40% abstain rate was measured against the OLD chooser and is not
-comparable to anything measured after this change.
+⚠ **CORRECTED.** An earlier version of this note claimed the pilot's 40%
+abstain rate was invalidated by this change. **It was not.** Harvest rows are
+single first steps with EMPTY history, so the exclusion has nothing to exclude
+and scores identically. Verified by replaying all 22 stored tables through the
+new chooser: **0 of 22 picks differ.**
+
+The pilot is disposable on ONE count — the role-set fingerprint moved
+(`9364275ceaeb5877` → `660427fcc1052cbf`) — not two.
+
+### 5.4 Install survey — the app list that clears the floor
+
+Measured, not listed: every installed candidate app launched and its real
+candidate count taken. **An app list is not the deliverable; an app list that
+clears N ≥ 10 is.**
+
+| app | elements | candidates | |
+|---|---:|---:|---|
+| gnome-calculator | 98 | **35** | use |
+| gnome-logs | 108 | **26** | use |
+| gnome-system-monitor | 106 | **22** | use |
+| org.gnome.Nautilus | 127 | **18** | use |
+| gnome-text-editor | 103 | **17** | use |
+| gnome-font-viewer | 70 | 8 | below floor |
+| baobab | 66 | 8 | below floor |
+| eog | 21 | 7 | below floor |
+| org.gnome.Characters | 132 | 7 | below floor |
+| gnome-disks | 26 | 4 | below floor |
+| evince | 9 | 4 | below floor |
+| org.gnome.clocks | 40 | 3 | below floor |
+
+**Five of twelve clear the floor.** `gnome-control-center` never reaches the
+accessibility bus at all and could not be measured.
+
+The pattern: apps that clear it have **toolbars and headerbars full of
+buttons** — a keypad, a sidebar, column headers. Apps below it are
+**content viewers** whose content is `image`, `document text` or `table cell`
+and is therefore not offered.
+
+**So the ceiling is role coverage, not app count.** With the pending roles
+added:
+
+| | now | if widened |
+|---|---:|---:|
+| org.gnome.Characters | 7 | **24** |
+| gnome-disks | 4 | **17** |
+| gnome-font-viewer | 8 | **18** |
+| apps clearing N ≥ 10 | **5** | **8** |
+
+Three apps cross the floor purely from role coverage, and the five that already
+clear it barely move — so widening buys breadth, not depth.
+
+⚠ That is a measurement, not a recommendation. Widening is still the halted
+decision, it now costs a re-prompt of every stored click grant, and each role
+is its own consent surface.
 
 ## 6. The correct answer is not the executed answer
 
