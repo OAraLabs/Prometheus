@@ -630,6 +630,64 @@ class BackgroundTaskManager:
         except Exception:
             log.warning("TaskStore.upsert failed for %s", record.id, exc_info=True)
 
+    async def shutdown(self, *, kill: bool = True) -> None:
+        """Drain every subprocess and waiter this manager owns.
+
+        WHY THIS EXISTS
+        ---------------
+        The manager spawned processes and ``asyncio.create_task`` waiters with
+        no way to dispose of them. In the daemon that is survivable — it lives
+        as long as the loop does. Anywhere with a SHORTER-LIVED loop it is not:
+        the loop closes, and some time later the garbage collector finalises an
+        ``asyncio`` subprocess transport whose ``__del__`` calls
+        ``self._loop.call_soon(...)`` on a closed loop, raising
+        ``RuntimeError: Event loop is closed`` from inside a finaliser.
+
+        That lands as an unraisable exception attributed to whichever test was
+        running when GC fired — usually not the one that leaked it — which is
+        why it read as a 0-to-5-per-run flake for weeks and put failure-level
+        annotations on innocent CI jobs.
+
+        WHO CALLS IT, AND WHO DELIBERATELY DOES NOT
+        -------------------------------------------
+        Production does not, and that is intentional rather than an oversight.
+        The only production instance is the module-level ``_DEFAULT_MANAGER``
+        singleton, which lives exactly as long as the process; at exit the
+        kernel reaps its children and no finaliser runs against a closed loop.
+        Wiring this into a daemon shutdown would add a teardown path with no
+        defect to fix.
+
+        It exists for loops SHORTER than the process — every test that builds a
+        manager today, and any future embedding. Do not delete it as unused:
+        the caller is ``tests/test_tasks.py::_drain_task_managers``, and
+        without it that file leaks twelve subprocess transports per run.
+
+        Idempotent, and safe to call on a manager that never started anything.
+        """
+        for task_id, waiter in list(self._waiters.items()):
+            waiter.cancel()
+            try:
+                await waiter
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                # A waiter cancelled mid-flight is the expected path, and a
+                # waiter that failed for its own reasons must not stop us
+                # draining the rest — shutdown is the last thing that runs.
+                pass
+            self._waiters.pop(task_id, None)
+
+        for task_id, process in list(self._processes.items()):
+            if process.returncode is None:
+                if kill:
+                    _signal_process_group(process, signal.SIGKILL)
+                try:
+                    # ALWAYS await. This is the reap: without it the transport
+                    # is still live when the loop closes, which is the whole
+                    # defect, and killing without reaping does not help.
+                    await process.wait()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._processes.pop(task_id, None)
+
     async def _emit_completion(self, task: TaskRecord) -> None:
         """Emit ``task_completed`` / ``task_failed`` once per terminal task."""
         if self.signal_bus is None or task.status not in TERMINAL_STATUSES:

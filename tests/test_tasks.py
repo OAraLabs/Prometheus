@@ -8,9 +8,46 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import pytest_asyncio
 
 from prometheus.tasks.manager import BackgroundTaskManager, _task_id
 from prometheus.tasks.types import TaskRecord, TaskStatus, TaskType
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _drain_task_managers(monkeypatch):
+    """Shut down every BackgroundTaskManager a test constructs.
+
+    Twelve tests in this file build one, spawn a real ``/bin/bash`` through
+    ``create_shell_task``, and end. Nothing disposed of them, because until now
+    there was no ``shutdown()`` to call — so each test closed its event loop
+    with a live subprocess transport and a live waiter task, and the transport
+    was finalised later against a CLOSED loop, raising
+    ``RuntimeError: Event loop is closed`` from inside ``__del__``.
+
+    ASYNC on purpose. A sync fixture's teardown runs AFTER pytest-asyncio has
+    already closed the test's loop, so the reap would target a transport bound
+    to a dead loop and change nothing — which is exactly what the first
+    version of this fixture did.
+
+    Autouse and wrapped around the CONSTRUCTOR rather than added to each test:
+    the next test to build a manager would otherwise reintroduce the leak, and
+    a leak that only reappears when someone forgets is not fixed.
+    """
+    import prometheus.tasks.manager as _m
+
+    built: list = []
+    real_init = _m.BackgroundTaskManager.__init__
+
+    def _tracking_init(self, *a, **kw):
+        real_init(self, *a, **kw)
+        built.append(self)
+
+    monkeypatch.setattr(_m.BackgroundTaskManager, "__init__", _tracking_init)
+    yield
+    for mgr in built:
+        await mgr.shutdown()
+
 
 
 # ---------------------------------------------------------------------------
