@@ -160,24 +160,44 @@ Harvest from **clean instances opened for the purpose**, closed afterwards. A
 corpus row is a permanent artifact; a window opened on real work is not a safe
 thing to make permanent.
 
-### 4.2 Volume
+### 4.2 Volume — CORRECTED 2026-09-20 to what this box can actually produce
 
-| population | target rows | rationale |
+⚠ **An earlier version of this section targeted ~100 tables. That target is not
+achievable here, and leaving it in the spec would have left a number nobody
+could hit.**
+
+Measured: **five** installed apps clear the N ≥ 10 floor, **eight** if the
+content roles are added. At ~5 goals per app that is:
+
+| | apps ≥ N10 | tables |
+|---|---:|---:|
+| today | 5 | **~25** |
+| + chrome roles | 5 | ~25 |
+| + content roles | **8** | **~40** |
+
+`gnome-control-center` never reaches the accessibility bus and cannot be
+measured. `baobab`, `eog`, `evince` and `clocks` never cross regardless — they
+are genuinely sparse, not role-limited.
+
+**~40 is the ceiling a GNOME desktop gives, and installing apps to raise it was
+declined: a corpus harvested from a box changed to produce it is a measurement
+of the change.**
+
+#### What ~40 tables actually powers
+
+| population | rows | verdict |
 |---|---:|---|
-| abstain rows | **50** | at median N=18 the chance floor is 5.6%; 30/50 correct is overwhelming against an expectation of ~3 |
-| picked rows | **50** | detects a *large* regression; see the caveat |
-| **total tables** | **~100** | at the measured 50/50 split |
+| abstain (coverage) | ~20 | **adequate.** At median N=18 the chance floor is 5.6%; 12/20 correct is overwhelming against an expectation of ~1 |
+| answered (regression) | ~20 | **underpowered, and stays so.** McNemar wants ~25 discordant pairs; 20 paired rows at 30% disagreement gives ~6 |
 
-**Stated honestly: 100 tables powers the coverage question well and the
-regression question poorly.** A paired comparison (McNemar) needs ~25 discordant
-pairs for a usable normal approximation. At 50 picked rows and a 30% disagreement
-rate that is ~15 discordant pairs — enough to catch a large regression, not
-enough to rule out a small one. Ruling out a small regression needs ~170 tables.
+So the coverage question — *does a classifier beat doing nothing where the
+deterministic path gives up* — is answerable on this box. **The regression
+question is not**, and no amount of goal-writing fixes it: the limit is
+distinct tables, not labels.
 
-100 is the recommended first harvest because the coverage question is the one
-that decides whether a classifier is worth having at all. If it passes, extend
-the corpus before trusting the regression number. **Do not report a regression
-verdict from 100 tables as though it were conclusive.**
+Do not report a regression verdict from this corpus. If one is needed, it needs
+a second machine with a different application set, which is a different
+decision.
 
 ### 4.3 Goals
 
@@ -305,6 +325,44 @@ clear it barely move — so widening buys breadth, not depth.
 ⚠ That is a measurement, not a recommendation. Widening is still the halted
 decision, it now costs a re-prompt of every stored click grant, and each role
 is its own consent surface.
+
+### 5.5 Chrome vs content — the role gain, split
+
+The decision rule was: *if chrome roles alone get to 8 apps, take them and
+defer content.* Measured per role, marginal gain over the current set:
+
+| role | bucket | carries | gain |
+|---|---|---|---|
+| `combo box` | chrome | no user data | **+0 on every app** |
+| `spin button` | chrome | no user data | **+0 on every app** |
+| `page tab` | chrome | no user data | **+0** — already in the set, the dead-string fix landed |
+| `tree item` | content | — | **+0 on every app** |
+| `menu`, `menu bar`, `popup menu`, `check/radio menu item` | — | — | **+0 on every app** |
+| **`table cell`** | **content** | file rows, log lines, sidebar paths | font-viewer **+9**, disks **+12** |
+| **`table row`** | **content** | character grid, process rows | Characters **+17** |
+| `table`, `tree table`, `page tab list` | — | — | +1 or +2, never decisive |
+
+**Chrome buys nothing. Every app that crosses the floor crosses on content
+roles.**
+
+```
+apps clearing N>=10   now: 5   chrome only: 5   content: 8   both: 8
+```
+
+So the trade is real and unavoidable, exactly as anticipated. `table cell` and
+`table row` are simultaneously:
+
+* the only thing that takes the corpus from ~25 to ~40 tables, and
+* what puts real filenames, log lines and process names into every table —
+  stored **verbatim** by the replay-surface ruling, which cannot scrub them
+  without changing the input a chooser is scored on.
+
+Refusing file-chooser states contained the path leak to one surface. Adding
+`table cell` un-contains it to every file-manager, log-viewer and
+process-list view.
+
+**This comes back to Will. It is not a coverage decision dressed as a role
+decision.**
 
 ## 6. The correct answer is not the executed answer
 
