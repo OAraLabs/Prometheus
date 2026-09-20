@@ -2420,7 +2420,49 @@ async def cmd_remember(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     return head + body + f"\nid: {request_id}"
 
 
-async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
+@dataclass(frozen=True)
+class ApproveOutcome:
+    """What an approval actually DID, not what its message says it did.
+
+    The core returned only prose, so every programmatic consumer inferred the
+    facts FROM that prose. web/server.py derived its ok flag from
+    message.startswith("No pending request"), which was wrong in three
+    directions at once:
+
+      * an always that remembered NOTHING (rule 4 — no describable
+        extent) returned ok: true with no other signal, so even a
+        correctly wired daemon could not tell a client "remembered" from
+        "approved once";
+      * an always on a queue with no gate attached returned ok: true
+        as well, its failure living only in the prose;
+      * "No pending approval requests." does not start with "No
+        pending request", so approving against an EMPTY queue returned
+        ok: true too.
+
+    Neither Beacon client could have rendered its way out of that.
+    beacon-desktop's resolveApproval is Promise<void> and reads the
+    body only on the HTTP-error path; beacon-ios decodes {ok} alone,
+    discards it, and labels the row from the scope the operator ASKED for.
+    There was no string for either to show, which is why the answer has to be
+    structured rather than better phrased.
+    """
+
+    #: Operator-facing text. Byte-identical to what cmd_approve returned.
+    message: str
+    #: The request was found and answered. False for usage text, an empty
+    #: queue, and an unknown request id.
+    resolved: bool = False
+    #: gate.add_grant RAN. Not "the operator asked for a lasting scope":
+    #: that is the distinction the prose could not carry.
+    remembered: bool = False
+    #: The grant's stable handle, so a client can show or revoke what it just
+    #: created. Present exactly when remembered.
+    grant_id: str | None = None
+
+
+async def approve_detail(
+    queue: Any, arg_text: str, *, prefix: str = "/"
+) -> ApproveOutcome:
     """Approve a pending tool request (shared /approve core).
 
     Forms:
@@ -2446,20 +2488,21 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
     # a backlog can never widen trust the way `always` does.
     if tokens and tokens[0] == "all":
         if queue is None:
-            return "Approval queue not active."
+            return ApproveOutcome("Approval queue not active.")
         pending = _pending_actions(queue)
         if not pending:
-            return "No pending approval requests."
+            return ApproveOutcome("No pending approval requests.")
         approved: list[str] = []
         for act in pending:
             rid = getattr(act, "request_id", "")
             if rid and await queue.approve(rid):
                 approved.append(rid)
         if not approved:
-            return "No pending approval requests."
-        return (
+            return ApproveOutcome("No pending approval requests.")
+        return ApproveOutcome(
             f"Approved {len(approved)} request(s), once each: "
-            + ", ".join(approved)
+            + ", ".join(approved),
+            resolved=True,
         )
 
     # SPRINT-CONSENT scope verbs, resolved through the ONE definition in
@@ -2495,9 +2538,12 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
         # "No pending request: awlways". Observed live 2026-08-17 00:08.
         # A guard against mistyped scopes that misses the commonest mistyped
         # scope is a guard in name only.
-        return _near_miss(tokens[0], list(_approve_verbs()), prefix, "scope") or usage
+        return ApproveOutcome(
+            _near_miss(tokens[0], list(_approve_verbs()), prefix, "scope")
+            or usage
+        )
     if queue is None:
-        return "Approval queue not active."
+        return ApproveOutcome("Approval queue not active.")
 
     request_id = tokens[0] if tokens else ""
     if not request_id:
@@ -2516,7 +2562,7 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
         # required.
         pending = _pending_actions(queue)
         if not pending:
-            return "No pending approval requests."
+            return ApproveOutcome("No pending approval requests.")
         if len(pending) > 1:
             lines = [
                 f"{len(pending)} pending requests — name one "
@@ -2528,10 +2574,10 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
                     f"{getattr(act, 'tool_name', '?')} — "
                     f"{_short(getattr(act, 'description', ''))}"
                 )
-            return "\n".join(lines)
+            return ApproveOutcome("\n".join(lines))
         request_id = getattr(pending[0], "request_id", "")
         if not request_id:
-            return usage
+            return ApproveOutcome(usage)
     # Capture the action BEFORE approve(): request_approval pops it from the
     # pending dict the moment the event fires, and the grant needs the
     # structured target (path/command) it carries.
@@ -2553,36 +2599,56 @@ async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
 
     ok = await queue.approve(request_id, scope=scope, grant=grant)
     if not ok:
-        return f"No pending request: {request_id}"
+        return ApproveOutcome(f"No pending request: {request_id}")
     if scope == "once" or action is None:
-        return f"Approved: {request_id}"
+        return ApproveOutcome(f"Approved: {request_id}", resolved=True)
 
     if gate is None:
-        return (
+        return ApproveOutcome(
             f"Approved: {request_id} — but no security gate is attached to "
-            f"the approval queue, so the {scope} grant could not be recorded."
+            f"the approval queue, so the {scope} grant could not be recorded.",
+            resolved=True,
         )
     if grant is None:
         # Rule 4: no target, so no describable extent. Approve ONCE and say
         # why nothing was remembered — silently minting the widest grant in
         # the system from the least information is what this replaced.
-        return (
+        return ApproveOutcome(
             f"Approved: {request_id} — approved ONCE only. This request "
             f"carries no specific target, so the extent of a remembered "
-            f"grant could not be described, and nothing was remembered."
+            f"grant could not be described, and nothing was remembered.",
+            resolved=True,
         )
     effective = gate.add_grant(grant)
     if effective.scope == "persistent":
         persisted = gate.persist_grant(effective)
         note = "saved to config" if persisted else "NOT persisted (config write failed)"
-        return (
+        return ApproveOutcome(
             f"Approved and remembered ({note}). Grants {effective.describe()}\n"
-            f"Revoke with: {prefix}revoke {effective.grant_id}"
+            f"Revoke with: {prefix}revoke {effective.grant_id}",
+            resolved=True,
+            remembered=True,
+            grant_id=effective.grant_id,
         )
-    return (
+    return ApproveOutcome(
         f"Approved and remembered. Grants {effective.describe()}\n"
-        f"Revoke with: {prefix}revoke {effective.grant_id}"
+        f"Revoke with: {prefix}revoke {effective.grant_id}",
+        resolved=True,
+        remembered=True,
+        grant_id=effective.grant_id,
     )
+
+async def cmd_approve(queue: Any, arg_text: str, *, prefix: str = "/") -> str:
+    """Approve a pending tool request (shared /approve core) — prose only.
+
+    The chat gateways want a string and nothing else, so this projection keeps
+    Telegram, Slack and Discord byte-identical while approve_detail serves
+    the structured facts to the REST surface. ONE core, two projections: a
+    second implementation is exactly what drifted the verb list from the REST
+    validator the day #232 landed.
+    """
+    return (await approve_detail(queue, arg_text, prefix=prefix)).message
+
 
 
 def cmd_grants(queue: Any, *, prefix: str = "/") -> str:
