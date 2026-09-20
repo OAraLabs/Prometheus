@@ -95,17 +95,6 @@ def test_the_count_is_surfaced_on_the_status_block(monkeypatch):
     assert "role set changed" in block["detail"]
 
 
-def test_a_missing_fingerprint_does_not_drop_anything():
-    """An install that predates the stamp must not lose its grants on upgrade.
-
-    Absent is not "changed". Dropping on absence would punish every existing
-    install once, for a set that may never have moved.
-    """
-    kept = _grants_for_current_role_set(_sec(None))
-    assert any(g.kind == COMPUTER_ACTION_KIND for g in kept)
-    assert CK.ROLE_SET_DROPPED_GRANTS == 0
-
-
 def test_the_fingerprint_covers_the_editable_roles_too(monkeypatch):
     """An element becomes a candidate through EITHER set."""
     before = role_set_fingerprint()
@@ -116,3 +105,25 @@ def test_the_fingerprint_covers_the_editable_roles_too(monkeypatch):
         "widening _EDITABLE_ROLES left the fingerprint unchanged, so a type "
         "grant would survive a change to what can be typed into"
     )
+
+
+def test_an_absent_fingerprint_DROPS_and_says_why():
+    """Absence is not "unchanged".
+
+    A grant with no fingerprint was made against a role set nobody recorded, so
+    its scope is unknowable — and keeping it guesses, in the permissive
+    direction. Same object as the three-term grant, whose ruling was
+    refuse-don't-pad. Earlier this returned the grants untouched; that was
+    convenience, not consent.
+    """
+    kept = _grants_for_current_role_set(_sec(None))
+
+    assert not any(g.kind == COMPUTER_ACTION_KIND for g in kept), (
+        "a click grant with NO role-set fingerprint survived — its scope is "
+        "unknowable and it is being honoured against the current set"
+    )
+    assert CK.ROLE_SET_DROPPED_GRANTS == 1
+    assert "NO role-set" in CK.ROLE_SET_DROP_REASON
+    assert "unknowable" in CK.ROLE_SET_DROP_REASON
+    # path/tool grants are unaffected: the role set says nothing about them
+    assert {g.kind for g in kept} == {"path_prefix", "tool"}

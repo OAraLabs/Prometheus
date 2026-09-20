@@ -127,6 +127,11 @@ def _cmd_score(args: argparse.Namespace) -> int:
     whether a replacement regresses.
     """
     corpus = load_corpus(_store(args))
+    try:
+        corpus.assert_one_role_set()
+    except ValueError as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 1
     scorable = corpus.scorable
     if not scorable:
         print(corpus.summary())

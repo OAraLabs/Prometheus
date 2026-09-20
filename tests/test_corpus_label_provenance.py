@@ -169,3 +169,47 @@ def test_a_container_opening_answer_is_counted_and_flagged(tmp_path):
     assert corpus.menu_opening_share() == (3, 3)
     assert "OVER HALF" in corpus.summary()
     assert "too coarse for one bounded step" in corpus.summary()
+
+
+def test_score_refuses_to_blend_across_role_sets(tmp_path):
+    """Checked, not remembered.
+
+    A different role set is a different universe of offerable elements, so a
+    score across two of them blends two experiments. The pilot and the real
+    harvest were collected under different sets; noticing that must not depend
+    on whoever runs `score` happening to know.
+    """
+    import sqlite3
+
+    from prometheus.computer.corpus import LABEL_MODEL
+
+    store = _store(tmp_path)
+    for i, fp in enumerate(("aaaa111122223333", "bbbb444455556666")):
+        rid = f"r{i}"
+        _capture(store, rid)
+        store.record_annotation(rid, "click-0", annotated_by="claude",
+                                label_source=LABEL_MODEL)
+        with sqlite3.connect(store.db_path) as conn:
+            conn.execute(
+                "UPDATE tables SET role_set_fingerprint=? WHERE record_id=?",
+                (fp, rid),
+            )
+
+    corpus = load_corpus(store)
+    assert len(corpus.role_set_mix()) == 2
+    with pytest.raises(ValueError, match="spans 2 role sets"):
+        corpus.assert_one_role_set()
+    assert "SPANS 2 ROLE SETS" in corpus.summary()
+
+
+def test_one_role_set_scores_normally(tmp_path):
+    """The guard must not fire on the case it protects."""
+    from prometheus.computer.corpus import LABEL_MODEL
+
+    store = _store(tmp_path)
+    _capture(store, "r1")
+    store.record_annotation("r1", "click-0", annotated_by="claude",
+                            label_source=LABEL_MODEL)
+    corpus = load_corpus(store)
+    assert len(corpus.role_set_mix()) == 1
+    corpus.assert_one_role_set()   # must not raise

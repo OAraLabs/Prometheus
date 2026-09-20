@@ -84,7 +84,21 @@ def role_set_fingerprint() -> str:
     than being recorded — a re-prompt is one click; a silently reinterpreted
     grant is the property the term exists for.
 
-    Covers both sets: an element becomes a candidate through either.
+    ⚠ COVERS BOTH SETS, DELIBERATELY CONSERVATIVE. An element becomes a
+    candidate through either, so a change to ``_EDITABLE_ROLES`` invalidates
+    click grants too. That OVER-invalidates: ``type_text`` carries a payload
+    and is therefore never rememberable at all (see
+    ``permissions/computer_schema.py``), so there is no type grant to widen and
+    a narrow version keyed only on ``_CLICKABLE_ROLES`` would be sufficient
+    today.
+
+    It is written this way on purpose and should not be "fixed" into the narrow
+    version without re-deriving that argument. Two things make the wide one
+    correct: the payload rule could change, and a widened editable set changes
+    which elements appear in the table AT ALL — a new editable role adds
+    ``type-N`` entries that shift nothing about clicking but do change what a
+    human saw when they granted. Over-invalidating costs a re-prompt; the
+    narrow version costs the property.
     """
     import hashlib
 

@@ -294,7 +294,11 @@ CREATE TABLE IF NOT EXISTS tables (
     goal_source           TEXT NOT NULL DEFAULT 'unknown',
     harvest_session       TEXT NOT NULL DEFAULT '',
     table_fingerprint     TEXT NOT NULL DEFAULT '',
-    code_fingerprint      TEXT NOT NULL DEFAULT '',
+    -- The role set the table was built under. Two corpora collected under
+    -- different sets are NOT comparable: a different set means a different
+    -- universe of offerable elements, so a score blended across them measures
+    -- two different experiments. `score` refuses to blend them.
+    role_set_fingerprint  TEXT NOT NULL DEFAULT '',
     unusable_reason       TEXT,
     status                TEXT NOT NULL,
     reason                TEXT NOT NULL DEFAULT '',
@@ -354,22 +358,14 @@ CREATE INDEX IF NOT EXISTS idx_annotations_record ON annotations (record_id);
 """
 
 
-def code_fingerprint() -> str:
-    """A sha over the constants that DEFINE what a candidate table is.
-
-    ``_CLICKABLE_ROLES``, ``_EDITABLE_ROLES`` and ``max_candidates`` decide
-    which elements become candidates at all. Change any of them and a row
-    harvested before the change describes a different universe of options —
-    scoring old and new rows together would blend two experiments. Imported
-    lazily so importing the corpus never drags the candidate builder in.
-    """
-    from prometheus.computer import candidates as _c
-
-    parts = [
-        ",".join(sorted(_c._CLICKABLE_ROLES)),
-        ",".join(sorted(_c._EDITABLE_ROLES)),
-    ]
-    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+#: THE canonical role-set hash lives with the roles it describes, in
+#: ``candidates``. It was briefly implemented twice — here and there — with
+#: identical output, which is the duplicate-constant defect this project keeps
+#: finding: two copies agree until one is changed. Re-exported rather than
+#: recomputed so there is exactly one implementation.
+from prometheus.computer.candidates import (  # noqa: E402
+    role_set_fingerprint as role_set_fingerprint,
+)
 
 
 def _table_fingerprint(rows: list[dict[str, str]]) -> str:
@@ -594,6 +590,7 @@ class CorpusStore:
     #: plus a schema_version bump.
     _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
         ("tables", "elements_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("tables", "role_set_fingerprint", "TEXT NOT NULL DEFAULT ''"),
         ("tables", "none_correct_reason", "TEXT"),
         ("tables", "label_source", "TEXT"),
         ("annotations", "none_correct_reason", "TEXT"),
@@ -657,7 +654,7 @@ class CorpusStore:
                         gate_decision, gate_approval_required,
                         gate_approval_granted,
                         driver_kind, goal_source, harvest_session,
-                        table_fingerprint, code_fingerprint,
+                        table_fingerprint, role_set_fingerprint,
                         unusable_reason, status, reason, extent, exception
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
@@ -686,7 +683,7 @@ class CorpusStore:
                         record.driver_kind, record.goal_source,
                         record.harvest_session,
                         _table_fingerprint(record.candidates),
-                        code_fingerprint(),
+                        role_set_fingerprint(),
                         record.unusable_reason, record.status,
                         _scrub(record.reason, MAX_REASON_CHARS),
                         record.extent, record.exception,
@@ -1163,6 +1160,37 @@ class ScorableCorpus:
             )
         return out
 
+    def role_set_mix(self) -> dict[str, int]:
+        """Which role sets the scorable rows were collected under.
+
+        More than one means the corpus spans a change to which elements could
+        become candidates at all — a different universe of options, not a
+        harder version of the same one. Scoring across them blends two
+        experiments.
+        """
+        out: dict[str, int] = {}
+        for row in self.scorable:
+            fp = row.get("role_set_fingerprint") or "(unrecorded)"
+            out[fp] = out.get(fp, 0) + 1
+        return out
+
+    def assert_one_role_set(self) -> None:
+        """Refuse to score a corpus spanning more than one role set.
+
+        Checked, not remembered. The pilot was collected under
+        9364275ceaeb5877 and the real harvest under 660427fcc1052cbf; noticing
+        that requires either this or whoever runs `score` happening to know.
+        """
+        mix = self.role_set_mix()
+        if len(mix) > 1:
+            raise ValueError(
+                f"this corpus spans {len(mix)} role sets: "
+                f"{ {k: v for k, v in sorted(mix.items())} }. A different role "
+                f"set is a different universe of offerable elements, so a "
+                f"score across them blends two experiments. Filter to one "
+                f"fingerprint, or re-harvest."
+            )
+
     def label_mix(self) -> dict[str, int]:
         """How many labels came from where. Reported on every score."""
         out: dict[str, int] = {}
@@ -1236,6 +1264,15 @@ class ScorableCorpus:
             base += (
                 f"\n  {len(self.pilot_excluded)} row(s) EXCLUDED — pilot "
                 f"session, never scored"
+            )
+        rmix = self.role_set_mix()
+        if len(rmix) > 1:
+            base += (
+                f"\n  ⚠ SPANS {len(rmix)} ROLE SETS: "
+                + ", ".join(f"{k}={v}" for k, v in sorted(rmix.items()))
+                + "\n    These rows are NOT comparable — a different role set "
+                  "means a different universe of offerable elements. Do not "
+                  "score across them."
             )
         mix = self.label_mix()
         if mix:

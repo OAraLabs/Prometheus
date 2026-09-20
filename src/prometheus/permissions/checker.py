@@ -684,7 +684,7 @@ def _grants_for_current_role_set(sec: dict) -> list["Grant"]:
         return loaded
 
     stored = sec.get("role_set_fingerprint")
-    if stored is None or stored == current:
+    if stored == current:
         return loaded
 
     dropped = [g for g in loaded if g.kind == COMPUTER_ACTION_KIND]
@@ -692,12 +692,28 @@ def _grants_for_current_role_set(sec: dict) -> list["Grant"]:
         return loaded
 
     ROLE_SET_DROPPED_GRANTS = len(dropped)
-    ROLE_SET_DROP_REASON = (
-        f"the clickable-element role set changed ({stored} -> {current}); "
-        f"{len(dropped)} computer_action grant(s) were dropped because they "
-        f"were given against a different set of offerable elements. Re-grant "
-        f"them if they are still wanted."
-    )
+    if stored is None:
+        # ABSENCE IS NOT "UNCHANGED". A grant with no fingerprint was made
+        # against a role set nobody recorded, so its scope is unknowable — and
+        # the set has in fact just changed. Keeping it would guess, and the
+        # permissive guess is the one that silently widens. Same object as the
+        # three-term grant above, whose ruling was refuse-don't-pad: a dropped
+        # grant costs one prompt, a mis-read one costs the property the
+        # fingerprint exists for.
+        ROLE_SET_DROP_REASON = (
+            f"{len(dropped)} computer_action grant(s) carry NO role-set "
+            f"fingerprint — they predate it, so the set of elements they were "
+            f"granted against is unknowable. Dropped rather than assumed "
+            f"unchanged; re-grant them if they are still wanted. "
+            f"(current set: {current})"
+        )
+    else:
+        ROLE_SET_DROP_REASON = (
+            f"the clickable-element role set changed ({stored} -> {current}); "
+            f"{len(dropped)} computer_action grant(s) were dropped because they "
+            f"were given against a different set of offerable elements. Re-grant "
+            f"them if they are still wanted."
+        )
     log.warning("SECURITY: %s", ROLE_SET_DROP_REASON)
     for g in dropped:
         log.warning("  dropped computer_action grant: %s", g.value)

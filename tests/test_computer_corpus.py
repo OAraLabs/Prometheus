@@ -461,17 +461,17 @@ def test_an_unlabelled_goal_is_unknown_not_human(tmp_path):
     assert store.all_tables()[0]["goal_source"] == "unknown"
 
 
-def test_the_code_fingerprint_moves_when_the_role_sets_move(tmp_path, monkeypatch):
+def test_the_role_set_fingerprint_moves_when_the_role_sets_move(tmp_path, monkeypatch):
     """The role sets DEFINE what a table is; old rows mean something else
     after they change, and scoring across the change blends two experiments."""
     from prometheus.computer import candidates as c
-    from prometheus.computer.corpus import code_fingerprint
+    from prometheus.computer.corpus import role_set_fingerprint
 
-    before = code_fingerprint()
+    before = role_set_fingerprint()
     monkeypatch.setattr(
         c, "_CLICKABLE_ROLES", frozenset({*c._CLICKABLE_ROLES, "slider"})
     )
-    assert code_fingerprint() != before, (
+    assert role_set_fingerprint() != before, (
         "the fingerprint did not change when the candidate-defining constants "
         "did — rows from before and after would look interchangeable"
     )
