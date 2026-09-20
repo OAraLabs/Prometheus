@@ -186,6 +186,7 @@ include = [
 testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
+    "no_manager_drain: do not auto-shutdown BackgroundTaskManagers (leak-detector self-test only)",
     "integration: integration wiring tests (verify components are connected at runtime)",
     "network: tests that require live network access (skip with -m 'not network')",
 ]

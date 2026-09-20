@@ -17,6 +17,7 @@ from __future__ import annotations
 import warnings
 
 import pytest
+import pytest_asyncio
 
 from tests.support import gate_manifest
 from tests.support.doubles import registry
@@ -237,6 +238,94 @@ def _gc_attribution(request):
         import gc
 
         gc.collect()
+
+
+# --------------------------------------------------------------------------- #
+# BACKGROUND TASK MANAGERS — drained centrally, so no test has to remember
+#
+# `BackgroundTaskManager` spawns a real subprocess and an `asyncio.create_task`
+# waiter per task. A manager that is not shut down leaves its subprocess
+# transport alive when the test's event loop closes; the GC finalises it later,
+# `BaseSubprocessTransport.__del__` calls `self._loop.call_soon(...)` on a
+# closed loop, and that raises `RuntimeError: Event loop is closed` from inside
+# a finaliser.
+#
+# pytest attributes that to whichever test was running when GC fired — almost
+# never the one that leaked it — so it reads as a 0-to-5-per-run flake and puts
+# failure-level annotations on innocent CI jobs.
+#
+# WHY THIS IS IN conftest AND KEYED ON A REGISTRY
+# ------------------------------------------------
+# The first fix was a fixture inside tests/test_tasks.py. It worked, and it was
+# the wrong shape: 25 more construction sites across 5 other files did not have
+# it, and site 26 would not either. Draining `tasks.manager.live_managers()` —
+# a WeakSet every manager joins in `__init__` — means a new test cannot opt out
+# by omission, because there is nothing to opt into.
+#
+# ASYNC on purpose. A sync fixture's teardown runs AFTER pytest-asyncio has
+# closed the test's loop, so the reap would target transports bound to a dead
+# loop and change nothing. That is measured, not assumed: the sync version of
+# this fixture left the failure exactly where it was.
+#
+# ⚠ It therefore CANNOT reach a test that calls `asyncio.run()` per call — the
+# loop is gone before teardown starts. Those sites are converted to
+# `pytest.mark.asyncio` instead; `tests/test_no_leaked_task_managers.py` is the
+# guard that keeps them converted.
+# --------------------------------------------------------------------------- #
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _drain_task_managers(monkeypatch, request):
+    """Shut down every BackgroundTaskManager a test constructs.
+
+    ⚠ HOLDS STRONG REFERENCES, and that is the whole trick. The obvious
+    implementation — iterate ``tasks.manager.live_managers()`` at teardown —
+    DOES NOT WORK, and fails silently: that registry is a WeakSet, a manager
+    created as a test-local is collected when the test's frame is freed, and
+    collection happens BEFORE fixture teardown runs. Measured: 8 of 12 managers
+    in test_tasks.py escaped a WeakSet-based drain while it reported success.
+    Collection is also precisely what raises "Event loop is closed", so the
+    weak registry loses exactly the managers that matter.
+
+    Wrapping the constructor keeps each one alive until this fixture has
+    drained it. Autouse and constructor-level rather than per-test, because 25
+    construction sites across 5 files did not remember and site 26 would not
+    either.
+
+    ASYNC on purpose. A sync fixture's teardown runs AFTER pytest-asyncio has
+    closed the test's loop, so the reap would target transports bound to a dead
+    loop and change nothing — measured, not assumed.
+    """
+    # One test needs to leak a manager ON PURPOSE, to prove the leak DETECTOR
+    # works. Holding a strong reference to it would stop it being collected and
+    # the detector's own test could never pass — the guard defeating its own
+    # precondition. Explicit marker, not a name check, so it cannot be opted
+    # into by accident.
+    if request.node.get_closest_marker("no_manager_drain"):
+        yield
+        return
+    try:
+        import prometheus.tasks.manager as _m
+    except Exception:  # pragma: no cover - import failure is not ours to mask
+        yield
+        return
+
+    built: list = []
+    real_init = _m.BackgroundTaskManager.__init__
+
+    def _tracking_init(self, *a, **kw):
+        real_init(self, *a, **kw)
+        built.append(self)
+
+    monkeypatch.setattr(_m.BackgroundTaskManager, "__init__", _tracking_init)
+    yield
+    for mgr in built:
+        try:
+            await mgr.shutdown()
+        except Exception:  # noqa: BLE001
+            # Teardown is the last thing that runs: one manager failing to
+            # drain must not stop the rest, nor mask the test's own result.
+            pass
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

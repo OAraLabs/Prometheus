@@ -79,8 +79,8 @@ def manager(tmp_path, monkeypatch):
     return mgr
 
 
-def _spawn(mgr, tmp_path, **kwargs):
-    return asyncio.run(
+async def _spawn(mgr, tmp_path, **kwargs):
+    return await (
         mgr.create_agent_task(
             prompt="do the thing",
             description="spawned agent",
@@ -94,21 +94,23 @@ def _spawn(mgr, tmp_path, **kwargs):
 # --------------------------------------------------------------------------
 # The perimeter — every durable surface, checked for the literal key
 # --------------------------------------------------------------------------
-def test_the_key_is_not_in_the_command(manager, tmp_path):
-    record = _spawn(manager, tmp_path)
+@pytest.mark.asyncio
+async def test_the_key_is_not_in_the_command(manager, tmp_path):
+    record = await _spawn(manager, tmp_path)
     assert record.command is not None
     assert FAKE_KEY not in record.command, (
         f"the key is in the persisted command string: {record.command!r}"
     )
 
 
-def test_the_key_is_not_anywhere_in_the_record(manager, tmp_path):
+@pytest.mark.asyncio
+async def test_the_key_is_not_anywhere_in_the_record(manager, tmp_path):
     """Not just `command` — the whole record, serialised.
 
     A fix that moved the key from `command` to `metadata` or `spec` would pass
     the narrower test and leak exactly as much.
     """
-    record = _spawn(manager, tmp_path)
+    record = await _spawn(manager, tmp_path)
     blob = json.dumps(asdict(record), default=str)
     assert FAKE_KEY not in blob, (
         "the key appears somewhere in the TaskRecord. Every field on this "
@@ -145,8 +147,9 @@ def _db_row_text(tmp_path: Path) -> str:
     return "\n".join(str(value) for row in rows for value in row)
 
 
-def test_the_key_is_not_in_the_database(manager, tmp_path):
-    record = _spawn(manager, tmp_path)
+@pytest.mark.asyncio
+async def test_the_key_is_not_in_the_database(manager, tmp_path):
+    record = await _spawn(manager, tmp_path)
     assert manager.store is not None
 
     row_text = _db_row_text(tmp_path)
@@ -249,40 +252,44 @@ async def test_the_old_flags_would_have_echoed_the_key_into_the_output(
     )
 
 
-def test_the_command_no_longer_uses_flags_that_do_not_exist(manager, tmp_path):
+@pytest.mark.asyncio
+async def test_the_command_no_longer_uses_flags_that_do_not_exist(manager, tmp_path):
     """`--headless` and `--api-key` are not arguments this CLI accepts.
 
     Keeping them guaranteed the child died at argument parsing — and that the
     death message contained the key.
     """
-    record = _spawn(manager, tmp_path)
+    record = await _spawn(manager, tmp_path)
     assert "--headless" not in record.command
     assert "--api-key" not in record.command
 
 
-def test_the_model_override_still_reaches_the_command(manager, tmp_path):
+@pytest.mark.asyncio
+async def test_the_model_override_still_reaches_the_command(manager, tmp_path):
     """Neutralising the leak must not silently drop the caller's arguments."""
-    record = _spawn(manager, tmp_path, model="some-model")
+    record = await _spawn(manager, tmp_path, model="some-model")
     assert "--model" in record.command
     assert "some-model" in record.command
     assert FAKE_KEY not in record.command
 
 
-def test_the_key_does_reach_the_child_environment(manager, tmp_path):
+@pytest.mark.asyncio
+async def test_the_key_does_reach_the_child_environment(manager, tmp_path):
     """Removed from the command is not the same as not delivered.
 
     A "fix" that merely dropped the credential would pass every test above and
     break the feature. The overlay must actually be attached to the task.
     """
-    record = _spawn(manager, tmp_path)
+    record = await _spawn(manager, tmp_path)
     overlay = manager._task_env.get(record.id)
     assert overlay is not None, "no environment overlay was registered"
     assert overlay.get("ANTHROPIC_API_KEY") == FAKE_KEY
 
 
-def test_an_explicit_command_override_gets_no_injected_credential(manager, tmp_path):
+@pytest.mark.asyncio
+async def test_an_explicit_command_override_gets_no_injected_credential(manager, tmp_path):
     """The caller's own string is theirs; nothing is spliced into it."""
-    record = asyncio.run(
+    record = await (
         manager.create_agent_task(
             prompt="p",
             description="d",
@@ -298,7 +305,8 @@ def test_an_explicit_command_override_gets_no_injected_credential(manager, tmp_p
 # --------------------------------------------------------------------------
 # Mutation check
 # --------------------------------------------------------------------------
-def test_the_old_construction_would_have_leaked_into_all_of_them(manager, tmp_path):
+@pytest.mark.asyncio
+async def test_the_old_construction_would_have_leaked_into_all_of_them(manager, tmp_path):
     """Replay the removed line and prove these assertions have power.
 
     If the harness stopped exercising anything — a task that is never created,
@@ -320,7 +328,7 @@ def test_the_old_construction_would_have_leaked_into_all_of_them(manager, tmp_pa
     assert shlex.quote(FAKE_KEY) == FAKE_KEY or FAKE_KEY in shlex.quote(FAKE_KEY)
 
     # The record built from it would carry the key through every surface.
-    record = asyncio.run(
+    record = await (
         manager.create_agent_task(
             prompt="p",
             description="d",

@@ -61,20 +61,22 @@ class TestWatchDirIsStoredAbsolute:
     def _mgr(self):
         return BackgroundTaskManager()
 
-    def test_relative_watch_dir_is_persisted_absolute(self, tmp_path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_relative_watch_dir_is_persisted_absolute(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         (tmp_path / "inbox").mkdir()
         mgr = self._mgr()
-        rec = asyncio.run(mgr.create_file_watch_task(
+        rec = await (mgr.create_file_watch_task(
             watch_dir="inbox", watch_pattern="*.done",
             description="d", cwd=tmp_path, timeout_seconds=1,
         ))
         assert rec.spec["dir"] == str((tmp_path / "inbox").resolve())
         assert Path(rec.spec["dir"]).is_absolute()
 
-    def test_tilde_watch_dir_is_persisted_expanded(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_tilde_watch_dir_is_persisted_expanded(self, tmp_path):
         mgr = self._mgr()
-        rec = asyncio.run(mgr.create_file_watch_task(
+        rec = await (mgr.create_file_watch_task(
             watch_dir="~/somedir", watch_pattern="*.done",
             description="d", cwd=tmp_path, timeout_seconds=1,
         ))
@@ -85,7 +87,8 @@ class TestResumeWatchesTheCreatedDirectory:
     """The load-bearing half. Proven by dropping a file and seeing
     artifact_path — not by asserting on the stored string."""
 
-    def test_resumed_task_watches_the_original_directory(self, tmp_path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_resumed_task_watches_the_original_directory(self, tmp_path, monkeypatch):
         inbox = tmp_path / "inbox"
         inbox.mkdir()
 
@@ -112,18 +115,19 @@ class TestResumeWatchesTheCreatedDirectory:
                 await asyncio.sleep(0.2)
             return mgr._tasks[rec.id]
 
-        task = asyncio.run(scenario())
+        task = await (scenario())
         assert task.status == "completed", f"resume watched the wrong dir: {task.error}"
         assert task.artifact_path
         assert Path(task.artifact_path).resolve() == (inbox / "ready.done").resolve()
 
 
 class TestInstrument:
-    def test_file_watch_record_carries_the_resolved_dir(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_file_watch_record_carries_the_resolved_dir(self, tmp_path):
         """0-of-0 sample: nothing recorded a watch_dir, so it could never
         grow. The resolved dir is now on the record itself."""
         mgr = BackgroundTaskManager()
-        rec = asyncio.run(mgr.create_file_watch_task(
+        rec = await (mgr.create_file_watch_task(
             watch_dir=str(tmp_path), watch_pattern="*.x",
             description="d", cwd=tmp_path, timeout_seconds=1,
         ))
@@ -161,40 +165,44 @@ class TestTaskCreateThroughRealDispatch:
             session_id="cli:test", permission_prompt=_prompt,
         )
 
-    def _call(self, ctx, watch_dir):
+    async def _call(self, ctx, watch_dir):
         from prometheus.engine.agent_loop import _execute_tool_call
 
-        return asyncio.run(_execute_tool_call(ctx, "task_create", "t", {
+        return await (_execute_tool_call(ctx, "task_create", "t", {
             "type": "file_watch", "description": "d",
             "watch_dir": watch_dir, "watch_pattern": "*.done",
         }))
 
-    def test_denied_watch_dir_is_refused(self, tmp_path):
+    @pytest.mark.asyncio
+
+    async def test_denied_watch_dir_is_refused(self, tmp_path):
         denied = tmp_path / "secrets"
         denied.mkdir()
         prompted: list = []
-        res = self._call(self._ctx(tmp_path, denied, prompted), str(denied))
+        res = await self._call(self._ctx(tmp_path, denied, prompted), str(denied))
         assert res.is_error
         assert "denied" in (res.content or "").lower()
 
-    def test_relative_watch_dir_proceeds_with_zero_prompts(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_relative_watch_dir_proceeds_with_zero_prompts(self, tmp_path):
         """THE ADMISSION HALF — the check that matters at a 0-of-0 sample.
         A relative dir must resolve against the base, not become UNKNOWN."""
         denied = tmp_path / "secrets"
         denied.mkdir()
         (tmp_path / "inbox").mkdir()
         prompted: list = []
-        res = self._call(self._ctx(tmp_path, denied, prompted), "inbox")
+        res = await self._call(self._ctx(tmp_path, denied, prompted), "inbox")
         assert not res.is_error, res.content
         assert prompted == [], f"a relative watch_dir prompted: {prompted}"
 
-    def test_ordinary_absolute_watch_dir_proceeds(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_ordinary_absolute_watch_dir_proceeds(self, tmp_path):
         denied = tmp_path / "secrets"
         denied.mkdir()
         work = tmp_path / "work"
         work.mkdir()
         prompted: list = []
-        res = self._call(self._ctx(tmp_path, denied, prompted), str(work))
+        res = await self._call(self._ctx(tmp_path, denied, prompted), str(work))
         assert not res.is_error, res.content
         assert prompted == []
 
@@ -209,7 +217,8 @@ class TestGateAndWatcherAgreeOnTheDirectory:
     reads is the TOCTOU shape the cron work was about, one layer over.
     """
 
-    def test_relative_dir_resolves_against_the_task_cwd_not_the_process(
+    @pytest.mark.asyncio
+    async def test_relative_dir_resolves_against_the_task_cwd_not_the_process(
         self, tmp_path, monkeypatch
     ):
         elsewhere = tmp_path / "elsewhere"
@@ -219,14 +228,15 @@ class TestGateAndWatcherAgreeOnTheDirectory:
         monkeypatch.chdir(elsewhere)          # process cwd != task cwd
 
         mgr = BackgroundTaskManager()
-        rec = asyncio.run(mgr.create_file_watch_task(
+        rec = await (mgr.create_file_watch_task(
             watch_dir="inbox", watch_pattern="*.done",
             description="d", cwd=task_cwd, timeout_seconds=1,
         ))
         assert rec.spec["dir"] == str((task_cwd / "inbox").resolve())
         assert "elsewhere" not in rec.spec["dir"]
 
-    def test_the_gate_and_the_stored_dir_match(self, tmp_path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_the_gate_and_the_stored_dir_match(self, tmp_path, monkeypatch):
         """The two resolutions must produce one path — asserted against the
         gate's own function rather than a restatement of it."""
         from prometheus.__main__ import create_tool_registry
@@ -247,7 +257,7 @@ class TestGateAndWatcherAgreeOnTheDirectory:
         assert unknown is None
 
         mgr = BackgroundTaskManager()
-        rec = asyncio.run(mgr.create_file_watch_task(
+        rec = await (mgr.create_file_watch_task(
             watch_dir="inbox", watch_pattern="*.done",
             description="d", cwd=task_cwd, timeout_seconds=1,
         ))
