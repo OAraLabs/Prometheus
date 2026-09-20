@@ -284,6 +284,35 @@ CREATE INDEX IF NOT EXISTS idx_tables_driver ON tables (driver_kind);
 CREATE INDEX IF NOT EXISTS idx_tables_abstained
     ON tables (deterministic_abstained);
 
+-- Session status. `pilot` sessions are EXCLUDED FROM ALL SCORING.
+--
+-- A separate table rather than a column on `tables`, because pilot-ness is a
+-- property of the harvest session and not of any observation — and because
+-- `tables` is machine-written and append-only, so retro-editing captured rows
+-- to carry a later judgment about the run is exactly the mixing this schema
+-- keeps apart everywhere else.
+CREATE TABLE IF NOT EXISTS sessions (
+    harvest_session TEXT PRIMARY KEY,
+    status          TEXT NOT NULL,   -- 'pilot' | 'real'
+    note            TEXT NOT NULL DEFAULT '',
+    recorded_at     REAL NOT NULL
+);
+
+-- Diagnostic answers about ABSTAIN rows. NOT ground truth, NOT correct_id.
+--
+-- Answers one question per row: was a correct candidate present at all, and if
+-- not, why not. That measures THE TABLE, not the chooser, and it is kept in
+-- its own table precisely so it can never be mistaken for a label or consume
+-- the calibration set.
+CREATE TABLE IF NOT EXISTS abstain_diagnostics (
+    record_id          TEXT PRIMARY KEY,
+    correct_present    INTEGER NOT NULL,   -- 0/1: was ANY candidate right?
+    reason             TEXT,               -- a NONE_CORRECT_REASON when not
+    answered_by        TEXT NOT NULL,
+    answered_at        REAL NOT NULL,
+    note               TEXT NOT NULL DEFAULT ''
+);
+
 -- Append-only provenance for correct_id: who judged what, when, and what they
 -- said before changing their mind. `tables.correct_id` is the materialised
 -- latest value; this is the history behind it. Both are written in ONE
@@ -701,6 +730,82 @@ class CorpusStore:
                  record_id),
             )
 
+    def mark_session(self, session: str, status: str, note: str = "") -> None:
+        """Record a harvest session as ``pilot`` or ``real``.
+
+        A pilot session is excluded from every scoring path. Marking it is a
+        decision about the RUN, so it lives beside the run rather than being
+        written back onto the observations it produced.
+        """
+        if status not in ("pilot", "real"):
+            raise ValueError(f"status must be 'pilot' or 'real', got {status!r}")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO sessions "
+                "(harvest_session, status, note, recorded_at) VALUES (?,?,?,?)",
+                (session, status, note, time.time()),
+            )
+
+    def session_status(self) -> dict[str, str]:
+        with self._connect() as conn:
+            return {
+                r["harvest_session"]: r["status"]
+                for r in conn.execute("SELECT * FROM sessions").fetchall()
+            }
+
+    def record_abstain_diagnostic(
+        self,
+        record_id: str,
+        *,
+        correct_present: bool,
+        answered_by: str,
+        reason: str | None = None,
+        note: str = "",
+    ) -> None:
+        """Answer the table question for ONE abstain row. NOT a label.
+
+        ``correct_present=False`` requires a reason from
+        :data:`NONE_CORRECT_REASONS` — that is the whole measurement. A
+        ``True`` answer means the table DID contain the right action and the
+        deterministic chooser missed it, which is a chooser gap rather than a
+        table gap, and takes no reason.
+
+        Deliberately not ``record_annotation``: this does not set ``correct_id``
+        and must never be counted as ground truth. Diagnosing which rows the
+        table could not express is a different question from which candidate
+        was right, and conflating them would spend the calibration set on it.
+        """
+        if not correct_present:
+            if reason not in NONE_CORRECT_REASONS:
+                raise ValueError(
+                    f"correct_present=False needs a reason from "
+                    f"{sorted(NONE_CORRECT_REASONS)}, got {reason!r}. The reason "
+                    f"IS the measurement — it is what separates a table that "
+                    f"could not express the goal from a chooser that missed it."
+                )
+        elif reason is not None:
+            raise ValueError(
+                "a reason is only meaningful when no candidate was correct; "
+                "correct_present=True means the table was fine."
+            )
+        if self.get_table(record_id) is None:
+            raise ValueError(f"no captured table with record_id {record_id!r}")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO abstain_diagnostics "
+                "(record_id, correct_present, reason, answered_by, "
+                " answered_at, note) VALUES (?,?,?,?,?,?)",
+                (record_id, int(correct_present), reason, answered_by,
+                 time.time(), note),
+            )
+
+    def abstain_diagnostics(self) -> dict[str, dict[str, Any]]:
+        with self._connect() as conn:
+            return {
+                r["record_id"]: dict(r)
+                for r in conn.execute("SELECT * FROM abstain_diagnostics")
+            }
+
     # -- reads -------------------------------------------------------------
 
     def get_table(self, record_id: str) -> sqlite3.Row | None:
@@ -918,6 +1023,9 @@ class ScorableCorpus:
     none_correct: list[dict[str, Any]] = field(default_factory=list)
     unusable: list[dict[str, Any]] = field(default_factory=list)
     unannotated: list[dict[str, Any]] = field(default_factory=list)
+    #: Rows from a session marked `pilot`. Never scored, and counted separately
+    #: so an empty scorable set is never mistaken for an empty corpus.
+    pilot_excluded: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def scorable(self) -> list[dict[str, Any]]:
@@ -974,6 +1082,7 @@ class ScorableCorpus:
         total = (
             len(self.answered) + len(self.none_correct)
             + len(self.unusable) + len(self.unannotated)
+            + len(self.pilot_excluded)
         )
         pct = (100 * len(self.unannotated) // total) if total else 0
         base = (
@@ -982,6 +1091,11 @@ class ScorableCorpus:
             f"none-correct), {len(self.unusable)} unusable-excluded, "
             f"{len(self.unannotated)} UNANNOTATED ({pct}%)"
         )
+        if self.pilot_excluded:
+            base += (
+                f"\n  {len(self.pilot_excluded)} row(s) EXCLUDED — pilot "
+                f"session, never scored"
+            )
         mix = self.label_mix()
         if mix:
             base += "\n  label sources: " + ", ".join(
@@ -1011,11 +1125,24 @@ class ScorableCorpus:
         return base
 
 
-def load_corpus(store: CorpusStore) -> ScorableCorpus:
-    """Join captured tables to judgments and partition them by scorability."""
+def load_corpus(
+    store: CorpusStore, *, include_pilot: bool = False
+) -> ScorableCorpus:
+    """Join captured tables to judgments and partition them by scorability.
+
+    PILOT SESSIONS ARE EXCLUDED unless asked for. A pilot corpus exists to
+    shake out the harvest, and scoring anything against it would import
+    whatever was wrong with the run it was built to find.
+    """
     annotations = store.latest_annotations()
+    pilots = {
+        k for k, v in store.session_status().items() if v == "pilot"
+    }
     out = ScorableCorpus()
     for row in store.all_tables():
+        if not include_pilot and row.get("harvest_session") in pilots:
+            out.pilot_excluded.append(row)
+            continue
         if row["candidate_count"] == 0:
             # STRUCTURALLY unscorable, not a judgment. A step blocked at the
             # precondition check never observed anything, so there is no table

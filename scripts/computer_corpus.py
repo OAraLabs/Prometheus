@@ -184,6 +184,94 @@ def _cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_abstains(args: argparse.Namespace) -> int:
+    """Print the ABSTAIN rows as one question each. Diagnostic, not labelling.
+
+    One question per row: was a correct candidate present at all, and if not,
+    why not. That measures THE TABLE. It is not `correct_id`, it does not touch
+    the calibration set, and it is stored in its own table so it can never be
+    counted as ground truth.
+    """
+    import json
+
+    store = _store(args)
+    rows = [r for r in store.all_tables() if r["deterministic_abstained"]]
+    done = store.abstain_diagnostics()
+    todo = [r for r in rows if r["record_id"] not in done]
+
+    print(f"{len(rows)} abstain row(s); {len(todo)} unanswered\n")
+    print("For each: was ANY candidate below the right thing to do?")
+    print("  yes -> the TABLE was fine, the chooser missed it")
+    print("  no  -> say which: verb_not_offered | key_not_offered |")
+    print("                    element_not_in_tree | not_achievable_here\n")
+
+    for i, r in enumerate(todo, 1):
+        cands = r["candidates"]  # all_tables() already decoded it
+        print("=" * 78)
+        print(f"[{i}/{len(todo)}]  {r['record_id']}")
+        print(f"  app  : {r['app']}   ({r['candidate_count']} candidates)")
+        print(f"  GOAL : {r['goal']}")
+        print("  table:")
+        for c in cands[: args.max_candidates]:
+            print(f"    {c['id']:<12} {c['description'][:72]}")
+        if len(cands) > args.max_candidates:
+            print(f"    … {len(cands) - args.max_candidates} more")
+        print()
+    return 0
+
+
+def _cmd_diagnose(args: argparse.Namespace) -> int:
+    """Record one abstain diagnostic. NOT a label."""
+    store = _store(args)
+    try:
+        store.record_abstain_diagnostic(
+            args.record_id,
+            correct_present=(args.answer == "yes"),
+            reason=None if args.answer == "yes" else args.reason,
+            answered_by=args.by, note=args.note,
+        )
+    except ValueError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
+    print(f"recorded (diagnostic, not a label): {args.record_id} -> {args.answer}"
+          + (f" / {args.reason}" if args.reason else ""))
+    return 0
+
+
+def _cmd_reasons(args: argparse.Namespace) -> int:
+    """THE SPLIT that decides whether build_candidates is fixed first."""
+    store = _store(args)
+    diags = store.abstain_diagnostics()
+    if not diags:
+        print("no abstain diagnostics recorded yet — run `abstains` first")
+        return 1
+    present = sum(1 for d in diags.values() if d["correct_present"])
+    by_reason: dict[str, int] = {}
+    for d in diags.values():
+        if not d["correct_present"]:
+            by_reason[d["reason"]] = by_reason.get(d["reason"], 0) + 1
+
+    n = len(diags)
+    print(f"{n} abstain row(s) diagnosed\n")
+    print(f"  table was FINE, chooser missed it : {present}  ({100*present//n}%)")
+    print(f"  no correct candidate existed      : {n-present}  ({100*(n-present)//n}%)")
+    for k, v in sorted(by_reason.items()):
+        print(f"      {k:<22} {v}")
+    table_defects = sum(
+        v for k, v in by_reason.items()
+        if k in ("verb_not_offered", "key_not_offered")
+    )
+    print()
+    if table_defects:
+        print(f"  ⚠ {table_defects}/{n} ({100*table_defects//n}%) are TABLE DEFECTS —")
+        print("    build_candidates never offers the verb or key the goal needs.")
+        print("    No chooser can improve these. Fix build_candidates and")
+        print("    re-measure BEFORE judging any classifier.")
+    else:
+        print("  No table defects. The abstain region is a genuine chooser gap.")
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -230,6 +318,30 @@ def main() -> int:
               "every column."),
     )
     ck.set_defaults(fn=_cmd_check)
+
+    ab = sub.add_parser("abstains", help="print the ABSTAIN rows as questions")
+    ab.add_argument("--max-candidates", type=int, default=40)
+    ab.set_defaults(fn=_cmd_abstains)
+
+    dg = sub.add_parser("diagnose", help="answer one abstain row (NOT a label)")
+    dg.add_argument("record_id")
+    dg.add_argument("answer", choices=("yes", "no"),
+                    help="was a correct candidate present in the table?")
+    dg.add_argument("--reason", default=None,
+                    choices=("verb_not_offered", "key_not_offered",
+                             "element_not_in_tree", "not_achievable_here"))
+    dg.add_argument("--by", required=True)
+    dg.add_argument("--note", default="")
+    dg.set_defaults(fn=_cmd_diagnose)
+
+    sub.add_parser("reasons", help="the abstain split").set_defaults(fn=_cmd_reasons)
+
+    ms = sub.add_parser("mark-session", help="record a session as pilot or real")
+    ms.add_argument("session")
+    ms.add_argument("status", choices=("pilot", "real"))
+    ms.add_argument("--note", default="")
+    ms.set_defaults(fn=lambda a: (_store(a).mark_session(a.session, a.status, a.note),
+                                  print(f"{a.session} -> {a.status}"))[1] or 0)
 
     args = p.parse_args()
     return int(args.fn(args))
