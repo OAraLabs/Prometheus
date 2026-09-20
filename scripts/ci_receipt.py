@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from collections import defaultdict
@@ -53,6 +54,21 @@ _NOISE = (
     "Node.js 20 is deprecated",
     "will migrate to Ubuntu",
 )
+
+
+def _signature(message: str) -> str:
+    """Collapse a message to what IDENTIFIES it, dropping what varies.
+
+    Numbers and absolute paths differ between runs for the same underlying
+    event (`/home/runner/work/...`, line numbers, pids), and a signature that
+    keeps them would report a brand-new message on every run — the same
+    fires-every-time failure this file exists to avoid.
+    """
+    first = (message or "").strip().splitlines()
+    sig = first[0] if first else "(no message)"
+    sig = re.sub(r"/\S+", "<path>", sig)
+    sig = re.sub(r"\d+", "N", sig)
+    return sig[:120]
 
 
 def _gh_json(args: list[str]) -> object:
@@ -134,30 +150,53 @@ def compare(run_id: str, base_run_id: str | None) -> int:
     base = read_receipt(base_run_id)
     _render(f"BASE {base_run_id}", base)
 
-    drift = {}
-    for name, r in receipt.items():
-        b = base.get(name)
-        if b is None:
-            continue
-        if r["failure_annotations"] != b["failure_annotations"]:
-            drift[name] = (b["failure_annotations"], r["failure_annotations"])
+    # ── THE VERDICT: the SET of distinct messages, not the counts ─────────
+    # A NEW message string is signal — something is happening that was not
+    # happening before. A count change within a KNOWN message is noise: these
+    # are GC-timing dependent and swing 0-5 on main with no code change, so a
+    # count-based verdict fires on nearly every run. A guard that fires every
+    # run gets ignored, which is the counter-nobody-reads shape it exists to
+    # prevent.
+    base_sigs, run_sigs = set(), set()
+    for r in base.values():
+        base_sigs.update(_signature(m) for m in r["messages"])
+    for r in receipt.values():
+        run_sigs.update(_signature(m) for m in r["messages"])
+
+    new_sigs = run_sigs - base_sigs
+    gone_sigs = base_sigs - run_sigs
 
     print("\nVERDICT")
+    if new_sigs:
+        print("  CONTAMINATED — annotation message(s) NOT present on the base:")
+        for sig in sorted(new_sigs):
+            print(f"    + {sig}")
+        print("\n  A message the base does not produce is signal. Investigate it")
+        print("  or state it explicitly in the PR body.")
+        status = 1
+    else:
+        print("  CLEAN — every annotation message also appears on the base.")
+        print("  No new failure mode was introduced by this branch.")
+        status = 0
+    if gone_sigs:
+        for sig in sorted(gone_sigs):
+            print(f"    - {sig}  (present on base, absent here)")
+
+    # ── SECONDARY: count drift. Reported, never the verdict. ──────────────
+    drift = {
+        name: (base[name]["failure_annotations"], r["failure_annotations"])
+        for name, r in receipt.items()
+        if name in base
+        and r["failure_annotations"] != base[name]["failure_annotations"]
+    }
     if drift:
-        print("  CONTAMINATED — annotation counts CHANGED vs the base:")
+        print("\n  (secondary) annotation COUNTS differ, same message set:")
         for name, (was, now) in sorted(drift.items()):
             print(f"    {name}: {was} -> {now}")
-        print("\n  A changed count is not proof the branch caused it (these are")
-        print("  GC-timing dependent and swing 0-5 on main too), but it is the")
-        print("  point at which 'nothing else moved' stops being provable by")
-        print("  inspection. Investigate or state it explicitly in the PR body.")
-        _explain(failed, annotated)
-        return 1
+        print("    Counts are timing-dependent; this is informational only.")
 
-    print("  Annotation counts are IDENTICAL to the base on every job.")
-    print("  That falsifies 'this branch caused it' directly.")
     _explain(failed, annotated)
-    return 0
+    return status
 
 
 def _explain(failed: list[str], annotated: dict) -> None:
