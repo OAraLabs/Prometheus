@@ -13,6 +13,15 @@ This page takes you from nothing to a running Prometheus daemon with Beacon conn
   ```
 
   Below 3.11, install a newer one (`brew install python@3.12`, or `uv python install 3.12` and `uv venv`) before anything else.
+
+  **What is actually verified, at patch granularity.** `requires-python` says `>=3.11`,
+  which is a claim about MINOR versions; CI resolves each matrix entry to the latest
+  PATCH, so what is genuinely exercised today is **3.11.16** and **3.12.14**. Ubuntu
+  24.04 — the likeliest self-hoster baseline — ships **3.12.3**, eleven releases behind
+  that 3.12 leg, so a distro interpreter is close to what is tested but not identical to
+  it. **3.13 is admitted by `requires-python` and has a known failure**: a deny-check in
+  the permission floor resolves a self-referential symlink differently on 3.13 and stops
+  treating it as denied. Prefer 3.11 or 3.12 until that is closed.
 - **An inference backend** — llama.cpp or Ollama running with any model loaded (LM Studio and vLLM also work), *or* a cloud API key (OpenAI, Anthropic, Gemini, xAI, DeepSeek, Kimi, GLM, MiMo). The setup wizard probes for local servers and never writes a config it knows is broken.
 - **Optional:** a Telegram bot token from [@BotFather](https://t.me/BotFather) if you want the Telegram gateway. The CLI and Beacon work without any gateway.
 
