@@ -211,13 +211,31 @@ jobs:
           sudo apparmor_parser -r -W deploy/apparmor/prometheus-bash
           sudo aa-status | grep -q prometheus-bash
 
-      - name: Provide the two preconditions these tests legitimately need
-        # Deliberately NOT solved by adding skips. The decoy fixture writes
-        # under ~/.ssh, and the git-network case reaches the network from the
-        # deploy clone's path — both are real properties of the operator's box,
-        # so CI reproduces them instead of excusing the tests from running.
+      - name: Provide the four preconditions these tests legitimately need
+        # Deliberately NOT solved by adding skips. Every path below is a real
+        # property of the operator's box, so CI reproduces it instead of
+        # excusing the tests from running.
+        #
+        # ⚠ .gnupg AND .config/prometheus/env WERE MISSING HERE, and that is
+        # why test_gnupg_is_refused and test_config_env_pattern_is_refused
+        # passed on every CI run from fb73b28 (2026-08-16) to 2026-09-20
+        # without once exercising their subject: with the path absent the
+        # command failed with ENOENT, and the tests asserted only that it
+        # failed. They now assert "Permission denied" specifically, so an
+        # absent subject is an ERROR naming the missing precondition.
+        #
+        # A subject added here is a SUBJECT THE PROFILE MUST DENY. Do not add
+        # one to silence an error — if a path is not in the profile's denied
+        # set, the test errors here rather than being quietly satisfied.
         run: |
           mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+          mkdir -p "$HOME/.gnupg" && chmod 700 "$HOME/.gnupg"
+          # Matches the profile's `deny @{HOME}/.config/*/*env` pattern. The
+          # CONTENT is deliberately inert: this file exists to be refused, not
+          # to be read, and it lives in a public repo's CI logs.
+          mkdir -p "$HOME/.config/prometheus"
+          printf '# placeholder for CI. No credentials. Exists so the confinement\n# floor test has a real file to be refused on.\n' > "$HOME/.config/prometheus/env"
+          chmod 600 "$HOME/.config/prometheus/env"
           git clone --depth 1 "${{ github.server_url }}/${{ github.repository }}" "$HOME/prometheus-deploy"
 
       - name: Refuse to continue if the floors are not actually active
