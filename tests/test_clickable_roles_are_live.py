@@ -34,22 +34,7 @@ atspi = pytest.importorskip(
 #: offers, and the extent carries NO role-set term — so any change to the
 #: offered set retroactively widens every stored click grant. That decision is
 #: Will's and is open. See docs/computer-use-corpus.md §7.
-KNOWN_DEAD: dict[str, str] = {
-    "tab": (
-        "AT-SPI emits 'page tab'. Correcting it is a dead-string fix rather "
-        "than a widening — the entry was always meant to cover tabs — but it "
-        "still changes the offered set, so it waits on the grant-versioning "
-        "decision."
-    ),
-    "button": (
-        "AT-SPI emits 'push button' / 'toggle button' / 'radio button', all "
-        "three already in the set. So this entry is redundant as well as dead "
-        "and the fix is deletion, not correction. Removing it offers strictly "
-        "LESS, so it does not widen any grant — but it is kept here until the "
-        "set is touched deliberately rather than in passing."
-    ),
-}
-
+KNOWN_DEAD: dict[str, str] = {}   # both corrected 2026-09-20; empty is the goal
 
 def _valid_role_names() -> set[str]:
     import gi

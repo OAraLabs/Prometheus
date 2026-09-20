@@ -40,13 +40,59 @@ class InvalidChoice(RuntimeError):
 #: click on every node in the tree makes a table nobody can review and hands a
 #: chooser a hundred ways to hit something unintended.
 _CLICKABLE_ROLES: frozenset[str] = frozenset({
-    "push button", "button", "toggle button", "check box", "radio button",
-    "menu item", "link", "list item", "tab",
+    # ⚠ AT-SPI ROLE NAMES, verbatim. Two entries here were DEAD — they named
+    # roles AT-SPI never emits, so they matched nothing while making the set
+    # look like it covered that class of control:
+    #   "tab"    -> AT-SPI emits "page tab". Corrected below. A dead-string
+    #               correction, NOT a widening: the entry always meant tabs.
+    #   "button" -> AT-SPI emits "push button" / "toggle button" /
+    #               "radio button", all three already present. Deleted rather
+    #               than corrected: redundant as well as dead, and removing it
+    #               offers strictly LESS.
+    # tests/test_clickable_roles_are_live.py interrogates AT-SPI's own enum and
+    # fails on a new dead entry. It SKIPS where the bindings are absent, which
+    # includes CI — it runs in the on-box verification ritual.
+    #
+    # ⚠ ANY CHANGE HERE INVALIDATES STORED CLICK GRANTS. The extent carries no
+    # role term, so a grant given against one set would otherwise be honoured
+    # against another. See role_set_fingerprint().
+    "push button", "toggle button", "check box", "radio button",
+    "menu item", "link", "list item", "page tab",
 })
 
 _EDITABLE_ROLES: frozenset[str] = frozenset({
     "text", "entry", "password text", "paragraph", "document text",
 })
+
+
+def role_set_fingerprint() -> str:
+    """A hash of the roles that decide which elements become clickable.
+
+    WHY A GRANT DEPENDS ON THIS
+    ---------------------------
+    The consent extent is ``target:app:verb:delivery_mode`` and carries no role
+    term, so a stored grant for ``mini:nautilus:click:background`` — "click
+    anything in Nautilus" — is honoured against whatever the offered set
+    happens to contain when it is used. Add ``table cell`` and that grant
+    silently starts meaning "select files", with no new prompt.
+
+    Versioning the role set INTO the extent was considered and rejected: the
+    prompt still reads "click anything", so a suffix improves the machine half
+    of the consent and leaves the human half exactly as vague. Instead the set
+    is fingerprinted, the fingerprint is stored beside the grants, and a
+    mismatch DROPS the click grants and says so. The consequence happens rather
+    than being recorded — a re-prompt is one click; a silently reinterpreted
+    grant is the property the term exists for.
+
+    Covers both sets: an element becomes a candidate through either.
+    """
+    import hashlib
+
+    payload = "|".join((
+        ",".join(sorted(_CLICKABLE_ROLES)),
+        ",".join(sorted(_EDITABLE_ROLES)),
+    ))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def build_candidates(

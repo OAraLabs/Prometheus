@@ -647,6 +647,63 @@ def _splice_grants(original: str, grants: list) -> str:
     return "\n".join(lines[:key] + render(ind) + lines[stop:]) + "\n"
 
 
+#: How many computer_action grants were dropped at load because the offered
+#: role set had changed since they were given. Surfaced on ``/api/status``.
+#:
+#: A module-level counter rather than a return value because the drop happens
+#: inside construction, and a silent drop is the same defect wearing the other
+#: hat: the grant is gone either way, and nobody re-grants what they were not
+#: told they lost.
+ROLE_SET_DROPPED_GRANTS: int = 0
+ROLE_SET_DROP_REASON: str = ""
+
+
+def _grants_for_current_role_set(sec: dict) -> list["Grant"]:
+    """Load grants, dropping click grants if the offered role set has changed.
+
+    The stored fingerprint is compared to the current one. A mismatch means the
+    set of elements ``build_candidates`` will offer is not the set the operator
+    saw when they granted, so every ``computer_action`` grant is dropped and the
+    count is surfaced. Path, command and tool grants are untouched — the role
+    set says nothing about them.
+    """
+    global ROLE_SET_DROPPED_GRANTS, ROLE_SET_DROP_REASON
+    ROLE_SET_DROPPED_GRANTS, ROLE_SET_DROP_REASON = 0, ""
+
+    loaded = [
+        g for g in (
+            Grant.from_config_dict(d) for d in (sec.get("grants") or [])
+            if isinstance(d, dict)
+        ) if g is not None
+    ]
+    try:
+        from prometheus.computer.candidates import role_set_fingerprint
+
+        current = role_set_fingerprint()
+    except Exception:  # pragma: no cover - computer subsystem absent
+        return loaded
+
+    stored = sec.get("role_set_fingerprint")
+    if stored is None or stored == current:
+        return loaded
+
+    dropped = [g for g in loaded if g.kind == COMPUTER_ACTION_KIND]
+    if not dropped:
+        return loaded
+
+    ROLE_SET_DROPPED_GRANTS = len(dropped)
+    ROLE_SET_DROP_REASON = (
+        f"the clickable-element role set changed ({stored} -> {current}); "
+        f"{len(dropped)} computer_action grant(s) were dropped because they "
+        f"were given against a different set of offerable elements. Re-grant "
+        f"them if they are still wanted."
+    )
+    log.warning("SECURITY: %s", ROLE_SET_DROP_REASON)
+    for g in dropped:
+        log.warning("  dropped computer_action grant: %s", g.value)
+    return [g for g in loaded if g.kind != COMPUTER_ACTION_KIND]
+
+
 class SecurityGate:
     """Permission checker for the Prometheus agent loop.
 
@@ -807,12 +864,7 @@ class SecurityGate:
             mode=sec.get("permission_mode", "default"),
             audit_logger=audit_logger,
             exfiltration_detector=exfil_detector,
-            grants=[
-                g for g in (
-                    Grant.from_config_dict(d) for d in (sec.get("grants") or [])
-                    if isinstance(d, dict)
-                ) if g is not None
-            ],
+            grants=_grants_for_current_role_set(sec),
         )
 
     # ------------------------------------------------------------------
@@ -1351,6 +1403,22 @@ class SecurityGate:
         for g in doomed:
             self.remove_grant(g.grant_id, config_path)
         return len(doomed)
+
+    @staticmethod
+    def _stamp_role_set(sec: dict) -> None:
+        """Record the role set a grant was given against, beside the grant.
+
+        Written on every persist rather than once at setup: a fingerprint that
+        only appears when someone remembers to add it is absent exactly on the
+        installs that never touched it, and an absent fingerprint reads as "no
+        change" — the permissive answer.
+        """
+        try:
+            from prometheus.computer.candidates import role_set_fingerprint
+
+            sec["role_set_fingerprint"] = role_set_fingerprint()
+        except Exception:  # pragma: no cover - computer subsystem absent
+            pass
 
     def persist_grant(self, grant: Grant, config_path: str | Path | None = None) -> bool:
         """Append a grant to ``security.grants`` in the on-disk YAML.

@@ -65,6 +65,19 @@ GOALS: dict[str, list[str]] = {
         "switch to a different kind of calculation",
         "copy the result so I can paste it elsewhere",
     ],
+    # A "main menu open" capture makes the menu's own items one-step
+    # reachable, which is the fix for the container-opening signal: at 3/3 the
+    # pilot was measuring "open the menu" rather than task selection.
+    "gnome-text-editor (main menu open)": [
+        "undo what I just did",
+        "save this somewhere",
+        "find a word in this document",
+    ],
+    "org.gnome.Nautilus (main menu open)": [
+        "make a new folder",
+        "change how these are displayed",
+        "show hidden files",
+    ],
     "gnome-text-editor": [
         "undo what I just did",
         "save this somewhere",
@@ -73,12 +86,14 @@ GOALS: dict[str, list[str]] = {
         "make the text bigger",
         "close this without losing anything",
     ],
+    # ⚠ NO PROCESS-LIST GOALS. See STRUCTURALLY_UNREACHABLE: the rows are not
+    # in the tree at all, so "stop a program that has hung" and "sort the list"
+    # can never be answered from any table this app produces. The tab switcher
+    # is reachable and those goals stay.
     "gnome-system-monitor": [
-        "see which program is using the most memory",
-        "stop a program that has hung",
-        "check how busy the processor is",
         "look at a different category of information",
-        "sort the list a different way",
+        "check how busy the processor is",
+        "switch to the view that shows disk usage",
     ],
     "baobab": [
         "find out what is using my disk space",
@@ -120,6 +135,19 @@ GOALS: dict[str, list[str]] = {
 #: firefox is outside this milestone and is where scraped text is most likely
 #: to be personal. Enforced here, not left to the operator to remember.
 NEVER_HARVEST = {"seahorse", "firefox", "thunderbird", "evolution", "keepassxc"}
+
+#: App views the loop STRUCTURALLY CANNOT operate — the widget never exposes
+#: its content to AT-SPI at all, so no role set and no chooser reaches it.
+#: Recorded so harvest states are not spent on them.
+#:
+#: gnome-system-monitor's PROCESS LIST: zero row-like nodes (table row, table
+#: cell, tree table, table, tree item, list item) anywhere in its 118-node full
+#: tree, showing or not. Its TAB SWITCHER is fine and worth capturing — that
+#: was a real role gap (`page tab`) and is now fixed.
+STRUCTURALLY_UNREACHABLE: dict[str, str] = {
+    "gnome-system-monitor: process list":
+        "the process rows never reach the accessibility tree; not a role gap",
+}
 
 MIN_CANDIDATES = 10
 

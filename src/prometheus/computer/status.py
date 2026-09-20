@@ -79,6 +79,23 @@ _SUBSTRATE_DETAIL: dict[str, str] = {
 _TOOL_PREFIX = "computer_"
 
 
+def _role_set_drops() -> dict[str, object]:
+    """How many click grants were dropped because the role set changed."""
+    try:
+        from prometheus.permissions import checker as _c
+
+        n = getattr(_c, "ROLE_SET_DROPPED_GRANTS", 0)
+        return {
+            "count": n,
+            "detail": getattr(_c, "ROLE_SET_DROP_REASON", "") or (
+                "no grants dropped; the clickable-element role set is "
+                "unchanged since they were given."
+            ),
+        }
+    except Exception:  # pragma: no cover
+        return {"count": 0, "detail": "unknown — the gate could not be read."}
+
+
 def computer_status(
     tool_registry: Any = None,
     target_registry: Any = None,
@@ -94,6 +111,10 @@ def computer_status(
     """
     block: dict[str, Any] = {
         "registered": _registered_count(tool_registry),
+        # A silent drop is the same defect wearing the other hat: the grant is
+        # gone either way, and nobody re-grants what they were not told they
+        # lost. Surfaced here, not only in a log line nobody tails.
+        "grants_dropped_role_set_change": _role_set_drops(),
         "targets": _targets(target_registry),
         "substrate": substrate_block(env),
     }

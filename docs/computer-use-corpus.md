@@ -348,16 +348,40 @@ name every term that changes what is authorised.* It named `target` because one
 grant should not span machines. It does not name the role set, and the role set
 is what decides which elements become clickable.
 
-**Two ways to close it, and the choice is Will's:**
+**RULED 2026-09-20 — invalidate stored click grants on a role-set change.**
+Not versioning: `describe()` still says "click anything", so a version suffix
+improves the machine half of the consent and leaves the human half equally
+vague — §17 drift. Done while it was free: `registered: 0`, the loop unwired,
+approximately zero stored click grants. Never cheaper than today.
+
+The set is fingerprinted (`role_set_fingerprint()`, covering BOTH role sets
+since an element becomes a candidate through either), the fingerprint is
+stamped beside the grants on every persist, and a mismatch **drops every
+`computer_action` grant and surfaces the count on `/api/status`**. Path,
+command and tool grants are untouched — the role set says nothing about them.
+An ABSENT fingerprint does not drop: absent is not "changed", and dropping on
+absence would punish every existing install once for a set that may never have
+moved.
+
+The options considered:
 
 | option | what it costs | what it buys |
 |---|---|---|
 | **Version the role set into the extent** — `mini:nautilus:click:background:r3` | every role-set change invalidates grants for that version; the value gets longer and less readable at the prompt | the grant states what it covered; old grants keep their original meaning rather than being reinterpreted |
 | **Invalidate stored click grants on a set change** | a re-prompt for every app after any change | the extent stays four terms and readable; the blast radius is visible at the moment of change |
 
-The second is simpler and matches "a note is not a guard" — it makes the
-consequence happen rather than recording it. The first is more precise and
-survives a set that changes often. I have **not** picked.
+### Dead entries — CORRECTED 2026-09-20 under the exemption
+
+`tab` → `page tab` (dead-string correction; the entry always meant tabs).
+`button` **deleted** — AT-SPI emits `push button` / `toggle button` /
+`radio button`, all three already present, so it was redundant as well as dead
+and removing it offers strictly *less*. Fingerprint moved
+`9364275ceaeb5877` → `660427fcc1052cbf`, which is itself the invalidation
+working. `KNOWN_DEAD` is now empty.
+
+**Nothing else added.** `combo box`, `table cell`, `tree item` and the rest
+remain genuine additions that do not inherit the exemption, and each now costs
+a re-prompt of every stored click grant — which is the point.
 
 **`page tab` is exempt, and the exemption is written down here so the next
 addition cannot inherit it.** `_CLICKABLE_ROLES` contains `tab`, which AT-SPI
@@ -382,8 +406,21 @@ a `KNOWN_DEAD` ratchet — new dead entries fail, and fixing one means deleting
 its line.
 
 ⚠ That test **skips where the AT-SPI bindings are absent**, which includes the
-project venv and CI. Skipped is not passed: it is a real guard only where it can
-run, and it caught both entries the first time it did.
+project venv and CI. Skipped is not passed, so it does not belong in CI: it
+runs in the **on-box verification ritual** under system python and is named in
+its output. A guard that skips in CI is a guard that runs when someone
+remembers.
+
+### Apps the loop structurally cannot operate
+
+**`gnome-system-monitor`'s process list never reaches AT-SPI at all.** Zero
+row-like nodes (`table row`, `table cell`, `tree table`, `table`, `tree item`,
+`list item`) anywhere in its 118-node full tree, showing or not. This is not a
+role gap and no role set reaches it — the widget does not expose its rows.
+
+**Do not spend harvest states on its process view.** Its tab switcher is
+worth capturing (that one was a real role gap, now fixed); its process list is
+not capturable by anything.
 
 ### Why this precedes the real harvest
 
