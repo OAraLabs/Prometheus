@@ -22,6 +22,7 @@ from prometheus.computer.corpus import (
     REASON_KEY_NOT_OFFERED,
     REASON_NOT_ACHIEVABLE_HERE,
     REASON_VERB_NOT_OFFERED,
+    LABEL_HUMAN,
     CorpusStore,
     TableRecord,
     load_corpus,
@@ -51,7 +52,7 @@ def test_none_correct_without_a_reason_is_refused(tmp_path):
     store = _store(tmp_path)
     _capture(store)
     with pytest.raises(ValueError, match="requires none_correct_reason"):
-        store.record_annotation("r1", ANNOTATION_NONE_CORRECT, annotated_by="will")
+        store.record_annotation("r1", ANNOTATION_NONE_CORRECT, annotated_by="will", label_source=LABEL_HUMAN)
 
 
 def test_a_free_text_reason_is_refused(tmp_path):
@@ -61,7 +62,7 @@ def test_a_free_text_reason_is_refused(tmp_path):
     with pytest.raises(ValueError, match="not a known reason"):
         store.record_annotation(
             "r1", ANNOTATION_NONE_CORRECT,
-            annotated_by="will", none_correct_reason="couldn't do it",
+            annotated_by="will", label_source=LABEL_HUMAN, none_correct_reason="couldn't do it",
         )
 
 
@@ -71,12 +72,12 @@ def test_a_reason_beside_a_real_candidate_is_refused(tmp_path):
     _capture(store)
     with pytest.raises(ValueError, match="only meaningful with"):
         store.record_annotation(
-            "r1", "click-0", annotated_by="will",
+            "r1", "click-0", annotated_by="will", label_source=LABEL_HUMAN,
             none_correct_reason=REASON_VERB_NOT_OFFERED,
         )
     with pytest.raises(ValueError, match="only meaningful with"):
         store.record_annotation(
-            "r1", ANNOTATION_TABLE_UNUSABLE, annotated_by="will",
+            "r1", ANNOTATION_TABLE_UNUSABLE, annotated_by="will", label_source=LABEL_HUMAN,
             none_correct_reason=REASON_VERB_NOT_OFFERED,
         )
 
@@ -87,7 +88,7 @@ def test_every_declared_reason_round_trips(tmp_path, reason):
     _capture(store, reason)
     store.record_annotation(
         reason, ANNOTATION_NONE_CORRECT,
-        annotated_by="will", none_correct_reason=reason,
+        annotated_by="will", label_source=LABEL_HUMAN, none_correct_reason=reason,
     )
     row = load_corpus(store).none_correct[0]
     assert row["none_correct_reason"] == reason
@@ -109,7 +110,7 @@ def test_the_split_separates_table_defects_from_genuine_abstains(tmp_path):
         _capture(store, rid)
         store.record_annotation(
             rid, ANNOTATION_NONE_CORRECT,
-            annotated_by="will", none_correct_reason=reason,
+            annotated_by="will", label_source=LABEL_HUMAN, none_correct_reason=reason,
         )
 
     corpus = load_corpus(store)
@@ -135,7 +136,7 @@ def test_the_column_and_its_provenance_cannot_drift(tmp_path):
     _capture(store)
     store.record_annotation(
         "r1", ANNOTATION_NONE_CORRECT,
-        annotated_by="will", none_correct_reason=REASON_VERB_NOT_OFFERED,
+        annotated_by="will", label_source=LABEL_HUMAN, none_correct_reason=REASON_VERB_NOT_OFFERED,
     )
     with sqlite3.connect(store.db_path) as conn:
         on_row = conn.execute(

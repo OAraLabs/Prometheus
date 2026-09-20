@@ -276,7 +276,43 @@ classifier reads the same table and finds nothing that undoes anything, because
 Judging a classifier before step 3 measures the table's limits and reports them
 as the chooser's.
 
-## 7. Provenance on every row
+## 7. Label provenance — and the harvest order
+
+`label_source` is required whenever `correct_id` is set. There is **no
+default**: `human` would be the comfortable one and the wrong one.
+
+| value | meaning |
+|---|---|
+| `human` | a person decided, having looked at the table. **The only labels a score may be called accuracy against.** |
+| `model` | a model proposed it, nobody checked. A score here is **agreement with a model**. |
+| `model_confirmed` | a model proposed it and a person confirmed or corrected it. Weaker than `human` — the person saw a suggestion first, and anchoring is real — so it is tracked separately rather than folded into either neighbour. |
+
+**Every summary and score reports its label mix, in words.** A number over
+`model` rows prints `AGREEMENT WITH A MODEL — not accuracy`, and a mixed corpus
+refuses to be summarised as either. A reader who skims must not be able to pick
+up the wrong word, so the rule is in the output rather than in a footnote, and a
+test asserts that the word "accuracy" never appears except inside a denial of it.
+
+The reason is the one `tests/fixtures/divergence_traces.py` already states: *a
+calibration round that cannot tell the two apart is calibrating against its own
+author.* A chooser graded against labels another model produced can only be
+measured on how alike they are.
+
+### Harvest order — do not reorder
+
+1. **Will hand-labels ~20 tables COLD**, before any model proposal exists. This
+   is the calibration set and it must not see a suggestion first — that is what
+   makes it a control rather than a confirmation.
+2. **Claude labels all ~100**, recorded as `model`.
+3. **Compare against the 20.** Report agreement.
+4. **Will decides** whether the remaining ~80 are usable as-is, need confirming
+   (`model_confirmed`), or get hand-labelled.
+
+⚠ Step 1 precedes step 2 for a reason that cannot be recovered afterwards: once
+a human has seen a model's answer, the label is `model_confirmed` at best and
+the calibration set no longer exists.
+
+## 8. Provenance on every row
 
 Four fields exist so a row cannot quietly mean something other than it appears
 to. Each one is stored, not inferred at read time.
@@ -291,7 +327,7 @@ to. Each one is stored, not inferred at read time.
 `table_fingerprint` is also stored, over the sorted `(id, description)` pairs, so
 the same window captured twice is identifiable rather than double-counted.
 
-## 8. Redaction
+## 9. Redaction
 
 Candidate descriptions are built from AT-SPI labels scraped off a live desktop:
 window titles, button text, field labels, and sometimes document content. A
@@ -304,7 +340,7 @@ decision, not a formatting one.
 - Apply the project's existing redaction before writing, not after.
 - The app allowlist in §4.1 is the primary control; redaction is the backstop.
 
-## 9. What this spec does not cover
+## 10. What this spec does not cover
 
 `hf-server`, SimpleJev, any classifier, and any scoring harness. Those come
 after a corpus exists and after the licence question is answered. This document

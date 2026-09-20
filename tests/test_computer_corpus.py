@@ -34,6 +34,7 @@ from prometheus.computer.corpus import (
     REASON_NOT_ACHIEVABLE_HERE,
     ANNOTATION_TABLE_UNUSABLE,
     CORPUS_SCHEMA_VERSION,
+    LABEL_HUMAN,
     CorpusStore,
     TableRecord,
     load_corpus,
@@ -259,7 +260,7 @@ def test_unannotated_is_not_none_correct(tmp_path):
     _capture_one(store, "unreviewed")
     _capture_one(store, "reviewed")
     store.record_annotation(
-        "reviewed", ANNOTATION_NONE_CORRECT, annotated_by="will",
+        "reviewed", ANNOTATION_NONE_CORRECT, annotated_by="will", label_source=LABEL_HUMAN,
         none_correct_reason=REASON_NOT_ACHIEVABLE_HERE,
     )
 
@@ -277,7 +278,7 @@ def test_table_unusable_is_excluded_not_counted_wrong(tmp_path):
     store = _store(tmp_path)
     _capture_one(store, "broken")
     store.record_annotation(
-        "broken", ANNOTATION_TABLE_UNUSABLE, annotated_by="will"
+        "broken", ANNOTATION_TABLE_UNUSABLE, annotated_by="will", label_source=LABEL_HUMAN
     )
 
     corpus = load_corpus(store)
@@ -294,7 +295,7 @@ def test_there_is_no_way_to_write_down_unannotated(tmp_path):
     store = _store(tmp_path)
     _capture_one(store)
     with pytest.raises(ValueError, match="NO row"):
-        store.record_annotation("r1", "", annotated_by="will")
+        store.record_annotation("r1", "", annotated_by="will", label_source=LABEL_HUMAN)
 
 
 def test_an_answer_outside_the_table_is_refused(tmp_path):
@@ -302,15 +303,15 @@ def test_an_answer_outside_the_table_is_refused(tmp_path):
     store = _store(tmp_path)
     _capture_one(store)
     with pytest.raises(ValueError, match="not a candidate"):
-        store.record_annotation("r1", "click-99", annotated_by="will")
+        store.record_annotation("r1", "click-99", annotated_by="will", label_source=LABEL_HUMAN)
 
 
 def test_a_revision_supersedes_without_erasing(tmp_path):
     store = _store(tmp_path)
     _capture_one(store)
-    store.record_annotation("r1", "click-0", annotated_by="will")
+    store.record_annotation("r1", "click-0", annotated_by="will", label_source=LABEL_HUMAN)
     store.record_annotation(
-        "r1", "click-1", annotated_by="will", note="looked again"
+        "r1", "click-1", annotated_by="will", label_source=LABEL_HUMAN, note="looked again"
     )
 
     corpus = load_corpus(store)
@@ -336,7 +337,7 @@ def test_the_executed_answer_is_not_the_correct_answer(tmp_path):
     row = store.all_tables()[0]
     assert row["executed_candidate_id"] == "click-0"
     store.record_annotation(
-        row["record_id"], "click-1", annotated_by="will",
+        row["record_id"], "click-1", annotated_by="will", label_source=LABEL_HUMAN,
         note="the goal said cancel; it clicked send",
     )
 
@@ -406,7 +407,7 @@ def test_summary_names_the_unannotated_count(tmp_path):
     store = _store(tmp_path)
     _capture_one(store, "a")
     _capture_one(store, "b")
-    store.record_annotation("a", "click-0", annotated_by="will")
+    store.record_annotation("a", "click-0", annotated_by="will", label_source=LABEL_HUMAN)
     summary = load_corpus(store).summary()
     assert "1 UNANNOTATED" in summary and "50%" in summary, summary
 

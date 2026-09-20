@@ -106,6 +106,41 @@ ANNOTATION_NONE_CORRECT = "none_correct"
 #: the chooser, so this row is EXCLUDED from scoring rather than counted lost.
 ANNOTATION_TABLE_UNUSABLE = "table_unusable"
 
+# --------------------------------------------------------------------------- #
+# LABEL PROVENANCE — who said this was the right answer
+#
+# A number computed over model-proposed labels is AGREEMENT WITH A MODEL. It is
+# not accuracy, and the two are not interchangeable: a chooser scored against
+# labels another model produced can only be measured on how alike they are,
+# which is exactly the "calibrating against its own author" failure
+# tests/fixtures/divergence_traces.py forbids in its opening paragraph.
+#
+# ⚠ Like every other provenance field here, it CANNOT BE RETROFITTED. Once a
+# corpus is labelled and nobody wrote down who labelled it, no later reader can
+# separate the human rows from the model rows — and the calibration set is
+# precisely the difference between them.
+# --------------------------------------------------------------------------- #
+
+#: A person decided, having looked at the table. The only labels against which
+#: a score may be called ACCURACY.
+LABEL_HUMAN = "human"
+
+#: A model proposed it and no person checked. A score over these rows measures
+#: AGREEMENT WITH A MODEL.
+LABEL_MODEL = "model"
+
+#: A model proposed it and a person then confirmed or corrected it. Weaker than
+#: `human` — the person saw a suggestion first, and anchoring is real — so it
+#: is tracked separately rather than folded into either neighbour.
+LABEL_MODEL_CONFIRMED = "model_confirmed"
+
+LABEL_SOURCES = frozenset({LABEL_HUMAN, LABEL_MODEL, LABEL_MODEL_CONFIRMED})
+
+#: Sources a score may be reported as ACCURACY against. Deliberately a set of
+#: one: `model_confirmed` is excluded because the confirming human saw the
+#: model's answer first.
+ACCURACY_GRADE_SOURCES = frozenset({LABEL_HUMAN})
+
 #: WHY no candidate was correct. Mandatory whenever the answer is
 #: ``none_correct``, because the four causes want OPPOSITE responses and a
 #: corpus that cannot tell them apart measures the TABLE'S limits and reports
@@ -227,6 +262,9 @@ CREATE TABLE IF NOT EXISTS tables (
     -- three of the four are table defects the deterministic path can fix, and
     -- only 'not_achievable_here' is a row where abstaining is RIGHT.
     none_correct_reason   TEXT,
+    -- WHO said so: human | model | model_confirmed. Required with correct_id.
+    -- A score over `model` rows is AGREEMENT WITH A MODEL, never accuracy.
+    label_source          TEXT,
 
     -- provenance + diagnostics (NOT part of the replay surface)
     driver_kind           TEXT NOT NULL DEFAULT 'unknown',
@@ -255,6 +293,7 @@ CREATE TABLE IF NOT EXISTS annotations (
     record_id             TEXT NOT NULL,
     correct_candidate_id  TEXT NOT NULL,
     none_correct_reason   TEXT,
+    label_source          TEXT NOT NULL,
     annotated_by          TEXT NOT NULL,
     annotated_at          REAL NOT NULL,
     note                  TEXT NOT NULL DEFAULT ''
@@ -565,6 +604,7 @@ class CorpusStore:
         correct_candidate_id: str,
         *,
         annotated_by: str,
+        label_source: str,
         none_correct_reason: str | None = None,
         note: str = "",
     ) -> None:
@@ -588,7 +628,21 @@ class CorpusStore:
         where abstaining is the right answer — so a ``none_correct`` row with no
         reason is a row that can never be placed on either side of that split.
         It cannot be backfilled: nobody recorded why.
+
+        ``label_source`` is REQUIRED — there is no default. A label whose author
+        is unrecorded cannot be separated from the calibration set later, and a
+        score computed over model-proposed labels is AGREEMENT WITH A MODEL
+        rather than accuracy. Defaulting it to ``human`` would be the
+        comfortable choice and the wrong one.
         """
+        if label_source not in LABEL_SOURCES:
+            raise ValueError(
+                f"label_source must be one of {sorted(LABEL_SOURCES)}, got "
+                f"{label_source!r}. A label whose author is unrecorded cannot "
+                f"be separated from the calibration set later, and a score over "
+                f"model-proposed labels is AGREEMENT WITH A MODEL, not accuracy. "
+                f"It cannot be added afterwards."
+            )
         if correct_candidate_id == ANNOTATION_NONE_CORRECT:
             if none_correct_reason is None:
                 raise ValueError(
@@ -632,18 +686,19 @@ class CorpusStore:
                 """
                 INSERT INTO annotations (
                     record_id, correct_candidate_id, none_correct_reason,
-                    annotated_by, annotated_at, note
-                ) VALUES (?,?,?,?,?,?)
+                    label_source, annotated_by, annotated_at, note
+                ) VALUES (?,?,?,?,?,?,?)
                 """,
                 (record_id, correct_candidate_id, none_correct_reason,
-                 annotated_by, time.time(), note),
+                 label_source, annotated_by, time.time(), note),
             )
             # Materialise onto the row in the SAME transaction, so the column
             # and its provenance cannot drift.
             conn.execute(
-                "UPDATE tables SET correct_id = ?, none_correct_reason = ? "
-                "WHERE record_id = ?",
-                (correct_candidate_id, none_correct_reason, record_id),
+                "UPDATE tables SET correct_id = ?, none_correct_reason = ?, "
+                "label_source = ? WHERE record_id = ?",
+                (correct_candidate_id, none_correct_reason, label_source,
+                 record_id),
             )
 
     # -- reads -------------------------------------------------------------
@@ -733,6 +788,11 @@ INTENTIONALLY_ABSENT: dict[str, str] = {
     "correct_id": (
         "filled by a human AFTER harvest. Empty on a freshly harvested corpus "
         "by design — `unannotated` is the state this measures."
+    ),
+    "label_source": (
+        "written with correct_id at annotation time, so it is empty on a "
+        "freshly harvested corpus for the same reason. REQUIRED once a label "
+        "exists — record_annotation refuses without it."
     ),
 }
 
@@ -837,6 +897,31 @@ class ScorableCorpus:
             )
         return out
 
+    def label_mix(self) -> dict[str, int]:
+        """How many labels came from where. Reported on every score."""
+        out: dict[str, int] = {}
+        for row in self.scorable:
+            src = row.get("label_source") or "(unrecorded)"
+            out[src] = out.get(src, 0) + 1
+        return out
+
+    def score_noun(self) -> str:
+        """What a number over these rows MAY be called.
+
+        Not a footnote and not a caller's choice. A score over model-proposed
+        labels measures how alike two models are; calling that "accuracy" is
+        the claim the corpus cannot support, and a reader who skims must not be
+        able to pick up the wrong word.
+        """
+        mix = self.label_mix()
+        if not mix:
+            return "nothing scorable"
+        if set(mix) <= ACCURACY_GRADE_SOURCES:
+            return "accuracy (labels are human)"
+        if LABEL_MODEL in mix and set(mix) == {LABEL_MODEL}:
+            return "AGREEMENT WITH A MODEL — not accuracy"
+        return "MIXED LABEL SOURCES — not accuracy; split before reporting"
+
     def summary(self) -> str:
         total = (
             len(self.answered) + len(self.none_correct)
@@ -849,6 +934,18 @@ class ScorableCorpus:
             f"none-correct), {len(self.unusable)} unusable-excluded, "
             f"{len(self.unannotated)} UNANNOTATED ({pct}%)"
         )
+        mix = self.label_mix()
+        if mix:
+            base += "\n  label sources: " + ", ".join(
+                f"{k}={v}" for k, v in sorted(mix.items())
+            )
+            base += f"\n  a score over these rows is: {self.score_noun()}"
+            if set(mix) - ACCURACY_GRADE_SOURCES:
+                base += (
+                    "\n  ⚠ NOT ACCURACY. Some labels were proposed by a model, "
+                    "so a number over them measures how alike two models are. "
+                    "Only rows labelled by a human grade as accuracy."
+                )
         by_reason = self.none_correct_by_reason()
         if by_reason:
             parts = ", ".join(f"{k}={v}" for k, v in sorted(by_reason.items()))
@@ -890,6 +987,7 @@ def load_corpus(store: CorpusStore) -> ScorableCorpus:
             **row,
             "correct_candidate_id": answer,
             "none_correct_reason": ann["none_correct_reason"],
+            "label_source": ann["label_source"],
             "annotated_by": ann["annotated_by"],
         }
         if answer == ANNOTATION_TABLE_UNUSABLE:

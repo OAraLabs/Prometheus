@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from prometheus.computer.corpus import (  # noqa: E402
     ANNOTATION_NONE_CORRECT,
     ANNOTATION_TABLE_UNUSABLE,
+    ACCURACY_GRADE_SOURCES,
     CorpusStore,
     IncompleteCorpus,
     assert_corpus_complete,
@@ -106,7 +107,8 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
     try:
         store.record_annotation(
             args.record_id, args.answer,
-            annotated_by=args.by, note=args.note,
+            annotated_by=args.by, label_source=args.label_source,
+            note=args.note,
         )
     except ValueError as exc:
         print(f"refused: {exc}", file=sys.stderr)
@@ -150,12 +152,19 @@ def _cmd_score(args: argparse.Namespace) -> int:
         hits = sum(1 for r in bucket if _right(r))
         sizes = [r["candidate_count"] for r in bucket]
         chance = sum(1 / n for n in sizes if n) / len(bucket)
-        print(f"{label:<20} {hits}/{len(bucket)} correct "
+        print(f"{label:<20} {hits}/{len(bucket)} matching the label "
               f"({100 * hits // len(bucket)}%) — chance floor "
               f"{100 * chance:.1f}%, median table {sorted(sizes)[len(sizes) // 2]}")
     print()
-    print("⚠ These populations are not comparable to each other and a blended")
-    print("  accuracy over both would be meaningless. See docs/computer-use-corpus.md.")
+    print(f"WHAT THESE NUMBERS ARE: {corpus.score_noun()}")
+    if set(corpus.label_mix()) - ACCURACY_GRADE_SOURCES:
+        print("  ⚠ Some labels were PROPOSED BY A MODEL. A number over those rows")
+        print("    measures how alike two models are — it is agreement, not")
+        print("    accuracy, and it cannot be reported as accuracy.")
+    print()
+    print("⚠ The two populations above are not comparable to each other, and a")
+    print("  blended number over both would be meaningless. See")
+    print("  docs/computer-use-corpus.md.")
     return 0
 
 
@@ -196,6 +205,13 @@ def main() -> int:
               f"(the table should not have existed)"),
     )
     a.add_argument("--by", required=True, help="who is asserting this")
+    a.add_argument(
+        "--label-source", required=True,
+        choices=("human", "model", "model_confirmed"),
+        help=("WHO decided. No default: a score over model-proposed labels is "
+              "AGREEMENT WITH A MODEL, not accuracy, and it cannot be "
+              "separated out afterwards if nobody recorded it."),
+    )
     a.add_argument("--note", default="")
     a.set_defaults(fn=_cmd_annotate)
 
