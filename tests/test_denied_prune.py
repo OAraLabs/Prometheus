@@ -92,6 +92,10 @@ class TestDeniedResolution:
         assert entry in denied
         # ...and still denies a file that matches it, plus its subtree.
         assert is_denied(tmp_path / "a" / "xenv", denied)
+        # Created for the same reason as in test_subpaths_are_denied: an
+        # absent path is denied because it cannot be verified, which would
+        # fail this assertion while the PATTERN logic under test was correct.
+        (tmp_path / "a" / "other.txt").write_text("x")
         assert not is_denied(tmp_path / "a" / "other.txt", denied)
 
     def test_a_star_glob_spans_path_separators_like_the_gate(self, tmp_path):
@@ -112,9 +116,23 @@ class TestDeniedResolution:
         assert resolve_denied([str(tmp_path / "nope")]) or True  # no raise
 
     def test_subpaths_are_denied(self, tmp_path):
+        """Both paths are CREATED, and that is load-bearing now.
+
+        They used not to exist, which made both assertions prove something
+        other than what they say. Since the guard fails closed on anything it
+        cannot verify, a nonexistent path is denied for THAT reason — so the
+        positive assertion would pass even against a matcher that had stopped
+        matching subpaths, and the negative one would fail against a matcher
+        that was working perfectly. Existing files put the matching rule back
+        under test.
+        """
         denied = resolve_denied([str(tmp_path / "d")])
         (tmp_path / "d").mkdir()
         denied = resolve_denied([str(tmp_path / "d")])
+        (tmp_path / "d" / "deep").mkdir()
+        (tmp_path / "d" / "deep" / "f.txt").write_text("x")
+        (tmp_path / "other").mkdir()
+        (tmp_path / "other" / "f.txt").write_text("x")
         assert is_denied(tmp_path / "d" / "deep" / "f.txt", denied)
         assert not is_denied(tmp_path / "other" / "f.txt", denied)
 
@@ -127,6 +145,44 @@ class TestDeniedResolution:
         loop = tmp_path / "loop"
         loop.symlink_to(loop)
         assert is_denied(loop, denied)
+
+    def test_a_BROKEN_SYMLINK_is_treated_as_denied(self, tmp_path):
+        """The loop case above was the only unresolvable input covered, and it
+        was the only one that happened to RAISE.
+
+        ``matches_any_denied`` promises to fail closed on "a broken symlink or
+        a loop". It delivered that for a loop only by accident: non-strict
+        ``Path.resolve()`` raises for a symlink cycle and returns the path
+        unchanged for a dangling one, so the ``except`` never fired here and
+        the guard fell through to the membership test. Measured on 3.12.3
+        before the fix: ``is_denied`` returned False.
+        """
+        denied = resolve_denied([str(tmp_path / "d")])
+        (tmp_path / "d").mkdir()
+        denied = resolve_denied([str(tmp_path / "d")])
+        broken = tmp_path / "broken"
+        broken.symlink_to(tmp_path / "target-that-does-not-exist")
+        assert is_denied(broken, denied), (
+            "a dangling symlink resolved to a path nobody can verify and was "
+            "handed back as allowed"
+        )
+
+    def test_a_NONEXISTENT_path_is_treated_as_denied(self, tmp_path):
+        """The third unresolvable shape, and the one with no symlink in it.
+
+        Non-strict resolve() returns a nonexistent path unchanged, so the
+        guard compared a path that does not exist against the deny list and
+        answered on its SPELLING. Every production caller enumerates the
+        filesystem (glob/grep results), so a path arriving here that does not
+        exist means reality disagrees with the caller -- which is precisely
+        when a security boundary should refuse rather than guess.
+        """
+        denied = resolve_denied([str(tmp_path / "d")])
+        (tmp_path / "d").mkdir()
+        denied = resolve_denied([str(tmp_path / "d")])
+        assert is_denied(tmp_path / "vanished.txt", denied), (
+            "a path that does not exist was verified as allowed"
+        )
 
 
 class TestTheShippedFloorActuallyWithholdsCredentials:
