@@ -106,6 +106,53 @@ ANNOTATION_NONE_CORRECT = "none_correct"
 #: the chooser, so this row is EXCLUDED from scoring rather than counted lost.
 ANNOTATION_TABLE_UNUSABLE = "table_unusable"
 
+#: WHY no candidate was correct. Mandatory whenever the answer is
+#: ``none_correct``, because the four causes want OPPOSITE responses and a
+#: corpus that cannot tell them apart measures the TABLE'S limits and reports
+#: them as the CHOOSER'S.
+#:
+#: Established by reading ``build_candidates`` against ``ACTION_MODELS`` at
+#: 424edc1: seven verbs are declared, three tool names are ever emitted, 12 of
+#: 15 ``ALLOWED_KEYS`` are unreachable, and there are no modifier combinations
+#: at all. ``scroll`` and ``invoke_menu`` carry full models, schemas, gate
+#: wiring and operator-facing consent phrases, and cannot be selected because
+#: nothing puts them in a table.
+#:
+#: So part of the measured 50% abstain rate is a table that cannot express the
+#: goal — rows no chooser, local or hosted, will ever improve. Worked example:
+#: "undo my last change" against a table offering only clicks, a type target
+#: and return/tab/escape. Both RuleChooser and a classifier abstain correctly,
+#: because ``invoke_menu(['Edit','Undo'])`` was never offered and Ctrl+Z has no
+#: representation. The gap was never the chooser.
+#:
+#: ⚠ CANNOT BE RETROFITTED. A corpus harvested without this cannot be split
+#: afterwards — nobody recorded why. That is why it lands with step 1.
+
+#: The verb exists in ``ACTION_MODELS`` but ``build_candidates`` never emits it
+#: (``scroll``, ``invoke_menu``). Fixable deterministically; no classifier
+#: needed and none would help.
+REASON_VERB_NOT_OFFERED = "verb_not_offered"
+
+#: Needs a key in ``ALLOWED_KEYS`` outside return/tab/escape, or a modifier
+#: combination — which has no representation anywhere today.
+REASON_KEY_NOT_OFFERED = "key_not_offered"
+
+#: The target was not in the observation at all. An observation problem, not a
+#: table-construction one.
+REASON_ELEMENT_NOT_IN_TREE = "element_not_in_tree"
+
+#: The goal genuinely cannot be done in this window. THE ONLY REASON FOR WHICH
+#: ABSTAINING IS THE CORRECT ANSWER — and therefore the only one against which
+#: a classifier that picks something scores a REGRESSION rather than a gain.
+REASON_NOT_ACHIEVABLE_HERE = "not_achievable_here"
+
+NONE_CORRECT_REASONS = frozenset({
+    REASON_VERB_NOT_OFFERED,
+    REASON_KEY_NOT_OFFERED,
+    REASON_ELEMENT_NOT_IN_TREE,
+    REASON_NOT_ACHIEVABLE_HERE,
+})
+
 SENTINEL_ANNOTATIONS = frozenset(
     {ANNOTATION_NONE_CORRECT, ANNOTATION_TABLE_UNUSABLE}
 )
@@ -176,6 +223,10 @@ CREATE TABLE IF NOT EXISTS tables (
     -- NULL means nobody has judged this yet. Materialised from the latest
     -- annotations row in the same transaction that writes it.
     correct_id            TEXT,
+    -- Populated iff correct_id == 'none_correct'. See NONE_CORRECT_REASONS:
+    -- three of the four are table defects the deterministic path can fix, and
+    -- only 'not_achievable_here' is a row where abstaining is RIGHT.
+    none_correct_reason   TEXT,
 
     -- provenance + diagnostics (NOT part of the replay surface)
     driver_kind           TEXT NOT NULL DEFAULT 'unknown',
@@ -203,6 +254,7 @@ CREATE TABLE IF NOT EXISTS annotations (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
     record_id             TEXT NOT NULL,
     correct_candidate_id  TEXT NOT NULL,
+    none_correct_reason   TEXT,
     annotated_by          TEXT NOT NULL,
     annotated_at          REAL NOT NULL,
     note                  TEXT NOT NULL DEFAULT ''
@@ -452,31 +504,48 @@ class CorpusStore:
                 conn.execute(
                     """
                     INSERT INTO tables (
-                        record_id, captured_at, schema_version, goal, target,
-                        app, window_id, pid, driver_kind, goal_source,
-                        harvest_session, table_fingerprint, code_fingerprint,
-                        snapshot_id, unusable_reason,
-                        candidates_json, candidate_count, chooser_answer_id,
-                        chooser_source, chooser_confidence,
-                        executed_candidate_id, status, reason, verified,
-                        extent, exception
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        record_id, captured_at, schema_version,
+                        goal, snapshot_id, candidates_json, history_json,
+                        target, app, window_id, pid, candidate_count,
+                        deterministic_chooser, deterministic_id,
+                        deterministic_confidence, deterministic_abstained,
+                        shadow_chooser, shadow_id, shadow_confidence,
+                        shadow_latency_ms, agreed,
+                        executed_candidate_id, verified,
+                        gate_decision, gate_approval_required,
+                        gate_approval_granted,
+                        driver_kind, goal_source, harvest_session,
+                        table_fingerprint, code_fingerprint,
+                        unusable_reason, status, reason, extent, exception
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         record.record_id, time.time(), CORPUS_SCHEMA_VERSION,
-                        _scrub(record.goal, MAX_GOAL_CHARS),
+                        # THE REPLAY SURFACE — verbatim, see note_candidates.
+                        record.goal, record.snapshot_id,
+                        json.dumps(record.candidates, ensure_ascii=False),
+                        json.dumps(record.history, ensure_ascii=False),
                         record.target, record.app, record.window_id,
-                        record.pid, record.driver_kind, record.goal_source,
+                        record.pid, len(record.candidates),
+                        record.deterministic_chooser, record.deterministic_id,
+                        record.deterministic_confidence,
+                        int(record.deterministic_abstained),
+                        record.shadow_chooser, record.shadow_id,
+                        record.shadow_confidence, record.shadow_latency_ms,
+                        None if record.agreed is None else int(record.agreed),
+                        record.executed_candidate_id,
+                        None if record.verified is None else int(record.verified),
+                        record.gate_decision,
+                        None if record.gate_approval_required is None
+                        else int(record.gate_approval_required),
+                        None if record.gate_approval_granted is None
+                        else int(record.gate_approval_granted),
+                        record.driver_kind, record.goal_source,
                         record.harvest_session,
                         _table_fingerprint(record.candidates),
                         code_fingerprint(),
-                        record.snapshot_id, record.unusable_reason,
-                        json.dumps(record.candidates, ensure_ascii=False),
-                        len(record.candidates), record.chooser_answer_id,
-                        record.chooser_source, record.chooser_confidence,
-                        record.executed_candidate_id, record.status,
-                        record.reason,
-                        None if record.verified is None else int(record.verified),
+                        record.unusable_reason, record.status,
+                        _scrub(record.reason, MAX_REASON_CHARS),
                         record.extent, record.exception,
                     ),
                 )
@@ -496,6 +565,7 @@ class CorpusStore:
         correct_candidate_id: str,
         *,
         annotated_by: str,
+        none_correct_reason: str | None = None,
         note: str = "",
     ) -> None:
         """Append one judgment. Raises on a bad one — this is a human's input.
@@ -510,7 +580,37 @@ class CorpusStore:
         An id that is not in the record's own table is refused too. A typo that
         lands as a valid-looking answer is unrecoverable later — nothing
         downstream can tell it from a real judgment.
+
+        ``none_correct_reason`` is REQUIRED with ``ANNOTATION_NONE_CORRECT`` and
+        REFUSED with anything else, both enforced here rather than documented.
+        The four reasons want opposite responses — three are table defects the
+        deterministic path can fix, and only ``not_achievable_here`` is a row
+        where abstaining is the right answer — so a ``none_correct`` row with no
+        reason is a row that can never be placed on either side of that split.
+        It cannot be backfilled: nobody recorded why.
         """
+        if correct_candidate_id == ANNOTATION_NONE_CORRECT:
+            if none_correct_reason is None:
+                raise ValueError(
+                    f"{ANNOTATION_NONE_CORRECT!r} requires none_correct_reason. "
+                    f"One of {sorted(NONE_CORRECT_REASONS)}. Without it this row "
+                    f"cannot be split into 'the table could not express the goal' "
+                    f"versus 'abstaining was correct', and those are the two "
+                    f"halves a classifier is judged on. It cannot be added later."
+                )
+            if none_correct_reason not in NONE_CORRECT_REASONS:
+                raise ValueError(
+                    f"{none_correct_reason!r} is not a known reason. "
+                    f"Known: {sorted(NONE_CORRECT_REASONS)}. A free-text reason "
+                    f"cannot be aggregated, and aggregating them is the point."
+                )
+        elif none_correct_reason is not None:
+            raise ValueError(
+                f"none_correct_reason is only meaningful with "
+                f"{ANNOTATION_NONE_CORRECT!r}, not with "
+                f"{correct_candidate_id!r} — a reason stored beside a real "
+                f"candidate id would be read as explaining a choice it does not."
+            )
         if not correct_candidate_id:
             raise ValueError(
                 "correct_candidate_id cannot be empty — an unannotated record "
@@ -531,11 +631,19 @@ class CorpusStore:
             conn.execute(
                 """
                 INSERT INTO annotations (
-                    record_id, correct_candidate_id, annotated_by,
-                    annotated_at, note
-                ) VALUES (?,?,?,?,?)
+                    record_id, correct_candidate_id, none_correct_reason,
+                    annotated_by, annotated_at, note
+                ) VALUES (?,?,?,?,?,?)
                 """,
-                (record_id, correct_candidate_id, annotated_by, time.time(), note),
+                (record_id, correct_candidate_id, none_correct_reason,
+                 annotated_by, time.time(), note),
+            )
+            # Materialise onto the row in the SAME transaction, so the column
+            # and its provenance cannot drift.
+            conn.execute(
+                "UPDATE tables SET correct_id = ?, none_correct_reason = ? "
+                "WHERE record_id = ?",
+                (correct_candidate_id, none_correct_reason, record_id),
             )
 
     # -- reads -------------------------------------------------------------
@@ -595,18 +703,53 @@ class ScorableCorpus:
         are excluded, and excluded differently from being counted wrong."""
         return [*self.answered, *self.none_correct]
 
+    def none_correct_by_reason(self) -> dict[str, int]:
+        """The split that decides the sequencing.
+
+        ``verb_not_offered`` + ``key_not_offered`` are table defects: fixable
+        deterministically, no dependency, no licence, no latency. If they are a
+        large share, ``build_candidates`` is fixed and the corpus RE-MEASURED
+        before any classifier is judged — otherwise the measurement is of the
+        table's limits, reported as the chooser's.
+
+        ``not_achievable_here`` is the only reason for which abstaining is
+        CORRECT, and therefore the only population against which a classifier
+        that picks something scores a regression rather than a gain.
+        """
+        out: dict[str, int] = {}
+        for row in self.none_correct:
+            out[row.get("none_correct_reason") or "(unrecorded)"] = (
+                out.get(row.get("none_correct_reason") or "(unrecorded)", 0) + 1
+            )
+        return out
+
     def summary(self) -> str:
         total = (
             len(self.answered) + len(self.none_correct)
             + len(self.unusable) + len(self.unannotated)
         )
         pct = (100 * len(self.unannotated) // total) if total else 0
-        return (
+        base = (
             f"{total} tables: {len(self.scorable)} scorable "
             f"({len(self.answered)} answered, {len(self.none_correct)} "
             f"none-correct), {len(self.unusable)} unusable-excluded, "
             f"{len(self.unannotated)} UNANNOTATED ({pct}%)"
         )
+        by_reason = self.none_correct_by_reason()
+        if by_reason:
+            parts = ", ".join(f"{k}={v}" for k, v in sorted(by_reason.items()))
+            table_defects = sum(
+                v for k, v in by_reason.items()
+                if k in (REASON_VERB_NOT_OFFERED, REASON_KEY_NOT_OFFERED)
+            )
+            base += f"\n  none-correct by reason: {parts}"
+            if table_defects:
+                base += (
+                    f"\n  ⚠ {table_defects} row(s) are TABLE DEFECTS, not "
+                    f"chooser failures — fix build_candidates and re-measure "
+                    f"before judging any classifier on this corpus."
+                )
+        return base
 
 
 def load_corpus(store: CorpusStore) -> ScorableCorpus:
@@ -632,6 +775,7 @@ def load_corpus(store: CorpusStore) -> ScorableCorpus:
         merged = {
             **row,
             "correct_candidate_id": answer,
+            "none_correct_reason": ann["none_correct_reason"],
             "annotated_by": ann["annotated_by"],
         }
         if answer == ANNOTATION_TABLE_UNUSABLE:

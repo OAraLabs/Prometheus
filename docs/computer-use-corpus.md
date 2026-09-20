@@ -213,7 +213,70 @@ A corpus that collapses unannotated into `none_correct` silently scores every
 un-reviewed row as "abstain was correct" — which would make a chooser that
 always abstains look perfect on an unannotated corpus.
 
-## 6. Provenance on every row
+## 6. Table expressiveness — DIAGNOSED 2026-09-20, deliberately NOT fixed here
+
+Verified independently at `424edc1`, by AST over the source rather than by
+reading prose.
+
+| | |
+|---|---|
+| `ACTION_MODELS` declares | `observe, click, scroll, press_key, type_text, invoke_menu, verify` (7) |
+| `build_candidates` emits | `computer_click`, `computer_type_text` (caller-supplied text only), `computer_press_key` |
+| `press_key` offers | exactly `return`, `tab`, `escape` |
+| `ALLOWED_KEYS` declares | **15** keys — so **12 are unreachable** |
+| modifier combinations | **none exist at all** — Ctrl+Z, Ctrl+S have no representation |
+
+**`scroll` and `invoke_menu` can never be selected.** All three `Candidate(`
+constructions in the entire `src/` tree are inside `build_candidates`, and it
+has exactly one caller (`loop.py:118`). There is no other path into a table.
+Both verbs nonetheless carry full models, schemas, gate wiring, and
+operator-facing consent phrases — `_VERB_PHRASES` offers to grant "scroll
+anything" and "use any menu item" for capabilities that cannot be exercised.
+
+### Was the narrowing deliberate? No — the docstring asserts the opposite
+
+`actions.py` carries a section headed **"WHAT IS IN v1, AND WHAT IS
+DELIBERATELY NOT"**, and lists `scroll` and `invoke_menu` under **In**.
+`build_candidates`' own docstring says "Every bounded action worth offering for
+this snapshot", which reads as completeness.
+
+So this is not an undocumented decision. It is a documented claim that the code
+contradicts, under the one heading whose entire purpose is to separate
+deliberate omission from oversight. That is §1's orphan shape — a capability
+fully built and unreachable — inside the subsystem whose premise is that code
+and claim must not diverge.
+
+**Not fixed in this PR, on instruction.** Fixing `build_candidates` is
+deterministic, adds no dependency, needs no licence and costs no latency — and
+it changes the measurement, so it belongs in its own change with its own
+before/after.
+
+### Why this reorders the plan
+
+Part of the measured 50% abstain rate is **not chooser weakness — it is a table
+that cannot express the goal**. Those rows are `none_correct` by construction
+and no chooser, local or hosted, will ever improve them.
+
+Worked example. Goal: *"undo my last change"* in a text editor. The table offers
+"Click the button labelled 'Open'", "Click the text area", "Press escape".
+`RuleChooser` scores `{undo, last, change}`, gets zero overlap, abstains. A
+classifier reads the same table and finds nothing that undoes anything, because
+`invoke_menu(['Edit','Undo'])` was never offered and Ctrl+Z is not a candidate.
+**Both abstain correctly. The gap was never the chooser.**
+
+### Revised sequence
+
+1. Harvest with `none_correct_reason` recorded (this PR).
+2. Split the `none_correct` rows by reason.
+3. If `verb_not_offered` / `key_not_offered` are a large share, **fix
+   `build_candidates` first and re-measure.**
+4. Only then judge a classifier — against the smaller remaining gap, and
+   against an **embeddings baseline** rather than against substring matching.
+
+Judging a classifier before step 3 measures the table's limits and reports them
+as the chooser's.
+
+## 7. Provenance on every row
 
 Four fields exist so a row cannot quietly mean something other than it appears
 to. Each one is stored, not inferred at read time.
@@ -228,7 +291,7 @@ to. Each one is stored, not inferred at read time.
 `table_fingerprint` is also stored, over the sorted `(id, description)` pairs, so
 the same window captured twice is identifiable rather than double-counted.
 
-## 7. Redaction
+## 8. Redaction
 
 Candidate descriptions are built from AT-SPI labels scraped off a live desktop:
 window titles, button text, field labels, and sometimes document content. A
@@ -241,7 +304,7 @@ decision, not a formatting one.
 - Apply the project's existing redaction before writing, not after.
 - The app allowlist in §4.1 is the primary control; redaction is the backstop.
 
-## 8. What this spec does not cover
+## 9. What this spec does not cover
 
 `hf-server`, SimpleJev, any classifier, and any scoring harness. Those come
 after a corpus exists and after the licence question is answered. This document

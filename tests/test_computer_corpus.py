@@ -31,6 +31,7 @@ import pytest
 
 from prometheus.computer.corpus import (
     ANNOTATION_NONE_CORRECT,
+    REASON_NOT_ACHIEVABLE_HERE,
     ANNOTATION_TABLE_UNUSABLE,
     CORPUS_SCHEMA_VERSION,
     CorpusStore,
@@ -173,7 +174,7 @@ def test_the_table_is_captured_even_when_nothing_executed(tmp_path):
 
     row = store.all_tables()[0]
     assert row["executed_candidate_id"] is None
-    assert row["chooser_answer_id"] == CANDIDATE_ABSTAIN
+    assert row["deterministic_id"] == CANDIDATE_ABSTAIN
     assert row["candidate_count"] > 0
     ids = {c["id"] for c in row["candidates"]}
     assert "click-0" in ids and "click-1" in ids
@@ -201,19 +202,34 @@ def test_arguments_and_payloads_never_reach_the_corpus(tmp_path):
     assert "tok-send" not in blob, f"an element token was persisted: {blob}"
 
 
-def test_descriptions_are_redacted_and_bounded(tmp_path):
-    """Descriptions are accessibility labels off a live desktop."""
+def test_the_replay_surface_is_stored_verbatim(tmp_path):
+    """SUPERSEDES an earlier test that asserted descriptions were truncated.
+
+    The ruling is that the table is stored exactly as offered, because
+    ``replay_request`` must hand a future chooser the object the original
+    chooser was handed. A description shortened to 300 characters is a
+    DIFFERENT input, and scoring against it measures a different question.
+
+    The diagnostic fields (``reason``, ``exception``) are still scrubbed — the
+    line is replay fidelity, not "everything is now raw".
+    """
     store = _store(tmp_path)
     rec = TableRecord(goal="g", target="box", app="a", window_id=1)
 
+    long_desc = "Click the push button " + "A" * 400
+
     class FakeCandidate:
         candidate_id = "click-0"
-        description = "Click the push button sk-" + "A" * 400
+        description = long_desc
 
     rec.note_candidates([FakeCandidate()])
     assert store.capture(rec)
-    desc = store.all_tables()[0]["candidates"][0]["description"]
-    assert len(desc) <= 300, f"an unbounded description was stored ({len(desc)})"
+
+    stored = store.all_tables()[0]["candidates"][0]["description"]
+    assert stored == long_desc, (
+        "the description was altered on the way in, so a replayed "
+        "ChoiceRequest is not the one the chooser saw"
+    )
 
 
 # ── THE FOUR ANNOTATION STATES ──────────────────────────────────────────────
@@ -243,7 +259,8 @@ def test_unannotated_is_not_none_correct(tmp_path):
     _capture_one(store, "unreviewed")
     _capture_one(store, "reviewed")
     store.record_annotation(
-        "reviewed", ANNOTATION_NONE_CORRECT, annotated_by="will"
+        "reviewed", ANNOTATION_NONE_CORRECT, annotated_by="will",
+        none_correct_reason=REASON_NOT_ACHIEVABLE_HERE,
     )
 
     corpus = load_corpus(store)
