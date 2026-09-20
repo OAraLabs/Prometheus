@@ -135,6 +135,19 @@ class RuleChooser:
 
     name = "rule"
 
+    #: ⚠ THE DETERMINISTIC BASELINE, and everything downstream is measured
+    #: against it. Two properties, both deliberate:
+    #:
+    #: 1. Substring overlap only — no embeddings, no model. "Confirm the
+    #:    dialog" scores zero against a candidate labelled "OK".
+    #: 2. It does not repeat itself. An action already in `history` is
+    #:    EXCLUDED. This was added 2026-09-20 after the chooser was found to
+    #:    ignore history entirely and repeat forever on a stable table.
+    #:
+    #: Raising the baseline before measuring a classifier is the same argument
+    #: as the embeddings baseline: "beats RuleChooser" means nothing if
+    #: RuleChooser is weaker than it needed to be.
+
     def __init__(self, prefer: tuple[str, ...] = ()) -> None:
         #: Substrings that raise a candidate's score, highest priority first.
         #: The caller states its goal in terms the table uses.
@@ -145,8 +158,23 @@ class RuleChooser:
             return Choice(CANDIDATE_ABSTAIN, confidence=1.0, source=self.name)
 
         goal_words = {w for w in request.goal.lower().split() if len(w) > 2}
+        # ALREADY-TRIED actions are excluded, not merely down-weighted.
+        #
+        # Without this the chooser ignores `history` entirely and returns the
+        # same pick forever on a stable table — proven live: four steps, same
+        # candidate every time, while history grew underneath it. A loop that
+        # cannot make progress is not a weak baseline, it is a stuck one, and
+        # measuring a classifier against it would credit the classifier for
+        # beating something that never moves.
+        #
+        # Descriptions, not ids: an id is snapshot-bound and dies at the next
+        # observation, so the same button is a different id one step later.
+        # The description is what survives, and it is what `history` carries.
+        tried = set(request.history or ())
         best, best_score = None, -1.0
         for entry in request.candidates:
+            if entry.get("description", "") in tried:
+                continue
             score = self._score(entry.get("description", ""), goal_words)
             if score > best_score:
                 best, best_score = entry, score

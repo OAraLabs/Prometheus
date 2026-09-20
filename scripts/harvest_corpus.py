@@ -144,6 +144,29 @@ NEVER_HARVEST = {"seahorse", "firefox", "thunderbird", "evolution", "keepassxc"}
 #: cell, tree table, table, tree item, list item) anywhere in its 118-node full
 #: tree, showing or not. Its TAB SWITCHER is fine and worth capturing — that
 #: was a real role gap (`page tab`) and is now fixed.
+#: States that must NOT be captured because of what their table CARRIES.
+#:
+#: ⚠ A file chooser's sidebar is `list item`, which IS in _CLICKABLE_ROLES, so
+#: real filesystem paths become CANDIDATE DESCRIPTIONS — not merely
+#: elements_json. Measured on a live GTK chooser: '/home/will/Documents',
+#: '/home/will/Videos', '/media/will/WD_BLACK' and a full scratchpad path, all
+#: as offered candidates.
+#:
+#: The replay-surface ruling stores candidate descriptions VERBATIM, and it has
+#: to: a redacted description is a different input and scores a different
+#: question. So these paths cannot be scrubbed without breaking the thing the
+#: corpus exists for. The only control is not capturing the state.
+#:
+#: This supersedes "close anything with real content first" for this surface —
+#: that warning was written before elements_json and before it was clear the
+#: paths reach the candidate table itself. A chooser pointed at an empty
+#: directory still lists the user's bookmarks.
+REFUSE_STATE: dict[str, str] = {
+    "file chooser / open dialog / save-as dialog":
+        "the sidebar lists real home and media paths as offered candidates, "
+        "stored verbatim by the replay-surface ruling and unscrubbable",
+}
+
 STRUCTURALLY_UNREACHABLE: dict[str, str] = {
     "gnome-system-monitor: process list":
         "the process rows never reach the accessibility tree; not a role gap",

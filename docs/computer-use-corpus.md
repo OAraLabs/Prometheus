@@ -194,7 +194,67 @@ An automated check should flag any row whose goal shares more than a threshold
 of content words with its annotated-correct candidate's description, and the
 harvest tool should refuse to store it silently.
 
-## 5. The correct answer is not the executed answer
+## 5. Three findings that change the harvest — verified 2026-09-20
+
+Found by Track A, reproduced here before spending anyone's time.
+
+### 5.1 `window_id` does not scope the observation
+
+Two Nautilus windows, different folders, different files:
+
+```
+window[0] 'probe-a'   127 elements -> 18 candidates
+window[1] 'probe-b'   127 elements -> 18 candidates
+OVERLAP: 34/38 = 89%   unique to window[1]: 2, both just the title
+```
+
+**Two genuinely different states of one app produce near-identical tables.**
+The file contents do not even differ, because file rows are `table cell` and
+are not offered.
+
+⚠ **This invalidates the "40 states" plan.** Six text-editor states and six
+Nautilus states would not have been twelve distinct tables — they would have
+been roughly two, plus titles. The harvest must go **wide across apps**, not
+deep into states of one app.
+
+### 5.2 A file chooser writes real paths into the candidate table
+
+Measured on a live GTK chooser: `/home/will/Documents`, `/home/will/Videos`,
+`/media/will/WD_BLACK` and a full scratchpad path — all as **offered
+candidates**, because the sidebar is `list item` and `list item` IS in
+`_CLICKABLE_ROLES`.
+
+Not merely `elements_json`. **Candidate descriptions**, which the
+replay-surface ruling stores VERBATIM and must: a redacted description is a
+different input and scores a different question. So these cannot be scrubbed
+without breaking the thing the corpus exists for.
+
+**The only control is not capturing the state.** File chooser, open dialog and
+save-as dialog are in `REFUSE_STATE` in the harvester. This supersedes "close
+anything with real content first" for this surface — that warning predates
+`elements_json` and assumed the risk was document content. A chooser pointed at
+an empty directory still lists the user's bookmarks.
+
+### 5.3 The deterministic baseline was stuck, not merely weak
+
+`RuleChooser` never read `request.history`. On a stable table it returned the
+same pick forever — four steps, same candidate, while history grew underneath
+it.
+
+**Fixed before any measurement**: an action already in `history` is excluded,
+matched on DESCRIPTION rather than id (ids are snapshot-bound and change every
+observation, so an id-keyed exclusion would exclude nothing in a real loop).
+Exhaustion now abstains, which is the honest answer and is exactly the region
+an additive classifier is authoritative in.
+
+Raising the baseline first is the same argument as the embeddings baseline:
+*"beats RuleChooser" means nothing if RuleChooser was weaker than it needed to
+be.* A repeat-refusal is deterministic, free, and needs no model.
+
+⚠ The pilot's 40% abstain rate was measured against the OLD chooser and is not
+comparable to anything measured after this change.
+
+## 6. The correct answer is not the executed answer
 
 The two differ exactly when the run was wrong, which is the case the corpus
 exists to capture. A schema that can only record what happened cannot score
@@ -218,7 +278,7 @@ A corpus that collapses unannotated into `none_correct` silently scores every
 un-reviewed row as "abstain was correct" — which would make a chooser that
 always abstains look perfect on an unannotated corpus.
 
-## 6. Table expressiveness — DIAGNOSED 2026-09-20, deliberately NOT fixed here
+## 7. Table expressiveness — DIAGNOSED 2026-09-20, deliberately NOT fixed here
 
 Verified independently at `424edc1`, by AST over the source rather than by
 reading prose.
@@ -281,7 +341,7 @@ classifier reads the same table and finds nothing that undoes anything, because
 Judging a classifier before step 3 measures the table's limits and reports them
 as the chooser's.
 
-## 7. Role coverage — SURVEYED 2026-09-20, deliberately NOT widened
+## 8. Role coverage — SURVEYED 2026-09-20, deliberately NOT widened
 
 Measured against live AT-SPI trees. **Diagnosis only.** Widening
 `_CLICKABLE_ROLES` is a new **consent surface** — every added role is a class of
@@ -434,7 +494,7 @@ reachability across the whole corpus, and every `role_not_clickable` row would
 be recorded against a set nobody had looked at. The survey is cheap; the
 harvest is not.
 
-## 8. Label provenance — and the harvest order
+## 9. Label provenance — and the harvest order
 
 `label_source` is required whenever `correct_id` is set. There is **no
 default**: `human` would be the comfortable one and the wrong one.
@@ -470,7 +530,7 @@ measured on how alike they are.
 a human has seen a model's answer, the label is `model_confirmed` at best and
 the calibration set no longer exists.
 
-## 9. Provenance on every row
+## 10. Provenance on every row
 
 Four fields exist so a row cannot quietly mean something other than it appears
 to. Each one is stored, not inferred at read time.
@@ -485,7 +545,7 @@ to. Each one is stored, not inferred at read time.
 `table_fingerprint` is also stored, over the sorted `(id, description)` pairs, so
 the same window captured twice is identifiable rather than double-counted.
 
-## 10. Redaction
+## 11. Redaction
 
 Candidate descriptions are built from AT-SPI labels scraped off a live desktop:
 window titles, button text, field labels, and sometimes document content. A
@@ -498,7 +558,7 @@ decision, not a formatting one.
 - Apply the project's existing redaction before writing, not after.
 - The app allowlist in §4.1 is the primary control; redaction is the backstop.
 
-## 11. What this spec does not cover
+## 12. What this spec does not cover
 
 `hf-server`, SimpleJev, any classifier, and any scoring harness. Those come
 after a corpus exists and after the licence question is answered. This document
