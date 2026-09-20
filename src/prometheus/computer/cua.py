@@ -127,7 +127,34 @@ class CuaDriverAdapter:
         #: The snapshot this driver last handed out, per (pid, window_id).
         #: Cua binds element tokens to a snapshot; we refuse a stale one
         #: BEFORE the call as well, so the refusal does not depend on the
-        #: driver's error text staying the same.
+        #: driver's error text staying the same. A MISSING entry is refused
+        #: too — see `act` — because no record means the snapshot cannot be
+        #: vouched for, not that it is fresh.
+        #:
+        #: ⚠ TWO KNOWN GAPS, BOTH DEFERRED 2026-09-20, recorded together
+        #: because anyone fixing either will be working on this key.
+        #:
+        #: 1. PID REUSE. This dict is keyed on (pid, window_id) and is never
+        #:    pruned — nothing here observes window close or process death.
+        #:    A long-lived adapter that observed pid P, where P then dies and
+        #:    the OS reissues the number to an unrelated process with a
+        #:    coincident window id, would compare a new snapshot against a
+        #:    dead window's record. Low likelihood; the consequence is a
+        #:    wrong staleness verdict in EITHER direction, so it is not
+        #:    fail-safe. A fix prunes on DriverUnavailable from a window
+        #:    target, or stops trusting the pid as identity.
+        #:
+        #: 2. NO DISCOVERY PATH. Nothing in `src/` ever calls the SDK's
+        #:    `list_windows`, and `observe` does not read pid/window_id back
+        #:    off the response — it echoes the caller's arguments into the
+        #:    Observation (note `app` two lines below does the opposite, and
+        #:    takes `out.app_name`). So every caller must already know both
+        #:    numbers, and the only way to obtain them today is out of band.
+        #:    Nothing validates them either: both are plain required ints
+        #:    with no bound, and a shipped script defaults both to 0.
+        #:    The SDK does refuse `pid=0` (`invalid_action_target`), so the
+        #:    failure is loud rather than silent — which is why this is a gap
+        #:    and not a defect.
         self._snapshots: dict[tuple[int, int], str] = {}
 
     # ── lifecycle ──────────────────────────────────────────────────────
@@ -246,7 +273,6 @@ class CuaDriverAdapter:
     def act(self, verb: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Dispatch one bounded action, and rule on what came back."""
         self._assert_target(arguments.get("target", self._target))
-        self.start()
         pid = int(arguments["pid"])
         window_id = int(arguments["window_id"])
 
@@ -254,13 +280,37 @@ class CuaDriverAdapter:
         # validates the candidate against the live observation; this is the
         # third refusal, and it exists so the guarantee does not depend on
         # the driver's error text staying the same across versions.
+        #
+        # ⚠ AND BEFORE start(), so a call that was always going to be refused
+        # does not spin up the Cua runtime on its way to being refused.
         snapshot = arguments.get("snapshot_id")
         current = self._snapshots.get((pid, window_id))
-        if snapshot and current and snapshot != current:
+        if snapshot and current is None:
+            # NO RECORD IS "CANNOT DETERMINE", NOT "FRESH". This read
+            # `if snapshot and current and ...`, so a missing record made the
+            # whole check evaporate and the action went to the driver
+            # unvouched. Reachable whenever the acting adapter is not the one
+            # that observed — a fresh adapter, a restart, a second adapter on
+            # the same target — and in exactly those cases the only thing left
+            # was the driver's error text, which is what this check exists NOT
+            # to depend on.
+            #
+            # Safe to be strict: one adapter serves both halves everywhere.
+            # `ComputerUseLoop._driver` is assigned once and used for observe,
+            # act and the post-action verify; `build_computer_tools` binds one
+            # driver to every tool. So "this adapter never observed that
+            # window" really does mean the snapshot cannot be vouched for.
+            raise StaleSnapshot(
+                f"no observation on record for pid {pid} window {window_id} "
+                f"on this adapter, so snapshot {snapshot!r} cannot be vouched "
+                f"for — observe before acting"
+            )
+        if snapshot and snapshot != current:
             raise StaleSnapshot(
                 f"snapshot {snapshot!r} has been superseded by {current!r} "
                 f"— re-observe before acting"
             )
+        self.start()
 
         builder = _BUILDERS.get(verb)
         if builder is None:

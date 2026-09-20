@@ -284,6 +284,49 @@ def test_a_stale_snapshot_is_refused_BEFORE_the_driver(adapter):
     assert not [c for c in fake.calls if c[0] == "click"]
 
 
+def test_acting_with_NO_observation_on_record_is_refused(adapter):
+    """A missing snapshot record is "cannot determine", not "fresh".
+
+    The guard read ``if snapshot and current and snapshot != current``, so
+    when ``current`` was None it did not fire AT ALL and the call went to the
+    driver. Reachable whenever the acting adapter is not the one that
+    observed: a fresh adapter, a restart, a second adapter on the same
+    target. Guard 3 (the driver's own error text) would still be there, but
+    guard 2 exists precisely so the guarantee does NOT depend on that text
+    staying stable across versions -- and in this case it was absent.
+
+    The loop always observes and acts through one adapter instance
+    (``ComputerUseLoop._driver`` is assigned once and used for observe, act
+    and the post-action verify; ``build_computer_tools`` binds one driver to
+    every tool). So "this adapter has no record of that window" means the
+    snapshot cannot be vouched for, and the honest answer is to refuse.
+    """
+    a, fake = adapter(_window_state(snapshot_id="s1"))
+    # NO observe -- nothing was ever recorded for (pid, window_id).
+    assert a._snapshots == {}
+    with pytest.raises(StaleSnapshot) as exc:
+        a.act("click", _args(snapshot_id="s1"))
+    assert "no observation on record" in str(exc.value)
+    assert not [c for c in fake.calls if c[0] == "click"], (
+        "the action reached the driver despite the adapter never having "
+        "observed that window"
+    )
+
+
+def test_a_refusal_with_no_record_does_not_need_the_runtime(adapter):
+    """Refused BEFORE start(), so an undeterminable snapshot costs nothing.
+
+    Pinned because the check used to sit after ``self.start()``, which means
+    a call that was always going to be refused first span up the Cua runtime.
+    """
+    a, fake = adapter(_window_state(snapshot_id="s1"))
+    a.shutdown()
+    a._driver = None
+    with pytest.raises(StaleSnapshot):
+        a.act("click", _args(snapshot_id="s1"))
+    assert a._driver is None, "the runtime was started for a refused call"
+
+
 def test_an_unimplemented_verb_is_refused_not_dispatched(adapter):
     """The narrowness IS the boundary — there must be no generic passthrough
     that could reach clipboard_read or the browser surface."""
