@@ -66,6 +66,141 @@ needs_profile = pytest.mark.skipif(
 )
 
 
+
+
+# --------------------------------------------------------------------------- #
+# THE TWO CONTROLS — a precondition guard and an errno assertion
+#
+# These are separate on purpose and they fail differently.
+#
+#   PRECONDITION GUARD -> ERROR. "This test did not run", naming which
+#   precondition was missing. Never a pass and never a FAIL: a test that
+#   cannot reach its subject has measured nothing, and reporting that as
+#   either verdict is a lie in one direction or the other. Same shape as
+#   ``computer/driver.check_preconditions`` — refuse loudly, do not degrade.
+#
+#   ERRNO ASSERTION -> FAIL. Reached only once the subject exists. Asserts
+#   the refusal SPECIFICALLY: EACCES from the profile passes, ENOENT fails.
+#
+# WHY BOTH, AND WHY THIS IS NOT PEDANTRY
+# ---------------------------------------
+# ``@{HOME}`` expands to ``@{HOMEDIRS}/*/`` and AppArmor's ``*`` does NOT
+# cross ``/`` — so the denied set is exactly ``/home/<one-component>/.ssh``.
+# A test home one level deeper (``~/.verify-home``) is OUTSIDE the profile
+# entirely, and a subject that does not exist there fails with ENOENT. A test
+# asserting only "the command errored" cannot tell that from a refusal, so it
+# passes while proving nothing.
+#
+# That is not hypothetical. ``test_gnupg_is_refused`` and
+# ``test_config_env_pattern_is_refused`` asserted exactly that and had never
+# once exercised their subject — on this box OR in CI, where nothing creates
+# ``$HOME/.gnupg`` either — since fb73b28 (PR #237, 2026-08-16).
+#
+# The fix is NOT to widen the profile to cover a test home. Making a security
+# guard broader so a test can pass is the inversion of the fix.
+# --------------------------------------------------------------------------- #
+
+#: Parsed from the profile's own tunable rather than hardcoded — the naming
+#: scheme is the thing under test, so reading it from somewhere else is how the
+#: shared-wrong-constant defect gets rebuilt.
+_TUNABLE_FILES = (
+    "/etc/apparmor.d/tunables/home",
+    "/etc/apparmor.d/tunables/home.d/site.local",
+)
+
+
+def _apparmor_homedirs() -> list[str]:
+    """The directories ``@{HOMEDIRS}`` names. Empty when it cannot be read."""
+    for path in _TUNABLE_FILES:
+        try:
+            for line in Path(path).read_text().splitlines():
+                line = line.strip()
+                if line.startswith("@{HOMEDIRS}="):
+                    return [
+                        d.rstrip("/") or "/"
+                        for d in line.split("=", 1)[1].split()
+                    ]
+        except OSError:
+            continue
+    return []
+
+
+def _home_inside_apparmor_home() -> tuple[bool, str]:
+    """Is the effective ``HOME`` inside ``@{HOME}``'s ONE-level glob?
+
+    ``@{HOME}=@{HOMEDIRS}/*/ /root/``. A single ``*`` in AppArmor matches one
+    path component, so ``$HOME`` qualifies only when its PARENT is a homedir
+    (or when it is ``/root``).
+    """
+    home = Path.home().resolve()
+    if home == Path("/root"):
+        return True, ""
+    homedirs = _apparmor_homedirs()
+    if not homedirs:
+        return False, (
+            "could not read @{HOMEDIRS} from the AppArmor tunables "
+            f"({', '.join(_TUNABLE_FILES)}) — the profile's own definition of "
+            "which paths it guards is unavailable, so this test cannot know "
+            "whether its subject is inside it"
+        )
+    if str(home.parent) in homedirs:
+        return True, ""
+    return False, (
+        f"HOME={home} is NOT inside @{{HOME}} (={'/*/ '.join(homedirs)}/*/ or "
+        f"/root/). AppArmor's '*' matches ONE path component, so a home nested "
+        f"below a real home is outside the profile's denied set and every "
+        f"subject under it fails with ENOENT instead of being refused. "
+        f"Re-run with a HOME whose parent is one of: {homedirs}"
+    )
+
+
+def require_floor_subject(subject: Path) -> Path:
+    """Guard: ERROR unless this test can actually reach its subject.
+
+    Two preconditions, reported separately because they have different
+    remedies. Raises rather than skipping: a skip is a quiet "not measured"
+    that accumulates unread, and the whole point here is that a floor claim
+    nobody can see is worse than a red one.
+    """
+    inside, why = _home_inside_apparmor_home()
+    if not inside:
+        raise RuntimeError(
+            f"PRECONDITION ABSENT — this test did not run. {why}"
+        )
+    if not subject.exists():
+        raise RuntimeError(
+            f"PRECONDITION ABSENT — this test did not run. Its subject "
+            f"{subject} does not exist, so any failure would be ENOENT rather "
+            f"than a refusal by the profile. Create it (CI does this "
+            f"deliberately rather than skipping) and re-run."
+        )
+    return subject
+
+
+#: What a refusal by the profile looks like, as opposed to an absent file.
+_REFUSED = "Permission denied"
+_NOT_FOUND = "No such file or directory"
+
+
+def assert_refused_not_missing(res, what: str) -> None:
+    """The errno assertion. EACCES passes; ENOENT FAILS.
+
+    Copied from ``test_confined_read_under_ssh_is_refused``, which already had
+    this shape and is the reason it was the only one of the seven that could
+    not silently pass on a missing file.
+    """
+    assert SENTINEL in res.output, f"{what}: never ran — not containment"
+    assert res.is_error, f"{what}: the command SUCCEEDED — the floor leaked"
+    assert _NOT_FOUND not in res.output, (
+        f"{what}: failed with ENOENT, not a refusal. The subject was absent, "
+        f"so this proves nothing about the floor:\n{res.output}"
+    )
+    assert _REFUSED in res.output, (
+        f"{what}: errored without {_REFUSED!r}, so the reason is unknown and "
+        f"may not be the profile:\n{res.output}"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Fail loud — runs everywhere, needs no profile
 # --------------------------------------------------------------------------- #
@@ -161,8 +296,18 @@ class TestWrapping:
 @needs_profile
 class TestFloorHolds:
     @pytest.fixture()
-    def decoy(self):
-        p = Path.home() / ".ssh" / "aa-pytest-decoy.txt"
+    def ssh_dir(self):
+        """The guarded directory itself — the precondition for every ssh case.
+
+        Does NOT create it. A test that manufactures its own subject inside a
+        directory the profile may not cover is measuring the directory it just
+        made, not the floor.
+        """
+        return require_floor_subject(Path.home() / ".ssh")
+
+    @pytest.fixture()
+    def decoy(self, ssh_dir):
+        p = ssh_dir / "aa-pytest-decoy.txt"
         p.write_text("DECOY\n")
         yield p
         p.unlink(missing_ok=True)
@@ -174,18 +319,15 @@ class TestFloorHolds:
 
     def test_confined_read_under_ssh_is_refused(self, decoy):
         res = _confined(f"cat {decoy}")
-        assert SENTINEL in res.output, "never ran — not containment"
-        assert res.is_error
-        assert "Permission denied" in res.output
-        assert "DECOY" not in res.output
+        assert_refused_not_missing(res, "read under ~/.ssh")
+        assert "DECOY" not in res.output, "the read landed — the floor leaked"
 
-    def test_confined_write_under_ssh_is_refused(self):
-        target = Path.home() / ".ssh" / "aa-pytest-write.txt"
+    def test_confined_write_under_ssh_is_refused(self, ssh_dir):
+        target = ssh_dir / "aa-pytest-write.txt"
         target.unlink(missing_ok=True)
         try:
             res = _confined(f"echo LEAK > {target}")
-            assert SENTINEL in res.output
-            assert res.is_error
+            assert_refused_not_missing(res, "write under ~/.ssh")
             assert not target.exists(), "the write landed — the floor leaked"
         finally:
             target.unlink(missing_ok=True)
@@ -198,26 +340,40 @@ class TestFloorHolds:
         are the ones that matter most.
         """
         res = _confined(f"{wrapper} 'cat {decoy}'")
-        assert SENTINEL in res.output
-        assert res.is_error
-        assert "DECOY" not in res.output
+        assert_refused_not_missing(res, f"{wrapper} read under ~/.ssh")
+        assert "DECOY" not in res.output, "the read landed — the floor leaked"
 
-    def test_gnupg_is_refused(self):
-        res = _confined("ls ~/.gnupg")
-        assert SENTINEL in res.output
-        assert res.is_error
+    @pytest.fixture()
+    def gnupg_dir(self):
+        return require_floor_subject(Path.home() / ".gnupg")
 
-    def test_config_env_pattern_is_refused(self):
-        res = _confined("wc -c < ~/.config/prometheus/env")
-        assert SENTINEL in res.output
-        assert res.is_error
+    @pytest.fixture()
+    def config_env_file(self):
+        return require_floor_subject(
+            Path.home() / ".config" / "prometheus" / "env"
+        )
+
+    def test_gnupg_is_refused(self, gnupg_dir):
+        res = _confined(f"ls {gnupg_dir}")
+        assert_refused_not_missing(res, "ls ~/.gnupg")
+
+    def test_config_env_pattern_is_refused(self, config_env_file):
+        res = _confined(f"wc -c < {config_env_file}")
+        assert_refused_not_missing(res, "read ~/.config/prometheus/env")
 
 
 @needs_profile
 class TestAdmissionHalf:
+    @pytest.fixture()
+    def deploy_clone(self):
+        """Precondition guard ONLY — this test's subject is the clone, not a
+        denied path, so there is no errno to assert. It must still never pass
+        while unable to reach what it measures."""
+        return require_floor_subject(Path.home() / "prometheus-deploy")
+
     """A floor that breaks the loop is not a win."""
 
-    def test_git_network_operation_succeeds(self):
+    def test_git_network_operation_succeeds(self, deploy_clone):
         """A real authenticated git network op, under the profile.
 
         Was `push --dry-run origin main`, which fails with rc=1 whenever the
@@ -228,7 +384,7 @@ class TestAdmissionHalf:
         the profile) and is independent of local repo state.
         """
         res = _confined(
-            "git -C ~/prometheus-deploy ls-remote origin HEAD "
+            f"git -C {deploy_clone} ls-remote origin HEAD "
             ">/dev/null 2>&1 && echo GIT_NET_OK")
         assert "GIT_NET_OK" in res.output
         assert not res.is_error
@@ -253,3 +409,111 @@ class TestAdmissionHalf:
         """pipefail sanity: the harness must not mask a failing stage."""
         res = _confined(f"cat {tmp_path}/nope | wc -c")
         assert res.is_error, "pipefail is not in force; refusals would read as passes"
+
+
+# --------------------------------------------------------------------------- #
+# The controls, tested against a built failing state — runs everywhere
+# --------------------------------------------------------------------------- #
+
+
+class _FakeResult:
+    """Just enough of a ToolResult to exercise the assertion's discrimination."""
+
+    def __init__(self, output: str, is_error: bool = True) -> None:
+        self.output = output
+        self.is_error = is_error
+
+
+class TestTheControlsThemselves:
+    """A control nobody has watched fail is a control nobody has tested.
+
+    The precondition guard stops a missing subject before the errno assertion
+    is reached, which is correct — and it means the assertion's discrimination
+    has to be proven here, against a failing state built on purpose, or it is
+    never exercised at all.
+    """
+
+    def test_enoent_fails_the_assertion(self):
+        """THE WHOLE POINT. This is the shape that was passing for five weeks."""
+        res = _FakeResult(
+            f"{SENTINEL}\nls: cannot access '/h/x/.gnupg': {_NOT_FOUND}"
+        )
+        with pytest.raises(AssertionError, match="ENOENT"):
+            assert_refused_not_missing(res, "built-on-purpose ENOENT")
+
+    def test_eacces_passes_the_assertion(self):
+        res = _FakeResult(
+            f"{SENTINEL}\nls: cannot open directory '/h/x/.gnupg': {_REFUSED}"
+        )
+        assert_refused_not_missing(res, "built-on-purpose EACCES")
+
+    def test_a_successful_command_fails_the_assertion(self):
+        """is_error False means the floor leaked, whatever the output says."""
+        res = _FakeResult(f"{SENTINEL}\nid_rsa", is_error=False)
+        with pytest.raises(AssertionError, match="floor leaked"):
+            assert_refused_not_missing(res, "built-on-purpose success")
+
+    def test_an_error_with_no_stated_reason_fails_the_assertion(self):
+        """Errored, but not identifiably BY THE PROFILE. Unknown is not pass."""
+        res = _FakeResult(f"{SENTINEL}\nsomething went wrong")
+        with pytest.raises(AssertionError, match="reason is unknown"):
+            assert_refused_not_missing(res, "built-on-purpose vague error")
+
+    def test_a_command_that_never_ran_fails_the_assertion(self):
+        res = _FakeResult("nothing at all")
+        with pytest.raises(AssertionError, match="never ran"):
+            assert_refused_not_missing(res, "built-on-purpose no-run")
+
+    def test_the_guard_names_which_precondition_was_missing(
+        self, tmp_path, monkeypatch
+    ):
+        """ERROR text must say WHICH one, because the remedies differ.
+
+        Builds BOTH halves of the world in tmp_path rather than reading the
+        host's HOME. The first draft of this test did read it, and so reported
+        the HOME failure under ~/.verify-home and the subject failure under the
+        real home — a test whose expectation depends on where it runs, which is
+        the entire defect this file is fixing.
+        """
+        fake_home = tmp_path / "someuser"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr(
+            "tests.test_bash_confinement._apparmor_homedirs",
+            lambda: [str(tmp_path)],
+        )
+        # HOME is now one level under a "homedir", so the first check passes
+        # and the SUBJECT check is the one that must fire.
+        with pytest.raises(RuntimeError, match="does not exist"):
+            require_floor_subject(fake_home / "definitely-absent")
+
+    def test_the_guard_refuses_when_the_tunable_cannot_be_read(
+        self, tmp_path, monkeypatch
+    ):
+        """Unknown is not OK. If the profile's own definition of what it guards
+        is unreadable, the test cannot know whether its subject is inside it —
+        so it refuses rather than assuming the favourable answer."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            "tests.test_bash_confinement._apparmor_homedirs", lambda: []
+        )
+        inside, why = _home_inside_apparmor_home()
+        assert not inside
+        assert "could not read" in why
+
+    def test_the_guard_rejects_a_home_outside_the_profile_glob(self, monkeypatch):
+        """A home one level too deep is outside @{HOME} — the original defect.
+
+        Asserted through the real resolver, not a mocked one: the thing under
+        test is a naming scheme, and a mock would encode the same assumption
+        the code is being checked for.
+        """
+        nested = Path.home() / ".verify-home-probe"
+        monkeypatch.setenv("HOME", str(nested))
+        inside, why = _home_inside_apparmor_home()
+        assert not inside, (
+            f"{nested} was accepted as inside @{{HOME}}, but AppArmor's '*' "
+            f"matches ONE component — this is the defect that let three tests "
+            f"pass on ENOENT for five weeks"
+        )
+        assert "ONE path component" in why or "one path component" in why.lower()
