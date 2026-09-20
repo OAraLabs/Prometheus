@@ -347,24 +347,59 @@ def _humanise_window(seconds) -> str:
 class ApprovalQueue:
     """Manages pending LEVEL 1 approval requests via Telegram.
 
-    Usage::
+    Usage -- BOTH hops, in this order::
 
-        queue = ApprovalQueue(telegram_adapter=tg, timeout_seconds=300)
-        # Wire into SecurityGate:
-        gate = SecurityGate(..., approval_queue=queue)
+        gate = SecurityGate(...)                      # the gate exists first
+        queue = ApprovalQueue(security_gate=gate, telegram_adapter=tg)
+        gate._approval_queue = queue                  # the late-bound hop
 
         # In agent loop, when requires_confirmation:
         result = await queue.request_approval("bash", "git push origin main")
         if result == ApprovalResult.APPROVED:
             # execute
+
+    THIS EXAMPLE USED TO SHOW ONLY ``SecurityGate(..., approval_queue=queue)``
+    under the heading "Wire into SecurityGate" -- which is the gate -> queue
+    hop. The queue -> gate hop is the one that records grants and writes every
+    resolution row to the audit log, and it appeared in no example, in no
+    docstring, and on exactly one line of the daemon. A reader following this
+    block built a queue that reported "Approved" and stored nothing. It is a
+    constructor argument now, so that queue can no longer be built.
     """
 
     def __init__(
         self,
+        *,
+        security_gate: Any,
         telegram_adapter=None,
         timeout_seconds: int = DEFAULT_APPROVAL_TIMEOUT_SECONDS,
         default_chat_id: int | None = None,
     ) -> None:
+        # REQUIRED, AND THE DIRECTION IS THE WHOLE POINT. The gate and the
+        # queue reference each other at RUNTIME, so one of the two hops has
+        # to be late-bound -- but they fail in OPPOSITE directions, and this
+        # class used to late-bind both:
+        #
+        #   gate._approval_queue missing -> request_approval returns False
+        #                                   -> the action is DENIED. Safe.
+        #   queue._security_gate missing -> "Approved", nothing stored, and
+        #                                   no audit row at all. Unsafe.
+        #
+        # So the failing-OPEN direction is the constructor argument, and the
+        # failing-closed one stays late-bound (daemon.py, once the queue
+        # exists). Keyword-only on purpose: every call site already passes
+        # keywords, and a positional first parameter would silently accept
+        # ApprovalQueue(tg), with a telegram adapter sitting in the gate slot.
+        if security_gate is None:
+            raise ValueError(
+                "ApprovalQueue requires a SecurityGate. It was attached "
+                "after construction for as long as this class existed, and "
+                "exactly ONE site on any surface ever did it -- so any other "
+                "queue answered an always-scope approval with 'Approved', "
+                "stored nothing, and wrote no resolution row to the audit "
+                "log. Pass the gate; the class docstring shows both hops."
+            )
+        self._security_gate = security_gate
         self._telegram = telegram_adapter
         self._timeout = timeout_seconds
         self._default_chat_id = default_chat_id
@@ -698,6 +733,21 @@ class ApprovalQueue:
         """Approve a pending action. Returns True if found and approved."""
         from prometheus.permissions.audit import AuditDecision
 
+        # BEFORE any mutation, so a raise leaves the request PENDING and it
+        # times out into a denial rather than half-resolving. Unreachable
+        # through __init__ now; this covers what bypasses __init__ entirely --
+        # a duck-typed double, or anything that clears the attribute later.
+        # Reporting success while storing nothing is the defect this
+        # subsystem exists to prevent, so it must not be survivable inside
+        # the consent path itself.
+        if scope is not None and scope != SCOPE_ONCE:
+            if getattr(self, "_security_gate", None) is None:
+                raise RuntimeError(
+                    f"approve(scope={scope!r}) on a queue with no "
+                    f"SecurityGate: the grant cannot be recorded and no "
+                    f"resolution row can be written. Refusing, rather than "
+                    f"returning True -- which is what made this silent."
+                )
         action = self.pending.get(request_id)
         if action is None:
             return False

@@ -12,12 +12,13 @@ from prometheus.permissions.approval_queue import (
     ApprovalResult,
     PendingAction,
 )
+from prometheus.permissions.checker import SecurityGate
 
 
 class TestApprovalQueue:
 
     def test_stores_pending_action(self):
-        queue = ApprovalQueue(timeout_seconds=1)
+        queue = ApprovalQueue(security_gate=SecurityGate(), timeout_seconds=1)
 
         async def _test():
             # Start the request but don't wait for it — it will timeout
@@ -37,7 +38,7 @@ class TestApprovalQueue:
         asyncio.run(_test())
 
     def test_approve_executes(self):
-        queue = ApprovalQueue(timeout_seconds=5)
+        queue = ApprovalQueue(security_gate=SecurityGate(), timeout_seconds=5)
 
         async def _test():
             task = asyncio.create_task(
@@ -57,7 +58,7 @@ class TestApprovalQueue:
         asyncio.run(_test())
 
     def test_deny_returns_denied(self):
-        queue = ApprovalQueue(timeout_seconds=5)
+        queue = ApprovalQueue(security_gate=SecurityGate(), timeout_seconds=5)
 
         async def _test():
             task = asyncio.create_task(
@@ -76,7 +77,7 @@ class TestApprovalQueue:
         asyncio.run(_test())
 
     def test_timeout_auto_denies(self):
-        queue = ApprovalQueue(timeout_seconds=0.1)  # very short timeout
+        queue = ApprovalQueue(security_gate=SecurityGate(), timeout_seconds=0.1)  # very short timeout
 
         async def _test():
             result = await queue.request_approval("bash", "dangerous")
@@ -85,7 +86,7 @@ class TestApprovalQueue:
         asyncio.run(_test())
 
     def test_approve_unknown_id(self):
-        queue = ApprovalQueue()
+        queue = ApprovalQueue(security_gate=SecurityGate())
 
         async def _test():
             ok = await queue.approve("nonexistent")
@@ -96,7 +97,7 @@ class TestApprovalQueue:
     def test_sends_telegram_notification(self):
         mock_tg = AsyncMock()
         mock_tg.send = AsyncMock()
-        queue = ApprovalQueue(telegram_adapter=mock_tg, timeout_seconds=0.1, default_chat_id=123)
+        queue = ApprovalQueue(security_gate=SecurityGate(), telegram_adapter=mock_tg, timeout_seconds=0.1, default_chat_id=123)
 
         async def _test():
             await queue.request_approval("bash", "git push")
@@ -115,7 +116,7 @@ class TestApprovalQueue:
         assert "did NOT run" in expiry[0][1]
 
     def test_list_pending_empty(self):
-        queue = ApprovalQueue()
+        queue = ApprovalQueue(security_gate=SecurityGate())
         assert queue.list_pending() == []
 
     def test_security_gate_regression_no_queue(self):
@@ -132,6 +133,6 @@ class TestApprovalQueue:
         """SecurityGate accepts approval_queue parameter."""
         from prometheus.permissions.checker import SecurityGate
 
-        queue = ApprovalQueue()
+        queue = ApprovalQueue(security_gate=SecurityGate())
         gate = SecurityGate(approval_queue=queue)
         assert gate._approval_queue is queue

@@ -56,6 +56,7 @@ from prometheus.permissions.computer_schema import (
     COMPUTER_APP_FIELD,
     COMPUTER_DELIVERY_FIELD,
     COMPUTER_PAYLOAD_FIELD,
+    COMPUTER_WINDOW_FIELD,
     COMPUTER_TARGET_FIELD,
     DELIVERY_BACKGROUND,
     computer_verb,
@@ -93,8 +94,14 @@ class _ActionBase(BaseModel):
         description="Target application (the consent term).",
         json_schema_extra=COMPUTER_APP_FIELD,
     )
-    pid: int = Field(..., description="Target process id.")
-    window_id: int = Field(..., description="Target window id.")
+    pid: int = Field(
+        ..., description="Target process id.",
+        json_schema_extra=COMPUTER_WINDOW_FIELD,
+    )
+    window_id: int = Field(
+        ..., description="Target window id.",
+        json_schema_extra=COMPUTER_WINDOW_FIELD,
+    )
     snapshot_id: str = Field(
         ...,
         description=(
@@ -116,8 +123,8 @@ class ObserveInput(BaseModel):
 
     target: str = Field(..., json_schema_extra=COMPUTER_TARGET_FIELD)
     app: str = Field(..., json_schema_extra=COMPUTER_APP_FIELD)
-    pid: int
-    window_id: int
+    pid: int = Field(..., json_schema_extra=COMPUTER_WINDOW_FIELD)
+    window_id: int = Field(..., json_schema_extra=COMPUTER_WINDOW_FIELD)
 
 
 class ClickInput(_ActionBase):
@@ -197,8 +204,8 @@ class VerifyInput(BaseModel):
 
     target: str = Field(..., json_schema_extra=COMPUTER_TARGET_FIELD)
     app: str = Field(..., json_schema_extra=COMPUTER_APP_FIELD)
-    pid: int
-    window_id: int
+    pid: int = Field(..., json_schema_extra=COMPUTER_WINDOW_FIELD)
+    window_id: int = Field(..., json_schema_extra=COMPUTER_WINDOW_FIELD)
     expect_role: str | None = None
     expect_label: str | None = None
     expect_value: str | None = None

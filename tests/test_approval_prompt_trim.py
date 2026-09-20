@@ -34,6 +34,7 @@ import pytest
 from prometheus.gateway import commands as cmds
 from prometheus.permissions.approval_queue import (
     ApprovalQueue, PendingAction, prospective_extents)
+from prometheus.permissions.checker import SecurityGate
 
 PATH = "/home/will/projects/notes/todo.md"
 
@@ -63,7 +64,7 @@ async def _prompt(queue: ApprovalQueue, **kw) -> str:
 
 
 def _queue(extra_pending: int = 0) -> ApprovalQueue:
-    q = ApprovalQueue(telegram_adapter=_FakeTelegram(), timeout_seconds=1800)
+    q = ApprovalQueue(security_gate=SecurityGate(), telegram_adapter=_FakeTelegram(), timeout_seconds=1800)
     q._default_chat_id = 1
     for i in range(extra_pending):
         q.pending[f"filler{i}"] = PendingAction(
@@ -161,7 +162,7 @@ async def test_approve_all_states_its_extent_when_it_is_offered():
 @pytest.mark.asyncio
 async def test_no_derivable_grant_does_not_advertise_remember():
     """An option that cannot be honoured is not offered — but is explained."""
-    q = ApprovalQueue(telegram_adapter=_FakeTelegram(), timeout_seconds=1800)
+    q = ApprovalQueue(security_gate=SecurityGate(), telegram_adapter=_FakeTelegram(), timeout_seconds=1800)
     q._default_chat_id = 1
     task = asyncio.create_task(
         q.request_approval("some_tool", "a thing with no structured target")

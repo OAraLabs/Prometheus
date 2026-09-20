@@ -41,6 +41,7 @@ from prometheus.providers.base import (
 )
 from prometheus.telemetry.tracker import ToolCallTelemetry
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolRegistry, ToolResult
+from prometheus.permissions.checker import SecurityGate
 
 pytestmark = pytest.mark.integration
 
@@ -1311,7 +1312,7 @@ class TestSprint15cApprovalQueue:
     def test_approve_flow(self):
         from prometheus.permissions.approval_queue import ApprovalQueue, ApprovalResult
 
-        queue = ApprovalQueue(timeout_seconds=5)
+        queue = ApprovalQueue(security_gate=SecurityGate(), timeout_seconds=5)
 
         async def _test():
             task = asyncio.create_task(queue.request_approval("bash", "git push"))
@@ -1328,7 +1329,7 @@ class TestSprint15cApprovalQueue:
         from prometheus.permissions.checker import SecurityGate
         from prometheus.permissions.approval_queue import ApprovalQueue
 
-        queue = ApprovalQueue()
+        queue = ApprovalQueue(security_gate=SecurityGate())
         gate = SecurityGate(approval_queue=queue)
         assert gate._approval_queue is queue
 

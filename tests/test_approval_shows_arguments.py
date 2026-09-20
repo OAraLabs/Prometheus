@@ -31,6 +31,7 @@ from prometheus.permissions.approval_queue import (
 from prometheus.permissions.argument_view import (
     MAX_VALUE_CHARS, format_arguments, redact_arguments,
 )
+from prometheus.permissions.checker import SecurityGate
 
 
 # ── REDACTION ───────────────────────────────────────────────────────────────
@@ -129,7 +130,7 @@ def test_format_produces_one_line_per_argument():
 # ── THE WIRE AND THE PROMPT ─────────────────────────────────────────────────
 
 def _queue() -> ApprovalQueue:
-    return ApprovalQueue(telegram_adapter=None, default_chat_id=None,
+    return ApprovalQueue(security_gate=SecurityGate(), telegram_adapter=None, default_chat_id=None,
                          timeout_seconds=1)
 
 

@@ -43,7 +43,7 @@ def _disk_grants(config) -> list:
 
 
 def _queue(config) -> ApprovalQueue:
-    q = ApprovalQueue(timeout_seconds=5)
+    q = ApprovalQueue(security_gate=SecurityGate(), timeout_seconds=5)
     q._security_gate = SecurityGate(approval_queue=q, config_path=str(config))
     return q
 

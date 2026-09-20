@@ -127,10 +127,55 @@ COMPUTER_DELIVERY_KEY = "x-prometheus-computer-delivery"
 COMPUTER_PAYLOAD_KEY = "x-prometheus-computer-payload"
 
 #: Drop-in ``Field(json_schema_extra=...)`` values.
+#: Marks a field that ADDRESSES the call but is DELIBERATELY NOT an extent
+#: term. It carries no behaviour: ``computer_extent_for`` reads only the four
+#: keys above, so an unrecognised key is inert by construction — which is the
+#: point. The value is the reason, written where the field is declared.
+#:
+#: WHY THIS EXISTS AT ALL. ``pid`` and ``window_id`` were the only arguments on
+#: a computer action with no ``json_schema_extra`` of any kind, so their
+#: absence from the extent looked exactly like an oversight, and an audit
+#: could only establish it was deliberate by reading this module's prose and
+#: inferring. An exclusion that can only be confirmed by inference is one a
+#: later change will quietly reverse — and reversing THIS one is not a
+#: refactor: ``Grant.matches`` compares the extent by EXACT WHOLE VALUE, so a
+#: fifth term would silently invalidate every stored grant rather than failing.
+#: The annotation makes the exclusion a recorded decision instead of a gap.
+COMPUTER_EXCLUDED_KEY = "x-prometheus-computer-excluded"
+
 COMPUTER_TARGET_FIELD: dict[str, Any] = {COMPUTER_TARGET_KEY: True}
 COMPUTER_APP_FIELD: dict[str, Any] = {COMPUTER_APP_KEY: True}
 COMPUTER_DELIVERY_FIELD: dict[str, Any] = {COMPUTER_DELIVERY_KEY: True}
 COMPUTER_PAYLOAD_FIELD: dict[str, Any] = {COMPUTER_PAYLOAD_KEY: True}
+
+#: ``pid`` / ``window_id``. They address WHICH WINDOW the driver acts on and
+#: they are load-bearing there — the SDK refuses a cross-window token with
+#: ``conflicting_element_target``, and refuses ``pid=0`` outright with
+#: ``window target requires a positive 32-bit pid`` (both measured on
+#: cua-driver 0.28.2, 2026-09-20). They are still not consent terms:
+#:
+#:   * They are NOT STABLE. A pid dies and a window id is reclaimed, so a
+#:     grant naming either would expire on the next restart of an app — or,
+#:     worse, silently re-point at whatever later holds that number. That is
+#:     the same failure the target term exists to prevent for machines.
+#:   * They are NOT MEANINGFUL TO AN OPERATOR. "Allow clicks in window
+#:     46137348" is not a sentence anyone can consent to, and the prompt has
+#:     to be readable to be consent at all.
+#:   * They would NOT NARROW WHAT WAS GRANTED. Observation is
+#:     application-scoped in practice: two top-level windows of one app
+#:     returned an IDENTICAL 32-element tree, each containing the other
+#:     document's text (measured 2026-09-20). A window term would read as a
+#:     narrowing the system does not actually perform, which is worse than no
+#:     term at all.
+#:
+#: ``app`` is therefore the true unit of reach, and the extent already says so.
+COMPUTER_WINDOW_FIELD: dict[str, Any] = {
+    COMPUTER_EXCLUDED_KEY: (
+        "window identity: addresses the call, never the consent — unstable "
+        "across restarts, unreadable in a prompt, and not an actual narrowing "
+        "because observation is application-scoped"
+    )
+}
 
 #: The delivery modes Cua documents. ``background`` injects without raising
 #: the target; ``foreground`` fronts it, acts, and restores. They are SEPARATE

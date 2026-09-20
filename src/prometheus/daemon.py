@@ -1383,6 +1383,12 @@ async def run_daemon(args: argparse.Namespace) -> None:
             from prometheus.permissions.approval_queue import ApprovalQueue
             default_chat = (gateway_config.get("allowed_chat_ids") or [None])[0]
             approval_queue = ApprovalQueue(
+                # The failing-OPEN hop, so it is a constructor argument and
+                # not a later assignment. Without it this queue records no
+                # grants and writes no resolution rows, while still answering
+                # "Approved" -- and for as long as the class existed, this
+                # file was the only place on any surface that set it.
+                security_gate=security_gate,
                 telegram_adapter=telegram,
                 # LITERAL on purpose: test_config_defaults_equality (#221) statically
                 # parses this line to compare it with the template, and a named
@@ -1392,12 +1398,12 @@ async def run_daemon(args: argparse.Namespace) -> None:
                 timeout_seconds=approval_cfg.get("timeout_seconds", 1800),
                 default_chat_id=default_chat,
             )
+            # The failing-CLOSED hop stays late-bound: absent,
+            # request_approval returns False and the action is DENIED, which
+            # is the safe direction. Its counterpart moved into the
+            # constructor above, where absence cannot be silent.
             security_gate._approval_queue = approval_queue
             gateway_registry.attach("_approval_queue", approval_queue)
-            # Reverse attachment: /approve session|always derive a Grant and
-            # record it on the gate, so the shared command core (all
-            # gateways) reaches the decider through the queue handle.
-            approval_queue._security_gate = security_gate
             logger.info("Approval queue wired to gateway adapters")
 
     # WEAVE-PRESS: Printing Press CLI registry

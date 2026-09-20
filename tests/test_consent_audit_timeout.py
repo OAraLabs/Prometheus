@@ -43,7 +43,7 @@ def config(tmp_path):
 @pytest.fixture
 def queue(config, tmp_path):
     """A real queue with a real gate and a real AuditLogger on disk."""
-    q = ApprovalQueue(timeout_seconds=5)
+    q = ApprovalQueue(security_gate=SecurityGate(), timeout_seconds=5)
     gate = SecurityGate(approval_queue=q, config_path=str(config))
     gate._audit = AuditLogger(tmp_path / "audit")
     q._security_gate = gate
@@ -112,7 +112,7 @@ async def test_timeout_writes_a_confirm_timeout_row(config, tmp_path):
 
     Without this row a timeout is indistinguishable from a request nobody
     ever answered — the ambiguity that cost a live probe to resolve."""
-    q = ApprovalQueue(timeout_seconds=1)
+    q = ApprovalQueue(security_gate=SecurityGate(), timeout_seconds=1)
     gate = SecurityGate(approval_queue=q, config_path=str(config))
     gate._audit = AuditLogger(tmp_path / "audit")
     q._security_gate = gate
@@ -154,7 +154,7 @@ async def test_expiry_notifies_the_operator(config, tmp_path):
         async def send(self, chat, text, **kw):
             sent.append(text)
 
-    q = ApprovalQueue(telegram_adapter=Tg(), timeout_seconds=1, default_chat_id=1)
+    q = ApprovalQueue(security_gate=SecurityGate(), telegram_adapter=Tg(), timeout_seconds=1, default_chat_id=1)
     gate = SecurityGate(approval_queue=q, config_path=str(config))
     gate._audit = AuditLogger(tmp_path / "audit")
     q._security_gate = gate

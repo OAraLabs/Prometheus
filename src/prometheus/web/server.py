@@ -4247,8 +4247,18 @@ def create_app(
         Body (optional): ``{"scope": <verb>}`` where <verb> is one of
         ``approve_verbs()`` — currently "once", "until-restart", "always",
         and the widening forms "until-restart here" / "always here". Parity
-        with the chat-gateway verbs. Non-"once" scopes record a SecurityGate
-        grant; "always" also persists it to config.
+        with the chat-gateway verbs.
+
+        Returns ``{ok, remembered, grant_id, message}``:
+
+        * ``ok`` — the request was found and answered.
+        * ``remembered`` — ``gate.add_grant`` RAN. A non-"once" scope does
+          NOT imply this: rule 4 approves once and remembers nothing when the
+          extent cannot be described, and a payload-bearing desktop action is
+          unrememberable by construction. Both are successes, so both still
+          return ``ok: true`` — which is exactly why the two facts cannot
+          share one flag.
+        * ``grant_id`` — the new grant's revoke handle, or null.
 
         Do not restate the verb list as a literal here. This docstring went
         on naming the pre-#232 vocabulary — once, the long-gone middle verb,
@@ -4279,9 +4289,25 @@ def create_app(
         from prometheus.gateway import commands as _cmds
 
         arg_text = request_id if scope == "once" else f"{scope} {request_id}"
-        text = await _cmds.cmd_approve(queue, arg_text)
-        ok = not text.startswith("No pending request")
-        return {"ok": ok, "message": text}
+        # STRUCTURED, NOT INFERRED FROM THE PROSE. This was
+        # `ok = not text.startswith("No pending request")`, which reported
+        # success in three distinct situations where nothing was remembered or
+        # nothing happened at all: an `always` whose extent could not be
+        # described (rule 4), an `always` on a queue with no gate attached,
+        # and an approve against an EMPTY queue ("No pending approval
+        # requests." does not match that prefix). None of it was visible to
+        # any client, because neither Beacon reads `message` on a 200 —
+        # beacon-desktop's resolveApproval is Promise<void> and parses the
+        # body only on the HTTP-error path, and beacon-ios decodes {ok} alone,
+        # discards it, and labels the row from the scope the operator ASKED
+        # for. See ApproveOutcome for why this is a shape and not a wording.
+        outcome = await _cmds.approve_detail(queue, arg_text)
+        return {
+            "ok": outcome.resolved,
+            "remembered": outcome.remembered,
+            "grant_id": outcome.grant_id,
+            "message": outcome.message,
+        }
 
     @app.get("/api/approvals/grants")
     async def list_grants():

@@ -21,6 +21,7 @@ the divergence is in one function and one test pins it
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
@@ -102,7 +103,10 @@ class ComputerUseLoop:
         history: list[str] | None = None,
     ) -> StepResult:
         if not self._skip_preconditions:
-            pre = check_preconditions()
+            # OFF THE LOOP. This is not a cheap predicate: it opens a unix
+            # socket to the X display and shells out to gdbus, and both block
+            # the thread that calls them.
+            pre = await asyncio.to_thread(check_preconditions)
             if not pre:
                 # REFUSE, do not degrade. See driver.check_preconditions: the
                 # observe and act halves fail independently on this box, and
@@ -111,7 +115,11 @@ class ComputerUseLoop:
                 return StepResult(status="blocked", reason=pre.reason)
 
         # 1. OBSERVE ---------------------------------------------------------
-        observation = self._driver.observe(target, app, pid, window_id)
+        # OFF THE LOOP. CuaDriverAdapter.observe blocks its caller: it submits
+        # to the driver's OWN loop and waits on the future. Awaiting that from
+        # the event loop thread is what stalled every other task on it.
+        observation = await asyncio.to_thread(
+            self._driver.observe, target, app, pid, window_id)
 
         # 2. BUILD -----------------------------------------------------------
         try:
@@ -199,7 +207,8 @@ class ComputerUseLoop:
 
         # 6. EXECUTE ---------------------------------------------------------
         try:
-            result = self._driver.act(verb, arguments)
+            # OFF THE LOOP, same reason as observe.
+            result = await asyncio.to_thread(self._driver.act, verb, arguments)
         except StaleSnapshot as exc:
             # Never retried here. A stale snapshot means the window moved
             # under us; the correct response is to observe again and rebuild
@@ -211,7 +220,7 @@ class ComputerUseLoop:
             )
 
         # 7. VERIFY — against FRESH state, not against the return value ------
-        verified = self._verify(candidate, target, app, pid, window_id)
+        verified = await self._verify(candidate, target, app, pid, window_id)
         return StepResult(
             status="executed",
             candidate=candidate,
@@ -223,7 +232,7 @@ class ComputerUseLoop:
             history=[*(history or []), candidate.description],
         )
 
-    def _verify(
+    async def _verify(
         self, candidate: Candidate, target: str, app: str, pid: int,
         window_id: int,
     ) -> bool | None:
@@ -236,7 +245,11 @@ class ComputerUseLoop:
         which is honest and distinguishable from False.
         """
         try:
-            after = self._driver.observe(target, app, pid, window_id)
+            # THE FOURTH BLOCKING CALL, and the one easiest to miss: it is a
+            # second full observation, after the action, and it blocked just
+            # as long as the first.
+            after = await asyncio.to_thread(
+                self._driver.observe, target, app, pid, window_id)
         except Exception:
             log.warning("computer-use: post-action observe failed", exc_info=True)
             return None

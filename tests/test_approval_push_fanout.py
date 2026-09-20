@@ -35,6 +35,7 @@ from pathlib import Path
 import pytest
 
 from prometheus.permissions.approval_queue import ApprovalQueue, PendingAction
+from prometheus.permissions.checker import SecurityGate
 
 #: What the APNs body is allowed to carry, top level. Reviewed 2026-09-19.
 ALLOWED_TOP_LEVEL = {"aps", "request_id", "tool_name", "expires_at"}
@@ -76,7 +77,7 @@ def _serialized_approval() -> dict:
     Hand-building it would prove the dispatcher filters a shape the caller
     never produces — the defect `tool_paths.py` records at length.
     """
-    queue = ApprovalQueue(telegram_adapter=None, default_chat_id=None,
+    queue = ApprovalQueue(security_gate=SecurityGate(), telegram_adapter=None, default_chat_id=None,
                           timeout_seconds=60)
     action = PendingAction(
         request_id="r1",
