@@ -280,6 +280,28 @@ def _read_floor_gate() -> tuple[str, str]:
         return "unprobeable", f"{exc.__class__.__name__}: {exc}"[:200]
 
 
+def _resolved_tree_head(pkg_dir: Path) -> str:
+    """Short HEAD sha of the checkout ``prometheus`` was imported from, or "".
+
+    ``git -C`` rather than reading ``.git/HEAD`` by hand: ``.git`` is a
+    DIRECTORY in an ordinary clone and a FILE in a worktree, and this box has
+    both, so hand-parsing would answer correctly in one case and not the
+    other. Returns "" for a non-repo install (a plain site-packages copy),
+    where there is no commit to name and the bare verdict is the honest one.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(pkg_dir), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    sha = out.stdout.strip()
+    return sha if out.returncode == 0 and sha else ""
+
+
 def _import_root_gate() -> tuple[str, str]:
     """Whether ``prometheus`` resolves INSIDE the tree under test.
 
@@ -314,7 +336,23 @@ def _import_root_gate() -> tuple[str, str]:
     try:
         resolved.relative_to(tree)
     except ValueError:
-        return "out-of-tree", (
+        # THE SHA IS PART OF THE VALUE, and it has to be. Without it this gate
+        # reported the same "out-of-tree" on both sides of a real event: on
+        # 2026-09-20 at 14:21 the canonical checkout this box installs from
+        # moved branches AND commits (b107c29 -> c7e26aa) while worktrees kept
+        # resolving to it. Out-of-tree before, out-of-tree after, same value,
+        # same manifest hash -- so two runs against genuinely different code
+        # would have compared as equal, which is the failure this gate exists
+        # to stop. Naming the commit makes them compare as different.
+        #
+        # Safe in a VALUE, where a path would not be: values are never passed
+        # through _redact_paths, and a sha names a commit rather than a user
+        # or a machine layout. `in-tree` stays categorical on purpose, so
+        # legitimate comparisons between correctly-set-up runs still hash
+        # equal regardless of which commit they are on -- the tree under test
+        # is already identified by everything else in the run.
+        sha = _resolved_tree_head(resolved)
+        return (f"out-of-tree:{sha}" if sha else "out-of-tree"), (
             "prometheus resolves OUTSIDE the tree under test — a shared "
             "editable install. Subprocess tests, doc generators and anything "
             "else that imports the package exercise the OTHER checkout, at "
