@@ -88,6 +88,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from prometheus.computer.types import CANDIDATE_ABSTAIN, ChoiceRequest
 from prometheus.permissions.audit import AuditLogger
 
 log = logging.getLogger(__name__)
@@ -123,57 +124,81 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     value TEXT NOT NULL
 );
 
--- Machine-written. Append-only: nothing in this module ever UPDATEs a row here.
+-- One row per STEP. Machine-written except correct_id.
 CREATE TABLE IF NOT EXISTS tables (
     record_id             TEXT PRIMARY KEY,
     captured_at           REAL NOT NULL,
     schema_version        INTEGER NOT NULL,
+
+    -- ── THE REPLAY SURFACE ────────────────────────────────────────────────
+    -- These four ARE a ChoiceRequest. `replay_request` rebuilds one from them
+    -- and it must equal the object the chooser was handed, so nothing here is
+    -- redacted, truncated or normalised. See the module docstring.
     goal                  TEXT NOT NULL,
+    snapshot_id           TEXT,
+    candidates_json       TEXT NOT NULL,   -- chooser_view() output, VERBATIM
+    history_json          TEXT NOT NULL DEFAULT '[]',
+
     target                TEXT NOT NULL,
     app                   TEXT NOT NULL,
     window_id             INTEGER NOT NULL,
     pid                   INTEGER NOT NULL DEFAULT 0,
-    -- PROVENANCE. tests/fixtures/divergence_traces.py states the rule this
-    -- implements: "a calibration round that cannot tell the two apart is
-    -- calibrating against its own author." A FixtureDriver row and a real Cua
-    -- row must never be indistinguishable, or the chooser is being scored
-    -- against tables this repo's own test fixtures invented.
+    candidate_count       INTEGER NOT NULL,
+
+    -- ── DETERMINISTIC: always runs, authoritative wherever it ANSWERS ─────
+    deterministic_chooser     TEXT NOT NULL DEFAULT '',
+    deterministic_id          TEXT,
+    deterministic_confidence  REAL,
+    -- Explicit, not inferred from `deterministic_id == "abstain"`. This flag
+    -- defines the region where a classifier is allowed to be authoritative,
+    -- so a scoring harness must not have to re-derive it from a string
+    -- comparison that a later reserved-id rename would silently break.
+    deterministic_abstained   INTEGER NOT NULL DEFAULT 0,
+
+    -- ── SHADOW: recorded, NEVER acted on. All nullable — usually absent. ──
+    shadow_chooser        TEXT,
+    shadow_id             TEXT,
+    shadow_confidence     REAL,
+    shadow_latency_ms     REAL,
+
+    -- NULL when there was no shadow answer to agree with. Not false: "they
+    -- disagreed" and "there was nothing to compare" score differently.
+    agreed                INTEGER,
+
+    -- ── WHAT ACTUALLY HAPPENED ────────────────────────────────────────────
+    executed_candidate_id TEXT,            -- may match NEITHER chooser
+    verified              INTEGER,         -- the bool|None from _verify
+    gate_decision         TEXT,
+    gate_approval_required INTEGER,
+    gate_approval_granted  INTEGER,
+
+    -- ── THE LABEL ─────────────────────────────────────────────────────────
+    -- NULL means nobody has judged this yet. Materialised from the latest
+    -- annotations row in the same transaction that writes it.
+    correct_id            TEXT,
+
+    -- provenance + diagnostics (NOT part of the replay surface)
     driver_kind           TEXT NOT NULL DEFAULT 'unknown',
-    -- "human" | "derived" | "unknown". docs/computer-use-corpus.md measures
-    -- that a description-derived goal makes 93% of rows trivial, so goal
-    -- provenance IS the experiment and must be on the row, not inferred.
     goal_source           TEXT NOT NULL DEFAULT 'unknown',
     harvest_session       TEXT NOT NULL DEFAULT '',
-    -- sha over the table itself, for spotting a re-captured identical window.
     table_fingerprint     TEXT NOT NULL DEFAULT '',
-    -- sha over the constants that DEFINE what a table is. Change the role sets
-    -- and old rows silently mean something different.
     code_fingerprint      TEXT NOT NULL DEFAULT '',
-    snapshot_id           TEXT,
     unusable_reason       TEXT,
-    -- The chooser's view only: [{"id": ..., "description": ...}]. Arguments
-    -- never enter the corpus; see TableRecord.note_candidates.
-    candidates_json       TEXT NOT NULL,
-    -- Its own column, not derivable from the blob, because the harvest spec
-    -- reports on table size and a scoring harness filters on it.
-    candidate_count       INTEGER NOT NULL,
-    chooser_answer_id     TEXT,
-    chooser_source        TEXT NOT NULL DEFAULT '',
-    chooser_confidence    REAL,
-    executed_candidate_id TEXT,
     status                TEXT NOT NULL,
     reason                TEXT NOT NULL DEFAULT '',
-    verified              INTEGER,
     extent                TEXT NOT NULL DEFAULT '',
     exception             TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tables_app ON tables (app);
 CREATE INDEX IF NOT EXISTS idx_tables_count ON tables (candidate_count);
 CREATE INDEX IF NOT EXISTS idx_tables_driver ON tables (driver_kind);
+CREATE INDEX IF NOT EXISTS idx_tables_abstained
+    ON tables (deterministic_abstained);
 
--- Human-written. Also append-only: a revision is a NEW row with a later
--- annotated_at, and the latest wins on read. Destructive edits would erase the
--- fact that someone changed their mind.
+-- Append-only provenance for correct_id: who judged what, when, and what they
+-- said before changing their mind. `tables.correct_id` is the materialised
+-- latest value; this is the history behind it. Both are written in ONE
+-- transaction so they cannot drift.
 CREATE TABLE IF NOT EXISTS annotations (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
     record_id             TEXT NOT NULL,
@@ -228,11 +253,11 @@ def _scrub(text: str, limit: int) -> str:
 
 @dataclass
 class TableRecord:
-    """One captured candidate table and what became of it.
+    """One captured STEP — an eval-set row, not an audit line.
 
     Mutable ON PURPOSE, and only within a single ``step()``. The loop builds one
     at the top of the call and fills it in as each stage produces its fact, so a
-    record still exists on the paths that return early or raise.
+    row still exists on the paths that return early or raise.
     """
 
     goal: str
@@ -240,11 +265,9 @@ class TableRecord:
     app: str
     window_id: int
     pid: int = 0
-    #: See the schema comment: fixture rows must never be mistaken for real ones.
+    #: Part of the REPLAY SURFACE — the chooser saw this, so it is stored.
+    history: list[str] = field(default_factory=list)
     driver_kind: str = "unknown"
-    #: "human" if a person wrote this goal without looking at the table,
-    #: "derived" if it came from a candidate's own description. A corpus that
-    #: cannot tell them apart cannot enforce its own harvest spec.
     goal_source: str = "unknown"
     harvest_session: str = ""
     record_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -253,49 +276,92 @@ class TableRecord:
     unusable_reason: str | None = None
     candidates: list[dict[str, str]] = field(default_factory=list)
 
-    #: What the chooser ANSWERED — including a reserved id, or an id that failed
-    #: validation. Distinct from what was executed, and recorded even when
-    #: nothing ran.
-    chooser_answer_id: str | None = None
-    chooser_source: str = ""
-    chooser_confidence: float | None = None
+    #: DETERMINISTIC — always runs, authoritative wherever it answers.
+    deterministic_chooser: str = ""
+    deterministic_id: str | None = None
+    deterministic_confidence: float | None = None
+    deterministic_abstained: bool = False
 
-    #: What was actually EXECUTED. None on every path that ran nothing, which is
-    #: most of them.
+    #: SHADOW — recorded, never acted on. Absent unless a shadow chooser ran.
+    shadow_chooser: str | None = None
+    shadow_id: str | None = None
+    shadow_confidence: float | None = None
+    shadow_latency_ms: float | None = None
+
+    #: What actually happened.
     executed_candidate_id: str | None = None
+    verified: bool | None = None
+    gate_decision: str | None = None
+    gate_approval_required: bool | None = None
+    gate_approval_granted: bool | None = None
 
     status: str = "incomplete"
     reason: str = ""
-    verified: bool | None = None
     extent: str = ""
-    #: Set when step() raised rather than returned. A crash mid-step is exactly
-    #: the row a corpus wants and the one a return-only recorder would lose.
     exception: str | None = None
+
+    @property
+    def agreed(self) -> bool | None:
+        """Did the two choosers pick the same candidate?
+
+        NULL — not False — when there was no shadow answer. "They disagreed"
+        and "there was nothing to compare" are different facts and a harness
+        that counts the second as the first understates agreement by exactly
+        the number of steps the shadow did not run on.
+        """
+        if self.shadow_id is None or self.deterministic_id is None:
+            return None
+        return self.shadow_id == self.deterministic_id
 
     def note_observation(self, observation: Any) -> None:
         self.snapshot_id = getattr(observation, "snapshot_id", None)
         self.unusable_reason = getattr(observation, "unusable_reason", None)
 
     def note_candidates(self, candidates: list[Any]) -> None:
-        """Store the chooser's view of the table — ids and descriptions only.
+        """Store the chooser's view of the table, VERBATIM.
 
-        Deliberately NOT the full ``Candidate``: arguments never enter the
-        corpus. They carry element tokens (meaningless once the snapshot dies)
-        and, for a type action, the caller's payload text. The chooser never saw
-        them, and neither does anything scoring the chooser.
+        ``chooser_view()`` output and nothing else: arguments never enter the
+        corpus — they carry element tokens that die with the snapshot and, for
+        a type action, the caller's payload.
+
+        Deliberately NOT redacted or truncated, unlike ``reason`` below. This
+        is the replay surface: ``replay_request`` has to hand a future chooser
+        the object the original chooser was handed, and a description shortened
+        to 300 characters is a DIFFERENT input that scores a different
+        question. See the module docstring for what that costs and what
+        controls it instead.
         """
         self.candidates = [
-            {
-                "id": c.candidate_id,
-                "description": _scrub(c.description, MAX_DESCRIPTION_CHARS),
-            }
+            {"id": c.candidate_id, "description": c.description}
             for c in candidates
         ]
 
-    def note_choice(self, choice: Any) -> None:
-        self.chooser_answer_id = getattr(choice, "candidate_id", None)
-        self.chooser_source = getattr(choice, "source", "") or ""
-        self.chooser_confidence = getattr(choice, "confidence", None)
+    def note_choice(self, choice: Any, *, shadow: bool = False,
+                    latency_ms: float | None = None) -> None:
+        cid = getattr(choice, "candidate_id", None)
+        if shadow:
+            self.shadow_chooser = getattr(choice, "source", "") or "unknown"
+            self.shadow_id = cid
+            self.shadow_confidence = getattr(choice, "confidence", None)
+            self.shadow_latency_ms = latency_ms
+            return
+        self.deterministic_chooser = getattr(choice, "source", "") or ""
+        self.deterministic_id = cid
+        self.deterministic_confidence = getattr(choice, "confidence", None)
+        # Set from the reserved id HERE, once, so every reader downstream sees
+        # a boolean rather than re-deriving it from a string.
+        self.deterministic_abstained = cid == CANDIDATE_ABSTAIN
+
+    def note_gate(self, decision: Any) -> None:
+        self.gate_decision = (
+            "allowed" if getattr(decision, "allowed", False) else "denied"
+        )
+        self.gate_approval_required = bool(
+            getattr(decision, "requires_confirmation", False)
+        )
+
+    def note_approval(self, granted: bool) -> None:
+        self.gate_approval_granted = granted
 
     def note_result(self, result: Any) -> None:
         self.status = getattr(result, "status", "unknown")
@@ -309,6 +375,27 @@ class TableRecord:
     def note_exception(self, exc: BaseException) -> None:
         self.status = "raised"
         self.exception = _scrub(f"{type(exc).__name__}: {exc}", MAX_REASON_CHARS)
+
+
+def replay_request(row: dict[str, Any]) -> ChoiceRequest:
+    """Rebuild the ChoiceRequest a chooser was handed, from a stored row.
+
+    THE POINT OF THE WHOLE CORPUS. The driver leg cannot be exercised without a
+    display and so is uncoverable in CI; the CHOOSER leg against a stored row is
+    fully coverable, on any machine, with no display, no AT-SPI and no Cua.
+
+    This is why the replay surface is stored verbatim. A reconstruction from a
+    stored *observation* would be a different thing: element tokens die at the
+    next observation, and rebuilding a table through ``build_candidates`` runs
+    today's role sets over yesterday's tree and can yield a different table
+    than the one the chooser actually saw.
+    """
+    return ChoiceRequest(
+        goal=row["goal"],
+        snapshot_id=row["snapshot_id"] or "",
+        candidates=row["candidates"],
+        history=row["history"],
+    )
 
 
 class CorpusStore:
