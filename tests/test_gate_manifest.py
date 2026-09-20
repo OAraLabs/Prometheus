@@ -42,6 +42,9 @@ def test_manifest_reports_the_gates_that_actually_decide_skips() -> None:
         "symlinks",
         "read_permission_revocable",
         "live_repo_config",
+        # Added 2026-09-20: a run against a different tree's code is not
+        # comparable to one against its own, and nothing printed which it was.
+        "import_root",
     ):
         assert required in names, f"gate {required!r} missing from the manifest"
 

@@ -68,7 +68,7 @@ from pathlib import Path
 #     branch's own test runs and must compare VOID against schema 2, which is
 #     what this bump buys.
 # 1 — first version.
-SCHEMA = 2
+SCHEMA = 3
 
 # Hostname of the DNS probe the network gate uses. A public name, not an
 # infrastructure identifier; recorded because the gate is meaningless without
@@ -280,6 +280,87 @@ def _read_floor_gate() -> tuple[str, str]:
         return "unprobeable", f"{exc.__class__.__name__}: {exc}"[:200]
 
 
+def _resolved_tree_head(pkg_dir: Path) -> str:
+    """Short HEAD sha of the checkout ``prometheus`` was imported from, or "".
+
+    ``git -C`` rather than reading ``.git/HEAD`` by hand: ``.git`` is a
+    DIRECTORY in an ordinary clone and a FILE in a worktree, and this box has
+    both, so hand-parsing would answer correctly in one case and not the
+    other. Returns "" for a non-repo install (a plain site-packages copy),
+    where there is no commit to name and the bare verdict is the honest one.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(pkg_dir), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    sha = out.stdout.strip()
+    return sha if out.returncode == 0 and sha else ""
+
+
+def _import_root_gate() -> tuple[str, str]:
+    """Whether ``prometheus`` resolves INSIDE the tree under test.
+
+    ⚠ THE FACT THAT COST THE MOST TIME, AND THE ONE NOTHING PRINTED. A shared
+    venv installed editable against ONE checkout serves every worktree that
+    uses it, so a worktree's tests can silently exercise a DIFFERENT commit's
+    code — and nothing anywhere said so. Measured 2026-09-20: one run had five
+    failures that read as five unrelated defects, and all five were this. The
+    generated-reference check imported the other tree's routes and reported the
+    docs stale; two gate-manifest tests failed downstream of it; and a CLI
+    logging test failed against a fix that existed in the tree under test and
+    not in the installed one. Every one of them passed in CI, where the package
+    is installed from the checkout — so the difference was invisible from both
+    sides until someone compared the two by hand.
+
+    THE VERDICT IS THE VALUE, NOT THE DETAIL, and that is deliberate twice
+    over. Details are redacted at the chokepoint above — rightly, since an
+    absolute path names a username — so a path here would render as ``<path>``
+    and diagnose nothing. And only values are hashed, which is the property
+    that matters: an out-of-tree run is VOID against an in-tree one rather than
+    quietly comparable, which is exactly the comparison that misled us.
+    """
+    try:
+        spec = importlib.util.find_spec("prometheus")
+    except (ImportError, ValueError) as exc:
+        return "unknown", f"prometheus could not be located: {exc}"
+    if spec is None or not spec.origin:
+        return "unknown", "prometheus has no locatable origin"
+    resolved = Path(spec.origin).resolve().parent
+    # parents[2] from tests/support/ is the repo root of the tree being run.
+    tree = Path(__file__).resolve().parents[2]
+    try:
+        resolved.relative_to(tree)
+    except ValueError:
+        # THE SHA IS PART OF THE VALUE, and it has to be. Without it this gate
+        # reported the same "out-of-tree" on both sides of a real event: on
+        # 2026-09-20 at 14:21 the canonical checkout this box installs from
+        # moved branches AND commits (b107c29 -> c7e26aa) while worktrees kept
+        # resolving to it. Out-of-tree before, out-of-tree after, same value,
+        # same manifest hash -- so two runs against genuinely different code
+        # would have compared as equal, which is the failure this gate exists
+        # to stop. Naming the commit makes them compare as different.
+        #
+        # Safe in a VALUE, where a path would not be: values are never passed
+        # through _redact_paths, and a sha names a commit rather than a user
+        # or a machine layout. `in-tree` stays categorical on purpose, so
+        # legitimate comparisons between correctly-set-up runs still hash
+        # equal regardless of which commit they are on -- the tree under test
+        # is already identified by everything else in the run.
+        sha = _resolved_tree_head(resolved)
+        return (f"out-of-tree:{sha}" if sha else "out-of-tree"), (
+            "prometheus resolves OUTSIDE the tree under test — a shared "
+            "editable install. Subprocess tests, doc generators and anything "
+            "else that imports the package exercise the OTHER checkout, at "
+            "whatever commit it happens to be sitting on."
+        )
+    return "in-tree", ""
+
+
 def _live_config_gate() -> tuple[str, str]:
     """``tests/test_config_drift.py`` skips without a live config file.
 
@@ -357,6 +438,8 @@ def collect_gates() -> tuple[Gate, ...]:
     gates.append(Gate("read_permission_revocable", val, det))
 
     # ── declared: differ between environments (local vs CI), not run to run ─
+    val, det = _import_root_gate()
+    gates.append(Gate("import_root", val, det))
     val, det = _live_config_gate()
     gates.append(Gate("live_repo_config", val, det))
     for name in PATH_GATES:
