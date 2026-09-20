@@ -159,3 +159,65 @@ def test_the_exclusion_list_does_not_hide_a_wired_column(tmp_path):
         f"real harvest. Remove the entries — the guard is no longer watching "
         f"columns that now carry data."
     )
+
+
+def test_capture_mode_is_narrower_and_full_mode_still_catches(tmp_path):
+    """The capture exclusion is SCOPED, not a permanent widening.
+
+    A capture-only harvest cannot populate the action-outcome columns, and that
+    is not a defect. But a corpus of REAL runs must still be held to them —
+    blanket-excluding them would stop the guard watching five columns forever
+    to make one harvest mode pass, which is weakening the instrument to obtain
+    a pass.
+    """
+    import sqlite3
+
+    store = _harvest(tmp_path)
+    assert_corpus_complete(store, mode="full")       # real runs: complete
+
+    # Simulate capture-only: blank everything an action would have produced.
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            "UPDATE tables SET executed_candidate_id=NULL, verified=NULL, "
+            "gate_decision=NULL, gate_approval_required=NULL, "
+            "gate_approval_granted=NULL"
+        )
+
+    assert_corpus_complete(store, mode="capture")    # capture: fine
+
+    with pytest.raises(IncompleteCorpus) as exc:
+        assert_corpus_complete(store, mode="full")   # full: still caught
+    for col in ("executed_candidate_id", "verified", "gate_decision"):
+        assert col in str(exc.value), f"full mode stopped watching {col}"
+
+
+def test_an_unknown_mode_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="unknown mode"):
+        assert_corpus_complete(_harvest(tmp_path), mode="lenient")
+
+
+def test_the_history_exclusion_names_the_test_that_proves_the_wiring():
+    """An exclusion for the field whose ABSENCE was the original defect has to
+    carry evidence, not an assertion.
+
+    This guard cannot distinguish "wired but the input was empty" from "never
+    wired" — which is precisely how `history` hid. So its capture-mode
+    exclusion must point at the test that fails if the loop stops populating
+    it, and that test must exist.
+    """
+    from pathlib import Path
+
+    from prometheus.computer.corpus import CAPTURE_ONLY_ABSENT
+
+    reason = CAPTURE_ONLY_ABSENT["history"]
+    assert "test_history_reaches_the_corpus" in reason, (
+        "the history exclusion does not name the test that proves the wiring; "
+        "without it this is an assertion that the field works, which is what "
+        "the original defect also looked like"
+    )
+    named = (
+        Path(__file__).resolve().parent / "test_computer_corpus_reasons.py"
+    ).read_text()
+    assert "def test_history_reaches_the_corpus" in named, (
+        "the exclusion names a test that does not exist"
+    )

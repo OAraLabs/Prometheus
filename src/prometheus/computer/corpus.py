@@ -797,6 +797,41 @@ INTENTIONALLY_ABSENT: dict[str, str] = {
 }
 
 
+#: Columns that exist ONLY because an action was executed. A CAPTURE-ONLY
+#: harvest cannot populate them, and that is not a defect — a corpus row is a
+#: table plus a judgment, and execution is no part of the label.
+#:
+#: ⚠ SCOPED TO capture MODE, deliberately not added to INTENTIONALLY_ABSENT.
+#: For a corpus harvested from real runs these columns MUST be populated, and a
+#: blanket exclusion would stop the guard watching them forever to make one
+#: harvest mode pass. Weakening an instrument to obtain a pass is the inversion
+#: this project has refused twice already.
+CAPTURE_ONLY_ABSENT: dict[str, str] = {
+    "executed_candidate_id": "capture-only harvest: nothing was executed",
+    "verified": "capture-only harvest: no action to verify",
+    "gate_decision": "capture-only harvest: the gate is not reached",
+    "gate_approval_required": "capture-only harvest: the gate is not reached",
+    "gate_approval_granted": "capture-only harvest: the gate is not reached",
+    "extent": (
+        "derived at the gate by computer_extent_for, which a capture-only "
+        "harvest never reaches"
+    ),
+    # ⚠ The uncomfortable one, and it gets evidence rather than an assertion.
+    # `history` being empty is EXACTLY what the original defect looked like, and
+    # this guard cannot tell "wired but the input was empty" from "never
+    # wired". Here it is the former: each harvest row is an independent first
+    # step with no prior action, and the wiring is pinned by
+    # tests/test_computer_corpus_reasons.py::test_history_reaches_the_corpus,
+    # which fails if the loop stops populating it. Remove this entry the moment
+    # a harvest produces multi-step sequences.
+    "history": (
+        "each harvest row is an independent first step, so there is no prior "
+        "action to record. Wiring proven by test_history_reaches_the_corpus — "
+        "NOT by this exclusion."
+    ),
+}
+
+
 class IncompleteCorpus(RuntimeError):
     """A declared column is empty in every row. Names the column."""
 
@@ -818,12 +853,19 @@ def _is_empty(value: Any) -> bool:
     return False
 
 
-def assert_corpus_complete(store: "CorpusStore") -> None:
+def assert_corpus_complete(
+    store: "CorpusStore", *, mode: str = "full"
+) -> None:
     """Fail loud if any declared column is empty across EVERY row.
 
     Harvest exit criteria. Run it after harvesting and before annotating: a
     corpus with a universally-empty column cannot be fixed afterwards, because
     the value was never captured.
+
+    ``mode="capture"`` additionally excludes the five action-outcome columns,
+    for a harvest that observed windows without executing anything. It is a
+    narrower guard and it says so; ``mode="full"`` remains the default so a
+    corpus of real runs is still held to every column.
 
     Raises :class:`IncompleteCorpus` naming every offending column, rather than
     returning a bool — a caller that forgets to check a return value is the
@@ -836,10 +878,16 @@ def assert_corpus_complete(store: "CorpusStore") -> None:
             "not measurable. This is a failure, not a pass."
         )
 
+    if mode not in ("full", "capture"):
+        raise ValueError(f"unknown mode {mode!r}; expected 'full' or 'capture'")
+    excluded = dict(INTENTIONALLY_ABSENT)
+    if mode == "capture":
+        excluded.update(CAPTURE_ONLY_ABSENT)
+
     columns = [c for c in rows[0] if c != "candidates_json"]
     offenders = []
     for col in columns:
-        if col in INTENTIONALLY_ABSENT:
+        if col in excluded:
             continue
         if all(_is_empty(row.get(col)) for row in rows):
             offenders.append(col)

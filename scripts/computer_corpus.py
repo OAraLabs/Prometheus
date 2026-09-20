@@ -176,7 +176,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
     out after a human has annotated 100 rows is the expensive version.
     """
     try:
-        assert_corpus_complete(_store(args))
+        assert_corpus_complete(_store(args), mode=args.mode)
     except IncompleteCorpus as exc:
         print(f"INCOMPLETE\n{exc}", file=sys.stderr)
         return 1
@@ -219,9 +219,17 @@ def main() -> int:
         fn=_cmd_score
     )
 
-    sub.add_parser(
+    ck = sub.add_parser(
         "check", help="harvest exit criteria — no declared column universally empty"
-    ).set_defaults(fn=_cmd_check)
+    )
+    ck.add_argument(
+        "--mode", choices=("full", "capture"), default="full",
+        help=("'capture' also excludes the five action-outcome columns, for a "
+              "harvest that observed windows without executing anything. "
+              "'full' is the default and holds a corpus of real runs to "
+              "every column."),
+    )
+    ck.set_defaults(fn=_cmd_check)
 
     args = p.parse_args()
     return int(args.fn(args))
