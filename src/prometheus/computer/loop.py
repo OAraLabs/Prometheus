@@ -261,11 +261,15 @@ class ComputerUseLoop:
             computer_unknown=unknown,
         )
         extent_value = extent.value if extent else ""
+        if record is not None:
+            record.note_gate(decision)
         if not decision.allowed:
             if decision.requires_confirmation and self._approve is not None:
                 confirmed = await self._call_approve(
                     candidate.tool_name, decision.reason, arguments
                 )
+                if record is not None:
+                    record.note_approval(confirmed)
                 if not confirmed:
                     return StepResult(
                         status="refused",

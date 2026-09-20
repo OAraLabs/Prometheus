@@ -36,6 +36,8 @@ from prometheus.computer.corpus import (  # noqa: E402
     ANNOTATION_NONE_CORRECT,
     ANNOTATION_TABLE_UNUSABLE,
     CorpusStore,
+    IncompleteCorpus,
+    assert_corpus_complete,
     load_corpus,
 )
 from prometheus.config.paths import get_computer_corpus_db_path  # noqa: E402
@@ -78,8 +80,16 @@ def _cmd_show(args: argparse.Namespace) -> int:
     print(f"app      : {row['app']}  window {row['window_id']}  target {row['target']}")
     print(f"goal     : {row['goal']}")
     print(f"status   : {row['status']}   {row['reason']}")
-    print(f"chooser  : answered {row['chooser_answer_id']!r} "
-          f"(source {row['chooser_source']!r}, confidence {row['chooser_confidence']})")
+    print(f"deterministic : {row['deterministic_id']!r} "
+          f"(source {row['deterministic_chooser']!r}, "
+          f"confidence {row['deterministic_confidence']}, "
+          f"abstained={bool(row['deterministic_abstained'])})")
+    print(f"shadow        : {row['shadow_id']!r} "
+          f"({row['shadow_chooser'] or 'none configured'}, "
+          f"{row['shadow_latency_ms']}ms)")
+    print(f"gate          : {row['gate_decision']!r} "
+          f"approval required={row['gate_approval_required']} "
+          f"granted={row['gate_approval_granted']}")
     print(f"executed : {row['executed_candidate_id']!r}")
     ann = store.latest_annotations().get(args.record_id)
     print(f"correct  : {ann['correct_candidate_id']!r} (by {ann['annotated_by']})"
@@ -121,13 +131,13 @@ def _cmd_score(args: argparse.Namespace) -> int:
         print("\nnothing scorable yet — annotate some rows first")
         return 1
 
-    abstained = [r for r in scorable if r["chooser_answer_id"] == "abstain"]
-    answered = [r for r in scorable if r["chooser_answer_id"] != "abstain"]
+    abstained = [r for r in scorable if r["deterministic_abstained"]]
+    answered = [r for r in scorable if not r["deterministic_abstained"]]
 
     def _right(r) -> bool:
         if r["correct_candidate_id"] == ANNOTATION_NONE_CORRECT:
-            return r["chooser_answer_id"] == "abstain"
-        return r["chooser_answer_id"] == r["correct_candidate_id"]
+            return r["deterministic_abstained"]
+        return r["deterministic_id"] == r["correct_candidate_id"]
 
     print(corpus.summary())
     print()
@@ -146,6 +156,22 @@ def _cmd_score(args: argparse.Namespace) -> int:
     print()
     print("⚠ These populations are not comparable to each other and a blended")
     print("  accuracy over both would be meaningless. See docs/computer-use-corpus.md.")
+    return 0
+
+
+def _cmd_check(args: argparse.Namespace) -> int:
+    """HARVEST EXIT CRITERIA. Run this before annotating anything.
+
+    A column empty in every row cannot be repaired afterwards — the value was
+    never captured — so the harvest has to be fixed and re-run. Finding that
+    out after a human has annotated 100 rows is the expensive version.
+    """
+    try:
+        assert_corpus_complete(_store(args))
+    except IncompleteCorpus as exc:
+        print(f"INCOMPLETE\n{exc}", file=sys.stderr)
+        return 1
+    print("complete — every declared column is populated in at least one row")
     return 0
 
 
@@ -176,6 +202,10 @@ def main() -> int:
     sub.add_parser("score", help="score the recorded chooser answers").set_defaults(
         fn=_cmd_score
     )
+
+    sub.add_parser(
+        "check", help="harvest exit criteria — no declared column universally empty"
+    ).set_defaults(fn=_cmd_check)
 
     args = p.parse_args()
     return int(args.fn(args))

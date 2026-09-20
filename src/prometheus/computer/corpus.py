@@ -684,6 +684,119 @@ class CorpusStore:
         return {r["record_id"]: dict(r) for r in rows}
 
 
+# --------------------------------------------------------------------------- #
+# CORPUS COMPLETENESS — a declared column empty in EVERY row is a defect
+#
+# `history` was declared on TableRecord, given a column, and never populated:
+# every row stored `[]`. The corpus looked complete and would have scored
+# choosers on an input the original never saw. It was found by reading the
+# loop, which is not a control.
+#
+# The generalised form: a field that is universally NULL or empty is either
+# unwired or meaningless, and BOTH are worth failing on. What it must never be
+# is invisible.
+#
+# ⚠ WHY DECLARATION AND NOT SILENCE. A column that is legitimately absent has
+# to say so, by name, with a reason. "Not wired yet" and "deliberately absent"
+# are indistinguishable from the data, and the whole point of this guard is
+# that the difference stops depending on somebody remembering which was which.
+# Adding a name here is a decision with a sentence attached; leaving one out is
+# the defect.
+# --------------------------------------------------------------------------- #
+
+#: Columns allowed to be universally empty, each with the reason. A column here
+#: is EXCLUDED BY DECLARATION. Remove the entry when the field is wired.
+INTENTIONALLY_ABSENT: dict[str, str] = {
+    "shadow_chooser": (
+        "no shadow chooser is built yet — milestone 3 ships the corpus first, "
+        "by instruction. Remove when AdditiveChooser lands."
+    ),
+    "shadow_id": "see shadow_chooser",
+    "shadow_confidence": "see shadow_chooser",
+    "shadow_latency_ms": "see shadow_chooser",
+    "agreed": (
+        "NULL by definition while there is no shadow answer to agree with — "
+        "and null here means 'nothing to compare', never 'disagreed'."
+    ),
+    "exception": (
+        "populated only when step() RAISES. A harvest with no crashes leaves "
+        "it empty, and that is the healthy outcome rather than a gap."
+    ),
+    "unusable_reason": (
+        "populated only when the observation was unusable. Empty across a "
+        "clean harvest is correct."
+    ),
+    "none_correct_reason": (
+        "populated only on none_correct annotations. Empty before annotation "
+        "and on a corpus with no none_correct rows."
+    ),
+    "correct_id": (
+        "filled by a human AFTER harvest. Empty on a freshly harvested corpus "
+        "by design — `unannotated` is the state this measures."
+    ),
+}
+
+
+class IncompleteCorpus(RuntimeError):
+    """A declared column is empty in every row. Names the column."""
+
+
+def _is_empty(value: Any) -> bool:
+    """Empty for this purpose: NULL, "", [] or {} — not 0 and not False.
+
+    0 and False are REAL VALUES. `deterministic_abstained` is 0 on every row of
+    a corpus where the chooser always answered, and `verified` is legitimately
+    False. Treating falsy as empty would fail on a healthy corpus, and a guard
+    that fires on healthy data gets switched off.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() in ("", "[]", "{}")
+    if isinstance(value, (list, dict)):
+        return len(value) == 0
+    return False
+
+
+def assert_corpus_complete(store: "CorpusStore") -> None:
+    """Fail loud if any declared column is empty across EVERY row.
+
+    Harvest exit criteria. Run it after harvesting and before annotating: a
+    corpus with a universally-empty column cannot be fixed afterwards, because
+    the value was never captured.
+
+    Raises :class:`IncompleteCorpus` naming every offending column, rather than
+    returning a bool — a caller that forgets to check a return value is the
+    same silence this exists to remove.
+    """
+    rows = store.all_tables()
+    if not rows:
+        raise IncompleteCorpus(
+            "the corpus is empty — nothing was harvested, so completeness is "
+            "not measurable. This is a failure, not a pass."
+        )
+
+    columns = [c for c in rows[0] if c != "candidates_json"]
+    offenders = []
+    for col in columns:
+        if col in INTENTIONALLY_ABSENT:
+            continue
+        if all(_is_empty(row.get(col)) for row in rows):
+            offenders.append(col)
+
+    if offenders:
+        raise IncompleteCorpus(
+            f"{len(offenders)} declared column(s) are empty in ALL "
+            f"{len(rows)} row(s): {sorted(offenders)}.\n"
+            f"Each is either unwired or meaningless. This cannot be repaired "
+            f"after the fact — the value was never captured — so the harvest "
+            f"must be fixed and re-run.\n"
+            f"If a column is legitimately always empty, add it to "
+            f"INTENTIONALLY_ABSENT with the reason. Declaring it is a decision; "
+            f"leaving it out is the defect this guard exists for."
+        )
+
+
 @dataclass
 class ScorableCorpus:
     """Tables joined to judgments, with the unscorable populations named.
