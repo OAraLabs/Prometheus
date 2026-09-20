@@ -671,6 +671,7 @@ class CorpusStore:
                 )
             d = dict(row)
             d["candidates"] = json.loads(d.pop("candidates_json"))
+            d["history"] = json.loads(d.pop("history_json") or "[]")
             out.append(d)
         return out
 

@@ -146,3 +146,45 @@ def test_the_column_and_its_provenance_cannot_drift(tmp_path):
             "WHERE record_id='r1'"
         ).fetchone()
     assert on_row == in_ann == (ANNOTATION_NONE_CORRECT, REASON_VERB_NOT_OFFERED)
+
+
+def test_history_reaches_the_corpus(tmp_path):
+    """`history` is part of the replay surface, so it must actually be stored.
+
+    It was declared on TableRecord, written to the history_json column, and
+    NEVER POPULATED — every row stored `[]`. A replayed ChoiceRequest would
+    then carry empty history where the original had entries, which is a
+    different input to the chooser. The same orphan shape this PR diagnoses in
+    build_candidates, in the code that diagnoses it.
+    """
+    import asyncio
+
+    from prometheus.computer.chooser import ScriptedChooser
+    from prometheus.computer.driver import FixtureDriver
+    from prometheus.computer.loop import ComputerUseLoop
+    from prometheus.computer.types import (
+        CANDIDATE_ABSTAIN, Element, Observation,
+    )
+    from prometheus.permissions.checker import PermissionMode, SecurityGate
+
+    store = _store(tmp_path)
+    obs = Observation(
+        target="box", app="scratchapp", pid=1, window_id=2, snapshot_id="s1",
+        elements=(Element(0, "tok-0", "push button", "Send"),),
+    )
+    loop = ComputerUseLoop(
+        driver=FixtureDriver([obs]),
+        chooser=ScriptedChooser([CANDIDATE_ABSTAIN]),
+        gate=SecurityGate(mode=PermissionMode.DEFAULT, audit_logger=None),
+        skip_preconditions=True, corpus=store,
+    )
+    asyncio.run(loop.step(
+        "press send", "box", "scratchapp", 1, 2,
+        history=["clicked Open", "typed a filename"],
+    ))
+
+    stored = store.all_tables()[0]["history"]
+    assert stored == ["clicked Open", "typed a filename"], (
+        f"history did not reach the corpus: {stored!r}. A replayed "
+        f"ChoiceRequest would differ from the one the chooser answered."
+    )

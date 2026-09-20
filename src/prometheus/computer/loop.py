@@ -126,6 +126,11 @@ class ComputerUseLoop:
         """
         record = TableRecord(
             goal=goal, target=target, app=app, window_id=window_id, pid=pid,
+            # Part of the REPLAY SURFACE — build_choice_request passes this
+            # straight to the chooser, so a row without it replays a different
+            # ChoiceRequest than the one that was actually answered. Copied,
+            # not aliased: the caller's list is mutated between steps.
+            history=list(history or []),
             driver_kind=self._driver_kind(),
             goal_source=goal_source, harvest_session=harvest_session,
         ) if self._corpus is not None else None
