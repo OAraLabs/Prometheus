@@ -183,21 +183,57 @@ are genuinely sparse, not role-limited.
 declined: a corpus harvested from a box changed to produce it is a measurement
 of the change.**
 
-#### What ~40 tables actually powers
+#### RULED 2026-09-20 — no content roles. Harvest at ~25 tables.
 
-| population | rows | verdict |
-|---|---:|---|
-| abstain (coverage) | ~20 | **adequate.** At median N=18 the chance floor is 5.6%; 12/20 correct is overwhelming against an expectation of ~1 |
-| answered (regression) | ~20 | **underpowered, and stays so.** McNemar wants ~25 discordant pairs; 20 paired rows at 30% disagreement gives ~6 |
+Reasons, in order, and none of them is the power math:
 
-So the coverage question — *does a classifier beat doing nothing where the
-deterministic path gives up* — is answerable on this box. **The regression
-question is not**, and no amount of goal-writing fixes it: the limit is
-distinct tables, not labels.
+1. **Regression is unanswerable at 40 and stays so.** The 25→40 jump buys
+   coverage rows for a question already answerable, not the question that is
+   blocked.
+2. **Reversible one way only.** Adding roles later costs one re-harvest.
+   Un-writing filenames costs the corpus, because replay requires verbatim
+   descriptions.
+3. **A corpus containing real filenames can never be published or shared.**
+   That constraint outlives the power math.
+4. Adding roles also invalidates every stored click grant (§8).
 
-Do not report a regression verdict from this corpus. If one is needed, it needs
-a second machine with a different application set, which is a different
-decision.
+#### What ~25 tables powers — sized to 12, not to 20
+
+At the measured abstain rate, ~25 tables is roughly **12 abstain rows**, not 20.
+Computed at the measured median table size N = 18, so chance = 1/18 = 5.6% and
+0.67 correct is the expectation from guessing:
+
+| | |
+|---|---|
+| critical value | **3 of 12 correct** rejects "no better than chance", p = 0.026 |
+| power at true p = 0.30 | **0.75** |
+| power at true p = 0.40 | **0.92** |
+| power at true p = 0.50 | **0.98** |
+| power at true p = 0.20 | 0.44 — the blind spot |
+
+**12 rows clears the chance floor decisively for any classifier worth having.**
+The claim it supports is: *detects a classifier at ≥30% accuracy in the abstain
+region with 75% power, and at ≥40% with 92%.* It is NOT "measures accuracy
+precisely", and it would miss a classifier scraping 20% more often than not.
+
+For comparison, 20 rows would give 0.89 at p = 0.30 — about fourteen points,
+and nothing at all at p ≥ 0.40. That is the size of what the content-role trade
+would have bought on this question.
+
+A 20% classifier in a region where the current baseline is **zero** is marginal
+by construction, and the go/no-go question is "does it beat doing nothing", not
+"what exactly is its accuracy".
+
+#### The regression ceiling is a property of the BOX
+
+Not of the method, and not a harvest parameter. Five apps clear the N ≥ 10
+floor here; eight would with content roles. Neither reaches the ~25 discordant
+pairs McNemar needs, and more goals cannot fix it because the limit is
+**distinct tables**.
+
+**A regression verdict needs a second machine with a different application
+set.** That is its own decision, to be taken on its own terms — not something a
+harvest can be tuned into providing.
 
 ### 4.3 Goals
 
