@@ -43,6 +43,15 @@ anthropic = ["anthropic>=0.40"]
 # with these missing fails the boot loudly.
 push = ["cryptography>=42", "h2>=4"]
 browser = ["playwright>=1.40"]
+# MILESTONE 2: the real desktop driver. MIT, ZERO runtime dependencies, a
+# platform wheel bundling generated UniFFI bindings and a Rust library — so
+# this extra adds exactly one lock entry and no transitive tail.
+#
+# ⚠ DELIBERATELY NOT IN CI's extras and not in `full`. The driver leg cannot
+# be exercised without a display, so installing it in CI would buy nothing
+# and would imply coverage that does not exist. See
+# computer/cua.py's module docstring.
+computer = ["cua-driver>=0.28,<1"]
 # Onboarding Phase 0 papercut: whisper STT was used for voice input but
 # never declared anywhere. The faster-whisper python API is the pip-
 # installable engine; the whisper/faster-whisper-xxl CLIs also work.
