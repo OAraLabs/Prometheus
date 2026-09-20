@@ -200,10 +200,24 @@ def _cmd_abstains(args: argparse.Namespace) -> int:
     todo = [r for r in rows if r["record_id"] not in done]
 
     print(f"{len(rows)} abstain row(s); {len(todo)} unanswered\n")
-    print("For each: was ANY candidate below the right thing to do?")
-    print("  yes -> the TABLE was fine, the chooser missed it")
-    print("  no  -> say which: verb_not_offered | key_not_offered |")
-    print("                    element_not_in_tree | not_achievable_here\n")
+    print("⚠ ONE STEP, NOT THE WHOLE GOAL. The loop takes one bounded action")
+    print("  then RE-OBSERVES with history. So the question is:")
+    print()
+    print("    Is any candidate below the correct NEXT ACTION toward the goal?")
+    print()
+    print("  Opening a menu that contains the target IS a correct next action.")
+    print("  'Nothing here finishes the goal' is NOT the same as 'no'.")
+    print()
+    print("  yes -> a correct next action WAS there; the chooser missed it")
+    print("  no  -> nothing here advances the goal at all. Say which:")
+    print("         verb_not_offered     the verb exists in ACTION_MODELS but")
+    print("                              build_candidates never emits it")
+    print("         key_not_offered      needs a key outside return/tab/escape,")
+    print("                              or a modifier combination")
+    print("         role_not_clickable   the element WAS observed; its role is")
+    print("                              outside _CLICKABLE_ROLES")
+    print("         element_not_in_tree  the target never reached the tree")
+    print("         not_achievable_here  genuinely impossible in this window\n")
 
     for i, r in enumerate(todo, 1):
         cands = r["candidates"]  # all_tables() already decoded it
@@ -259,7 +273,8 @@ def _cmd_reasons(args: argparse.Namespace) -> int:
         print(f"      {k:<22} {v}")
     table_defects = sum(
         v for k, v in by_reason.items()
-        if k in ("verb_not_offered", "key_not_offered")
+        if k in ("verb_not_offered", "key_not_offered",
+                 "role_not_clickable")
     )
     print()
     if table_defects:
@@ -326,10 +341,13 @@ def main() -> int:
     dg = sub.add_parser("diagnose", help="answer one abstain row (NOT a label)")
     dg.add_argument("record_id")
     dg.add_argument("answer", choices=("yes", "no"),
-                    help="was a correct candidate present in the table?")
+                    help=("was the correct NEXT ACTION present? One step, not "
+                          "goal completion — opening the menu that contains "
+                          "the target counts as yes."))
     dg.add_argument("--reason", default=None,
                     choices=("verb_not_offered", "key_not_offered",
-                             "element_not_in_tree", "not_achievable_here"))
+                             "role_not_clickable", "element_not_in_tree",
+                             "not_achievable_here"))
     dg.add_argument("--by", required=True)
     dg.add_argument("--note", default="")
     dg.set_defaults(fn=_cmd_diagnose)

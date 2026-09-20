@@ -276,7 +276,63 @@ classifier reads the same table and finds nothing that undoes anything, because
 Judging a classifier before step 3 measures the table's limits and reports them
 as the chooser's.
 
-## 7. Label provenance — and the harvest order
+## 7. Role coverage — SURVEYED 2026-09-20, deliberately NOT widened
+
+Measured against live AT-SPI trees. **Diagnosis only.** Widening
+`_CLICKABLE_ROLES` is a new **consent surface** — every added role is a class of
+thing the system may be asked to click — so each one wants its own decision.
+
+### `tab` is a dead entry
+
+`_CLICKABLE_ROLES` contains `tab`. AT-SPI's own role enum contains **`page tab`
+and never `tab`**, so that entry has never matched anything. Tab switching has
+been unreachable the whole time, behind an allowlist entry that makes the set
+look like it covers it.
+
+Same shape as the a11y-bus defect: a constant in the code that does not match
+what the system emits, with nothing to notice the mismatch. A survey of the
+emitted roles catches it; reading the set does not.
+
+### Roles present in real windows and never offered
+
+| role | nodes seen | where |
+|---|---:|---|
+| `panel` | 217 | everywhere — structural, correctly not offered |
+| **`table cell`** | **40** | the file chooser's file list |
+| `label` | 31 | everywhere — structural |
+| `image` | 23 | icons |
+| **`table row`** | **9** | the file chooser |
+| `scroll pane` / `scroll bar` | 10 | — |
+| **`page tab` / `page tab list`** | **4** | the editor's document tabs |
+| `list` | 4 | — |
+| `tree table` | 1 | the file chooser |
+
+**A file chooser's actual content is `table cell`.** None of it is offered, so
+"open my documents" in a file dialog has no candidate that selects a file.
+
+### Roles AT-SPI defines that the set does not contain
+
+`combo box` · `menu` · `menu bar` · `popup menu` · `check menu item` ·
+`radio menu item` · `spin button` · `table` · `table cell` · `table row` ·
+`tree table` · `page tab` · `page tab list`
+
+Only `menu item` is present, so an **open menu** offers its items but the thing
+that opens it, and the menu bar itself, are not candidates.
+
+⚠ **`combo box` could not be measured against a real preferences pane** —
+`gnome-control-center` exits immediately on this box and never registers on the
+accessibility bus. That it is absent from the set is a fact about the code; how
+much of a prefs pane it accounts for is not yet measured and should be, during
+the real harvest, before any decision to widen.
+
+### Why this precedes the real harvest
+
+Forty states collected against the current role set would understate
+reachability across the whole corpus, and every `role_not_clickable` row would
+be recorded against a set nobody had looked at. The survey is cheap; the
+harvest is not.
+
+## 8. Label provenance — and the harvest order
 
 `label_source` is required whenever `correct_id` is set. There is **no
 default**: `human` would be the comfortable one and the wrong one.
@@ -312,7 +368,7 @@ measured on how alike they are.
 a human has seen a model's answer, the label is `model_confirmed` at best and
 the calibration set no longer exists.
 
-## 8. Provenance on every row
+## 9. Provenance on every row
 
 Four fields exist so a row cannot quietly mean something other than it appears
 to. Each one is stored, not inferred at read time.
@@ -327,7 +383,7 @@ to. Each one is stored, not inferred at read time.
 `table_fingerprint` is also stored, over the sorted `(id, description)` pairs, so
 the same window captured twice is identifiable rather than double-counted.
 
-## 9. Redaction
+## 10. Redaction
 
 Candidate descriptions are built from AT-SPI labels scraped off a live desktop:
 window titles, button text, field labels, and sometimes document content. A
@@ -340,7 +396,7 @@ decision, not a formatting one.
 - Apply the project's existing redaction before writing, not after.
 - The app allowlist in §4.1 is the primary control; redaction is the backstop.
 
-## 10. What this spec does not cover
+## 11. What this spec does not cover
 
 `hf-server`, SimpleJev, any classifier, and any scoring harness. Those come
 after a corpus exists and after the licence question is answered. This document

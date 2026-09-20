@@ -141,7 +141,8 @@ LABEL_SOURCES = frozenset({LABEL_HUMAN, LABEL_MODEL, LABEL_MODEL_CONFIRMED})
 #: model's answer first.
 ACCURACY_GRADE_SOURCES = frozenset({LABEL_HUMAN})
 
-#: WHY no candidate was correct. Mandatory whenever the answer is
+#: WHY no candidate was the correct NEXT ACTION. Mandatory whenever the answer
+#: is
 #: ``none_correct``, because the four causes want OPPOSITE responses and a
 #: corpus that cannot tell them apart measures the TABLE'S limits and reports
 #: them as the CHOOSER'S.
@@ -153,12 +154,16 @@ ACCURACY_GRADE_SOURCES = frozenset({LABEL_HUMAN})
 #: wiring and operator-facing consent phrases, and cannot be selected because
 #: nothing puts them in a table.
 #:
-#: So part of the measured 50% abstain rate is a table that cannot express the
-#: goal — rows no chooser, local or hosted, will ever improve. Worked example:
-#: "undo my last change" against a table offering only clicks, a type target
-#: and return/tab/escape. Both RuleChooser and a classifier abstain correctly,
-#: because ``invoke_menu(['Edit','Undo'])`` was never offered and Ctrl+Z has no
-#: representation. The gap was never the chooser.
+#: ⚠ THE QUESTION IS ABOUT ONE STEP, NOT THE WHOLE GOAL. ``loop.step`` takes a
+#: single bounded action and then RE-OBSERVES with history, so the label is the
+#: correct NEXT action — not a candidate that completes the goal by itself. A
+#: table offering "Main menu" for the goal "undo what I just did" contains the
+#: right next action even though nothing in it undoes anything; that is a
+#: CHOOSER gap, not a table defect. Judging these rows against goal-completion
+#: overstates table defects and would send the fix to the wrong place.
+#:
+#: A row is only a table defect when NO step from this table advances the goal
+#: — not when no single step finishes it.
 #:
 #: ⚠ CANNOT BE RETROFITTED. A corpus harvested without this cannot be split
 #: afterwards — nobody recorded why. That is why it lands with step 1.
@@ -172,9 +177,19 @@ REASON_VERB_NOT_OFFERED = "verb_not_offered"
 #: combination — which has no representation anywhere today.
 REASON_KEY_NOT_OFFERED = "key_not_offered"
 
-#: The target was not in the observation at all. An observation problem, not a
-#: table-construction one.
+#: The target was not in the observation at all. Blames the OBSERVATION — the
+#: element never reached the tree, so no table could have contained it.
 REASON_ELEMENT_NOT_IN_TREE = "element_not_in_tree"
+
+#: The element WAS observed, and its role is outside ``_CLICKABLE_ROLES`` so
+#: ``build_candidates`` never offered it. Blames the CANDIDATE BUILDER, and the
+#: fix is different from ``element_not_in_tree``: widening a role set, not
+#: fixing an observation. Kept distinct for exactly that reason.
+#:
+#: ⚠ Widening ``_CLICKABLE_ROLES`` is a new CONSENT SURFACE, not a config
+#: tweak — every added role is a class of thing the system may now be asked to
+#: click. Each wants its own decision.
+REASON_ROLE_NOT_CLICKABLE = "role_not_clickable"
 
 #: The goal genuinely cannot be done in this window. THE ONLY REASON FOR WHICH
 #: ABSTAINING IS THE CORRECT ANSWER — and therefore the only one against which
@@ -185,6 +200,7 @@ NONE_CORRECT_REASONS = frozenset({
     REASON_VERB_NOT_OFFERED,
     REASON_KEY_NOT_OFFERED,
     REASON_ELEMENT_NOT_IN_TREE,
+    REASON_ROLE_NOT_CLICKABLE,
     REASON_NOT_ACHIEVABLE_HERE,
 })
 
@@ -650,6 +666,13 @@ class CorpusStore:
         lands as a valid-looking answer is unrecoverable later — nothing
         downstream can tell it from a real judgment.
 
+        ⚠ ``correct_candidate_id`` is the correct NEXT ACTION for this goal,
+        not a candidate that completes the goal on its own. The loop takes one
+        bounded step and re-observes with history, so "open the menu that
+        contains the thing" is a correct label when the thing itself is one
+        level down. ``none_correct`` means no candidate here advances the goal
+        AT ALL.
+
         ``none_correct_reason`` is REQUIRED with ``ANNOTATION_NONE_CORRECT`` and
         REFUSED with anything else, both enforced here rather than documented.
         The four reasons want opposite responses — three are table defects the
@@ -764,11 +787,18 @@ class CorpusStore:
     ) -> None:
         """Answer the table question for ONE abstain row. NOT a label.
 
+        ⚠ THE QUESTION IS ONE-STEP. "Was a correct NEXT ACTION present" — not
+        "did any candidate complete the goal". ``loop.step`` takes one bounded
+        action and re-observes with history, so opening the menu that contains
+        the target IS a correct next action. Asking the goal-completion
+        question instead classifies chooser gaps as table defects and sends the
+        fix to the wrong place.
+
         ``correct_present=False`` requires a reason from
         :data:`NONE_CORRECT_REASONS` — that is the whole measurement. A
-        ``True`` answer means the table DID contain the right action and the
-        deterministic chooser missed it, which is a chooser gap rather than a
-        table gap, and takes no reason.
+        ``True`` answer means the table DID contain a correct next action and
+        the deterministic chooser missed it: a chooser gap, not a table gap,
+        and it takes no reason.
 
         Deliberately not ``record_annotation``: this does not set ``correct_id``
         and must never be counted as ground truth. Diagnosing which rows the
@@ -1113,7 +1143,8 @@ class ScorableCorpus:
             parts = ", ".join(f"{k}={v}" for k, v in sorted(by_reason.items()))
             table_defects = sum(
                 v for k, v in by_reason.items()
-                if k in (REASON_VERB_NOT_OFFERED, REASON_KEY_NOT_OFFERED)
+                if k in (REASON_VERB_NOT_OFFERED, REASON_KEY_NOT_OFFERED,
+                         REASON_ROLE_NOT_CLICKABLE)
             )
             base += f"\n  none-correct by reason: {parts}"
             if table_defects:
