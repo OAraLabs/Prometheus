@@ -27,6 +27,7 @@ import os
 import shlex
 import signal
 import time
+import weakref
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -74,6 +75,62 @@ DEFAULT_POLL_INITIAL_INTERVAL = 5.0
 DEFAULT_POLL_MAX_INTERVAL = 120.0
 
 
+#: Every live BackgroundTaskManager, weakly held.
+#:
+#: A WeakSet so registration cannot itself leak. The consumer is
+#: ``tests/conftest.py::_drain_task_managers``, which reaps every live manager
+#: at teardown so no test has to remember to.
+_LIVE_MANAGERS: "weakref.WeakSet[BackgroundTaskManager]" = weakref.WeakSet()
+
+
+class _LeakState:
+    """Two flags that outlive the manager they describe.
+
+    Separate from the manager because a finaliser must not hold a strong
+    reference to the object it is finalising — that would keep it alive and
+    the callback would never run.
+    """
+
+    __slots__ = ("spawned", "drained", "label")
+
+    def __init__(self, label: str) -> None:
+        self.spawned = False
+        self.drained = False
+        self.label = label
+
+
+#: Managers that were garbage-collected having spawned a process and never been
+#: shut down. THE leak record.
+#:
+#: ⚠ Why a finaliser and not a scan of ``_LIVE_MANAGERS``: a leaked manager is
+#: COLLECTED — that collection is exactly what runs the transport's ``__del__``
+#: and raises "Event loop is closed" — so by the time any later assertion looks
+#: at the WeakSet, the evidence has already dropped out of it. Two earlier
+#: versions of the guard asserted over the live set and passed under mutation
+#: for precisely that reason. The only place the fact is observable is at
+#: collection time.
+_LEAKED_MANAGERS: list[str] = []
+
+
+def _note_if_leaked(state: "_LeakState") -> None:
+    if state.spawned and not state.drained:
+        _LEAKED_MANAGERS.append(state.label)
+
+
+def leaked_managers() -> list[str]:
+    """Managers collected while still holding unreaped processes."""
+    return list(_LEAKED_MANAGERS)
+
+
+def reset_leak_record() -> None:
+    _LEAKED_MANAGERS.clear()
+
+
+def live_managers() -> list["BackgroundTaskManager"]:
+    """Every manager still alive. For test teardown and its guard."""
+    return list(_LIVE_MANAGERS)
+
+
 class BackgroundTaskManager:
     """Manage shell, agent, file-watch and poll tasks with full lifecycle tracking."""
 
@@ -106,6 +163,14 @@ class BackgroundTaskManager:
         self.signal_bus = signal_bus
         self.security_gate = security_gate
         self.store = store
+        #: Flags live on a SEPARATE object so the finaliser can read them
+        #: without keeping this manager alive. `_processes` is unusable for
+        #: this: `_watch_process` pops an entry the moment its task completes,
+        #: so a manager that ran short tasks and leaked every transport looks
+        #: identical to one that never ran anything.
+        self._leak_state = _LeakState(f"BackgroundTaskManager@{id(self):x}")
+        weakref.finalize(self, _note_if_leaked, self._leak_state)
+        _LIVE_MANAGERS.add(self)
         self.poll_initial_interval = poll_initial_interval
         self.poll_max_interval = poll_max_interval
         self.default_timeout_seconds = default_timeout_seconds
@@ -630,6 +695,66 @@ class BackgroundTaskManager:
         except Exception:
             log.warning("TaskStore.upsert failed for %s", record.id, exc_info=True)
 
+    async def shutdown(self, *, kill: bool = True) -> None:
+        """Drain every subprocess and waiter this manager owns.
+
+        WHY THIS EXISTS
+        ---------------
+        The manager spawned processes and ``asyncio.create_task`` waiters with
+        no way to dispose of them. In the daemon that is survivable — it lives
+        as long as the loop does. Anywhere with a SHORTER-LIVED loop it is not:
+        the loop closes, and some time later the garbage collector finalises an
+        ``asyncio`` subprocess transport whose ``__del__`` calls
+        ``self._loop.call_soon(...)`` on a closed loop, raising
+        ``RuntimeError: Event loop is closed`` from inside a finaliser.
+
+        That lands as an unraisable exception attributed to whichever test was
+        running when GC fired — usually not the one that leaked it — which is
+        why it read as a 0-to-5-per-run flake for weeks and put failure-level
+        annotations on innocent CI jobs.
+
+        WHO CALLS IT, AND WHO DELIBERATELY DOES NOT
+        -------------------------------------------
+        Production does not, and that is intentional rather than an oversight.
+        The only production instance is the module-level ``_DEFAULT_MANAGER``
+        singleton, which lives exactly as long as the process; at exit the
+        kernel reaps its children and no finaliser runs against a closed loop.
+        Wiring this into a daemon shutdown would add a teardown path with no
+        defect to fix.
+
+        It exists for loops SHORTER than the process — every test that builds a
+        manager today, and any future embedding. Do not delete it as unused:
+        the caller is ``tests/test_tasks.py::_drain_task_managers``, and
+        without it that file leaks twelve subprocess transports per run.
+
+        Idempotent, and safe to call on a manager that never started anything.
+        """
+        for task_id, waiter in list(self._waiters.items()):
+            waiter.cancel()
+            try:
+                await waiter
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                # A waiter cancelled mid-flight is the expected path, and a
+                # waiter that failed for its own reasons must not stop us
+                # draining the rest — shutdown is the last thing that runs.
+                pass
+            self._waiters.pop(task_id, None)
+
+        for task_id, process in list(self._processes.items()):
+            if process.returncode is None:
+                if kill:
+                    _signal_process_group(process, signal.SIGKILL)
+                try:
+                    # ALWAYS await. This is the reap: without it the transport
+                    # is still live when the loop closes, which is the whole
+                    # defect, and killing without reaping does not help.
+                    await process.wait()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._processes.pop(task_id, None)
+
+        self._leak_state.drained = True
+
     async def _emit_completion(self, task: TaskRecord) -> None:
         """Emit ``task_completed`` / ``task_failed`` once per terminal task."""
         if self.signal_bus is None or task.status not in TERMINAL_STATUSES:
@@ -698,6 +823,7 @@ class BackgroundTaskManager:
             start_new_session=True,
             env=env,
         )
+        self._leak_state.spawned = True
         self._processes[task_id] = process
         self._waiters[task_id] = asyncio.create_task(
             self._watch_process(task_id, process, generation)
