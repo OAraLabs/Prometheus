@@ -73,7 +73,18 @@ def resolve_denied(denied_paths: Iterable[str] | None) -> tuple[str, ...]:
 
 
 def is_denied(path: Path | str, denied: Sequence[str]) -> bool:
-    """True when *path* is denied by any entry — the SAME matcher the gate uses.
+    """True when *path* is denied by any entry.
+
+    ⚠ SHARES THE PREDICATE, NOT THE RESOLVER, and the difference is
+    load-bearing. This said "the SAME matcher the gate uses", which is false
+    and was read by two people as meaning the gate inherited this function's
+    behaviour. What is actually shared is ``denied_entry_matches`` — the
+    comparison. The gate (``checker.py``) and workspace binding
+    (``context/workspace.py``) each resolve the path THEMSELVES and call that
+    predicate directly; neither goes through ``matches_any_denied``. So when
+    the resolver here failed open, it did not follow that the write gate did
+    — and it did not. Say which part is shared, because "same matcher" made
+    a read/disclosure bug look like a write-gate bug.
 
     Fails closed on a path that cannot be resolved (broken symlink, loop): a path
     we cannot reason about is not one to hand back from inside a search that may
@@ -94,7 +105,15 @@ def withheld_note(count: int) -> str:
     if count <= 0:
         return ""
     noun = "path" if count == 1 else "paths"
+    # "or could not be verified" is not hedging — the guard fails CLOSED on a
+    # path it cannot resolve, so a file removed mid-scan is withheld WITHOUT
+    # being a deny-rule hit. Claiming "under a denied path" for it would name
+    # a rule the operator could then go and look for, and not find. The reader
+    # is told what is certain: it was withheld, and here are the two reasons
+    # that can produce that. No taxonomy, and no counting the two apart:
+    # distinguishing them would mean the matcher reporting WHY, which is a
+    # wider change than an honest sentence needs.
     return (
         f"\n\n[{count} {noun} withheld: under a denied path "
-        f"(security.denied_paths)]"
+        f"(security.denied_paths), or could not be verified]"
     )

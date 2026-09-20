@@ -138,11 +138,32 @@ def matches_any_denied(path: str | Path, entries: Iterable[str]) -> bool:
     """Whether *path* is denied by ANY entry.
 
     Resolves the path FIRST (so ``../`` cannot step around an entry) and fails
-    CLOSED on a path that cannot be resolved — a broken symlink or a loop is not
-    something to hand back from inside a search that may be rooted anywhere.
+    CLOSED on a path that cannot be resolved — a broken symlink, a loop, or a
+    path that is simply not there is not something to hand back from inside a
+    search that may be rooted anywhere.
+
+    ⚠ ``strict=True`` IS THE GUARANTEE, NOT A DETAIL. This read
+    ``.resolve()`` — non-strict — and the fail-closed promise above was
+    therefore delivered by accident and only for one of the three shapes it
+    names. Non-strict resolve raises for a symlink CYCLE but returns the path
+    unchanged for a DANGLING symlink and for a path that does not exist, so
+    the ``except`` never fired for either and the guard answered on the
+    path's SPELLING. Measured on 3.12.3, the version we ship: a dangling
+    symlink and a nonexistent path both came back allowed. 3.13 then removed
+    the last case that raised, which is how CI found it — but it was never a
+    3.13 defect; 3.13 only took away the accident.
+
+    Safe to be strict, and checked before relying on it: every caller reaches
+    here through ``denied_prune.is_denied``, whose only two call sites prune
+    the RESULTS of a filesystem walk (``glob.py`` filters ``root.glob(...)``;
+    ``grep.py`` filters the same after ``is_file()`` has already passed). No
+    caller asks about a path that has yet to be created, so nothing here can
+    refuse a write target. A path arriving here that does not exist means
+    reality disagrees with the caller — a file removed mid-scan — which is
+    exactly when a boundary should refuse rather than guess.
     """
     try:
-        resolved = str(Path(path).expanduser().resolve())
+        resolved = str(Path(path).expanduser().resolve(strict=True))
     except (OSError, RuntimeError, ValueError):
         return True
     return any(denied_entry_matches(resolved, e) for e in entries)
