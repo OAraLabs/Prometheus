@@ -126,9 +126,26 @@ def test_no_telemetry_handle_degrades_instead_of_500(tmp_path):
 
 
 def test_billing_for_refuses_to_guess_a_metered_host(tmp_path):
-    """The pay-as-you-go case: same model, non-plan host, no price row → unknown, not $0."""
+    """No plan marker AND no price row → unknown, never a $0 that reads as free.
+
+    #533: this used `qwen3.8-max` for the unknown case because that was the real
+    incident and the model had no price row at the time. It has one now — the
+    pay-as-you-go endpoint genuinely charges per token — so the example had to
+    become a synthetic name that cannot acquire one. The rule is unchanged; only
+    the stand-in moved. The `premise` assertion keeps it from drifting again.
+    """
+    from prometheus.telemetry.cost import price_for
+
+    unpriced = "a-model-with-no-price-row-zzz"
+    assert price_for(unpriced) is None, "premise: the stand-in must stay unpriced"
+
+    assert billing_for(unpriced, METERED)[0] == "unknown"
+    assert billing_for("", None)[0] == "unknown"
+    # A plan host is subscription whatever the model is called...
     assert billing_for("qwen3.8-max", TOKEN_PLAN)[0] == "subscription"
-    assert billing_for("qwen3.8-max", METERED)[0] == "unknown"
+    assert billing_for(unpriced, TOKEN_PLAN)[0] == "subscription"
+    # ...and off the plan, a model we CAN price is metered. This is the half
+    # #533 created: qwen3.8-max used to fall through to unknown here and bill $0.
+    assert billing_for("qwen3.8-max", METERED)[0] == "metered"
     assert billing_for("grok-4.5", "https://api.x.ai/v1")[0] == "metered"
     assert billing_for("/models/x.gguf", TOKEN_PLAN)[0] == "local"  # structural beats nominal
-    assert billing_for("", None)[0] == "unknown"
