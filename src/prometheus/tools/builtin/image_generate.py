@@ -72,12 +72,28 @@ _COMFYUI_PROBE_TIMEOUT = 2.0
 _COMFYUI_TOTAL_TIMEOUT = 180.0
 _COMFYUI_POLL_INTERVAL = 0.5
 
-# DashScope (WAN 2.5) — async-only task API. CLOUD EXPANSION (2026-07).
+# DashScope (WAN) — async-only task API. CLOUD EXPANSION (2026-07).
 # Legacy-but-working international default; newer workspace-scoped domains
 # exist, so the base URL is config-overridable
 # (image_generation.dashscope.base_url).
+#
+# #533 — THE MODEL NAME AND THE WIRE SHAPE ARE ONE FACT, and they had come
+# apart. This backend has always POSTed to `/image-generation/generation`,
+# which is the endpoint for wan2.6 and later, but sent `wan2.5-t2i-preview`
+# with an `input.prompt` body — and BOTH of those belong to the OLDER
+# `/text2image/image-synthesis` endpoint, which Alibaba documents as a
+# different protocol that this path does not accept
+# (alibabacloud.com/help/en/model-studio/text-to-image-v2-api-reference and
+# .../text-to-image, both read 2026-09-21). The combination shipped here
+# matched no documented endpoint at all. It was never caught because the
+# backend is dormant-until-keyed and no DASHSCOPE_API_KEY has ever existed on
+# this box, so the fixtures pinned the broken shape rather than a real
+# exchange. Refreshing only the NAME would have left it broken, so the body
+# moves with it.
 _DASHSCOPE_DEFAULT_BASE = "https://dashscope-intl.aliyuncs.com/api/v1"
-_DASHSCOPE_DEFAULT_MODEL = "wan2.5-t2i-preview"
+# wan2.7-image: current, async, up to 2K. `wan2.7-image-pro` is the 4K variant
+# — set image_generation.dashscope.model to pick it.
+_DASHSCOPE_DEFAULT_MODEL = "wan2.7-image"
 _DASHSCOPE_DEFAULT_KEY_ENV = "DASHSCOPE_API_KEY"
 _DASHSCOPE_POLL_INTERVAL = 3.0
 _DASHSCOPE_POLL_BUDGET = 300.0
@@ -737,11 +753,22 @@ async def _generate_via_dashscope(
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "X-DashScope-Async": "enable",   # WAN 2.5 t2i is async-ONLY
+        # Documented as REQUIRED on this endpoint: without it the API returns
+        # "current user api does not support synchronous calls".
+        "X-DashScope-Async": "enable",
     }
+    # `input.messages`, not `input.prompt` — see the #533 note on
+    # _DASHSCOPE_DEFAULT_MODEL. Every current Wan model on this endpoint
+    # (wan2.6-t2i, wan2.6-image, wan2.7-image, wan2.7-image-pro) takes the
+    # messages shape; `prompt` belongs to the retired text2image endpoint.
+    # The content array must carry EXACTLY ONE object with a `text` field.
     payload: dict[str, Any] = {
         "model": model,
-        "input": {"prompt": arguments.prompt},
+        "input": {
+            "messages": [
+                {"role": "user", "content": [{"text": arguments.prompt}]},
+            ],
+        },
         "parameters": {
             "size": f"{arguments.width}*{arguments.height}",
             "n": 1,

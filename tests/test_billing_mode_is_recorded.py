@@ -39,7 +39,23 @@ from prometheus.web.server import create_app  # noqa: E402
 PLAN_HOST = "token-plan.ap-southeast-1.example.invalid"
 PLAN_URL = f"https://{PLAN_HOST}/compatible-mode/v1"
 METERED_URL = "https://dashscope-intl.example.invalid/compatible-mode/v1"
-MODEL = "qwen3.8-max"
+# The model these tests use to exercise the UNPRICED path.
+#
+# It was `qwen3.8-max` — chosen because it was the real incident, and unpriced
+# at the time. #533 gave it a price row (Alibaba's pay-as-you-go endpoint does
+# charge per token for it), which silently turned these cases from "unknown"
+# into "metered" and broke three tests for a reason unrelated to what they
+# guard. Picking a live model name as a stand-in for "has no price row" makes
+# the test's premise expire the day someone fixes the gap it was written about.
+#
+# A synthetic name can never acquire a price. `test_the_unpriced_model_is_still
+# _unpriced` below asserts that, so if anyone ever adds it the premise fails
+# loudly instead of the meaning changing underneath.
+MODEL = "a-model-with-no-price-row-zzz"
+
+# The real one, kept for the cases that are ABOUT the Alibaba plan rather than
+# about being unpriceable.
+PLAN_MODEL = "qwen3.8-max"
 
 
 def _app_pointed_at(url: str):
@@ -425,6 +441,22 @@ def test_a_failed_call_is_stamped_too(tmp_path):
     assert _modes(tel) == ["subscription"]
 
 
+def test_the_unpriced_model_is_still_unpriced(tmp_path):
+    """The premise these tests rest on, asserted rather than assumed.
+
+    If MODEL ever gains a PRICING row, every "unknown" case below quietly
+    becomes "metered" and stops testing what it claims to. That is exactly how
+    #533 broke this file. Fail here, with the reason, instead.
+    """
+    from prometheus.telemetry.cost import price_for
+
+    assert price_for(MODEL) is None, (
+        f"{MODEL!r} has acquired a price row, so it can no longer stand in for "
+        f"an unpriceable model. Pick another synthetic name — do not 'fix' the "
+        f"assertions below to match."
+    )
+
+
 def test_the_stamp_follows_the_provider_not_the_model_name(tmp_path):
     """Same model, different host, different answer — which is the point.
 
@@ -437,6 +469,21 @@ def test_the_stamp_follows_the_provider_not_the_model_name(tmp_path):
     assert _modes(tel) == ["subscription", "unknown"], (
         "the stamp did not move when the provider did"
     )
+
+
+def test_a_plan_host_beats_a_price_row(tmp_path):
+    """#533: qwen3.8-max now HAS a price, and that must not override the plan.
+
+    The marker is evidence about the arrangement the tokens were bought under;
+    a price row is only evidence that a per-token rate exists somewhere. On a
+    flat plan the rate is not what you are charged, so the host has to win —
+    otherwise adding a price row silently re-bills 89M subscription tokens.
+    """
+    from prometheus.telemetry.cost import billing_for, price_for
+
+    assert price_for(PLAN_MODEL) is not None, "premise: this model is priced"
+    assert billing_for(PLAN_MODEL, PLAN_URL)[0] == "subscription"
+    assert billing_for(PLAN_MODEL, METERED_URL)[0] == "metered"
 
 
 def test_a_provider_that_cannot_be_classified_costs_the_label_not_the_row(tmp_path):

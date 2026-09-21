@@ -42,21 +42,32 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 NEW_PROVIDERS = ("deepseek", "kimi", "glm", "mimo")
 
-# provider -> (env var, default base_url, default model)
-EXPECTED: dict[str, tuple[str, str, str]] = {
-    "deepseek": (
-        "DEEPSEEK_API_KEY", "https://api.deepseek.com", "deepseek-v4-flash",
-    ),
-    "kimi": (
-        "MOONSHOT_API_KEY", "https://api.moonshot.ai/v1", "kimi-k2.6",
-    ),
-    "glm": (
-        "ZAI_API_KEY", "https://api.z.ai/api/paas/v4", "glm-5.2",
-    ),
-    "mimo": (
-        "MIMO_API_KEY", "https://api.xiaomimimo.com/v1", "mimo-v2.5-pro",
-    ),
+# provider -> (env var, default base_url)
+#
+# MIXED ON PURPOSE (#533). The env var and base URL stay VALUE-PINNED: they are
+# wire facts that should not move without someone noticing, and a wrong one is
+# a silent misroute rather than a 404. The MODEL was pinned here too and should
+# not have been — it is the fastest-moving value in the repo, so pinning it in a
+# fourth place bought nothing and cost an edit every refresh. It is derived from
+# the presets below, which tests/test_model_catalog_consistency.py holds to the
+# other eight sites.
+EXPECTED: dict[str, tuple[str, str]] = {
+    "deepseek": ("DEEPSEEK_API_KEY", "https://api.deepseek.com"),
+    "kimi": ("MOONSHOT_API_KEY", "https://api.moonshot.ai/v1"),
+    "glm": ("ZAI_API_KEY", "https://api.z.ai/api/paas/v4"),
+    "mimo": ("MIMO_API_KEY", "https://api.xiaomimimo.com/v1"),
 }
+
+
+def _expected_model(provider: str) -> str:
+    """The default model for *provider*, from the presets — never re-typed."""
+    return str(
+        next(
+            spec["model"]
+            for spec in OVERRIDE_PRESETS.values()
+            if spec["provider"] == provider
+        )
+    )
 
 
 # -----------------------------------------------------------------------
@@ -67,7 +78,8 @@ EXPECTED: dict[str, tuple[str, str, str]] = {
 class TestRegistryCreate:
     @pytest.mark.parametrize("provider", NEW_PROVIDERS)
     def test_create_returns_openai_compat(self, provider: str) -> None:
-        env_var, base_url, model = EXPECTED[provider]
+        env_var, base_url = EXPECTED[provider]
+        model = _expected_model(provider)
         with patch.dict(os.environ, {env_var: "test-key"}):
             p = ProviderRegistry.create({"provider": provider})
         assert isinstance(p, OpenAICompatProvider)
@@ -77,7 +89,7 @@ class TestRegistryCreate:
 
     @pytest.mark.parametrize("provider", NEW_PROVIDERS)
     def test_missing_key_raises_with_env_name(self, provider: str) -> None:
-        env_var, _, _ = EXPECTED[provider]
+        env_var, _ = EXPECTED[provider]
         with patch.dict(os.environ, {}, clear=True):
             with pytest.raises(ValueError, match=env_var):
                 ProviderRegistry.create({"provider": provider})
@@ -93,37 +105,53 @@ class TestRegistryCreate:
 
     def test_cloud_defaults_cover_new_four(self) -> None:
         for provider in NEW_PROVIDERS:
-            env_var, base_url, model = EXPECTED[provider]
+            env_var, base_url = EXPECTED[provider]
             defaults = CLOUD_DEFAULTS[provider]
             assert defaults["default_env"] == env_var
             assert defaults["base_url"] == base_url
-            assert defaults["model"] == model
+            assert defaults["model"] == _expected_model(provider)
 
 
 class TestDeepSeekDefaultModelPin:
-    """The single most load-bearing pin of the sprint: DeepSeek's legacy
-    ``deepseek-chat`` / ``deepseek-reasoner`` aliases are deprecated
-    2026-07-24. Every default in this repo must ship a V4 name."""
+    """DeepSeek's legacy ``deepseek-chat`` / ``deepseek-reasoner`` aliases are
+    deprecated. No default in this repo may ship one.
+
+    SHAPE, NOT VALUE (#533). Each of these used to read
+    ``assert model == "deepseek-v4-flash"`` immediately followed by
+    ``assert model not in DEPRECATED`` — and only the SECOND line was the rule.
+    The first made a name refresh a three-line code change while adding no
+    protection the second did not already give, and it went stale the moment
+    DeepSeek renamed the model to ``deepseek-flash``. The equality that IS worth
+    asserting is between the three sites, not against a literal.
+    """
 
     DEPRECATED = ("deepseek-chat", "deepseek-reasoner")
 
-    def test_registry_default_is_v4_not_deprecated_alias(self) -> None:
-        model = CLOUD_DEFAULTS["deepseek"]["model"]
-        assert model == "deepseek-v4-flash"
-        assert model not in self.DEPRECATED
-
-    def test_override_preset_is_v4_not_deprecated_alias(self) -> None:
-        model = OVERRIDE_PRESETS["deepseek"]["model"]
-        assert model == "deepseek-v4-flash"
-        assert model not in self.DEPRECATED
-
-    def test_yaml_default_slash_command_is_v4(self) -> None:
+    def _yaml_model(self) -> str:
         cfg = yaml.safe_load(
             (_REPO_ROOT / "config" / "prometheus.yaml.default").read_text()
         )
-        model = cfg["slash_commands"]["deepseek"]["model"]
-        assert model == "deepseek-v4-flash"
-        assert model not in self.DEPRECATED
+        return str(cfg["slash_commands"]["deepseek"]["model"])
+
+    def test_registry_default_is_not_a_deprecated_alias(self) -> None:
+        assert CLOUD_DEFAULTS["deepseek"]["model"] not in self.DEPRECATED
+
+    def test_override_preset_is_not_a_deprecated_alias(self) -> None:
+        assert OVERRIDE_PRESETS["deepseek"]["model"] not in self.DEPRECATED
+
+    def test_yaml_default_slash_command_is_not_a_deprecated_alias(self) -> None:
+        assert self._yaml_model() not in self.DEPRECATED
+
+    def test_all_three_deepseek_sites_agree(self) -> None:
+        """The real invariant: whatever the name is, it is the SAME name."""
+        sites = {
+            "CLOUD_DEFAULTS": str(CLOUD_DEFAULTS["deepseek"]["model"]),
+            "OVERRIDE_PRESETS": str(OVERRIDE_PRESETS["deepseek"]["model"]),
+            "prometheus.yaml.default": self._yaml_model(),
+        }
+        assert len(set(sites.values())) == 1, (
+            f"DeepSeek's default model differs across sites: {sites!r}"
+        )
 
 
 # -----------------------------------------------------------------------
@@ -191,7 +219,8 @@ class TestChatCompletionsUrlJoin:
 class TestOverridePresets:
     @pytest.mark.parametrize("name", NEW_PROVIDERS)
     def test_preset_shape(self, name: str) -> None:
-        env_var, _, model = EXPECTED[name]
+        env_var, _ = EXPECTED[name]
+        model = _expected_model(name)
         preset = OVERRIDE_PRESETS[name]
         assert preset["provider"] == name
         assert preset["api_key_env"] == env_var
@@ -235,7 +264,7 @@ class TestProviderOverrideCommand:
             cmd_provider_override,
         )
 
-        env_var, _, _ = EXPECTED[name]
+        env_var, _ = EXPECTED[name]
         agent_loop = self._agent_loop_with_router()
         with patch.dict(os.environ, {}, clear=True):
             text, applied = cmd_provider_override(
@@ -251,7 +280,8 @@ class TestProviderOverrideCommand:
     def test_key_present_applies_override(self, name: str) -> None:
         from prometheus.gateway.commands import cmd_provider_override
 
-        env_var, _, model = EXPECTED[name]
+        env_var, _ = EXPECTED[name]
+        model = _expected_model(name)
         agent_loop = self._agent_loop_with_router()
         with patch.dict(os.environ, {env_var: "test-key"}):
             text, applied = cmd_provider_override(
@@ -365,7 +395,8 @@ class TestConfigSurfaces:
         )
 
         for name in NEW_PROVIDERS:
-            env_var, _, model = EXPECTED[name]
+            env_var, _ = EXPECTED[name]
+            model = _expected_model(name)
             assert CLOUD_DEFAULT_ENV_VARS[name] == env_var
             assert model in [m for m, _, _ in CLOUD_PROVIDER_MODELS[name]]
             assert PROVIDER_EFFECTIVE_LIMITS[name] > 0
@@ -374,7 +405,8 @@ class TestConfigSurfaces:
         from prometheus.cli.init import _CLOUD_FAST_PROVIDERS
 
         for name in NEW_PROVIDERS:
-            env_var, _, model = EXPECTED[name]
+            env_var, _ = EXPECTED[name]
+            model = _expected_model(name)
             key_env, default_model, limit = _CLOUD_FAST_PROVIDERS[name]
             assert key_env == env_var
             assert default_model == model
@@ -412,7 +444,8 @@ class TestConfigSurfaces:
             (_REPO_ROOT / "config" / "prometheus.yaml.default").read_text()
         )
         for name in NEW_PROVIDERS:
-            env_var, _, model = EXPECTED[name]
+            env_var, _ = EXPECTED[name]
+            model = _expected_model(name)
             block = cfg["slash_commands"][name]
             assert block["provider"] == name
             assert block["api_key_env"] == env_var

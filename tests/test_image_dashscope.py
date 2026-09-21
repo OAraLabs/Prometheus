@@ -32,7 +32,11 @@ _PNG = b"\x89PNG\r\n\x1a\nfake-wan-image-bytes"
 _DS_CFG: dict[str, Any] = {
     "dashscope": {
         "api_key_env": "DASHSCOPE_API_KEY",
-        "model": "wan2.5-t2i-preview",
+        # #533: was "wan2.5-t2i-preview", a model that belongs to a DIFFERENT
+        # endpoint than the one this backend posts to. Configs are free-form,
+        # so a user can still set that string — it will simply 400 upstream,
+        # which is the provider's answer to give, not ours to fake.
+        "model": "wan2.7-image",
         "base_url": "https://dashscope-intl.aliyuncs.com/api/v1",
     },
 }
@@ -148,8 +152,21 @@ class TestDashscopeHappyPath:
             assert headers["X-DashScope-Async"] == "enable"   # async-ONLY API
             assert headers["Authorization"] == "Bearer paid-key"
             payload = kwargs["json"]
-            assert payload["model"] == "wan2.5-t2i-preview"
-            assert payload["input"] == {"prompt": "a red lighthouse at dusk"}
+            # #533: these pin the WIRE CONTRACT, so they stay value-pinned —
+            # but the values they pinned were wrong. `wan2.5-t2i-preview` and
+            # `input.prompt` belong to the retired /text2image/image-synthesis
+            # endpoint, while this backend POSTs to /image-generation/generation,
+            # whose documented body is `input.messages`. A green test over a
+            # hand-built fake is exactly how that survived: nothing here ever
+            # spoke to Alibaba. Shape per
+            # alibabacloud.com/help/en/model-studio/text-to-image (2026-09-21).
+            assert payload["model"] == "wan2.7-image"
+            assert payload["input"] == {
+                "messages": [
+                    {"role": "user",
+                     "content": [{"text": "a red lighthouse at dusk"}]},
+                ],
+            }
             assert payload["parameters"]["size"] == "1024*1024"
             return _FakeResponse({"output": {"task_id": "task-abc"}})
 

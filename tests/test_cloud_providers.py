@@ -241,6 +241,9 @@ class TestPassthroughFormatter:
 class TestCostTracker:
     """Tests for telemetry.cost.CostTracker."""
 
+    # VALUE-PINNED ON PURPOSE (#533): the arithmetic below multiplies by gpt-4o's
+    # published rate, so it needs a model whose price is known and stable. These
+    # stay literal — a shape assertion cannot check that the multiply happened.
     def test_record_known_model(self):
         from prometheus.telemetry.cost import CostTracker
         ct = CostTracker()
@@ -249,11 +252,18 @@ class TestCostTracker:
         expected = (1000 * 2.50 + 500 * 10.00) / 1_000_000
         assert abs(cost - expected) < 1e-8
 
-    def test_record_unknown_model_free(self):
+    def test_record_unknown_model_is_unpriced_not_free(self):
+        """#533: was `test_record_unknown_model_free`. "some-local-model" is
+        not local by any structural test — no path, no .gguf — so it is
+        UNKNOWN, and the old name asserted the conflation this release removed.
+        record() still returns 0.0 (callers and stored history read it as a
+        float), but the tracker must not present that zero as a settled bill."""
         from prometheus.telemetry.cost import CostTracker
         ct = CostTracker()
         cost = ct.record("some-local-model", input_tokens=1000, output_tokens=500)
         assert cost == 0.0
+        assert ct.cost_is_complete is False
+        assert "some-local-model" in ct.to_dict()["unpriced_models"]
 
     def test_total_cost_accumulates(self):
         from prometheus.telemetry.cost import CostTracker

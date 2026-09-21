@@ -49,40 +49,59 @@ def _config_target() -> Path:
     return get_config_dir() / "prometheus.yaml"
 
 # Cloud provider model choices: (model_id, label, pricing)
+#
+# THE PRICES HERE ARE RE-TYPED FROM cost.py's PRICING, and the model ids must
+# be selectable from PRESET_MODEL_CHOICES — both are asserted by
+# tests/test_model_catalog_consistency.py. Before that test existed this table
+# offered `claude-sonnet-4-6`, which the Models tab could not select, and had
+# no Qwen entry at all despite cli/init.py having one.
 CLOUD_PROVIDER_MODELS: dict[str, list[tuple[str, str, str]]] = {
     "openai": [
-        ("gpt-4o", "Best quality", "$2.50/$10 per 1M tokens"),
-        ("gpt-4o-mini", "Fast + cheap", "$0.15/$0.60 per 1M tokens"),
-        ("o3-mini", "Reasoning", "$1.10/$4.40 per 1M tokens"),
+        ("gpt-5.6-luna", "Fast + cheap", "$0.20/$1.20 per 1M tokens"),
+        ("gpt-5.6-terra", "Balanced", "$2/$12 per 1M tokens"),
+        ("gpt-6-astra", "Flagship", "$10/$50 per 1M tokens"),
     ],
     "anthropic": [
-        ("claude-sonnet-4-6", "Best quality", "$3/$15 per 1M tokens"),
-        ("claude-haiku-4-5-20251001", "Fast + cheap", "$0.80/$4 per 1M tokens"),
+        ("claude-sonnet-5", "Best value", "$2/$10 per 1M tokens"),
+        ("claude-opus-5", "Flagship", "$5/$25 per 1M tokens"),
+        ("claude-haiku-4-5-20251001", "Fast + cheap", "$1/$5 per 1M tokens"),
     ],
     "gemini": [
         ("gemini-2.5-flash", "Fast + cheap", "$0.15/$0.60 per 1M tokens"),
         ("gemini-2.5-pro", "Best quality", "$1.25/$10 per 1M tokens"),
     ],
     "xai": [
+        # Single-entry ON PURPOSE, matching PRESET_MODEL_CHOICES: the alias
+        # names ("grok-3", "grok-4", "grok-4-latest") are silently served as
+        # grok-4.3 on the SuperGrok OAuth surface, so offering them would be
+        # offering models the user does not actually get. grok-3-mini was
+        # removed here in #533 for that reason — it was the one entry that
+        # contradicted the policy, and the Models tab could not select it.
         ("grok-4.5", "Flagship", "$3/$15 per 1M tokens (est.)"),
-        ("grok-3-mini", "Fast + cheap", "$0.30/$0.50 per 1M tokens"),
     ],
-    # -- CLOUD EXPANSION (2026-07) — pricing from the 2026-07-05 research
-    # pass; verify at first live use.
+    # -- CLOUD EXPANSION (2026-07), prices refreshed 2026-09-21 --
     "deepseek": [
-        # V4 names only — the deepseek-chat/deepseek-reasoner aliases are
-        # deprecated 2026-07-24.
-        ("deepseek-v4-flash", "Fast + cheap", "$0.14/$0.28 per 1M tokens"),
-        ("deepseek-v4-pro", "Reasoning flagship", "$0.435/$0.87 per 1M tokens"),
+        # `deepseek-flash` is the current name; `deepseek-v4-flash` still works
+        # as a legacy alias. Prices are the PEAK, cache-miss rates — off-peak
+        # (UTC 16:30-00:30) is roughly half.
+        ("deepseek-flash", "Fast + cheap", "$0.30/$1.20 per 1M tokens"),
+        ("deepseek-v4-pro", "Reasoning flagship", "$1.32/$3.96 per 1M tokens"),
     ],
     "kimi": [
         ("kimi-k2.6", "Flagship", "$0.95/$4 per 1M tokens"),
     ],
     "glm": [
-        ("glm-5.2", "Flagship", "$1.40/$4.40 per 1M tokens"),
+        ("glm-5.3", "Flagship", "$1.40/$4.40 per 1M tokens"),
+        ("glm-5.3-flash", "Fast + cheap", "$0.15/$0.50 per 1M tokens"),
     ],
     "mimo": [
         ("mimo-v2.5-pro", "Flagship", "$0.435/$0.87 per 1M tokens"),
+    ],
+    "qwen": [
+        # International pay-as-you-go endpoint. The Alibaba subscription plans
+        # are different hosts with different keys and are NOT configured here.
+        ("qwen3.8-max", "Flagship", "$2/$6 per 1M tokens"),
+        ("qwen3.8-flash", "Fast + cheap", "$0.15/$0.48 per 1M tokens"),
     ],
 }
 
@@ -96,6 +115,9 @@ CLOUD_DEFAULT_ENV_VARS: dict[str, str] = {
     "kimi": "MOONSHOT_API_KEY",
     "glm": "ZAI_API_KEY",
     "mimo": "MIMO_API_KEY",
+    # Deliberately NOT DASHSCOPE_API_KEY — that is the WAN image backend's var,
+    # on a different host. See providers/registry.py CLOUD_DEFAULTS["qwen"].
+    "qwen": "QWEN_API_KEY",
 }
 
 # Effective context limits per provider for sane defaults
@@ -113,6 +135,7 @@ PROVIDER_EFFECTIVE_LIMITS: dict[str, int] = {
     "kimi": 64000,
     "glm": 64000,
     "mimo": 64000,
+    "qwen": 64000,
 }
 
 
@@ -304,20 +327,21 @@ class SetupWizard:
             [
                 "Local — llama.cpp (recommended for sovereignty)",
                 "Local — Ollama",
-                "Cloud — OpenAI (GPT-4o, o3-mini)",
-                "Cloud — Anthropic (Claude Sonnet, Haiku)",
+                "Cloud — OpenAI (GPT-5.6 Luna, GPT-6 Astra)",
+                "Cloud — Anthropic (Claude Sonnet 5, Opus 5, Haiku)",
                 "Cloud — Google Gemini (Flash, Pro)",
                 "Cloud — xAI (Grok)",
-                "Cloud — DeepSeek (V4 Flash, V4 Pro)",
+                "Cloud — DeepSeek (Flash, V4 Pro)",
                 "Cloud — Kimi / Moonshot (K2.6)",
-                "Cloud — GLM / Z.ai (GLM-5.2)",
+                "Cloud — GLM / Z.ai (GLM-5.3)",
                 "Cloud — MiMo / Xiaomi (V2.5 Pro)",
+                "Cloud — Qwen / Alibaba (3.8 Max, 3.8 Flash)",
                 "I don't have one running yet",
             ],
             default=1,
         )
 
-        if choice == 11:
+        if choice == 12:
             # Dead-end fix (Phase 0, item 5): don't just print help and
             # bail — offer the same recovery menu as a failed connection.
             self._no_server_menu()
@@ -326,7 +350,7 @@ class SetupWizard:
         # Cloud providers
         cloud_map = {
             3: "openai", 4: "anthropic", 5: "gemini", 6: "xai",
-            7: "deepseek", 8: "kimi", 9: "glm", 10: "mimo",
+            7: "deepseek", 8: "kimi", 9: "glm", 10: "mimo", 11: "qwen",
         }
         if choice in cloud_map:
             self._step_cloud_provider(cloud_map[choice])
@@ -378,7 +402,7 @@ class SetupWizard:
                 [
                     "Point Prometheus at a remote server URL",
                     "Use a cloud provider (OpenAI / Anthropic / Gemini / xAI / "
-                    "DeepSeek / Kimi / GLM / MiMo)",
+                    "DeepSeek / Kimi / GLM / MiMo / Qwen)",
                     "Show install instructions for a local server and exit",
                 ],
                 default=3,
@@ -412,13 +436,13 @@ class SetupWizard:
                     [
                         "OpenAI", "Anthropic", "Google Gemini", "xAI",
                         "DeepSeek", "Kimi (Moonshot)", "GLM (Z.ai)",
-                        "MiMo (Xiaomi)",
+                        "MiMo (Xiaomi)", "Qwen (Alibaba)",
                     ],
                     default=2,
                 )
                 provider = {
                     1: "openai", 2: "anthropic", 3: "gemini", 4: "xai",
-                    5: "deepseek", 6: "kimi", 7: "glm", 8: "mimo",
+                    5: "deepseek", 6: "kimi", 7: "glm", 8: "mimo", 9: "qwen",
                 }[cloud]
                 self._step_cloud_provider(provider)
                 return
@@ -1016,7 +1040,10 @@ Run this wizard again after you're ready:
                 headers["x-api-key"] = api_key
                 headers["anthropic-version"] = "2023-06-01"
                 payload = {
-                    "model": self._model_name or "claude-sonnet-4-6",
+                    # Smoke-test fallback only — the wizard always sets
+                    # _model_name by this point. Kept in step with
+                    # _CLOUD_FAST_PROVIDERS["anthropic"].
+                    "model": self._model_name or "claude-sonnet-5",
                     "max_tokens": 32,
                     "messages": [{"role": "user", "content": "What is 2+2? Reply with just the number."}],
                 }

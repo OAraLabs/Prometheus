@@ -85,13 +85,13 @@ Every cloud provider except Anthropic rides the same OpenAI-compatible wire form
 
 | Provider | Config name | Env var | Default model |
 |----------|-------------|---------|---------------|
-| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-4o` |
+| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-5.6-luna` |
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | `claude-haiku-4-5-20251001` |
 | Google Gemini | `gemini` | `GEMINI_API_KEY` | `gemini-2.5-flash` |
 | xAI (Grok) | `xai` | `XAI_API_KEY` *or* SuperGrok OAuth | `grok-4.5` |
-| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-v4-flash` |
+| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-flash` |
 | Kimi (Moonshot) | `kimi` | `MOONSHOT_API_KEY` | `kimi-k2.6` |
-| GLM (Z.ai / Zhipu) | `glm` | `ZAI_API_KEY` | `glm-5.2` |
+| GLM (Z.ai / Zhipu) | `glm` | `ZAI_API_KEY` | `glm-5.3` |
 | MiMo (Xiaomi) | `mimo` | `MIMO_API_KEY` | `mimo-v2.5-pro` |
 | Qwen (Alibaba Model Studio) | `qwen` | `QWEN_API_KEY` | `qwen3.8-max` |
 
@@ -142,7 +142,7 @@ slash_commands:
   gpt:
     provider: openai
     api_key_env: OPENAI_API_KEY
-    model: gpt-4o
+    model: gpt-5.6-luna
   gemini:
     provider: gemini
     api_key_env: GEMINI_API_KEY
@@ -154,7 +154,7 @@ slash_commands:
   deepseek:
     provider: deepseek
     api_key_env: DEEPSEEK_API_KEY
-    model: deepseek-v4-flash    # reasoning flagship: deepseek-v4-pro
+    model: deepseek-flash       # reasoning flagship: deepseek-v4-pro
   kimi:
     provider: kimi
     api_key_env: MOONSHOT_API_KEY
@@ -162,7 +162,7 @@ slash_commands:
   glm:
     provider: glm
     api_key_env: ZAI_API_KEY
-    model: glm-5.2
+    model: glm-5.3
   mimo:
     provider: mimo
     api_key_env: MIMO_API_KEY
@@ -211,23 +211,31 @@ slash_commands:
     model: qwen3.8-max                  # the default — bare /qwen
     models:                             # everything selectable
       - qwen3.7-max
-      - qwen3.7-plus
-      - qwen3.6-flash
+      - qwen3.8-flash
+      - qwen3.7-max
 ```
 
 Then, in any chat:
 
 ```
 /qwen                  → the default (qwen3.8-max)
-/qwen qwen3.7-plus     → switch to that model
-/qwen qwen3.6-flash summarize this  → switch, then ask, in one message
+/qwen qwen3.8-flash    → switch to that model
+/qwen qwen3.7-max summarize this  → switch, then ask, in one message
 ```
 
 A leading token is read as a model **only** when it exactly matches one of the listed models, so `/qwen explain this` still just asks a question on the default. An unlisted model is rejected with the list rather than passed to the provider as a 404.
 
+### These are defaults, not limits
+
+**The model string is free-form.** Prometheus validates the *provider* name against a fixed list; it does not validate the *model*. Whatever you write in `model:` is sent to the provider as-is, so anything your provider ships is reachable today — name it, restart, done. A wrong name comes back as the provider's own 404; it is not something Prometheus refuses.
+
+`model:` runs a model. `models:` additionally makes it **selectable in the UI**. You only need the second when you want the Models tab to offer it.
+
+`GET /api/models` carries this as a `catalog_note` object, so a client can say so in the picker instead of implying a closed menu.
+
 The same list flattens into `GET /api/models`, so Beacon's model picker shows one entry per model with no Beacon change. The default keeps the bare preset key (`qwen`); alternates get `qwen:<model>`.
 
-Built-in lists ship for Claude, Gemini, DeepSeek, and Qwen, and are deliberately short — only names verified against provider docs, because a wrong name is a runtime 404 that looks like a Prometheus bug. **Your `models:` list replaces the built-in one entirely**, so a provider shipping something new is a config edit and a restart, never a release. Providers with no list offer just their default.
+Built-in lists ship for every preset except xAI, and are deliberately short — only names verified against provider docs, because a wrong name is a runtime 404 that looks like a Prometheus bug. **Your `models:` list replaces the built-in one entirely**, so a provider shipping something new is a config edit and a restart, never a release. Each list holds what the provider's own model-list page carried when it was last refreshed (2026-09-21). A model in the list without a price row still runs — `/status` reports its tokens as unpriced rather than as $0.00.
 
 xAI is intentionally single-entry: `grok-3` / `grok-4` / `grok-4-latest` are all silently served as grok-4.3, so offering them would be offering models you do not actually get.
 
@@ -239,7 +247,7 @@ Restart the daemon and grep the journal to verify the wiring:
 systemctl --user restart prometheus.service
 journalctl --user -u prometheus.service | grep slash_commands
 # INFO  slash_commands.claude  → anthropic / claude-sonnet-4-5
-# INFO  slash_commands.gpt     → openai / gpt-4o
+# INFO  slash_commands.gpt     → openai / gpt-5.6-luna
 # ...
 ```
 
@@ -294,7 +302,7 @@ router:
     provider:
       provider: anthropic
       api_key_env: ANTHROPIC_API_KEY
-      model: claude-sonnet-4-6
+      model: claude-sonnet-5
     as_subagent: true
     budget_usd: 1.00       # soft cost cap per escalation (future enforcement)
 ```
@@ -332,7 +340,7 @@ image_generation:
     default_model: "flux1-schnell-fp8.safetensors"
   dashscope:
     api_key_env: DASHSCOPE_API_KEY
-    model: "wan2.5-t2i-preview"
+    model: "wan2.7-image"
 ```
 
 ## Video generation

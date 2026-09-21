@@ -4743,10 +4743,16 @@ class TestGraftRouterWirePhase4:
                 self._mock_update(200), self._mock_context()
             ))
 
+        from prometheus.router.model_router import OVERRIDE_PRESETS
+
         ov = router.get_override_for_session("telegram:200")
         assert ov is not None
         assert ov.provider_config["provider"] == "openai"
-        assert ov.provider_config["model"] == "gpt-4o"
+        # SHAPE (#533): what this test is about is that /gpt WIRES an override
+        # through to the router at all — the specific model is the preset's
+        # business, and pinning it here meant a default refresh broke a
+        # gateway-wiring test for a reason unrelated to wiring.
+        assert ov.provider_config["model"] == OVERRIDE_PRESETS["gpt"]["model"]
 
     @pytest.mark.integration
     def test_telegram_gemini_command_sets_gemini_override(self):
