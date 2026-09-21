@@ -83,7 +83,7 @@ none either — the key is documented so its absence is visible.
 | `security.permission_mode` | `default` |
 | `security.workspace_root` | `~/.prometheus/workspace` |
 | `security.dashboard_tool_bind_host` | `127.0.0.1` |
-| `security.denied_commands` | `['rm -rf /', 'rm -rf ~', 'DROP TABLE', 'mkfs']` |
+| `security.denied_commands` | `['DROP TABLE']` |
 | `security.denied_paths` | `['/etc', '/sys', '/boot', '/*/.ssh', '/*/.gnupg', '/*/.config/*/*env']` |
 | `security.bash_confinement` | `off` |
 | `security.bash_write_confinement` | `auto` |

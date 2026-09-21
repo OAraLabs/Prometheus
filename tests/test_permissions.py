@@ -560,3 +560,69 @@ class TestProtectedRootsReplaceThePatternList:
                     'echo "never write > /dev/sda"'):
             assert gate.pre_tool_use("bash", {"command": cmd}, {}).action != "DENY", \
                 f"{cmd!r} is benign and was blocked by a pattern that is now deleted"
+
+
+class TestTheShippedDefaultDoesNotHandcuffAFreshInstall:
+    """The template's own `denied_commands`, read from disk, not retyped here.
+
+    `denied_commands` is SUBSTRING-matched, case-insensitively, against the
+    whole command string. So a shipped entry blocks every command that merely
+    CONTAINS it, and the list that shipped alongside the old regex floor
+    carried the same three false positives the regexes did — meaning every new
+    install got the handcuff back the moment the hardcoded list was emptied.
+
+    This asserts the TEMPLATE's verdicts, not the developer's own config, and
+    it constructs the gate the way a fresh install would: the template's
+    workspace_root as well as its denied_commands, because the named-roots
+    mechanism reads the former.
+    """
+
+    @staticmethod
+    def _shipped_security() -> dict:
+        import yaml
+        from pathlib import Path
+
+        raw = (Path(__file__).resolve().parent.parent
+               / "config" / "prometheus.yaml.default").read_text(encoding="utf-8")
+        return yaml.safe_load(raw)["security"]
+
+    def _fresh_gate(self) -> SecurityGate:
+        sec = self._shipped_security()
+        return SecurityGate(
+            workspace_root=sec.get("workspace_root"),
+            denied_commands=sec.get("denied_commands") or [],
+        )
+
+    def test_a_fresh_install_may_clean_a_build_directory(self):
+        gate = self._fresh_gate()
+        for cmd in ("rm -rf /tmp/build", "rm -rf ~/projects/scratch"):
+            assert gate.pre_tool_use("bash", {"command": cmd}, {}).action != "DENY", (
+                f"the SHIPPED default blocks {cmd!r} — a path the agent may "
+                f"legitimately write. denied_commands is substring-matched, so "
+                f"an entry of 'rm -rf /' catches every absolute path."
+            )
+
+    def test_a_fresh_install_may_read_about_mkfs(self):
+        gate = self._fresh_gate()
+        for cmd in ("man mkfs", "grep mkfs /etc/fstab"):
+            assert gate.pre_tool_use("bash", {"command": cmd}, {}).action != "DENY", (
+                f"the SHIPPED default blocks {cmd!r}, which writes nothing. "
+                f"Formatting is covered by the kernel: /dev is a synthetic "
+                f"tmpfs remounted read-only, so no block device is present."
+            )
+
+    def test_a_fresh_install_still_refuses_the_filesystem_root(self):
+        """The handcuff goes; the floor does not. This is the load-bearing half."""
+        gate = self._fresh_gate()
+        assert gate.pre_tool_use("bash", {"command": "rm -rf /"}, {}).action == "DENY", (
+            "a fresh install no longer refuses `rm -rf /` — the named-roots "
+            "mechanism is not reachable from the shipped config"
+        )
+
+    def test_the_shipped_list_keeps_what_no_mechanism_covers(self):
+        """DROP TABLE has no code mechanism, so it stays. If this ever fails,
+        the deletion was a different decision from the covered ones and needs
+        arguing on its own terms."""
+        assert any("drop table" in e.lower()
+                   for e in (self._shipped_security().get("denied_commands") or [])), \
+            "DROP TABLE left the shipped list; nothing in code covers it"
