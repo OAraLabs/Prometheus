@@ -281,8 +281,9 @@ def test_prune_keeps_the_newest_complete_sets(tmp_path):
         d.mkdir(parents=True)
         (d / "MANIFEST.json").write_text("{}")
 
-    pruned = prune_snapshots(snaps, keep=2)
-    assert pruned == ["20260101T000000Z"]
+    result = prune_snapshots(snaps, keep=2)
+    assert result.pruned == ["20260101T000000Z"]
+    assert result.set_aside == []
     assert sorted(p.name for p in snaps.iterdir()) == [
         "20260102T000000Z", "20260103T000000Z",
     ]
@@ -303,11 +304,96 @@ def test_an_interrupted_set_is_pruned_first_and_costs_no_slot(tmp_path):
     ):
         d = snaps / name
         d.mkdir(parents=True)
+        # The marker is what makes it OURS. A run writes it before copying
+        # anything, so even wreckage carries it; that is what separates an
+        # interrupted run from a directory this job never touched.
+        (d / ".written-by-db-snapshot").write_text("x")
         if complete:
             (d / "MANIFEST.json").write_text("{}")
 
-    pruned = prune_snapshots(snaps, keep=2)
-    assert "20260103T000000Z" in pruned
+    result = prune_snapshots(snaps, keep=2)
+    assert "20260103T000000Z" in result.pruned
+    assert result.set_aside == []
     assert sorted(p.name for p in snaps.iterdir()) == [
         "20260101T000000Z", "20260102T000000Z",
     ]
+
+
+def test_a_directory_this_job_did_not_write_is_never_deleted(tmp_path):
+    """The regression this fix exists for.
+
+    The first version read "no MANIFEST.json" as "interrupted run" and deleted on
+    sight, BEFORE --keep was applied — so the very first run on any machine
+    destroyed whatever was already in db-snapshots/, at any keep value. On
+    2026-09-20 that deleted three hand-made directories holding the only copies
+    of some June databases outside the nightly archives.
+    """
+    snaps = tmp_path / "db-snapshots"
+    stranger = snaps / "20260621T044344Z-pre-memhygiene"
+    stranger.mkdir(parents=True)
+    (stranger / "memory.db").write_bytes(b"irreplaceable")
+
+    result = prune_snapshots(snaps, keep=1)
+
+    assert result.pruned == []
+    assert result.set_aside == ["20260621T044344Z-pre-memhygiene"]
+    moved = snaps / "unrecognized" / "20260621T044344Z-pre-memhygiene"
+    assert moved.is_dir(), "it must be moved, not deleted"
+    assert (moved / "memory.db").read_bytes() == b"irreplaceable"
+
+
+def test_setting_aside_is_reported_separately_from_deleting(tmp_path):
+    """One "(pruned N)" covering both is how the deletion went unnoticed."""
+    snaps = tmp_path / "db-snapshots"
+    for name in ("20260101T000000Z", "20260102T000000Z"):
+        d = snaps / name
+        d.mkdir(parents=True)
+        (d / "MANIFEST.json").write_text("{}")
+    (snaps / "hand-made").mkdir(parents=True)
+
+    result = prune_snapshots(snaps, keep=1)
+
+    assert result.pruned == ["20260101T000000Z"]
+    assert result.set_aside == ["hand-made"]
+
+
+def test_the_unrecognized_dir_is_not_itself_treated_as_a_set(tmp_path):
+    """Otherwise each run sets aside the previous run's set-aside directory."""
+    snaps = tmp_path / "db-snapshots"
+    keeper = snaps / "20260102T000000Z"
+    keeper.mkdir(parents=True)
+    (keeper / "MANIFEST.json").write_text("{}")
+    (snaps / "unrecognized" / "moved-earlier").mkdir(parents=True)
+
+    result = prune_snapshots(snaps, keep=1)
+
+    assert result.pruned == []
+    assert result.set_aside == []
+    assert (snaps / "unrecognized" / "moved-earlier").is_dir()
+
+
+def test_an_interrupted_run_leaves_a_marker_the_next_run_can_act_on(tmp_path):
+    """End to end: the marker must survive the failure path, or it proves nothing.
+
+    A run that dies partway has no manifest. Without the marker written up front,
+    the next run cannot distinguish its own wreckage from somebody else's data —
+    and would have to choose between leaking wreckage forever and deleting data.
+    """
+    root = tmp_path / ".prometheus"
+    conn = _make_db(root / "good.db")
+    (root / "broken.db").write_bytes(b"not a database" * 100)
+
+    with pytest.raises(SnapshotError):
+        run_snapshot(root, keep=3)
+    conn.close()
+
+    sets = [p for p in (root / "db-snapshots").iterdir() if p.is_dir()]
+    assert len(sets) == 1
+    wreckage = sets[0]
+    assert (wreckage / ".written-by-db-snapshot").is_file()
+    assert not (wreckage / "MANIFEST.json").exists()
+
+    # ...and retention then recognises it as ours and clears it.
+    result = prune_snapshots(root / "db-snapshots", keep=3)
+    assert result.pruned == [wreckage.name]
+    assert result.set_aside == []
