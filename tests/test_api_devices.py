@@ -163,6 +163,50 @@ def test_delete_unknown_device_is_404(tmp_path):
                          headers=_auth(GLOBAL)).status_code == 404
 
 
+def test_double_revoke_is_idempotent(tmp_path):
+    """A second DELETE of an already-revoked device SUCCEEDS; it does not 404.
+
+    DeviceStore.revoke documents this ("Revoking an already-revoked device is
+    True (idempotent)") and the code matches, but nothing pinned it — so the
+    distinction the route rests on was stated only in a docstring:
+
+        404  = unknown device id          (the row was never there)
+        200  = revoked, or already was    (the tombstone is the end state)
+
+    That matters off this repo. The iOS client raises on a 404 from this route
+    and does NOT fold it into success, precisely because 404 here means "no such
+    device" rather than "already gone" — the opposite of DELETE /api/grants/{id},
+    where 404 IS the desired end state and the client treats it as one. If this
+    route ever started 404ing on the second call, a phone retrying a revoke it
+    could not confirm would be told the device is unknown, and the operator would
+    be left unable to tell "it is gone" from "it was never mine".
+
+    Asserted through the API rather than on the store alone: the store returning
+    True is only half of it — the route has to keep turning that into a 200.
+    """
+    client, _ = _client(tmp_path)
+    device = client.post("/api/devices", json={"name": "phone", "platform": "ios"},
+                         headers=_auth(GLOBAL)).json()
+
+    first = client.delete(f"/api/devices/{device['id']}", headers=_auth(GLOBAL))
+    assert first.status_code == 200 and first.json() == {"ok": True, "id": device["id"]}
+
+    # The tombstone's own timestamp, read before the second call: the row must
+    # not be re-stamped, or "revoked at" would report the last retry rather than
+    # the moment the credential actually died.
+    revoked_at = {r["id"]: r for r in
+                  client.get("/api/devices", headers=_auth(GLOBAL)).json()}[device["id"]]["revoked_at"]
+    assert revoked_at is not None
+
+    second = client.delete(f"/api/devices/{device['id']}", headers=_auth(GLOBAL))
+    assert second.status_code == 200, "a second revoke must not report the device unknown"
+    assert second.json() == {"ok": True, "id": device["id"]}
+
+    after = {r["id"]: r for r in
+             client.get("/api/devices", headers=_auth(GLOBAL)).json()}[device["id"]]
+    assert after["revoked_at"] == revoked_at, "the second revoke re-stamped the tombstone"
+
+
 def test_open_daemon_stays_open(tmp_path):
     client, _ = _client(tmp_path, token="")
     # No token configured → auth off; the device surface works unauthenticated.
