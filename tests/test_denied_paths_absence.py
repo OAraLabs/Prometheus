@@ -130,7 +130,24 @@ def test_the_floor_is_narrower_than_the_shipped_list_and_is_credentials_only():
         f"— it is whether an override could ever be legitimate. /etc and "
         f"/boot could be; a private key or a secrets env file could not."
     )
-    assert _ALWAYS_BLOCKED_PATTERNS, "the command floor vanished"
+    # The command floor is no longer a list of regexes — every one of them was
+    # either a false positive over a benign string or a guarantee delegated to
+    # a substring, and each was replaced by the mechanism that holds (the
+    # kernel for device writes, RLIMIT_* for runaway files and fork bombs,
+    # resolved-argument matching for a recursive rm at a protected root).
+    # `_ALWAYS_BLOCKED_PATTERNS` is empty by design.
+    #
+    # So assert the FLOOR still exists rather than that the list is non-empty:
+    # a command no mode and no config can waive.
+    from prometheus.permissions.checker import PermissionMode, SecurityGate
+
+    for mode in (PermissionMode.AUTONOMOUS, PermissionMode.DEFAULT):
+        gate = SecurityGate(mode=mode, denied_commands=[])
+        decision = gate.pre_tool_use("bash", {"command": "rm -rf /"}, {})
+        assert decision.action == "DENY", (
+            f"the command floor vanished at mode {mode}: `rm -rf /` was not "
+            f"denied ({decision.action})"
+        )
 
 
 # ---------------------------------------------------------------------------

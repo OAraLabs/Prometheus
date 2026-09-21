@@ -412,3 +412,122 @@ class TestDevRemountOrderIsPinned:
             "mkdir the bind's mountpoint on a read-only /dev and dies at "
             "startup: every bash call fails on any host with a GPU node"
         )
+
+
+@needs_floor
+class TestASingleRunawayFileIsBounded:
+    """Item 3 — there was no write-size limit anywhere in the stack.
+
+    Measured before this change: 1.1 GB landed in /tmp in seconds, through the
+    real tool, with nothing anywhere objecting. The limit is RLIMIT_FSIZE, set
+    in the PARENT before exec — not injected as `ulimit` into the command
+    string, which the command can simply undo (`ulimit -S -f unlimited`
+    succeeds when only the soft limit is set, and the string is the agent's to
+    edit besides).
+
+    What exceeding it does, measured: SIGXFSZ, shell exit 153, the message
+    "File size limit exceeded", and A TRUNCATED FILE IS LEFT ON DISK. That
+    last part is why the error has to be loud — a silent truncation would be
+    the same substitute-success shape as the /dev no-op above.
+    """
+
+    def _bounded(self, workspace: Path, limit: int) -> BashTool:
+        return BashTool(workspace=workspace, max_file_bytes=limit)
+
+    def test_a_file_over_the_limit_is_refused_loudly(self, workspace):
+        tool = self._bounded(workspace, 1024 * 1024)
+        target = workspace / "big"
+        res = _run(tool, f"head -c 5000000 /dev/zero > {target}", workspace)
+        assert res.is_error, (
+            "a write past the size limit reported SUCCESS — RLIMIT_FSIZE is "
+            "not being applied to the bash subprocess"
+        )
+        assert "File size limit exceeded" in (res.output or ""), (
+            "the refusal does not name the size limit, so an agent cannot tell "
+            f"it from any other failure. got: {res.output!r}"
+        )
+
+    def test_the_partial_file_is_reported_not_hidden(self, workspace):
+        """RLIMIT_FSIZE truncates. The agent must not read that as 'nothing
+        happened' — the error is the only signal that a stub was left."""
+        tool = self._bounded(workspace, 1024 * 1024)
+        target = workspace / "partial"
+        res = _run(tool, f"head -c 5000000 /dev/zero > {target}", workspace)
+        assert res.is_error, res.output
+        assert target.exists(), (
+            "expected a truncated file — if this ever stops being true the "
+            "docstring and the PR body both need correcting"
+        )
+        assert target.stat().st_size <= 1024 * 1024, target.stat().st_size
+
+    def test_the_command_cannot_raise_the_limit(self, workspace):
+        """Set in the parent, so both soft AND hard are bounded."""
+        tool = self._bounded(workspace, 1024 * 1024)
+        target = workspace / "escaped"
+        res = _run(
+            tool,
+            f"ulimit -S -f unlimited 2>/dev/null; head -c 5000000 /dev/zero > {target}",
+            workspace,
+        )
+        assert res.is_error, (
+            "the command raised its own file-size limit back — the limit was "
+            "set as a soft limit only, or injected into the command string"
+        )
+
+    def test_a_file_under_the_limit_is_unaffected(self, workspace):
+        tool = self._bounded(workspace, 1024 * 1024)
+        target = workspace / "small"
+        res = _run(tool, f"head -c 1000 /dev/zero > {target}", workspace)
+        assert not res.is_error, res.output
+        assert target.stat().st_size == 1000
+
+
+@needs_floor
+class TestRefusedByNamesTheGateThatRefused:
+    """Item 4 — `write_floor` is on every result, including rc 0 successes.
+
+    It reports "the floor was in force", which is a true statement and not the
+    question anyone asks it. Measured: a successful write to an allowed path
+    and a refused write to a denied one both carry `write_floor: 'active'`, so
+    the field cannot distinguish them.
+
+    `refused_by` is added ALONGSIDE it — `write_floor` is correct at what it
+    does and is not changed. Note what `refused_by` is NOT: it is a REPORTING
+    field derived from the shell's own message, never a control. Nothing may
+    gate on it.
+    """
+
+    def test_refused_by_is_null_on_success(self, workspace):
+        res = _run(_bash(workspace), f"printf x > {workspace}/ok", workspace)
+        assert not res.is_error, res.output
+        assert res.metadata.get("refused_by") is None, (
+            "a successful write named a gate as having refused it: "
+            f"{res.metadata}"
+        )
+
+    def test_refused_by_names_the_write_floor(self, workspace, outside):
+        res = _run(_bash(workspace), f"printf x > {outside}", workspace)
+        assert res.is_error, res.output
+        assert res.metadata.get("refused_by") == "write_floor", (
+            "a write outside the writable set did not name the write floor as "
+            f"the refusing gate: {res.metadata}"
+        )
+
+    def test_refused_by_names_posix_inside_the_writable_set(self, workspace):
+        """EACCES inside the writable set is ownership, not the floor.
+
+        Conflating the two is what sent a live debugging session after the
+        wrong cause for an hour.
+        """
+        locked = workspace / "locked"
+        locked.mkdir()
+        locked.chmod(0o500)
+        try:
+            res = _run(_bash(workspace), f"printf x > {locked}/f", workspace)
+            assert res.is_error, res.output
+            assert res.metadata.get("refused_by") == "posix", (
+                "an EACCES inside the writable set was attributed to the write "
+                f"floor, or to nothing at all: {res.metadata}"
+            )
+        finally:
+            locked.chmod(0o700)

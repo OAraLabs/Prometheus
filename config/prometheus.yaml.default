@@ -397,6 +397,43 @@ security:
   #   bash_write_allow:
   #     - "~/models"
   bash_write_allow: []
+  # Largest single file bash may write, in GB. RLIMIT_FSIZE, set in the parent
+  # before exec, both soft AND hard — a soft-only limit is undone by
+  # `ulimit -S -f unlimited` from inside the command.
+  #
+  # The default is ABOVE measured real usage, deliberately. The largest file
+  # this daemon legitimately writes is a ~1.1 GB install image; runtime
+  # downloads run 0.4-0.7 GB and db snapshots ~0.16 GB. A ceiling below real
+  # usage would replace one handcuff with another.
+  #
+  # ⚠ ONE WORKLOAD ON THIS HOST IS ALREADY ABOVE THE DEFAULT, written down
+  # rather than relied upon: the nightly backup writes single tarballs of
+  # 10-11 GB (projects_*.tar.gz) and ~1.7 GB (prometheus_*.tar.gz). It does
+  # not reach this limit TODAY only because backup.sh runs from cron as the
+  # operator, never through the agent's bash tool. That is an unreachability
+  # argument, and unreachability is the first thing a refactor breaks — route
+  # a backup through the agent path and 8 GB stops it. Raise this key, or
+  # keep that job off this path deliberately.
+  #
+  # Exceeding it raises SIGXFSZ: the command dies with exit 153 and "File size
+  # limit exceeded", AND LEAVES A TRUNCATED FILE. The error is the only signal
+  # that a stub was left, which is why it must stay loud.
+  bash_max_file_gb: 8
+  # Max processes, as RLIMIT_NPROC. Replaces a fork-bomb regex that matched
+  # one exact spelling and missed every variant.
+  #
+  # ⚠ RLIMIT_NPROC is PER-UID and counts processes that already exist, so this
+  # bounds total damage rather than scoping it to the agent. It is not
+  # equivalent to a PID cgroup.
+  #
+  # Sized with headroom on purpose. Measured on this host: 142 processes at
+  # rest with a light browser session; a heavy one (many tabs, containers,
+  # a -j16 build) plausibly multiplies that. Against an EXPONENTIAL bomb the
+  # difference between 2048 and 8192 is two doublings — microseconds, no real
+  # loss of protection — while the headroom is what stops a legitimate
+  # command failing because of browser tabs. Still ~11x below the system
+  # ceiling (93210 here).
+  bash_max_procs: 8192
   # Regexes auto-ALLOWed even at SYSTEM trust (background tasks / cron) so a
   # vetted long-running job can run without a human approver. Evaluated AFTER
   # the denied/always-blocked/exfiltration gates (cannot resurrect a block) and

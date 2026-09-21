@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import resource
 import logging
 import os
 import signal
@@ -72,6 +73,8 @@ class BashTool(BaseTool):
         self,
         workspace: str | Path | None = None,
         max_output: int = _DEFAULT_MAX_OUTPUT,
+        max_file_bytes: int | None = None,
+        max_procs: int | None = None,
         confinement: str = "off",
         confinement_profile: str = _CONFINE.PROFILE,
         write_confinement: str = _CONFINE.WRITE_MODE_AUTO,
@@ -88,6 +91,8 @@ class BashTool(BaseTool):
                 Path(w).expanduser().resolve() for w in workspace if w)
         self._workspace = self._workspaces[0] if self._workspaces else None
         self._max_output = max_output
+        self._max_file_bytes = max_file_bytes
+        self._max_procs = max_procs
         self._confinement = _CONFINE.normalise_mode(confinement)
         self._confinement_profile = confinement_profile
         # The write floor's boundary IS the workspace lock, one level down:
@@ -223,6 +228,7 @@ class BashTool(BaseTool):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
+            preexec_fn=self._rlimit_preexec(),
         )
 
         try:
@@ -263,8 +269,37 @@ class BashTool(BaseTool):
         return ToolResult(
             output=text,
             is_error=process.returncode != 0,
-            metadata={"returncode": process.returncode, "write_floor": write_floor},
+            metadata={
+                "returncode": process.returncode,
+                "write_floor": write_floor,
+                "refused_by": _refused_by(process.returncode, text, write_floor),
+            },
         )
+
+    def _rlimit_preexec(self):
+        """Resource limits, set in the PARENT before exec.
+
+        NOT injected as ``ulimit`` into the command string, for two reasons.
+        The string is the agent's to edit. And a soft-only limit is undone by
+        ``ulimit -S -f unlimited``, which succeeds — measured. Setting both
+        soft and hard here means the child can only ever lower them.
+        """
+        limits: list[tuple[int, int]] = []
+        if self._max_file_bytes:
+            limits.append((resource.RLIMIT_FSIZE, int(self._max_file_bytes)))
+        if self._max_procs:
+            limits.append((resource.RLIMIT_NPROC, int(self._max_procs)))
+        if not limits:
+            return None
+
+        def _apply() -> None:  # pragma: no cover — runs post-fork
+            for which, value in limits:
+                try:
+                    resource.setrlimit(which, (value, value))
+                except (ValueError, OSError):
+                    pass  # a limit we cannot lower must not kill the call
+
+        return _apply
 
     @staticmethod
     async def _kill_process_group(process: asyncio.subprocess.Process) -> None:
@@ -290,3 +325,25 @@ class BashTool(BaseTool):
             await process.wait()
         except Exception:  # noqa: BLE001 — reaping must never raise
             pass
+
+
+def _refused_by(returncode: int | None, text: str, write_floor: str) -> str | None:
+    """Which gate refused this call — ``None`` when nothing did.
+
+    ``write_floor`` reports that the floor was IN FORCE, which is true of
+    every call including the successes, so it cannot answer "was this
+    refused, and by what". This can.
+
+    ⚠ REPORTING ONLY. It is derived from the shell's own message, because a
+    shell reports errno as text and there is nothing else to read. Nothing may
+    ever gate on it: a control built on matching a message is the mechanism
+    this whole boundary is designed not to be. Unknown stays ``None`` rather
+    than guessing.
+    """
+    if not returncode:
+        return None
+    if write_floor == "active" and "Read-only file system" in text:
+        return "write_floor"
+    if "Permission denied" in text or "Operation not permitted" in text:
+        return "posix"
+    return None

@@ -209,6 +209,23 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
         confinement=security_cfg.get("bash_confinement", "off"),
         write_confinement=security_cfg.get("bash_write_confinement", "auto"),
         write_allow=security_cfg.get("bash_write_allow") or (),
+        # Resource ceilings, set in the parent before exec. Defaults chosen
+        # ABOVE measured real usage, not below it: the largest file the daemon
+        # legitimately writes today is a 1.07 GB install image, with runtime
+        # downloads at 0.4-0.7 GB and db snapshots at ~0.16 GB. A limit under
+        # real usage would replace one handcuff with another.
+        max_file_bytes=int(
+            float(security_cfg.get("bash_max_file_gb", 8)) * 1024 ** 3
+        ),
+        # RLIMIT_NPROC is PER-UID and counts processes that already exist
+        # (142 measured at rest here), so this bounds total damage rather than
+        # scoping it to the agent. It replaces a fork-bomb regex that matched
+        # one exact spelling; it is not equivalent to a PID cgroup.
+        #
+        # Headroom over protection: against an exponential bomb 2048 and 8192
+        # are two doublings apart, while the headroom is what keeps a
+        # legitimate parallel build from failing because of browser tabs.
+        max_procs=int(security_cfg.get("bash_max_procs", 8192)),
     ))
     try_register(registry, "TaskCreateTool",
                  "prometheus.tools.builtin.task_create", "TaskCreateTool")
