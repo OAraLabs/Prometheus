@@ -63,12 +63,11 @@ PRICING: dict[str, tuple[float, float]] = {
     "claude-sonnet-4-20250514": (3.00, 15.00),      # legacy Sonnet 4 (deprecated June 2026)
     "claude-haiku-4-5": (1.00, 5.00),               # alias — added PR #19
     "claude-haiku-4-5-20251001": (1.00, 5.00),      # PR #19: was (0.80, 4.00) — pricing increased on GA
-    # Gemini — verified 2026-05-25 from ai.google.dev (≤200k tier). DELIBERATELY
-    # NOT refreshed in #533: the known divergence below needs tiered-modality
-    # pricing to fix properly, which is a behaviour change, not a data refresh.
-    "gemini-2.5-flash": (0.15, 0.60),               # NOTE: ai.google.dev now lists $0.30/$2.50 for text — pricing diverges,
-                                                    # left as-is in PR #19 pending a follow-up that handles tiered modality pricing
-    "gemini-2.5-pro": (1.25, 10.00),
+    # Gemini — verified 2026-09-21 from ai.google.dev/gemini-api/docs/pricing.
+    # Flat approximation of a tiered schedule (service tier / input modality /
+    # prompt length): these are the standard tier, text input.
+    "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-2.5-pro": (1.25, 10.00),                # ≤200k prompt
     # xAI (not re-verified — docs.x.ai no longer lists grok-3)
     "grok-3": (3.00, 15.00),
     "grok-3-mini": (0.30, 0.50),
