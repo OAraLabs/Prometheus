@@ -52,16 +52,63 @@ _LEGACY_APPROVAL_QUEUE_WARNED: bool = False
 # Blocked command patterns (applied before prometheus.yaml denied_commands)
 # ---------------------------------------------------------------------------
 
-_ALWAYS_BLOCKED_PATTERNS: list[str] = [
-    r"rm\s+-rf\s+/",
-    r"rm\s+-rf\s+~",
-    r"rm\s+--no-preserve-root",
-    r"mkfs\b",
-    r"dd\s+if=.*of=/dev/",
-    r"chmod\s+-R\s+777\s+/",
-    r">\s*/dev/sda",
-    r":(){ :|:& };:",  # fork bomb
-]
+# WHAT IS LEFT HERE, AND WHY THE REST WENT
+# ----------------------------------------
+# This list was eight regexes over the command STRING. A sweep of all eight
+# against benign input found seven produced false positives, and the eighth
+# did not do what its name said:
+#
+#   rm -rf /            blocked `rm -rf /tmp/build` and `rm -rf <repo>/node_modules`
+#   rm -rf ~            blocked `rm -rf ~/projects/scratch`
+#   rm --no-preserve-root  blocked `echo "never use rm --no-preserve-root"`
+#   mkfs\b              blocked `man mkfs`, `grep mkfs /etc/fstab`, `which mkfs`
+#   dd if=.*of=/dev/    blocked `dd if=/dev/zero of=/dev/null bs=1M count=1`
+#   > /dev/sda          blocked a doc string; MISSED /dev/sdb entirely
+#   :(){ :|:& };:       not a literal — it compiles as an ALTERNATION with an
+#                       empty group, so it matched the benign text ':{ :' and
+#                       MISSED `:(){ :|:&};:`, one space away, and any bomb
+#                       whose function is not named `:`
+#
+# Each was replaced by the mechanism that actually holds, rather than repaired:
+#
+#   mkfs, dd of=/dev/*, > /dev/sdX  -> the kernel. /dev is a synthetic tmpfs
+#       remounted read-only (confinement.write_wrap_argv), so a device the
+#       namespace does not carry cannot be created, and one it does carry is
+#       not reachable without privileges the agent does not have.
+#   fork bomb                       -> RLIMIT_NPROC on the bash subprocess.
+#   a runaway single file           -> RLIMIT_FSIZE on the bash subprocess.
+#   rm -rf at a root the agent MAY write -> _rm_targets_a_protected_root below,
+#       which is the one gap no kernel mechanism closes.
+#
+#   chmod -R 777 /  -> DELETED, same justification as the rest. It blocked
+#       `chmod -R 777 /tmp/scratch`, a path the agent may legitimately write,
+#       and protected nothing: outside the writable set the kernel floor
+#       refuses the mode change already (measured: `chmod` on ~/.bashrc leaves
+#       644 unchanged), and inside it the pattern misses the relative spelling
+#       (`cd / && chmod -R 777 .`) exactly as the rm one did.
+#
+#       NOT closed by this: chmod INSIDE the workspace is ungated by anything,
+#       and nothing here inspects mode changes. That is a separate, still-open
+#       gap — do not read this deletion as having addressed it.
+#
+# The list is now EMPTY, and that is the finding, not an oversight. Every
+# entry it held was either a false positive over a benign string or a
+# guarantee delegated to a substring; each one is replaced below or in the
+# kernel. The structure stays because `denied_commands` is configurable policy
+# and this is the floor beneath it — an operator adding a pattern here still
+# gets one that no mode can waive.
+_ALWAYS_BLOCKED_PATTERNS: list[str] = []
+
+#: Roots that `rm -r` must never be pointed AT. Not their contents — the roots
+#: themselves. `/` plus whatever this gate was configured with, plus the
+#: agent's own state directory.
+_EXTRA_PROTECTED_ROOTS: tuple[str, ...] = ("/", "~", "~/.prometheus")
+
+#: `rm` with a recursive flag, in any of its spellings: -r, -R, -rf, -fr,
+#: --recursive. Force is deliberately NOT required: `rm -r <root>` is the same
+#: loss with one more keystroke.
+_RM_CALL = re.compile(r"(?:^|[;&|]|\b(?:and|then|do)\b)\s*(rm\s+[^;&|]*)", re.I)
+_RM_RECURSIVE_FLAG = re.compile(r"(?:^|\s)-(?:-recursive\b|[A-Za-z]*[rR])")
 
 # ---------------------------------------------------------------------------
 # Path locations denied REGARDLESS of configuration — the structural floor.
@@ -1469,14 +1516,61 @@ class SecurityGate:
             log.warning("grant config rewrite failed for %r", grant, exc_info=True)
             return False
 
+    def _protected_roots(self) -> tuple[Path, ...]:
+        roots: list[Path] = []
+        for raw in (*self._workspaces, *(Path(r) for r in _EXTRA_PROTECTED_ROOTS)):
+            try:
+                roots.append(Path(raw).expanduser())
+            except (OSError, RuntimeError):  # pragma: no cover — unresolvable ~
+                continue
+        return tuple(roots)
+
+    def _rm_targets_a_protected_root(self, command: str) -> str:
+        """Reason string if a recursive `rm` is pointed AT a protected root.
+
+        A SPEED BUMP, not the confinement — and deliberately so. It reads
+        arguments, it does not parse the shell: `cd /tmp/build && rm -rf .`
+        is ALLOWED and must stay allowed. Following `cd` means tracking shell
+        state, and a parser has to win every round while a shell has to win
+        once. The boundary that actually holds is the kernel write floor
+        (permissions/confinement.py); this catches the one thing that floor
+        cannot see — an `rm -rf` aimed at a root the agent is legitimately
+        allowed to write.
+        """
+        roots = self._protected_roots()
+        for call in _RM_CALL.findall(command):
+            if not _RM_RECURSIVE_FLAG.search(call):
+                continue
+            for token in call.split()[1:]:
+                if token.startswith("-"):
+                    continue
+                if not (token.startswith("/") or token.startswith("~")):
+                    continue  # relative target — see the docstring
+                try:
+                    target = Path(token.rstrip("/") or "/").expanduser()
+                except (OSError, RuntimeError):  # pragma: no cover
+                    continue
+                for root in roots:
+                    if target == root:
+                        return (
+                            "Blocked: recursive rm aimed at a protected root — "
+                            f"{token!r} resolves to {root}"
+                        )
+        return ""
+
     def _is_always_blocked(self, command: str) -> bool:
-        return any(r.search(command) for r in self._blocked_re)
+        if any(r.search(command) for r in self._blocked_re):
+            return True
+        return bool(self._rm_targets_a_protected_root(command))
 
     def _check_blocked_command(self, command: str) -> str:
         """Return a denial reason if the command matches any blocked pattern."""
         for pattern in self._blocked_re:
             if pattern.search(command):
                 return f"Blocked command pattern matched: {pattern.pattern!r}"
+        reason = self._rm_targets_a_protected_root(command)
+        if reason:
+            return reason
         for denied in self._denied_commands:
             if denied.lower() in command.lower():
                 return f"Command matches deny list entry: {denied!r}"

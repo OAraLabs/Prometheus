@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **399** of
+Every key in `config/prometheus.yaml.default` — **401** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -88,6 +88,8 @@ none either — the key is documented so its absence is visible.
 | `security.bash_confinement` | `off` |
 | `security.bash_write_confinement` | `auto` |
 | `security.bash_write_allow` | `[]` |
+| `security.bash_max_file_gb` | `8` |
+| `security.bash_max_procs` | `8192` |
 | `security.audit` | *(section)* |
 | `security.audit.enabled` | `True` |
 | `security.audit.retention_days` | `30` |

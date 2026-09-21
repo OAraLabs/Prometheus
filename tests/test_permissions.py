@@ -87,10 +87,19 @@ class TestSecurityGateAcceptance:
         result = gate.pre_tool_use("bash", {"command": "rm -rf ~"}, {})
         assert result.action == "DENY"
 
-    def test_mkfs_is_denied(self):
+    def test_mkfs_is_no_longer_a_pattern_because_the_kernel_covers_it(self):
+        """The `mkfs\\b` regex is DELETED, and this asserts the consequence.
+
+        It blocked `man mkfs`, `grep mkfs /etc/fstab` and `which mkfs` — three
+        false positives for a command that cannot work anyway: /dev is a
+        synthetic tmpfs remounted read-only, so the device node is not in the
+        namespace, and formatting needs privileges the agent does not have.
+        The gate no longer pretends to be the control here.
+        """
         gate = SecurityGate()
         result = gate.pre_tool_use("bash", {"command": "mkfs.ext4 /dev/sda1"}, {})
-        assert result.action == "DENY"
+        assert result.action != "DENY", \
+            "the pattern is deleted; the kernel is the mechanism now"
 
 
 # ---------------------------------------------------------------------------
@@ -188,10 +197,23 @@ class TestTrustedCommandAllowlist:
     def test_real_download_allowed_at_system_trust(self):
         assert self._gate().evaluate("bash", command=self._dl(), origin="system").action == "ALLOW"
 
-    def test_chained_destructive_is_denied_not_allowlisted(self):
-        # The appended rm is always-blocked; crucially it is NOT ALLOWed through.
+    def test_chained_destructive_is_not_allowlisted(self):
+        """The property this guards is NOT-ALLOW, and it still holds.
+
+        It used to land on DENY because `rm\\s+-rf\\s+~` matched any path
+        under $HOME. That pattern is gone: only $HOME ITSELF is a protected
+        root now, and `rm -rf ~/models` is refused one layer down by the
+        kernel write floor (the parent is read-only, so the unlink fails
+        EROFS) rather than by a substring.
+
+        So the chain is now APPROVE rather than DENY — the allowlist still
+        refuses to wave a chained command through, which is the bypass this
+        test exists to catch. Asserting NOT-ALLOW rather than DENY states the
+        guarantee the allowlist actually makes.
+        """
         d = self._gate().evaluate("bash", command=self._dl() + " ; rm -rf ~/models", origin="system")
-        assert d.action == "DENY"
+        assert d.action != "ALLOW", \
+            "a destructive command chained onto an allowlisted one was waved through"
 
     def test_pipe_chain_is_not_allowlisted(self):
         d = self._gate().evaluate("bash", command=self._dl() + " | tee /tmp/log", origin="system")
@@ -326,12 +348,17 @@ class TestSecurityGateOriginUser:
         d = gate.evaluate("bash", command="rm -rf /", origin=ORIGIN_USER)
         assert d.action == "DENY"
 
-    def test_user_origin_still_blocks_mkfs(self):
+    def test_user_origin_no_longer_pattern_blocks_mkfs(self):
+        """Counterpart of the acceptance test above — the pattern is gone.
+
+        What user origin still blocks is unchanged for everything that is
+        still a pattern; this one stopped being a pattern deliberately.
+        """
         gate = self._gate()
         d = gate.evaluate(
             "bash", command="mkfs.ext4 /dev/sda1", origin=ORIGIN_USER,
         )
-        assert d.action == "DENY"
+        assert d.action != "DENY"
 
     def test_user_origin_still_blocks_denied_commands(self):
         gate = self._gate(denied_commands=["DROP TABLE"])
@@ -467,3 +494,69 @@ class TestSecurityGateFromConfig:
         gate = SecurityGate.from_config("/nonexistent/prometheus.yaml")
         # Should not raise; creates a default gate
         assert gate is not None
+
+
+class TestProtectedRootsReplaceThePatternList:
+    """Item 2 — the pattern list was never a security mechanism.
+
+    Measured on the shipped list: seven of its eight regexes produced false
+    positives on benign commands (``man mkfs``, ``dd if=/dev/zero
+    of=/dev/null``, ``rm -rf /tmp/build``, ``chmod -R 777 /tmp/scratch``,
+    ``echo "never > /dev/sda"``), and the fork-bomb entry was not a literal at
+    all but an alternation with an empty group — it caught one exact spelling
+    and missed ``:(){ :|:&};:``, one character away.
+
+    What remains here is the one gap a kernel mechanism does NOT cover: an
+    ``rm -rf`` aimed at a root the agent is legitimately allowed to write.
+    """
+
+    def _gate(self, workspace=None):
+        return SecurityGate(workspace_root=workspace) if workspace else SecurityGate()
+
+    def test_rm_rf_at_the_filesystem_root_is_refused(self):
+        assert self._gate().pre_tool_use(
+            "bash", {"command": "rm -rf /"}, {}).action == "DENY", \
+            "rm -rf / is the case the whole mechanism exists for"
+
+    def test_rm_rf_at_the_prometheus_home_is_refused(self):
+        assert self._gate().pre_tool_use(
+            "bash", {"command": "rm -rf ~/.prometheus"}, {}).action == "DENY", \
+            "~/.prometheus holds the sessions, skills and db snapshots"
+
+    def test_rm_rf_at_a_workspace_root_is_refused(self, tmp_path):
+        gate = self._gate(str(tmp_path))
+        assert gate.pre_tool_use(
+            "bash", {"command": f"rm -rf {tmp_path}"}, {}).action == "DENY", \
+            "a configured workspace root is a protected root"
+
+    def test_rm_rf_inside_the_writable_set_is_allowed(self):
+        """The handcuff. `rm -rf /tmp/build` was DENIED by `rm\\s+-rf\\s+/`."""
+        assert self._gate().pre_tool_use(
+            "bash", {"command": "rm -rf /tmp/build"}, {}).action != "DENY", \
+            "cleaning a build dir the agent may write is not a destructive act"
+
+    def test_rm_rf_of_a_subpath_of_a_protected_root_is_allowed(self, tmp_path):
+        gate = self._gate(str(tmp_path))
+        assert gate.pre_tool_use(
+            "bash", {"command": f"rm -rf {tmp_path}/node_modules"}, {}).action != "DENY", \
+            "protection is of the root itself, not of everything beneath it"
+
+    def test_a_relative_target_is_deliberately_allowed(self):
+        """R2: `cd /tmp/build && rm -rf .` stays ALLOWED, on purpose.
+
+        Following `cd` means parsing the shell, and a parser has to win every
+        round while a shell has to win once. Named roots are a SPEED BUMP; the
+        confinement is the kernel write floor. Do not "fix" this.
+        """
+        assert self._gate().pre_tool_use(
+            "bash", {"command": "cd /tmp/build && rm -rf ."}, {}).action != "DENY"
+
+    def test_deleted_patterns_no_longer_block_benign_commands(self):
+        """The false positives the sweep found, now that the regexes are gone."""
+        gate = self._gate()
+        for cmd in ("man mkfs",
+                    "grep mkfs /etc/fstab",
+                    "dd if=/dev/zero of=/dev/null bs=1M count=1",
+                    'echo "never write > /dev/sda"'):
+            assert gate.pre_tool_use("bash", {"command": cmd}, {}).action != "DENY", \
+                f"{cmd!r} is benign and was blocked by a pattern that is now deleted"
