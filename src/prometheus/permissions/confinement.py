@@ -343,6 +343,27 @@ def write_wrap_argv(
     for pattern in DEVICE_BIND_GLOBS:
         for node in sorted(_glob.glob(pattern)):
             wrapped += ["--dev-bind-try", node, node]
+    # ⚠ ORDER IS LOAD-BEARING: this MUST stay after every --dev-bind-try above.
+    #
+    # `--dev /dev` mounts a synthetic tmpfs that is WRITABLE, so a command
+    # aimed at a device node the namespace does not carry does not fail — it
+    # creates a regular file of that name, exits 0 and prints nothing. An
+    # agent asked to write a device is told the write worked. Remounting that
+    # tmpfs read-only turns the lie into EROFS. The device nodes bound above
+    # are separate mounts layered on top and are unaffected: measured
+    # writable after the remount on a host with /dev/nvidia0 and
+    # /dev/dri/renderD128, as is /dev/null.
+    #
+    # Emitted BEFORE those binds, bwrap cannot mkdir the bind's mountpoint on
+    # a now-read-only /dev and dies before running anything:
+    #
+    #     bwrap: Can't mkdir /dev/dri: Read-only file system
+    #
+    # That is every bash call failing to start on any host with a GPU. CI has
+    # no GPU, so no behavioural test can catch the reorder — the argv order
+    # itself is pinned in
+    # tests/test_bash_write_floor.py::TestDevRemountOrderIsPinned.
+    wrapped += ["--remount-ro", "/dev"]
     for path in writable:
         # bind-TRY: a workspace root or cache dir that does not exist yet is
         # a missing bind source, and must not abort every bash call.

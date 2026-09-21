@@ -315,3 +315,100 @@ class TestWiringRunsEverywhere:
         ))
         assert not res.is_error, res.output
         assert target.read_text() == "hello"
+
+
+@needs_floor
+class TestANewEntryUnderDevIsRefused:
+    """The /dev half of the boundary — shape D, a silent no-op reporting success.
+
+    ``--dev /dev`` mounts a synthetic, WRITABLE tmpfs. So a command aimed at a
+    device node the namespace does not carry does not fail: it CREATES A
+    REGULAR FILE of that name in the throwaway tmpfs, exits 0, prints nothing,
+    and the file evaporates when the namespace does. Measured on the live
+    floor before this change::
+
+        printf x > /dev/sdb   ->  rc=0, no output, /dev/sdb is a 1-byte file
+
+    An agent asked to write a device therefore cannot report failure — it
+    reports success, having done nothing. That is strictly worse than a
+    refusal, and it is the same substitute-success shape the write floor
+    exists to remove for ordinary paths.
+
+    Note what is NOT claimed: this does not make block devices reachable, and
+    it is not a device-access control. It converts a lie into an error.
+    """
+
+    def test_creating_a_new_entry_under_dev_is_refused(self, workspace):
+        """A name that does not exist in the namespace must EROFS, not appear.
+
+        Deliberately a uuid name rather than /dev/sdb: the property under test
+        is "a new entry under /dev cannot be created", which must hold on a
+        runner with no block devices at all.
+        """
+        name = f"probe-{uuid.uuid4().hex}"
+        res = _run(_bash(workspace), f"printf x > /dev/{name}", workspace)
+        assert res.is_error, (
+            "creating a new entry under /dev reported SUCCESS — the synthetic "
+            f"/dev tmpfs is still writable, so /dev/{name} was created as a "
+            "regular file and the agent was told the write worked"
+        )
+        assert "Read-only file system" in (res.output or ""), (
+            "the refusal did not name EROFS; the agent needs a legible cause, "
+            f"not a bare non-zero exit. got: {res.output!r}"
+        )
+
+    def test_an_existing_device_node_is_still_writable(self, workspace):
+        """/dev/null must keep working, or every shell command breaks.
+
+        A read-only BIND of the host /dev was rejected upstream for exactly
+        this reason (it makes `> /dev/null` fail EACCES). Remounting the
+        synthetic tmpfs read-only must not reintroduce that.
+        """
+        res = _run(_bash(workspace), "echo x > /dev/null && echo ok", workspace)
+        assert not res.is_error, (
+            "writing to the EXISTING /dev/null node was refused — the remount "
+            f"went too far and broke ordinary shell redirection. got: {res.output!r}"
+        )
+        assert "ok" in (res.output or ""), res.output
+
+
+class TestDevRemountOrderIsPinned:
+    """The fix is ORDER-SENSITIVE and one order is fatal. Pin the order.
+
+    ``--remount-ro /dev`` must be emitted AFTER every ``--dev-bind-try``.
+    Emitted BEFORE them, bwrap cannot create the bind's mountpoint and dies
+    before the command runs at all::
+
+        bwrap: Can't mkdir /dev/dri: Read-only file system
+
+    That is every bash call failing to start, on any host with a GPU. CI has
+    no GPU and no /dev/dri, so the BEHAVIOURAL tests above cannot catch a
+    reorder — they would pass on the runner and fail on the operator's box.
+    This asserts the argv itself, which is why it is here and not there.
+    """
+
+    def test_remount_ro_dev_is_emitted_after_every_dev_bind(self, monkeypatch, tmp_path):
+        # Force a device bind to exist on every host, including runners with
+        # no GPU: without this the argv carries no --dev-bind-try at all and
+        # the ordering assertion passes vacuously.
+        monkeypatch.setattr(C, "DEVICE_BIND_GLOBS", ("/dev/null",))
+        argv = C.write_wrap_argv(["true"], writable=[tmp_path])
+
+        assert "--remount-ro" in argv, (
+            "the /dev tmpfs is never remounted read-only, so a new entry "
+            "under /dev can still be created silently"
+        )
+        remount = argv.index("--remount-ro")
+        assert argv[remount + 1] == "/dev", (
+            f"--remount-ro targets {argv[remount + 1]!r}, not /dev"
+        )
+        binds = [i for i, a in enumerate(argv) if a == "--dev-bind-try"]
+        assert binds, (
+            "no --dev-bind-try in the argv — the monkeypatched glob did not "
+            "take, so this test would have passed without measuring anything"
+        )
+        assert remount > max(binds), (
+            "--remount-ro /dev is emitted BEFORE a --dev-bind-try. bwrap cannot "
+            "mkdir the bind's mountpoint on a read-only /dev and dies at "
+            "startup: every bash call fails on any host with a GPU node"
+        )
