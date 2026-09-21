@@ -360,6 +360,13 @@ SLASH_COMMAND_NAMES: tuple[str, ...] = (
 # Selectable models per preset — the allowlist behind the flattened
 # GET /api/models catalog and the `/qwen <model>` argument.
 #
+# THIS LIST EXISTS FOR VERSION SELECTION. A preset with one entry gives the
+# Models tab nothing to offer, which defeats the point: the tab becomes a
+# provider switcher rather than a model switcher. Every entry below is a model
+# the provider's OWN model-list page carries (verified 2026-09-21), so a preset
+# should be single-entry only when there is a documented reason — xai is the
+# one such case, and it says why.
+#
 # THESE LISTS ARE DELIBERATELY CONSERVATIVE. They carry only names verified
 # against provider docs at the time of writing, because a wrong name is a
 # runtime 404 that looks like a Prometheus bug. Providers ship models far
@@ -389,12 +396,21 @@ PRESET_MODEL_CHOICES: dict[str, tuple[str, ...]] = {
     "gemini": ("gemini-2.5-flash", "gemini-2.5-pro"),
     "deepseek": ("deepseek-flash", "deepseek-v4-pro"),
     "glm": ("glm-5.3", "glm-5.3-flash", "glm-5.3-flashx"),
+    "kimi": (
+        "kimi-k2.6",
+        "kimi-k3",
+        "kimi-k2.7-code",
+        "kimi-k2.7-code-highspeed",
+    ),
+    "mimo": ("mimo-v2.5-pro", "mimo-v2.5"),
     "qwen": (
-        # qwen3.8-max went GA 2026-08-03 and is CHEAPER than 3.7-max
-        # ($2.00/$6.00 vs $2.50/$7.50 per Mtok in/out).
+        # The current commercial text family per Alibaba's own model list
+        # (2026-09-21). qwen3.7-max is NOT on it any more — its PRICING row
+        # stays for anyone still pinning it, since the model string is
+        # free-form, but it is no longer offered as a choice.
         "qwen3.8-max",
         "qwen3.8-flash",
-        "qwen3.7-max",
+        "qwen3.7-plus",
     ),
     # xai is intentionally single-entry: "grok-3"/"grok-4"/"grok-4-latest" are
     # silently served as grok-4.3 on the OAuth surface (probed 2026-07-10), so

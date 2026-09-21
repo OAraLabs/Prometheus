@@ -97,18 +97,72 @@ class TestEveryPresetDefaultIsSelectableAndPriced:
         )
 
 
-class TestEverySelectableModelIsPriced:
-    """A model the Models tab offers is a model a user can pick. Picking it must
-    not silently produce an unbillable session."""
+class TestEverySelectableModelIsOfferedForAReason:
+    """The DEFAULT must be priced. An alternate need not be — and that is a
+    deliberate loosening, not an oversight.
+
+    This class briefly required a PRICING row for every selectable model. That
+    rule made sense only while an unpriced model billed $0.00 in silence. It no
+    longer does: CostTracker classifies through billing_for(), excludes unpriced
+    tokens from the dollar total, and names the model on /status. Picking an
+    unpriced alternate is now a visible, self-announcing choice.
+
+    Holding the stricter line would have meant one of two things, both worse
+    than the loosening. Either the Models tab offers one model per provider —
+    which defeats what the list is FOR, version selection — or every new
+    alternate needs a price invented to satisfy a test. That second path is
+    precisely what produced the rows this release had to correct: of the price
+    rows checked against a provider's own page, three of three were wrong and
+    all three under-billed. A guessed price is worse than an absent one,
+    because an absent one warns.
+
+    So: defaults are held hard (TestEveryPresetDefaultIsSelectableAndPriced),
+    and alternates are held to existing upstream.
+    """
 
     @pytest.mark.parametrize("key", PRESET_KEYS)
-    def test_all_choices_have_prices(self, key: str) -> None:
-        unpriced = [m for m in resolve_model_choices(key, {}) if price_for(m) is None]
-        assert not unpriced, (
-            f"PRESET_MODEL_CHOICES[{key!r}] offers {unpriced!r} with no PRICING "
-            f"row. The Models tab would let a user select these and then report "
-            f"their spend as $0.00."
+    def test_offers_more_than_one_version_where_the_provider_has_one(
+        self, key: str
+    ) -> None:
+        """A single-entry preset makes the Models tab a provider switcher.
+
+        xai is the one documented exception: "grok-3" / "grok-4" /
+        "grok-4-latest" are all silently served as grok-4.3 on the SuperGrok
+        OAuth surface, so extra entries would list models the user does not
+        actually get.
+        """
+        single_by_design = {"xai"}
+        choices = resolve_model_choices(key, {})
+        if key in single_by_design:
+            assert len(choices) == 1, (
+                f"/{key} is documented as single-entry on purpose; it now has "
+                f"{choices!r}. Either the reason no longer holds (update the "
+                f"comment in PRESET_MODEL_CHOICES) or this is drift."
+            )
+            return
+        assert len(choices) > 1, (
+            f"PRESET_MODEL_CHOICES[{key!r}] offers only {choices!r}, so the "
+            f"Models tab cannot switch VERSION for this provider — only "
+            f"providers. Populate it from the provider's own model-list page, "
+            f"or add {key!r} to single_by_design with the reason."
         )
+
+    @pytest.mark.parametrize("key", PRESET_KEYS)
+    def test_unpriced_alternates_are_visible_not_silent(self, key: str) -> None:
+        """Whatever is unpriced must announce itself, since we now allow it."""
+        from prometheus.telemetry.cost import CostTracker
+
+        for model in resolve_model_choices(key, {}):
+            if price_for(model) is not None:
+                continue
+            tracker = CostTracker()
+            tracker.record(model, 1000, 500)
+            assert tracker.cost_is_complete is False, (
+                f"{model!r} is offered by /{key} with no PRICING row, which is "
+                f"allowed — but the tracker reported a complete cost anyway. "
+                f"That is the silent $0.00 this release removed."
+            )
+            assert model in tracker.to_dict()["unpriced_models"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

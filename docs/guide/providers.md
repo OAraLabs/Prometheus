@@ -235,7 +235,7 @@ A leading token is read as a model **only** when it exactly matches one of the l
 
 The same list flattens into `GET /api/models`, so Beacon's model picker shows one entry per model with no Beacon change. The default keeps the bare preset key (`qwen`); alternates get `qwen:<model>`.
 
-Built-in lists ship for Claude, GPT, Gemini, DeepSeek, GLM, and Qwen, and are deliberately short — only names verified against provider docs, because a wrong name is a runtime 404 that looks like a Prometheus bug. **Your `models:` list replaces the built-in one entirely**, so a provider shipping something new is a config edit and a restart, never a release. Providers with no list offer just their default.
+Built-in lists ship for every preset except xAI, and are deliberately short — only names verified against provider docs, because a wrong name is a runtime 404 that looks like a Prometheus bug. **Your `models:` list replaces the built-in one entirely**, so a provider shipping something new is a config edit and a restart, never a release. Each list holds what the provider's own model-list page carried when it was last refreshed (2026-09-21). A model in the list without a price row still runs — `/status` reports its tokens as unpriced rather than as $0.00.
 
 xAI is intentionally single-entry: `grok-3` / `grok-4` / `grok-4-latest` are all silently served as grok-4.3, so offering them would be offering models you do not actually get.
 
