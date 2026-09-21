@@ -52,6 +52,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _KLING_DEFAULT_BASE = "https://api-singapore.klingai.com"
+# #533 — DELIBERATELY NOT REFRESHED, and this comment is the reason.
+#
+# Kling ships newer variants (their docs index lists Kling 3.0 Turbo, 3.0 Omni,
+# 2.6 and 2.5 Turbo as separate endpoint pages), so this name is very likely
+# behind. It stays anyway: kling.ai/document-api renders its API reference
+# client-side, so the pages return no model_name strings to any fetch, and the
+# third-party aggregators that DO publish names disagree with each other —
+# Alibaba re-hosts them as `kling/kling-v3-*-video-generation`, fal as
+# `kling-video/v3/standard`, others as `kling-v3-text-to-video`. None of those
+# is klingai.com's own first-party API, which is what this tool calls.
+#
+# Changing a model id on a third party's say-so would be a guess wearing a
+# citation. The honest state is: unverified, left alone, config-overridable via
+# video_generation.kling.model_name. Verify against the console at first keyed
+# use — there has never been a KLING_ACCESS_KEY on this box.
 _KLING_DEFAULT_MODEL = "kling-v3"
 _KLING_ACCESS_KEY_ENV = "KLING_ACCESS_KEY"
 _KLING_SECRET_KEY_ENV = "KLING_SECRET_KEY"

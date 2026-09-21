@@ -18,7 +18,9 @@ log = logging.getLogger(__name__)
 CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
     "openai": {
         "base_url": "https://api.openai.com/v1",
-        "model": "gpt-4o",
+        # Kept in step with OVERRIDE_PRESETS["gpt"]["model"] — the cross-site
+        # consistency test asserts they agree.
+        "model": "gpt-5.6-luna",
         "default_env": "OPENAI_API_KEY",
         "default_base_url_env": "OPENAI_BASE_URL",
     },
@@ -46,11 +48,12 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
         # DeepSeek serves /v1/chat/completions with or without the /v1
         # prefix; the bare host is their documented base.
         "base_url": "https://api.deepseek.com",
-        # V4 names ship here deliberately: the legacy `deepseek-chat` /
-        # `deepseek-reasoner` aliases are deprecated 2026-07-24. The
-        # reasoning flagship is `deepseek-v4-pro` (pin it via
+        # `deepseek-flash` is the current name (api-docs.deepseek.com, read
+        # 2026-09-21); `deepseek-v4-flash` remains accepted as a legacy alias,
+        # and the pre-V4 `deepseek-chat` / `deepseek-reasoner` aliases are
+        # deprecated. The reasoning flagship is `deepseek-v4-pro` (pin it via
         # slash_commands.deepseek.model or model.model in prometheus.yaml).
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-flash",
         "default_env": "DEEPSEEK_API_KEY",
         "default_base_url_env": "DEEPSEEK_BASE_URL",
     },
@@ -69,7 +72,7 @@ CLOUD_DEFAULTS: dict[str, dict[str, Any]] = {
         # bases (see openai_compat._chat_completions_url). CN mainland
         # endpoint (https://open.bigmodel.cn/api/paas/v4) has the same shape.
         "base_url": "https://api.z.ai/api/paas/v4",
-        "model": "glm-5.2",
+        "model": "glm-5.3",
         "default_env": "ZAI_API_KEY",
         "default_base_url_env": "ZAI_BASE_URL",
     },

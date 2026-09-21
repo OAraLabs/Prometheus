@@ -690,12 +690,53 @@ router:
 # (cheap/fast) and listed in src/prometheus/router/model_router.py
 # under OVERRIDE_PRESETS.
 #
+# ─────────────────────────────────────────────────────────────────────────
+# THESE ARE DEFAULTS, NOT LIMITS.
+#
+# The model string is FREE-FORM. Prometheus validates the PROVIDER name
+# against a fixed list (llama_cpp, ollama, lm_studio, vllm, openai,
+# anthropic, gemini, xai, deepseek, kimi, glm, mimo, qwen) but it does not
+# validate the MODEL — whatever you write is sent to the provider as-is. If
+# your provider ships a model newer than this file, just name it here. A
+# wrong name comes back as the provider's own 404; it is not something
+# Prometheus refuses.
+#
+# Two keys, and they do different jobs:
+#
+#   model:   the model this slash command runs.
+#              claude:
+#                model: claude-opus-5
+#
+#   models:  the list the Models tab (GET /api/models) lets you pick from.
+#            Setting it REPLACES the built-in list wholesale, so a provider
+#            releasing new models is an edit here plus a daemon restart — no
+#            Prometheus release needed. The `model:` above is always offered
+#            and always first, whether or not you repeat it in the list.
+#              claude:
+#                model: claude-sonnet-5
+#                models: [claude-sonnet-5, claude-opus-5, claude-haiku-4-5]
+#
+# `model:` alone is enough to RUN anything. Add `models:` when you want it
+# selectable from the UI too.
+#
+# Why a built-in list exists at all: enumerating the provider was considered
+# and rejected, because it is not uniformly possible. xAI returns 403 on
+# GET /v1/models for standard SuperGrok subscribers even though
+# chat/completions works, and Z.ai and Alibaba document no models endpoint on
+# their OpenAI-compatible surfaces at all. So the list is configured rather
+# than discovered — which is why it is yours to override.
+# ─────────────────────────────────────────────────────────────────────────
+#
 # Model field accepts either a provider alias (e.g. claude-sonnet-4-5,
 # claude-haiku-4-5) or a fully pinned snapshot ID
 # (claude-sonnet-4-5-20250929). Anthropic pre-4.6 aliases resolve
 # server-side; 4.6+ IDs are already dateless pinned snapshots. For
 # OpenAI / Gemini / xAI use the model name the provider exposes
-# (e.g. gpt-4o, gemini-2.5-pro, grok-4.5).
+# (e.g. gpt-5.6-luna, gemini-2.5-pro, grok-4.5).
+#
+# COST NOTE: a model with no row in src/prometheus/telemetry/cost.py PRICING
+# still runs — it just cannot be priced, and /status will say so rather than
+# quietly reporting $0.00 for it.
 #
 # After editing, restart the daemon and grep journalctl for "slash_commands"
 # to verify the wiring:
@@ -708,7 +749,7 @@ slash_commands:
   gpt:
     provider: openai
     api_key_env: OPENAI_API_KEY
-    model: gpt-4o
+    model: gpt-5.6-luna    # cheap + fast, current generation
   gemini:
     provider: gemini
     api_key_env: GEMINI_API_KEY
@@ -723,8 +764,9 @@ slash_commands:
   deepseek:
     provider: deepseek
     api_key_env: DEEPSEEK_API_KEY
-    model: deepseek-v4-flash   # reasoning flagship: deepseek-v4-pro
-                               # (deepseek-chat/-reasoner aliases deprecated 2026-07-24)
+    model: deepseek-flash      # reasoning flagship: deepseek-v4-pro
+                               # (deepseek-v4-flash still accepted as a legacy alias;
+                               #  deepseek-chat/-reasoner deprecated 2026-07-24)
   kimi:
     provider: kimi
     api_key_env: MOONSHOT_API_KEY
@@ -732,11 +774,20 @@ slash_commands:
   glm:
     provider: glm
     api_key_env: ZAI_API_KEY
-    model: glm-5.2
+    model: glm-5.3             # same price as the glm-5.2 it replaces
   mimo:
     provider: mimo
     api_key_env: MIMO_API_KEY
     model: mimo-v2.5-pro
+  # /qwen — Alibaba Model Studio. The default base URL is the INTERNATIONAL
+  # pay-as-you-go endpoint; the subscription plans (Token Plan, Coding Plan)
+  # are separate hosts with separate keys that must be used in matching pairs,
+  # so set QWEN_BASE_URL in the env file rather than base_url here (the
+  # hostname identifies the account).
+  qwen:
+    provider: qwen
+    api_key_env: QWEN_API_KEY  # NOT DASHSCOPE_API_KEY — that is the WAN image backend
+    model: qwen3.8-max         # cheaper than 3.7-max; qwen3.8-flash for fast + cheap
 
 # Phase 3 — opt-in cloud escalation for failed tool calls.
 #

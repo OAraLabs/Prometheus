@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **401** of
+Every key in `config/prometheus.yaml.default` — **405** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -190,7 +190,7 @@ none either — the key is documented so its absence is visible.
 | `slash_commands.gpt` | *(section)* |
 | `slash_commands.gpt.provider` | `openai` |
 | `slash_commands.gpt.api_key_env` | `OPENAI_API_KEY` |
-| `slash_commands.gpt.model` | `gpt-4o` |
+| `slash_commands.gpt.model` | `gpt-5.6-luna` |
 | `slash_commands.gemini` | *(section)* |
 | `slash_commands.gemini.provider` | `gemini` |
 | `slash_commands.gemini.api_key_env` | `GEMINI_API_KEY` |
@@ -202,7 +202,7 @@ none either — the key is documented so its absence is visible.
 | `slash_commands.deepseek` | *(section)* |
 | `slash_commands.deepseek.provider` | `deepseek` |
 | `slash_commands.deepseek.api_key_env` | `DEEPSEEK_API_KEY` |
-| `slash_commands.deepseek.model` | `deepseek-v4-flash` |
+| `slash_commands.deepseek.model` | `deepseek-flash` |
 | `slash_commands.kimi` | *(section)* |
 | `slash_commands.kimi.provider` | `kimi` |
 | `slash_commands.kimi.api_key_env` | `MOONSHOT_API_KEY` |
@@ -210,11 +210,15 @@ none either — the key is documented so its absence is visible.
 | `slash_commands.glm` | *(section)* |
 | `slash_commands.glm.provider` | `glm` |
 | `slash_commands.glm.api_key_env` | `ZAI_API_KEY` |
-| `slash_commands.glm.model` | `glm-5.2` |
+| `slash_commands.glm.model` | `glm-5.3` |
 | `slash_commands.mimo` | *(section)* |
 | `slash_commands.mimo.provider` | `mimo` |
 | `slash_commands.mimo.api_key_env` | `MIMO_API_KEY` |
 | `slash_commands.mimo.model` | `mimo-v2.5-pro` |
+| `slash_commands.qwen` | *(section)* |
+| `slash_commands.qwen.provider` | `qwen` |
+| `slash_commands.qwen.api_key_env` | `QWEN_API_KEY` |
+| `slash_commands.qwen.model` | `qwen3.8-max` |
 | `divergence` | *(section)* |
 | `divergence.enabled` | `False` |
 | `divergence.threshold` | `0.7` |

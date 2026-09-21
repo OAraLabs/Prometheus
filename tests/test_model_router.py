@@ -650,12 +650,43 @@ class TestModelChoices:
             OVERRIDE_PRESETS,
             resolve_model_choices,
         )
-        choices = resolve_model_choices("qwen", {})
-        assert choices[0] == OVERRIDE_PRESETS["qwen"]["model"] == "qwen3.8-max"
+        # SHAPE, not value (#533): the invariant is that the list LEADS with
+        # whatever the preset defaults to. Chaining a literal onto the end made
+        # every model refresh edit this line while protecting nothing — the
+        # literal cannot fail unless one of the two sides it sits between
+        # already has.
+        for key in OVERRIDE_PRESETS:
+            choices = resolve_model_choices(key, {})
+            assert choices and choices[0] == OVERRIDE_PRESETS[key]["model"], (
+                f"resolve_model_choices({key!r})[0] is {choices[:1]!r} but the "
+                f"preset defaults to {OVERRIDE_PRESETS[key]['model']!r} — "
+                f"selecting the bare key and selecting its default from the "
+                f"list would give different models."
+            )
 
     def test_preset_without_choices_offers_just_its_default(self):
-        from prometheus.router.model_router import resolve_model_choices
-        assert resolve_model_choices("glm", {}) == ("glm-5.2",)
+        """A preset with no PRESET_MODEL_CHOICES entry offers exactly one model.
+
+        Was ``resolve_model_choices("glm", {}) == ("glm-5.2",)`` (#533). That
+        spelling broke twice over: it made a data refresh a code change, and
+        when glm GAINED a choices list the assertion became false for a reason
+        that had nothing to do with the behaviour it was guarding. The rule is
+        about the ABSENCE of an entry, so it now finds a preset that actually
+        has none rather than naming one that happened to.
+        """
+        from prometheus.router.model_router import (
+            OVERRIDE_PRESETS,
+            PRESET_MODEL_CHOICES,
+            resolve_model_choices,
+        )
+        bare = [k for k in OVERRIDE_PRESETS if k not in PRESET_MODEL_CHOICES]
+        assert bare, (
+            "every preset now has a choices list, so this rule is untestable — "
+            "either that is intended (delete this test) or a preset lost its "
+            "single-model fallback."
+        )
+        for key in bare:
+            assert resolve_model_choices(key, {}) == (OVERRIDE_PRESETS[key]["model"],)
 
     def test_unknown_preset_has_no_choices(self):
         from prometheus.router.model_router import resolve_model_choices
@@ -664,10 +695,17 @@ class TestModelChoices:
     def test_user_models_list_replaces_builtin(self):
         """A provider shipping a new model is a config edit, not a release."""
         from prometheus.router.model_router import resolve_model_choices
+        from prometheus.router.model_router import (
+            OVERRIDE_PRESETS,
+            PRESET_MODEL_CHOICES,
+        )
+        default = OVERRIDE_PRESETS["qwen"]["model"]
         cfg = {"slash_commands": {"qwen": {"models": ["qwen4-max", "qwen4-flash"]}}}
         choices = resolve_model_choices("qwen", cfg)
-        assert choices == ("qwen3.8-max", "qwen4-max", "qwen4-flash")
-        assert "qwen3.7-max" not in choices  # builtin replaced, not merged
+        assert choices == (default, "qwen4-max", "qwen4-flash")
+        # REPLACED, not merged — assert against the built-in list itself rather
+        # than one name plucked out of it, so this keeps holding as that list moves.
+        assert not (set(PRESET_MODEL_CHOICES["qwen"]) - {default}) & set(choices)
 
     def test_user_default_model_leads_its_own_list(self):
         from prometheus.router.model_router import resolve_model_choices
@@ -686,13 +724,28 @@ class TestModelChoices:
         assert split_model_key("ollama:qwen3.5:9b") == ("ollama", "qwen3.5:9b")
 
     def test_target_bare_key_is_preset_default(self):
-        from prometheus.router.model_router import resolve_model_target
-        assert resolve_model_target("qwen", {})["model"] == "qwen3.8-max"
+        from prometheus.router.model_router import (
+            OVERRIDE_PRESETS,
+            resolve_model_target,
+        )
+        assert (
+            resolve_model_target("qwen", {})["model"]
+            == OVERRIDE_PRESETS["qwen"]["model"]
+        )
 
     def test_target_composite_key_selects_listed_model(self):
-        from prometheus.router.model_router import resolve_model_target
-        target = resolve_model_target("qwen:qwen3.7-plus", {})
-        assert target["model"] == "qwen3.7-plus"
+        from prometheus.router.model_router import (
+            resolve_model_choices,
+            resolve_model_target,
+        )
+        # Take a NON-DEFAULT model from the live list rather than naming one:
+        # the pinned name here (qwen3.7-plus) was dropped from the catalog in
+        # #533 and this test would have failed for the wrong reason.
+        alternates = resolve_model_choices("qwen", {})[1:]
+        assert alternates, "qwen needs >1 choice for this test to mean anything"
+        model = alternates[0]
+        target = resolve_model_target(f"qwen:{model}", {})
+        assert target["model"] == model
         assert target["provider"] == "qwen"          # rest of preset intact
         assert target["api_key_env"] == "QWEN_API_KEY"
 

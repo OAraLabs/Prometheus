@@ -291,7 +291,11 @@ OVERRIDE_PRESETS: dict[str, dict[str, Any]] = {
     "gpt": {
         "provider": "openai",
         "api_key_env": "OPENAI_API_KEY",
-        "model": "gpt-4o",
+        # gpt-5.6-luna, not gpt-4o: same "cheap + fast for interactive chat"
+        # intent this preset has always had, on the current generation.
+        # $0.20/$1.20 per Mtok vs gpt-4o's $2.50/$10 — an order of magnitude
+        # cheaper AND newer (developers.openai.com/api/docs/pricing, 2026-09-21).
+        "model": "gpt-5.6-luna",
     },
     "gemini": {
         "provider": "gemini",
@@ -310,11 +314,13 @@ OVERRIDE_PRESETS: dict[str, dict[str, Any]] = {
     "deepseek": {
         "provider": "deepseek",
         "api_key_env": "DEEPSEEK_API_KEY",
-        # V4 flash: cheap + fast chat default. The reasoning flagship is
-        # deepseek-v4-pro — pin it via slash_commands.deepseek in
-        # prometheus.yaml. The pre-V4 aliases (deepseek-chat /
-        # deepseek-reasoner) are deprecated 2026-07-24; do NOT use them.
-        "model": "deepseek-v4-flash",
+        # `deepseek-flash` is the CURRENT name; `deepseek-v4-flash` is a legacy
+        # alias DeepSeek still accepts (api-docs.deepseek.com/quick_start/pricing,
+        # read 2026-09-21). Both are priced identically in cost.py so a config
+        # still pinning the old name bills correctly. The reasoning flagship is
+        # deepseek-v4-pro — pin it via slash_commands.deepseek in prometheus.yaml.
+        # The pre-V4 aliases (deepseek-chat / deepseek-reasoner) are deprecated.
+        "model": "deepseek-flash",
     },
     "kimi": {
         "provider": "kimi",
@@ -324,7 +330,10 @@ OVERRIDE_PRESETS: dict[str, dict[str, Any]] = {
     "glm": {
         "provider": "glm",
         "api_key_env": "ZAI_API_KEY",
-        "model": "glm-5.2",
+        # glm-5.3 supersedes glm-5.2 at the SAME price ($1.40/$4.40 per Mtok —
+        # docs.z.ai/guides/overview/pricing, read 2026-09-21), so this is a
+        # free upgrade. glm-5.2 stays priced in cost.py for existing configs.
+        "model": "glm-5.3",
     },
     "mimo": {
         "provider": "mimo",
@@ -365,20 +374,27 @@ SLASH_COMMAND_NAMES: tuple[str, ...] = (
 PRESET_MODEL_CHOICES: dict[str, tuple[str, ...]] = {
     "claude": (
         "claude-haiku-4-5-20251001",
-        "claude-sonnet-4-5",
         "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5",
         "claude-opus-5",
     ),
+    "gpt": (
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+        "gpt-6-astra",
+        "gpt-5-nano",
+    ),
     "gemini": ("gemini-2.5-flash", "gemini-2.5-pro"),
-    "deepseek": ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v3.2"),
+    "deepseek": ("deepseek-flash", "deepseek-v4-pro"),
+    "glm": ("glm-5.3", "glm-5.3-flash", "glm-5.3-flashx"),
     "qwen": (
         # qwen3.8-max went GA 2026-08-03 and is CHEAPER than 3.7-max
         # ($2.00/$6.00 vs $2.50/$7.50 per Mtok in/out).
         "qwen3.8-max",
+        "qwen3.8-flash",
         "qwen3.7-max",
-        "qwen3.7-plus",
-        "qwen3.6-plus",
-        "qwen3.6-flash",
     ),
     # xai is intentionally single-entry: "grok-3"/"grok-4"/"grok-4-latest" are
     # silently served as grok-4.3 on the OAuth surface (probed 2026-07-10), so

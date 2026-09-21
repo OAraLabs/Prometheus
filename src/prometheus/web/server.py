@@ -1966,7 +1966,7 @@ def create_app(
         """
         from datetime import datetime, timezone
 
-        from prometheus.telemetry.cost import PRICING, billing_for
+        from prometheus.telemetry.cost import billing_for, price_for
         from prometheus.telemetry.tracker import get_telemetry_handle
 
         tel = get_telemetry_handle()
@@ -2027,10 +2027,8 @@ def create_app(
             first = row.get("first_seen") or 0.0
             return "recorded" if first >= boundary else "backfilled"
 
-        def _price_for(name: str):
-            return PRICING.get(name) or next(
-                (PRICING[k] for k in PRICING if name.startswith(k)), None
-            )
+        # The shared lookup — not a third copy of the prefix rule (#533).
+        _price_for = price_for
 
         def _cost_of(name: str, inp: int, out: int) -> float | None:
             price = _price_for(name)
@@ -4656,11 +4654,48 @@ def create_app(
         st = await reg.probe(name, force=True)
         return st.as_dict(stale=reg.is_stale(name))
 
+    # The catalog is a list of DEFAULTS, not the set of models this daemon can
+    # run. The model string in prometheus.yaml is free-form — only the PROVIDER
+    # name is validated — so anything a provider ships is reachable today by
+    # editing config, with no Prometheus release. A client that renders this
+    # catalog as a closed menu tells the user the opposite, and the only place
+    # that said otherwise was a Python docstring.
+    #
+    # This travels in the response rather than living in the client because the
+    # daemon is the thing that knows: the list is configured, not discovered,
+    # precisely because discovery is not uniformly possible (xAI 403s on
+    # GET /v1/models for standard SuperGrok subscribers; Z.ai and Alibaba
+    # document no models endpoint on their OpenAI-compatible surfaces).
+    #
+    # Additive: a client that ignores `catalog_note` is exactly as correct as
+    # it was before.
+    _CATALOG_NOTE = {
+        "defaults_not_limits": True,
+        "summary": (
+            "These are defaults, not limits. The model name in prometheus.yaml "
+            "is free-form — if your provider ships something newer, name it and "
+            "restart; no Prometheus update is needed."
+        ),
+        "run_any_model": "slash_commands.<key>.model",
+        "extend_this_list": "slash_commands.<key>.models",
+        "why_not_fetched": (
+            "The list is configured rather than fetched because model discovery "
+            "is not uniformly available: xAI returns 403 on GET /v1/models for "
+            "standard SuperGrok subscribers, and Z.ai and Alibaba document no "
+            "models endpoint on their OpenAI-compatible surfaces."
+        ),
+        "config_file": "prometheus.yaml",
+    }
+
     @app.get("/api/models")
     async def list_models():
         if getattr(app.state, "model_router", None) is None:
             return JSONResponse(status_code=503, content={"error": "model router unavailable"})
-        return {"models": _model_catalog(), "default_key": _LOCAL_MODEL_KEY}
+        return {
+            "models": _model_catalog(),
+            "default_key": _LOCAL_MODEL_KEY,
+            "catalog_note": _CATALOG_NOTE,
+        }
 
     @app.get("/api/sessions/{session_id}/model")
     async def get_session_model(session_id: str):

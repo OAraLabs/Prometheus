@@ -316,15 +316,23 @@ _ENV_TEMPLATE = """# Prometheus environment file — secrets live here, not in p
 
 # Cloud fast-path choices: provider → (api_key_env, default model, context limit)
 # Appended entries keep the historical anthropic/openai numbering stable.
+#
+# THE MODEL COLUMN MUST AGREE WITH OVERRIDE_PRESETS. It did not, for two
+# releases: this table shipped `qwen3.7-max` while every other site said
+# `qwen3.8-max`, so non-interactive cloud setup silently chose the older AND
+# dearer model ($2.50/$7.50 vs $2.00/$6.00 per Mtok). It also wrote
+# `claude-sonnet-4-6`, which PRESET_MODEL_CHOICES could not select, so setup
+# produced a config the Models tab refused to show. Both are asserted by
+# tests/test_model_catalog_consistency.py now.
 _CLOUD_FAST_PROVIDERS: dict[str, tuple[str, str, int]] = {
-    "anthropic": ("ANTHROPIC_API_KEY", "claude-sonnet-4-6", 100000),
-    "openai": ("OPENAI_API_KEY", "gpt-4o", 64000),
+    "anthropic": ("ANTHROPIC_API_KEY", "claude-sonnet-5", 100000),
+    "openai": ("OPENAI_API_KEY", "gpt-5.6-luna", 64000),
     # CLOUD EXPANSION (2026-07)
-    "deepseek": ("DEEPSEEK_API_KEY", "deepseek-v4-flash", 64000),
+    "deepseek": ("DEEPSEEK_API_KEY", "deepseek-flash", 64000),
     "kimi": ("MOONSHOT_API_KEY", "kimi-k2.6", 64000),
-    "glm": ("ZAI_API_KEY", "glm-5.2", 64000),
+    "glm": ("ZAI_API_KEY", "glm-5.3", 64000),
     "mimo": ("MIMO_API_KEY", "mimo-v2.5-pro", 64000),
-    "qwen": ("QWEN_API_KEY", "qwen3.7-max", 64000),
+    "qwen": ("QWEN_API_KEY", "qwen3.8-max", 64000),
 }
 
 
