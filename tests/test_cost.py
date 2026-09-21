@@ -195,3 +195,38 @@ class TestUnpricedIsVisiblyDistinctFromZero:
             "the distinction survives into anything that reads the rows rather "
             f"than the rollup. Got: {record!r}"
         )
+
+
+class TestPrefixMatchPicksTheLongestKey:
+    """Overlapping model families make iteration order a pricing bug.
+
+    The old lookup took the FIRST key in dict order that the name started with.
+    That was harmless while the table held no overlapping families; it is not
+    harmless now. `glm-5.3` is a prefix of `glm-5.3-flash` at 9x the price, and
+    `grok-3` is a prefix of `grok-3-mini` at 10x — so an unrecognised variant of
+    either could bill at the wrong rate depending on nothing more than where its
+    family landed in the dict.
+    """
+
+    def test_longest_prefix_wins_over_a_shorter_family_name(self) -> None:
+        from prometheus.telemetry.cost import PRICING, price_for
+
+        # A variant name that is NOT in the table and must fall back by prefix.
+        assert price_for("glm-5.3-flash-preview") == PRICING["glm-5.3-flash"], (
+            "glm-5.3-flash-preview matched a shorter key — it would bill at "
+            "glm-5.3's $1.40/$4.40 instead of glm-5.3-flash's $0.15/$0.50."
+        )
+        assert price_for("grok-3-mini-fast") == PRICING["grok-3-mini"], (
+            "grok-3-mini-fast matched 'grok-3' — a 10x overbill."
+        )
+
+    def test_exact_match_still_beats_any_prefix(self) -> None:
+        from prometheus.telemetry.cost import PRICING, price_for
+
+        assert price_for("glm-5.3") == PRICING["glm-5.3"]
+        assert price_for("grok-3") == PRICING["grok-3"]
+
+    def test_unknown_family_is_still_none(self) -> None:
+        from prometheus.telemetry.cost import price_for
+
+        assert price_for("a-model-from-nowhere") is None
