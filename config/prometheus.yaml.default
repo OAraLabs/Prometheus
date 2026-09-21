@@ -301,11 +301,39 @@ security:
   # puts model-authored markup, with no CSP, in front of whoever can reach the
   # address. That is a separate piece of work, not a reason this key is safe.
   dashboard_tool_bind_host: "127.0.0.1"
+  # ⚠ THIS LIST IS SHORT ON PURPOSE. Do not "restore" it.
+  #
+  # Entries are SUBSTRING matches, case-insensitive, against the whole command
+  # string (checker.py `_check_blocked_command`). An entry therefore blocks
+  # every command that merely CONTAINS it — which is why the obvious entries
+  # were removed rather than kept "just in case":
+  #
+  #   "rm -rf /"   also blocked `rm -rf /tmp/build` and
+  #                `rm -rf <repo>/node_modules` — paths the agent is supposed
+  #                to be able to clean. Covered properly now: a recursive rm
+  #                is refused when its RESOLVED argument is a named protected
+  #                root (/, $HOME, ~/.prometheus, every workspace_root), and
+  #                `--ro-bind / /` sits underneath that.
+  #   "rm -rf ~"   same defect, same replacement — $HOME is a named root.
+  #   "mkfs"       also blocked `man mkfs`, `grep mkfs /etc/fstab` and
+  #                `which mkfs`, none of which write anything. Covered by the
+  #                kernel: /dev is a synthetic tmpfs remounted read-only, so
+  #                the namespace carries no block device to format, and doing
+  #                so needs privileges the agent does not have.
+  #
+  # The general rule the removals follow: if a kernel mechanism enforces it,
+  # a substring here adds false positives and no protection. A longer list is
+  # not a safer one — it is a list that stops legitimate work while the same
+  # command spelled differently walks through.
+  #
+  # "DROP TABLE" stays because NOTHING in code covers it. Note it is a weak
+  # speed bump even so: respacing ("DROP  TABLE") defeats the substring. Keep
+  # it, do not mistake it for a control.
+  #
+  # Pinned by tests/test_permissions.py::
+  # TestTheShippedDefaultDoesNotHandcuffAFreshInstall, which reads THIS FILE.
   denied_commands:
-    - "rm -rf /"
-    - "rm -rf ~"
     - "DROP TABLE"
-    - "mkfs"
   # Paths the agent may never read or write. ABSOLUTE ONLY — an entry that is
   # not absolute (or ~-rooted) raises at startup rather than being resolved,
   # because a relative entry resolves against the DAEMON'S WORKING DIRECTORY,
