@@ -1,27 +1,72 @@
 name: Release
 
 # Onboarding Phase 3 (distribution): tag `vX.Y.Z` (or run manually) → build the
-# sdist + wheel and attach them to a DRAFT GitHub Release. Nothing is published
-# automatically: the release stays a draft until a human publishes it, and the
-# PyPI step is skipped entirely unless the PYPI_API_TOKEN secret exists
-# (Settings → Secrets and variables → Actions). Add that secret only when the
-# `oara-prometheus` name is ready to go live on PyPI.
+# sdist + wheel, attach them to a DRAFT GitHub Release, and publish to PyPI via
+# TRUSTED PUBLISHING. The GitHub Release stays a draft until a human publishes
+# it.
+#
+# ── WHY THERE IS NO PyPI_API_TOKEN ANY MORE ─────────────────────────────────
+#
+# There never was one. The old `Publish to PyPI` step carried
+# `if: ... && env.PYPI_API_TOKEN != ''`, and that secret was never set — so on
+# the only Release run this repo has ever had (v0.1.0, 2026-07-29) the step
+# reported `skipped` inside a job that reported `success`. Green, silent, and
+# indistinguishable from a publish at the `gh pr checks` level. The repo has
+# zero Actions secrets to this day.
+#
+# Trusted publishing removes the credential rather than storing it: PyPI issues
+# a 15-minute API token in exchange for a GitHub OIDC identity token, so there
+# is no long-lived secret to set, leak, rotate, or forget to set.
+#
+#   docs.pypi.org/trusted-publishers:
+#     "The short-lived API token behaves exactly like a normal project-scoped
+#      API token, except that it's only valid for 15 minutes from time of
+#      creation (enough time for the CI to use it to upload packages)."
+#
+# ── WHY TWO JOBS ────────────────────────────────────────────────────────────
+#
+#   docs.astral.sh/uv/guides/integration/github:
+#     "This example workflow uses two separate jobs (build and publish) so that
+#      the publishing step (which has access to a publishing credential via
+#      id-token: write) does not share its permissions with the building step.
+#      This reduces the surface for supply chain attacks."
+#
+# `id-token: write` is the credential. It lives on `publish` and nowhere else.
+# `publish` runs no repository code at all — it downloads an artifact and
+# uploads it. Everything that executes checked-out code happens in `build`,
+# which cannot mint a PyPI token.
+#
+# ── WHY `--trusted-publishing always` AND NOT THE DEFAULT ───────────────────
+#
+#   docs.astral.sh/uv/reference/cli (uv publish --trusted-publishing):
+#     "By default, uv checks for trusted publishing when running in a supported
+#      environment, but IGNORES IT IF IT ISN'T CONFIGURED."
+#
+# That default is the PYPI_API_TOKEN failure rebuilt out of new parts: a
+# misregistered publisher, a renamed workflow file, a missing `pypi`
+# environment — each would fall through to "no credential" and the run would
+# not fail on it. `always` makes an unusable publisher a red job instead of a
+# quiet non-event. The whole reason this file is being rewritten is that a
+# publish step which silently does nothing is worse than one that breaks.
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
 
-permissions:
-  contents: write
+# No workflow-level `permissions:` block. Each job declares exactly what it
+# needs — the split is the point, and a workflow-level grant would hand the
+# floor to both jobs and quietly undo it.
 
 jobs:
-  build-and-release:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      # Needed by the draft-Release step below (`gh release create/upload`).
+      # NOT `id-token`: this job runs repository code and must not be able to
+      # mint a PyPI token. See the two-jobs note above.
+      contents: write
     env:
-      # Job-level so the step-level `if:` can see it (secrets context is not
-      # available in job-level conditionals).
-      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
       # See ci.yml: never let uv download an interpreter (that download is a
       # GitHub release asset). The venv below names its Python with an explicit
       # flag rather than relying on UV_PYTHON.
@@ -30,27 +75,74 @@ jobs:
       # Actions pinned to full commit SHAs — supply-chain hygiene, NOT the fix
       # for the codeload 429 documented in ci.yml.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
       # uv comes from PyPI, not astral-sh/setup-uv. The full reasoning lives in
       # .github/workflows/ci.yml — in short, the runner's fetch of the action's
       # own tarball from codeload.github.com started returning 429 on 2026-08-17,
       # surfacing as a terminal 503. This job is a single leg so it is hit less
       # often than the CI matrix, but a spurious failure on the RELEASE path is
       # worse than one on a PR, so it gets the same treatment.
-      - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
+      #
+      # ⚠ The uv guide this file otherwise follows uses `astral-sh/setup-uv`.
+      # DO NOT adopt that part. It reinstates the exact codeload fetch ci.yml
+      # spends forty lines explaining how to avoid.
       - name: Install uv (from PyPI — deliberately not astral-sh/setup-uv)
         run: python -m pip install --upgrade uv
       - name: Build sdist + wheel
         run: uv build
+
+      # ── THE TAG DOES NOT SET THE VERSION ──────────────────────────────────
+      #
+      # `uv build` reads the version out of pyproject.toml. It has never read
+      # the tag. So `git tag v0.9.0rc1` on a tree whose pyproject says 0.9.0
+      # builds, uploads and PERMANENTLY BURNS 0.9.0 — PyPI does not allow a
+      # version to be re-uploaded, not even after a delete. The tag name is the
+      # only thing a human looks at, and it is the one input the build ignores.
+      #
+      # Normalized comparison, not string equality: PEP 440 says `v0.9.0-rc1`,
+      # `v0.9.0.rc1` and `v0.9.0rc1` are all the same version, and the wheel
+      # filename only ever spells it the last way. A string compare would
+      # reject two correct tags and teach the next person to delete this check.
+      - name: Assert the built version IS the tag (PyPI uploads are forever)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          built="$(uv run --no-project --with packaging python -c "
+          import pathlib, sys
+          from packaging.utils import parse_wheel_filename
+          whl = sorted(pathlib.Path('dist').glob('*.whl'))
+          if len(whl) != 1:
+              sys.exit(f'expected exactly one wheel in dist/, found {[p.name for p in whl]}')
+          print(parse_wheel_filename(whl[0].name)[1])
+          ")"
+          uv run --no-project --with packaging python -c "
+          import sys
+          from packaging.version import InvalidVersion, Version
+          tag_raw, built_raw = sys.argv[1].removeprefix('v'), sys.argv[2]
+          try:
+              tag, built = Version(tag_raw), Version(built_raw)
+          except InvalidVersion as exc:
+              sys.exit(f'TAG IS NOT A PEP 440 VERSION: {exc}')
+          print(f'tag {sys.argv[1]} -> {tag}; built artifact -> {built}')
+          if tag != built:
+              sys.exit(
+                  f'VERSION/TAG MISMATCH: tag says {tag}, pyproject built {built}.\n'
+                  f'uv build reads pyproject.toml, not the tag. Publishing now would '
+                  f'burn {built} on PyPI permanently. Fix pyproject.toml (and '
+                  f'src/prometheus/__init__.py), or retag.'
+              )
+          " "$GITHUB_REF_NAME" "$built"
+
       - name: Smoke the wheel (install into a scratch venv, `oara --help` + the `prometheus` alias)
         run: |
           uv venv --python 3.12 /tmp/relcheck
           uv pip install --python /tmp/relcheck/bin/python dist/*.whl
           /tmp/relcheck/bin/oara --help
           /tmp/relcheck/bin/prometheus --help   # the alias, kept for the deprecation window
-      - name: Upload build artifacts (always, incl. workflow_dispatch runs)
+      - name: Upload distributions as artifacts (always, incl. workflow_dispatch runs)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: python-dist
@@ -65,6 +157,51 @@ jobs:
             --notes "Draft release for $GITHUB_REF_NAME — publish manually after review." \
             || true  # already exists (e.g. re-run) → just upload
           gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-      - name: Publish to PyPI (ONLY when the PYPI_API_TOKEN secret is set)
-        if: startsWith(github.ref, 'refs/tags/v') && env.PYPI_API_TOKEN != ''
-        run: uv publish --token "$PYPI_API_TOKEN"
+
+  publish:
+    needs: build
+    # Tag pushes only. A `workflow_dispatch` run still builds, smokes and
+    # uploads artifacts — it just does not publish, which is what made manual
+    # dry runs useful before and still does.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # The environment is what makes this job gateable: PyPI matches it as part
+    # of the trusted-publisher configuration, and GitHub can require manual
+    # approval on it.
+    #
+    #   docs.pypi.org/trusted-publishers/adding-a-publisher:
+    #     "Configuring an environment is optional, but strongly recommended:
+    #      with a GitHub environment, you can apply additional restrictions to
+    #      your trusted workflow, such as requiring manual approval on each run
+    #      by a trusted subset of repository maintainers."
+    #
+    # It must EXIST under Settings → Environments and its name must match what
+    # is registered on PyPI, or the OIDC exchange fails.
+    environment:
+      name: pypi
+    permissions:
+      # The credential. Nothing else — this job deliberately cannot write to
+      # the repository, and never checks it out.
+      id-token: write
+    steps:
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Install uv (from PyPI — deliberately not astral-sh/setup-uv)
+        run: python -m pip install --upgrade uv
+      # NO `actions/checkout` HERE, ON PURPOSE. The artifact is the release;
+      # re-checking-out would mean the job holding `id-token: write` also has
+      # repository code on disk, which is the exact sharing the split exists to
+      # prevent. It also removes any chance of publishing something other than
+      # the bytes that were built, smoked and version-checked above.
+      - name: Download distributions artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-dist
+          path: dist/
+      - name: Publish to PyPI (trusted publishing — no token anywhere)
+        # `always`, not the default `automatic`. See the header: `automatic`
+        # "ignores it if it isn't configured", which would turn a broken
+        # publisher registration back into a silent green no-op.
+        run: uv publish --trusted-publishing always
