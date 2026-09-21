@@ -59,13 +59,27 @@ are SQLite files totalling a few tens of MB, pruned to ``--keep`` sets. If you a
 reading this while reclaiming disk, prune harder or lower ``--keep`` — do not
 delete the mechanism, or the backup silently returns to capturing torn pairs.
 
+Retention only ever deletes sets this job wrote. Anything else it finds in
+``db-snapshots/`` is moved to ``unrecognized/`` and reported separately, never
+removed — see :func:`prune_snapshots`.
+
 WIRING (the operator half — this does nothing until it is scheduled)
 --------------------------------------------------------------------
 Run it shortly BEFORE the nightly tar, so the archive carries a snapshot minutes
 old rather than a day old::
 
-    55 2 * * *  cd /path/to/Prometheus && PYTHONPATH=$PWD/src python3 -m prometheus.jobs.db_snapshot >> ~/.prometheus/logs/db_snapshot.log 2>&1
-    0  3 * * *  /home/will/backups/backup.sh
+    55 2 * * *  cd /path/to/Prometheus && /usr/bin/python3 -m prometheus.jobs.db_snapshot >> /path/to/home/.prometheus/logs/db_snapshot.log 2>&1
+    0  3 * * *  /path/to/home/backups/backup.sh
+
+``PYTHONPATH`` is NOT needed when the package is installed. An editable install
+leaves a ``.pth`` in site-packages that resolves with no environment at all —
+``env -i /usr/bin/python3 -c "import prometheus.jobs.db_snapshot"`` still finds
+it. Set ``PYTHONPATH`` only for a checkout that was never installed, and note
+that if you set it wrongly you will silently test a DIFFERENT tree.
+
+Use an ABSOLUTE interpreter path: cron's ``PATH`` is minimal, so a bare
+``python3`` may not resolve at all. Absolute log paths are steadier than ``~``
+for the same reason — depend on as little of the environment as you can.
 
 ``backup.sh`` needs NO change to include them: the snapshots land under
 ``~/.prometheus/db-snapshots/``, inside the tree it already archives. Its comment
@@ -120,6 +134,18 @@ _SNAPSHOT_DIRNAME = "db-snapshots"
 _MANIFEST_NAME = "MANIFEST.json"
 _STATUS_NAME = "LAST_RUN.json"
 
+# Written into a set's directory the moment it is created, BEFORE any database is
+# copied. It is how retention tells an interrupted run of THIS job (safe to
+# delete) from a directory this job did not write (never safe to delete). The
+# manifest cannot carry that meaning: it is written last, so it is absent in both
+# cases, and reading its absence as "interrupted" is what made a first run
+# destructive.
+_OWNED_MARKER = ".written-by-db-snapshot"
+
+# Unrecognised directories are moved here instead of being deleted. It lives
+# inside db-snapshots/, so the nightly tar still archives whatever lands in it.
+_UNRECOGNIZED_DIRNAME = "unrecognized"
+
 
 class SnapshotError(RuntimeError):
     """A database could not be snapshotted or did not verify. Exits non-zero."""
@@ -151,6 +177,7 @@ class RunReport:
     sqlite_version: str = sqlite3.sqlite_version
     databases: list[DbResult] = field(default_factory=list)
     pruned: list[str] = field(default_factory=list)
+    set_aside: list[str] = field(default_factory=list)
     ok: bool = False
     error: str | None = None
 
@@ -253,33 +280,104 @@ def snapshot_database(src: Path, dst: Path) -> DbResult:
 # ---------------------------------------------------------------------------
 
 
-def prune_snapshots(snapshot_root: Path, keep: int) -> list[str]:
-    """Delete all but the *keep* newest COMPLETE snapshot sets. Never the current.
+@dataclass
+class PruneResult:
+    """What retention did, split by whether it DELETED or merely MOVED.
 
-    A set without a manifest is an interrupted run. Those are pruned first and
-    do not consume a ``keep`` slot — retaining a half-written set in preference
-    to a good one is the opposite of what retention is for.
+    Two lists rather than one count, because ``(pruned 3)`` reading identically
+    for "three of my old sets aged out" and "three directories I did not
+    recognise were destroyed" is how the first run of this job deleted three
+    hand-made snapshots without anyone noticing.
+    """
+
+    pruned: list[str] = field(default_factory=list)
+    set_aside: list[str] = field(default_factory=list)
+
+
+def _is_own_set(path: Path) -> bool:
+    """True when this job wrote *path*.
+
+    A complete set has a manifest; an interrupted one has at least the marker,
+    written before any copying starts. Neither present means it predates this job
+    or belongs to something else, and it is not ours to delete.
+    """
+    return (path / _MANIFEST_NAME).exists() or (path / _OWNED_MARKER).exists()
+
+
+def _set_aside(path: Path, aside_root: Path) -> str | None:
+    """Move an unrecognised directory out of the retention path. Never deletes.
+
+    Returns the destination name, or ``None`` if it could not be moved — in which
+    case it is left exactly where it is, which is the safe failure.
+    """
+    try:
+        aside_root.mkdir(parents=True, exist_ok=True)
+        dest = aside_root / path.name
+        suffix = 1
+        while dest.exists():
+            dest = aside_root / f"{path.name}.{suffix}"
+            suffix += 1
+        shutil.move(str(path), str(dest))
+    except OSError:
+        logger.warning(
+            "could not set aside %s — leaving it in place", path, exc_info=True
+        )
+        return None
+    logger.warning(
+        "SET ASIDE %s -> %s: no %s and no %s, so this job did not write it. "
+        "Retention does not delete what it did not create.",
+        path.name, dest, _MANIFEST_NAME, _OWNED_MARKER,
+    )
+    return dest.name
+
+
+def prune_snapshots(snapshot_root: Path, keep: int) -> PruneResult:
+    """Delete all but the *keep* newest complete sets THIS JOB WROTE.
+
+    Three classes, and the distinction between the last two is the whole point:
+
+    * **complete** (has a manifest) — ordinary retention; oldest beyond *keep* go.
+    * **interrupted** (ours: marker, no manifest) — deleted first, costing no
+      ``keep`` slot. Retaining a half-written set over a good one is the opposite
+      of what retention is for.
+    * **unrecognised** (neither) — **never deleted.** Moved into
+      ``db-snapshots/unrecognized/`` and reported separately.
+
+    The third class exists because the first version had only the first two: it
+    read "no manifest" as "interrupted run" and deleted on sight, *before* ``keep``
+    was applied. A first run therefore destroyed whatever was already in
+    ``db-snapshots/`` at any ``keep`` value, and reported it as ordinary
+    retention. On 2026-09-20 that deleted three hand-made directories.
     """
     if keep < 1:
         raise ValueError("keep must be >= 1")
-    sets = sorted(
-        (p for p in snapshot_root.iterdir() if p.is_dir()),
+    result = PruneResult()
+    aside_root = snapshot_root / _UNRECOGNIZED_DIRNAME
+    candidates = sorted(
+        (
+            p for p in snapshot_root.iterdir()
+            if p.is_dir() and p.name != _UNRECOGNIZED_DIRNAME
+        ),
         key=lambda p: p.name,
         reverse=True,
     )
-    complete = [p for p in sets if (p / _MANIFEST_NAME).exists()]
-    incomplete = [p for p in sets if not (p / _MANIFEST_NAME).exists()]
-    doomed = incomplete + complete[keep:]
-    pruned: list[str] = []
-    for p in doomed:
+
+    for path in [p for p in candidates if not _is_own_set(p)]:
+        if _set_aside(path, aside_root) is not None:
+            result.set_aside.append(path.name)
+
+    ours = [p for p in candidates if _is_own_set(p)]
+    complete = [p for p in ours if (p / _MANIFEST_NAME).exists()]
+    interrupted = [p for p in ours if not (p / _MANIFEST_NAME).exists()]
+    for path in interrupted + complete[keep:]:
         try:
-            shutil.rmtree(p)
-            pruned.append(p.name)
+            shutil.rmtree(path)
+            result.pruned.append(path.name)
         except OSError:
             # Retention failing is not a reason to fail the backup: the snapshot
             # that matters was already written and verified above.
-            logger.warning("could not prune %s", p, exc_info=True)
-    return pruned
+            logger.warning("could not prune %s", path, exc_info=True)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +398,16 @@ def run_snapshot(root: Path, *, keep: int = 3) -> RunReport:
     snapshot_root.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     target = snapshot_root / stamp
+    # Claim the directory before copying anything. If this run dies partway, the
+    # marker is what lets the NEXT run recognise the wreckage as its own and clear
+    # it; without it, retention cannot tell our debris from somebody else's data.
+    target.mkdir(parents=True, exist_ok=True)
+    (target / _OWNED_MARKER).write_text(
+        "Written by prometheus.jobs.db_snapshot when this set was created.\n"
+        "Retention uses it to tell an interrupted run of this job from a\n"
+        "directory the job did not write. Do not remove it.\n",
+        encoding="utf-8",
+    )
 
     report = RunReport(started_at=time.time(), snapshot_dir=str(target))
     try:
@@ -318,7 +426,8 @@ def run_snapshot(root: Path, *, keep: int = 3) -> RunReport:
             )
         # The manifest is what makes a set COMPLETE, so it is written last and
         # only after every database verified. An interrupted run leaves a
-        # directory with no manifest, which prune_snapshots removes on sight.
+        # directory carrying the marker but no manifest, which the next run's
+        # retention recognises as its own and clears.
         (target / _MANIFEST_NAME).write_text(
             json.dumps(
                 {
@@ -332,7 +441,9 @@ def run_snapshot(root: Path, *, keep: int = 3) -> RunReport:
             ),
             encoding="utf-8",
         )
-        report.pruned = prune_snapshots(snapshot_root, keep)
+        prune = prune_snapshots(snapshot_root, keep)
+        report.pruned = prune.pruned
+        report.set_aside = prune.set_aside
         report.ok = True
     except Exception as exc:
         report.error = f"{type(exc).__name__}: {exc}"
@@ -402,10 +513,20 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     total = sum(d.snapshot_bytes for d in report.databases)
+    # Deleting and setting aside are reported as different things. Collapsing them
+    # into one "(pruned N)" is precisely how three directories went quietly.
+    notes: list[str] = []
+    if report.pruned:
+        notes.append(f"pruned {len(report.pruned)}")
+    if report.set_aside:
+        notes.append(
+            f"SET ASIDE {len(report.set_aside)} unrecognised -> "
+            f"{_UNRECOGNIZED_DIRNAME}/ (NOT deleted)"
+        )
     logger.info(
         "db snapshot OK: %d database(s), %.1f MB, -> %s%s",
         len(report.databases), total / 1_048_576, report.snapshot_dir,
-        f" (pruned {len(report.pruned)})" if report.pruned else "",
+        f" ({'; '.join(notes)})" if notes else "",
     )
     return 0
 
