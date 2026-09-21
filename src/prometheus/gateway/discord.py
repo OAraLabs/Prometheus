@@ -1237,8 +1237,9 @@ class DiscordAdapter(BasePlatformAdapter):
         await self._respond(interaction, text)
 
     async def _app_context(self, interaction: Any, args: str) -> None:
-        from prometheus.gateway.commands import cmd_context
+        from prometheus.gateway.commands import _session_messages, cmd_context
 
+        channel = self._cmd_channel(interaction)
         await self._respond(
             interaction,
             cmd_context(
@@ -1247,6 +1248,10 @@ class DiscordAdapter(BasePlatformAdapter):
                 local_model=self.model_name,
                 detected_limit=self._detected_context_size,
                 config=self._prometheus_config or None,
+                messages=(
+                    _session_messages(self.session_manager, f"discord:{channel}")
+                    if channel else None
+                ),
             ),
         )
 

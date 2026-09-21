@@ -266,6 +266,37 @@ _LIMIT_SOURCE_TEXT = {
 }
 
 
+def _session_messages(session_manager: Any, session_key: str) -> list[Any] | None:
+    """Live conversation for *session_key*, or None when there is no session.
+
+    NON-CREATING: asking what a session costs must not bring one into being.
+    None means "no session here", which /context reports as not measured —
+    distinct from an empty conversation, which is 0.
+    """
+    if session_manager is None:
+        return None
+    try:
+        session = session_manager.get(session_key)
+    except Exception:  # noqa: BLE001 — a store miss must not break /context
+        return None
+    return list(session.get_messages()) if session is not None else None
+
+
+def _conversation_line(tokens: int | None, available: int | None) -> str:
+    """The conversation row, or an honest statement that it was not measured.
+
+    Never "0" for an unthreaded session: a zero that means "nobody told me"
+    is the defect this row exists to fix, printed one level down.
+    """
+    if tokens is None:
+        return ("Conversation:    not measured "
+                "(this surface did not thread the session)")
+    if available:
+        pct = tokens / available * 100
+        return f"Conversation:    {tokens:,} tokens ({pct:.0f}%)"
+    return f"Conversation:    {tokens:,} tokens"
+
+
 def cmd_context(
     system_prompt: str,
     model_name: str,
@@ -273,8 +304,21 @@ def cmd_context(
     local_model: str | None = None,
     detected_limit: int | None = None,
     config: dict[str, Any] | None = None,
+    messages: list[Any] | None = None,
+    tools_chars: int = 0,
 ) -> str:
     """Return context window usage text for the model SERVING this session.
+
+    *messages* is the live conversation. WITHOUT IT THIS COMMAND MEASURES
+    NOTHING THAT MOVES. It used to take only the system prompt, compute
+    ``headroom = available - prompt_tokens``, and label the result "used" —
+    so a session reported the same percentage on turn 1 and turn 100 while
+    the compactor fired every turn on a total the command never showed.
+    Observed: /context printing "35% used, 20,134 headroom" against a live
+    session the compactor had just measured at 23,320 of 30,768 — 76%.
+
+    The window detection was never the broken part. Occupancy was: correctly
+    computed, over the wrong body.
 
     *local_model* and *detected_limit* are what the daemon detected at boot;
     without them the resolver cannot reach its "detected" branch and every
@@ -367,7 +411,17 @@ def cmd_context(
         reserved_output = DEFAULT_RESERVED_OUTPUT
         limit_source = "unknown"
 
+    from prometheus.context.token_estimation import estimate_messages
+
     prompt_tokens = estimate_tokens(system_prompt)
+    tools_tokens = max(0, int(tools_chars)) // 4
+    conversation_tokens = (
+        estimate_messages(messages) if messages is not None else None
+    )
+    # What the assembled request actually costs. Same three terms, same
+    # chars/4 heuristic, as ContextCompactor.estimate_total — which is the
+    # figure compaction acts on, so the two cannot disagree.
+    in_use = prompt_tokens + tools_tokens + (conversation_tokens or 0)
 
     lines = ["Context Window\n"]
     if effective_limit is None:
@@ -376,20 +430,37 @@ def cmd_context(
             f"Reserved output: {reserved_output:,} tokens",
             "",
             f"System prompt:   {prompt_tokens:,} tokens",
+            _conversation_line(conversation_tokens, None),
             "Headroom:        unknown (no window to measure against)",
         ]
     else:
         available = effective_limit - reserved_output
-        headroom = max(0, available - prompt_tokens)
-        usage_pct = (prompt_tokens / available * 100) if available > 0 else 0
+        headroom = max(0, available - in_use)
+        usage_pct = (in_use / available * 100) if available > 0 else 0
         lines += [
             f"Window size:     {effective_limit:,} tokens",
             f"Reserved output: {reserved_output:,} tokens",
             f"Available:       {available:,} tokens",
             "",
-            f"System prompt:   {prompt_tokens:,} tokens ({usage_pct:.0f}%)",
+            f"System prompt:   {prompt_tokens:,} tokens",
+            _conversation_line(conversation_tokens, available),
+        ]
+        if tools_tokens:
+            lines.append(f"Tool schemas:    {tools_tokens:,} tokens")
+        lines += [
+            f"In use:          {in_use:,} tokens ({usage_pct:.0f}%)",
             f"Headroom:        {headroom:,} tokens",
         ]
+        try:
+            from prometheus.context.compactor import (
+                compaction_threshold_from_config,
+            )
+
+            threshold = compaction_threshold_from_config(effective_limit, config)
+            over = " — EXCEEDED, compaction fires" if in_use > threshold else ""
+            lines.append(f"Compacts above:  {threshold:,} tokens{over}")
+        except Exception:  # noqa: BLE001 — a missing budget must not break /context
+            log.debug("cmd_context: compaction threshold unavailable", exc_info=True)
 
     lines += [
         "",
@@ -399,7 +470,7 @@ def cmd_context(
 
     if effective_limit is not None:
         available = effective_limit - reserved_output
-        usage_pct = (prompt_tokens / available * 100) if available > 0 else 0
+        usage_pct = (in_use / available * 100) if available > 0 else 0
         bar_len = 20
         filled = round(usage_pct / 100 * bar_len)
         bar = "\u2588" * filled + "\u2591" * (bar_len - filled)
@@ -1593,6 +1664,7 @@ async def _fc_context(ctx: CommandContext, args: str) -> str:
         local_model=ctx.local_model,
         detected_limit=ctx.detected_limit,
         config=ctx.config,
+        messages=ctx.session.get_messages() if ctx.session is not None else None,
     )
 
 

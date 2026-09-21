@@ -1626,7 +1626,7 @@ class TelegramAdapter(BasePlatformAdapter):
         if update.effective_chat is None:
             return
 
-        from prometheus.gateway.commands import cmd_context
+        from prometheus.gateway.commands import _session_messages, cmd_context
 
         # Delegates to the SHARED formatter rather than keeping a parallel
         # copy. The copy that used to live here had drifted twice over: it
@@ -1645,6 +1645,9 @@ class TelegramAdapter(BasePlatformAdapter):
             local_model=self.model_name,
             detected_limit=getattr(self, "_detected_context_size", None),
             config=getattr(self, "_prometheus_config", None) or None,
+            # The conversation, without which the reply measures only the
+            # system prompt — a constant — and calls it "used".
+            messages=_session_messages(self.session_manager, _session_key),
         )
         await self.send(update.effective_chat.id, text, parse_mode=None)
 
