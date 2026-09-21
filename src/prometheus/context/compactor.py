@@ -57,7 +57,10 @@ from prometheus.context.budget import (
     LEGACY_FALLBACK_LIMIT,
     resolve_effective_limit,
 )
-from prometheus.context.token_estimation import estimate_tokens
+from prometheus.context.token_estimation import (
+    estimate_message_tokens,
+    estimate_tokens,
+)
 
 if TYPE_CHECKING:
     from prometheus.engine.messages import ConversationMessage
@@ -111,6 +114,36 @@ DEFAULT_CLOUD_LIMIT = 1_000_000
 
 # A span smaller than this many messages isn't worth a model call.
 MIN_SPAN_MESSAGES = 4
+
+
+def compaction_threshold(
+    effective_limit: int,
+    reserve_tokens: int = DEFAULT_RESERVE_TOKENS,
+    threshold_pct: float = DEFAULT_THRESHOLD_PCT,
+) -> int:
+    """The assembled-request token total at which compaction fires.
+
+    Module-level and pure so the surfaces that REPORT this number use the
+    same arithmetic as the one that acts on it. /context used to derive its
+    own budget from ``context.reserved_output`` (2000) while compaction ran
+    against ``compaction.reserve_tokens`` (4096) — two figures ~2k apart for
+    the same window, and the more optimistic one was the one the operator
+    was shown.
+    """
+    available = max(1, int(effective_limit) - int(reserve_tokens))
+    return int(available * float(threshold_pct))
+
+
+def compaction_threshold_from_config(
+    effective_limit: int, config: dict | None
+) -> int:
+    """:func:`compaction_threshold` resolved from a loaded prometheus.yaml."""
+    comp = (config or {}).get("compaction") or {}
+    return compaction_threshold(
+        effective_limit,
+        comp.get("reserve_tokens", DEFAULT_RESERVE_TOKENS),
+        comp.get("threshold_pct", DEFAULT_THRESHOLD_PCT),
+    )
 
 # Idempotence cache (FIFO-bounded): span content hash -> summary text.
 _CACHE_MAX_ENTRIES = 16
@@ -335,12 +368,13 @@ class ContextCompactor:
 
     @staticmethod
     def _message_tokens(msg: "ConversationMessage") -> int:
-        """Estimated tokens for one message — content_json covers every block
-        type (text, tool_use, tool_result), unlike .text."""
-        try:
-            return estimate_tokens(msg.content_json)
-        except Exception:
-            return estimate_tokens(getattr(msg, "text", "") or "")
+        """Estimated tokens for one message.
+
+        Delegates to the shared estimator so the number /context REPORTS and
+        the number this class ACTS ON are produced by one function. They were
+        two before, and the reporting one omitted the conversation entirely.
+        """
+        return estimate_message_tokens(msg)
 
     def estimate_total(
         self,
@@ -404,25 +438,72 @@ class ContextCompactor:
         return int(resolved)
 
     def _threshold_tokens(self, model: str | None = None) -> int:
-        available = max(1, self.limit_for(model) - self._reserve_tokens)
-        return int(available * self._threshold_pct)
+        return compaction_threshold(
+            self.limit_for(model), self._reserve_tokens, self._threshold_pct,
+        )
 
     # -- span selection ----------------------------------------------------
 
-    def _protected_boundary(self, messages: list) -> int:
-        """Index of the first message of the protected tail: the last
-        ``protect_recent_turns`` user-role messages and everything after the
-        earliest of them never compact (microcompaction's fresh-window
-        convention)."""
+    def _boundary_for(self, messages: list, keep_turns: int) -> int:
+        """First protected index when *keep_turns* user turns are protected.
+
+        0 when the conversation holds fewer than that many user turns — the
+        whole thing is protected and nothing is compactable.
+        """
         seen = 0
         for i in range(len(messages) - 1, -1, -1):
             if getattr(messages[i], "role", "") == "user":
                 seen += 1
-                if seen >= self._protect_recent_turns:
+                if seen >= keep_turns:
                     return i
         return 0
 
-    def _select_span_end(self, messages: list) -> int:
+    def _tail_tokens(self, messages: list, boundary: int) -> int:
+        """Tokens held by the protected tail beginning at *boundary*."""
+        return sum(self._message_tokens(m) for m in messages[boundary:])
+
+    def _protected_boundary(
+        self, messages: list, tail_budget: int | None = None
+    ) -> int:
+        """Index of the first message of the protected tail: the last
+        ``protect_recent_turns`` user-role messages and everything after the
+        earliest of them never compact (microcompaction's fresh-window
+        convention).
+
+        *tail_budget* is the room the tail has to fit in. Without one the
+        tail is protected unconditionally — and an unconditional tail is how
+        a compaction pass becomes a no-op that still costs a turn. Once the
+        protected region ALONE exceeds the threshold, no span chosen in front
+        of it can bring the total under, so the pass re-runs on every
+        subsequent turn: same prefix re-summarised, a summary of a summary,
+        and a model reading an ever more lossy history while the logs report
+        each pass as a success.
+
+        Measured on a live session: 36-40 messages collapsed to one summary
+        every turn, landing at 22.7k-23.5k against a 21,504 threshold —
+        over by 1.2k-2k each time, for hours.
+
+        So when a budget is given and the tail busts it, the protection
+        yields one user turn at a time. The floor is the most recent user
+        turn: the question being answered is never summarised away.
+        """
+        boundary = self._boundary_for(messages, self._protect_recent_turns)
+        if tail_budget is None:
+            return boundary
+        if self._tail_tokens(messages, boundary) <= tail_budget:
+            return boundary
+        for keep in range(self._protect_recent_turns - 1, 0, -1):
+            candidate = self._boundary_for(messages, keep)
+            if candidate <= boundary:
+                continue
+            boundary = candidate
+            if self._tail_tokens(messages, candidate) <= tail_budget:
+                break
+        return boundary
+
+    def _select_span_end(
+        self, messages: list, tail_budget: int | None = None
+    ) -> int:
         """End index (exclusive) of the compactable prefix span.
 
         The span is the contiguous prefix of span-transparent messages (see
@@ -432,7 +513,7 @@ class ContextCompactor:
         summarized away, and the single-layer guarantee holds because
         synthetic summaries can never enter a span.
         """
-        boundary = self._protected_boundary(messages)
+        boundary = self._protected_boundary(messages, tail_budget)
         end = 0
         for i in range(boundary):
             if getattr(messages[i], "provenance", "user") not in _SPAN_TRANSPARENT:
@@ -571,13 +652,39 @@ class ContextCompactor:
         if tokens_before <= threshold:
             return messages
 
-        max_end = self._select_span_end(messages)
+        # Room the protected tail is allowed to occupy: the threshold less
+        # the fixed costs that are there whatever we do (system prompt, tool
+        # schemas).
+        #
+        # Deliberately NOT less ``_max_summary_tokens`` as well. Reserving the
+        # summary's worst case here makes the tail yield while convergence is
+        # still reachable — recent turns summarised to buy room that a
+        # typical summary never needed. The condition that justifies yielding
+        # is the narrow one: the tail ALONE cannot fit, so no span chosen in
+        # front of it converges however small its summary turns out to be.
+        fixed_tokens = (
+            estimate_tokens(system_prompt or "") + max(0, int(tools_chars)) // 4
+        )
+        tail_budget = max(0, threshold - fixed_tokens)
+
+        max_end = self._select_span_end(messages, tail_budget=tail_budget)
         if max_end < MIN_SPAN_MESSAGES:
-            log.debug(
-                "ContextCompactor: over threshold (%d > %d) but compactable "
-                "span has only %d message(s) — nothing to do",
-                tokens_before, threshold, max_end,
+            # Over threshold with no remedy. WARNING, not DEBUG: this repeats
+            # on every turn for as long as the session stays over, and at
+            # debug level it is indistinguishable from a healthy quiet one.
+            log.warning(
+                "ContextCompactor: over threshold (%d > %d) for %s but the "
+                "compactable span is %d message(s) — nothing to do. Repeats "
+                "every turn while the session stays over.",
+                tokens_before, threshold, session_id, max_end,
             )
+            await self._record_event("context_compaction_noop", {
+                "session_id": session_id,
+                "tokens_before": tokens_before,
+                "threshold": threshold,
+                "span_messages": max_end,
+                "over_by": tokens_before - threshold,
+            })
             return messages
 
         # Anchored span: reuse the previously summarized span while the
@@ -653,18 +760,32 @@ class ContextCompactor:
         out = [synthetic] + list(messages[span_end:])
         tokens_after = self.estimate_total(system_prompt, out, tools_chars)
 
+        converged = tokens_after <= threshold
         log.info(
             "ContextCompactor: %d msgs → 1 summary (%s); tokens %d → %d "
             "(threshold %d)%s",
             len(span), session_id, tokens_before, tokens_after, threshold,
             " [cache]" if cache_hit else "",
         )
+        if not converged:
+            # A pass that lands over the line reads exactly like one that
+            # lands under it — same INFO, same shape — and the only visible
+            # consequence is that it happens again next turn. Say it.
+            log.warning(
+                "ContextCompactor: pass did NOT converge for %s — %d tokens "
+                "after compaction still exceeds the %d threshold by %d. The "
+                "protected tail is the floor; the next turn re-runs this "
+                "pass and the model reads a re-summarised history.",
+                session_id, tokens_after, threshold, tokens_after - threshold,
+            )
         await self._record_event("context_compaction", {
             "session_id": session_id,
             "span_messages": len(span),
             "tokens_before": tokens_before,
             "tokens_after": tokens_after,
             "threshold": threshold,
+            "converged": converged,
+            "over_by": max(0, tokens_after - threshold),
             "duration_ms": round(duration_ms, 1),
             "cache_hit": cache_hit,
             "summarizer_input_omitted": omitted,

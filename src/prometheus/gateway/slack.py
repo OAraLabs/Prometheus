@@ -908,16 +908,26 @@ class SlackAdapter(BasePlatformAdapter):
         except Exception as exc:
             await respond(text=f"Benchmark: FAIL\nError: {exc}")
 
-    async def _slash_context(self, ack: Any, respond: Any) -> None:
+    async def _slash_context(
+        self, ack: Any, command: Any, respond: Any
+    ) -> None:
         await ack()
-        from prometheus.gateway.commands import cmd_context
+        from prometheus.gateway.commands import _session_messages, cmd_context
 
+        # ``command`` is injected by name (bolt), same as /prometheus-skills.
+        # It is here for one reason: the channel id, which is the session key,
+        # without which this reply cannot measure the conversation.
+        channel = (command or {}).get("channel_id") if command else None
         await respond(text=cmd_context(
             self.system_prompt,
             self.model_name,
             local_model=self.model_name,
             detected_limit=self._detected_context_size,
             config=self._prometheus_config or None,
+            messages=(
+                _session_messages(self.session_manager, f"slack:{channel}")
+                if channel else None
+            ),
         ))
 
     async def _slash_skills(
