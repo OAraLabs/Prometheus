@@ -402,7 +402,7 @@ class SetupWizard:
                 [
                     "Point Prometheus at a remote server URL",
                     "Use a cloud provider (OpenAI / Anthropic / Gemini / xAI / "
-                    "DeepSeek / Kimi / GLM / MiMo)",
+                    "DeepSeek / Kimi / GLM / MiMo / Qwen)",
                     "Show install instructions for a local server and exit",
                 ],
                 default=3,
