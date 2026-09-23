@@ -2871,7 +2871,7 @@ def create_app(
             return _unmeasured("assemble_failed")
 
         _fresh_tokens, _summary_tokens = _split_of(result)
-        return {
+        body = {
             "session_id": session_id,
             "total_tokens": result.total_tokens,
             "limit": limit,
@@ -2886,7 +2886,51 @@ def create_app(
             "fresh_tokens": _fresh_tokens,
             "summary_tokens": _summary_tokens,
             "assembled": True,
+            "basis": "lcm_assembly",
         }
+
+        # WHAT THE METER SHOWS IS WHAT THE MODEL WAS SENT. The assembly above is the LCM store's
+        # view of the conversation — its text only. The loop's request also carries the system
+        # prompt, the tool schemas, and every tool call and result, so the assembly under-reports
+        # an agent session by an order of magnitude: 4,018 here against 110k-243k sent per round
+        # on a live session (2026-09-23), while the agent itself was reporting its context full.
+        # When the provider has counted a request for this session, that count IS the answer.
+        #
+        # The split is dropped with it: fresh + summary sum to the ASSEMBLY's total, not to this
+        # one, and a split that does not reconstruct the total cannot be drawn inside the bar
+        # (clients already treat null as "no split"). The store's own counts and ratio stay — they
+        # are true statements about the conversation store, and Status shows them as such.
+        measured = _last_request(session_id)
+        if measured is not None:
+            body.update({
+                "total_tokens": measured["input_tokens"],
+                "fresh_tokens": None,
+                "summary_tokens": None,
+                "basis": "last_request",
+                "measured_model": measured["model"],
+                "measured_at": measured["timestamp"],
+            })
+        return body
+
+    def _last_request(session_id: str) -> dict[str, Any] | None:
+        """The loop's last measured prompt for *session_id*, or None. Never raises: a telemetry
+        problem degrades the meter to the assembly figure (labelled as such by ``basis``) rather
+        than failing the route."""
+        try:
+            from prometheus.telemetry.tracker import get_telemetry_handle
+
+            tel = get_telemetry_handle()
+            if tel is None or not hasattr(tel, "last_request_tokens"):
+                return None
+            return tel.last_request_tokens(session_id)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "last_request_tokens failed for %s — reporting the assembly figure", session_id,
+                exc_info=True,
+            )
+            return None
 
     # ── Global conversation search (Beacon ⌘⇧F) ────────────────────
     # Spec: beacon-search-spec.md v2 (frozen; review delta: POST-only). Two
