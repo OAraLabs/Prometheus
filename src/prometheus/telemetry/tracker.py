@@ -257,6 +257,9 @@ CREATE INDEX IF NOT EXISTS idx_silent_failures_ts ON silent_failures (timestamp)
 CREATE INDEX IF NOT EXISTS idx_silent_failures_subsystem ON silent_failures (subsystem);
 CREATE INDEX IF NOT EXISTS idx_subsystem_runs_ts ON subsystem_runs (timestamp);
 CREATE INDEX IF NOT EXISTS idx_subsystem_runs_subsystem ON subsystem_runs (subsystem);
+-- /api/lcm reads the newest agent-loop round for ONE session on every context-meter poll (Beacon
+-- polls every 8s per open window, iOS likewise). Without this each poll scans every run recorded.
+CREATE INDEX IF NOT EXISTS idx_subsystem_runs_session_ts ON subsystem_runs (session_id, timestamp);
 
 -- SignalBus Persistence sprint: (signal_type, timestamp DESC) is the natural
 -- read pattern for /events filtered queries and Beacon's recent-events
@@ -1302,6 +1305,41 @@ class ToolCallTelemetry:
                 "read_at": row[5],
             })
         return out
+
+    def last_request_tokens(self, session_id: str) -> dict[str, Any] | None:
+        """The size of the most recent prompt the agent loop SENT for one session, as the provider
+        counted it — or None when nothing has been measured for that session.
+
+        This is what a context meter has to show. ``/api/lcm`` used to report the LCM assembler's
+        view of the conversation instead, which counts the conversation store's text and nothing
+        else: no system prompt, no tool schemas, no tool calls or results. On a 730-message agent
+        session it read 4,018 tokens while the loop's rounds were sending 110k-243k (measured,
+        2026-09-23) — fifty times low, on the surface that exists to say "you are nearly full".
+
+        ``input_tokens`` is the whole prompt, cached part included: the usage layer normalises every
+        provider to that (``UsageSnapshot.uncached_input_tokens`` is derived FROM it), so no
+        provider-specific arithmetic belongs here.
+
+        Only ``agent_loop``/``loop_round`` rows: those are the requests that carry the session's
+        context. Any other subsystem that records a session id (a titler, a summariser) sends a
+        different, smaller prompt and must not be mistaken for the conversation's size. Newest by
+        timestamp, then rowid (insert order) — NOT id, which record_run fills with random uuid4 hex
+        and so orders nothing.
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT input_tokens, model, timestamp FROM subsystem_runs "
+                "WHERE session_id = ? AND subsystem = 'agent_loop' AND operation = 'loop_round' "
+                "AND input_tokens IS NOT NULL AND input_tokens > 0 "
+                "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            log.warning("last_request_tokens: query failed for session %r", session_id, exc_info=True)
+            return None
+        if row is None:
+            return None
+        return {"input_tokens": int(row[0]), "model": row[1], "timestamp": float(row[2])}
 
     def usage_rollup(
         self,
