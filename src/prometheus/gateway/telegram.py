@@ -3294,7 +3294,20 @@ class TelegramAdapter(BasePlatformAdapter):
         import shutil
         piper_bin = shutil.which("piper")
         if piper_bin is None:
-            logger.debug("piper binary not found on PATH")
+            if model_path and not getattr(self, "_piper_missing_warned", False):
+                # A model is configured, so this is a missing install, not an
+                # unconfigured deployment — piper-tts left the base
+                # dependencies in 0.9.1 and an upgrade without the extra
+                # lands exactly here. Say so once, at WARNING; the reply
+                # still falls back to text.
+                self._piper_missing_warned = True
+                logger.warning(
+                    "Voice replies are configured (gateway.voice.model_path) "
+                    "but piper is not installed — replying in text. "
+                    "Fix: pip install 'oara-prometheus[voice]'"
+                )
+            else:
+                logger.debug("piper binary not found on PATH")
             return False
         if not model_path:
             logger.debug("No piper model_path configured in gateway.voice")

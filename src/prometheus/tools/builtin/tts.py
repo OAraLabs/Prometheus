@@ -52,7 +52,20 @@ class TTSTool(BaseTool):
         engine = arguments.engine or _detect_engine()
         if engine is None:
             return ToolResult(
-                output="No TTS engine found. Install espeak-ng or piper.",
+                output=(
+                    "No TTS engine found. Install espeak-ng, or piper with: "
+                    "pip install 'oara-prometheus[voice]'"
+                ),
+                is_error=True,
+            )
+        if engine == "piper" and not shutil.which("piper"):
+            # Asked for by name: without this the exec below raises
+            # FileNotFoundError instead of saying what to install.
+            return ToolResult(
+                output=(
+                    "piper is not installed. "
+                    "Fix: pip install 'oara-prometheus[voice]'"
+                ),
                 is_error=True,
             )
 

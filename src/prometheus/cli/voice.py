@@ -51,6 +51,10 @@ CHANNELS = 1
 # the actionable message once, not per turn).
 _WARNED: set[str] = set()
 
+# piper-tts, sounddevice and scipy are the `voice` extra, not base
+# dependencies (0.9.1). Every "voice is not installed" message ends here.
+VOICE_EXTRA_FIX = "Fix: pip install 'oara-prometheus[voice]'"
+
 
 def _warn_once(key: str, message: str) -> None:
     """Print *message* the first time *key* is seen; log afterwards."""
@@ -127,7 +131,12 @@ async def record_push_to_talk(max_seconds: int = 60) -> Path | None:
         import sounddevice as sd
         from scipy.io import wavfile
     except ImportError as exc:
-        print(f"\n[voice] missing audio dependency: {exc}")
+        # Not deduplicated like the output warnings: this runs only when the
+        # user asked to speak, and a silent second Enter reads as a dead mic.
+        print(
+            f"\n[voice] microphone capture needs {exc.name or exc}, which is "
+            f"not installed — voice INPUT disabled. {VOICE_EXTRA_FIX}"
+        )
         return None
 
     buffer: list[Any] = []
@@ -199,6 +208,7 @@ def play_wav(wav_path: str | Path) -> bool:
     if not p.is_file():
         return False
 
+    missing_dep: str | None = None
     try:
         import sounddevice as sd
         from scipy.io import wavfile
@@ -207,6 +217,9 @@ def play_wav(wav_path: str | Path) -> bool:
         sd.play(data, sample_rate)
         sd.wait()
         return True
+    except ImportError as exc:
+        missing_dep = exc.name or str(exc)
+        logger.debug("playback dependency missing: %s — trying ffplay", exc)
     except Exception as exc:
         logger.debug("sounddevice playback failed: %s — trying ffplay", exc)
 
@@ -221,6 +234,13 @@ def play_wav(wav_path: str | Path) -> bool:
             return True
         except Exception as exc:
             logger.debug("ffplay playback failed: %s", exc)
+    if missing_dep is not None:
+        _warn_once(
+            "playback-missing",
+            f"[voice] playback needs {missing_dep}, which is not installed, "
+            f"and no ffplay fallback worked — voice OUTPUT disabled. "
+            f"{VOICE_EXTRA_FIX}",
+        )
     return False
 
 
@@ -268,9 +288,9 @@ async def synthesize_wav(
     if piper_bin is None:
         _warn_once(
             "piper-missing",
-            "[voice] piper binary not on PATH — voice OUTPUT disabled. "
-            "piper-tts ships with Prometheus; check your PATH or reinstall "
-            "with: pip install piper-tts",
+            "[voice] piper is not installed (no `piper` on PATH) — voice "
+            f"OUTPUT disabled. {VOICE_EXTRA_FIX}. If it is installed, the "
+            "environment's bin directory must be on PATH.",
         )
         return None
     model_path = voice_config.get("model_path")
