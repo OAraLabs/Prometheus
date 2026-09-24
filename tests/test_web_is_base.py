@@ -71,7 +71,20 @@ from tests.test_daemon_shutdown import _free_port, _ModelsHandler
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 
-WEB_DISTS = {"fastapi", "uvicorn", "websockets"}
+# python-multipart is here because Beacon uses the live recorder's multipart
+# upload (Record a Skill): a plain install must run everything Beacon uses.
+WEB_DISTS = {"fastapi", "uvicorn", "websockets", "python-multipart"}
+
+# Security floors, each the first release with every listed advisory fixed
+# (checked with pip-audit: the floor audits clean, the release below it
+# does not). A floor that slips lets pip keep, or a re-resolve pick, a
+# vulnerable version.
+FLOORS = {
+    # CVE-2026-54282/-54283 (1.3.0, 1.3.1), CVE-2026-48817/-48818 (1.1.0)
+    "starlette": ("1.3.0", "1.3.1"),
+    # the last advisory, CVE-2026-53540, is fixed in 0.0.31
+    "python-multipart": ("0.0.30", "0.0.31"),
+}
 
 
 def _project() -> dict:
@@ -93,6 +106,18 @@ def test_the_web_stack_is_in_the_base_dependencies():
         f"`pip install oara-prometheus` (and the Homebrew formula) then "
         f"cannot start `oara daemon`, not even into setup mode."
     )
+
+
+@pytest.mark.parametrize("dist", sorted(FLOORS))
+def test_security_floors_hold(dist):
+    """starlette is fastapi's dependency, not ours — but pip will not upgrade an
+    installed starlette that still satisfies fastapi's range, so only a direct
+    floor gets an upgraded install off a vulnerable version."""
+    last_bad, first_good = FLOORS[dist]
+    spec = _requirements(_project()["dependencies"])[dist].specifier
+    assert not spec.contains(last_bad), (
+        f"base {dist}{spec} admits {last_bad}, which has known advisories")
+    assert spec.contains(first_good), f"base {dist}{spec} excludes {first_good}"
 
 
 def test_base_uvicorn_is_plain_not_standard():
