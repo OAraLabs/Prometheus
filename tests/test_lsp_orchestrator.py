@@ -17,7 +17,7 @@ from prometheus.lsp.client import (
     LSPError,
 )
 from prometheus.lsp.languages import LSPServerDef
-from prometheus.lsp.orchestrator import LSPOrchestrator
+from prometheus.lsp.orchestrator import LSPOrchestrator, LSPUnavailable, _StartFailure
 
 
 # ------------------------------------------------------------------
@@ -104,25 +104,27 @@ async def test_reuses_existing_server(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_marks_failed_servers_broken(tmp_path):
-    """Marks failed servers as broken, doesn't retry."""
+async def test_failed_start_not_retried_inside_backoff(tmp_path):
+    """A failed start is not retried until its backoff has passed."""
     py_file = tmp_path / "pyproject.toml"
     py_file.touch()
     src = tmp_path / "test.py"
     src.write_text("x = 1\n")
 
-    orch = LSPOrchestrator()
+    orch = LSPOrchestrator(clock=lambda: 100.0)
     with patch.object(orch, "_spawn", new_callable=AsyncMock, return_value=None):
         result1 = await orch.ensure_server(str(src))
         assert result1 is None
 
-    # Mark as broken manually (since our mock doesn't go through real _spawn)
+    # Record the failure manually (since our mock doesn't go through real _spawn)
     key = "python:" + str(tmp_path)
-    orch._broken.add(key)
+    orch._failures[key] = _StartFailure(at=100.0, attempts=1, error="RuntimeError: boom")
 
-    # Second attempt should not even try to spawn
-    result2 = await orch.ensure_server(str(src))
+    # Second attempt inside the backoff should not even try to spawn
+    with patch.object(orch, "_spawn", new_callable=AsyncMock) as spawn:
+        result2 = await orch.ensure_server(str(src))
     assert result2 is None
+    spawn.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -217,13 +219,13 @@ async def test_symbol_context_packages_all_info(tmp_path):
 
 @pytest.mark.asyncio
 async def test_symbol_context_handles_no_server(tmp_path):
-    """get_symbol_context returns helpful message when no server is available."""
+    """get_symbol_context raises with the reason when no server is available."""
     txt = tmp_path / "readme.txt"
     txt.write_text("hello")
 
     orch = LSPOrchestrator()
-    result = await orch.get_symbol_context(str(txt), 1, 1)
-    assert "No language server" in result
+    with pytest.raises(LSPUnavailable, match="no language server is configured for `.txt` files"):
+        await orch.get_symbol_context(str(txt), 1, 1)
 
 
 # ------------------------------------------------------------------

@@ -2397,8 +2397,8 @@ class TestSprint20LSPWiring:
     # -- Orchestrator lifecycle ----------------------------------------
 
     def test_orchestrator_broken_server_tracking(self, tmp_path: Path) -> None:
-        """Orchestrator marks broken servers and doesn't retry them."""
-        from prometheus.lsp.orchestrator import LSPOrchestrator
+        """Orchestrator records a failed start and doesn't retry it inside the backoff."""
+        from prometheus.lsp.orchestrator import LSPOrchestrator, _StartFailure
         from prometheus.lsp.languages import LSPServerDef, find_project_root
 
         server_def = LSPServerDef(
@@ -2411,16 +2411,18 @@ class TestSprint20LSPWiring:
         src = tmp_path / "test.py"
         src.write_text("x = 1\n")
 
-        orch = LSPOrchestrator()
+        orch = LSPOrchestrator(clock=lambda: 100.0)
         root = find_project_root(src, server_def.root_markers)
         key = f"{server_def.language_id}:{root}"
 
-        # Simulate a broken server
-        orch._broken.add(key)
+        # Simulate a start that just failed
+        orch._failures[key] = _StartFailure(at=100.0, attempts=1, error="RuntimeError: boom")
 
         # ensure_server should return None without attempting spawn
-        result = asyncio.run(orch.ensure_server(str(src)))
+        with patch.object(orch, "_spawn", new_callable=AsyncMock) as spawn:
+            result = asyncio.run(orch.ensure_server(str(src)))
         assert result is None
+        spawn.assert_not_called()
 
     def test_orchestrator_shutdown_clears_state(self) -> None:
         """shutdown_all clears client dict and spawning set."""
