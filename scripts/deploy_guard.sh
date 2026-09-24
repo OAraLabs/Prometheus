@@ -76,10 +76,28 @@
 # when its detector breaks is not a guard (CROSS-CUTTING §8: fail-closed and
 # fail-open are choices; fail-by-exception is the third state nobody chose).
 #
+# THE VENV MUST BE BUILT FROM THIS CHECKOUT'S uv.lock (2026-09-24)
+# -----------------------------------------------------------------
+# Until 0.9.2 the daemon ran on packages installed by hand into the user
+# site (~/.local), so neither uv.lock nor CI's pip-audit over it described
+# what actually ran: starlette 0.52.1 there, with CVE-2026-48710 turning the
+# bearer gate off for a crafted Host header. scripts/deploy.sh now builds a
+# venv per deployed commit from that commit's lock and records the lock's
+# sha256 in <venv>/BUILT_FROM_UV_LOCK. When the unit runs from such a venv
+# it sets PROMETHEUS_VENV, and this guard REFUSES unless the venv records
+# exactly the checkout's uv.lock — a code deploy without a matching venv
+# (or a venv rolled back under newer code) cannot start silently.
+#   * PROMETHEUS_VENV unset: not a managed venv (the pre-0.9.2 unit, or
+#     rollback R1) — nothing to compare, the check does not apply.
+#   * PROMETHEUS_VENV set: fail CLOSED — no bin/python, no marker, no
+#     uv.lock in the checkout, or no sha256 tool all refuse.
+#   * PROMETHEUS_ALLOW_LOCK_MISMATCH=1 skips it, loudly. The branch
+#     override below does NOT: it answers a different question.
+#
 # ESCAPE HATCH, DELIBERATE AND VISIBLE
 # ------------------------------------
-# PROMETHEUS_ALLOW_UNMERGED_DEPLOY=1 skips the check and logs loudly that it
-# did. A guard with no override is one people disable wholesale the first
+# PROMETHEUS_ALLOW_UNMERGED_DEPLOY=1 skips the branch checks and logs loudly
+# that it did (not the venv/lock check above, which has its own). A guard with no override is one people disable wholesale the first
 # time it blocks something legitimate — the `--no-verify` reflex. An override
 # that announces itself in the journal is strictly better than a guard that
 # gets commented out.
@@ -112,10 +130,61 @@ GIT=$(command -v git || echo /usr/bin/git)
 
 log() { printf 'deploy-guard: %s\n' "$*" >&2; }
 
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
+    else return 1
+    fi
+}
+
+# The venv/lock check (see the header). Exits 1 on refusal.
+lock_check() {
+    local venv="${PROMETHEUS_VENV:-}" marker want got
+    [ -z "$venv" ] && return 0
+    if [ "${PROMETHEUS_ALLOW_LOCK_MISMATCH:-0}" = "1" ]; then
+        log "OVERRIDE ACTIVE (PROMETHEUS_ALLOW_LOCK_MISMATCH=1) — venv/lock check skipped."
+        log "OVERRIDE the daemon's packages may not be what $REPO/uv.lock says."
+        return 0
+    fi
+    marker="$venv/BUILT_FROM_UV_LOCK"
+    if [ ! -x "$venv/bin/python" ]; then
+        log "REFUSING: PROMETHEUS_VENV=$venv has no bin/python — there is no venv to run."
+        exit 1
+    fi
+    if [ ! -f "$REPO/uv.lock" ]; then
+        log "REFUSING: $REPO has no uv.lock — cannot tell what the venv should hold."
+        exit 1
+    fi
+    if [ ! -r "$marker" ]; then
+        log "REFUSING: $marker is missing — this venv does not record which uv.lock built it."
+        log "  Build deploy venvs with scripts/deploy.sh, which writes it."
+        exit 1
+    fi
+    if ! want=$(sha256_of "$REPO/uv.lock"); then
+        log "REFUSING: no sha256sum or shasum — cannot compare the venv with uv.lock."
+        exit 1
+    fi
+    got=$(awk 'NR==1{print $1}' "$marker")
+    if [ "$got" != "$want" ]; then
+        log "REFUSING: the venv was built from a different uv.lock than the checkout's."
+        log "  venv  $venv  built from uv.lock ${got:0:12}"
+        log "  repo  $REPO/uv.lock is ${want:0:12}"
+        log "  The daemon would run packages this checkout's lock does not describe,"
+        log "  and an audit of that lock would be auditing something else."
+        log "  Fix: scripts/deploy.sh <ref> builds the venv for the checkout's lock."
+        log "  Override (announces itself): PROMETHEUS_ALLOW_LOCK_MISMATCH=1"
+        exit 1
+    fi
+    log "venv matches the lock: $venv was built from this checkout's uv.lock (${want:0:12})."
+}
+
+# Every path that lets the daemon start goes through here.
+allow() { lock_check; exit 0; }
+
 if [ "${PROMETHEUS_ALLOW_UNMERGED_DEPLOY:-0}" = "1" ]; then
     log "OVERRIDE ACTIVE (PROMETHEUS_ALLOW_UNMERGED_DEPLOY=1) — branch check skipped."
     log "OVERRIDE the daemon may be running code that is not on main."
-    exit 0
+    allow
 fi
 
 if [ ! -x "$GIT" ]; then
@@ -250,8 +319,8 @@ if [ "$head" != "$origin" ]; then
     log "  Every commit here is on origin/main and was reviewed; the checkout is"
     log "  merely old. This is what a deliberate dark-merge looks like."
     log "  To go live with the newest: git -C $REPO pull --ff-only && restart"
-    exit 0
+    allow
 fi
 
 log "OK: $REPO on main at ${head:0:7} == origin/main."
-exit 0
+allow

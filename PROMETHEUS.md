@@ -52,6 +52,18 @@ The deploy clone is updated one way only:
 git -C ~/prometheus-deploy fetch origin && git -C ~/prometheus-deploy merge --ff-only origin/main
 ```
 
+Once the daemon runs from a **managed venv** (its unit carries the drop-in
+`scripts/deploy.sh` writes), deploy with the script instead. It fast-forwards
+the clone *and* builds that commit's venv from its `uv.lock`, gated on
+pip-audit. A clone moved by hand without a matching venv is refused at boot:
+the guard compares the venv's `BUILT_FROM_UV_LOCK` with the checkout's lock.
+The script can run from any checkout; it acts on `~/prometheus-deploy`.
+
+```bash
+scripts/deploy.sh v0.9.2 --prepare-only   # build + gate the venv; nothing live changes
+scripts/deploy.sh v0.9.2                  # switch, restart, verify, restore model choices
+```
+
 **Merging a PR and deferring the deploy is two steps, not one.** The daemon's
 `ExecStartPre` guard refuses to boot when that clone is not on `main`, is
 AHEAD of local `origin/main`, has DIVERGED from it, or has uncommitted changes

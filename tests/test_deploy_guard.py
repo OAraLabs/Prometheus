@@ -45,6 +45,7 @@ This suite now pins the verdict in both directions.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -55,7 +56,11 @@ GUARD = Path(__file__).resolve().parent.parent / "scripts" / "deploy_guard.sh"
 
 
 def _run(repo: Path, **env_overrides: str) -> subprocess.CompletedProcess:
-    env = {**os.environ, **env_overrides}
+    # The venv/lock check reads these; a value leaking in from the shell that
+    # runs the suite must not decide a test that did not ask for it.
+    inherited = {k: v for k, v in os.environ.items()
+                 if k not in ("PROMETHEUS_VENV", "PROMETHEUS_ALLOW_LOCK_MISMATCH")}
+    env = {**inherited, **env_overrides}
     return subprocess.run(
         ["bash", str(GUARD), str(repo)],
         capture_output=True, text=True, env=env, timeout=30,
@@ -417,3 +422,129 @@ def test_override_is_off_unless_it_is_exactly_1(repo):
         assert r.returncode == 1, (
             f"PROMETHEUS_ALLOW_UNMERGED_DEPLOY={value!r} disabled the guard"
         )
+
+
+# ── THE VENV MUST BE BUILT FROM THE CHECKOUT'S uv.lock (0.9.2) ──────────────
+#
+# scripts/deploy.sh builds one venv per deployed commit and records the
+# lock's sha256 in <venv>/BUILT_FROM_UV_LOCK; the unit's drop-in sets
+# PROMETHEUS_VENV. Until 0.9.2 the daemon ran on hand-installed user-site
+# packages that neither the lock nor CI's audit described (starlette 0.52.1,
+# with CVE-2026-48710 switching the bearer gate off).
+
+def _commit_lock(repo: Path, text: str = "lock v1\n") -> Path:
+    lock = repo / "uv.lock"
+    lock.write_text(text)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "lock")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    return lock
+
+
+def _venv(tmp_path: Path, built_from: str | None, name: str = "venv") -> Path:
+    v = tmp_path / name
+    (v / "bin").mkdir(parents=True)
+    py = v / "bin" / "python"
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+    if built_from is not None:
+        (v / "BUILT_FROM_UV_LOCK").write_text(built_from + "\n")
+    return v
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_allows_a_venv_built_from_the_checkouts_lock(repo, tmp_path):
+    """The good state, pinned first (§2c): a refusing-everything check would
+    otherwise pass every test below and the daemon would never start."""
+    lock = _commit_lock(repo)
+    r = _run(repo, PROMETHEUS_VENV=str(_venv(tmp_path, _sha(lock))))
+    assert r.returncode == 0, f"guard refused a matching venv:\n{r.stderr}"
+    assert "OK:" in r.stderr
+    assert "venv matches the lock" in r.stderr
+
+
+def test_refuses_a_venv_built_from_another_lock(repo, tmp_path):
+    """THE case: code moved to a new lock, the venv did not (or a venv was
+    rolled back under newer code)."""
+    lock = _commit_lock(repo)
+    other = hashlib.sha256(b"a different lock").hexdigest()
+    r = _run(repo, PROMETHEUS_VENV=str(_venv(tmp_path, other)))
+    assert r.returncode == 1
+    assert "different uv.lock" in r.stderr
+    assert other[:12] in r.stderr and _sha(lock)[:12] in r.stderr
+
+
+def test_refuses_a_venv_that_records_no_lock(repo, tmp_path):
+    _commit_lock(repo)
+    r = _run(repo, PROMETHEUS_VENV=str(_venv(tmp_path, None)))
+    assert r.returncode == 1
+    assert "BUILT_FROM_UV_LOCK is missing" in r.stderr
+
+
+def test_refuses_a_venv_with_no_python(repo, tmp_path):
+    lock = _commit_lock(repo)
+    v = _venv(tmp_path, _sha(lock))
+    (v / "bin" / "python").unlink()
+    r = _run(repo, PROMETHEUS_VENV=str(v))
+    assert r.returncode == 1
+    assert "no bin/python" in r.stderr
+
+
+def test_refuses_a_managed_venv_when_the_checkout_has_no_lock(repo, tmp_path):
+    r = _run(repo, PROMETHEUS_VENV=str(_venv(tmp_path, "0" * 64)))
+    assert r.returncode == 1
+    assert "has no uv.lock" in r.stderr
+
+
+def test_no_managed_venv_means_no_lock_check(repo):
+    """The pre-0.9.2 unit, and rollback R1 (drop-in removed), set no
+    PROMETHEUS_VENV. They must still start — even with no uv.lock at all."""
+    assert not (repo / "uv.lock").exists()
+    r = _run(repo)
+    assert r.returncode == 0, r.stderr
+    assert "uv.lock" not in r.stderr, "the lock check ran with no managed venv"
+
+
+def test_the_branch_override_does_not_skip_the_lock_check(repo, tmp_path):
+    """PROMETHEUS_ALLOW_UNMERGED_DEPLOY answers "may unmerged code run?" —
+    not "may the packages differ from the lock?"."""
+    _commit_lock(repo)
+    _git(repo, "checkout", "-qb", "feat/x")
+    r = _run(repo, PROMETHEUS_ALLOW_UNMERGED_DEPLOY="1",
+             PROMETHEUS_VENV=str(_venv(tmp_path, "0" * 64)))
+    assert r.returncode == 1
+    assert "OVERRIDE ACTIVE (PROMETHEUS_ALLOW_UNMERGED_DEPLOY=1)" in r.stderr
+    assert "different uv.lock" in r.stderr
+
+
+def test_the_lock_check_also_guards_a_behind_checkout(repo, tmp_path):
+    """BEHIND warns and starts — through the same lock check."""
+    _commit_lock(repo)
+    (repo / "b.txt").write_text("b\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "two")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(repo, "reset", "-q", "--hard", "HEAD~1")
+    r = _run(repo, PROMETHEUS_VENV=str(_venv(tmp_path, "0" * 64)))
+    assert r.returncode == 1
+    assert "BEHIND" in r.stderr and "different uv.lock" in r.stderr
+
+
+def test_lock_override_allows_a_mismatch_and_announces_itself(repo, tmp_path):
+    _commit_lock(repo)
+    r = _run(repo, PROMETHEUS_ALLOW_LOCK_MISMATCH="1",
+             PROMETHEUS_VENV=str(_venv(tmp_path, "0" * 64)))
+    assert r.returncode == 0, r.stderr
+    assert "OVERRIDE ACTIVE (PROMETHEUS_ALLOW_LOCK_MISMATCH=1)" in r.stderr
+
+
+def test_lock_override_is_off_unless_it_is_exactly_1(repo, tmp_path):
+    _commit_lock(repo)
+    v = str(_venv(tmp_path, "0" * 64))
+    for value in ("0", "", "false", "no", "true", "yes"):
+        r = _run(repo, PROMETHEUS_ALLOW_LOCK_MISMATCH=value, PROMETHEUS_VENV=v)
+        assert r.returncode == 1, (
+            f"PROMETHEUS_ALLOW_LOCK_MISMATCH={value!r} disabled the lock check")
