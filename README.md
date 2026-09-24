@@ -27,7 +27,7 @@ Running the tests from a uv-managed venv? Sync it with the same extras CI uses f
 uv sync --extra web --extra anthropic --extra mcp --group dev
 ```
 
-Without this, `import fastapi` fails inside `.venv` and three test files won't even collect (the daemon itself doesn't need it — `pip install -e '.[full]'` above already covers everything).
+That is the environment the CI test job runs in, so a local run exercises the same tests (`pip install -e '.[full]'` above already covers everything).
 
 `oara setup` probes for a running local inference server, generates your agent's identity, writes a working config with the web API enabled, and smoke-tests the loop. In a hurry? `oara setup --fast` (or `--noninteractive`) is the three-question version. On first daemon start a web API token is minted and printed once — `oara token show` re-prints it. If anything misbehaves: `oara doctor`.
 
@@ -315,7 +315,7 @@ pip install -e '.[full]'
 pip install 'oara-prometheus[full]'
 ```
 
-Keep the `[full]` extra on each of those three paths — the web API that Beacon pairs with is not in the base package.
+A plain install, with no extras, runs `oara daemon` and pairs with Beacon: the web API is part of the base package. `[full]` adds the Slack and Discord gateways, MCP, the browser tool, the Anthropic provider and voice output.
 
 **With Homebrew** — Apple Silicon Macs (M1 and later) only; Intel Macs aren't verified yet:
 

@@ -49,6 +49,33 @@ dependencies = [
     # missing-deps as a boot failure). Already in the lock via authlib; this
     # makes it a declared base need. The push extra keeps its own pin.
     "cryptography>=42",
+    # The web API — the REST server Beacon pairs with and the WebSocket
+    # bridge it streams from. Base since 0.9.2: until then it was the `web`
+    # extra, so `pip install oara-prometheus` (and the Homebrew formula,
+    # built from this list) could not start `oara daemon` at all, not even
+    # into setup mode. Plain uvicorn, not uvicorn[standard]: the daemon runs
+    # its WebSocket bridge on `websockets` directly and needs none of the
+    # standard extras' native speedups. tests/test_web_is_base.py pins this.
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "websockets>=12",
+    # The live recorder's multipart trace upload (POST
+    # /api/learning/live-upload — Record a Skill) parses with it; without it
+    # that endpoint answers 400. Beacon uses it, so a plain install carries it.
+    # >=0.0.31: every advisory published against it is fixed by 0.0.31, the
+    # last being CVE-2026-53540 (0.0.30 still carries it — pip-audit). The
+    # floor matters as much as the lock: the lock pinned 0.0.29 through four
+    # of those advisories while this package was extra-only, where CI's audit
+    # of the base closure never looked.
+    "python-multipart>=0.0.31",
+    # >=1.3.1: CVE-2026-54282, CVE-2026-54283, CVE-2026-48817 and
+    # CVE-2026-48818 are all fixed by 1.3.1 (the last, CVE-2026-54283, in
+    # 1.3.1 itself). starlette is fastapi's dependency, not a direct one of
+    # ours — but the floor is the DURABLE half of this fix: pip will not
+    # upgrade an already-installed starlette that still satisfies fastapi's
+    # range, so without it an upgraded install keeps the vulnerable version,
+    # and a future re-resolve can walk straight back onto one.
+    "starlette>=1.3.1",
 ]
 
 [project.urls]
@@ -104,10 +131,11 @@ slack = ["slack-bolt>=1.18.0", "slack-sdk>=3.27.0"]
 # SPRINT G2: Discord gateway adapter. Optional so base installs stay slim
 # (discord.py pulls aiohttp); import-guarded exactly like the slack extra.
 discord = ["discord.py>=2.3.0"]
-# Polish sprint WS2: Beacon dashboard backend + WS bridge. Optional so the
-# CLI/Telegram-only path stays slim. python-multipart backs the live
-# recorder's multipart trace upload (POST /api/learning/live-upload).
-web = ["fastapi>=0.110", "uvicorn>=0.27", "websockets>=12", "python-multipart>=0.0.9"]
+# Polish sprint WS2: Beacon dashboard backend + WS bridge. Everything here is
+# a BASE dependency since 0.9.2, so the extra adds nothing; it stays defined,
+# with the same packages, so every existing `pip install
+# 'oara-prometheus[web]'` still works.
+web = ["fastapi>=0.110", "uvicorn>=0.27", "websockets>=12", "python-multipart>=0.0.31"]
 evals = [
     "deepeval>=2.0",
     "arize-phoenix>=5.0",
@@ -116,9 +144,12 @@ evals = [
 ]
 # Polish sprint WS4: meta-extra so `pip install oara-prometheus[full]`
 # pulls in every optional surface. The README docs install
-#     `pip install oara-prometheus` for the minimal CLI/Telegram path
-#     `pip install oara-prometheus[full]` to get the dashboard, Slack,
-#       browser tools, MCP, and the Anthropic provider in one step.
+#     `pip install oara-prometheus` for the daemon, its web API and Beacon
+#       pairing, the CLI and Telegram
+#     `pip install oara-prometheus[full]` to add Slack, Discord, MCP, the
+#       browser tool, the Anthropic provider and voice output in one step.
+# fastapi/uvicorn/websockets stay listed here although the base now carries
+# them, so `full` never depends on where the base list happens to stand.
 full = [
     "anthropic>=0.40",
     "playwright>=1.40",

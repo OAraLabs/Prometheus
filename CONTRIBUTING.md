@@ -38,18 +38,19 @@ uv run pytest tests/ --cov=prometheus
 
 All tests must pass before submitting a PR.
 
-### Web / WebSocket tests run under system `python3`, not `uv`
+### Web / WebSocket tests need the web stack — `uv` has it since 0.9.2
 
-The `uv` environment does **not** include `fastapi` or `websockets`. Tests that
-import them — the `tests/test_api_*.py` web suite, the WebSocket auth tests, and
-the endpoint half of `tests/test_boot_sha_staleness.py` — call
-`pytest.importorskip(...)`, so they are **silently skipped** under `uv run
-pytest` (reported as skipped, never run). Run them under the system interpreter —
-the same one the daemon runs on, which has those packages:
+`fastapi`, `uvicorn` and `websockets` are **base dependencies** since 0.9.2, so
+a plain `uv run pytest` runs the `tests/test_api_*.py` web suite, the WebSocket
+auth tests and the endpoint half of `tests/test_boot_sha_staleness.py`. Until
+then they were the `web` extra, the `uv` environment had none of them, and
+those tests were skipped there. They still call `pytest.importorskip(...)`, so
+in an environment that lacks the web stack they skip rather than abort the run
+— check the skip count before trusting a green result:
 
 ```bash
-# web / WS / endpoint tests — system python3, NOT uv
-python3 -m pytest tests/test_api_cron.py tests/test_boot_sha_staleness.py -v
+# should report no skips for these on a synced uv environment
+uv run pytest tests/test_api_cron.py tests/test_boot_sha_staleness.py -v
 ```
 
 > **This is enforced, because for eleven modules it was not true.** Until
@@ -66,11 +67,11 @@ python3 -m pytest tests/test_api_cron.py tests/test_boot_sha_staleness.py -v
 > `tests/test_suite_collects_without_the_web_extra.py` now fails if a test
 > module imports `fastapi` (or anything under `prometheus.web`) without one.
 >
-> Note what that means for coverage: a suite that "passes" under `uv` has not
-> exercised any of this. The paragraph below is the important half.
+> Note what that means for coverage: a suite that "passes" with these skipped
+> has not exercised any of this. The paragraph below is the important half.
 
-So a change under `web/` (FastAPI routes) or `gateway/` WS auth is **not** fully
-exercised by `uv run pytest` alone — run the relevant suite under `python3` too.
+So a run that skipped them has not exercised a change under `web/` (FastAPI
+routes) or `gateway/` WS auth — make sure the web stack is installed first.
 
 ## Code Style
 

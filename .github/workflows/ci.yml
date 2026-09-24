@@ -310,6 +310,19 @@ jobs:
         include:
           - leg: local
             install: wheel
+          # The plain install: a wheel with NO extras, no config, and
+          # `oara daemon` must boot into setup mode with a pairing banner.
+          # Every other row installs [full], which is why none of them saw a
+          # plain install fail to start the daemon at all (fixed in 0.9.2).
+          - leg: setup-mode
+            install: base
+          # ...and the whole first-run flow on that same plain install:
+          # setup, doctor, a CLI tool turn, the configured daemon and a REST
+          # turn. It caught what the setup-mode row cannot: the configured
+          # boot also needed an extra (the mcp SDK, via prometheus.mcp's
+          # eager __init__) until 0.9.2.
+          - leg: local
+            install: base
     env:
       UV_PYTHON_DOWNLOADS: never
     steps:

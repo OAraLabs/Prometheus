@@ -5,7 +5,7 @@ Drives the exact flow the README promises, in an environment with no host
 config, and fails loudly naming WHICH step broke and why:
 
   S1  git clone (of --source, at its current SHA) into a temp tree
-  S2  python -m venv + install                      (--install-mode editable|wheel)
+  S2  python -m venv + install                      (--install-mode editable|wheel|base)
   S2i oara identity --regenerate               (SOUL.md/AGENTS.md from the
       SHIPPED templates — the ONE first-run step `setup --noninteractive`
       never reaches, and the step that stayed green while templates/ did not
@@ -17,6 +17,15 @@ config, and fails loudly naming WHICH step broke and why:
   S5  oara --once "..."                        (one CLI turn that CALLS A TOOL)
   S6  oara daemon                              (401 bare -> token show -> /api/status; one REST turn)
   S7  teardown                                       (no residue: temp gone, ports closed)
+
+  --leg setup-mode runs S1, S2, then S6s instead of S2i-S6:
+  S6s oara daemon, NO config                   (boots into setup mode: pairing
+      banner with a 6-digit code, the pairing API answering, no config written,
+      clean exit on SIGTERM) — the couch path a plain install must be able to
+      start. Run it with --install-mode base: a built wheel and NO extras,
+      exactly `pip install oara-prometheus`. Every other leg installs [full],
+      which is why none of them noticed that a plain install could not start
+      the daemon at all until 0.9.2.
 
 CONTRACT
   * This file never imports from src/prometheus. It drives the CLI and the
@@ -65,6 +74,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -251,7 +261,7 @@ class Harness:
         """
         self.run([sys.executable, "-m", "venv", str(self.venv)],
                  "s2-install", timeout=120, cwd=self.work)
-        if self.install_mode == "wheel":
+        if self.install_mode in ("wheel", "base"):
             dist = self.work / "dist"
             self.run([str(self.venv / "bin" / "pip"), "install", "--quiet",
                       "build"], "s2-install", timeout=600)
@@ -263,9 +273,12 @@ class Harness:
                 raise StepFailure(
                     f"expected exactly one wheel in {dist}, got "
                     f"{[w.name for w in wheels]}", self.logs / "s2-install.log")
+            # base: the wheel with NO extras — what `pip install
+            # oara-prometheus` puts in a venv, and nothing more.
+            extras = "" if self.install_mode == "base" else "[full]"
             self.run([str(self.venv / "bin" / "pip"), "install", "--quiet",
-                      f"{wheels[0]}[full]"], "s2-install", timeout=1500)
-            what = f"pip install {wheels[0].name}[full]"
+                      f"{wheels[0]}{extras}"], "s2-install", timeout=1500)
+            what = f"pip install {wheels[0].name}{extras}"
         else:
             self.run([str(self.venv / "bin" / "pip"), "install", "--quiet",
                       "-e", ".[full]"], "s2-install", timeout=1500)
@@ -287,10 +300,10 @@ class Harness:
             # resolver's checkout fallback finds <clone>/templates and every
             # step stays green. A lever that cannot go red is worse than no
             # lever, so the combination is refused rather than run.
-            if self.install_mode != "wheel":
+            if self.install_mode not in ("wheel", "base"):
                 raise StepFailure(
                     "--self-mutation no-templates requires --install-mode "
-                    "wheel. On an editable install the module imports from "
+                    "wheel or base. On an editable install the module imports from "
                     "the clone, so the resolver falls back to "
                     "<clone>/templates and the mutation cannot fail anything "
                     "— which is exactly why this harness stayed green while "
@@ -582,6 +595,72 @@ class Harness:
         self.daemon_proc = None
         return f"status + one REST turn; shutdown: {shutdown_note}"
 
+    def s6_setup_mode(self) -> str:
+        """`oara daemon` with NO config: the plain install's couch path.
+
+        The daemon must boot into setup mode — print the pairing banner with a
+        6-digit code and serve the pairing API — and write nothing while doing
+        it. On 0.9.1 a plain install died here with ModuleNotFoundError:
+        fastapi was an extra, and the setup-mode gate imported it unguarded.
+        Setup mode has no config to read a port from, so the harness moves it
+        with PROMETHEUS_WEB_API_PORT / _WS_PORT (infra, like the port edits
+        the other legs make): a live daemon on the host must never collide.
+        """
+        log_path = self.logs / "s6s-setup-mode.log"
+        env = self.env() | {"PROMETHEUS_WEB_API_PORT": str(self.api_port),
+                            "PROMETHEUS_WEB_WS_PORT": str(self.ws_port)}
+        with log_path.open("a", encoding="utf-8") as log:
+            self.daemon_proc = subprocess.Popen(
+                [str(self.venv / "bin" / "oara"), "daemon"],
+                cwd=self.work, env=env, stdout=log, stderr=subprocess.STDOUT,
+            )
+        code_line = re.compile(r"^ {4}(\d{6})\s*$", re.MULTILINE)
+        base = f"http://127.0.0.1:{self.api_port}"
+        deadline = time.time() + 120
+        status = None
+        while time.time() < deadline:
+            if self.daemon_proc.poll() is not None:
+                raise StepFailure(
+                    f"`oara daemon` exited rc={self.daemon_proc.returncode} "
+                    f"instead of booting into setup mode", log_path)
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+            if "PROMETHEUS IS IN SETUP MODE" in text and code_line.search(text):
+                try:
+                    status = http_get(f"{base}/api/setup/status", timeout=2)
+                    break
+                except Exception:
+                    pass
+            time.sleep(0.5)
+        if status is None:
+            raise StepFailure(
+                f"no pairing banner with a 6-digit code, or no pairing API on "
+                f"{base}, within 120s", log_path)
+        code, body = status
+        try:
+            answered_setup_mode = json.loads(body).get("setup_mode") is True
+        except ValueError:
+            answered_setup_mode = False
+        if code != 200 or not answered_setup_mode:
+            raise StepFailure(
+                f"GET /api/setup/status answered {code} {body[:200]!r} — "
+                f"expected 200 with setup_mode: true", log_path)
+        # Setup mode creates no ~/.prometheus state up front; only a paired
+        # client's explicit configure call may write a config.
+        written = [p for p in (self.home / ".prometheus" / "prometheus.yaml",)
+                   if p.exists()]
+        if written:
+            raise StepFailure(f"setup mode wrote {written} before anyone "
+                              f"paired", log_path)
+        self.daemon_proc.send_signal(signal.SIGTERM)
+        try:
+            rc = self.daemon_proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            raise StepFailure("setup-mode daemon did not exit within 15s of "
+                              "SIGTERM", log_path)
+        self.daemon_proc = None
+        return (f"banner with a 6-digit code; /api/setup/status 200 "
+                f"setup_mode=true; no config written; SIGTERM -> rc {rc}")
+
     def s7_teardown(self) -> str:
         self._stop_procs()
         for name, port in (("stub", self.stub_port), ("api", self.api_port),
@@ -615,10 +694,20 @@ class Harness:
         self.daemon_proc = self.stub_proc = None
 
     def main(self) -> int:
-        steps = [
+        install_what = {"wheel": "pip install <wheel>[full]",
+                        "base": "pip install <wheel> (no extras)",
+                        }.get(self.install_mode, "pip install -e '.[full]'")
+        if self.leg == "setup-mode":
+            return self._run_steps([
+                ("S1", "git clone at source SHA", self.s1_clone),
+                ("S2", install_what, self.s2_install),
+                ("S6s", "oara daemon, no config: setup mode + pairing banner",
+                 self.s6_setup_mode),
+                ("S7", "teardown, no residue", self.s7_teardown),
+            ])
+        return self._run_steps([
             ("S1", "git clone at source SHA", self.s1_clone),
-            ("S2", ("pip install <wheel>[full]" if self.install_mode == "wheel"
-                    else "pip install -e '.[full]'"), self.s2_install),
+            ("S2", install_what, self.s2_install),
             ("S2i", "oara identity --regenerate (renders the SHIPPED templates)",
              self.s2i_identity),
             ("S3", ("oara setup --noninteractive (no server, one cloud key)"
@@ -628,7 +717,9 @@ class Harness:
             ("S5", "one CLI turn that calls a tool (--once)", self.s5_cli_turn),
             ("S6", "daemon boots; /api/status; one REST turn", self.s6_daemon_rest),
             ("S7", "teardown, no residue", self.s7_teardown),
-        ]
+        ])
+
+    def _run_steps(self, steps: list) -> int:
         t0 = time.time()
         print(f"[FIRSTLIGHT] leg={self.leg} install={self.install_mode} "
               f"source={self.source} work={self.work}")
@@ -659,17 +750,23 @@ def main() -> int:
                         help="repo to test (cloned at its current HEAD)")
     parser.add_argument("--keep", action="store_true",
                         help="keep the temp tree on success too")
-    parser.add_argument("--leg", default="local", choices=["local", "cloud"],
+    parser.add_argument("--leg", default="local",
+                        choices=["local", "cloud", "setup-mode"],
                         help="local: setup detects the stub as a local server "
                              "(default). cloud: no local server, one cloud key "
-                             "in the environment, provider aimed at the stub")
+                             "in the environment, provider aimed at the stub. "
+                             "setup-mode: no config at all — `oara daemon` "
+                             "must boot into setup mode (use with "
+                             "--install-mode base)")
     parser.add_argument("--install-mode", default="editable",
-                        choices=["editable", "wheel"],
+                        choices=["editable", "wheel", "base"],
                         help="editable: `pip install -e .[full]`, the README's "
                              "contributor line (default). wheel: build a wheel "
                              "and install THAT — the shape a `pip install "
                              "oara-prometheus` user gets, and the only one in "
-                             "which an unpackaged file is genuinely absent")
+                             "which an unpackaged file is genuinely absent. "
+                             "base: that wheel with NO extras — exactly "
+                             "`pip install oara-prometheus`")
     parser.add_argument("--stub-mode", default="normal",
                         choices=["normal", "models-500", "no-final"],
                         help="stub model mutation (harness self-test)")

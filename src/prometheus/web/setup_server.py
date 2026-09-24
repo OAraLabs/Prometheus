@@ -78,23 +78,32 @@ from pathlib import Path
 from typing import Any
 
 from prometheus.config.defaults import config_search_paths
-from prometheus.web.strict_query import StrictQueryRoute
 
 logger = logging.getLogger("prometheus.setup_mode")
 
-# fastapi is the optional [web] extra. Imported at module level (not inside
-# create_setup_app) because FastAPI resolves the postponed "Request"
-# annotation against the endpoint function's __globals__ — a function-local
-# import silently degrades it to a required query param. Guarded so that
-# `from prometheus.web.setup_server import find_config_file` (the daemon's
-# setup-mode gate) still works on a bare install; run_setup_mode() then
-# fails loudly with install instructions instead of a traceback.
+# fastapi is a base dependency since 0.9.2 (the [web] extra until then).
+# Imported at module level (not inside create_setup_app) because FastAPI
+# resolves the postponed "Request" annotation against the endpoint function's
+# __globals__ — a function-local import silently degrades it to a required
+# query param. Guarded so that `from prometheus.web.setup_server import
+# find_config_file` (the daemon's setup-mode gate) still works in an
+# environment where the web stack is missing; run_setup_mode() then fails
+# loudly with install instructions instead of a traceback.
+#
+# EVERY fastapi-dependent import belongs INSIDE this try. StrictQueryRoute
+# (#292) was added above it, and strict_query imports fastapi at module
+# level — so on an install without fastapi the gate itself raised
+# ModuleNotFoundError, the guard below was never reached, and `oara daemon`
+# died with a traceback whether or not a config existed.
+# tests/test_web_is_base.py replays that with fastapi made unimportable.
 try:  # pragma: no cover — exercised implicitly by every test below
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse
     from starlette.background import BackgroundTask
+
+    from prometheus.web.strict_query import StrictQueryRoute
     _FASTAPI_AVAILABLE = True
-except ImportError:  # pragma: no cover — bare install without [web]
+except ImportError:  # pragma: no cover — web stack missing from this env
     _FASTAPI_AVAILABLE = False
 
 DEFAULT_API_PORT = 8005  # web.api_port default (config/prometheus.yaml.default)
@@ -877,6 +886,18 @@ async def _serve_setup_mode(
     await server.serve()
 
 
+def missing_web_stack() -> list[str]:
+    """What setup mode needs to serve and cannot import: fastapi (checked at
+    module load, above) and uvicorn (imported only once serving starts, so it
+    would otherwise fail as a traceback after the banner)."""
+    missing = [] if _FASTAPI_AVAILABLE else ["fastapi"]
+    try:  # an import, not find_spec: a present-but-broken uvicorn counts too
+        import uvicorn  # noqa: F401
+    except ImportError:
+        missing.append("uvicorn")
+    return missing
+
+
 def run_setup_mode() -> int | str:
     """Entry point: `oara daemon` found no config.
 
@@ -889,12 +910,15 @@ def run_setup_mode() -> int | str:
     Creates no ~/.prometheus state up front; the only writes happen on
     an explicit pair (env-file token) or configure (config/identity).
     """
-    if not _FASTAPI_AVAILABLE:
+    missing = missing_web_stack()
+    if missing:
         print(
-            "No configuration found, and setup mode needs the web extra to "
-            "serve the pairing API.\n"
-            "Either install it:   pip install 'oara-prometheus[web]'\n"
-            "or set up directly:  oara setup",
+            "No configuration found, and setup mode needs the web API to "
+            "serve the pairing API — but "
+            f"{' and '.join(missing)} {'is' if len(missing) == 1 else 'are'} "
+            "not installed in this environment.\n"
+            "Install the web stack:  pip install 'oara-prometheus[web]'\n"
+            "or set up directly:     oara setup",
         )
         return 1
 
