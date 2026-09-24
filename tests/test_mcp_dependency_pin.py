@@ -58,10 +58,16 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 # The first mcp release carrying the keyword-only `params=` signature, and the
 # newest one at the time this guard was written. Both must be excluded.
 BREAKING = [Version("2.0.0"), Version("2.2.0")]
-# Versions that DO accept `cursor=`. The cap must not be so tight it excludes
-# what actually works. 1.27.1 is what uv.lock resolves to; 1.30.0 is the
-# newest 1.x. Both are verified against the published wheels.
-WORKING = [Version("1.9.4"), Version("1.27.1"), Version("1.30.0")]
+# Versions that DO accept `cursor=` AND carry no known advisory. The spec must
+# not be so tight it excludes them. 1.28.1 is the security floor; 1.30.0 is
+# what uv.lock resolves to and the newest 1.x. Until 0.9.3 this list held
+# 1.9.4 and 1.27.1 too — they still work, but are now excluded on purpose.
+WORKING = [Version("1.28.1"), Version("1.30.0")]
+# Versions that work but carry advisories: CVE-2026-52870/-52869 (fixed in
+# 1.27.2) and CVE-2026-59950 (fixed in 1.28.1). pip keeps an installed mcp
+# that satisfies the spec, so only the floor gets an upgraded install off
+# them. 1.26.0 is what the live daemon ran from the user site until 0.9.2.
+VULNERABLE = [Version("1.26.0"), Version("1.27.1"), Version("1.28.0")]
 
 
 def _extras() -> dict[str, list[str]]:
@@ -108,6 +114,16 @@ def test_declared_specifier_still_admits_working_versions(extra: str, good: Vers
         f"[{extra}] declared {str(req)!r} excludes mcp {good}, which accepts "
         f"`cursor=` and works. The cap is meant to exclude 2.x, not to strand "
         f"the extra on an old release."
+    )
+
+
+@pytest.mark.parametrize("extra", ["mcp", "full"])
+@pytest.mark.parametrize("bad", VULNERABLE, ids=str)
+def test_declared_specifier_excludes_vulnerable_versions(extra: str, bad: Version):
+    req = _mcp_requirements()[extra]
+    assert not req.specifier.contains(bad), (
+        f"[{extra}] declared {str(req)!r} admits mcp {bad}, which has known "
+        f"advisories — an upgraded install would keep it."
     )
 
 
