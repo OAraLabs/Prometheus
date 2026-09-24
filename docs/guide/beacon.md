@@ -56,7 +56,7 @@ After the setup wizard, a dismissible **first-flight checklist** sits on Mission
 
 The main chat surface streams markdown replies with syntax-highlighted code blocks (language chip, copy button, auto-collapse past 40 lines) and renders each turn's tool activity inline.
 
-![A finished reply in Beacon — the tool timeline above the answer, with the model switcher, Agent|Chat toggle, and force-search control in the composer](../assets/shots/chat-5-reply-done.png)
+![A finished reply in Beacon — the session list, the answer, and the composer's Agent / Chat / Voice toggle and model picker](../assets/shots/chat-5-reply-done.png)
 
 What you can actually do here:
 
