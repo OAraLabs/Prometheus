@@ -29,10 +29,12 @@ from prometheus.config.env_file import (
 
 TOKEN_ENV_VAR = "PROMETHEUS_API_TOKEN"
 
-# Where a new user downloads the Beacon desktop client (prebuilt releases —
-# Onboarding Phase 3). A public repo URL, not an infra host, so it is safe to
-# print anywhere.
-BEACON_DOWNLOAD_URL = "https://github.com/OAraLabs/beacon-desktop/releases"
+# Where a new user gets the Beacon desktop client (Onboarding Phase 3): the
+# public product page, not an infra host, so it is safe to print anywhere.
+# It was the beacon-desktop repo's releases page until 0.9.1 — but that repo
+# is private (Beacon is free, not open source), so every user who followed
+# the link got a GitHub 404. Never point this at a repo.
+BEACON_DOWNLOAD_URL = "https://oara.ai/beacon"
 
 
 def mint_api_token() -> str:

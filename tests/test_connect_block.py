@@ -148,16 +148,24 @@ class TestRichPathEndScreen:
 
 
 class TestBeaconDownloadPointer:
-    """A newcomer must be told WHERE to get Beacon, not just that it exists."""
+    """A newcomer must be told WHERE to get Beacon, not just that it exists.
 
-    def test_connect_block_has_download_url(self):
-        from prometheus.config.api_token import (
-            BEACON_DOWNLOAD_URL,
-            format_connect_client_block,
-        )
-        assert BEACON_DOWNLOAD_URL in format_connect_client_block({})
+    These asserted ``BEACON_DOWNLOAD_URL in <output>`` until 0.9.1 — true
+    whatever the constant held, so they stayed green while it pointed at the
+    private beacon-desktop repo and every newcomer who followed it got a
+    GitHub 404. The printed value is what the user sees, so the tests pin
+    the literal, not the name.
+    """
 
-    def test_pairing_banner_has_download_url(self):
+    BEACON_PAGE = "https://oara.ai/beacon"
+
+    def test_download_url_is_the_public_product_page(self):
         from prometheus.config.api_token import BEACON_DOWNLOAD_URL
+        assert BEACON_DOWNLOAD_URL == self.BEACON_PAGE
+
+    def test_connect_block_prints_the_product_page(self, env_file):
+        assert self.BEACON_PAGE in format_connect_client_block({})
+
+    def test_pairing_banner_prints_the_product_page(self):
         from prometheus.web.setup_server import format_pairing_banner
-        assert BEACON_DOWNLOAD_URL in format_pairing_banner("123456", 8005)
+        assert self.BEACON_PAGE in format_pairing_banner("123456", 8005)
