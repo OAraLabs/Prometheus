@@ -2769,6 +2769,7 @@ dependencies = [
     { name = "anyio" },
     { name = "croniter" },
     { name = "cryptography" },
+    { name = "fastapi" },
     { name = "httpx" },
     { name = "openpyxl" },
     { name = "pydantic" },
@@ -2777,7 +2778,9 @@ dependencies = [
     { name = "python-telegram-bot" },
     { name = "pyyaml" },
     { name = "rich" },
+    { name = "uvicorn" },
     { name = "watchdog" },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -2869,6 +2872,7 @@ requires-dist = [
     { name = "deepeval", marker = "extra == 'evals'", specifier = ">=2.0" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.3.0" },
     { name = "discord-py", marker = "extra == 'full'", specifier = ">=2.3.0" },
+    { name = "fastapi", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'full'", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.110" },
@@ -2903,9 +2907,11 @@ requires-dist = [
     { name = "slack-sdk", marker = "extra == 'slack'", specifier = ">=3.27.0" },
     { name = "sounddevice", marker = "extra == 'full'", specifier = ">=0.5.5" },
     { name = "sounddevice", marker = "extra == 'voice'", specifier = ">=0.5.5" },
+    { name = "uvicorn", specifier = ">=0.27" },
     { name = "uvicorn", marker = "extra == 'full'", specifier = ">=0.27" },
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.27" },
     { name = "watchdog", specifier = ">=4.0" },
+    { name = "websockets", specifier = ">=12" },
     { name = "websockets", marker = "extra == 'full'", specifier = ">=12" },
     { name = "websockets", marker = "extra == 'web'", specifier = ">=12" },
 ]
