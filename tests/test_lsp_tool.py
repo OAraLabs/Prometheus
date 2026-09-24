@@ -224,7 +224,8 @@ async def test_rename_returns_edit_summary(tool, mock_orch, ctx, py_file):
     result = await tool.execute(args, ctx)
 
     assert not result.is_error
-    assert "Renamed to 'bar'" in result.output
+    # The tool applies nothing, so it reports proposed edits, not a rename.
+    assert "Rename to 'bar' NOT APPLIED" in result.output
     assert "2 file(s)" in result.output
 
 

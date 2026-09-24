@@ -5,6 +5,10 @@ one — it packages definition + references + type info into one call instead of
 three separate round trips.
 
 Modeled after Claude Code's ``LSPTool`` pattern.
+
+Every answer is either what the server said or an error saying why it could
+not be asked. "none found" / "No diagnostics" only ever come from a server
+that answered; no server, a failed start, or a failed request is an error.
 """
 
 from __future__ import annotations
@@ -14,10 +18,15 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from prometheus.lsp.orchestrator import LSPUnavailable
 from prometheus.tools.base import BaseTool, ToolExecutionContext, ToolResult
 
 # Module-level orchestrator — set by daemon at startup
 _orchestrator = None
+
+# How long the diagnostics action waits for the server to publish for the
+# file's current content. A first open of a large project can take seconds.
+_DIAGNOSTICS_WAIT_S = 15.0
 
 
 def set_lsp_orchestrator(orch: object) -> None:
@@ -51,7 +60,7 @@ class LSPToolInput(BaseModel):
     )
     new_name: str | None = Field(
         default=None,
-        description="New name for the symbol (rename action only).",
+        description="New name for the symbol (rename action only). Rename returns the server's proposed edits; it does not write files.",
     )
 
 
@@ -91,7 +100,10 @@ class LSPTool(BaseTool):
         line = arguments.line
         col = arguments.column or 1
         if line is None and arguments.symbol:
-            resolved = _find_symbol_in_file(filepath, arguments.symbol)
+            try:
+                resolved = _find_symbol_in_file(filepath, arguments.symbol)
+            except OSError as exc:
+                return ToolResult(output=f"Couldn't check: could not read {filepath}: {exc}", is_error=True)
             if resolved is None:
                 return ToolResult(
                     output=f"Symbol '{arguments.symbol}' not found in {filepath}",
@@ -121,7 +133,7 @@ class LSPTool(BaseTool):
                 return ToolResult(output=str(info))
 
             elif action == "diagnostics":
-                diags = await orch.get_diagnostics(filepath)
+                diags = await orch.get_diagnostics(filepath, wait_s=_DIAGNOSTICS_WAIT_S)
                 return ToolResult(output=_format_diagnostics(filepath, diags))
 
             elif action == "symbols":
@@ -147,6 +159,8 @@ class LSPTool(BaseTool):
                     output=f"Unknown action: {action}. Use: definition, references, hover, diagnostics, symbols, rename, or context",
                     is_error=True,
                 )
+        except LSPUnavailable as exc:
+            return ToolResult(output=str(exc), is_error=True)
         except Exception as exc:
             return ToolResult(output=f"LSP error: {exc}", is_error=True)
 
@@ -163,11 +177,12 @@ def _resolve_path(base: Path, candidate: str) -> str:
 
 
 def _find_symbol_in_file(filepath: str, symbol: str) -> tuple[int, int] | None:
-    """Search a file for a symbol name, return (line, col) or None."""
-    try:
-        text = Path(filepath).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
+    """Search a file for a symbol name, return (line, col) or None.
+
+    A file that cannot be read raises OSError: "not in the file" and "could
+    not read the file" are different answers.
+    """
+    text = Path(filepath).read_text(encoding="utf-8", errors="replace")
     pattern = re.compile(r"\b" + re.escape(symbol) + r"\b")
     for i, line in enumerate(text.splitlines(), start=1):
         m = pattern.search(line)
@@ -206,10 +221,17 @@ def _format_symbols(symbols: list, indent: int = 0) -> str:
 
 
 def _format_rename(new_name: str, edits: dict) -> str:
+    # Nothing here writes files: the server returns a workspace edit and this
+    # reports it. It used to say "Renamed to", which read as done.
     if not edits:
-        return f"Rename to '{new_name}': no changes (symbol may not support rename)"
+        return f"Rename to '{new_name}': the server proposed no changes (the symbol may not support rename)"
     total = sum(len(v) for v in edits.values())
-    lines = [f"Renamed to '{new_name}': {total} edit(s) across {len(edits)} file(s):"]
+    lines = [
+        f"Rename to '{new_name}' NOT APPLIED. The server proposes {total} edit(s) "
+        f"across {len(edits)} file(s); nothing was written. Apply them with edit_file:",
+    ]
     for path, file_edits in edits.items():
         lines.append(f"  {path}: {len(file_edits)} edit(s)")
+        for e in file_edits:
+            lines.append(f"    line {e.get('start_line')}: -> {e.get('newText', '')!r}")
     return "\n".join(lines)

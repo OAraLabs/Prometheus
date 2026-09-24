@@ -17,6 +17,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from prometheus.lsp.languages import EXTENSION_TO_LANGUAGE, LSPServerDef
 
@@ -116,8 +117,10 @@ def _path_to_uri(path: Path | str) -> str:
 
 
 def _uri_to_path(uri: str) -> str:
+    # Servers percent-encode (a space arrives as %20). Undecoded, diagnostics
+    # for such a path were stored under a key no lookup ever used.
     if uri.startswith("file://"):
-        return uri[7:]
+        return unquote(uri[7:])
     return uri
 
 
@@ -135,6 +138,7 @@ class LSPClient:
         self._request_id: int = 0
         self._pending: dict[int, asyncio.Future] = {}
         self._diagnostics: dict[str, list[Diagnostic]] = {}
+        self._diag_seq: dict[str, int] = {}  # path → publishDiagnostics received
         self._open_files: dict[str, int] = {}  # path → version
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
@@ -354,10 +358,33 @@ class LSPClient:
             return HoverInfo(contents="\n".join(parts))
         return HoverInfo(contents=str(contents))
 
-    async def get_diagnostics(self, filepath: str) -> list[Diagnostic]:
-        """Return cached diagnostics for a file (from publishDiagnostics)."""
+    async def get_diagnostics(
+        self, filepath: str, *, wait_s: float | None = None,
+    ) -> list[Diagnostic] | None:
+        """Diagnostics the server published for a file, or ``None`` if it published none.
+
+        ``[]`` and ``None`` are different answers: ``[]`` is the server saying
+        the file is clean, ``None`` is the server not having said anything.
+
+        With *wait_s*, the file's current content is sent first and the call
+        waits up to that long for a publish newer than the call, so the answer
+        describes what is on disk now rather than an earlier version.
+        """
         path = str(Path(filepath).resolve())
-        return list(self._diagnostics.get(path, []))
+        if wait_s is not None:
+            seen = self._diag_seq.get(path, 0)
+            await self.did_open(path)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + wait_s
+            while self._diag_seq.get(path, 0) <= seen:
+                if not self.is_alive:
+                    raise LSPError({"message": "server stopped while waiting for diagnostics"})
+                if loop.time() >= deadline:
+                    return None
+                await asyncio.sleep(0.05)
+        if path not in self._diagnostics:
+            return None
+        return list(self._diagnostics[path])
 
     async def get_document_symbols(self, filepath: str) -> list[DocumentSymbol]:
         """Get document symbols (outline)."""
@@ -543,6 +570,7 @@ class LSPClient:
                 )
                 for d in params.get("diagnostics", [])
             ]
+            self._diag_seq[path] = self._diag_seq.get(path, 0) + 1
 
 
 # ------------------------------------------------------------------

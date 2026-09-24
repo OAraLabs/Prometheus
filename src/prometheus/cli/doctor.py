@@ -22,7 +22,10 @@ import argparse
 import asyncio
 import json
 import os
+import shlex
+import shutil
 import socket
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
@@ -925,6 +928,74 @@ def check_whisper(config: dict[str, Any]) -> DiagnosticCheck:
     )
 
 
+def _daemon_path() -> tuple[str, str]:
+    """The PATH the daemon resolves language-server binaries on, and whose it is.
+
+    A systemd user unit sets its own PATH. An install that works in this
+    shell can be invisible to the daemon, so read the unit's PATH when there
+    is one, and say which PATH was checked either way.
+    """
+    from prometheus.cli.service import UNIT_NAME
+
+    try:
+        out = subprocess.run(
+            ["systemctl", "--user", "show", UNIT_NAME, "-p", "Environment", "--value"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if out.returncode == 0:
+            for assignment in shlex.split(out.stdout):
+                if assignment.startswith("PATH="):
+                    return assignment[len("PATH="):], f"the {UNIT_NAME} unit's PATH"
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return os.environ.get("PATH", ""), "this shell's PATH"
+
+
+def check_language_servers(config: dict[str, Any]) -> list[DiagnosticCheck]:
+    """One row per language the ``lsp`` tool supports: is its server installed?
+
+    A missing server used to be invisible everywhere. The tool answered
+    "none found" for every lookup, and nothing else recorded it. A warning,
+    not an error: a missing server costs code intelligence for that language,
+    not the daemon.
+    """
+    from prometheus.lsp.languages import install_hint, merged_servers
+
+    lsp_cfg = config.get("lsp", {}) or {}
+    if not lsp_cfg.get("enabled", False):
+        return [DiagnosticCheck(
+            name="Language servers", category="resources", status="info",
+            message="lsp is disabled (lsp.enabled is not true), so nothing uses them",
+        )]
+
+    path, whose = _daemon_path()
+    rows: list[DiagnosticCheck] = []
+    for sdef in merged_servers(lsp_cfg.get("servers") or {}).values():
+        name = f"LSP {sdef.language_id}"
+        covers = " ".join(sdef.extensions)
+        binary = sdef.command[0] if sdef.command else ""
+        if not binary:
+            rows.append(DiagnosticCheck(
+                name=name, category="resources", status="warning",
+                message=f"no command configured, so {covers} files can't be checked",
+                fix=f"Set lsp.servers.{sdef.language_id}.command in the config.",
+            ))
+            continue
+        found = shutil.which(binary, path=path)
+        if found:
+            rows.append(DiagnosticCheck(
+                name=name, category="resources", status="ok",
+                message=f"{binary} found at {found} on {whose} (found, not started)",
+            ))
+        else:
+            rows.append(DiagnosticCheck(
+                name=name, category="resources", status="warning",
+                message=f"{binary} is not on {whose}; lsp can't check {covers} files",
+                fix=f"{install_hint(sdef)}, into a directory on {whose}.",
+            ))
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -948,6 +1019,7 @@ def run_extended_checks(
         check_advertised_tools(config),
         check_coding_sandbox(config),
         *check_bash_floors(config),
+        *check_language_servers(config),
         check_config_pins(),
         check_trajectory_export(config),
         check_whisper(config),

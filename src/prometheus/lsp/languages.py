@@ -96,6 +96,14 @@ def find_project_root(filepath: Path, root_markers: list[str]) -> Path:
         current = parent
 
 
+def install_hint(server_def: LSPServerDef) -> str:
+    """One sentence on how to get *server_def*'s binary, for the model and ``oara doctor``."""
+    if server_def.install_command:
+        return f"Install it with `{' '.join(server_def.install_command)}`"
+    binary = server_def.command[0] if server_def.command else server_def.language_id
+    return f"No install command is known for it; install `{binary}`"
+
+
 def get_server_for_file(
     filepath: str | Path,
     custom_servers: dict[str, dict] | None = None,
@@ -109,7 +117,18 @@ def get_server_for_file(
     if not ext:
         return None
 
-    # Merge custom servers over builtins
+    for server in merged_servers(custom_servers).values():
+        if ext in server.extensions:
+            return server
+    return None
+
+
+def merged_servers(custom_servers: dict[str, dict] | None = None) -> dict[str, LSPServerDef]:
+    """The builtin servers with config overrides and additions applied.
+
+    This is the set the ``lsp`` tool can route to, so it is also the set
+    ``oara doctor`` checks.
+    """
     servers = dict(BUILTIN_SERVERS)
     for name, cfg in (custom_servers or {}).items():
         if name in servers:
@@ -131,8 +150,4 @@ def get_server_for_file(
                 install_command=cfg.get("install_command"),
                 initialization_options=cfg.get("initialization_options", {}),
             )
-
-    for server in servers.values():
-        if ext in server.extensions:
-            return server
-    return None
+    return servers
