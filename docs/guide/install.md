@@ -55,7 +55,7 @@ pip install 'oara-prometheus[full]'
 brew install oaralabs/tap/oara
 ```
 
-Use the full name: a bare `brew install oara` fails because the tap isn't trusted. It installs in a few minutes.
+Use the full name: a bare `brew install oara` fails because the tap isn't trusted. The install takes a few minutes, since every Homebrew dependency comes prebuilt, and like a plain pip install it runs `oara daemon` and pairs with Beacon.
 
 ## Run setup
 
