@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 # PyPI: `prometheus` is taken by prometheus-client; we publish as
 # `oara-prometheus` but the import path / console scripts stay as `prometheus`.
 name = "oara-prometheus"
-version = "0.9.0"
+version = "0.9.1"
 description = "Sovereign AI agent harness — extract, adapt, integrate"
 readme = "README.md"
 requires-python = ">=3.11"
