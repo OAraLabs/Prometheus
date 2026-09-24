@@ -8,7 +8,7 @@ Prometheus Coding Mode is a sandboxed, autonomous "iterate-to-green" coding loop
 
 ## The philosophy: done is a verdict, not a claim
 
-Most agent loops let the model decide when it is finished. Coding Mode does not. The `IterateToGreenPolicy` treats "done" as something the harness proves, not something the model asserts:
+Most agent loops let the model decide when it is finished. Coding Mode does not. The `IterateToGreenPolicy` treats "done" as something Prometheus proves, not something the model asserts:
 
 - **The session re-runs your acceptance command itself.** When the model claims the task is complete, Prometheus executes the acceptance command you supplied inside the sandbox and reads the exit code. Exit 0 is the only thing that counts as success.
 - **No-evidence turns are rejected.** A turn where the model declares progress without actually running anything is bounced back — the loop demands evidence before it accepts a claim.
@@ -24,7 +24,7 @@ The result is a run report you can trust: `success` means your command passed in
 - The environment is **scrubbed** — provider API keys and other secrets never reach the subprocess that runs your code or tests.
 - **Wall-clock and round caps** bound the run. The defaults are 30 model rounds and 1200 seconds; both are configurable.
 
-**Episodes.** The session drives the agent loop in episodes — coherent stretches of work punctuated by seams where the harness checks in, evaluates evidence, and (if supervision is enabled) polls the control channel. Thinking is on by default for coding turns; it is the single highest-leverage setting for this workload.
+**Episodes.** The session drives the agent loop in episodes — coherent stretches of work punctuated by seams where Prometheus checks in, evaluates evidence, and (if supervision is enabled) polls the control channel. Thinking is on by default for coding turns; it is the single highest-leverage setting for this workload.
 
 **The artifact.** The output of a run is a **branch in the sandbox clone**, named `coding/<task-id>`. Prometheus **never merges and never pushes** — not from the CLI, not from Beacon. You review the branch with ordinary git:
 

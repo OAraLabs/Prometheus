@@ -1,8 +1,9 @@
 # Prometheus
 
-A sovereign agent harness for local LLMs — the validation layer that makes open models actually reliable in a tool loop.
+**A fire you own doesn't go out.**\
+Not a local model. A local agent.
 
-**The model is the agent. The harness is the vehicle.**
+Prometheus is an AI agent daemon: always on, on hardware you own. It remembers, keeps its own schedule, reaches you on Telegram, Slack, Discord and Beacon, and makes open models reliable at using tools.
 
 ![Beacon's Mission home — the Armilla telemetry sphere beside Mission Control: agent state, scheduled jobs, local backends, and tool-call telemetry](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/panel-mission-home.png)
 
@@ -84,9 +85,11 @@ The last one is there because its absence shipped: a control suite whose every c
 
 Open models are getting good at conversation. They're still terrible at *doing things*. Ask Qwen to call a tool and it hallucinates the tool name. Ask Gemma to return JSON and it wraps it in markdown. Ask Llama to chain three tool calls and it drops a required parameter on the second one.
 
-Every other agent harness — LangChain, CrewAI, AutoGen — assumes the model will get tool calls right. That works fine when you're paying OpenAI. It falls apart the moment you point it at a local model.
+Agent harnesses like LangChain, CrewAI and AutoGen assume the model will get tool calls right. That works fine when you're paying OpenAI. It falls apart the moment you point it at a local model.
 
 Prometheus fixes this with a Model Adapter Layer that sits between your agent loop and whatever LLM you're running. Every tool call gets validated before execution, common errors get auto-repaired (fuzzy name matching, JSON extraction from markdown fences, type coercion), and when something still fails, the model gets specific error feedback with the actual schema — not a generic "try again." For llama.cpp, it goes further: tool calls are constrained at the decode layer rather than validated after the fact — Prometheus supplies GBNF grammar where the server doesn't enforce its own.
+
+The design philosophy behind it: **The model is the agent. The harness is the vehicle.**
 
 The result: open models that reliably call tools, chain multi-step tasks, and run autonomously — without you babysitting every interaction.
 
@@ -94,7 +97,7 @@ The result: open models that reliably call tools, chain multi-step tasks, and ru
 
 ## What Makes This Different
 
-Prometheus isn't a wrapper around `ollama.chat()`. It's a complete agent operating system with novel systems that don't exist in other harnesses:
+Prometheus isn't a wrapper around `ollama.chat()`. It's a complete agent operating system with novel systems that agent harnesses don't have:
 
 **The Model Adapter Layer is what makes local models work in a tool loop.** Four cascading extraction strategies handle whatever mess the model produces. A retry engine feeds specific schema errors back to the model. Grammar-constrained decoding at the llama.cpp level makes invalid JSON structurally impossible, with Prometheus supplying the grammar on paths the server doesn't cover. Telemetry tracks success rates per model per tool so you know exactly where your model struggles. It is tier-selected: `strictness: NONE` switches it off for cloud APIs that already emit clean tool calls, so the repair path is exercised exactly where it is needed.
 
@@ -112,7 +115,7 @@ Prometheus isn't a wrapper around `ollama.chat()`. It's a complete agent operati
 
 ## Open Models First, APIs Welcome
 
-Prometheus is built for local inference. That's the whole point — sovereignty, privacy, no subscriptions. But it's not religious about it. If you want to use cloud models, the same harness works with:
+Prometheus is built for local inference. That's the whole point — sovereignty, privacy, no subscriptions. But it's not religious about it. If you want to use cloud models, the same daemon works with:
 
 - OpenAI (GPT-4o, o3-mini)
 - Anthropic (Claude)
@@ -414,7 +417,7 @@ Connect via Tailscale, WireGuard, or any network — Beacon pairs over the same 
 
 ### What About Smaller GPUs?
 
-16GB VRAM runs Gemma 2 9B or Qwen 2.5 14B (Q4 quantized). Set `strictness: STRICT` — the adapter compensates with more validation and retries. No GPU at all? Use a cloud provider and you still get the full harness: memory, wiki, SENTINEL, security, profiles, all of it.
+16GB VRAM runs Gemma 2 9B or Qwen 2.5 14B (Q4 quantized). Set `strictness: STRICT` — the adapter compensates with more validation and retries. No GPU at all? Use a cloud provider and you still get the whole daemon: memory, wiki, SENTINEL, security, profiles, all of it.
 
 ## Architecture
 
