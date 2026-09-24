@@ -153,13 +153,22 @@ jobs:
         # has become clean, so the list can only shrink.
         run: uv run python scripts/mypy_gate.py
 
-      - name: Dependency advisories (pip-audit)
+      - name: Dependency advisories (pip-audit, every extra)
         # Audits the RESOLVED lock, not the loose ranges in pyproject: the lock
         # is what installs, and a range that permits a fixed version proves
         # nothing about what CI and the deploy clone actually get.
+        #
+        # EVERY EXTRA, not just the base (0.9.3). The base-only export never
+        # saw mcp, pydantic-settings, setuptools, aiohttp, strawberry-graphql
+        # or the other evals packages — 28 advisories in 8 packages sat in the
+        # lock unaudited, and the first place they surfaced was the deploy
+        # gate on the live host. The export is fully pinned (every transitive
+        # is listed), so --no-deps --disable-pip checks those exact versions
+        # without resolving or installing ~200 packages; markers are evaluated
+        # for this runner (Linux, the deploy platform).
         run: |
-          uv export --format requirements-txt --no-hashes --no-emit-project > /tmp/requirements-audit.txt
-          uv run pip-audit -r /tmp/requirements-audit.txt --progress-spinner off
+          uv export --format requirements-txt --no-hashes --no-emit-project --all-extras > /tmp/requirements-audit.txt
+          uv run pip-audit -r /tmp/requirements-audit.txt --no-deps --disable-pip --progress-spinner off
 
   # The security floors, actually executed. Until now they SKIPPED on every CI
   # run and had been proven only on the operator's own machine — and the files
