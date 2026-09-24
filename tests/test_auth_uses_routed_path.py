@@ -28,11 +28,13 @@ tests that fail against the old middleware.
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
-from starlette.datastructures import URL
-from starlette.requests import HTTPConnection
 
-from prometheus.web.server import create_app
+pytest.importorskip("fastapi")
+from fastapi.testclient import TestClient  # noqa: E402
+from starlette.datastructures import URL  # noqa: E402
+from starlette.requests import HTTPConnection  # noqa: E402
+
+from prometheus.web.server import create_app  # noqa: E402
 
 TOKEN = "routed-path-test-token"
 CRAFTED_HOST = "x/abc?"
