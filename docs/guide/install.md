@@ -27,7 +27,7 @@ No GPU? Point Prometheus at a cloud provider and you still get the full harness 
 
 ## Install the daemon
 
-Three ways, all working today. Whichever you pick, keep the `[full]` extra: it pulls in everything (web API, Slack/Discord gateways, MCP, browser, voice, evals), and the web API that Beacon pairs with is not in the base package. You can install leaner extras later — for example `pip install 'oara-prometheus[slack]'` adds just the Slack gateway.
+Four ways. On the three pip-based ones, keep the `[full]` extra: it pulls in everything (web API, Slack/Discord gateways, MCP, browser, voice, evals), and the web API that Beacon pairs with is not in the base package. You can install leaner extras later — for example `pip install 'oara-prometheus[slack]'` adds just the Slack gateway.
 
 **One command, from Git** — an isolated install of the `oara` command straight from `main`, with [uv](https://docs.astral.sh/uv/) or pipx:
 
@@ -49,7 +49,13 @@ pip install -e '.[full]'
 pip install 'oara-prometheus[full]'
 ```
 
-> **Homebrew — not yet.** The tap `oaralabs/tap` exists but serves no formula, so `brew install` will not give you Prometheus today.
+**With Homebrew** — Apple Silicon Macs (M1 and later) only; Intel Macs aren't verified yet:
+
+```bash
+brew install oaralabs/tap/oara
+```
+
+Use the full name: a bare `brew install oara` fails because the tap isn't trusted. The first install can take a while, because some dependencies build from source. The formula installs the base package, so it does not include the web API that Beacon pairs with — for Beacon, use one of the `[full]` installs above.
 
 ## Run setup
 
@@ -121,7 +127,7 @@ The exit code is nonzero when anything is broken, so it also works in scripts an
 
 ## Install Beacon
 
-Beacon is the native desktop cockpit (macOS / Linux). Honest status: the beacon-desktop repository is **private while it hardens**, and public prebuilt releases will arrive with the public release — until then, installing Beacon requires repo access and the from-source path below. When prebuilds land (`.dmg` for macOS, `.AppImage`/`.deb` for Linux), the notes below apply to them:
+Beacon is the native desktop cockpit (macOS / Linux). It is free to use but not open source, and it is in beta: builds are published when Beacon leaves beta, and until then early users get draft builds ([oara.ai/beacon](https://oara.ai/beacon)). Once you have a build (`.dmg` for macOS, `.AppImage`/`.deb` for Linux), the notes below apply:
 
 - **macOS (Apple Silicon)** — download `Beacon-<version>-arm64.dmg` and drag Beacon to Applications. The build is currently **unsigned**, so Gatekeeper will balk the first time: right-click the app → **Open** → **Open**, or clear the quarantine flag directly:
 
@@ -139,13 +145,6 @@ Beacon is the native desktop cockpit (macOS / Linux). Honest status: the beacon-
 
   ```bash
   sudo apt install ./Beacon-<version>-amd64.deb
-  ```
-
-- **From source** (the working path today; requires repo access):
-
-  ```bash
-  git clone https://github.com/OAraLabs/beacon-desktop.git && cd beacon-desktop
-  npm install && npm run dev
   ```
 
 ## The guided install (couch mode)
