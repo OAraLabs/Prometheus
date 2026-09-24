@@ -35,7 +35,7 @@ This page is the complete map of what Prometheus can do: every entry point, tool
 
 ### Providers — Default: local on, cloud dormant until keyed
 
-Prometheus runs against local inference first: llama.cpp (with GBNF grammar-constrained decoding) and Ollama. The same harness also speaks to cloud providers — OpenAI, Google Gemini, xAI, DeepSeek, Kimi (Moonshot), GLM (Z.ai), and MiMo (Xiaomi) via the OpenAI-compatible protocol, plus native Anthropic. Cloud providers do nothing until you supply a key (in `~/.config/prometheus/env` or via Beacon's Models tab).
+Prometheus runs against local inference first: llama.cpp (with GBNF grammar-constrained decoding) and Ollama. The same daemon also speaks to cloud providers — OpenAI, Google Gemini, xAI, DeepSeek, Kimi (Moonshot), GLM (Z.ai), and MiMo (Xiaomi) via the OpenAI-compatible protocol, plus native Anthropic. Cloud providers do nothing until you supply a key (in `~/.config/prometheus/env` or via Beacon's Models tab).
 
 Two extras worth knowing about:
 
@@ -124,7 +124,7 @@ These are the proactive subsystems that act while you are idle. They are the mar
 
 - **Cron** — **Default: on** (runs inside the daemon). Schedule anything the agent can do, in plain English ("every weekday at 7am") or cron syntax, via chat commands, the `cron_*` tools, or the REST API. Failed jobs push a Telegram notification.
 - **Durable tasks** — **Default: on.** Background tasks persist in a database and survive daemon restarts; completion fires an event that notifies you on Telegram and in Beacon.
-- **Honesty check** — **Default: on.** If the model tells you it will do something later, the harness verifies a real task was actually registered; unfounded promises are caught rather than silently forgotten.
+- **Honesty check** — **Default: on.** If the model tells you it will do something later, Prometheus verifies a real task was actually registered; unfounded promises are caught rather than silently forgotten.
 - **Daily briefing** — **Default: available, not scheduled.** A deterministic news + market + weather briefing job that delivers to Telegram and fails loudly rather than sending a partial briefing. It is the only shipped job; wire it to whatever cron schedule you want.
 - **Heartbeat** — **Default: on** (with the daemon). Periodic health checks, task watching, and proactive pushes.
 

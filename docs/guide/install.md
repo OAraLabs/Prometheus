@@ -23,7 +23,7 @@ This page takes you from nothing to a running Prometheus daemon with Beacon conn
 - **An inference backend** — llama.cpp or Ollama running with any model loaded (LM Studio and vLLM also work), *or* a cloud API key (OpenAI, Anthropic, Gemini, xAI, DeepSeek, Kimi, GLM, MiMo). The setup wizard probes for local servers and never writes a config it knows is broken.
 - **Optional:** a Telegram bot token from [@BotFather](https://t.me/BotFather) if you want the Telegram gateway. The CLI and Beacon work without any gateway.
 
-No GPU? Point Prometheus at a cloud provider and you still get the full harness — memory, wiki, security gate, coding runs, all of it.
+No GPU? Point Prometheus at a cloud provider and you still get the whole daemon — memory, wiki, security gate, coding runs, all of it.
 
 ## Install the daemon
 

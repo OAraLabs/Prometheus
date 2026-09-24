@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 # `oara-prometheus` but the import path / console scripts stay as `prometheus`.
 name = "oara-prometheus"
 version = "0.9.3"
-description = "Sovereign AI agent harness — extract, adapt, integrate"
+description = "An AI agent daemon that runs on hardware you own."
 readme = "README.md"
 requires-python = ">=3.11"
 # PEP 639: an SPDX expression, emitted as License-Expression. It deprecates

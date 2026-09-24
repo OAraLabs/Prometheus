@@ -1,6 +1,6 @@
 # Models & providers
 
-Prometheus is built for local inference first — llama.cpp or Ollama on your own GPU, with a Model Adapter Layer that makes open models reliable in a tool loop. But the same harness speaks to ten-plus providers, cloud included, and you can switch any single chat to a cloud model with one slash command and come home with `/local`. This page covers the local backends, the cloud providers and their keys, per-chat overrides, the SuperGrok subscription sign-in, key management, the router, force-search, and image/video generation.
+Prometheus is built for local inference first — llama.cpp or Ollama on your own GPU, with a Model Adapter Layer that makes open models reliable in a tool loop. But the same daemon speaks to ten-plus providers, cloud included, and you can switch any single chat to a cloud model with one slash command and come home with `/local`. This page covers the local backends, the cloud providers and their keys, per-chat overrides, the SuperGrok subscription sign-in, key management, the router, force-search, and image/video generation.
 
 [← README](../../README.md)
 
@@ -55,7 +55,7 @@ Where it shows: `/backends` on every chat surface and in Beacon (`refresh` force
 
 Names become slash commands, so they follow Telegram's grammar (`[a-z0-9_]{1,32}`) and may not collide with a cloud preset or a built-in command. A bad entry is refused with its reason — logged at boot and listed by `/backends` — and the rest still load. Only `llama_cpp` and `ollama` are backends; cloud providers are slash-command presets.
 
-One thing the registry deliberately does not do: it never changes what a box serves. llama-server is one model per process, and swapping it is a restart of that box's service, outside this harness. `/4090` points a chat at the box; what the box serves is the box's business, and the registry reports it.
+One thing the registry deliberately does not do: it never changes what a box serves. llama-server is one model per process, and swapping it is a restart of that box's service, outside Prometheus. `/4090` points a chat at the box; what the box serves is the box's business, and the registry reports it.
 
 ### Switching a chat to a backend: `/4090`, `/mini`
 
@@ -102,7 +102,7 @@ The defaults live in `src/prometheus/providers/registry.py` (`CLOUD_DEFAULTS`) a
 - **Kimi** — the default base URL is the international endpoint (`api.moonshot.ai`). A separate CN endpoint (`api.moonshot.cn`) exists with *separate keys*; set `base_url` in config if your key is CN-issued.
 - **Qwen** — the default is Alibaba's international **pay-as-you-go** endpoint (`dashscope-intl.aliyuncs.com/compatible-mode/v1`), which takes an ordinary `sk-` Model Studio key. Alibaba also sells subscription plans (Token Plan, Coding Plan) on *different hosts with different keys* — per their docs the key/base-URL pairs "are completely isolated and must be used in matching pairs", and plan keys are limited to **interactive use in programming tools and agents**, explicitly not automated scripts, application backends, or other non-interactive callers. Point `slash_commands.qwen.base_url` at a plan endpoint only if your usage fits that scope; unattended paths (cron, briefings, evals, autonomous loops) do not. `QWEN_API_KEY` is deliberately separate from `DASHSCOPE_API_KEY`, which is the WAN image backend on another host.
 
-Any of these can also be your **primary** model — set `model.provider` to the config name and you get the full harness (memory, wiki, security, profiles) on a cloud backend, no GPU required.
+Any of these can also be your **primary** model — set `model.provider` to the config name and you get the whole daemon (memory, wiki, security, profiles) on a cloud backend, no GPU required.
 
 ## Per-chat overrides: the slash commands
 
