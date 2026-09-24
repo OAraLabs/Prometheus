@@ -2763,7 +2763,7 @@ wheels = [
 
 [[package]]
 name = "oara-prometheus"
-version = "0.9.1"
+version = "0.9.2"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
