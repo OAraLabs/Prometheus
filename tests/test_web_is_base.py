@@ -156,7 +156,7 @@ def _child_env(blocked: set[str], home: Path) -> dict[str, str]:
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "PYTHONUNBUFFERED": "1",
         "LANG": "C.UTF-8",
-        "HOME": str(home),  # no ~/.prometheus → no config → setup mode
+        "HOME": str(home),  # isolated: no config unless the test writes one
         "BLOCKED": json.dumps(sorted(blocked)),
         # If the guard ever failed OPEN and setup mode really started, it
         # must not grab a port a live daemon on this host is using.
