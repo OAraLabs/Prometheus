@@ -323,7 +323,7 @@ A plain install, with no extras, runs `oara daemon` and pairs with Beacon: the w
 brew install oaralabs/tap/oara
 ```
 
-Use the full name: a bare `brew install oara` fails because the tap isn't trusted. The first install can take a while, because some dependencies build from source.
+Use the full name: a bare `brew install oara` fails because the tap isn't trusted. It installs in a few minutes.
 
 Then run the setup wizard:
 
