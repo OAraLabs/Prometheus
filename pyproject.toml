@@ -25,9 +25,7 @@ dependencies = [
     "python-docx>=1.1.0",
     "PyMuPDF>=1.24.0",
     "openpyxl>=3.1.0",
-    "piper-tts>=1.4.2",
-    "sounddevice>=0.5.5",
-    "scipy>=1.17.1",
+    # piper-tts, sounddevice and scipy are NOT here — see the `voice` extra.
     "watchdog>=4.0",
     # FOUNDATION Part 3.2: node identity is Ed25519, and identity must not
     # inherit the optional-extra fragility the push stack has (enabled-but-
@@ -55,7 +53,25 @@ computer = ["cua-driver>=0.28,<1"]
 # Onboarding Phase 0 papercut: whisper STT was used for voice input but
 # never declared anywhere. The faster-whisper python API is the pip-
 # installable engine; the whisper/faster-whisper-xxl CLIs also work.
-voice = ["faster-whisper>=1.0"]
+#
+# piper-tts, sounddevice and scipy were BASE dependencies from #22 until
+# 0.9.1, which made every install carry voice's native stack whether or not
+# it ever spoke. piper-tts drags in onnxruntime, which ships no sdist and no
+# macOS x86_64 wheel after 1.23.2, and 1.23.2 stops at cp313. On an Intel
+# Mac the base install therefore did not resolve at all under Python 3.14,
+# resolved under <=3.13 only by backtracking onto that abandoned line, and
+# uv.lock's onnxruntime (1.26.0) has no Intel-mac wheel whatever the Python.
+# Nothing imports any of them at module level: piper is run as a CLI
+# subprocess, sounddevice/scipy are imported inside the mic and playback
+# functions. tests/test_voice_is_an_extra.py pins both halves — the
+# declaration here, and that the package imports and the daemon boots
+# with all of it absent.
+voice = [
+    "faster-whisper>=1.0",
+    "piper-tts>=1.4.2",
+    "sounddevice>=0.5.5",
+    "scipy>=1.17.1",
+]
 # UPPER BOUND IS LOAD-BEARING — see tests/test_mcp_dependency_pin.py.
 # mcp 2.x moved ClientSession.list_tools to a keyword-only `params=`;
 # mcp/runtime.py calls it with `cursor=`, so 2.x is a TypeError on the
@@ -90,6 +106,12 @@ full = [
     "fastapi>=0.110",
     "uvicorn>=0.27",
     "websockets>=12",
+    # Voice OUTPUT — base dependencies until 0.9.1, so `full` keeps them and
+    # an existing `[full]` install loses nothing. faster-whisper (voice
+    # INPUT) was never in `full` and still is not: that is the `voice` extra.
+    "piper-tts>=1.4.2",
+    "sounddevice>=0.5.5",
+    "scipy>=1.17.1",
 ]
 dev = [
     "pytest>=8.0",
