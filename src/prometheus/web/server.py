@@ -228,6 +228,20 @@ def _resolve_project_file(repo: str, name: str) -> Path:
     return target
 
 
+def _routed_path(scope: dict[str, Any]) -> str:
+    """The path the router dispatches on: ``scope["path"]`` less any
+    ``root_path`` prefix, the same derivation Starlette's routing uses. Never
+    ``request.url`` — that is rebuilt from the client's Host header."""
+    path: str = scope["path"]
+    root_path: str = scope.get("root_path", "")
+    if root_path and path.startswith(root_path):
+        if path == root_path:
+            return ""
+        if path[len(root_path)] == "/":
+            return path[len(root_path):]
+    return path
+
+
 def create_app(
     config: dict[str, Any],
     signal_bus: Any | None = None,
@@ -313,6 +327,14 @@ def create_app(
 
     @app.middleware("http")
     async def _check_bearer_token(request: Request, call_next):
+        # Every decision here keys on the ROUTED path (the path the router
+        # dispatches on), never on request.url. request.url is rebuilt from
+        # the Host header, and on starlette <1.0.1 (CVE-2026-48710) a Host
+        # like `x/abc?` moved the path boundary: request.url.path read "/abc"
+        # while the router still ran /api/..., so this gate let the request
+        # through with no token. The starlette floor fixes the rebuild; this
+        # makes the gate not depend on it. tests/test_auth_uses_routed_path.py.
+        path = _routed_path(request.scope)
         # Reject oversized bodies up front (by Content-Length, before any read).
         # NOTE: a chunked request without Content-Length sidesteps this — a hard
         # streaming cap belongs at the uvicorn/reverse-proxy layer.
@@ -320,7 +342,7 @@ def create_app(
         if cl is not None:
             body_cap = (
                 _MAX_RECORDING_BODY_BYTES
-                if request.url.path == _RECORDING_UPLOAD_PATH
+                if path == _RECORDING_UPLOAD_PATH
                 else _MAX_BODY_BYTES
             )
             try:
@@ -331,7 +353,7 @@ def create_app(
         # /v1 is the OpenAI-compatible surface (web/openai_api.py): same
         # bearer, same device tokens. A route prefix outside this tuple is
         # an UNAUTHENTICATED route — widen here, never elsewhere.
-        if _api_token and request.url.path.startswith(("/api/", "/v1/")):
+        if _api_token and path.startswith(("/api/", "/v1/")):
             # GRAFT-MOBILE-BRIDGE 1: the bearer may be the global token or an
             # enrolled device token. verify_token compares constant-time (the
             # old `!=` here was the timing side-channel the graft spec flags)
