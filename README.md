@@ -4,7 +4,7 @@ A sovereign agent harness for local LLMs — the validation layer that makes ope
 
 **The model is the agent. The harness is the vehicle.**
 
-![Beacon Mission Control connected to a freshly installed Prometheus daemon](docs/assets/shots/install-9-mission-home.png)
+![Beacon's Mission home — the Armilla telemetry sphere beside Mission Control: agent state, scheduled jobs, local backends, and tool-call telemetry](docs/assets/shots/panel-mission-home.png)
 
 Prometheus is two pieces that pair with a 6-digit code:
 

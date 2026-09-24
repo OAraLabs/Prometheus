@@ -4,7 +4,7 @@ Beacon is the native desktop client for the Prometheus daemon — an Electron ap
 
 [← README](../../README.md)
 
-![Beacon's Mission home — the default landing view, with the Armilla telemetry sphere, Mission Control HUD, and a chat composer](../assets/shots/install-9-mission-home.png)
+![Beacon's Mission home — the default landing view, with the Armilla telemetry sphere beside the Mission Control HUD: agent state, scheduled jobs, local backends, and tool-call telemetry](../assets/shots/panel-mission-home.png)
 
 ## Getting Beacon
 
