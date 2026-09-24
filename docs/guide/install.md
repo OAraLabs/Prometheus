@@ -1,6 +1,6 @@
 # Install & first flight
 
-This page takes you from nothing to a running Prometheus daemon with Beacon connected — including the fully guided "couch mode" path, where the daemon boots into setup mode and Beacon's wizard does the rest. Every command here is copy-pasteable; where something is rough today (unsigned macOS builds, PyPI publish still pending), the page says so instead of pretending otherwise.
+This page takes you from nothing to a running Prometheus daemon with Beacon connected — including the fully guided "couch mode" path, where the daemon boots into setup mode and Beacon's wizard does the rest. Every command here is copy-pasteable; where something is rough today (unsigned macOS builds, no Homebrew formula yet), the page says so instead of pretending otherwise.
 
 [← README](../../README.md)
 
@@ -27,16 +27,29 @@ No GPU? Point Prometheus at a cloud provider and you still get the full harness 
 
 ## Install the daemon
 
-The path that works for everyone today is a git checkout:
+Three ways, all working today. Whichever you pick, keep the `[full]` extra: it pulls in everything (web API, Slack/Discord gateways, MCP, browser, voice, evals), and the web API that Beacon pairs with is not in the base package. You can install leaner extras later — for example `pip install 'oara-prometheus[slack]'` adds just the Slack gateway.
+
+**One command, from Git** — an isolated install of the `oara` command straight from `main`, with [uv](https://docs.astral.sh/uv/) or pipx:
+
+```bash
+uv tool install 'oara-prometheus[full] @ git+https://github.com/OAraLabs/Prometheus'
+# or: pipx install 'oara-prometheus[full] @ git+https://github.com/OAraLabs/Prometheus'
+```
+
+**From source** — best if you want to read or change the code, or run the test suite:
 
 ```bash
 git clone https://github.com/OAraLabs/Prometheus.git && cd Prometheus
 pip install -e '.[full]'
 ```
 
-The `[full]` extra pulls in everything (web API, Slack/Discord gateways, MCP, browser, voice, evals). You can install leaner extras later — for example `pip install 'oara-prometheus[slack]'` adds just the Slack gateway.
+**From PyPI** — the packaged release, [`oara-prometheus`](https://pypi.org/project/oara-prometheus/) (first published at 0.9.0):
 
-> **Packaged install (pending).** `pip install 'oara-prometheus[full]'` is the intended one-liner. CI already builds sdist + wheel per tagged release, but PyPI publishing hasn't landed yet — until it does, use the git checkout above.
+```bash
+pip install 'oara-prometheus[full]'
+```
+
+> **Homebrew — not yet.** The tap `oaralabs/tap` exists but serves no formula, so `brew install` will not give you Prometheus today.
 
 ## Run setup
 

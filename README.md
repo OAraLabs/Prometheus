@@ -9,7 +9,7 @@ A sovereign agent harness for local LLMs — the validation layer that makes ope
 Prometheus is two pieces that pair with a 6-digit code:
 
 - **The daemon** — an always-on Python agent runtime: agent loop + Model Adapter Layer, a registry of every local inference box you own, three chat gateways (Telegram / Slack / Discord), lossless memory, sandboxed coding runs, cron, a security gate, and a bearer-token REST + WebSocket control plane — plus an OpenAI-compatible `/v1` surface so anything that already speaks OpenAI can talk to it.
-- **[Beacon](https://github.com/OAraLabs/beacon-desktop)** — its native desktop cockpit (macOS / Linux): chat with live tool timelines, `@`-references and hands-free voice, Mission Control, a Loop Manager for coding runs, per-turn file checkpoints you can restore, a documents editor with AI redlines, Kanban, telemetry feeds, and per-provider key management. An iOS client rides the same control plane (per-device tokens, push, pagination).
+- **[Beacon](https://github.com/OAraLabs/beacon-desktop)** — its native desktop cockpit (macOS / Linux): chat with live tool timelines, `@`-references and hands-free voice, Mission Control, a Loop Manager for coding runs, per-turn file checkpoints you can restore, a documents editor with AI redlines, Kanban, telemetry feeds, and per-provider key management. An [iOS client](https://oara.ai/beacon-ios) rides the same control plane (per-device tokens, push, pagination).
 
 ```bash
 git clone https://github.com/OAraLabs/Prometheus.git && cd Prometheus
@@ -31,7 +31,7 @@ Without this, `import fastapi` fails inside `.venv` and three test files won't e
 
 `oara setup` probes for a running local inference server, generates your agent's identity, writes a working config with the web API enabled, and smoke-tests the loop. In a hurry? `oara setup --fast` (or `--noninteractive`) is the three-question version. On first daemon start a web API token is minted and printed once — `oara token show` re-prints it. If anything misbehaves: `oara doctor`.
 
-> `pip install 'oara-prometheus[full]'` is the packaged path — CI builds sdist + wheel per tagged release; PyPI publishing lands once the release pipeline is public. Until then, the git checkout above is the path that works for everyone.
+> `pip install 'oara-prometheus[full]'` is the packaged path, live on [PyPI](https://pypi.org/project/oara-prometheus/) since 0.9.0. The checkout above is the path for reading, changing, or testing the code — all three ways to install are under [Install](#install).
 
 **What it gives you:**
 
@@ -90,7 +90,7 @@ Prometheus fixes this with a Model Adapter Layer that sits between your agent lo
 
 The result: open models that reliably call tools, chain multi-step tasks, and run autonomously — without you babysitting every interaction.
 
-![A local model streaming a reply with a live tool-call timeline in Beacon](docs/assets/shots/chat-5-reply-done.png)
+![A finished reply from a local model in Beacon — the session list, the answer, and the composer's Agent / Chat / Voice toggle and model picker](docs/assets/shots/chat-5-reply-done.png)
 
 ## What Makes This Different
 
@@ -293,9 +293,33 @@ Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, a
 
 ### Install
 
+Three ways to get it — all three work today:
+
+**One command, from Git** — an isolated install of the `oara` command straight from the main branch, with [uv](https://docs.astral.sh/uv/) or pipx:
+
+```bash
+uv tool install 'oara-prometheus[full] @ git+https://github.com/OAraLabs/Prometheus'
+# or: pipx install 'oara-prometheus[full] @ git+https://github.com/OAraLabs/Prometheus'
+```
+
+**From source** — clone and install editable. Best if you want to read or change the code, or run the test suite:
+
 ```bash
 git clone https://github.com/OAraLabs/Prometheus.git && cd Prometheus
 pip install -e '.[full]'
+```
+
+**From PyPI** — the packaged release, [`oara-prometheus`](https://pypi.org/project/oara-prometheus/):
+
+```bash
+pip install 'oara-prometheus[full]'
+```
+
+Keep the `[full]` extra on any path — the web API that Beacon pairs with is not in the base package. Homebrew is **not here yet**: the tap `oaralabs/tap` exists but serves no formula, so `brew install` will not give you Prometheus today.
+
+Then run the setup wizard:
+
+```bash
 oara setup
 ```
 
@@ -309,15 +333,6 @@ oara setup --noninteractive  # zero questions (first detected server, CLI gatewa
 oara setup --gateway-only    # add/change Telegram, Slack, or Discord later
 oara setup --provider anthropic --api-key-env ANTHROPIC_API_KEY --model claude-sonnet-5   # no local GPU yet: start on a cloud model, switch later
 ```
-
-**Other ways to get it.** One command, isolated, straight from the main branch — then `oara setup` as above:
-
-```bash
-uv tool install 'oara-prometheus[full] @ git+https://github.com/OAraLabs/Prometheus'
-# or: pipx install 'oara-prometheus[full] @ git+https://github.com/OAraLabs/Prometheus'
-```
-
-Homebrew and PyPI are **coming, not here**: the tap `oaralabs/tap` exists and the `oara` name is reserved on PyPI, but neither serves a package yet — `brew install` and `pip install oara` will not give you Prometheus today. Both open with the first published release (see Roadmap).
 
 Prefer doing setup from a couch? Skip `oara setup`, run `oara daemon` bare, and it boots in **setup mode** — a pairing-only API that prints a one-time 6-digit code. Beacon's wizard takes it from there (detects backends, names the agent, configures gateways) and the daemon wakes fully configured:
 
@@ -359,7 +374,7 @@ Exit code is nonzero when anything is broken, so it also works in scripts.
 
 ### Get Beacon
 
-Beacon is currently private while it hardens; public builds — macOS dmg, Linux AppImage/deb — arrive with the public release. Early users get draft builds. First launch walks you through pairing — the full flow with screenshots is in the [install guide](docs/guide/install.md), and the app tour is in the [Beacon guide](docs/guide/beacon.md).
+Beacon is currently private while it hardens; public builds — macOS dmg, Linux AppImage/deb — arrive with the public release. Early users get draft builds. Beacon iOS isn't on the App Store yet — TestFlight access is by request ([oara.ai/beacon-ios](https://oara.ai/beacon-ios)). First launch walks you through pairing — the full flow with screenshots is in the [install guide](docs/guide/install.md), and the app tour is in the [Beacon guide](docs/guide/beacon.md).
 
 ![Beacon's setup wizard pairing with a daemon](docs/assets/shots/install-2-pairing.png)
 
@@ -646,7 +661,8 @@ prometheus/
 - [ ] Beacon: attach to running coding runs, pause/inject/resume from the UI — *the daemon endpoints exist; the UI does not call them*
 - [x] Secrets redacted at every log handler and at capture time; logs rotate
 - [ ] Fine-tuning flywheel (LoRA on collected traces) — *capture/export pipeline shipped; training loop pending*
-- [ ] PyPI release + published Beacon builds — *`oara` is claimed on PyPI; the publish gate opens with the install path*
+- [x] PyPI release — [`oara-prometheus`](https://pypi.org/project/oara-prometheus/), from 0.9.0
+- [ ] Published Beacon builds — *every tag drafts a dmg, an AppImage and a deb; they go public with the Beacon repo*
 - [ ] Wake word for hands-free (an in-renderer model under the app's CSP — a decision, not a build)
 
 ## License
