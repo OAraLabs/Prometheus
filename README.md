@@ -4,12 +4,12 @@ A sovereign agent harness for local LLMs — the validation layer that makes ope
 
 **The model is the agent. The harness is the vehicle.**
 
-![Beacon's Mission home — the Armilla telemetry sphere beside Mission Control: agent state, scheduled jobs, local backends, and tool-call telemetry](docs/assets/shots/panel-mission-home.png)
+![Beacon's Mission home — the Armilla telemetry sphere beside Mission Control: agent state, scheduled jobs, local backends, and tool-call telemetry](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/panel-mission-home.png)
 
 Prometheus is two pieces that pair with a 6-digit code:
 
 - **The daemon** — an always-on Python agent runtime: agent loop + Model Adapter Layer, a registry of every local inference box you own, three chat gateways (Telegram / Slack / Discord), lossless memory, sandboxed coding runs, cron, a security gate, and a bearer-token REST + WebSocket control plane — plus an OpenAI-compatible `/v1` surface so anything that already speaks OpenAI can talk to it.
-- **[Beacon](https://github.com/OAraLabs/beacon-desktop)** — its native desktop cockpit (macOS / Linux): chat with live tool timelines, `@`-references and hands-free voice, Mission Control, a Loop Manager for coding runs, per-turn file checkpoints you can restore, a documents editor with AI redlines, Kanban, telemetry feeds, and per-provider key management. An [iOS client](https://oara.ai/beacon-ios) rides the same control plane (per-device tokens, push, pagination).
+- **[Beacon](https://oara.ai/beacon)** — its native desktop cockpit (macOS / Linux): chat with live tool timelines, `@`-references and hands-free voice, Mission Control, a Loop Manager for coding runs, per-turn file checkpoints you can restore, a documents editor with AI redlines, Kanban, telemetry feeds, and per-provider key management. An [iOS client](https://oara.ai/beacon-ios) rides the same control plane (per-device tokens, push, pagination).
 
 ```bash
 git clone https://github.com/OAraLabs/Prometheus.git && cd Prometheus
@@ -31,7 +31,7 @@ Without this, `import fastapi` fails inside `.venv` and three test files won't e
 
 `oara setup` probes for a running local inference server, generates your agent's identity, writes a working config with the web API enabled, and smoke-tests the loop. In a hurry? `oara setup --fast` (or `--noninteractive`) is the three-question version. On first daemon start a web API token is minted and printed once — `oara token show` re-prints it. If anything misbehaves: `oara doctor`.
 
-> `pip install 'oara-prometheus[full]'` is the packaged path, live on [PyPI](https://pypi.org/project/oara-prometheus/) since 0.9.0. The checkout above is the path for reading, changing, or testing the code — all three ways to install are under [Install](#install).
+> `pip install 'oara-prometheus[full]'` is the packaged path, live on [PyPI](https://pypi.org/project/oara-prometheus/) since 0.9.0. The checkout above is the path for reading, changing, or testing the code — every way to install, Homebrew included, is under [Install](#install).
 
 **What it gives you:**
 
@@ -48,8 +48,8 @@ Without this, `import fastapi` fails inside `.venv` and three test files won't e
 
 > **Status:** Active development. Expect rough edges. Fixes land weekly. Feedback welcome.
 
-**Deeper docs** — the guide pages under [`docs/guide/`](docs/guide/):
-[Install & first flight](docs/guide/install.md) · [Feature reference](docs/guide/features.md) · [Beacon desktop](docs/guide/beacon.md) · [Coding Mode & Loop Manager](docs/guide/coding-mode.md) · [Record a Skill](docs/guide/record-a-skill.md) · [Memory & knowledge](docs/guide/memory.md) · [Models & providers](docs/guide/providers.md) · [HTTP & WebSocket API](docs/guide/api.md)
+**Deeper docs** — the guide pages under [`docs/guide/`](https://github.com/OAraLabs/Prometheus/tree/main/docs/guide):
+[Install & first flight](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/install.md) · [Feature reference](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/features.md) · [Beacon desktop](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/beacon.md) · [Coding Mode & Loop Manager](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/coding-mode.md) · [Record a Skill](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/record-a-skill.md) · [Memory & knowledge](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/memory.md) · [Models & providers](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/providers.md) · [HTTP & WebSocket API](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/api.md)
 
 ---
 
@@ -90,7 +90,7 @@ Prometheus fixes this with a Model Adapter Layer that sits between your agent lo
 
 The result: open models that reliably call tools, chain multi-step tasks, and run autonomously — without you babysitting every interaction.
 
-![A finished reply from a local model in Beacon — the session list, the answer, and the composer's Agent / Chat / Voice toggle and model picker](docs/assets/shots/chat-5-reply-done.png)
+![A finished reply from a local model in Beacon — the session list, the answer, and the composer's Agent / Chat / Voice toggle and model picker](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/chat-5-reply-done.png)
 
 ## What Makes This Different
 
@@ -123,13 +123,13 @@ Prometheus is built for local inference. That's the whole point — sovereignty,
 
 Switch any single chat with a slash command — `/claude`, `/gpt`, `/gemini`, `/xai`, `/deepseek`, `/kimi`, `/glm`, `/mimo` — and `/local` to come home. Keys are managed from Beacon's Models tab (paste once, live immediately, no restart) or the env file. The adapter layer adjusts its strictness automatically: full validation for open models, passthrough for APIs that already handle tool calling well.
 
-![Beacon's Models tab — per-provider keys, auth-mode badges, and SuperGrok subscription sign-in](docs/assets/shots/extra-models-tab.png)
+![Beacon's Models tab — per-provider keys, auth-mode badges, and SuperGrok subscription sign-in](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/extra-models-tab.png)
 
 The architecture doesn't care where the tokens come from. It cares that the tools get called correctly.
 
 ## Features
 
-*The [feature reference](docs/guide/features.md) covers everything below in depth — including which subsystems are on by default and which are opt-in.*
+*The [feature reference](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/features.md) covers everything below in depth — including which subsystems are on by default and which are opt-in.*
 
 Three commitments run through everything below:
 
@@ -165,13 +165,13 @@ Point the agent at a repo, a task, and an acceptance command. It clones the repo
 - Supervision is fail-safe by construction: a corrupt or missing control file reads as "not paused", and a run with no control channel is byte-identical to an unsupervised one
 - Repeated failures are caught by fingerprint: the failure output is normalized (timings, addresses) and hashed, so hitting the same wall twice triggers an explicit step-back — and zero-progress runs abort instead of burning rounds
 
-![A finished coding run in Beacon — Converted ✓, acceptance exit 0, and the reviewable diff](docs/assets/shots/run-2-artifact.png)
+![A finished coding run in Beacon — Converted ✓, acceptance exit 0, and the reviewable diff](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/run-2-artifact.png)
 
-Beacon's **Loop Manager** turns this into a PM cockpit: register repos, keep a `TASKS.md` board, edit the `LOOP.md` run contract, and fire — Autonomous, Composed, or Supervised. Kanban stories can be dispatched straight into coding runs. See the [Coding Mode guide](docs/guide/coding-mode.md).
+Beacon's **Loop Manager** turns this into a PM cockpit: register repos, keep a `TASKS.md` board, edit the `LOOP.md` run contract, and fire — Autonomous, Composed, or Supervised. Kanban stories can be dispatched straight into coding runs. See the [Coding Mode guide](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/coding-mode.md).
 
 ### Skills
 
-The agent writes skills for itself: the SkillCreator turns successful multi-step traces into markdown skill files, the SkillRefiner updates them when better executions come along, and a weekly Curator pass consolidates and prunes (pinned skills are protected; nothing is hard-deleted). Three core skills ship in the package (`commit`, `debug`, `plan`), and the repo carries a **103-file skill library** in [`skills/`](skills/) you can drop into `~/.prometheus/skills/` selectively — it's deliberately not auto-loaded, to keep prompts lean.
+The agent writes skills for itself: the SkillCreator turns successful multi-step traces into markdown skill files, the SkillRefiner updates them when better executions come along, and a weekly Curator pass consolidates and prunes (pinned skills are protected; nothing is hard-deleted). Three core skills ship in the package (`commit`, `debug`, `plan`), and the repo carries a **103-file skill library** in [`skills/`](https://github.com/OAraLabs/Prometheus/tree/main/skills) you can drop into `~/.prometheus/skills/` selectively — it's deliberately not auto-loaded, to keep prompts lean.
 
 ### Record a Skill
 
@@ -180,7 +180,7 @@ Show the agent a workflow instead of describing it. Two capture paths, two trust
 - **Live DOM recording** — record a browser workflow; a deterministic pipeline (no model calls) turns the event trace into a skill, runs it through a five-check quality gate, and auto-persists it to `skills/auto/`
 - **Video / YouTube ingestion** — screen recordings and videos are transcribed and vision-digested into skill drafts that **never** auto-persist: they wait in Beacon for human accept or reject
 
-Ground-truth DOM traces earn autonomy; lossy vision output stays human-reviewed. Full walkthrough: [Record a Skill guide](docs/guide/record-a-skill.md).
+Ground-truth DOM traces earn autonomy; lossy vision output stays human-reviewed. Full walkthrough: [Record a Skill guide](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/record-a-skill.md).
 
 Why this only works here: a screen recording of you doing your job is among the most revealing data you own, and every frame of it stays on your disk. A hosted product can't offer the same feature, because shipping your screen to someone else's server *is* the feature — and the problem.
 
@@ -191,7 +191,7 @@ Why this only works here: a screen recording of you doing your job is among the 
 - Scoped and gated: per-server `allowed_tools` allowlists (enforced at discovery *and* at call time); every MCP tool call requires confirmation before it runs — a server's `readOnlyHint` is recorded and shown, never trusted to skip the prompt
 - Managed over REST as well as config: `/api/mcp/servers` adds, edits and removes servers live (Beacon's Connectors tab is its client); a server added at runtime is advertised to the model and reaches the llama.cpp grammar on the next turn, or the add fails loudly
 - Context7 is a two-line config away for up-to-date library documentation
-- **Packs** — the extension contract at the boundary: a pack declares its tools, skills and panels; skills arrive quarantined, panels are discoverable, and nothing a pack ships is trusted before it is declared ([FOUNDATION](docs/FOUNDATION.md) Part 2)
+- **Packs** — the extension contract at the boundary: a pack declares its tools, skills and panels; skills arrive quarantined, panels are discoverable, and nothing a pack ships is trusted before it is declared ([FOUNDATION](https://github.com/OAraLabs/Prometheus/blob/main/docs/FOUNDATION.md) Part 2)
 
 ### Identity System
 
@@ -201,12 +201,12 @@ Why this only works here: a screen recording of you doing your job is among the 
 - **MEMORY.md + USER.md** — the agent learns who you are over time (bounded: 12K + 8K chars)
 - **Agent Profiles** — `full`, `coder`, `research`, `assistant`, `minimal` via `/profile` to trade tool breadth for context budget — and a profile can belong to one conversation rather than the whole daemon
 - **Project instructions** — walking up from the daemon's cwd, or from a conversation's own `/workspace`, the assembler stacks `PROMETHEUS.md`, `HERMES.md`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, `.windsurfrules`, `.github/copilot-instructions.md` and `.prometheus/rules/*.md`, one per directory level, under a per-file and an aggregate cap that names what it had to omit
-- **Node & instance identity** — a local Ed25519 node keypair plus a vault-resident instance UUID (`oara vault adopt` / `vault status`); see [Identity, and what does not phone home](#identity-and-what-does-not-phone-home) and [docs/FOUNDATION.md](docs/FOUNDATION.md)
+- **Node & instance identity** — a local Ed25519 node keypair plus a vault-resident instance UUID (`oara vault adopt` / `vault status`); see [Identity, and what does not phone home](#identity-and-what-does-not-phone-home) and [docs/FOUNDATION.md](https://github.com/OAraLabs/Prometheus/blob/main/docs/FOUNDATION.md)
 
 ### Security
 
 - 4-level trust model (BLOCKED → APPROVE → AUTO → AUTONOMOUS), origin-aware: background work (SENTINEL, cron, gym) faces stricter gates than what you ask for directly
-- 8 always-blocked command patterns plus configurable deny lists and bash intent analysis, plus a workspace boundary on `write_file` / `edit_file` — **a speed bump, not confinement**: `bash` is gated on the command string, not on the paths a command writes to, so a shell redirect goes anywhere. `denied_paths` is the hard stop, a turn-end check detects writes that landed outside the permitted area — after the fact — and for a conversation with a workspace every turn takes a file checkpoint first, so its writes can be undone over REST or from Beacon. With bubblewrap available, the **bash write floor** makes the boundary real in the kernel: the filesystem is mounted read-only except the workspace, and the gate follows the conversation's `/workspace`. [What each one actually catches](docs/guide/features.md#security--permissions)
+- 8 always-blocked command patterns plus configurable deny lists and bash intent analysis, plus a workspace boundary on `write_file` / `edit_file` — **a speed bump, not confinement**: `bash` is gated on the command string, not on the paths a command writes to, so a shell redirect goes anywhere. `denied_paths` is the hard stop, a turn-end check detects writes that landed outside the permitted area — after the fact — and for a conversation with a workspace every turn takes a file checkpoint first, so its writes can be undone over REST or from Beacon. With bubblewrap available, the **bash write floor** makes the boundary real in the kernel: the filesystem is mounted read-only except the workspace, and the gate follows the conversation's `/workspace`. [What each one actually catches](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/features.md#security--permissions)
 - Untrusted-input fencing: every message carries a provenance tag, and content from cron jobs, task output, and files is wrapped as data — not instructions — before it reaches the model
 - Secrets structurally absent: tool sandboxes strip key/token/secret variables from the environment (the agent can't `env` its own keys), key updates reject control characters, and key reads return booleans — never values
 - **Secrets do not survive into logs or capture data**: every log handler redacts token shapes (Telegram `bot<token>`, Bearer headers, `?token=` query values, the `sk-`/`xai-`/`AIza`/GitHub/Discord/Slack key families) before a line is written — including the web server's own request log — and `daemon.log`/`cli.log` rotate. The same redactor runs at capture time on telemetry, training pairs and trajectory exports, and `scripts/scrub_capture_stores.py` cleans what was written before it existed. Not config-gated, on purpose
@@ -252,7 +252,7 @@ Why this only works here: a screen recording of you doing your job is among the 
 
 - `image_generate`: Pollinations (free, hosted), ComfyUI (free, local GPU), or WAN 2.5 via DashScope (paid). `auto` never selects the paid backend.
 - `video_generate`: Kling 3.0 text/image-to-video (paid, dormant until keyed).
-- Details in the [providers guide](docs/guide/providers.md).
+- Details in the [providers guide](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/providers.md).
 
 ### Fine-Tuning Flywheel (in progress)
 
@@ -280,7 +280,7 @@ Why this only works here: a screen recording of you doing your job is among the 
 
 ### On by default vs opt-in
 
-Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, and the web API are on out of the box. The bigger autonomous subsystems — SENTINEL dreaming, the router's autonomous half (task classification and fallback chains — its per-chat `/claude`-style overrides ship **on**), LSP, GEPA, escalation-to-teacher, SYMBIOTE (GitHub research → license gate → AST scan → safe graft → blue-green hot swap with auto-rollback; experimental), the Paperclip gateway, and Record-a-Skill's video ingestion — ship **off by default** and are one config flag away when you want them. The [feature reference](docs/guide/features.md) marks every subsystem's default.
+Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, and the web API are on out of the box. The bigger autonomous subsystems — SENTINEL dreaming, the router's autonomous half (task classification and fallback chains — its per-chat `/claude`-style overrides ship **on**), LSP, GEPA, escalation-to-teacher, SYMBIOTE (GitHub research → license gate → AST scan → safe graft → blue-green hot swap with auto-rollback; experimental), the Paperclip gateway, and Record-a-Skill's video ingestion — ship **off by default** and are one config flag away when you want them. The [feature reference](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/features.md) marks every subsystem's default.
 
 ## Quick Start
 
@@ -293,7 +293,7 @@ Chat, tools, adapter, memory + LCM + passive recall, security gate, telemetry, a
 
 ### Install
 
-Three ways to get it — all three work today:
+Four ways to get it:
 
 **One command, from Git** — an isolated install of the `oara` command straight from the main branch, with [uv](https://docs.astral.sh/uv/) or pipx:
 
@@ -315,7 +315,15 @@ pip install -e '.[full]'
 pip install 'oara-prometheus[full]'
 ```
 
-Keep the `[full]` extra on any path — the web API that Beacon pairs with is not in the base package. Homebrew is **not here yet**: the tap `oaralabs/tap` exists but serves no formula, so `brew install` will not give you Prometheus today.
+Keep the `[full]` extra on each of those three paths — the web API that Beacon pairs with is not in the base package.
+
+**With Homebrew** — Apple Silicon Macs (M1 and later) only; Intel Macs aren't verified yet:
+
+```bash
+brew install oaralabs/tap/oara
+```
+
+Use the full name: a bare `brew install oara` fails because the tap isn't trusted. The first install can take a while, because some dependencies build from source.
 
 Then run the setup wizard:
 
@@ -336,7 +344,7 @@ oara setup --provider anthropic --api-key-env ANTHROPIC_API_KEY --model claude-s
 
 Prefer doing setup from a couch? Skip `oara setup`, run `oara daemon` bare, and it boots in **setup mode** — a pairing-only API that prints a one-time 6-digit code. Beacon's wizard takes it from there (detects backends, names the agent, configures gateways) and the daemon wakes fully configured:
 
-![Setup-mode pairing banner](docs/assets/shots/term-pairing-banner.svg)
+![Setup-mode pairing banner](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/term-pairing-banner.svg)
 
 ### Run
 
@@ -368,15 +376,15 @@ journalctl --user -u prometheus -f
 oara doctor
 ```
 
-![oara doctor output — every subsystem checked with a fix hint per failure](docs/assets/shots/term-doctor.svg)
+![oara doctor output — every subsystem checked with a fix hint per failure](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/term-doctor.svg)
 
 Exit code is nonzero when anything is broken, so it also works in scripts.
 
 ### Get Beacon
 
-Beacon is currently private while it hardens; public builds — macOS dmg, Linux AppImage/deb — arrive with the public release. Early users get draft builds. Beacon iOS isn't on the App Store yet — TestFlight access is by request ([oara.ai/beacon-ios](https://oara.ai/beacon-ios)). First launch walks you through pairing — the full flow with screenshots is in the [install guide](docs/guide/install.md), and the app tour is in the [Beacon guide](docs/guide/beacon.md).
+Beacon is free to use but not open source, and it is in beta: builds — macOS dmg, Linux AppImage/deb — are published when Beacon leaves beta, and until then early users get draft builds ([oara.ai/beacon](https://oara.ai/beacon)). Beacon iOS isn't on the App Store yet — TestFlight access is by request ([oara.ai/beacon-ios](https://oara.ai/beacon-ios)). First launch walks you through pairing — the full flow with screenshots is in the [install guide](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/install.md), and the app tour is in the [Beacon guide](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/beacon.md).
 
-![Beacon's setup wizard pairing with a daemon](docs/assets/shots/install-2-pairing.png)
+![Beacon's setup wizard pairing with a daemon](https://raw.githubusercontent.com/OAraLabs/Prometheus/main/docs/assets/shots/install-2-pairing.png)
 
 ### Where the config lives (search order)
 
@@ -543,7 +551,7 @@ Tokens live in the env file, never in the yaml. The easiest way to configure any
 
 ## Commands
 
-The full 40+ command surface is in the [feature reference](docs/guide/features.md#commands); the daily drivers:
+The full 40+ command surface is in the [feature reference](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/features.md#commands); the daily drivers:
 
 | Command | Description |
 |---------|-------------|
@@ -559,7 +567,7 @@ The full 40+ command surface is in the [feature reference](docs/guide/features.m
 | `/local` `/route` | Back to the local model · show this chat's routing |
 | `/sentinel` `/gepa` `/curator` `/symbiote` `/audit` | The opt-in autonomous layers |
 
-Cloud slash-commands are configurable per command (provider, key env, model) in `prometheus.yaml` — see the [providers guide](docs/guide/providers.md).
+Cloud slash-commands are configurable per command (provider, key env, model) in `prometheus.yaml` — see the [providers guide](https://github.com/OAraLabs/Prometheus/blob/main/docs/guide/providers.md).
 
 ## Benchmarks
 
@@ -662,13 +670,13 @@ prometheus/
 - [x] Secrets redacted at every log handler and at capture time; logs rotate
 - [ ] Fine-tuning flywheel (LoRA on collected traces) — *capture/export pipeline shipped; training loop pending*
 - [x] PyPI release — [`oara-prometheus`](https://pypi.org/project/oara-prometheus/), from 0.9.0
-- [ ] Published Beacon builds — *every tag drafts a dmg, an AppImage and a deb; they go public with the Beacon repo*
+- [ ] Published Beacon builds — *every tag drafts a dmg, an AppImage and a deb; they are published when Beacon leaves beta*
 - [ ] Wake word for hands-free (an in-renderer model under the app's CSP — a decision, not a build)
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Upstream copyright notices for adapted code are collected in [NOTICE](NOTICE).
+MIT — see [LICENSE](https://github.com/OAraLabs/Prometheus/blob/main/LICENSE). Upstream copyright notices for adapted code are collected in [NOTICE](https://github.com/OAraLabs/Prometheus/blob/main/NOTICE).
 
 ## Credits
 
-Built by [OAra Labs](https://github.com/OAraLabs), starting with early scaffolding from [OpenHarness](https://github.com/HKUDS/OpenHarness). Design informed by Andrej Karpathy's [LLM Wiki concept](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), [Lossless-Claw](https://github.com/Martian-Engineering/lossless-claw), and [Sigrid Jin's](https://github.com/instructkr) analysis of Claude Code's agent-loop patterns. Full lineage and upstream licenses: [NOTICE](NOTICE).
+Built by [OAra Labs](https://github.com/OAraLabs), starting with early scaffolding from [OpenHarness](https://github.com/HKUDS/OpenHarness). Design informed by Andrej Karpathy's [LLM Wiki concept](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), [Lossless-Claw](https://github.com/Martian-Engineering/lossless-claw), and [Sigrid Jin's](https://github.com/instructkr) analysis of Claude Code's agent-loop patterns. Full lineage and upstream licenses: [NOTICE](https://github.com/OAraLabs/Prometheus/blob/main/NOTICE).

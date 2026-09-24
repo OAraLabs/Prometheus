@@ -10,7 +10,24 @@ version = "0.9.0"
 description = "Sovereign AI agent harness — extract, adapt, integrate"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+# PEP 639: an SPDX expression, emitted as License-Expression. It deprecates
+# the "License ::" classifiers, so none is listed below.
+license = "MIT"
+authors = [{ name = "OAra Labs" }]
+# The Python versions are exactly the ci.yml test matrix — a version that
+# is admitted by requires-python but not tested is not claimed here. Linux
+# is what CI runs on; macOS is the Homebrew install, verified on Apple
+# Silicon.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "pydantic>=2.0",
     "httpx>=0.27",
@@ -33,6 +50,12 @@ dependencies = [
     # makes it a declared base need. The push extra keeps its own pin.
     "cryptography>=42",
 ]
+
+[project.urls]
+Homepage = "https://oara.ai/prometheus"
+Source = "https://github.com/OAraLabs/Prometheus"
+Issues = "https://github.com/OAraLabs/Prometheus/issues"
+Documentation = "https://github.com/OAraLabs/Prometheus/tree/main/docs/guide"
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]

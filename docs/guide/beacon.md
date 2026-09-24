@@ -8,16 +8,7 @@ Beacon is the native desktop client for the Prometheus daemon — an Electron ap
 
 ## Getting Beacon
 
-Honest status first: the beacon-desktop repository is **private while it hardens**, and public builds will arrive with the public release — so today, getting Beacon means having repo access and building from source. Two more caveats for when builds do land: macOS builds are **unsigned** unless Apple credentials were in the build environment, so Gatekeeper will complain the first time — right-click → Open gets you past it. And there is **no auto-update channel** yet; new versions are a manual download.
-
-Building from source is quick if you have access:
-
-```bash
-git clone https://github.com/OAraLabs/beacon-desktop.git && cd beacon-desktop
-npm install
-npm run dev        # dev mode
-npm run dist       # packaged build for your platform
-```
+Honest status first: Beacon is free to use but not open source, and it is in beta. Builds — a `.dmg` for macOS, an `.AppImage` and a `.deb` for Linux — are published when Beacon leaves beta; until then, early users get draft builds ([oara.ai/beacon](https://oara.ai/beacon)). Two more caveats about those builds: macOS builds are **unsigned** unless Apple credentials were in the build environment, so Gatekeeper will complain the first time — right-click → Open gets you past it. And there is **no auto-update channel** yet; new versions are a manual download.
 
 First launch drops you into a stepped setup wizard that connects to your daemon — either with a 6-digit pairing code (if the daemon booted in setup mode) or an API token — then walks through model detection, agent identity, and optional chat gateways. The full pairing walkthrough with screenshots lives in the [install guide](install.md).
 
