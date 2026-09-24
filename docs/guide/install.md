@@ -1,6 +1,6 @@
 # Install & first flight
 
-This page takes you from nothing to a running Prometheus daemon with Beacon connected — including the fully guided "couch mode" path, where the daemon boots into setup mode and Beacon's wizard does the rest. Every command here is copy-pasteable; where something is rough today (unsigned macOS builds, no Homebrew formula yet), the page says so instead of pretending otherwise.
+This page takes you from nothing to a running Prometheus daemon with Beacon connected — including the fully guided "couch mode" path, where the daemon boots into setup mode and Beacon's wizard does the rest. Every command here is copy-pasteable; where something is rough today (unsigned macOS builds, Homebrew verified on Apple Silicon only), the page says so instead of pretending otherwise.
 
 [← README](../../README.md)
 
