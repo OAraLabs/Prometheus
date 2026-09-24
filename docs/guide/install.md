@@ -27,7 +27,7 @@ No GPU? Point Prometheus at a cloud provider and you still get the full harness 
 
 ## Install the daemon
 
-Four ways. On the three pip-based ones, keep the `[full]` extra: it pulls in everything (web API, Slack/Discord gateways, MCP, browser, voice, evals), and the web API that Beacon pairs with is not in the base package. You can install leaner extras later — for example `pip install 'oara-prometheus[slack]'` adds just the Slack gateway.
+Four ways. On the three pip-based ones, keep the `[full]` extra: the web API that Beacon pairs with is not in the base package. `[full]` adds the web API (FastAPI, Uvicorn, websockets), the Slack and Discord gateways, MCP, the Playwright browser tool, the Anthropic provider, and voice output (piper-tts, sounddevice, scipy). It does not add voice input (faster-whisper — the `voice` extra), `evals`, `push` or `computer`; install those by name if you want them. You can install leaner extras later — for example `pip install 'oara-prometheus[slack]'` adds just the Slack gateway.
 
 **One command, from Git** — an isolated install of the `oara` command straight from `main`, with [uv](https://docs.astral.sh/uv/) or pipx:
 
@@ -55,7 +55,7 @@ pip install 'oara-prometheus[full]'
 brew install oaralabs/tap/oara
 ```
 
-Use the full name: a bare `brew install oara` fails because the tap isn't trusted. The first install can take a while, because some dependencies build from source. The formula installs the base package, so it does not include the web API that Beacon pairs with — for Beacon, use one of the `[full]` installs above.
+Use the full name: a bare `brew install oara` fails because the tap isn't trusted. The first install can take a while, because some dependencies build from source.
 
 ## Run setup
 

@@ -323,7 +323,7 @@ Keep the `[full]` extra on each of those three paths — the web API that Beacon
 brew install oaralabs/tap/oara
 ```
 
-Use the full name: a bare `brew install oara` fails because the tap isn't trusted. The first install can take a while, because some dependencies build from source. The formula installs the base package, so it does not include the web API that Beacon pairs with — for Beacon, use one of the `[full]` installs above.
+Use the full name: a bare `brew install oara` fails because the tap isn't trusted. The first install can take a while, because some dependencies build from source.
 
 Then run the setup wizard:
 
