@@ -345,7 +345,8 @@ then switches off the time-window attribution below, because the daemon writes t
 
 ### Known gaps the ladder works around, not fixes
 
-All four are in daemon code (engine or providers), which this work package does not change.
+All of these are in daemon code (engine, adapter or providers), which this work package does not
+change.
 
 - Early-exit tool calls (`permission_denied`, `validation_failed`, `unknown_tool`,
   `tool_exception`, `hook_blocked`, `tool_timeout`, ...) and `_loop_transition` rows are written
@@ -361,6 +362,19 @@ All four are in daemon code (engine or providers), which this work package does 
 - The loop writes a repaired call's repair count only when the call executes (or times out); a
   repaired call that then fails is recorded with 0. The ladder counts repairs from the per-call
   observer instead.
+- **Tier `full` cannot read XML tool calls.** At `full` the tools are withheld from the request, so
+  llama-server's own parser has nothing to parse against, and Prometheus's extractor reads JSON
+  only. A model trained on Qwen3-Coder XML calls (Qwen3.5 / 3.8, Bonsai 2) keeps writing them:
+  a reply that is only the XML is stripped and retried (`stripped_to_empty`), and XML after prose
+  is deleted silently — the prose becomes the answer. Seen in real Bonsai 2 output (the smoke's
+  `parse_disagreement` halts and "Let me use Python…" format misses). The ladder counts
+  XML-markup turns per run so the tier sweep shows it; it cannot recover the deleted calls.
+- At `full` the model never sees parameter schemas (the tool list is name: description; the schema
+  exists only inside the grammar and a retry prompt), and at `light` it gets two call formats at
+  once (the template's XML block and the formatter's JSON instruction).
+- A circuit-breaker tier bump works on a copy of the adapter that keeps the old validator and
+  retry budget — a hybrid of two tiers. Rows record the tier at start and end, and the tier-sweep
+  report leaves bumped runs out of each tier's figures.
 
 ## Running it
 
@@ -369,10 +383,30 @@ uv run python scripts/ladder_run.py --provider llama_cpp --base-url "$LADDER_BAS
   --rung r27b --judge-base-url "$LADDER_JUDGE_BASE_URL"
 ```
 
-- **First run** (`first_run` in `rungs.yaml`): `r04b` (Qwen3.5-4B, Q8_0), `r14b` (Qwen3-14B,
-  Q4_K_M) and `r27b` (Qwen3.8-27B, UD-Q4_K_XL — the 4090's production model). The 4B and 14B
-  files were not on either box on 2026-09-24 and must be downloaded first. `r02b`, `r08b` and the
-  26B-A4B MoE stay proposed for a later run.
+- **First run** (`first_run` in `rungs.yaml`, decided 2026-09-25): `r27b` (Qwen3.8-27B
+  UD-Q4_K_XL — the 4090's production model, run against the production server untouched and only
+  inside 06:30–10:00), `r27b-pq2` (PrismML's ternary Bonsai 2 27B — the same checkpoint, what
+  compression costs) and `r08b` (Qwen3.5-9B UD-Q4_K_XL — what size costs). Each pins its file by
+  revision and SHA-256. `r04b` (Qwen3.5-4B) comes later.
+- **Serving.** Every rung runs on llama.cpp — never Ollama, which turns thinking on, drops the
+  grammar-constrained tool decoding, swaps the prompt renderer and sampler, and reports the file
+  type as the quant. The mini rungs mirror production's flags (`-c 32768 --parallel 1
+  --flash-attn on --jinja --reasoning-budget 2048`), set sampling explicitly to production's
+  effective values (`--temp 1.0 --top-k 20 --top-p 0.95 --min-p 0.05` — Prometheus sends none, and
+  each GGUF carries its own defaults), bind to localhost, and differ only in port, no vision
+  projector (text-only suite) and, for Bonsai, `-ub 512` (memory). `r08b` runs on llama.cpp built on
+  the mini at production's commit; `r27b-pq2` on PrismML's fork, release `prism-b10735` or later
+  (earlier builds crash loading PQ2_0 on the mini's AVX-512 CPU). Record each server's `/props`
+  (build, context, sampler) with the run. Thinking stays suppressed on every rung, and every rung
+  runs at least 3 runs per task.
+- **Tier sweep.** `--force-adapter-tier off|light|full` (with `--rung`) runs the rung's model with
+  the daemon's own adapter for that tier — only the tier decision is replaced. The rung's checks
+  still run; rows are filed under no rung (`tier_sweep` says what was forced and what the daemon
+  picks), `--compare` refuses them, and `--tier-report L1,L2,…` writes the per-tier table: task
+  success, tool-call success, repairs, adapter retries and aborts, calls recovered from text, text
+  calls tier off missed, XML-markup turns, breaker halts — plus paired per-task differences. Run
+  each tier as its own arm, rotate the tier order across repetitions, and use a separate
+  `--telemetry-db`.
 
 - Endpoints come from flags or `LADDER_BASE_URL` / `LADDER_JUDGE_BASE_URL`; none are committed.
 - `--rung` refuses to run unless the endpoint serves a model matching the rung, the adapter picks
