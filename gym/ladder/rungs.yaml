@@ -1,0 +1,87 @@
+# The model ladder's rungs — PROPOSED for WP-2.2 (4090) and WP-2.3 (Apple
+# Silicon). WP-2.1 defines the suite; these entries are the targets those runs
+# confirm or replace. Endpoints never live here: pass --base-url /
+# --judge-base-url (or LADDER_BASE_URL / LADDER_JUDGE_BASE_URL).
+#
+# A --rung run is REFUSED unless the endpoint serves a model matching `match`
+# (regex, case-insensitive), the adapter picks `adapter_tier` for it (the tier
+# the daemon itself would use — config/model_registry.yaml), and the probed
+# quantization equals `quantization`. Rows are never filed under a rung the
+# endpoint is not actually serving.
+#
+# on_disk: where a copy was seen on 2026-09-24 (read-only listing), or "none"
+# (must be downloaded first). Sizes follow one family (Qwen3.5) where the
+# family has the size, so the ladder measures size rather than generation.
+
+version: 1
+
+# The FIRST run's rungs (WP-2.2 / WP-2.3): about 4B, about 14B, and the 27B.
+# r02b, r08b and the MoE (r26b-moe, the 32 GB Apple Silicon run) stay
+# proposed for a later run.
+first_run: [r04b, r14b, r27b]
+
+# ONE judge for every rung, so pass rates on judged tasks are comparable
+# across rungs. It must not be any rung's model (enforced by
+# tests/test_ladder_suite.py and again at run time), and it runs on a box
+# that is NOT serving the rung under test. qwen2.5:14b-instruct: a different
+# generation from every rung, stronger than the 7B nightly-eval judge, and it
+# fits on the mini's 24 GB card during a ladder window. It is weaker than the
+# 27B rung it grades — see docs/MODEL-LADDER.md, "Judge".
+judge:
+  model: qwen2.5:14b-instruct
+  served_by: ollama
+  on_disk: mini
+
+rungs:
+  - id: r02b
+    size_class: 2B
+    model: Qwen3.5-2B
+    match: 'qwen3\.5[-_:]2b'
+    quantization: Q8_0
+    adapter_tier: light
+    on_disk: none
+    notes: Small models lose the most to quantization; Q8_0 keeps it out of the comparison.
+
+  - id: r04b
+    size_class: 4B
+    model: Qwen3.5-4B
+    match: 'qwen3\.5[-_:]4b'
+    quantization: Q8_0
+    adapter_tier: light
+    on_disk: none
+
+  - id: r08b
+    size_class: 8B
+    model: Qwen3.5-9B
+    match: 'qwen3\.5[-_:]9b'
+    quantization: Q4_K_M
+    adapter_tier: light
+    on_disk: 4090 (ollama qwen3.5:9b)
+
+  - id: r14b
+    size_class: 14B
+    model: Qwen3-14B
+    match: 'qwen3[-_:]14b'
+    quantization: Q4_K_M
+    adapter_tier: light
+    on_disk: none
+    notes: >
+      Qwen3.5 has no 14B; this rung is one generation older than its
+      neighbours, so a step here mixes size with generation. Say so in the
+      WP-2.2 write-up rather than reading it as a pure size effect.
+
+  - id: r27b
+    size_class: 27B
+    model: Qwen3.8-27B
+    match: 'qwen3\.8[-_]27b'
+    quantization: UD-Q4_K_XL
+    adapter_tier: light
+    on_disk: 4090 (the production llama-server model)
+
+  - id: r26b-moe
+    size_class: 26B-A4B MoE
+    model: gemma-4-26B-A4B-it
+    match: 'gemma-4-26b-a4b'
+    quantization: Q4_K_M
+    adapter_tier: light
+    on_disk: 4090 (GGUF); WP-2.3 runs it on a 32 GB Apple Silicon Mac

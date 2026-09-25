@@ -1,0 +1,687 @@
+# Class: plain Q&A — answerable without tools.
+# Exact answers: the prompt asks the reply to end with "ANSWER: <value>", and
+# expect_answer fullmatches that value (verdict.read_answer), so working and
+# distractors above the line cannot pass or fail the run. wrong_answers prove
+# the check is tight, right_answers that it credits other spellings.
+# On the ANSWER line, a wrong value of the answer_shape fails, and so does one
+# clean token of the wrong kind; a sentence is scored on its one value of the
+# answer_shape; a hedge ("or"), a negation, a parenthetical or a list is a
+# FORMAT MISS (format_misses), never a wrong answer.
+# A reply with NO answer line is read only for its last line: the right value
+# there passes (alone, or as the one value of the answer_shape in a sentence),
+# a bare wrong value of the answer_shape fails, and anything else — prose, a
+# list, a quoted block — is a format miss.
+# Open-ended explanations are graded by the pinned judge.
+class: qa
+tasks:
+  - id: qa-arith-mult
+    difficulty: easy
+    smoke: true
+    prompt: "What is 47 multiplied by 23? End your reply with a final line `ANSWER: <the number>`."
+    score:
+      expect_answer: '1[,\s]?081(?:\.0+)?'
+      answer_shape: '-?\d+(?:[,\s]\d{3})*(?:\.\d+)?'
+    reference:
+      answer: "47 × 23 = 47 × 20 + 47 × 3 = 940 + 141 = 1081.\nANSWER: 1081"
+      right_answers:
+        - "ANSWER: 1081"
+        - "47 × 23 = 940 + 141 = 1,081. (1071 would drop a ten from the 141, and 1034 is 47 × 22.)\nANSWER: 1,081"
+        - "**ANSWER:** 1 081"
+        - "Final answer: 1 081"
+        - "ANSWER: `1 081`"
+        - "47 × 23 = 940 + 141.\nSo the answer is 1081."
+        - "ANSWER: <1081>"
+        - "47 × 23 = 1081.\n\n**Final Answer:**\n\n$$\\boxed{1081}$$"
+        - "Final Answer: $\\boxed{1{,}081}$"
+        - "Final Answer: \\[\\boxed{1081}\\]"
+      wrong_answers:
+        - "ANSWER: 1071"
+        - "47 × 23 = 940 + 141 = 1081.\nANSWER: 1071"
+        - "ANSWER: 1,801"
+        - "ANSWER: 1034"
+        - "ANSWER: 1081.5"
+        - "1071"
+      format_misses:
+        - "47 × 23 = 940 + 141 = 1081."
+        - "Multiplying 47 by 23 means adding 47 × 20 and 47 × 3; the sum is left as an exercise."
+        - "47 × 23 = 940 + 141 = 1081.\n\nANSWER:"
+    notes: "Two-digit multiplication; the traps are dropping a ten (1071) and 47 × 22 (1034)."
+
+  - id: qa-explain-sky-blue
+    difficulty: medium
+    smoke: true
+    prompt: "In two or three sentences, explain why the daytime sky looks blue."
+    judge:
+      rubric: >
+        Pass only if the answer attributes the colour to sunlight being
+        scattered by the gas molecules of the atmosphere (Rayleigh scattering)
+        AND says shorter (blue) wavelengths are scattered more strongly than
+        longer (red) ones. Fail answers that attribute it to reflection of the
+        ocean, to the colour of the air itself, or to ozone absorption alone.
+        It should be two to four sentences.
+      reference: >
+        Sunlight is scattered by the nitrogen and oxygen molecules in the air,
+        and short wavelengths scatter far more strongly than long ones
+        (Rayleigh scattering goes roughly as 1/wavelength^4). Blue light is
+        therefore redirected across the whole sky and reaches our eyes from
+        every direction, so the sky looks blue.
+      threshold: 0.7
+
+  # --- easy -------------------------------------------------------------
+
+  - id: qa-percent-of
+    difficulty: easy
+    prompt: "What is 15% of 840? End your reply with a final line `ANSWER: <the number>`."
+    score:
+      expect_answer: '126(?:\.0+)?'
+      answer_shape: '-?\d+(?:[,\s]\d{3})*(?:\.\d+)?'
+    reference:
+      answer: "10% of 840 is 84 and 5% is 42, so 15% is 84 + 42 = 126.\nANSWER: 126"
+      right_answers:
+        - "ANSWER: 126"
+        - "15% of 840 = 0.15 × 840 = 126. It is not 12.6 (that is 1.5%) or 1260 (that is 150%).\nANSWER: 126"
+        - "**ANSWER:** `126.0`"
+        - "Final answer: 126."
+        - "10% is 84 and 5% is 42.\n126"
+      wrong_answers:
+        - "ANSWER: 12.6"
+        - "0.15 × 840 = 126.\nANSWER: 1260"
+        - "ANSWER: 136"
+        - "ANSWER: 162"
+        - "ANSWER: 714"
+        - "12.6"
+      format_misses:
+        - "0.15 × 840 = 126."
+        - "Fifteen percent is a tenth of 840 plus half of that tenth, which is easy to add up."
+        - "ANSWER: 126 (84 + 42)"
+    notes: "A percentage of a number; the traps are a slipped decimal point (12.6, 1260) and the complement (714). 126.0, as Python prints 0.15 * 840, is accepted."
+
+  - id: qa-seconds-in-hours
+    difficulty: easy
+    prompt: "How many seconds are there in 3.5 hours? End your reply with a final line `ANSWER: <the number>`."
+    score:
+      expect_answer: '12[,\s]?600(?:\.0+)?(?:\s*(?:s|secs?|seconds))?'
+      answer_shape: '-?\d+(?:[,\s]\d{3})*(?:\.\d+)?(?:\s*(?:s|secs?|seconds?|mins?|minutes?|h|hrs?|hours?))?'
+    reference:
+      answer: "One hour is 3,600 seconds, so 3.5 hours is 3.5 × 3,600 = 12,600 seconds.\nANSWER: 12600"
+      right_answers:
+        - "ANSWER: 12600"
+        - "3.5 h is 210 minutes, not 3 h 50 min, and 210 × 60 = 12,600 s. (Reading 3.5 as 3:50 would give 13,800.)\nANSWER: 12,600 seconds"
+        - "**ANSWER:** 12 600"
+        - "Final answer: 12600.0"
+        - "ANSWER: 12 600 s"
+        - "3.5 × 3,600 =\n12,600 seconds"
+        - "ANSWER: $\\boxed{12{,}600}$"
+      wrong_answers:
+        - "ANSWER: 13800"
+        - "ANSWER: 210"
+        - "3.5 × 3600 = 12,600 seconds.\nANSWER: 1260"
+        - "ANSWER: 12,600 minutes"
+        - "ANSWER: 11,100"
+        - "ANSWER: 12600.5"
+        - "13,800 seconds"
+      format_misses:
+        - "3.5 × 3600 = 12,600 seconds."
+        - "An hour has 3,600 seconds, so multiply that by three and a half."
+    notes: "A unit conversion with a fractional hour; the traps are reading 3.5 h as 3 h 50 min (13,800) and stopping at minutes (210). A trailing .0 (Python's 3.5 * 3600) and a seconds unit are accepted."
+
+  - id: qa-gk-titan-planet
+    difficulty: easy
+    prompt: "Which planet does the moon Titan orbit? End your reply with a final line `ANSWER: <the planet's name>`."
+    score:
+      expect_answer: '(?:the planet )?saturn'
+      answer_shape: '(?:the planet )?(?:mercury|venus|earth|mars|jupiter|saturn|uranus|neptune|pluto)'
+    reference:
+      answer: "Titan is Saturn's largest moon.\nANSWER: Saturn"
+      right_answers:
+        - "ANSWER: Saturn"
+        - "Titan is easily confused with Triton, which orbits Neptune, and Jupiter's Ganymede is the only moon larger than Titan. Titan itself orbits Saturn.\nANSWER: Saturn"
+        - "**ANSWER:** *SATURN*"
+        - "Final answer: the planet Saturn."
+        - "Titan is the largest moon of the ringed planet.\nThe answer is Saturn."
+        - "Final Answer: $\\boxed{\\text{Saturn}}$"
+        - "Titan orbits Saturn."
+      wrong_answers:
+        - "ANSWER: Neptune"
+        - "Titan is Saturn's largest moon.\nANSWER: Jupiter"
+        - "ANSWER: Jupiter"
+        - "ANSWER: Uranus"
+        - "Jupiter"
+      format_misses:
+        - "Titan is one of the largest moons in the Solar System, with a thick nitrogen atmosphere."
+        - "ANSWER: Saturn or Jupiter"
+    notes: "General-knowledge recall; the trap is confusing Titan with Triton (Neptune) or with Jupiter's large moons, which a reply may discuss freely above the ANSWER line."
+
+  - id: qa-algebra-linear
+    difficulty: easy
+    prompt: "Solve for x: 7x - 19 = 3x + 45. End your reply with a final line `ANSWER: <the value of x>`."
+    score:
+      expect_answer: '(?:x\s*=\s*)?16(?:\.0+)?'
+      answer_shape: '(?:x\s*=\s*)?(?:-?\d+(?:\.\d+)?(?:\s*/\s*\d+)?|-?\\[dt]?frac\{-?\d+\}\{\d+\})'
+    reference:
+      answer: "Subtract 3x from both sides: 4x − 19 = 45. Add 19: 4x = 64. Divide by 4: x = 16.\nANSWER: x = 16"
+      right_answers:
+        - "ANSWER: 16"
+        - "4x = 64, so x = 64/4 = 16 — not 1/16 (dividing the wrong way) and not −16 (a sign slip). Check: 7·16 − 19 = 93 = 3·16 + 45.\nANSWER: x = 16"
+        - "**ANSWER:** $x = 16$"
+        - "Final answer: \\boxed{16}"
+        - "ANSWER: 16.0"
+        - "4x = 64.\nx = 16"
+        - "4x = 64.\n\n**ANSWER:**\n$$x = 16$$"
+      wrong_answers:
+        - "ANSWER: -16"
+        - "4x = 64, so x = 16.\nANSWER: 1/16"
+        - "ANSWER: x = 64"
+        - "ANSWER: x = 6.5"
+        - "ANSWER: x = −16"
+        - "ANSWER: $x = \\frac{16}{3}$"
+        - "x = -16"
+      format_misses:
+        - "4x = 64, so x = 16."
+        - "Collect the x terms on one side and the constants on the other, then divide."
+    notes: "A one-variable linear equation; the traps are the sign slip (−16), dividing the wrong way (1/16), stopping at 4x = 64, and subtracting 19 instead of adding it (6.5)."
+
+  - id: qa-number-sequence
+    difficulty: easy
+    prompt: "What number comes next in the sequence 2, 6, 12, 20, 30, 42, ...? End your reply with a final line `ANSWER: <the number>`."
+    score:
+      expect_answer: '56'
+      answer_shape: '-?\d+'
+    reference:
+      answer: "The terms are n(n + 1): 1·2, 2·3, 3·4, 4·5, 5·6, 6·7, so the next is 7·8 = 56.\nANSWER: 56"
+      right_answers:
+        - "ANSWER: 56"
+        - "The differences are 4, 6, 8, 10, 12, growing by 2, so the next difference is 14 — not 12 again (54) or 16 (58): 42 + 14 = 56.\nANSWER: 56"
+        - "**ANSWER:** **56**"
+        - "Final answer: 56."
+        - "The terms are n(n + 1).\nSo 56."
+        - "Final Answer: \\[\\boxed{56}\\]"
+      wrong_answers:
+        - "ANSWER: 54"
+        - "The next term is 7 × 8 = 56.\nANSWER: 58"
+        - "ANSWER: 72"
+        - "ANSWER: 52"
+        - "54"
+      format_misses:
+        - "The next term is 7 × 8 = 56."
+        - "Each difference grows by two, so the pattern is easy to continue from here."
+    notes: "Spot the pattern n(n + 1); the traps are repeating the last difference (54) and skipping a term (72)."
+
+  - id: qa-explain-ice-floats
+    difficulty: easy
+    prompt: "In two or three sentences, explain why ice floats on liquid water."
+    judge:
+      rubric: >
+        Pass only if the answer says ice is LESS DENSE than liquid water AND
+        explains why: as water freezes, hydrogen bonds lock the molecules into
+        an open, spread-out (hexagonal) crystal lattice that takes up more
+        space than the same molecules in the liquid. Fail answers that credit
+        trapped air bubbles, surface tension, or ice simply being "lighter"
+        with no mention of density, and answers that say ice is denser.
+        It should be two to four sentences.
+      reference: >
+        When water freezes, hydrogen bonds hold the molecules in an open
+        hexagonal lattice, so they sit farther apart than in the liquid, where
+        they can pack more closely. The same mass therefore takes up more
+        volume as ice, making ice about 9% less dense than liquid water, so it
+        floats.
+      threshold: 0.7
+
+  # --- medium -----------------------------------------------------------
+
+  - id: qa-long-division
+    difficulty: medium
+    prompt: "What is 9,828 divided by 36? End your reply with a final line `ANSWER: <the number>`."
+    score:
+      expect_answer: '273(?:\.0+)?'
+      answer_shape: '-?\d+(?:[,\s]\d{3})*(?:\.\d+)?'
+    reference:
+      answer: "36 × 270 = 9,720, and 9,828 − 9,720 = 108 = 36 × 3, so 9,828 ÷ 36 = 273.\nANSWER: 273"
+      right_answers:
+        - "ANSWER: 273"
+        - "36 × 273 = 9,828 exactly, with no remainder. (263 and 283 are a ten off; 27.3 misplaces the decimal point.)\nANSWER: 273"
+        - "**ANSWER:** `273.0`"
+        - "Final answer: 273"
+        - "36 × 270 = 9,720 and 108 = 36 × 3.\n273"
+        - "ANSWER: <273>"
+      wrong_answers:
+        - "ANSWER: 263"
+        - "9,828 ÷ 36 = 273.\nANSWER: 27.3"
+        - "ANSWER: 283"
+        - "ANSWER: 272"
+        - "ANSWER: 2730"
+        - "263"
+      format_misses:
+        - "9,828 ÷ 36 = 273."
+        - "Dividing by 36 is the same as dividing by 4 and then by 9."
+    notes: "Long division with an exact quotient; the traps are a tens-digit slip (263, 283) and a misplaced decimal point (27.3, 2730). 273.0, as Python prints 9828 / 36, is accepted."
+
+  - id: qa-train-arrival
+    difficulty: medium
+    prompt: "A train departs at 09:47 and the journey takes 2 hours 38 minutes. At what time does it arrive? End your reply with a final line `ANSWER: <the arrival time in 24-hour HH:MM format>`."
+    score:
+      expect_answer: '12:25(?:\s?p\.?m\.?)?'
+      answer_shape: '\d{1,2}:\d{2}(?:\s?[ap]\.?m\.?)?'
+    reference:
+      answer: "09:47 + 2 h = 11:47, and 11:47 + 38 min = 12:25.\nANSWER: 12:25"
+      right_answers:
+        - "ANSWER: 12:25"
+        - "47 + 38 = 85 minutes, which carries an hour: not 11:85 or 11:25 but 12:25, twenty-five past noon (12:25 AM would be just after midnight).\nANSWER: 12:25"
+        - "**ANSWER:** `12:25`"
+        - "Final answer: 12:25 PM"
+        - "09:47 + 2 h 38 min carries an hour.\nThe answer is 12:25."
+        - "It arrives at 12:25."
+      wrong_answers:
+        - "ANSWER: 11:25"
+        - "09:47 + 2 h 38 min = 12:25.\nANSWER: 12:15"
+        - "ANSWER: 12:25 AM"
+        - "ANSWER: 11:85"
+        - "ANSWER: 13:25"
+        - "12:15"
+      format_misses:
+        - "Add the hours first and then the minutes, carrying into the next hour where needed."
+        - "ANSWER: `12:25` (twenty-five past noon)"
+    notes: "Clock arithmetic across the hour; the trap is the minute carry (47 + 38 = 85). 12:25 PM is accepted, 12:25 AM (just after midnight) is not."
+
+  - id: qa-area-units
+    difficulty: medium
+    prompt: "How many square centimetres are in 1.2 square metres? End your reply with a final line `ANSWER: <the number>`."
+    score:
+      expect_answer: '12[,\s]?000(?:\.0+)?(?:\s*(?:cm²|cm\^?2|sq\.?\s*cm|square\s+cm|square centimet(?:re|er)s))?'
+      answer_shape: '-?\d+(?:[,\s]\d{3})*(?:\.\d+)?(?:\s*(?:[cmk]?m²|[cmk]?m\^?2|sq\.?\s*[cmk]?m|square\s+(?:(?:centi|milli|kilo)?met(?:re|er)s?|[cmk]?m)))?'
+    reference:
+      answer: "1 m² = 100 cm × 100 cm = 10,000 cm², so 1.2 m² = 12,000 cm².\nANSWER: 12000"
+      right_answers:
+        - "ANSWER: 12000"
+        - "The factor is 100² = 10,000, not 100 (which would give 120) or 1,000,000 (the factor for mm²): 1.2 × 10,000 = 12,000.\nANSWER: 12,000 cm²"
+        - "**ANSWER:** 12 000.0"
+        - "Final answer: 12000 square centimetres"
+        - "ANSWER: 12,000 sq cm"
+        - "1 m² is 10,000 cm², times 1.2:\n12,000 sq. cm"
+        - "ANSWER: $12\\,000$"
+        - "ANSWER: $12{,}000\\ \\text{cm}^2$"
+        - "ANSWER: 12,000 square cm"
+      wrong_answers:
+        - "ANSWER: 120"
+        - "1.2 × 10,000 = 12,000 cm².\nANSWER: 1,200"
+        - "ANSWER: 1,200,000"
+        - "ANSWER: 120,000"
+        - "ANSWER: 12000.5"
+        - "120 cm²"
+        - "ANSWER: 12,000 sq mm"
+      format_misses:
+        - "1.2 × 10,000 = 12,000 cm²."
+        - "A square metre is 100 cm by 100 cm, so scale by that area rather than by 100."
+    notes: "An area unit conversion; the trap is scaling by the linear factor 100 (120) instead of 100² (12,000). A trailing .0 (Python's 1.2 * 10000) and a cm² or sq cm unit are accepted."
+
+  - id: qa-roman-numeral
+    difficulty: medium
+    prompt: "Write the year 1994 in Roman numerals. End your reply with a final line `ANSWER: <the Roman numeral>`."
+    score:
+      expect_answer: 'mcmxciv'
+      answer_shape: 'm{1,3}(?:cm|cd|d?c{0,4})(?:xc|xl|l?x{0,4})(?:ix|iv|v?i{0,4})'
+    reference:
+      answer: "1994 = 1000 + 900 + 90 + 4 = M + CM + XC + IV.\nANSWER: MCMXCIV"
+      right_answers:
+        - "ANSWER: MCMXCIV"
+        - "M = 1000, CM = 900, XC = 90, IV = 4. Writing 4 as IIII or 90 as LXXXX is the additive style, and MCMXCVI would be 1996.\nANSWER: MCMXCIV"
+        - "**ANSWER:** `MCMXCIV`"
+        - "Final answer: mcmxciv."
+        - "1994 = M + CM + XC + IV.\n**MCMXCIV**"
+        - "Final Answer: $\\boxed{\\text{MCMXCIV}}$"
+        - "1994 in Roman numerals is MCMXCIV."
+      wrong_answers:
+        - "ANSWER: MCMXCVI"
+        - "1994 is M CM XC IV, that is MCMXCIV.\nANSWER: MCMXCIIII"
+        - "ANSWER: MDCCCCLXXXXIV"
+        - "ANSWER: MXMIV"
+        - "ANSWER: MCMLXLIV"
+        - "MCMXCVI"
+      format_misses:
+        - "Break the year into thousands, hundreds, tens and units, and use the subtractive pairs."
+        - "1994 is MCMXCIV; 1996 would be MCMXCVI."
+    notes: "Subtractive Roman numerals; the traps are transposing the last two symbols (MCMXCVI, 1996) and additive or invalid forms (IIII, MXMIV)."
+
+  - id: qa-py-sorted-slice
+    difficulty: medium
+    prompt: |
+      What does this Python code print?
+
+      words = ["kiwi", "fig", "banana", "apple", "date"]
+      print(sorted(words, key=lambda w: (len(w), w))[1:4])
+
+      End your reply with a final line `ANSWER: <the exact output>`.
+    score:
+      expect_answer: '\[\s*[''"]date[''"],\s*[''"]kiwi[''"],\s*[''"]apple[''"]\s*\]'
+      answer_shape: '\[\s*(?:[''"][^''"]*[''"](?:\s*,\s*[''"][^''"]*[''"])*\s*,?)?\s*\]'
+    reference:
+      answer: "Sorted by (length, word) the list is ['fig', 'date', 'kiwi', 'apple', 'banana'], and [1:4] takes indexes 1 to 3.\nANSWER: ['date', 'kiwi', 'apple']"
+      right_answers:
+        - "ANSWER: ['date', 'kiwi', 'apple']"
+        - "The key sorts by length, then alphabetically: 'fig' (3), 'date' and 'kiwi' (4), 'apple' (5), 'banana' (6). The slice [1:4] skips 'fig' at index 0 and stops before 'banana' at index 4.\nANSWER: ['date', 'kiwi', 'apple']"
+        - "**ANSWER:** `['date','kiwi','apple']`"
+        - "Final answer: [\"date\", \"kiwi\", \"apple\"]"
+        - "It prints:\n```\n['date', 'kiwi', 'apple']\n```"
+        - "Sorted: ['fig', 'date', 'kiwi', 'apple', 'banana'].\n\n**ANSWER:**\n```\n['date', 'kiwi', 'apple']\n```"
+        - "It prints ['date', 'kiwi', 'apple']."
+      wrong_answers:
+        - "ANSWER: ['fig', 'date', 'kiwi']"
+        - "The sorted list is ['fig', 'date', 'kiwi', 'apple', 'banana'], so the slice is ['date', 'kiwi', 'apple'].\nANSWER: ['date', 'kiwi', 'apple', 'banana']"
+        - "ANSWER: ['apple', 'date', 'kiwi']"
+        - "ANSWER: ['kiwi', 'date', 'apple']"
+        - "ANSWER: ['date', 'kiwi']"
+        - "It prints:\n```\n['fig', 'date', 'kiwi']\n```"
+      format_misses:
+        - "The key sorts by length first and then alphabetically, and the slice drops the first element."
+        - "Sorted it is ['fig', 'date', 'kiwi', 'apple', 'banana'], so it prints ['date', 'kiwi', 'apple']."
+    notes: "Predicting Python output from a tuple sort key and a slice; the traps are an off-by-one slice (['fig', 'date', 'kiwi']) and ignoring the length key (['apple', 'date', 'kiwi'])."
+
+  - id: qa-reverse-word
+    difficulty: medium
+    prompt: "Write the word \"algorithm\" spelled backwards. End your reply with a final line `ANSWER: <the reversed word>`."
+    score:
+      expect_answer: 'mhtirogla'
+      answer_shape: '(?!algorithm\b)[aghilmort]{8,10}'
+    reference:
+      answer: "a-l-g-o-r-i-t-h-m read from the end is m-h-t-i-r-o-g-l-a.\nANSWER: mhtirogla"
+      right_answers:
+        - "ANSWER: mhtirogla"
+        - "Letter by letter from the end: m, h, t, i, r, o, g, l, a. Careful not to write mhtirogal (the last two swapped) or mthirogla.\nANSWER: mhtirogla"
+        - "**ANSWER:** \"MHTIROGLA\""
+        - "Final answer: `mhtirogla`."
+        - "Read from the end, letter by letter:\n\"mhtirogla\""
+        - "Final Answer: $\\text{mhtirogla}$"
+        - "\"algorithm\" spelled backwards is \"mhtirogla\"."
+      wrong_answers:
+        - "ANSWER: mhtirogal"
+        - "Backwards it is m-h-t-i-r-o-g-l-a.\nANSWER: mhtiorgla"
+        - "ANSWER: mthirogla"
+        - "ANSWER: mhtirgola"
+        - "ANSWER: algorithm"
+        - "mhtirogal"
+      format_misses:
+        - "Reading a word backwards is easiest one letter at a time, starting from the end."
+        - "Backwards it reads mhtirogla; swapping the last two letters would give mhtirogal."
+    notes: "Reversing a nine-letter word, which tokenised models find hard; the traps are transposed letters (mhtirogal, mthirogla). Case is ignored."
+
+  - id: qa-explain-tcp-udp
+    difficulty: medium
+    prompt: "In two sentences, explain the main difference between TCP and UDP."
+    judge:
+      rubric: >
+        Pass only if the answer says TCP is connection-oriented and gives
+        reliable, ordered delivery (acknowledgements and retransmission of
+        lost data), AND that UDP is connectionless and gives no guarantee of
+        delivery or ordering. Naming the trade-off (UDP has less overhead and
+        latency and suits streaming, games and DNS; TCP suits data that must
+        arrive intact, such as web pages and file transfer) is welcome but not
+        required, since the prompt asks only for the main difference. Fail if
+        the properties are swapped, if UDP is described as encrypted or more
+        secure, or if the only difference given is speed. No more than three
+        sentences.
+      reference: >
+        TCP sets up a connection and guarantees that data arrives complete and
+        in order, acknowledging and retransmitting lost packets, at the cost
+        of extra overhead and latency. UDP just sends independent datagrams
+        with no connection, no delivery or ordering guarantee and very little
+        overhead, which suits real-time uses like voice, games and DNS
+        lookups.
+      threshold: 0.7
+
+  - id: qa-explain-hash-collision
+    difficulty: medium
+    prompt: "Briefly explain what a hash collision is and why collisions cannot be avoided entirely."
+    judge:
+      rubric: >
+        Pass only if the answer defines a collision as two DIFFERENT inputs
+        that produce the SAME hash value, AND explains that they are
+        unavoidable because a hash maps a larger (often unbounded) set of
+        possible inputs onto a fixed, finite set of outputs, so by the
+        pigeonhole principle some inputs must share an output. Mentioning how
+        hash tables cope (chaining, probing) or that cryptographic hashes make
+        collisions infeasible to FIND is welcome but not required. Fail if a
+        collision is described as the same input giving different outputs, or
+        if the answer claims a good hash function has no collisions at all.
+      reference: >
+        A hash collision happens when two different inputs produce the same
+        hash value. Collisions cannot be avoided entirely because a hash
+        function maps an effectively unlimited number of possible inputs onto
+        a fixed-size output, so by the pigeonhole principle many inputs must
+        share each output; good hash functions only make collisions rare and,
+        for cryptographic hashes, infeasible to find on purpose.
+      threshold: 0.7
+
+  # --- hard -------------------------------------------------------------
+
+  - id: qa-weekday-of-date
+    difficulty: hard
+    prompt: "What day of the week will 4 July 2047 be? End your reply with a final line `ANSWER: <the weekday>`."
+    score:
+      expect_answer: 'thursday'
+      answer_shape: '(?:mon|tues|wednes|thurs|fri|satur|sun)day'
+    reference:
+      answer: "4 July 2046 is a Wednesday and 2047 is not a leap year, so 4 July 2047 is one weekday later.\nANSWER: Thursday"
+      right_answers:
+        - "ANSWER: Thursday"
+        - "4 July 2024 was a Thursday. The 23 years to 2047 contain 5 leap days (2028, 2032, 2036, 2040, 2044), so the shift is 23 + 5 = 28 days, exactly 4 weeks. Counting 6 leap days would give Friday, and forgetting them would give Saturday.\nANSWER: Thursday"
+        - "**ANSWER:** *Thursday*"
+        - "Final answer: THURSDAY."
+        - "23 years plus 5 leap days is 28 days, exactly four weeks after a Thursday.\nThursday."
+        - "ANSWER: \\boxed{\\text{Thursday}}"
+        - "4 July 2047 falls on a Thursday."
+      wrong_answers:
+        - "ANSWER: Friday"
+        - "4 July 2024 was a Thursday and the 23 years add 28 days, so 4 July 2047 is a Thursday.\nANSWER: Friday"
+        - "ANSWER: Wednesday"
+        - "ANSWER: Saturday"
+        - "Friday"
+      format_misses:
+        - "Count the years and the leap days between a known date and 2047, then shift the weekday by that many days."
+        - "ANSWER: Wednesday or Thursday"
+    notes: "Calendar arithmetic over 23 years; the traps are miscounting the leap days (Friday) or forgetting them (Saturday), and the natural anchor 4 July 2024 is itself a Thursday."
+
+  - id: qa-logic-race-order
+    difficulty: hard
+    prompt: >
+      Five runners (Ines, Priya, Tomas, Wen and Zara) finished a race with no
+      ties. Tomas finished somewhere ahead of Wen. Zara finished immediately
+      after Priya. Wen did not finish last. Priya did not finish first. Ines
+      and Tomas did not finish next to each other. Ines finished somewhere
+      ahead of Priya. End your reply with a final line `ANSWER: <the five
+      names in finishing order from first to last, separated by commas>`.
+    score:
+      expect_answer: 'tomas,\s*wen,\s*ines,\s*priya,?\s*(?:and\s+)?zara'
+      answer_shape: '(?:ines|priya|tomas|wen|zara)(?:,\s*(?:ines|priya|tomas|wen|zara)){3},?\s*(?:and\s+)?(?:ines|priya|tomas|wen|zara)'
+    reference:
+      answer: "Nobody else can be last, so Zara is fifth and Priya fourth. Of the orders left for Ines, Tomas and Wen with Tomas ahead of Wen, only Tomas, Wen, Ines keeps Ines and Tomas apart.\nANSWER: Tomas, Wen, Ines, Priya, Zara"
+      right_answers:
+        - "ANSWER: Tomas, Wen, Ines, Priya, Zara"
+        - "Zara must be last and Priya fourth. Ines, Tomas, Wen, Priya, Zara fails because Ines and Tomas are adjacent, and so does Tomas, Ines, Wen, Priya, Zara; one order is left.\nANSWER: Tomas, Wen, Ines, Priya, Zara"
+        - "**ANSWER:** *tomas, wen, ines, priya and zara*"
+        - "Final answer: Tomas, Wen, Ines, Priya, and Zara."
+        - "Zara is last and Priya fourth; Ines and Tomas must not be adjacent.\nTomas, Wen, Ines, Priya, Zara"
+        - "Only one order survives every clue.\n\n**Final answer:**\n\nTomas, Wen, Ines, Priya, Zara"
+        - "The finishing order is Tomas, Wen, Ines, Priya, Zara."
+      wrong_answers:
+        - "ANSWER: Ines, Tomas, Wen, Priya, Zara"
+        - "Only Tomas, Wen, Ines, Priya, Zara satisfies every clue.\nANSWER: Tomas, Ines, Wen, Priya, Zara"
+        - "ANSWER: Wen, Tomas, Ines, Priya, Zara"
+        - "ANSWER: Zara, Priya, Ines, Wen, Tomas"
+        - "ANSWER: Tomas, Wen, Ines, Zara, Priya"
+        - "Ines, Tomas, Wen, Priya, Zara"
+      format_misses:
+        - "Zara must be last and Priya fourth; the rest follows from the adjacency clue."
+        - "Tomas, Wen, Ines, Priya, Zara works; Ines, Tomas, Wen, Priya, Zara breaks the adjacency clue."
+    notes: "A five-runner ordering puzzle with exactly one solution (brute-forced over all 120 orders); the trap is Ines, Tomas, Wen, Priya, Zara, which breaks only the Ines/Tomas adjacency clue."
+
+  - id: qa-py-mutable-default
+    difficulty: hard
+    smoke: true
+    prompt: |
+      What does this Python program print?
+
+      def add(item, bucket=[]):
+          bucket.append(item)
+          return len(bucket)
+
+      print(add("a"), add("b"), add("c", []), add("d"))
+
+      End your reply with a final line `ANSWER: <the exact output>`.
+    score:
+      expect_answer: '1[\s,]+2[\s,]+1[\s,]+3'
+      answer_shape: '-?\d+(?:[\s,]+-?\d+)*'
+    reference:
+      answer: "The default list is created once, when the function is defined, so every call that omits bucket appends to the same list.\nANSWER: 1 2 1 3"
+      right_answers:
+        - "ANSWER: 1 2 1 3"
+        - "add(\"a\") → 1 and add(\"b\") → 2 on the shared default list; add(\"c\", []) gets a fresh list → 1; add(\"d\") is back on the shared list, which already holds a and b → 3. It is not 1 1 1 1 (a fresh list per call) or 1 2 3 4 (one list for all four).\nANSWER: 1 2 1 3"
+        - "**ANSWER:** `1 2 1 3`"
+        - "Final answer: 1 2 1 3"
+        - "It prints:\n```\n1 2 1 3\n```"
+        - "The default list is shared by every call that omits bucket.\n\n**ANSWER:**\n```\n1 2 1 3\n```"
+        - "It prints 1 2 1 3."
+      wrong_answers:
+        - "ANSWER: 1 1 1 1"
+        - "The shared default gives 1, 2, the fresh list gives 1, and add(\"d\") gives 3.\nANSWER: 1 2 3 4"
+        - "ANSWER: 1 2 1 4"
+        - "ANSWER: 1 2 1 2"
+        - "ANSWER: 0 1 0 2"
+        - "It prints:\n```\n1 2 3 4\n```"
+      format_misses:
+        - "The default list is created once, when the function is defined, and shared by later calls."
+        - "add(\"d\") returns 3, so it prints 1 2 1 3."
+    notes: "Predicting Python output through the shared mutable default argument; the traps are a fresh list per call (1 1 1 1) and one list for all four calls (1 2 3 4)."
+
+  - id: qa-percent-up-down
+    difficulty: hard
+    prompt: "A jacket's price is raised by 20%, and later the new price is cut by 20%. The final price is what percentage of the original price? End your reply with a final line `ANSWER: <the percentage>`."
+    score:
+      expect_answer: '96(?:\.0+)?\s*(?:%|per\s?cent)?(?:\s+of\s+the\s+original(?:\s+price)?)?'
+      answer_shape: '-?\d+(?:\.\d+)?\s*(?:%|per\s?cent)?(?:\s+of\s+the\s+original(?:\s+price)?)?'
+    reference:
+      answer: "The two changes multiply: 1.20 × 0.80 = 0.96, so the final price is 96% of the original.\nANSWER: 96%"
+      right_answers:
+        - "ANSWER: 96%"
+        - "Up 20% then down 20% does not return to 100%, because the cut applies to the larger price. On $100: $120, then $120 − $24 = $96, a 4% loss overall.\nANSWER: 96%"
+        - "**ANSWER:** 96.0 percent"
+        - "Final answer: 96 per cent."
+        - "ANSWER: 96"
+        - "1.2 × 0.8 = 0.96.\nTherefore 96%."
+        - "ANSWER: $96\\%$"
+        - "Final Answer: $\\boxed{96\\%}$"
+        - "ANSWER: \\(96\\%\\)"
+        - "ANSWER: 96% of the original price"
+      wrong_answers:
+        - "ANSWER: 100%"
+        - "ANSWER: 100% of the original price"
+        - "1.2 × 0.8 = 0.96, so the price ends at 96% of the original.\nANSWER: 4%"
+        - "ANSWER: 104%"
+        - "ANSWER: 0.96%"
+        - "ANSWER: 94%"
+        - "100%"
+      format_misses:
+        - "1.2 × 0.8 = 0.96, so the price ends at 96% of the original."
+        - "Percentage changes multiply rather than add, so the two changes do not simply cancel out."
+    notes: "Successive percentage changes; the traps are assuming +20% and −20% cancel (100%) and reporting the 4% loss instead of the percentage of the original."
+
+  - id: qa-count-letter-r
+    difficulty: hard
+    prompt: "How many times does the letter r appear in the phrase \"strawberry raspberry\"? End your reply with a final line `ANSWER: <the number>`."
+    score:
+      expect_answer: '(?:6|six)(?:\s*(?:r[''’]?s|times|occurrences))?'
+      answer_shape: '(?:\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten)(?:\s*(?:r[''’]?s|times|occurrences?))?'
+    reference:
+      answer: "strawberry has an r at positions 3, 8 and 9, and raspberry at 1, 7 and 8: 3 + 3.\nANSWER: 6"
+      right_answers:
+        - "ANSWER: 6"
+        - "s(1) t(2) r(3) a(4) w(5) b(6) e(7) r(8) r(9) y(10) → 3. r(1) a(2) s(3) p(4) b(5) e(6) r(7) r(8) y(9) → 3, counting the easy-to-miss leading r, so not 5.\nANSWER: 6"
+        - "**ANSWER:** **six**"
+        - "Final answer: 6 r's."
+        - "strawberry has 3 and raspberry has 3.\nSo the answer is six r's."
+        - "Final answer: $\\text{6 times}$"
+        - "ANSWER: 6 occurrences"
+      wrong_answers:
+        - "ANSWER: 5"
+        - "strawberry has 3 r's and raspberry has 3, so 6 in total.\nANSWER: 5"
+        - "ANSWER: 3"
+        - "ANSWER: 7"
+        - "ANSWER: 4"
+        - "5"
+      format_misses:
+        - "There are 6 r's: 3 in strawberry and 3 in raspberry."
+        - "Spell each word out and count the r's one position at a time."
+    notes: "Letter counting, which tokenised models find hard; the trap is missing the leading r of raspberry (5). Position lists and per-word counts above the ANSWER line cannot pass or fail the run."
+
+  - id: qa-shop-change
+    difficulty: hard
+    prompt: "Pens are sold in packs of 3 for $2, and notebooks cost $4.50 each. Maya buys 18 pens and 5 notebooks and pays with a $50 note. How much change does she get? End your reply with a final line `ANSWER: <the amount of change>`."
+    score:
+      expect_answer: '\$?15\.50?(?:\s*(?:dollars|usd))?|15 dollars(?: and)? 50 cents'
+      answer_shape: '-?\$?-?\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:dollars|usd))?|\d+ dollars(?: and)? \d+ cents'
+    reference:
+      answer: "18 pens is 6 packs, so 6 × $2 = $12; 5 notebooks are 5 × $4.50 = $22.50. The total is $34.50, and $50 − $34.50 = $15.50.\nANSWER: $15.50"
+      right_answers:
+        - "ANSWER: $15.50"
+        - "Pens come in packs of 3, so 18 pens cost 6 × $2 = $12, not 18 × $2 = $36 (which would leave her $8.50 short). Notebooks: $22.50. Total $34.50, change $15.50.\nANSWER: $15.50"
+        - "**ANSWER:** 15.5 dollars"
+        - "Final answer: 15 dollars and 50 cents."
+        - "ANSWER: $15.50."
+        - "Pens $12 + notebooks $22.50 = $34.50.\n$15.50"
+        - "Final Answer: $\\boxed{\\$15.50}$"
+        - "ANSWER: \\$15.50"
+      wrong_answers:
+        - "ANSWER: $34.50"
+        - "Pens $12 + notebooks $22.50 = $34.50, so the change is $15.50.\nANSWER: $16.50"
+        - "ANSWER: -$8.50"
+        - "ANSWER: $15.00"
+        - "ANSWER: $38"
+        - "ANSWER: $27.50"
+        - "$16.50"
+      format_misses:
+        - "Pens $12 + notebooks $22.50 = $34.50, so the change is $15.50."
+        - "Work out the cost of the pens and the notebooks first, then subtract the total from $50."
+    notes: "A multi-step money problem; the traps are pricing pens singly (18 × $2 leaves her $8.50 short) and reporting the $34.50 total instead of the change."
+
+  - id: qa-explain-float-sum
+    difficulty: hard
+    prompt: "In two to four sentences, explain why 0.1 + 0.2 == 0.3 evaluates to False in Python."
+    judge:
+      rubric: >
+        Pass only if the answer says Python floats are binary (IEEE 754
+        double-precision) numbers with a finite number of bits, AND that 0.1
+        and 0.2 have no exact binary representation (they are repeating
+        fractions in base 2), so each is stored as the nearest approximation,
+        AND that these rounding errors make the sum (0.30000000000000004)
+        differ from the float stored for 0.3. Suggesting math.isclose or
+        decimal.Decimal is welcome but not required. Fail if it calls this a
+        Python bug, blames only "limited decimal digits" without the binary
+        representation, or claims 0.1 is stored exactly.
+      reference: >
+        Floats are stored in binary (IEEE 754 doubles), and decimals like 0.1
+        and 0.2 are repeating fractions in base 2, so each is stored as the
+        closest representable value rather than exactly. Their tiny rounding
+        errors add up, so 0.1 + 0.2 comes out as 0.30000000000000004, which
+        is not the same double as the one nearest 0.3, and == compares the
+        exact stored values. Compare floats with a tolerance, e.g.
+        math.isclose, instead.
+      threshold: 0.7
+
+  - id: qa-explain-monty-hall
+    difficulty: hard
+    prompt: "In the Monty Hall problem there are three doors, one hiding a car and two hiding goats. You pick a door; the host, who knows where the car is, then opens a different door that hides a goat and offers you a switch to the remaining closed door. Should you switch? Explain why in a few sentences and give the probability of winning the car if you switch."
+    judge:
+      rubric: >
+        Pass only if the answer says you should switch, AND gives a 2/3
+        chance of winning when switching (1/3 when staying), AND justifies it
+        correctly: the first pick is right only 1/3 of the time, and because
+        the host knowingly always reveals a goat, switching wins exactly when
+        the first pick was wrong, which happens 2/3 of the time. Fail if it
+        says the odds are 1/2 or that switching does not matter, or if it
+        gives 2/3 with a wrong or missing justification.
+      reference: >
+        Yes, switch: switching wins the car with probability 2/3, staying
+        only 1/3. Your first pick is the car only 1/3 of the time. The host
+        knows where the car is and always opens a goat door, so in the 2/3 of
+        cases where your first pick was a goat, the one remaining closed door
+        must hide the car, and switching wins.
+      threshold: 0.7
