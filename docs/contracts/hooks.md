@@ -1,6 +1,6 @@
-# Hook contract, v1 (draft)
+# Hook contract, v1
 
-**Status:** Draft for review (WP-1.1). Not frozen. It becomes v1 in WP-1.3 once the [open questions](#17-open-questions-for-wp-13) are decided.
+**Status:** v1, frozen 2026-09-24. Drafted in WP-1.1; the review decisions (WP-1.3) are recorded in [section 17](#17-decisions-wp-13). From here on, a change follows section 12: an additive change is a minor version, and anything else is a major version.
 **Contract id:** `hooks/1.0`
 **Part of:** Contracts v1, alongside the daemon API, the blackboard protocol and the memory schema.
 **Scope:** How local pillars plug into a turn. Instinct makes fast, bounded decisions such as routing and tool choice. Cognition does open-ended work such as verification and planning. This document contains no code; the typed payload models land in WP-4.2.
@@ -13,11 +13,11 @@
 1. With no pillar loaded, a turn runs exactly as it does today. Section 16 lists everything that runs and explains why nothing changes.
 2. Built-in behavior (the default hooks, [Appendix A](#appendix-a-inventory-of-built-in-behavior)) always runs first, in a fixed order. No pillar replaces the security gate or the adapter.
 3. A pillar can only add restrictions: escalate a tool call to the human, refuse it, or stop the run. It can never let through anything the gate blocked or sent for approval.
-4. A pillar changes a value in one way only: by answering a **decision point** with an option id from a table that open code built. It may do that only where the default abstains, and only when the operator names that pillar for that point in config. Every decision flag is off by default.
+4. A pillar changes a value in one way only: by answering a **decision point** with an option id from a table that open code built. It may do that only where the default abstains, and only when the operator names that pillar for that point in config. Every decision flag is off by default. A pillar's route choice never sends conversation content to a hosted API unless the operator allows cloud routes.
 5. Every bounded decision uses one shape: the `Chooser` shape from `computer/chooser.py`. A request carries options and context. The answer is an option id or `abstain`, plus a confidence and the backend's name and version.
 6. Hooks never run on the daemon's event loop. The daemon enforces deadlines by stopping its wait, not by trying to cancel work. One session's hook can never delay another session's turn.
 7. A hook that times out, errors or returns something invalid leaves the turn on today's behavior. The daemon logs a WARNING and writes a telemetry row with the real outcome. Nothing ever reads as if the hook ran.
-8. Pillars run on this machine and talk to the daemon over a unix socket or loopback, never a network address. The daemon authenticates every connection before it sends a payload.
+8. Pillars run on this machine, in their own processes, never inside the daemon. They talk to the daemon over a socketpair or a unix socket, never a network address. The daemon authenticates every connection before it sends a payload.
 9. Installing a pillar means trusting local code with your conversation content. Section 14 says this plainly.
 
 ---
@@ -45,7 +45,7 @@
 - **Closed advises, open decides.** Anything that can block or change an action stays in open code. A pillar picks an id; open code built the options, validates the id and runs every downstream default (the adapter's validator, the gate, the approval prompt) on the result.
 - **Fail visibly.** Section 9.
 - **Pillars run locally.** Sections 11 and 14.
-- **Claim only what's measured.** Every latency figure here is a target or a proposed deadline. None of them has been measured.
+- **Claim only what's measured.** Every latency figure here is a target or a provisional deadline. None of them has been measured.
 
 ---
 
@@ -59,7 +59,7 @@ Four events already exist in `hooks/events.py:16-19`. Only `pre_tool_use` and `p
 | `turn_start` | turn | Instinct | ✓ | — | `route` | `halt` | After turn setup, before the first round |
 | `before_model_call` | round | Instinct | ✓ | — | `tool_choice` | — | Each round, just before the request is sent |
 | `after_model_response` | round | Instinct | ✓ | — | — | `halt` | Each round, after the response is parsed, before it is committed |
-| `pre_tool_use` | tool call | Instinct | ✓ | — | `tool_name` | `escalate`, `veto`, `halt` | Each call the gate allowed or sent for approval, before the approval prompt |
+| `pre_tool_use` | tool call | Instinct | ✓ | — | — | `escalate`, `veto`, `halt` | Each call the gate allowed or sent for approval, before the approval prompt |
 | `post_tool_use` | tool call | Instinct | ✓ | — | — | — | Each executed call, after the built-in post-result steps |
 | `after_tool_results` | round | Cognition | ✓ | next request only | — | `halt` | Each round with tool calls, after its results are in history |
 | `before_delivery` | turn | Cognition | ✓ | note after the answer | — | — | Once, on the model's final answer, before it is committed |
@@ -82,7 +82,7 @@ Class sets the budget (section 9). A subscription that only observes is dispatch
 
 **`after_model_response`.** Fires once per round, after M1–M8: the stream, text tool-call extraction, markup hygiene, the strip-disagreement and empty-response guards, and the forced-tool check that ends at `:2040`. It fires before the commit at `:2059`. It does not fire on rounds those guards already retried or ended.
 
-**`pre_tool_use`.** Fires once per tool call inside `_execute_tool_call`, after C1–C10: operator hooks, adapter repair, markup guard, validation and the security gate, which ends at `:4375`. It fires before the approval prompt at `:4381`, so a pillar veto means the human is never asked. It does not fire for calls the gate denied (there is nothing left to restrict), for calls the repeat guard refused (B3), or for calls rejected earlier in C1–C8. The `tool_name` decision point is consulted inline at C3 (`:3988`), when adapter repair has failed.
+**`pre_tool_use`.** Fires once per tool call inside `_execute_tool_call`, after C1–C10: operator hooks, adapter repair, markup guard, validation and the security gate, which ends at `:4375`. It fires before the approval prompt at `:4381`, so a pillar veto means the human is never asked. It does not fire for calls the gate denied (there is nothing left to restrict), for calls the repeat guard refused (B3), or for calls rejected earlier in C1–C8. v1 has no decision point here. When adapter repair fails (C3–C4), the model is told and retries, as today (decision 9).
 
 **`post_tool_use`.** Fires once per executed call, after C12–C19, which includes the LSP diagnostics hook (`:4646-4652`). It is the last step before `_execute_tool_call` returns. Observe only.
 
@@ -91,7 +91,7 @@ Class sets the budget (section 9). A subscription that only observes is dispatch
 **`before_delivery`.** Fires once, when a round ends with non-empty text and no tool calls, which is the model's final answer. It fires at `:2059`, before the answer is appended and yielded at `:2084-2085`. It does not fire for synthetic messages written by Prometheus: breaker trips, the pre-flight refusal, the iteration cap, or halts. Those go straight to `turn_end`.
 
 - **Streaming surfaces.** On web and Beacon the answer has already streamed to the user as deltas (`web/ws_server.py:1253-1262`) by the time this fires. That is why the event cannot withhold the answer, only add a note after it.
-- **Telegram.** The honesty correction and teacher escalation run after `run_async` returns (`gateway/telegram.py:2048-2064`). So on Telegram, `before_delivery` is not the last thing that can change the reply (open question 16).
+- **Telegram.** The honesty correction and teacher escalation run after `run_async` returns (`gateway/telegram.py:2048-2064`). So on Telegram, `before_delivery` is not the last thing that can change the reply. This is a known limit of v1 (decision 16).
 
 **`turn_end`.** Fires from `run_loop`'s `finally` block (`:990`), so it runs on every exit: a normal return, a halt, an error, and the Stop button closing the generator. It is dispatched without awaiting. On a normal finish, the in-loop tail defaults E1–E2 (the boundary-escape check and the file-change summary, `:2160-2200`) have already run by then. On a halt they don't run at all, as today.
 
@@ -168,7 +168,7 @@ The rule is: when in doubt, it goes in `content`. For example, the gate's `reaso
 | `compaction_candidates` | `system`, `candidate {start, end, messages, est_tokens}`, `threshold`, `reused_anchor` | `span` (mixed `user`/`model`/`external`, each item labeled) |
 | `skill_draft_score` | `kind` (`create` \| `refine`), `name`, `default {verdict, reason_code}`, `trace_stats {calls, errors}`, `target` | `draft` (`model`), `task` (`user`), `final_text` (`model`), `trace` (`external`) |
 
-**Ephemeral sessions.** When `session.ephemeral` is true, `content` is sent empty. Decision requests then carry option ids and descriptions but no goal text. This is the proposed default: "Prometheus won't remember this" should not depend on a pillar keeping a promise the daemon cannot check. See open question 3.
+**Ephemeral sessions.** When `session.ephemeral` is true, `content` is sent empty. Decision requests then carry option ids and descriptions but no goal text. The reason: "Prometheus won't remember this" should not depend on a pillar keeping a promise the daemon cannot check (decision 3).
 
 ### 4.4 Response
 
@@ -210,7 +210,7 @@ An invalid response is never partly applied. The daemon discards it, the turn co
 
 **Annotation slots**
 - `after_tool_results`: appended to the next model call's request-only system addendum. This is the same channel steers, the empty-retry nudge and memory recall already use (`:1504-1541`, `:1410-1427`). It is fenced as untrusted and never persisted.
-- `before_delivery`: a separate note committed after the final answer. It is written as an injected message, the way the file-mutation verifier's summary is (`:2187-2191`), not inside the model's own message. The model therefore never reads a pillar's words as its own. This needs a new provenance value (open question 10).
+- `before_delivery`: a separate note committed after the final answer. It is written as an injected message, the way the file-mutation verifier's summary is (`:2187-2191`), not inside the model's own message. The model therefore never reads a pillar's words as its own. The note carries a new provenance value, `pillar`, which is untrusted by default. `pillar` is added to the closed `Provenance` set (`engine/messages.py:32-36`) through the memory schema contract (decision 10).
 
 **Veto semantics.** A veto before an action means the action doesn't happen. A veto after an action stops the run going forward; nothing is undone.
 - **`halt` at `turn_start`.** The turn ends before any model call, with the message "Stopped by *pillar*: *reason*. Nothing was sent to the model."
@@ -240,7 +240,7 @@ Every bounded decision in `hooks/1` has the shape already used by the decision s
   "goal": "…",
   "options": [
     { "id": "primary", "description": "Local model on the primary backend" },
-    { "id": "claude",  "description": "Anthropic, cloud" }
+    { "id": "coder",   "description": "Local coding model on the `coder` backend" }
   ],
   "history": [],
   "default": { "status": "abstained", "reason": "no override, escalation, smart-routing or task rule matched" }
@@ -253,7 +253,7 @@ Every bounded decision in `hooks/1` has the shape already used by the decision s
 {
   "point": "route",
   "table_id": "rt-7c1…",
-  "choice": "claude",
+  "choice": "coder",
   "confidence": 0.82,
   "backend": { "name": "instinct-router", "version": "0.3.1" }
 }
@@ -287,32 +287,38 @@ WP-4.2 should move `ChoiceRequest` and `Choice` into one shared module, with com
 This follows the 2026-09-20 ruling:
 
 - **The default answers first and wins wherever it answers.** In that region no pillar is consulted for the decision. A pillar may still observe the event, and may veto where the event allows it.
-- **A pillar decides only where the default abstains**, and only when `pillars.decide.<point>` names that pillar. Every point is off by default, and at most one pillar may be named per point.
+- **A pillar decides only where the default abstains**, and only when `pillars.decide.<point>` names that pillar. Every point is off by default, and at most one pillar may be named per point. `tool_choice` is also locked off until WP-1.2 has measured its cost (section 6.3).
 - If the pillar abstains, times out, errors, answers invalid or stale, is busy or is tripped, the result is **the default's own fallback, which is today's behavior** in that region.
 - **A timeout limits delay. It is not what keeps things safe**, because a fast wrong answer passes a timeout. What keeps a pillar's decision safe:
   1. open code builds the option table;
   2. the returned id is validated against that table;
-  3. every downstream default still runs on the result (the adapter's validator, the security gate, the approval prompt);
-  4. the operator turned the point on.
+  3. every downstream default still runs: each tool call the model makes afterwards still goes through the adapter, the security gate and the approval prompt;
+  4. the operator turned the point on;
+  5. for `route`, the table holds no hosted API unless the operator allowed cloud routes (decision 17).
 
 ### 6.3 Decision points in v1
 
 | Point | Event | Options (built by) | Default | Default abstains when | Fallback |
 |---|---|---|---|---|---|
-| `route` | `turn_start` | Configured routes: the primary and the providers the router can build (router) | `ModelRouter.route` (`router/model_router.py:747`) | The router reaches its primary branch (`:791-792`) because no per-session override, escalation, smart-routing or task rule answered | The primary, as today |
+| `route` | `turn_start` | The primary, plus routes served by a box the operator runs. Cloud routes are included only with `pillars.decide.route_allow_cloud: true` (router) | `ModelRouter.route` (`router/model_router.py:747`) | The router reaches its primary branch (`:791-792`) because no per-session override, escalation, smart-routing or task rule answered | The primary, as today |
 | `tool_choice` | `before_model_call` | `auto`, `none`, `required`, and `tool:<name>` for each advertised tool (loop) | The caller's `tool_choice`, or the one resolved from `mode` (`engine/agent_loop.py:1076`), with first-round forcing (`:1086-1091`, `:1559-1561`) | The round's directive is `auto` and came from `mode`, not from the caller | `auto`, as today |
-| `tool_name` | `pre_tool_use` | Advertised tool names (registry) | `ModelAdapter.validate_and_repair` (`adapter/__init__.py:148`) | Validation and repair both failed (`ValueError`, `engine/agent_loop.py:3988`). Adapter tiers `light` and `full` only; tier `off` never validates, so it never abstains. | The adapter's retry and escalation path (`:3988-4048`), as today |
 | `compaction_span` | `compaction_candidates` | Cut points the compactor considered | `_select_span_end` (`context/compactor.py:504`) | **Never, today** | — |
 | `skill_draft` | `skill_draft_score` | `keep`, `discard` | SkillCreator Stage 0/1 plus the name-collision check (`learning/skill_creator.py:214-291`) | **Never, today** | — |
 
 Constraints that apply to specific points:
 
-- **`route`.** A per-session user override (`/claude`, `/local`, …) always answers, so a pillar can never overrule the person's own choice of model.
+- **`route`: the person's choice wins.** A per-session user override (`/claude`, `/local`, …) always answers, so a pillar can never overrule the person's own choice of model.
+- **`route`: local unless the operator opts in** (decision 17). A pillar's choice must never send conversation content to a hosted API, or spend money, without the operator opting in. So the option table holds:
+  - the primary, which is where the turn goes anyway when the pillar abstains. If the primary is a hosted API, picking it changes nothing: the operator already sends every unrouted turn there;
+  - routes served by a box the operator runs: the providers in `_LOCAL_PROVIDERS` (`providers/registry.py:167`), and named backends, which may only use local providers (`providers/backends.py:95`);
+  - any other route, including every hosted API, **only** when `pillars.decide.route_allow_cloud` is `true`. The default is `false`.
+
+  A route whose provider can't be classified is treated as cloud and left out.
+- **`tool_choice`: locked until measured.** This flag can't be turned on anywhere, on any install, until the parity harness (WP-1.2) has measured the llama.cpp prefix-cache cost of a forced round. A forced round withholds native tools so the grammar path fires (`:1572-1579`), and that changes the cached prompt prefix. The implementation (WP-4.2) ships the flag locked: a config that sets it loads with the flag off, logs one WARNING, and doctor shows ✗ naming the missing measurement. Lifting the lock is an edit to this section that records the measurement.
 - **`tool_choice`: one round only.** A pillar-set directive binds one round, and a pillar may set at most one round per turn. This mirrors first-round forcing.
 - **`tool_choice`: forcing must never raise.** Today a forced `{tool: X}` that the provider doesn't honor raises (`:2032-2040`). A round forced by a pillar must instead record the outcome as `not_honored` and continue.
-- **`tool_choice`: cache cost.** On llama.cpp, a forced round withholds native tools so that the grammar path fires (`:1572-1579`), and that changes the cached prompt prefix. See open question 8.
-- **`tool_name`.** The chosen name goes back through the adapter's validator, and then through C7–C11 like any other call. A choice the validator rejects falls back to the default's retry path.
-- **`compaction_span` and `skill_draft` are defined but unreachable.** Their defaults always answer today. They become reachable only if a default gains an abstain band, and that is a change to default behavior with its own WP (open question 12). In v1, `skill_draft_score` offers `veto` (discard) instead, which is a restriction and needs no decision.
+- **No `tool_name` point in v1** (decision 9). When adapter repair fails today, the model is told and retries (`:3988-4048`). That is not a dead end. So a pillar-chosen tool name would save at most one round, at the cost of running a tool the model didn't name. Section 18 says what evidence would reopen it.
+- **`compaction_span` and `skill_draft` are defined but unreachable.** Their defaults always answer today. They become reachable only if a default gains an abstain band. That is a change to default behavior and needs its own WP (decision 12). In v1, `skill_draft_score` offers `veto` (discard) instead, which is a restriction and needs no decision.
 
 ---
 
@@ -331,11 +337,12 @@ For a tool call, the effective outcome is the **most restrictive** of the gate's
 
 Nothing in the protocol can express a decrease.
 
-**Defaults no pillar replaces.** The security gate (`permissions/checker.py:697`, called at `engine/agent_loop.py:4302`) and the adapter (`adapter/__init__.py:48`, applied at `engine/agent_loop.py:3948`, `:1856`, `:1399`) always run, in their positions, on every call. The dispatcher has no API that disables, skips, reorders or wraps a default hook. Decision outputs pass back through the adapter and the gate.
+**Defaults no pillar replaces.** The security gate (`permissions/checker.py:697`, called at `engine/agent_loop.py:4302`) and the adapter (`adapter/__init__.py:48`, applied at `engine/agent_loop.py:3948`, `:1856`, `:1399`) always run, in their positions, on every call. The dispatcher has no API that disables, skips, reorders or wraps a default hook. After a pillar decision, every tool call the model makes still goes through the adapter and the gate.
 
 **What a pillar can never do in `hooks/1`:**
 - allow something the gate denied, or skip the approval prompt;
-- change a tool call's arguments;
+- change a tool call's arguments, or which tool runs;
+- route a turn to a hosted API, or to anything that costs money, unless the operator set `pillars.decide.route_allow_cloud`;
 - add a tool to the advertised catalog;
 - widen the workspace or write boundary;
 - change `origin`;
@@ -366,13 +373,15 @@ Declared order is fixed at boot. Nothing reorders it at runtime.
 
 ## 9. Latency, deadlines and failure
 
-### 9.1 Budgets (proposed, not measured)
+### 9.1 Budgets (provisional, not measured)
+
+These numbers are adopted as provisional (decision 2). WP-4.x re-sets them from measurements.
 
 | Class | Target | Enforced deadline | Other bound |
 |---|---|---|---|
 | Instinct | p95 ≤ 50 ms per hook call, measured by the daemon from dispatch to result, transport included | 100 ms default, configurable up to 250 ms | — |
 | Cognition | — | 5 s per call default, configurable up to 30 s | 15 s per turn: the total a turn waits on Cognition. Once it is spent, the rest of that turn's Cognition calls are skipped (`budget_exhausted`). |
-| Pipeline (`skill_draft_score`, `compaction_candidates` at `lcm`) | — | 60 s per call | Meant to stay off the person's path, but **today `skill_draft_score` is not off it on every surface.** Post-task hooks run before `run_async` returns (Appendix B.8), so on Telegram, Slack, Discord and REST a veto subscription there would add up to this deadline to the reply. See open question 16. |
+| Pipeline (`skill_draft_score`, `compaction_candidates` at `lcm`) | — | 60 s per call | Meant to stay off the person's path, but **today `skill_draft_score` is not off it on every surface.** Post-task hooks run before `run_async` returns (Appendix B.8), so on Telegram, Slack, Discord and REST a veto subscription there would add up to this deadline to the reply. This is a known limit of v1 (decision 16). |
 
 A hook over its target is reported by `oara doctor` as slow (a warning). It is not an error. The deadline is what the daemon enforces.
 
@@ -395,44 +404,47 @@ A surface that shows check status (for example "verified") must read it from the
 
 ## 10. Execution: never block the daemon
 
-- **The event loop never runs pillar code and never waits on it synchronously.** It submits the call to the pillar's transport and awaits a future, with a deadline.
-- **Deadlines are enforced by abandoning the wait, not by cancelling the work.** `asyncio.wait_for` cancels the awaiting coroutine. It cannot stop a forward pass running in a thread or another process. So:
-  - **In-process code** runs on a daemon-owned worker pool with a fixed size per pillar. A timed-out call keeps its worker until it returns. When no worker is free, the call is **not queued**: it is skipped at once with outcome `busy`.
-  - **Out-of-process code** can be stopped. After 3 consecutive timeouts the daemon restarts the pillar's host process (SIGTERM, then SIGKILL).
+- **No pillar code runs in the daemon process.** Every pillar in v1 runs in its own process: a `host` subprocess the daemon supervises, or a `unix` service (section 11).
+- **The event loop never waits on a pillar synchronously.** It sends the call over the pillar's transport and awaits the reply with a deadline.
+- **Deadlines are enforced by abandoning the wait, not by cancelling the work.** `asyncio.wait_for` cancels the awaiting coroutine; it can't stop a forward pass running in another process. So:
+  - a timed-out call keeps counting against the pillar's in-flight caps (below) until its late reply arrives or the connection is reset;
+  - a `host` process can be stopped: after 3 consecutive timeouts the daemon restarts it (SIGTERM, then SIGKILL);
+  - a `unix` service isn't the daemon's to restart. Its timeouts trip the circuit breaker instead.
 - **One session never stalls another:**
   - No pillar call holds or waits on any session's turn lock (`web/ws_server.py:1182`, `gateway/telegram.py:1975`).
-  - Each session has its own in-flight cap per pillar (default 2), under a global cap per pillar. A call over either cap gets `busy`.
+  - Each session has its own in-flight cap per pillar (default 2), under a global cap per pillar. A call over either cap is **not queued**; it is skipped at once with outcome `busy`.
   - Calls are admitted or refused at dispatch; there is no queue shared across sessions. A slow hook can cost its own session the pillar's help, but it cannot delay anyone else's turn.
   - Observer queues are bounded, one per pillar. On overflow, events are dropped. Each drop is counted in telemetry (`dropped`), and the WARNING for drops is rate-limited.
 - **Circuit breaker per pillar.** After 5 non-`ok`, non-`abstain` outcomes within 60 s, the pillar is **tripped**. Its calls are skipped (`tripped`) for a cooldown of 5 minutes. The daemon logs one WARNING when it trips and one when it resets, and doctor shows it.
-- **The GIL.** A CPU-bound, pure-Python pillar running on a worker thread still competes for the GIL with the event-loop thread, and can slow every session. In-process is only acceptable for code that releases the GIL (native inference) or does trivially little work. That is one reason the default is a separate process (section 11, open question 1).
+- **No shared interpreter.** Because pillar code never runs in the daemon's process, a CPU-bound pillar competes with the daemon only for CPU, which the caps bound where they are enforced. It never competes for the daemon's GIL.
 
 ---
 
 ## 11. Transports and isolation
 
-All transports use one payload schema (sections 4 and 6), UTF-8 JSON. Only the framing differs.
+v1 has exactly two transports. Both use one payload schema (sections 4 and 6), as UTF-8 JSON; only the framing differs. Either kind of pillar may use either transport. `kind` only sets the default.
 
 | Transport | For | How it runs | Isolation |
 |---|---|---|---|
-| `host` (**default** for Instinct pillars) | A Python package exposing an entry point in the `prometheus.pillars` group | The daemon starts one supervised host subprocess per loaded pillar and loads the entry point **there**. They talk over a socketpair with length-prefixed JSON. | A separate process. Caps apply (below). A crash cannot take the daemon down. |
-| `inproc` (opt-in, Instinct only) | The same entry point | Loaded into the daemon process and called on the worker pool (section 10). Must be requested explicitly with `pillars.<name>.transport: inproc`. | **None.** It shares the daemon's memory, CPU and crash fate. Doctor says so. |
-| `unix` (**default** for Cognition pillars) | A pillar that runs as its own local service | HTTP/1.1 over a unix socket at `~/.prometheus/run/pillars/<name>.sock`, as `POST /hooks/1/<event>` | A separate process that someone else launches |
-| `http` (discouraged) | A service that cannot use a unix socket | `http://127.0.0.1:<port>` or `http://[::1]:<port>` only. The daemon refuses to load a pillar whose address resolves to anything but loopback. | Same as `unix` |
+| `host` (**default** for Instinct pillars) | A Python package exposing an entry point in the `prometheus.pillars` group | The daemon starts one supervised host subprocess per loaded pillar and loads the entry point **there**, never in the daemon. They talk over a socketpair with length-prefixed JSON. | A separate process. Caps apply (below). A crash cannot take the daemon down. |
+| `unix` (**default** for Cognition pillars) | A pillar that runs as its own local service | HTTP/1.1 framing over a unix socket at `~/.prometheus/run/pillars/<name>.sock`, as `POST /hooks/1/<event>`. There is no TCP listener. | A separate process that someone else launches |
 
-The WP text asks for "in-process entry points" for Instinct. This draft keeps **entry points** as the way Instinct is packaged and discovered, and makes a **separate process** the default way it runs. In-process execution cannot meet two principles: capped CPU and memory, and "a pillar crash never takes the daemon down". Open question 1 asks Will to confirm this choice.
+**Not in v1** (decisions 1 and 13):
+- **`inproc`.** Loading a pillar into the daemon's own process is removed from v1 entirely: it can't meet "a pillar crash never takes the daemon down". Entry points remain the way Instinct pillars are packaged and discovered, and `host` is how they run. `inproc` may return in a later minor version only if the measured `host` overhead misses the Instinct budget (section 18).
+- **`http` on loopback.** Not in v1. It gets added only when a real pillar can't use a unix socket (section 18).
 
 **Authentication.** The daemon authenticates every connection before it sends any payload.
+- **`host`:** the daemon creates the socketpair before it starts the host, and the host inherits one end. There is no listening address, so there is nothing for another process to connect to or squat.
 - **`unix`:** the socket directory is mode 0700 and the socket 0600, owned by the daemon's user. The daemon checks that the peer's uid matches its own (`SO_PEERCRED` on Linux, `getpeereid` on macOS).
-- **`http`:** a per-pillar secret lives at `~/.prometheus/pillars/<name>.secret` (0600), created when the pillar is enabled. On each connection, both sides answer the other's nonce with HMAC-SHA256 over the secret before any payload moves. The secret itself never crosses the wire, so a process squatting on the port while the pillar is down learns nothing.
-- **The daemon's API token is never sent to a pillar.** Sending it to a loopback port would hand the daemon's master credential to whatever happens to be listening there.
+- **The daemon's API token is never sent to a pillar** (decision 14). Sending it over any local connection would hand the daemon's master credential to whatever is on the other end.
 - **Pillar-to-daemon calls.** A pillar that calls the daemon (for example to post an asynchronous Cognition result) is an ordinary daemon API client. It authenticates with a token the operator gives it, under the daemon API contract.
+- **The plan for when `http` is added.** It will be loopback only: `127.0.0.1` or `::1`, refusing any address that resolves elsewhere. A per-pillar secret will live at `~/.prometheus/pillars/<name>.secret` (0600), created when the pillar is enabled. On each connection, both sides answer the other's nonce with HMAC-SHA256 over that secret before any payload moves. The secret never crosses the wire, so a process squatting on the port while the pillar is down learns nothing. That minor version adopts this design, or states why it doesn't.
 
 **Resource caps, for daemon-launched processes.**
 - **Linux with a systemd user manager:** the host is launched in a transient user scope with `CPUQuota=`, `MemoryMax=` and `IPAddressDeny=any` / `IPAddressAllow=localhost`.
 - **Linux without systemd:** `setrlimit(RLIMIT_AS)` and a nice value. There is no CPU quota.
 - **macOS:** no per-process CPU quota exists, and `RLIMIT_AS` is not reliably enforced. Caps are **not enforced** on macOS, and doctor says exactly that.
-- **Pillars running as their own services** (`unix`, `http`) are capped by whoever launches them, and doctor reports "caps: set outside Prometheus".
+- **Pillars running as their own services** (`unix`) are capped by whoever launches them, and doctor reports "caps: set outside Prometheus".
 - A cap that is configured but not enforced is always shown as **not enforced**, never as "capped".
 
 **Crashes.** When a host process exits:
@@ -440,7 +452,7 @@ The WP text asks for "in-process entry points" for Instinct. This draft keeps **
 - the daemon restarts it with backoff (1 s, 2 s, 4 s … up to 60 s);
 - after 5 crashes in 10 minutes it stays down until the daemon restarts, and doctor shows it.
 
-The daemon never imports a `host` pillar's code. An `inproc` pillar that crashes takes the daemon with it, as stated in the table.
+The daemon never imports a pillar's code, so no pillar crash can take the daemon down. A `unix` service that dies has its calls resolve as `crashed` in the same way. The daemon reconnects with the same backoff, but restarting the service is up to whoever launched it.
 
 **Host environment.** A host process gets a minimal environment. It does **not** inherit the daemon's environment, which holds provider API keys and the daemon token. Today's command hooks do inherit it (`hooks/executor.py:93-96`; see Appendix B). Pillars must not.
 
@@ -448,8 +460,8 @@ The daemon never imports a `host` pillar's code. An `inproc` pillar that crashes
 
 ## 12. Versioning and the manifest
 
-- The contract version is `hooks/MAJOR.MINOR`. This draft is `hooks/1.0`.
-- **A minor version** may add optional payload fields, events, decision points, or outcome codes. It never removes, renames or retypes anything, and never widens an existing event's capabilities. A pillar only ever receives events it subscribed to, and new optional fields must be safe to ignore.
+- The contract version is `hooks/MAJOR.MINOR`. This document is `hooks/1.0`.
+- **A minor version** may add optional payload fields, events, decision points, outcome codes, or transports. It never removes, renames or retypes anything, and never widens an existing event's capabilities. A pillar only ever receives events it subscribed to, and new optional fields must be safe to ignore.
 - **A major version** is anything else.
 - The daemon declares the range it supports: one major version and a minor range, for example `hooks/1.0–1.2`.
 - A pillar declares the version it needs, for example `requires: hooks/1.1`. It loads if and only if the majors match and its minor is within the daemon's range.
@@ -461,7 +473,7 @@ name: instinct
 version: 0.3.1
 requires: hooks/1.0
 kind: instinct              # instinct | cognition
-transport: host             # host | inproc | unix | http
+transport: host             # host | unix
 subscriptions:
   - event: turn_start
     hook: router
@@ -483,24 +495,25 @@ A pillar's `kind` sets its default transport and how doctor groups it. It does n
 - its version is out of range;
 - it subscribes to an unknown event;
 - it asks for a capability or veto strength the event doesn't allow;
-- it names an unknown decision point.
+- it names an unknown decision point;
+- it names a transport v1 doesn't have (`inproc`, `http`).
 
 Then:
 - the daemon logs one WARNING at boot;
 - it writes a `subsystem_runs` row (`subsystem: pillars`, `operation: load`, `outcome: skipped`, with the reason);
 - `oara doctor` shows ✗ with the reason. For example: *"cognition 0.4.0 requires hooks/1.3; this daemon supports hooks/1.0–1.2 — upgrade Prometheus or install cognition 0.3.x."*
 
-A pillar never runs with some of its subscriptions silently dropped. `unix` and `http` pillars can be upgraded while the daemon runs, so the daemon repeats the version check at each connect (`GET /hooks/1/manifest`).
+A pillar never runs with some of its subscriptions silently dropped. A `unix` pillar can be upgraded while the daemon runs, so the daemon repeats the version check at each connect (`GET /hooks/1/manifest`).
 
-**Config** (proposed; all keys are new):
+**Config** (all keys are new; they land with WP-4.2):
 
 ```yaml
 pillars:
   load: []                  # pillars to load, in declared order. Empty or absent = none.
   decide:                   # at most one pillar per point; false = off (the default)
     route: false
-    tool_choice: false
-    tool_name: false
+    route_allow_cloud: false  # true lets the route table include hosted APIs (section 6.3)
+    tool_choice: false        # locked off until WP-1.2 measures a forced round's cache cost (section 6.3)
   budgets:
     instinct_deadline_ms: 100
     cognition_deadline_ms: 5000
@@ -514,7 +527,7 @@ Installing a package is not enough for a pillar to load: it must also be listed 
 
 ## 13. Observability
 
-**Every pillar hook call and every decision-point consultation writes one row.** The proposal is a new `hook_calls` table in `telemetry.db`; its DDL belongs to WP-4.x. Proposed columns:
+**Every pillar hook call and every decision-point consultation writes one row**, in a new `hook_calls` table in `telemetry.db` (decision 15). Its DDL lands with WP-4.x. Columns:
 
 | Column | Notes |
 |---|---|
@@ -535,19 +548,24 @@ Installing a package is not enough for a pillar to load: it must also be listed 
 **Logs**
 - one INFO line per pillar at load, with name, version, transport, subscriptions and the decision points it holds;
 - one WARNING per non-`ok`, non-`abstain` outcome (section 9.2);
+- one WARNING at boot if any operator hook is configured on `session_start` or `session_end`, naming the events. Those hooks never fire in v1 (decision 4, section 15);
 - no conversation content, ever.
 
 **`oara doctor`** (`cli/doctor.py`) gains a **Pillars and hooks** section, built from config, manifests and `telemetry.db`, so it works with the daemon stopped:
 - the contract range this daemon supports;
 - each installed pillar: loaded, not loaded (✗ with the reason), or installed but not enabled;
 - each pillar's transport and isolation, and **which caps are actually enforced**;
-- each pillar's subscriptions (event, hook, capabilities), and each decision point with its flag state;
+- each pillar's subscriptions (event, hook, capabilities), each decision point with its flag state, and `route_allow_cloud`;
 - health over the last 24 h: number of calls, p50/p95 duration, and counts of timeouts, errors, busy, crashes and drops, plus whether the pillar is tripped;
 - operator hooks from `hooks:`: event, kind, matcher, `block_on_failure`, timeout.
 
 Doctor's exit code follows its existing rule (non-zero on any ✗, `cli/doctor.py:1050`):
 - a configured pillar that fails to load is ✗;
+- an operator hook configured on `session_start` or `session_end` is ✗ **"configured, never fires"** (decision 4);
+- `pillars.decide.tool_choice` set while it is still locked is ✗, naming the missing WP-1.2 measurement (section 6.3);
 - a tripped pillar, or a p95 over target, is a warning.
+
+The decision-4 WARNING and ✗ are the v1 behavior. Their code lands with WP-4.2.
 
 ---
 
@@ -565,14 +583,15 @@ What the contract does and does not guarantee:
 
 - **Content is labeled** (section 4.2), so a well-behaved pillar can avoid being steered by text it received. The label protects the pillar from the payload. It does not protect you from the pillar.
 - **"Pillars run locally, no outside hosts"** is a rule for pillars, and OAra's own pillars must follow it. The daemon enforces it only where the OS lets it: a daemon-launched host on Linux under systemd gets `IPAddressDeny`. Everywhere else it is a promise, not a guarantee, and doctor reports which of the two applies.
-- **Ephemeral sessions** send pillars no content (section 4.3, open question 3).
+- **Ephemeral sessions** send pillars no content (section 4.3, decision 3).
+- **Routing stays local unless you opt in.** A pillar's route choice can't send your conversation to a hosted API, or spend money, unless you set `pillars.decide.route_allow_cloud` (section 6.3, decision 17). Your own per-session model choice always wins.
 - **What a compromised or buggy pillar can do:**
   - see content;
   - delay a turn by up to its deadlines;
   - stop turns (a denial of service);
   - put labeled notes in front of the model, which can steer it;
   - decide within the option tables of the decision points the operator turned on.
-- **What it cannot do:** execute a tool, change a tool call's arguments, get past the gate or the approval prompt, or write memory.
+- **What it cannot do:** execute a tool, change a tool call's arguments or which tool runs, get past the gate or the approval prompt, route to a hosted API you didn't allow, or write memory.
 
 ---
 
@@ -591,7 +610,7 @@ What the contract does and does not guarantee:
 - **A. One registry.** Operator hooks and pillar hooks are two kinds of entry in one registry and one dispatcher. They share the event catalogue, ordering, telemetry and doctor listing, and keep separate rules.
 - **B. Separate registries.** The `HookExecutor` stays as it is, and a new pillar host sits beside it.
 
-**Recommendation: A, one registry with two kinds.** Operator hooks keep their current semantics, positions and payloads in v1.
+**Decided: A, one registry with two kinds** (decision 5). Operator hooks keep their current semantics, positions and payloads in v1. The reasons:
 
 1. **One answer to "what runs here, and in what order".** Two registries at the same event means two orderings, and doctor and telemetry would have to reconcile them. Two parallel copies of machinery that drift apart is the defect the loop already names "the two-loop defect" (CROSS-CUTTING §2, `engine/agent_loop.py:957`).
 2. **One authority rule.** Restriction-only verdicts, with the gate as the floor, apply to both kinds. Operator hooks can only block today, so they already fit.
@@ -607,12 +626,15 @@ What the contract does and does not guarantee:
 | Payload in v1 | Today's flat payload, unchanged: `{tool_name, tool_input, event}` plus `tool_output`/`tool_is_error` after the call, delivered to command hooks as `PROMETHEUS_HOOK_PAYLOAD` / `ARGUMENTS` | `hooks/1` envelope |
 | Capabilities in v1 | Today's: block at `pre_tool_use`, observe at `post_tool_use` | Section 3 |
 | Position in v1 | Today's: `pre_tool_use` before the adapter and gate (C1), `post_tool_use` at C18 | Section 8 |
+| `session_start` / `session_end` in v1 | Never fire, as today. If any are configured, boot logs one WARNING and doctor shows ✗ "configured, never fires" (decision 4) | Fire (section 3.1) |
+
+**Operator session hooks (decision 4).** These can be configured today, and nothing fires them (Appendix B.1). In v1 they still don't fire, because firing them would change behavior for anyone who configured them. But they are no longer silent: the boot WARNING and the doctor ✗ tell the operator their hook does nothing. The code for both lands with WP-4.2.
 
 **Why B is weaker.** B ships sooner, but it leaves two hook systems at the same events, with separate ordering and observability, and nothing forcing them to agree.
 
 **Constraints on the migration**
 - Unifying the registry is a refactor of `hooks/`. It has to pass the full suite unchanged and replay the golden traces identically, like any other seam.
-- Changing where operator hooks run, or what they receive, is a later minor version with its own decision (open questions 4 and 6).
+- Changing where operator hooks run, or what they receive, or firing their session events, is a later minor version with its own decision (decisions 4 and 6, section 18).
 
 ---
 
@@ -626,44 +648,83 @@ What the contract does and does not guarantee:
   - the same payloads and the same `block_on_failure`;
   - the same missing timeout for `prompt` and `agent` hooks;
   - `session_start` and `session_end` still never fire for operator hooks.
+- **One addition, deliberately (decision 4).** If an operator hook is configured on `session_start` or `session_end`, boot logs one WARNING and doctor shows ✗ "configured, never fires". This happens at boot and in doctor only. No turn runs differently, and with no such hook configured, nothing is added at all.
 - **Nothing else.**
   - no host processes, worker threads or sockets;
-  - no `hook_calls` rows and no new log lines;
+  - no `hook_calls` rows, and no new log lines beyond the decision-4 WARNING;
   - no config keys required: an absent `pillars:` section means no pillars.
 
 A pillar that is installed but not listed in `pillars.load` counts as not installed for all of the above.
 
-### Why behavior is identical
+### Why turn behavior is identical
 
 1. **The pillar registry is built once at boot** from `pillars.load`. With nothing listed it is empty, and it stays unchanged for the life of the daemon.
 2. **Every insertion point is a single `has_subscribers(event)` check** against that frozen registry: a dictionary lookup. With no subscribers it builds no payload, takes no lock and adds **no `await`**. The last part matters: an extra await point on the hot path changes how concurrent sessions interleave, even if it returns immediately.
 3. **Every decision point needs a flag that names a loaded pillar.** With none loaded, every flag resolves to off, and the default's own fallback runs. That is the code path that runs today.
-4. **Nothing is written.** There are no telemetry rows, files or sockets.
+4. **Nothing is written during a turn.** There are no telemetry rows, files or sockets.
 
 **What proves it is not this document.** The proof is the full existing suite passing unchanged, identical golden-trace replay, and overhead inside the noise band, all run on the implementation (WP-4.x). Until then, "identical" is a design requirement, not a measured result.
 
 ---
 
-## 17. Open questions for WP-1.3
+## 17. Decisions (WP-1.3)
 
-Each question has a recommendation. Will decides.
+These were decided in review on 2026-09-24, and they close WP-1.1 and WP-1.3. Each entry says whether it was accepted as recommended, changed in review, or added in review, and where this document applies it.
 
-1. **How Instinct runs by default.** The WP asks for in-process entry points, but in-process execution can't meet "capped CPU and memory" or "a crash never takes the daemon down". **Recommended:** entry points for packaging, a supervised `host` process for execution, and `inproc` as an explicit opt-in.
-2. **Budget numbers.** Instinct: 100 ms deadline, 50 ms p95 target. Cognition: 5 s per call, 15 s per turn. Pipeline: 60 s. Also the thresholds in section 10: a host restart after 3 consecutive timeouts, a trip after 5 failures in 60 s, and 2 in-flight calls per session. All are unmeasured. **Recommended:** adopt them as provisional and re-set them from WP-4.x measurements.
-3. **Ephemeral sessions.** **Recommended:** withhold `content` from pillars. The alternatives are to skip pillars entirely for those sessions or to send everything.
-4. **Operator hooks on `session_start` and `session_end`.** They are configurable today and never fire, and firing them would change behavior for anyone who configured them. **Recommended:** leave them unfired in v1, and fire the events for pillars only.
-5. **Registry.** **Recommended:** one registry with two kinds (section 15).
-6. **Where operator `pre_tool_use` hooks run.** Today they run before the adapter and the gate, so they see the raw call as the model emitted it. **Recommended:** keep that in v1, and move them after the gate in a later minor version, so they see what will actually run.
-7. **What "escalate" means.** It is defined here as "require the human's approval". Should a pillar also be able to ask for a stronger model? That is a routing change, not a restriction. **Recommended:** not in v1.
-8. **The `tool_choice` decision.** Allow forcing (`required`, `tool:X`), or only `none`? Forcing costs the cached prefix on llama.cpp's grammar path (`:1572-1579`). **Recommended:** allow forcing, behind the flag, limited to one round per turn, and never raising when the provider doesn't honor it.
-9. **The `tool_name` decision.** This is the decision closest to an action: the tool that runs differs from the one the model named, with the same arguments. The gate still rules on the result, and the adapter's fuzzy repair already does this deterministically. **Recommended:** include it, behind a flag that is off by default.
-10. **Provenance for delivery notes.** `before_delivery` notes need a new value, `pillar`, in the closed `Provenance` set (`engine/messages.py:32-36`). That set belongs to the memory schema contract. **Recommended:** add `pillar`, untrusted by default.
-11. **Pillar-written compaction summaries.** Should a memory pillar be able to supply them? Today's compactor summary is trusted (`is_trusted=True`). A pillar-written one would have to render as untrusted. **Recommended:** not in v1.
-12. **The unreachable decision points** (`compaction_span`, `skill_draft`). Should their defaults gain abstain bands? That changes default behavior and would need its own WP. **Recommended:** leave them inert in v1.
-13. **HTTP transport.** **Recommended:** unix sockets only in v1, with HTTP added only when a real pillar can't use one.
-14. **The daemon token.** The WP says local connections authenticate with "the daemon token or a permission-restricted socket". This draft never sends the daemon token to a pillar (section 11) and uses it only for pillar-to-daemon calls. **Recommended:** confirm that.
-15. **Where the telemetry goes.** **Recommended:** a new `hook_calls` table rather than rows in `subsystem_runs`, because of the volume (every tool call, times every hook) and because it needs its own indexes.
-16. **Post-processing after the loop, per surface.** On Telegram, the honesty correction and teacher escalation change the reply after `before_delivery` has fired. SkillCreator and SkillRefiner run only on `run_async` surfaces, not on web/Beacon, and on those surfaces they run before the reply is sent, so a `skill_draft_score` hook would sit on the reply path there. **Recommended:** record this as a known limit in v1. Decide separately whether those steps move into the loop, and whether post-task hooks move off the delivery path. That second move would be a change to default behavior with its own WP.
+1. **How Instinct runs.** *Changed in review.*
+   - `host` is the default for Instinct pillars.
+   - `inproc` is removed from v1 entirely, because it can't meet "a pillar crash never takes the daemon down".
+   - It may return in a later minor version, but only if the measured `host` overhead misses the Instinct budget.
+
+   Applied in sections 10, 11 and 18.
+2. **Budget numbers.** *Accepted.* The deadlines, targets and thresholds are provisional, and WP-4.x re-sets them from measurements (section 9.1).
+3. **Ephemeral sessions.** *Accepted.* Pillars get no `content` for ephemeral sessions (section 4.3).
+4. **Operator hooks on `session_start` and `session_end`.** *Changed in review.*
+   - They don't fire in v1.
+   - They aren't left silent either: if any are configured, boot logs one WARNING and `oara doctor` shows ✗ "configured, never fires".
+   - This is the v1 behavior, and its code lands with WP-4.2.
+
+   Applied in sections 13, 15 and 16.
+5. **Registry.** *Accepted.* One registry with two kinds (section 15).
+6. **Where operator `pre_tool_use` hooks run.** *Accepted.* Unchanged in v1. Moving them after the gate is a later minor version (section 18).
+7. **What "escalate" means.** *Accepted.* It means "require the human's approval". A pillar can't ask for a stronger model in v1 (section 5).
+8. **The `tool_choice` decision.** *Accepted, with an addition.*
+   - Forcing is allowed behind the flag, for at most one round per turn, and a pillar-forced round never raises.
+   - **Addition:** the flag can't be turned on anywhere until the parity harness (WP-1.2) has measured the llama.cpp prefix-cache cost of a forced round.
+
+   Applied in section 6.3.
+9. **The `tool_name` decision.** *Changed in review: removed from v1.*
+   - When adapter repair fails today, the model is told and retries. That is not a dead end.
+   - So the upside is at most one saved round, and the downside is running a tool the model didn't name.
+
+   Applied in sections 3 and 6.3. Section 18 lists the evidence needed before it is reconsidered.
+10. **Provenance for delivery notes.** *Accepted.* A new value, `pillar`, untrusted by default, added to the `Provenance` set through the memory schema contract (section 5).
+11. **Pillar-written compaction summaries.** *Accepted.* Not in v1.
+12. **The unreachable decision points** (`compaction_span`, `skill_draft`). *Accepted.* They stay inert in v1. Making either reachable is a change to default behavior with its own WP (section 6.3).
+13. **HTTP transport.** *Accepted.* Unix sockets only in v1. The loopback, mutual-HMAC design is kept as the plan for when `http` is added (sections 11 and 18).
+14. **The daemon token.** *Accepted.* It is never sent to a pillar, and is used only for pillar-to-daemon calls (section 11).
+15. **Where the telemetry goes.** *Accepted.* A new `hook_calls` table (section 13).
+16. **Post-processing after the loop, per surface.** *Accepted.* This is a known limit of v1. Two things are separate decisions: whether the Telegram-only steps move into the loop, and whether post-task hooks move off the delivery path (sections 3.1 and 9.1).
+17. **Cloud routes.** *Added in review.*
+    - The `route` option table includes only local providers unless the operator allows otherwise, with `pillars.decide.route_allow_cloud` (default `false`).
+    - A pillar's choice must never send conversation content to a hosted API, or spend money, without the operator opting in.
+    - The per-session user override still always wins.
+
+    Applied in sections 6.3, 7, 12 and 14.
+
+---
+
+## 18. Possible later minor versions
+
+None of these is in v1. Each would need its own decision and a minor version bump (section 12). Each is listed with what has to be true before it is considered.
+
+| Candidate | Before it is considered |
+|---|---|
+| `inproc` transport (decision 1) | The measured `host` transport overhead misses the Instinct budget (section 9.1). |
+| `tool_name` decision point (decision 9) | Evidence of two things. First, how often adapter repair fails: `tool_calls` rows with `error_type = 'validation_failed'` (`engine/agent_loop.py:4024`). Second, what the model does next: whether its retry succeeds and in how many rounds. `retry_success` repair pairs in `training.db` record the recoveries (`:3996-4003`). |
+| `http` transport on loopback (decision 13) | A real pillar that can't use a unix socket. Section 11 has the design. |
+| Operator `pre_tool_use` hooks after the gate (decision 6) | A decision to change what existing operator hooks see. After the move, they would see the repaired call that will actually run. |
+| Firing operator `session_start` / `session_end` hooks (decision 4) | A decision to change behavior for operators who configured them. Until then, the boot WARNING and doctor ✗ tell them the hooks never fire. |
 
 ---
 
@@ -676,7 +737,7 @@ Every place built-in behavior runs during a turn, in the order it runs. These ar
 | Turn setup | A.2 | `turn_start` |
 | Each round, before the model call | A.3 | `before_model_call` |
 | Model call and response | A.4 | `after_model_response`; `before_delivery` for the final answer (after M8's empty-turn check, before its commit) |
-| Tool batch and each call | A.5, A.6 through C11 | `pre_tool_use` |
+| Tool batch and each call | A.5, and A.6 through C10. The event fires before the approval prompt, C11. | `pre_tool_use` |
 | Each call, after execution | C12–C19 | `post_tool_use` |
 | After the batch | A.7 | `after_tool_results` |
 | Turn end | A.8 | `turn_end` |
