@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable, Iterable
 
-from prometheus.coding.sandbox import ProcessSandbox, SandboxViolation
+from prometheus.coding.sandbox import ProcessSandbox, SandboxPolicyDenial, SandboxViolation
 from prometheus.coding.tools import CodeStrReplaceArgs, CodeStrReplaceTool
 from prometheus.tools.base import ToolExecutionContext
 
@@ -139,6 +139,11 @@ class DocumentsService:
         """
         try:
             real = self._sandbox.resolve(rel)
+        except SandboxPolicyDenial as exc:
+            # A denial the sandbox did not make before WP-X.27 (a glob entry,
+            # say); the gate refused these, in its own words. Keep them.
+            self._gate_check(exc.path, tool_name)
+            raise DocumentsError(403, f"path escapes the documents root: {exc}") from exc
         except SandboxViolation as exc:
             raise DocumentsError(403, f"path escapes the documents root: {exc}") from exc
         self._gate_check(real, tool_name)

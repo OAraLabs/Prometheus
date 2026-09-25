@@ -39,7 +39,7 @@ from prometheus.permissions.modes import PermissionMode, TrustLevel
 # The ONE denied-path matcher. Imported from security/ (a leaf that checker
 # may depend on) so the gate and the grep/glob prune layer share it — see
 # _check_denied_path. security/ imports nothing from permissions/, so no cycle.
-from prometheus.security.path_guard import denied_entry_matches
+from prometheus.security.path_guard import denying_entry, file_identity
 
 log = logging.getLogger(__name__)
 
@@ -613,6 +613,26 @@ def _normalise_denied_path(entry: str) -> str:
     if _is_glob(expanded):
         return expanded
     return str(Path(expanded).resolve())
+
+
+def _rm_would_remove(target: Path, root: Path, *, follow: bool) -> bool:
+    """Whether ``rm -r <target>`` would remove ``root`` itself, by file identity.
+
+    The roots were compared as spelled: a workspace root is stored resolved,
+    ``/``, ``~`` and ``~/.prometheus`` only expanded, and the operand is
+    neither. So on macOS a workspace configured as ``/tmp/ws`` (stored as
+    ``/private/tmp/ws``) was not protected from ``rm -rf /tmp/ws``, and with
+    ``$HOME`` behind a symlink, ``rm -rf`` of its real path was not stopped
+    (WP-X.27). Compared by (device, inode) instead, as #574's guard compares.
+
+    ``rm`` removes a symlink operand, not what it points at, unless the
+    operand ends in ``/``. So the operand is taken as rm will act on it, and
+    the root in both forms: the link itself and the directory it names.
+    """
+    operand = file_identity(target, follow_symlinks=follow)
+    if operand is None:
+        return False  # nothing there for rm to remove
+    return operand in (file_identity(root), file_identity(root, follow_symlinks=False))
 
 
 def _splice_grants(original: str, grants: list) -> str:
@@ -1538,6 +1558,7 @@ class SecurityGate:
         allowed to write.
         """
         roots = self._protected_roots()
+        operands: list[tuple[str, Path]] = []
         for call in _RM_CALL.findall(command):
             if not _RM_RECURSIVE_FLAG.search(call):
                 continue
@@ -1547,16 +1568,22 @@ class SecurityGate:
                 if not (token.startswith("/") or token.startswith("~")):
                     continue  # relative target — see the docstring
                 try:
-                    target = Path(token.rstrip("/") or "/").expanduser()
+                    operands.append((token, Path(token.rstrip("/") or "/").expanduser()))
                 except (OSError, RuntimeError):  # pragma: no cover
                     continue
-                for root in roots:
-                    if target == root:
-                        return (
-                            "Blocked: recursive rm aimed at a protected root — "
-                            f"{token!r} resolves to {root}"
-                        )
-        return ""
+        # The comparison as spelled first, over every operand and root, so a
+        # command it blocked names the same operand and root; identity only
+        # for what it missed (WP-X.27).
+        hit = next(((t, r) for t, target in operands for r in roots if target == r), None) or next(
+            ((t, r) for t, target in operands for r in roots
+             if _rm_would_remove(target, r, follow=t.endswith("/"))), None)
+        if hit is None:
+            return ""
+        token, root = hit
+        return (
+            "Blocked: recursive rm aimed at a protected root — "
+            f"{token!r} resolves to {root}"
+        )
 
     def _is_always_blocked(self, command: str) -> bool:
         if any(r.search(command) for r in self._blocked_re):
@@ -1659,24 +1686,31 @@ class SecurityGate:
         happened to sit under the daemon's cwd.
         """
         resolved = str(Path(file_path).expanduser().resolve())
-        for denied in self._denied_paths:
-            # The comparison is ONE shared predicate (path_guard.denied_entry_matches)
-            # — the SAME one the grep/glob prune layer uses. That symmetry is the
-            # fix for the matcher drift that left the shipped credential floor
-            # inert in the prune layer: this gate matched ``/*/.ssh`` with fnmatch
-            # while the prune layer expanded it with Path.glob to nothing. Two
-            # layers reading one deny list must not have two ideas of what matches.
-            #
-            # The branch below only chooses the WORDING of the denial (pattern vs
-            # prefix), not the decision. denied_entry_matches is the decision:
-            # a glob entry matches the path or anything under it (fnmatch's ``*``
-            # spans ``/`` — broader means MORE denied); a literal entry matches on
-            # PATH COMPONENTS, so "/etc" does not deny "/etcetera/notes" (a bare
-            # startswith did, silently — over-refusal that never announced itself).
-            if denied_entry_matches(resolved, denied):
-                if _is_glob(denied):
-                    return f"Path {file_path!r} matches denied pattern {denied!r}"
-                return f"Path {file_path!r} is under denied prefix {denied!r}"
+        # The decision is ONE shared function (path_guard.denying_entry) — the
+        # SAME one the grep/glob prune layer and workspace binding use. That
+        # symmetry is the fix for the matcher drift that left the shipped
+        # credential floor inert in the prune layer: this gate matched ``/*/.ssh``
+        # with fnmatch while the prune layer expanded it with Path.glob to
+        # nothing. Two layers reading one deny list must not have two ideas of
+        # what matches.
+        #
+        # A glob entry matches the path or anything under it (fnmatch's ``*``
+        # spans ``/`` — broader means MORE denied); a literal entry matches on
+        # PATH COMPONENTS, so "/etc" does not deny "/etcetera/notes" (a bare
+        # startswith did, silently — over-refusal that never announced itself).
+        # Literal entries are resolved at construction, glob entries are not
+        # (resolve() would treat a wildcard as a name), so on macOS
+        # ``/tmp/*.secret`` never matched the resolved ``/private/tmp/x.secret``
+        # (WP-X.27): denying_entry also compares each entry with its literal
+        # directories resolved and, failing that, by file identity.
+        #
+        # The branch below only chooses the WORDING of the denial (pattern vs
+        # prefix), and names the entry as configured.
+        denied = denying_entry(resolved, self._denied_paths)
+        if denied is not None:
+            if _is_glob(denied):
+                return f"Path {file_path!r} matches denied pattern {denied!r}"
+            return f"Path {file_path!r} is under denied prefix {denied!r}"
         return ""
 
     def _within_workspace(self, file_path: str, roots: "tuple[Path, ...] | list[Path] | None" = None) -> bool:

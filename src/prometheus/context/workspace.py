@@ -23,9 +23,9 @@ def validate_workspace_path(raw: str, security_cfg: dict | None) -> tuple[Path |
     ``security.denied_paths``. Returns ``(resolved, None)`` or ``(None, why)``.
     """
     from prometheus.config.shipped_defaults import resolve_denied_paths
-    # The SAME matcher the gate and the grep/glob prune layer use — see the
-    # comment at the loop below for why resolving each entry here was inert.
-    from prometheus.security.path_guard import denied_entry_matches
+    # The SAME decision the gate and the grep/glob prune layer use — see the
+    # comment at the loop below.
+    from prometheus.security.path_guard import denied_entry_matches, denying_entry
 
     text = (raw or "").strip()
     if not text:
@@ -45,10 +45,24 @@ def validate_workspace_path(raw: str, security_cfg: dict | None) -> tuple[Path |
     # ``/workspace ~/.ssh`` was accepted, handing a session its write boundary
     # inside a credential directory. Resolving a PATTERN is the defect; matching
     # against it is the fix.
+    #
+    # And compare like with like (WP-X.27). ``resolved`` is resolved; the entries
+    # came straight from the config, not even ``~``-expanded, so a ``~/...``
+    # entry never matched, and on macOS neither did ``/etc`` (resolved,
+    # ``/private/etc``). ``denying_entry`` expands nothing, so expand ``~``
+    # here, as the gate does; it compares every spelling and, failing that,
+    # file identity.
+    raw_entries = resolve_denied_paths(security_cfg or {})
     resolved_str = str(resolved)
-    for denied in resolve_denied_paths(security_cfg or {}):
-        if denied_entry_matches(resolved_str, denied):
-            return None, f"{resolved} is under denied path {denied}"
+    for raw in raw_entries:  # the comparison as before first: a refusal names the same entry
+        if denied_entry_matches(resolved_str, raw):
+            return None, f"{resolved} is under denied path {raw}"
+    entries: dict[str, str] = {}
+    for raw in raw_entries:
+        entries.setdefault(str(Path(raw).expanduser()), raw)  # the first spelling wins
+    hit = denying_entry(resolved, entries)
+    if hit is not None:
+        return None, f"{resolved} is under denied path {entries[hit]}"
     return resolved, None
 
 
