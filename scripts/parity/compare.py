@@ -78,12 +78,67 @@ def _lines(obj: Any) -> list[str]:
     return json.dumps(obj, indent=1, sort_keys=True, ensure_ascii=False, default=str).splitlines()
 
 
-def _udiff(a: Any, b: Any, label: str, context: int = 2, limit: int = 60) -> list[str]:
-    out = list(difflib.unified_diff(_lines(a), _lines(b), f"recorded:{label}",
-                                    f"replayed:{label}", n=context, lineterm=""))
+def _leaves(a: Any, b: Any, path: str = "") -> list[tuple[str, Any, Any]]:
+    """Every differing leaf, by path — so a one-line change inside a 30 kB
+    system prompt is reported as that line, not as two identical prefixes."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        out: list[tuple[str, Any, Any]] = []
+        for k in sorted(set(a) | set(b), key=str):
+            if a.get(k, _MISSING) != b.get(k, _MISSING):
+                out += _leaves(a.get(k, _MISSING), b.get(k, _MISSING), f"{path}.{k}")
+        return out
+    if isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        out = []
+        for i, (x, y) in enumerate(zip(a, b)):
+            if x != y:
+                out += _leaves(x, y, f"{path}[{i}]")
+        return out
+    return [(path or ".", a, b)]
+
+
+class _Missing:
+    def __repr__(self) -> str:
+        return "<absent>"
+
+
+_MISSING = _Missing()
+
+
+def _show(v: Any) -> str:
+    if isinstance(v, str) or v is _MISSING:
+        return repr(v)
+    return json.dumps(v, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _udiff(a: Any, b: Any, label: str, context: int = 1, limit: int = 60) -> list[str]:
+    out: list[str] = []
+    for path, x, y in _leaves(a, b):
+        if isinstance(x, list) and isinstance(y, list):
+            # Rows added or removed: show them, one JSON line per field.
+            body = list(difflib.unified_diff(_lines(x), _lines(y), "recorded", "replayed",
+                                             n=context, lineterm=""))[2:]
+            out.append(f"{label}{path}: ({len(x)} -> {len(y)} items)")
+            out += ["  " + ln[:240] for ln in body]
+        elif isinstance(x, str) and isinstance(y, str) and ("\n" in x or "\n" in y):
+            body = list(difflib.unified_diff(x.splitlines(), y.splitlines(), "recorded",
+                                             "replayed", n=context, lineterm=""))[2:]
+            out.append(f"{label}{path}: (multi-line text)")
+            out += ["  " + ln[:240] for ln in body]
+        else:
+            out.append(f"{label}{path}:")
+            out.append(f"  - recorded: {_show(x)[:240]}")
+            out.append(f"  + replayed: {_show(y)[:240]}")
     if len(out) > limit:
         out = out[:limit] + [f"... ({len(out) - limit} more diff lines)"]
     return out
+
+
+def _keyed(table: dict | None) -> Any:
+    """Rows as {column: value} so a diff path names the column, not an index."""
+    if not table:
+        return table
+    cols = table.get("columns", [])
+    return {"rows": [dict(zip(cols, r)) for r in table.get("rows", [])]}
 
 
 def compare(out: RunOutput, expected: dict, root: Path) -> CompareResult:
@@ -128,7 +183,7 @@ def compare(out: RunOutput, expected: dict, root: Path) -> CompareResult:
                 te, ta = e["sqlite"].get(table), a["sqlite"].get(table)
                 if te != ta:
                     res.diffs.setdefault(categorize(path, table), []).extend(
-                        _udiff(te, ta, f"{path}:{table}"))
+                        _udiff(_keyed(te), _keyed(ta), f"{path}:{table}"))
         else:
             res.diffs.setdefault(categorize(path, None), []).extend(_udiff(e, a, path))
     return res
