@@ -312,3 +312,42 @@ async def test_an_https_hook_that_times_out_in_the_handshake_closes_its_socket(t
             f"the hook left {3 - server.closed_by_client} of 3 connections open")
     finally:
         server.close()
+
+
+class _Ok(BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_an_http_hook_whose_connection_setup_is_slow_but_in_time_succeeds(
+        tmp_path, monkeypatch):
+    """The deadline is the TOTAL, not a cap on each phase: name resolution
+    that takes half the budget must not fail a request that completes inside
+    it. (An earlier version of this change capped connection setup at 0.4 of
+    the timeout and failed exactly this.)"""
+    real_getaddrinfo = socket.getaddrinfo
+
+    def slow_getaddrinfo(*args, **kwargs):
+        time.sleep(0.5)
+        return real_getaddrinfo(*args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", slow_getaddrinfo)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Ok)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        hook = HttpHookDefinition(url=f"http://localhost:{server.server_address[1]}/hook",
+                                  timeout_seconds=TIMEOUT, block_on_failure=True)
+        elapsed, result = await _run(hook, tmp_path)
+        [one] = result.results
+        assert one.success is True, f"{one.reason} after {elapsed:.2f}s"
+        assert one.output == "ok"
+    finally:
+        server.shutdown()

@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpcore
 import httpx
 
 from prometheus.engine.messages import ConversationMessage
@@ -183,17 +184,17 @@ class HookExecutor:
         # timeout, and such a hook ran as long as the server liked, then
         # reported success (WP-X.26). timeout_seconds is now the total.
         #
-        # Connection setup is left to httpx's own connect timer, set so the TCP
-        # connect plus the TLS handshake (each gets the connect timeout) end
-        # inside the total. Cancelling httpcore in the middle of start_tls
-        # skips its cleanup and leaks the socket; its own timeout closes it.
+        # The deadline arrives as a cancellation, which can land anywhere,
+        # including inside httpcore's TLS handshake, whose cleanup runs only on
+        # an Exception. The transport is made cancel-safe for exactly that
+        # case (_cancel_safe_transport); httpx's own per-phase limits are as
+        # before.
         started = time.monotonic()
         deadline = asyncio.timeout(hook.timeout_seconds)
-        timeouts = httpx.Timeout(hook.timeout_seconds,
-                                 connect=hook.timeout_seconds * _HTTP_CONNECT_SHARE)
         try:
             async with deadline:
-                async with httpx.AsyncClient(timeout=timeouts) as client:
+                async with httpx.AsyncClient(timeout=hook.timeout_seconds,
+                                             transport=_cancel_safe_transport()) as client:
                     response = await client.post(
                         hook.url,
                         json={"event": event.value, "payload": payload},
@@ -214,12 +215,6 @@ class HookExecutor:
                 return _failed_hook_result(
                     hook, event, hook_label(event, position, hook), "timeout",
                     f"timed out after {hook.timeout_seconds}s", started,
-                )
-            if isinstance(exc, httpx.TimeoutException):
-                return _failed_hook_result(
-                    hook, event, hook_label(event, position, hook), "timeout",
-                    f"timed out ({type(exc).__name__}, deadline "
-                    f"{hook.timeout_seconds}s)", started,
                 )
             return HookResult(
                 hook_type=hook.type,
@@ -320,9 +315,82 @@ class HookExecutor:
 _REAP_GRACE_SECONDS = 2.0
 _KILL_INTERVAL_SECONDS = 0.05
 
-#: Share of an http hook's timeout that httpx may spend on the TCP connect,
-#: and again on the TLS handshake: 2 x 0.4 keeps connection setup inside it.
-_HTTP_CONNECT_SHARE = 0.4
+
+class _CancelSafeStream(httpcore.AsyncNetworkStream):
+    """A network stream that closes its socket when a TLS handshake is cut off.
+
+    httpcore's ``start_tls`` closes the stream only on an ``Exception``. An
+    http hook's total deadline cancels the request, and a cancellation that
+    lands in the handshake left the socket open for as long as the server
+    held it: one leaked fd per timed-out hook against a stalled TLS endpoint.
+    """
+
+    def __init__(self, stream: httpcore.AsyncNetworkStream) -> None:
+        self._stream = stream
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        return await self._stream.read(max_bytes, timeout)
+
+    async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        await self._stream.write(buffer, timeout)
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()
+
+    async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        try:
+            tls = await self._stream.start_tls(ssl_context, server_hostname, timeout)
+        except BaseException:
+            try:
+                await self._stream.aclose()
+            except BaseException:  # noqa: BLE001 — the original exception wins
+                pass
+            raise
+        return _CancelSafeStream(tls)
+
+    def get_extra_info(self, info: str):
+        return self._stream.get_extra_info(info)
+
+
+class _CancelSafeBackend(httpcore.AsyncNetworkBackend):
+    """httpcore's own backend, handing out cancel-safe streams."""
+
+    def __init__(self, inner: httpcore.AsyncNetworkBackend) -> None:
+        self._inner = inner
+
+    async def connect_tcp(self, host, port, timeout=None, local_address=None,
+                          socket_options=None):
+        return _CancelSafeStream(await self._inner.connect_tcp(
+            host, port, timeout=timeout, local_address=local_address,
+            socket_options=socket_options))
+
+    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        return _CancelSafeStream(await self._inner.connect_unix_socket(
+            path, timeout=timeout, socket_options=socket_options))
+
+    async def sleep(self, seconds: float) -> None:
+        await self._inner.sleep(seconds)
+
+
+def _cancel_safe_transport() -> httpx.AsyncHTTPTransport:
+    """httpx's default transport, with its pool's backend made cancel-safe.
+
+    httpx 0.28 takes no network backend, but the httpcore pool it builds does,
+    and uses it lazily for every connection, so it is swapped in after
+    construction. A proxy from the environment is mounted by the client as a
+    separate transport and is not covered. If a future httpx moves the
+    attribute, the hook still runs, and this says so (the TLS-stall test in
+    tests/test_hook_timeouts.py would fail too).
+    """
+    transport = httpx.AsyncHTTPTransport()
+    pool = getattr(transport, "_pool", None)
+    backend = getattr(pool, "_network_backend", None)
+    if backend is None:
+        log.warning("http hooks: this httpx has no pool backend to wrap; a hook "
+                    "that times out in a TLS handshake may leak its socket")
+        return transport
+    pool._network_backend = _CancelSafeBackend(backend)
+    return transport
 
 
 def _kill_process_group(process: asyncio.subprocess.Process) -> bool:
