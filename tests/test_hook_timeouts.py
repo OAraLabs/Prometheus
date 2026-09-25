@@ -424,6 +424,78 @@ async def test_a_hooks_exit_status_passes_through(tmp_path):
     assert one.metadata["returncode"] == 3
 
 
+@pytest.fixture
+def quiet_home(tmp_path, monkeypatch):
+    """A HOME whose login files the test controls; hooks read HOME at call time."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bash_profile").write_text("export FROM_PROFILE=yes\n")
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+@pytest.mark.parametrize("command, printed", [
+    (f"{sys.executable} -c 'import os, signal; os.kill(os.getpid(), signal.SIGKILL)'", ""),
+    ("echo before; kill -TERM $$", "before"),
+], ids=["simple-command", "compound-command"])
+@pytest.mark.asyncio
+async def test_a_hook_killed_by_a_signal_reports_only_what_it_printed(
+        command, printed, quiet_home, tmp_path):
+    """The session's leader is a bash that waits for the command. A bash whose
+    child dies from a signal writes a job-status line to its stderr
+    ("... Killed: 9  /bin/bash -lc "$1""), which would become the hook's output
+    and, under block_on_failure, the reason the model is shown."""
+    hook = CommandHookDefinition(command=command, timeout_seconds=10, block_on_failure=True)
+
+    _, result = await _run(hook, tmp_path)
+
+    [one] = result.results
+    assert one.blocked is True
+    assert one.output == printed
+    assert "/bin/bash" not in one.reason, one.reason
+
+
+@pytest.mark.asyncio
+async def test_a_hook_does_not_source_bashrc_when_stdin_is_a_socket(quiet_home, tmp_path):
+    """bash sources ~/.bashrc for a non-login `-c` shell whose stdin is a socket
+    (its rshd/sshd heuristic). A daemon started with socket stdio (a Node
+    parent's pipes are socketpairs) hands its stdin to every hook, so the
+    leader must not take that path; the login bash never did."""
+    (quiet_home / ".bashrc").write_text("echo BASHRC-SOURCED\n")
+    hook = CommandHookDefinition(command="echo hi", timeout_seconds=10)
+    ours, theirs = socket.socketpair()
+    saved = os.dup(0)
+    try:
+        os.dup2(ours.fileno(), 0)
+        _, result = await _run(hook, tmp_path)
+    finally:
+        os.dup2(saved, 0)
+        os.close(saved)
+        ours.close()
+        theirs.close()
+
+    [one] = result.results
+    assert one.output == "hi"
+
+
+@pytest.mark.asyncio
+async def test_an_allowlisted_bash_env_runs_once_after_the_profile(
+        quiet_home, tmp_path, monkeypatch):
+    """A non-interactive bash sources $BASH_ENV before its script. Read by the
+    leader too, it would run twice, first without anything the operator's
+    profile sets (and a `set -e` in it could stop the command running at all)."""
+    bash_env = tmp_path / "bash_env.sh"
+    bash_env.write_text('echo "sourced, FROM_PROFILE=${FROM_PROFILE-unset}"\n')
+    monkeypatch.setenv("BASH_ENV", str(bash_env))
+    hook = CommandHookDefinition(command='echo "BASH_ENV=$BASH_ENV"', timeout_seconds=10,
+                                 env_allowlist=["BASH_ENV"])
+
+    _, result = await _run(hook, tmp_path)
+
+    [one] = result.results
+    assert one.output.splitlines() == ["sourced, FROM_PROFILE=yes", f"BASH_ENV={bash_env}"]
+
+
 @pytest.mark.asyncio
 async def test_an_http_hook_still_runs_if_httpx_moves_its_pool(tmp_path, monkeypatch, caplog):
     """The cancel-safe wrapping reaches into httpx's private pool. If a future

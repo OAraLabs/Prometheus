@@ -111,12 +111,15 @@ class HookExecutor:
         # reason naming the hook, one WARNING.
         started = time.monotonic()
         try:
+            argv, env = _command_launch(
+                hook.command, _command_environment(hook, event, payload),
+            )
             process = await asyncio.create_subprocess_exec(
-                *_command_argv(hook.command),
+                *argv,
                 cwd=str(self._context.cwd),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=_command_environment(hook, event, payload),
+                env=env,
                 # Its own process group, so a timeout can stop everything the
                 # hook started, not just bash: see _kill_process_group.
                 start_new_session=True,
@@ -311,12 +314,15 @@ class HookExecutor:
 
 #: The leader of a command hook's session: a constant, non-login bash that runs
 #: the operator's command in a login bash as its CHILD, then exits with its
-#: status. See _command_argv.
-_SESSION_LEADER_SCRIPT = '/bin/bash -lc "$1"; exit $?'
+#: status. See _command_launch.
+_SESSION_LEADER_SCRIPT = (
+    '{ case $# in 2) BASH_ENV=$2; export BASH_ENV;; esac; '
+    '/bin/bash -lc "$1" 2>&3 3>&-; exit $?; } 3>&2 2>/dev/null'
+)
 
 
-def _command_argv(command: str) -> list[str]:
-    """argv for a command hook: ``bash -lc <command>``, one level down.
+def _command_launch(command: str, env: dict[str, str]) -> tuple[list[str], dict[str, str]]:
+    """argv and environment for a command hook: ``bash -lc <command>``, one level down.
 
     The hook gets its own session so a timeout can stop everything it started.
     Run directly, ``bash -lc cmd`` execs a single simple command in place, and
@@ -326,8 +332,30 @@ def _command_argv(command: str) -> list[str]:
     failing gate would ALLOW the call. A constant leader keeps the command out
     of that role; ``exit $?`` hands its status through. The command reaches the
     inner bash as a positional argument, never as script text of the leader.
+
+    The leader must add nothing the command would see:
+
+    - Its own stderr goes to /dev/null (the command keeps the real one), so
+      when the command dies from a signal the leader's job-status line
+      ("Killed: 9 /bin/bash -lc ...") does not become the hook's output.
+    - ``--norc``: bash sources ~/.bashrc for a non-login ``-c`` shell whose
+      stdin is a socket (its rshd/sshd heuristic), and a daemon started with
+      socket stdio would otherwise run it before every hook.
+    - A non-interactive bash sources ``$BASH_ENV`` before its script runs, so
+      an allowlisted BASH_ENV would run twice, the first time before the
+      operator's profile. The leader gets it as an argument instead and
+      exports it, unchanged, for the command's login bash only.
+
+    Two differences remain, both documented in the hooks contract (§15): the
+    command's ``$PPID`` is the leader, not the daemon, and a command killed by
+    a signal reports 128+n (the leader's ``exit``), not -n.
     """
-    return ["/bin/bash", "-c", _SESSION_LEADER_SCRIPT, "prometheus-hook", command]
+    env = dict(env)
+    argv = ["/bin/bash", "--norc", "-c", _SESSION_LEADER_SCRIPT, "prometheus-hook", command]
+    bash_env = env.pop("BASH_ENV", None)
+    if bash_env is not None:
+        argv.append(bash_env)
+    return argv, env
 
 
 #: After a command hook times out, how long to keep killing its process group
