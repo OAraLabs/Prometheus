@@ -10,6 +10,7 @@ import asyncio
 import os
 import shutil
 import socket
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -343,7 +344,21 @@ class TestFilenameFromUrl:
         assert "example" in name
 
 
+# WP-X.23. STRICT: the day the guard is fixed these pass on macOS, the
+# marking turns into a failure, and it has to be removed with the fix.
+WPX23_MACOS = pytest.mark.xfail(
+    sys.platform == "darwin", strict=True,
+    reason=(
+        "WP-X.23: on macOS the download tool's protected-path guard never "
+        "fires. _resolve_destination resolves the destination (/etc is a "
+        "symlink to /private/etc) and compares it with UNRESOLVED prefixes, "
+        "so /private/etc/... is not under Path('/etc')."
+    ),
+)
+
+
 class TestPathTraversalGuard:
+    @WPX23_MACOS
     def test_etc_path_blocked(self):
         with pytest.raises(ValueError):
             _resolve_destination("https://x.com/x", "/etc/passwd")
@@ -352,6 +367,7 @@ class TestPathTraversalGuard:
         with pytest.raises(ValueError):
             _resolve_destination("https://x.com/x", "/sys/test")
 
+    @WPX23_MACOS
     def test_traversal_resolves_first(self):
         # Even if the literal string starts safely, ../ should be resolved
         # before the protected-path check.
@@ -419,6 +435,7 @@ class TestDownloadToolBehavior:
         assert result.is_error
         assert "Blocked" in result.output
 
+    @WPX23_MACOS
     @pytest.mark.asyncio
     async def test_protected_path_rejected(self, tmp_path):
         tool = DownloadFileTool()

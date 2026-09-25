@@ -820,6 +820,46 @@ def check_bash_floors(config: dict[str, Any]) -> list[DiagnosticCheck]:
     return rows
 
 
+def check_operator_hooks(config: dict[str, Any]) -> list[DiagnosticCheck]:
+    """One row per hook under ``hooks:``, with what its command may see.
+
+    Command hooks no longer inherit the daemon's environment: they get a
+    minimal set plus the names in their ``env_allowlist``. A hook that relied
+    on an inherited variable now runs without it, and this is where the
+    operator sees exactly which names each hook still gets. No rows when no
+    hooks are configured.
+    """
+    from prometheus.hooks.events import HookEvent
+    from prometheus.hooks.executor import BASE_ENV_NAMES, BASE_ENV_PREFIXES, hook_label
+    from prometheus.hooks.loader import load_hook_registry
+    from prometheus.hooks.schemas import CommandHookDefinition
+
+    try:
+        registry = load_hook_registry(config.get("hooks", {}) or {})
+    except Exception as exc:
+        return [DiagnosticCheck(
+            name="Hooks", category="platform", status="warning",
+            message=f"could not read the hooks: section ({exc})",
+        )]
+    base = ", ".join([*BASE_ENV_NAMES, *(f"{p}*" for p in BASE_ENV_PREFIXES)])
+    rows: list[DiagnosticCheck] = []
+    for event in HookEvent:
+        for position, hook in enumerate(registry.get(event), start=1):
+            parts = [
+                f"block_on_failure={str(hook.block_on_failure).lower()}",
+                f"timeout {hook.timeout_seconds}s",
+            ]
+            if isinstance(hook, CommandHookDefinition):
+                allow = ", ".join(hook.env_allowlist) or "none"
+                parts.append(f"env: {base} + allowlist: {allow}")
+            rows.append(DiagnosticCheck(
+                name=f"Hook {hook_label(event, position, hook)}",
+                category="platform", status="info",
+                message="; ".join(parts),
+            ))
+    return rows
+
+
 def check_trajectory_export(config: dict[str, Any]) -> DiagnosticCheck:
     """Is golden-trace capture actually accumulating anything?
 
@@ -948,6 +988,7 @@ def run_extended_checks(
         check_advertised_tools(config),
         check_coding_sandbox(config),
         *check_bash_floors(config),
+        *check_operator_hooks(config),
         check_config_pins(),
         check_trajectory_export(config),
         check_whisper(config),

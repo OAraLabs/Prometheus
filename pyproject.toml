@@ -234,6 +234,13 @@ include = ["src/prometheus/web/static/*"]
 # `cli.generate_identity.identity_template_path()`, which looks here first.
 "templates/SOUL.md.template" = "prometheus/templates/SOUL.md.template"
 "templates/AGENTS.md.template" = "prometheus/templates/AGENTS.md.template"
+# And again: the model registry decides the adapter tier for local models
+# (listed with native tool calling -> "light", otherwise "full"). It sat at
+# the repo root, so every pip and Homebrew install ran every local model at
+# "full". Resolved by `config.model_registry.get_model_registry_path()`,
+# which looks here first. The sdist already carries it under /config, and a
+# wheel built FROM the sdist (Homebrew's path) picks it up through this line.
+"config/model_registry.yaml" = "prometheus/config/model_registry.yaml"
 
 # ---------------------------------------------------------------------------
 # SDIST — an explicit ALLOWLIST, because the default is not a decision.
