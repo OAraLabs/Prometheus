@@ -70,10 +70,8 @@ HOOK = REPO / ".githooks" / "pre-commit"
 # re-add the literals here, and do not allowlist this file to work around it.
 # ---------------------------------------------------------------------------
 HOOK_PATTERN_FIXTURES: dict[str, tuple[int, str]] = {
-    "tests/test_wiki.py": (
-        13, "wiki-dedup fixture entities, deliberately case-varied to exercise "
-            "entity normalization; MagicDNS labels, no IPs",
-    ),
+    # tests/test_wiki.py was listed here with 13 hits until its case-variant
+    # fixtures were renamed to neutral names (Host-A.example); it has none now.
     "tests/test_turn_errors.py": (
         1, "the synthetic provider key in the test asserting a URL query "
            "string is never echoed to clients — the fixture IS the control",
