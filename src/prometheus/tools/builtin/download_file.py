@@ -186,6 +186,32 @@ class DownloadFileTool(BaseTool):
 # Path resolution + traversal guard
 # ---------------------------------------------------------------------------
 
+# Where a download may never land. The destination is checked after it is
+# RESOLVED, so these must be compared in the same form: see _protected_prefixes.
+_PROTECTED_ROOTS = ("/etc", "/sys", "/boot", "/proc", "/dev")
+
+
+def _protected_prefixes() -> list[Path]:
+    """Every protected prefix, as written AND resolved.
+
+    The destination is resolved before it is checked, and the prefixes were
+    not. On macOS ``/etc`` is a symlink to ``/private/etc``, so
+    ``/etc/passwd`` resolved to ``/private/etc/passwd``, which is not under
+    ``Path("/etc")``, and the guard never fired there (WP-X.23). The same
+    happens to ``~/.ssh`` on any host where ``$HOME`` is reached through a
+    symlink. So each prefix is checked in both spellings. The resolved form
+    is the one that matters; the written form costs nothing.
+
+    Computed per call, not at import: ``Path.home()`` follows ``$HOME``.
+    """
+    prefixes: list[Path] = []
+    for raw in (*(Path(r) for r in _PROTECTED_ROOTS), Path.home() / ".ssh"):
+        for form in (raw, raw.resolve()):
+            if form not in prefixes:
+                prefixes.append(form)
+    return prefixes
+
+
 def _resolve_destination(url: str, requested: str | None) -> Path:
     """Resolve the destination path. Apply path-traversal guard and reject
     common system paths (``/etc``, ``/sys``, ``/boot``).
@@ -199,20 +225,10 @@ def _resolve_destination(url: str, requested: str | None) -> Path:
         Path.cwd() / candidate
     ).resolve()
 
-    forbidden_prefixes = (
-        Path("/etc"),
-        Path("/sys"),
-        Path("/boot"),
-        Path("/proc"),
-        Path("/dev"),
-        Path.home() / ".ssh",
-    )
-    for forbidden in forbidden_prefixes:
-        try:
-            candidate.relative_to(forbidden)
-        except ValueError:
-            continue
-        raise ValueError(f"Destination {candidate} is in a protected path")
+    for forbidden in _protected_prefixes():
+        if candidate.is_relative_to(forbidden):
+            raise ValueError(
+                f"Destination {candidate} is in a protected path ({forbidden})")
 
     if derived:
         # THE INVARIANT THE FORBIDDEN LIST CANNOT EXPRESS: when the URL chose the
