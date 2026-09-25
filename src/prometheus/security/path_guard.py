@@ -349,7 +349,7 @@ def _entry_forms(entry: str) -> tuple[tuple[str, str, tuple[str, ...] | None], .
     """
     if not Path(entry).is_absolute():
         return ()
-    forms = []
+    forms: list[tuple[str, str, tuple[str, ...] | None]] = []
     for spelling in entry_spellings(entry):
         folded = _loose(spelling)
         if is_glob_pattern(spelling):
@@ -425,7 +425,7 @@ class _Plan(NamedTuple):
     literal_exact: frozenset[str]
     literal_prefixes: tuple[str, ...]
     literal_forms: tuple[tuple[str, str, str], ...]
-    glob_forms: tuple[tuple[str, str, str, tuple[str, ...]], ...]
+    glob_forms: tuple[tuple[str, str, str, tuple[str, ...] | None], ...]  # words never None here
     # One C-level test per pass; only a hit walks the list, in order, so the
     # entry named is the same one the walk alone would name.
     screen_1: _Screen
