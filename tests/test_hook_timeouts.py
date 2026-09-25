@@ -392,3 +392,80 @@ async def test_an_http_hook_still_goes_through_the_environment_proxy(tmp_path, m
         assert _RecordingProxy.seen == ["http://hooks.example.invalid/hook"]
     finally:
         proxy.shutdown()
+
+
+# ── what a hook that does NOT time out must still see ───────────────────────
+
+@pytest.mark.asyncio
+async def test_the_hooks_own_command_is_not_a_session_leader(tmp_path):
+    """The hook's session gets a constant leader; the operator's command runs
+    below it, as before. Were the command itself the leader, its setsid()
+    would fail, and util-linux `setsid ./gate.sh` would fork and exit 0 at
+    once: a failing gate would allow the call."""
+    hook = CommandHookDefinition(
+        command=f"{sys.executable} -c 'import os; os.setsid(); print(\"ok\")'",
+        timeout_seconds=10)
+
+    _, result = await _run(hook, tmp_path)
+
+    [one] = result.results
+    assert one.success is True, one.reason
+    assert one.output == "ok"
+
+
+@pytest.mark.asyncio
+async def test_a_hooks_exit_status_passes_through(tmp_path):
+    hook = CommandHookDefinition(command="exit 3", timeout_seconds=10)
+
+    _, result = await _run(hook, tmp_path)
+
+    [one] = result.results
+    assert one.success is False
+    assert one.metadata["returncode"] == 3
+
+
+@pytest.mark.asyncio
+async def test_an_http_hook_still_runs_if_httpx_moves_its_pool(tmp_path, monkeypatch, caplog):
+    """The cancel-safe wrapping reaches into httpx's private pool. If a future
+    httpx moves it, the hook must degrade (run, and say the wrapping is off),
+    not fail every call."""
+    import httpx
+
+    class _PoolMoved(httpx.AsyncHTTPTransport):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._elsewhere = self._pool
+            del self._pool
+
+        async def handle_async_request(self, request):
+            self._pool = self._elsewhere
+            try:
+                return await super().handle_async_request(request)
+            finally:
+                del self._pool
+
+        async def __aenter__(self):
+            await self._elsewhere.__aenter__()
+            return self
+
+        async def __aexit__(self, *exc):
+            await self._elsewhere.__aexit__(*exc)
+
+        async def aclose(self):
+            await self._elsewhere.aclose()
+
+    monkeypatch.setattr(httpx._client, "AsyncHTTPTransport", _PoolMoved)
+    for name in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    caplog.set_level(logging.WARNING, logger=EXECUTOR_LOGGER)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Ok)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        hook = HttpHookDefinition(url=f"http://127.0.0.1:{server.server_address[1]}/hook",
+                                  timeout_seconds=5, block_on_failure=True)
+        _, result = await _run(hook, tmp_path)
+        [one] = result.results
+        assert one.success is True, one.reason
+        assert any("no pool backend to wrap" in m for m in _warnings(caplog))
+    finally:
+        server.shutdown()

@@ -112,9 +112,7 @@ class HookExecutor:
         started = time.monotonic()
         try:
             process = await asyncio.create_subprocess_exec(
-                "/bin/bash",
-                "-lc",
-                hook.command,
+                *_command_argv(hook.command),
                 cwd=str(self._context.cwd),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -311,6 +309,27 @@ class HookExecutor:
         )
 
 
+#: The leader of a command hook's session: a constant, non-login bash that runs
+#: the operator's command in a login bash as its CHILD, then exits with its
+#: status. See _command_argv.
+_SESSION_LEADER_SCRIPT = '/bin/bash -lc "$1"; exit $?'
+
+
+def _command_argv(command: str) -> list[str]:
+    """argv for a command hook: ``bash -lc <command>``, one level down.
+
+    The hook gets its own session so a timeout can stop everything it started.
+    Run directly, ``bash -lc cmd`` execs a single simple command in place, and
+    the operator's own program would become the session and group leader,
+    where it was an ordinary process before: its ``setsid()`` fails with
+    EPERM, and util-linux ``setsid ./gate.sh`` forks and exits 0 at once, so a
+    failing gate would ALLOW the call. A constant leader keeps the command out
+    of that role; ``exit $?`` hands its status through. The command reaches the
+    inner bash as a positional argument, never as script text of the leader.
+    """
+    return ["/bin/bash", "-c", _SESSION_LEADER_SCRIPT, "prometheus-hook", command]
+
+
 #: After a command hook times out, how long to keep killing its process group
 #: and waiting for its output pipes to close before giving up on them.
 _REAP_GRACE_SECONDS = 2.0
@@ -396,8 +415,6 @@ def _make_cancel_safe(client: httpx.AsyncClient) -> None:
                         type(transport).__name__)
         elif not isinstance(backend, _CancelSafeBackend):
             pool._network_backend = _CancelSafeBackend(backend)
-    pool._network_backend = _CancelSafeBackend(backend)
-    return transport
 
 
 def _kill_process_group(process: asyncio.subprocess.Process) -> bool:
