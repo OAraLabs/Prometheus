@@ -206,6 +206,9 @@ class TestFallback:
 
 CODE_MSG = "write a python function to parse json"
 REASONING_MSG = "explain the tradeoffs of immutable data structures in depth"
+# What YAML builds from `0x` + 4000 hex digits: the loader takes it, but
+# repr() and str() refuse it (past Python's 4300-digit conversion limit).
+HUGE_INT = 1 << 16000
 
 
 class TestTaskRuleProviderCache:
@@ -237,18 +240,35 @@ class TestTaskRuleProviderCache:
             RoutingRule(TaskType.REASONING, "llama_cpp", "qwen3.8-27b",
                         base_url="http://gpu-a:8080"),
         ])
-        assert r.route(CODE_MSG).provider is r.route(REASONING_MSG).provider
+        code, reasoning = r.route(CODE_MSG), r.route(REASONING_MSG)
+
+        assert code.reason == reasoning.reason == RouteReason.TASK_RULE
+        assert code.provider is reasoning.provider
+
+    def test_rule_without_base_url_reaches_the_default_host(self):
+        # base_url stays out of the config when unset: passing None through
+        # would fail the llama.cpp build and drop the rule to the primary.
+        r = _make_router(task_rules=[
+            RoutingRule(TaskType.CODE_GENERATION, "llama_cpp", "qwen3.8-27b"),
+        ])
+        decision = r.route(CODE_MSG)
+
+        assert decision.reason == RouteReason.TASK_RULE
+        assert decision.provider._base_url == "http://localhost:8080"
 
     @pytest.mark.parametrize("malformed", [
         {"base_url": ["http://gpu-a:8080"]},
         {"base_url": {"host": "gpu-a", "port": 8080}},
+        {"base_url": HUGE_INT},
         {"provider": ["llama_cpp"]},
     ])
     def test_malformed_rule_still_falls_through_to_primary(self, malformed):
-        # YAML can put a list or a map where a string belongs. Building that
-        # provider fails, and a rule whose provider cannot be built falls
-        # through to the next branch. A key hashed from the raw values raised
-        # (unhashable type: 'list') out of route() before it got that far.
+        # YAML can put a list, a map or an unprintable int where a string
+        # belongs. Building that provider fails, and a rule whose provider
+        # cannot be built falls through to the next branch. A key made from
+        # the raw values raised (unhashable type: 'list') out of route() before
+        # it got that far, and a repr() key made outside the try raised on
+        # HUGE_INT.
         fields = {"provider": "llama_cpp", "model": "qwen3.8-27b", **malformed}
         r = _make_router(task_rules=[RoutingRule(TaskType.CODE_GENERATION, **fields)])
 
@@ -256,6 +276,17 @@ class TestTaskRuleProviderCache:
 
         assert decision.reason == RouteReason.PRIMARY
         assert decision.provider is r.primary_provider
+
+    @pytest.mark.parametrize("field", ["provider", "model"])
+    def test_unprintable_rule_field_does_not_raise_out_of_route(self, field):
+        # origin/main raised here: its f-string key printed provider and model
+        # outside the try. Only "does not raise" is pinned. The decision
+        # depends on the interpreter's int_max_str_digits setting, so it is
+        # left unasserted.
+        fields = {"provider": "llama_cpp", "model": "qwen3.8-27b", field: HUGE_INT}
+        r = _make_router(task_rules=[RoutingRule(TaskType.CODE_GENERATION, **fields)])
+
+        r.route(CODE_MSG)
 
 
 # -- Auxiliary ---------------------------------------------------------------

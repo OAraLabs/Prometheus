@@ -1066,22 +1066,24 @@ class ModelRouter:
             # later is in the key without anyone having to remember.
             #
             # repr(), not the raw values: YAML can put a list or a map in any
-            # of these fields, and hashing one would raise out of route()
-            # before the try below could let the malformed rule fall through.
-            cache_key = tuple((k, repr(v)) for k, v in provider_cfg.items())
-            if cache_key not in self._task_rule_providers:
-                from prometheus.providers.registry import ProviderRegistry
-                try:
+            # of these fields, and hashing one raises. repr() can raise too (an
+            # int past the 4300-digit limit, which a YAML hex literal builds),
+            # so the key is made inside the try: a rule that cannot be keyed
+            # falls through exactly like one whose provider cannot be built.
+            from prometheus.providers.registry import ProviderRegistry
+            try:
+                cache_key = tuple((k, repr(v)) for k, v in provider_cfg.items())
+                if cache_key not in self._task_rule_providers:
                     self._task_rule_providers[cache_key] = ProviderRegistry.create(
                         provider_cfg
                     )
-                except Exception:
-                    log.debug(
-                        "Failed to create task-rule provider %s",
-                        provider_cfg,
-                        exc_info=True,
-                    )
-                    return None
+            except Exception:
+                log.debug(
+                    "Failed to create task-rule provider %s",
+                    provider_cfg,
+                    exc_info=True,
+                )
+                return None
 
             return RouteDecision(
                 provider=self._task_rule_providers[cache_key],
