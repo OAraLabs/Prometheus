@@ -39,7 +39,7 @@ from prometheus.gym.ladder.record import (
     record_summary,
 )
 from prometheus.gym.ladder.suite import LadderSuite, LadderTask
-from prometheus.gym.ladder.verdict import ERROR, Verdict, decide
+from prometheus.gym.ladder.verdict import ERROR, FAIL, FORMAT_MISS, PASS, UNSCORED, Verdict, decide
 from prometheus.gym.runner import (
     _probe_kv_cache,
     build_pipeline,
@@ -579,6 +579,19 @@ def _redact_acceptance(acc: dict[str, Any] | None) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
+_ICONS = {PASS: "✅", FAIL: "❌", FORMAT_MISS: "〰️", UNSCORED: "❔", ERROR: "💥"}
+
+
+def progress_line(task: LadderTask, row: dict[str, Any]) -> str:
+    """One run's line on the console (and why, when it did not pass)."""
+    line = (f"  {_ICONS[row['verdict']]} {task.task_class:13s} {task.id:28s} "
+            f"rounds={row['rounds']} calls={row['tool_calls_ok']}/{row['tool_calls']} "
+            f"repairs={row['repairs']} {row['duration_ms'] / 1000:.1f}s")
+    if row["verdict"] != PASS:
+        line += f"\n       → {'; '.join(row['fail_reasons'])[:200]}"
+    return line
+
+
 async def run_ladder(
     suite: LadderSuite,
     tasks: list[LadderTask],
@@ -738,14 +751,7 @@ async def run_ladder(
                     )
                     rows.append(row)
                     if progress:
-                        icon = {"pass": "✅", "fail": "❌", "unscored": "❔",
-                                "error": "💥"}[row["verdict"]]
-                        print(f"  {icon} {task.task_class:13s} {task.id:28s} "
-                              f"rounds={row['rounds']} calls={row['tool_calls_ok']}/"
-                              f"{row['tool_calls']} repairs={row['repairs']} "
-                              f"{row['duration_ms'] / 1000:.1f}s")
-                        if row["verdict"] != "pass":
-                            print(f"       → {'; '.join(row['fail_reasons'])[:200]}")
+                        print(progress_line(task, row))
         finally:
             tel.close()
         return rows

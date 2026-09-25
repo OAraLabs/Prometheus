@@ -1079,6 +1079,22 @@ ANSWER_TASK = """  - id: mult
 """
 
 
+def test_every_verdict_has_a_progress_line():
+    # A format miss crashed the first real run: the progress printer knew only
+    # four verdicts. Every verdict the harness can return must print.
+    from types import SimpleNamespace
+
+    from prometheus.gym.ladder import verdict as v
+
+    task = SimpleNamespace(task_class="qa", id="t")
+    row = {"rounds": 1, "tool_calls_ok": 0, "tool_calls": 0, "repairs": 0,
+           "duration_ms": 1200.0, "fail_reasons": ["why"]}
+    for verdict in (v.PASS, v.FAIL, v.FORMAT_MISS, v.UNSCORED, v.ERROR):
+        line = lr.progress_line(task, {**row, "verdict": verdict})
+        assert "qa" in line and "t" in line
+        assert ("why" in line) == (verdict != v.PASS)
+
+
 class TestRunOutcomes:
 
     def test_the_whole_final_reply_is_recorded_for_audit(self, tmp_path):
