@@ -43,12 +43,20 @@ def _free_port() -> int:
 def cli_home(tmp_path):
     """Isolated HOME with a config pointing at a live stub model."""
     port = _free_port()
-    stub = subprocess.Popen(
-        [sys.executable, str(STUB), "--port", str(port)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    deadline = time.time() + 10
+    # The stub's own output goes to a file, not DEVNULL: when it does not come
+    # up, the failure below says WHY (its exit code and stderr), instead of a
+    # bare "never came up" that no CI log can explain.
+    stub_log = tmp_path / "stub.log"
+    with stub_log.open("wb") as log_fh:
+        stub = subprocess.Popen(
+            [sys.executable, str(STUB), "--port", str(port)],
+            stdout=log_fh, stderr=subprocess.STDOUT,
+        )
+    started = time.time()
+    deadline = started + 10
     while time.time() < deadline:
+        if stub.poll() is not None:
+            break  # it exited: no point waiting out the deadline
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.5):
                 break
@@ -56,7 +64,14 @@ def cli_home(tmp_path):
             time.sleep(0.1)
     else:
         stub.kill()
-        pytest.fail("stub model never came up")
+        stub.wait()
+    if stub.poll() is not None:
+        output = stub_log.read_text(encoding="utf-8", errors="replace")
+        pytest.fail(
+            f"stub model never came up: exit code {stub.returncode} after "
+            f"{time.time() - started:.1f}s on port {port} "
+            f"({sys.executable} {STUB}).\n--- stub output ---\n{output[-3000:]}"
+        )
 
     home = tmp_path / "home"
     (home / ".prometheus").mkdir(parents=True)
