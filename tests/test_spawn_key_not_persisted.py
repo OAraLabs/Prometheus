@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -80,11 +81,31 @@ def manager(tmp_path, monkeypatch):
     # THE CHILD IS A REAL AGENT NOW (WP-X.24). While the command was a bare
     # `python`, it died at once on most hosts; with the daemon's interpreter it
     # starts Prometheus, which resolves its OWN config, and conftest's
-    # in-process isolation does not reach a child. In a checkout with a live
-    # config/prometheus.yaml it would be a live agent. So the prompt is kept
-    # from it: the agent starts, prints its banner and waits, and never runs a
-    # turn. Nothing here asserts on prompt delivery; conftest shuts every
-    # manager down after the test.
+    # in-process isolation (REPO_CONFIG_PATH -> tmp) does not reach a child.
+    # In a checkout with a live config/prometheus.yaml the child would boot
+    # from it: its MCP servers, its model, its credentials.
+    #
+    # 1. The same isolation, for the child: a sitecustomize, first on the
+    #    child's PYTHONPATH, points REPO_CONFIG_PATH at a missing file before
+    #    anything imports it. PROMETHEUS_CONFIG_DIR is already tmp (conftest),
+    #    so the child boots on built-in defaults, as it does in CI.
+    site_dir = tmp_path / "child-site"
+    site_dir.mkdir()
+    (site_dir / "sitecustomize.py").write_text(
+        "# Written by tests/test_spawn_key_not_persisted.py: keep a spawned agent\n"
+        "# off the checkout's own config/prometheus.yaml.\n"
+        "import prometheus.config.defaults as _defaults\n"
+        f"_defaults.REPO_CONFIG_PATH = _defaults.Path({str(tmp_path / 'no-repo-config' / 'prometheus.yaml')!r})\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(p for p in (str(site_dir), os.environ.get("PYTHONPATH", "")) if p),
+    )
+
+    # 2. And no turn: the prompt is withheld, so the agent starts, prints its
+    #    banner and waits. Nothing here asserts on prompt delivery; conftest
+    #    shuts every manager down after the test.
     async def _prompt_withheld(task_id: str, data: str) -> None:
         return None
 

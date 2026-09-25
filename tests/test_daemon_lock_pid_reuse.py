@@ -108,13 +108,27 @@ def test_the_process_that_holds_the_lock_still_blocks(lock_dir, newer_process):
     assert "already running" in reason.lower(), reason
 
 
+def _pre_fix_start_time(pid: int) -> float | None:
+    """A FROZEN copy of the pre-fix reader (origin/main b1a697f), deliberately
+    not the module's: this test must still fail if the module's reader changes."""
+    from pathlib import Path
+
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        fields = stat.rsplit(")", 1)[-1].split()
+        return float(fields[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 def _pre_fix_decision(lock: dict) -> str:
-    """What a release before this fix concludes about a lock (verbatim logic)."""
+    """What a release before this fix concludes about a lock: its decision
+    logic, verbatim, with its own reader."""
     pid = lock.get("pid", -1)
     if not S._process_alive(pid):
         return "stale"
     old_start = lock.get("start_time")
-    current = S._process_start_time(pid)  # unchanged: /proc only
+    current = _pre_fix_start_time(pid)
     if old_start is not None and current is not None and old_start == current:
         return "running"
     if old_start is None:
@@ -129,7 +143,7 @@ def test_an_older_release_still_sees_this_releases_lock_as_held(lock_dir):
     assert ok, reason
     lock = json.loads((lock_dir / "daemon.lock").read_text())
 
-    assert lock["start_time"] == S._process_start_time(os.getpid())
+    assert lock["start_time"] == _pre_fix_start_time(os.getpid())
     assert isinstance(lock["started_epoch"], float)
     assert _pre_fix_decision(lock) == "running"
 
