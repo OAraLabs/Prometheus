@@ -19,6 +19,7 @@ from __future__ import annotations
 import fnmatch
 import functools
 import os
+import re
 import sys
 import unicodedata
 from pathlib import Path
@@ -206,16 +207,22 @@ _DARWIN_PC_CASE_SENSITIVE = 11
 
 def volume_folds_case(directory: str | Path) -> bool:
     """Whether the volume holding ``directory`` treats names differing only
-    in case as one name. Asked of the volume, not assumed from the OS: a Mac
-    can mount a case-sensitive APFS volume. Anything that can't answer (every
-    Linux filesystem here) is taken as case-sensitive, which is what ext4 is.
+    in case as one name.
+
+    Asked of that path's own volume on every call, never once at start: a
+    Mac can mount a case-sensitive disk next to its case-insensitive one.
+    FAILS CLOSED: on macOS, an answer the volume can't give (the path is
+    gone, no permission, any value but 0 or 1) counts as folding, which only
+    ever denies more. Linux has no such query; its filesystems here (ext4)
+    are case-sensitive, and that is what it answers.
     """
     if sys.platform != "darwin":
         return False
     try:
-        return os.pathconf(directory, _DARWIN_PC_CASE_SENSITIVE) == 0
+        answer = os.pathconf(directory, _DARWIN_PC_CASE_SENSITIVE)
     except (OSError, ValueError):
-        return False
+        return True
+    return answer != 1  # 1: case-sensitive; 0: folds; anything else: can't tell
 
 
 def inside_by_identity(
@@ -359,11 +366,72 @@ def _literal_under(text: str, entry: str) -> bool:
     return text == entry or text.startswith(entry.rstrip("/") + "/")
 
 
+def _glob_regex(patterns: Iterable[str]) -> re.Pattern[str] | None:
+    """One regex matching whatever ``denied_entry_matches`` matches for any of
+    ``patterns`` (the pattern itself, or anything under it). fnmatch compares
+    through ``os.path.normcase``, which is the identity on POSIX."""
+    parts = [fnmatch.translate(p) for pat in patterns for p in (pat, pat.rstrip("/") + "/*")]
+    return re.compile("|".join(parts)) if parts else None
+
+
+class _Screen(NamedTuple):
+    """Could any of a set of spellings match? Literal ones by component
+    (``_literal_under``), glob ones by pattern. A superset test: when it says
+    no, no spelling matches; when it says yes, the caller walks the list."""
+    exact: frozenset[str]
+    prefixes: tuple[str, ...]
+    globs: re.Pattern[str] | None
+    #: A word each glob must contain, searched for before the patterns.
+    words: re.Pattern[str] | None
+
+    def hits(self, text: str) -> bool:
+        if text in self.exact or text.startswith(self.prefixes):
+            return True
+        if self.globs is None:
+            return False
+        if self.words is not None and self.words.search(text) is None:
+            return False
+        return self.globs.match(text) is not None
+
+
+def _screen(literals: Iterable[str], globs: Iterable[str] = ()) -> _Screen:
+    literals = tuple(literals)
+    globs = tuple(globs)
+    return _Screen(
+        frozenset(literals), tuple(x.rstrip("/") + "/" for x in literals),
+        _glob_regex(globs),
+        _word_regex(tuple(w for w in g.split("/") if w and not is_glob_pattern(w)) for g in globs),
+    )
+
+
+def _word_regex(word_sets: Iterable[tuple[str, ...]]) -> re.Pattern[str] | None:
+    """One search for a word every glob must contain: each glob's literal
+    component nearest the leaf (the one that tells paths apart). None when
+    some glob has no literal component, so every path must be matched."""
+    keys = []
+    for words in word_sets:
+        if not words:
+            return None
+        keys.append(words[-1])
+    return re.compile("|".join(re.escape(k) for k in sorted(set(keys)))) if keys else None
+
+
 class _Plan(NamedTuple):
     entries: tuple[str, ...]
     glob_entries: tuple[str, ...]
     other_spellings: tuple[tuple[str, str, bool], ...]
-    forms: tuple[tuple[str, str, str, tuple[str, ...] | None], ...]
+    #: Every form's loose spelling equals its spelling (nothing to fold).
+    fold_free: bool
+    literal_exact: frozenset[str]
+    literal_prefixes: tuple[str, ...]
+    literal_forms: tuple[tuple[str, str, str], ...]
+    glob_forms: tuple[tuple[str, str, str, tuple[str, ...]], ...]
+    # One C-level test per pass; only a hit walks the list, in order, so the
+    # entry named is the same one the walk alone would name.
+    screen_1: _Screen
+    screen_2: _Screen
+    screen_3: _Screen
+    screen_4_globs: _Screen
 
 
 @functools.lru_cache(maxsize=64)
@@ -371,12 +439,26 @@ def _plan(entries: tuple[str, ...]) -> _Plan:
     """A deny list compiled once: readers pass the same list on every call,
     and the prune layer calls once per search result."""
     kept = tuple(e for e in entries if e)
+    forms = [(e, *form) for e in kept for form in _entry_forms(e)]
+    literal = tuple((e, s, f) for e, s, f, words in forms if words is None)
+    glob_forms = tuple(form for form in forms if form[3] is not None)
     return _Plan(
         entries=kept,
         glob_entries=tuple(e for e in kept if is_glob_pattern(e)),
         other_spellings=tuple(
             (e, s, is_glob_pattern(s)) for e in kept for s in entry_spellings(e)[1:]),
-        forms=tuple((e, *form) for e in kept for form in _entry_forms(e)),
+        fold_free=all(f == s for _, s, f, _ in forms),
+        literal_exact=frozenset(f for _, _, f in literal),
+        literal_prefixes=tuple(f.rstrip("/") + "/" for _, _, f in literal),
+        literal_forms=literal,
+        glob_forms=glob_forms,
+        screen_1=_screen((e for e in kept if not is_glob_pattern(e)),
+                         (e for e in kept if is_glob_pattern(e))),
+        screen_2=_screen(e for e in kept if is_glob_pattern(e)),
+        screen_3=_screen(
+            (s for e in kept for s in entry_spellings(e)[1:] if not is_glob_pattern(s)),
+            (s for e in kept for s in entry_spellings(e)[1:] if is_glob_pattern(s))),
+        screen_4_globs=_screen((), (f for _, _, f, _ in glob_forms)),
     )
 
 
@@ -405,24 +487,32 @@ def denying_entry(resolved_path: str | Path, entries: Iterable[str]) -> str | No
     """
     text = str(resolved_path)
     plan = _plan(tuple(entries))
-    for entry in plan.entries:
-        if denied_entry_matches(text, entry):
-            return entry
-    for entry in plan.glob_entries:
-        if _literal_under(text, entry):
-            return entry
-    for entry, spelling, glob in plan.other_spellings:
-        if denied_entry_matches(text, spelling) or (glob and _literal_under(text, spelling)):
-            return entry
+    if plan.screen_1.hits(text):  # main's comparison, walked only when it can match
+        for entry in plan.entries:
+            if denied_entry_matches(text, entry):
+                return entry
+    if plan.screen_2.hits(text):
+        for entry in plan.glob_entries:
+            if _literal_under(text, entry):
+                return entry
+    if plan.screen_3.hits(text):
+        for entry, spelling, glob in plan.other_spellings:
+            if denied_entry_matches(text, spelling) or (glob and _literal_under(text, spelling)):
+                return entry
     loose = _loose(text)
+    if loose == text and plan.fold_free:
+        # Nothing to fold on either side, so the filter below would ask
+        # exactly what passes 1-3 just answered: nothing can pass it.
+        return None
     literal: dict[Path, str] = {}
+    if loose in plan.literal_exact or loose.startswith(plan.literal_prefixes):
+        for entry, spelling, folded in plan.literal_forms:
+            if _literal_under(loose, folded):  # also covers an absent entry's variant
+                literal.setdefault(Path(spelling), entry)
     globs: list[tuple[str, str]] = []
-    for entry, spelling, folded, words in plan.forms:
-        if words is not None:
-            if all(w in loose for w in words) and denied_entry_matches(loose, folded):
-                globs.append((entry, spelling))
-        elif _literal_under(loose, folded):  # also covers an absent entry's variant
-            literal.setdefault(Path(spelling), entry)
+    if plan.screen_4_globs.hits(loose):
+        globs = [(entry, spelling) for entry, spelling, folded, words in plan.glob_forms
+                 if denied_entry_matches(loose, folded)]
     if not literal and not globs:
         return None
     path = Path(text)
@@ -490,7 +580,9 @@ def _as_the_pattern_spells_it(ancestor: Path, rel: str, rest: str) -> str:
 
 
 def _nearest_folds_case(directory: Path) -> bool:
+    """:func:`volume_folds_case` for the volume ``directory`` is (or would be)
+    on: that of its nearest existing ancestor. Nothing exists: can't tell, fold."""
     for candidate in (directory, *directory.parents):
         if file_identity(candidate) is not None:
             return volume_folds_case(candidate)
-    return False
+    return True

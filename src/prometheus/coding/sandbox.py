@@ -82,6 +82,9 @@ class SandboxPolicyDenial(SandboxViolation):
         super().__init__(message)
         self.path = path
 
+    def __reduce__(self):  # pickle/copy: rebuild with both arguments
+        return (type(self), (self.args[0], self.path))
+
 
 class SandboxConstructionError(Exception):
     """bwrap itself failed to start the sandboxed process.

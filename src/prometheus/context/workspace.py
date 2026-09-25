@@ -25,7 +25,7 @@ def validate_workspace_path(raw: str, security_cfg: dict | None) -> tuple[Path |
     from prometheus.config.shipped_defaults import resolve_denied_paths
     # The SAME decision the gate and the grep/glob prune layer use — see the
     # comment at the loop below.
-    from prometheus.security.path_guard import denying_entry
+    from prometheus.security.path_guard import denied_entry_matches, denying_entry
 
     text = (raw or "").strip()
     if not text:
@@ -52,7 +52,14 @@ def validate_workspace_path(raw: str, security_cfg: dict | None) -> tuple[Path |
     # ``/private/etc``). ``denying_entry`` expands nothing, so expand ``~``
     # here, as the gate does; it compares every spelling and, failing that,
     # file identity.
-    entries = {str(Path(raw).expanduser()): raw for raw in resolve_denied_paths(security_cfg or {})}
+    raw_entries = resolve_denied_paths(security_cfg or {})
+    resolved_str = str(resolved)
+    for raw in raw_entries:  # the comparison as before first: a refusal names the same entry
+        if denied_entry_matches(resolved_str, raw):
+            return None, f"{resolved} is under denied path {raw}"
+    entries: dict[str, str] = {}
+    for raw in raw_entries:
+        entries.setdefault(str(Path(raw).expanduser()), raw)  # the first spelling wins
     hit = denying_entry(resolved, entries)
     if hit is not None:
         return None, f"{resolved} is under denied path {entries[hit]}"

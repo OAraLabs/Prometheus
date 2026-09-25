@@ -470,3 +470,122 @@ def test_the_rm_guard_names_the_operand_main_named(tmp_path, monkeypatch):
     reason = gate._rm_targets_a_protected_root("rm -rf ~/ws/.. ~/.prometheus")
 
     assert "'~/.prometheus' resolves to" in reason, reason
+
+
+# ── case sensitivity: asked of each path's own volume, failing closed ───────
+
+@pytest.fixture
+def as_darwin(monkeypatch):
+    """Run the macOS branch of volume_folds_case on any host, with a scripted
+    pathconf. Records every path it is asked about."""
+    import os as _os
+    from types import SimpleNamespace
+
+    # path_guard's own references only, so nothing else in the process sees a
+    # fake platform or a fake pathconf.
+    monkeypatch.setattr(path_guard, "sys", SimpleNamespace(platform="darwin"))
+    calls: list[str] = []
+    answers: dict[str, object] = {}
+
+    def fake_pathconf(path, name):
+        assert name == 11, name  # Darwin's _PC_CASE_SENSITIVE
+        calls.append(str(path))
+        for prefix, answer in sorted(answers.items(), key=lambda kv: -len(kv[0])):
+            if str(path).startswith(prefix):
+                if isinstance(answer, BaseException):
+                    raise answer
+                return answer
+        raise AssertionError(f"pathconf asked about an unscripted path: {path}")
+
+    class _Os:
+        def __getattr__(self, name):
+            return fake_pathconf if name == "pathconf" else getattr(_os, name)
+
+    monkeypatch.setattr(path_guard, "os", _Os())
+    return calls, answers
+
+
+@pytest.mark.parametrize("answer, folds", [
+    (0, True),                                   # case-insensitive
+    (1, False),                                  # case-sensitive
+    (2, True),                                   # not 0 or 1: can't tell, fold
+    (-1, True),                                  # "not defined": can't tell, fold
+    (PermissionError(13, "Permission denied"), True),
+    (FileNotFoundError(2, "No such file or directory"), True),
+    (OSError(22, "Invalid argument"), True),
+], ids=["0", "1", "2", "-1", "EACCES", "ENOENT", "EINVAL"])
+def test_the_case_probe_fails_closed(as_darwin, tmp_path, answer, folds):
+    """Anything but a clear "case-sensitive" folds, which only denies more."""
+    _, answers = as_darwin
+    answers[str(tmp_path)] = answer
+
+    assert path_guard.volume_folds_case(tmp_path) is folds
+
+
+def _env_file(root: Path) -> Path:
+    (root / ".config" / "app").mkdir(parents=True)
+    (root / ".config" / "app" / ".env").write_text("TOKEN=not-real\n")
+    return root / ".config" / "app" / ".ENV"
+
+
+def test_an_unanswerable_case_probe_denies_the_variant(as_darwin, tmp_path):
+    """The floor's ``*env`` against ``.ENV``: folded only if the volume folds.
+    When the probe can't answer, it is denied."""
+    _, answers = as_darwin
+    variant = _env_file(tmp_path)
+    gate = SecurityGate()
+
+    answers[str(tmp_path)] = 1
+    assert gate._check_denied_path(str(variant)) == ""
+    answers[str(tmp_path)] = PermissionError(13, "Permission denied")
+    assert gate._check_denied_path(str(variant)) != ""
+    answers[str(tmp_path)] = 7
+    assert gate._check_denied_path(str(variant)) != ""
+
+
+def test_case_sensitivity_is_asked_of_each_paths_own_volume_every_time(as_darwin, tmp_path):
+    """Two volumes, one gate: the decision follows each path's own volume,
+    and a volume's answer is asked again on the next call (an external disk
+    can be swapped under the same mount point), never cached at start."""
+    _, answers = as_darwin
+    sensitive = _env_file(tmp_path / "external")
+    folding = _env_file(tmp_path / "internal")
+    answers[str(tmp_path / "external")] = 1
+    answers[str(tmp_path / "internal")] = 0
+    gate = SecurityGate()
+
+    assert gate._check_denied_path(str(sensitive)) == ""
+    assert gate._check_denied_path(str(folding)) != ""
+
+    answers[str(tmp_path / "external")] = 0  # a different disk now
+    assert gate._check_denied_path(str(sensitive)) != ""
+
+
+def test_the_case_probe_asks_the_nearest_existing_ancestor(as_darwin, tmp_path):
+    """A write target that does not exist yet is on its nearest existing
+    ancestor's volume; the probe asks that directory, not the missing path."""
+    calls, answers = as_darwin
+    (tmp_path / "home" / ".config").mkdir(parents=True)
+    answers[str(tmp_path)] = 0
+    target = tmp_path / "home" / ".config" / "new-app" / "sub" / ".ENV"
+
+    reason = SecurityGate()._check_denied_path(str(target))
+
+    assert reason != ""
+    assert calls, "the probe was never asked"
+    assert all(Path(c).exists() for c in calls), calls
+    assert str(tmp_path / "home" / ".config") in calls, calls
+
+
+def test_a_workspace_refusal_main_made_names_the_entry_main_named(tmp_path, monkeypatch):
+    """Expanding ``~`` must not let a ``~`` entry pre-empt the entry main
+    matched, and duplicates keep the first spelling, as main's loop did."""
+    home = tmp_path / "home"
+    (home / "proj").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    _, why = validate_workspace_path(str(home / "proj"), {"denied_paths": ["~", str(home / "proj")]})
+    assert why == f"{home / 'proj'} is under denied path {home / 'proj'}"
+
+    _, why = validate_workspace_path(str(home / "proj"), {"denied_paths": [f"{home}/proj", f"{home}/proj/"]})
+    assert why == f"{home / 'proj'} is under denied path {home}/proj"
