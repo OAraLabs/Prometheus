@@ -23,7 +23,7 @@
      "content_json": {
       "$json": [
        {
-        "id": "o8OkbtAbXRB7t85qS9HgAb2DnWF9SD1y",
+        "id": "Xd8cWVodyKt21gEAA9b4dtulu5iC9Gut",
         "input": {
          "pattern": "*"
         },
@@ -43,7 +43,7 @@
        {
         "content": "inventory.txt",
         "is_error": false,
-        "tool_use_id": "o8OkbtAbXRB7t85qS9HgAb2DnWF9SD1y",
+        "tool_use_id": "Xd8cWVodyKt21gEAA9b4dtulu5iC9Gut",
         "type": "tool_result"
        }
       ]
@@ -57,7 +57,7 @@
      "content_json": {
       "$json": [
        {
-        "id": "soTE468BmowqvsKu0NDyw4dJ9bs7Ty1b",
+        "id": "Z5DxaKjIDti0tyKYzrlLVxdEBW0LxrcO",
         "input": {
          "path": "inventory.txt"
         },
@@ -77,7 +77,7 @@
        {
         "content": "     1\twidgets: 7\n     2\tgears: 3\n     3\tsprockets: 11",
         "is_error": false,
-        "tool_use_id": "soTE468BmowqvsKu0NDyw4dJ9bs7Ty1b",
+        "tool_use_id": "Z5DxaKjIDti0tyKYzrlLVxdEBW0LxrcO",
         "type": "tool_result"
        }
       ]
@@ -87,11 +87,11 @@
      "role": "user"
     },
     {
-     "content": "Files in the current directory: `inventory.txt` only.\n\nSprockets: **11**",
+     "content": "Files in the current directory:\n- `inventory.txt`\n\n**Sprockets: 11**",
      "content_json": {
       "$json": [
        {
-        "text": "Files in the current directory: `inventory.txt` only.\n\nSprockets: **11**",
+        "text": "Files in the current directory:\n- `inventory.txt`\n\n**Sprockets: 11**",
         "type": "text"
        }
       ]
@@ -102,7 +102,7 @@
     }
    ],
    "op": "chat",
-   "reply": "Files in the current directory: `inventory.txt` only.\n\nSprockets: **11**",
+   "reply": "Files in the current directory:\n- `inventory.txt`\n\n**Sprockets: 11**",
    "session": "desktop:parity-tools"
   }
  ],
@@ -266,7 +266,7 @@
        {
         "$json": [
          {
-          "id": "o8OkbtAbXRB7t85qS9HgAb2DnWF9SD1y",
+          "id": "Xd8cWVodyKt21gEAA9b4dtulu5iC9Gut",
           "input": {
            "pattern": "*"
           },
@@ -292,7 +292,7 @@
          {
           "content": "inventory.txt",
           "is_error": false,
-          "tool_use_id": "o8OkbtAbXRB7t85qS9HgAb2DnWF9SD1y",
+          "tool_use_id": "Xd8cWVodyKt21gEAA9b4dtulu5iC9Gut",
           "type": "tool_result"
          }
         ]
@@ -312,7 +312,7 @@
        {
         "$json": [
          {
-          "id": "soTE468BmowqvsKu0NDyw4dJ9bs7Ty1b",
+          "id": "Z5DxaKjIDti0tyKYzrlLVxdEBW0LxrcO",
           "input": {
            "path": "inventory.txt"
           },
@@ -338,7 +338,7 @@
          {
           "content": "     1\twidgets: 7\n     2\tgears: 3\n     3\tsprockets: 11",
           "is_error": false,
-          "tool_use_id": "soTE468BmowqvsKu0NDyw4dJ9bs7Ty1b",
+          "tool_use_id": "Z5DxaKjIDti0tyKYzrlLVxdEBW0LxrcO",
           "type": "tool_result"
          }
         ]
@@ -354,16 +354,16 @@
        "desktop:parity-tools",
        5,
        "assistant",
-       "Files in the current directory: `inventory.txt` only.\n\nSprockets: **11**",
+       "Files in the current directory:\n- `inventory.txt`\n\n**Sprockets: 11**",
        {
         "$json": [
          {
-          "text": "Files in the current directory: `inventory.txt` only.\n\nSprockets: **11**",
+          "text": "Files in the current directory:\n- `inventory.txt`\n\n**Sprockets: 11**",
           "type": "text"
          }
         ]
        },
-       18,
+       17,
        "<time>",
        0,
        "user",
@@ -392,7 +392,7 @@
        ""
       ],
       [
-       "Files in the current directory: `inventory.txt` only.\n\nSprockets: **11**"
+       "Files in the current directory:\n- `inventory.txt`\n\n**Sprockets: 11**"
       ]
      ]
     },
@@ -417,7 +417,7 @@
       [
        1,
        {
-        "$bytes_sha256": "fb468e7a3d60e614",
+        "$bytes_sha256": "cf5fd0de4aa9b0de",
         "len": 2
        }
       ],
@@ -438,8 +438,8 @@
       [
        274877906945,
        {
-        "$bytes_sha256": "7e4dd40b176b2dc8",
-        "len": 114
+        "$bytes_sha256": "e5ef10c8782ee6fc",
+        "len": 104
        }
       ]
      ]
@@ -488,7 +488,7 @@
       [
        6,
        {
-        "$bytes_sha256": "01ba4719c80b6fe9",
+        "$bytes_sha256": "2b4c342f5433ebe5",
         "len": 1
        }
       ]
@@ -639,7 +639,7 @@
      "rows": [
       [
        "desktop:parity-tools",
-       "Counting Sprockets in Inventory File",
+       "Sprocket Inventory Count",
        "<time>"
       ]
      ]
@@ -1664,7 +1664,7 @@
          "stop_reason": "tool_calls"
         }
        },
-       5956,
+       5951,
        26,
        0,
        "desktop:parity-tools",
@@ -1688,7 +1688,7 @@
          "stop_reason": "tool_calls"
         }
        },
-       6001,
+       5996,
        26,
        1,
        "desktop:parity-tools",
@@ -1712,8 +1712,8 @@
          "stop_reason": "stop"
         }
        },
-       6071,
-       23,
+       6066,
+       24,
        2,
        "desktop:parity-tools",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",

@@ -39,7 +39,7 @@
      "content_json": {
       "$json": [
        {
-        "id": "AcChqYndKyHFhjBtiFF7qAw45k1dbd48",
+        "id": "zlcnfx7ZagYYhsaOkiiwXVfvjpJby3hQ",
         "input": {
          "content": "hello parity",
          "path": "/tmp/prometheus-parity/ws/scratch/greeting.txt"
@@ -48,9 +48,9 @@
         "type": "tool_use"
        },
        {
-        "id": "9F5UdPYy3dYImQDtij2CE1jyTD97QMN8",
+        "id": "Xf3EA1W1FOLxJIkDE0ySG8e4rR3TrOJP",
         "input": {
-         "content": "widgets: 99",
+         "content": "widgets: 99\n",
          "path": "/tmp/prometheus-parity/ws/scratch/inventory.txt"
         },
         "name": "write_file",
@@ -69,13 +69,13 @@
        {
         "content": "Wrote /tmp/prometheus-parity/ws/scratch/greeting.txt",
         "is_error": false,
-        "tool_use_id": "AcChqYndKyHFhjBtiFF7qAw45k1dbd48",
+        "tool_use_id": "zlcnfx7ZagYYhsaOkiiwXVfvjpJby3hQ",
         "type": "tool_result"
        },
        {
         "content": "Wrote /tmp/prometheus-parity/ws/scratch/inventory.txt",
         "is_error": false,
-        "tool_use_id": "9F5UdPYy3dYImQDtij2CE1jyTD97QMN8",
+        "tool_use_id": "Xf3EA1W1FOLxJIkDE0ySG8e4rR3TrOJP",
         "type": "tool_result"
        }
       ]
@@ -89,9 +89,9 @@
      "content_json": {
       "$json": [
        {
-        "id": "huFs19aeChLYwNePmCZEMvuaPD6KUl7t",
+        "id": "4nxRip9iBeBZuExXaACkhEBNg8olp2lL",
         "input": {
-         "command": "cd /tmp/prometheus-parity/ws/scratch && od -c greeting.txt && od -c inventory.txt"
+         "command": "cd /tmp/prometheus-parity/ws/scratch && cat -A greeting.txt inventory.txt"
         },
         "name": "bash",
         "type": "tool_use"
@@ -107,9 +107,9 @@
      "content_json": {
       "$json": [
        {
-        "content": "0000000   h   e   l   l   o       p   a   r   i   t   y\n0000014\n0000000   w   i   d   g   e   t   s   :       9   9\n0000013",
+        "content": "hello paritywidgets: 99$",
         "is_error": false,
-        "tool_use_id": "huFs19aeChLYwNePmCZEMvuaPD6KUl7t",
+        "tool_use_id": "4nxRip9iBeBZuExXaACkhEBNg8olp2lL",
         "type": "tool_result"
        }
       ]
@@ -119,11 +119,80 @@
      "role": "user"
     },
     {
-     "content": "Done:\n- **greeting.txt** — created with exactly `hello parity` (no trailing newline, as specified)\n- **inventory.txt** — overwritten with the single line `widgets: 99`",
+     "content": "",
      "content_json": {
       "$json": [
        {
-        "text": "Done:\n- **greeting.txt** — created with exactly `hello parity` (no trailing newline, as specified)\n- **inventory.txt** — overwritten with the single line `widgets: 99`",
+        "id": "P4kzPndkFCypGZGJbwMx3Zarss4wU64v",
+        "input": {
+         "content": "hello parity\n",
+         "path": "/tmp/prometheus-parity/ws/scratch/greeting.txt"
+        },
+        "name": "write_file",
+        "type": "tool_use"
+       }
+      ]
+     },
+     "is_trusted": false,
+     "provenance": "user",
+     "role": "assistant"
+    },
+    {
+     "content": "",
+     "content_json": {
+      "$json": [
+       {
+        "content": "Wrote /tmp/prometheus-parity/ws/scratch/greeting.txt",
+        "is_error": false,
+        "tool_use_id": "P4kzPndkFCypGZGJbwMx3Zarss4wU64v",
+        "type": "tool_result"
+       }
+      ]
+     },
+     "is_trusted": false,
+     "provenance": "user",
+     "role": "user"
+    },
+    {
+     "content": "",
+     "content_json": {
+      "$json": [
+       {
+        "id": "3GtjeoDeH3ekdHFsMP1UN9PNXQUPuXg0",
+        "input": {
+         "command": "cd /tmp/prometheus-parity/ws/scratch && cat -A greeting.txt && echo --- && cat -A inventory.txt"
+        },
+        "name": "bash",
+        "type": "tool_use"
+       }
+      ]
+     },
+     "is_trusted": false,
+     "provenance": "user",
+     "role": "assistant"
+    },
+    {
+     "content": "",
+     "content_json": {
+      "$json": [
+       {
+        "content": "hello parity$\n---\nwidgets: 99$",
+        "is_error": false,
+        "tool_use_id": "3GtjeoDeH3ekdHFsMP1UN9PNXQUPuXg0",
+        "type": "tool_result"
+       }
+      ]
+     },
+     "is_trusted": false,
+     "provenance": "user",
+     "role": "user"
+    },
+    {
+     "content": "Done. Both files are in `/tmp/prometheus-parity/ws/scratch/`:\n\n- `greeting.txt` — `hello parity`\n- `inventory.txt` — `widgets: 99`\n\n(Verified with `cat -A`: each contains exactly one line.)",
+     "content_json": {
+      "$json": [
+       {
+        "text": "Done. Both files are in `/tmp/prometheus-parity/ws/scratch/`:\n\n- `greeting.txt` — `hello parity`\n- `inventory.txt` — `widgets: 99`\n\n(Verified with `cat -A`: each contains exactly one line.)",
         "type": "text"
        }
       ]
@@ -133,11 +202,11 @@
      "role": "assistant"
     },
     {
-     "content": "[FILE MUTATION VERIFIER]\nFiles touched this turn:\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: created (+12 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/inventory.txt — write_file: modified (-23 bytes)",
+     "content": "[FILE MUTATION VERIFIER]\nFiles touched this turn:\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: created (+12 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/inventory.txt — write_file: modified (-22 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: modified (+1 bytes)",
      "content_json": {
       "$json": [
        {
-        "text": "[FILE MUTATION VERIFIER]\nFiles touched this turn:\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: created (+12 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/inventory.txt — write_file: modified (-23 bytes)",
+        "text": "[FILE MUTATION VERIFIER]\nFiles touched this turn:\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: created (+12 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/inventory.txt — write_file: modified (-22 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: modified (+1 bytes)",
         "type": "text"
        }
       ]
@@ -148,15 +217,15 @@
     }
    ],
    "op": "chat",
-   "reply": "Done:\n- **greeting.txt** — created with exactly `hello parity` (no trailing newline, as specified)\n- **inventory.txt** — overwritten with the single line `widgets: 99`",
+   "reply": "Done. Both files are in `/tmp/prometheus-parity/ws/scratch/`:\n\n- `greeting.txt` — `hello parity`\n- `inventory.txt` — `widgets: 99`\n\n(Verified with `cat -A`: each contains exactly one line.)",
    "session": "desktop:parity-undo"
   },
   {
    "label": "after-turn",
    "op": "tree",
    "tree": {
-    "greeting.txt": "876ccc8447f881a4",
-    "inventory.txt": "c00dd17065584939"
+    "greeting.txt": "aec52f3eb3180f83",
+    "inventory.txt": "f408144bf8be8b49"
    }
   },
   {
@@ -383,7 +452,7 @@
        {
         "$json": [
          {
-          "id": "AcChqYndKyHFhjBtiFF7qAw45k1dbd48",
+          "id": "zlcnfx7ZagYYhsaOkiiwXVfvjpJby3hQ",
           "input": {
            "content": "hello parity",
            "path": "/tmp/prometheus-parity/ws/scratch/greeting.txt"
@@ -392,9 +461,9 @@
           "type": "tool_use"
          },
          {
-          "id": "9F5UdPYy3dYImQDtij2CE1jyTD97QMN8",
+          "id": "Xf3EA1W1FOLxJIkDE0ySG8e4rR3TrOJP",
           "input": {
-           "content": "widgets: 99",
+           "content": "widgets: 99\n",
            "path": "/tmp/prometheus-parity/ws/scratch/inventory.txt"
           },
           "name": "write_file",
@@ -419,13 +488,13 @@
          {
           "content": "Wrote /tmp/prometheus-parity/ws/scratch/greeting.txt",
           "is_error": false,
-          "tool_use_id": "AcChqYndKyHFhjBtiFF7qAw45k1dbd48",
+          "tool_use_id": "zlcnfx7ZagYYhsaOkiiwXVfvjpJby3hQ",
           "type": "tool_result"
          },
          {
           "content": "Wrote /tmp/prometheus-parity/ws/scratch/inventory.txt",
           "is_error": false,
-          "tool_use_id": "9F5UdPYy3dYImQDtij2CE1jyTD97QMN8",
+          "tool_use_id": "Xf3EA1W1FOLxJIkDE0ySG8e4rR3TrOJP",
           "type": "tool_result"
          }
         ]
@@ -445,9 +514,9 @@
        {
         "$json": [
          {
-          "id": "huFs19aeChLYwNePmCZEMvuaPD6KUl7t",
+          "id": "4nxRip9iBeBZuExXaACkhEBNg8olp2lL",
           "input": {
-           "command": "cd /tmp/prometheus-parity/ws/scratch && od -c greeting.txt && od -c inventory.txt"
+           "command": "cd /tmp/prometheus-parity/ws/scratch && cat -A greeting.txt inventory.txt"
           },
           "name": "bash",
           "type": "tool_use"
@@ -469,9 +538,9 @@
        {
         "$json": [
          {
-          "content": "0000000   h   e   l   l   o       p   a   r   i   t   y\n0000014\n0000000   w   i   d   g   e   t   s   :       9   9\n0000013",
+          "content": "hello paritywidgets: 99$",
           "is_error": false,
-          "tool_use_id": "huFs19aeChLYwNePmCZEMvuaPD6KUl7t",
+          "tool_use_id": "4nxRip9iBeBZuExXaACkhEBNg8olp2lL",
           "type": "tool_result"
          }
         ]
@@ -487,16 +556,21 @@
        "desktop:parity-undo",
        5,
        "assistant",
-       "Done:\n- **greeting.txt** — created with exactly `hello parity` (no trailing newline, as specified)\n- **inventory.txt** — overwritten with the single line `widgets: 99`",
+       "",
        {
         "$json": [
          {
-          "text": "Done:\n- **greeting.txt** — created with exactly `hello parity` (no trailing newline, as specified)\n- **inventory.txt** — overwritten with the single line `widgets: 99`",
-          "type": "text"
+          "id": "P4kzPndkFCypGZGJbwMx3Zarss4wU64v",
+          "input": {
+           "content": "hello parity\n",
+           "path": "/tmp/prometheus-parity/ws/scratch/greeting.txt"
+          },
+          "name": "write_file",
+          "type": "tool_use"
          }
         ]
        },
-       41,
+       0,
        "<time>",
        0,
        "user",
@@ -507,16 +581,104 @@
        "desktop:parity-undo",
        6,
        "user",
-       "[FILE MUTATION VERIFIER]\nFiles touched this turn:\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: created (+12 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/inventory.txt — write_file: modified (-23 bytes)",
+       "",
        {
         "$json": [
          {
-          "text": "[FILE MUTATION VERIFIER]\nFiles touched this turn:\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: created (+12 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/inventory.txt — write_file: modified (-23 bytes)",
+          "content": "Wrote /tmp/prometheus-parity/ws/scratch/greeting.txt",
+          "is_error": false,
+          "tool_use_id": "P4kzPndkFCypGZGJbwMx3Zarss4wU64v",
+          "type": "tool_result"
+         }
+        ]
+       },
+       0,
+       "<time>",
+       0,
+       "user",
+       0
+      ],
+      [
+       "<uuid:8>",
+       "desktop:parity-undo",
+       7,
+       "assistant",
+       "",
+       {
+        "$json": [
+         {
+          "id": "3GtjeoDeH3ekdHFsMP1UN9PNXQUPuXg0",
+          "input": {
+           "command": "cd /tmp/prometheus-parity/ws/scratch && cat -A greeting.txt && echo --- && cat -A inventory.txt"
+          },
+          "name": "bash",
+          "type": "tool_use"
+         }
+        ]
+       },
+       0,
+       "<time>",
+       0,
+       "user",
+       0
+      ],
+      [
+       "<uuid:9>",
+       "desktop:parity-undo",
+       8,
+       "user",
+       "",
+       {
+        "$json": [
+         {
+          "content": "hello parity$\n---\nwidgets: 99$",
+          "is_error": false,
+          "tool_use_id": "3GtjeoDeH3ekdHFsMP1UN9PNXQUPuXg0",
+          "type": "tool_result"
+         }
+        ]
+       },
+       0,
+       "<time>",
+       0,
+       "user",
+       0
+      ],
+      [
+       "<uuid:10>",
+       "desktop:parity-undo",
+       9,
+       "assistant",
+       "Done. Both files are in `/tmp/prometheus-parity/ws/scratch/`:\n\n- `greeting.txt` — `hello parity`\n- `inventory.txt` — `widgets: 99`\n\n(Verified with `cat -A`: each contains exactly one line.)",
+       {
+        "$json": [
+         {
+          "text": "Done. Both files are in `/tmp/prometheus-parity/ws/scratch/`:\n\n- `greeting.txt` — `hello parity`\n- `inventory.txt` — `widgets: 99`\n\n(Verified with `cat -A`: each contains exactly one line.)",
           "type": "text"
          }
         ]
        },
-       55,
+       47,
+       "<time>",
+       0,
+       "user",
+       0
+      ],
+      [
+       "<uuid:11>",
+       "desktop:parity-undo",
+       10,
+       "user",
+       "[FILE MUTATION VERIFIER]\nFiles touched this turn:\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: created (+12 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/inventory.txt — write_file: modified (-22 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: modified (+1 bytes)",
+       {
+        "$json": [
+         {
+          "text": "[FILE MUTATION VERIFIER]\nFiles touched this turn:\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: created (+12 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/inventory.txt — write_file: modified (-22 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: modified (+1 bytes)",
+          "type": "text"
+         }
+        ]
+       },
+       77,
        "<time>",
        0,
        "file_mutation_verifier",
@@ -545,10 +707,22 @@
        ""
       ],
       [
-       "Done:\n- **greeting.txt** — created with exactly `hello parity` (no trailing newline, as specified)\n- **inventory.txt** — overwritten with the single line `widgets: 99`"
+       ""
       ],
       [
-       "[FILE MUTATION VERIFIER]\nFiles touched this turn:\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: created (+12 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/inventory.txt — write_file: modified (-23 bytes)"
+       ""
+      ],
+      [
+       ""
+      ],
+      [
+       ""
+      ],
+      [
+       "Done. Both files are in `/tmp/prometheus-parity/ws/scratch/`:\n\n- `greeting.txt` — `hello parity`\n- `inventory.txt` — `widgets: 99`\n\n(Verified with `cat -A`: each contains exactly one line.)"
+      ],
+      [
+       "[FILE MUTATION VERIFIER]\nFiles touched this turn:\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: created (+12 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/inventory.txt — write_file: modified (-22 bytes)\n   ✓ /tmp/prometheus-parity/ws/scratch/greeting.txt — write_file: modified (+1 bytes)"
       ]
      ]
     },
@@ -573,7 +747,7 @@
       [
        1,
        {
-        "$bytes_sha256": "36441f61b3dbd5e8",
+        "$bytes_sha256": "23db521583c57730",
         "len": 2
        }
       ],
@@ -594,15 +768,15 @@
       [
        274877906945,
        {
-        "$bytes_sha256": "d85e941220445b8b",
-        "len": 234
+        "$bytes_sha256": "0088738ad121ca6e",
+        "len": 268
        }
       ],
       [
        412316860417,
        {
-        "$bytes_sha256": "928342676f2d8bd5",
-        "len": 246
+        "$bytes_sha256": "78024acdfd12cd83",
+        "len": 263
        }
       ]
      ]
@@ -651,14 +825,42 @@
       [
        6,
        {
-        "$bytes_sha256": "7cb7c4547cf26535",
+        "$bytes_sha256": "6e340b9cffb37a98",
         "len": 1
        }
       ],
       [
        7,
        {
-        "$bytes_sha256": "ffe679bb831c95b6",
+        "$bytes_sha256": "6e340b9cffb37a98",
+        "len": 1
+       }
+      ],
+      [
+       8,
+       {
+        "$bytes_sha256": "6e340b9cffb37a98",
+        "len": 1
+       }
+      ],
+      [
+       9,
+       {
+        "$bytes_sha256": "6e340b9cffb37a98",
+        "len": 1
+       }
+      ],
+      [
+       10,
+       {
+        "$bytes_sha256": "77adfc95029e73b1",
+        "len": 1
+       }
+      ],
+      [
+       11,
+       {
+        "$bytes_sha256": "a318c24216defe20",
         "len": 1
        }
       ]
@@ -817,7 +1019,7 @@
      "rows": [
       [
        "desktop:parity-undo",
-       "File Creation and Overwrite",
+       "Create greeting and inventory files",
        "<time>"
       ]
      ]
@@ -909,6 +1111,39 @@
       [
        5,
        "<time>",
+       "bash",
+       "allow",
+       2,
+       "Auto-allowed (user-initiated)",
+       "",
+       null,
+       null
+      ],
+      [
+       6,
+       "<time>",
+       "write_file",
+       "allow",
+       2,
+       "Auto-allowed (user-initiated)",
+       "",
+       null,
+       null
+      ],
+      [
+       7,
+       "<time>",
+       "write_file",
+       "allow",
+       2,
+       "Auto-allowed (user-initiated)",
+       "",
+       null,
+       null
+      ],
+      [
+       8,
+       "<time>",
        "write_file",
        "allow",
        2,
@@ -953,6 +1188,39 @@
      "timestamp_iso": "<time>",
      "tool_input_summary": "",
      "tool_name": "bash",
+     "trust_level": 2,
+     "user_id": null
+    },
+    {
+     "decision": "allow",
+     "reason": "Auto-allowed (user-initiated)",
+     "session_id": null,
+     "timestamp": "<time>",
+     "timestamp_iso": "<time>",
+     "tool_input_summary": "",
+     "tool_name": "write_file",
+     "trust_level": 2,
+     "user_id": null
+    },
+    {
+     "decision": "allow",
+     "reason": "Auto-allowed (user-initiated)",
+     "session_id": null,
+     "timestamp": "<time>",
+     "timestamp_iso": "<time>",
+     "tool_input_summary": "",
+     "tool_name": "bash",
+     "trust_level": 2,
+     "user_id": null
+    },
+    {
+     "decision": "allow",
+     "reason": "Auto-allowed (user-initiated)",
+     "session_id": null,
+     "timestamp": "<time>",
+     "timestamp_iso": "<time>",
+     "tool_input_summary": "",
+     "tool_name": "write_file",
      "trust_level": 2,
      "user_id": null
     },
@@ -1301,7 +1569,7 @@
      ],
      "rows": [
       [
-       "<uuid:8>",
+       "<uuid:12>",
        "<time>",
        "tool_registration",
        "TaskCreateTool",
@@ -1326,7 +1594,7 @@
        null
       ],
       [
-       "<uuid:9>",
+       "<uuid:13>",
        "<time>",
        "tool_registration",
        "GitHubSearchTool",
@@ -1351,7 +1619,7 @@
        null
       ],
       [
-       "<uuid:10>",
+       "<uuid:14>",
        "<time>",
        "tool_registration",
        "SymbioteScoutTool",
@@ -1376,7 +1644,7 @@
        null
       ],
       [
-       "<uuid:11>",
+       "<uuid:15>",
        "<time>",
        "tool_registration",
        "SymbioteHarvestTool",
@@ -1401,7 +1669,7 @@
        null
       ],
       [
-       "<uuid:12>",
+       "<uuid:16>",
        "<time>",
        "tool_registration",
        "SymbioteGraftTool",
@@ -1426,7 +1694,7 @@
        null
       ],
       [
-       "<uuid:13>",
+       "<uuid:17>",
        "<time>",
        "tool_registration",
        "SymbioteStatusTool",
@@ -1451,7 +1719,7 @@
        null
       ],
       [
-       "<uuid:14>",
+       "<uuid:18>",
        "<time>",
        "tool_registration",
        "SkillTool",
@@ -1476,7 +1744,7 @@
        null
       ],
       [
-       "<uuid:15>",
+       "<uuid:19>",
        "<time>",
        "tool_registration",
        "MemoryTool",
@@ -1501,7 +1769,7 @@
        null
       ],
       [
-       "<uuid:16>",
+       "<uuid:20>",
        "<time>",
        "tool_registration",
        "TodoWriteTool",
@@ -1526,7 +1794,7 @@
        null
       ],
       [
-       "<uuid:17>",
+       "<uuid:21>",
        "<time>",
        "tool_registration",
        "VaultSearchTool",
@@ -1551,7 +1819,7 @@
        null
       ],
       [
-       "<uuid:18>",
+       "<uuid:22>",
        "<time>",
        "tool_registration",
        "VaultReadTool",
@@ -1576,7 +1844,7 @@
        null
       ],
       [
-       "<uuid:19>",
+       "<uuid:23>",
        "<time>",
        "tool_registration",
        "AnatomyTool",
@@ -1601,7 +1869,7 @@
        null
       ],
       [
-       "<uuid:20>",
+       "<uuid:24>",
        "<time>",
        "tool_registration",
        "BrowserTool",
@@ -1626,7 +1894,7 @@
        null
       ],
       [
-       "<uuid:21>",
+       "<uuid:25>",
        "<time>",
        "tool_registration",
        "SessionsListTool",
@@ -1651,7 +1919,7 @@
        null
       ],
       [
-       "<uuid:22>",
+       "<uuid:26>",
        "<time>",
        "tool_registration",
        "SessionsSendTool",
@@ -1676,7 +1944,7 @@
        null
       ],
       [
-       "<uuid:23>",
+       "<uuid:27>",
        "<time>",
        "tool_registration",
        "SessionsSpawnTool",
@@ -1701,7 +1969,7 @@
        null
       ],
       [
-       "<uuid:24>",
+       "<uuid:28>",
        "<time>",
        "tool_registration",
        "TaskGetTool",
@@ -1726,7 +1994,7 @@
        null
       ],
       [
-       "<uuid:25>",
+       "<uuid:29>",
        "<time>",
        "tool_registration",
        "TaskListTool",
@@ -1751,7 +2019,7 @@
        null
       ],
       [
-       "<uuid:26>",
+       "<uuid:30>",
        "<time>",
        "tool_registration",
        "TaskUpdateTool",
@@ -1776,7 +2044,7 @@
        null
       ],
       [
-       "<uuid:27>",
+       "<uuid:31>",
        "<time>",
        "tool_registration",
        "TaskStopTool",
@@ -1801,7 +2069,7 @@
        null
       ],
       [
-       "<uuid:28>",
+       "<uuid:32>",
        "<time>",
        "tool_registration",
        "TaskOutputTool",
@@ -1826,7 +2094,7 @@
        null
       ],
       [
-       "<uuid:29>",
+       "<uuid:33>",
        "<time>",
        "tool_registration",
        "ImageGenerateTool",
@@ -1851,7 +2119,7 @@
        null
       ],
       [
-       "<uuid:30>",
+       "<uuid:34>",
        "<time>",
        "tool_registration",
        "KlingVideoTool",
@@ -1876,7 +2144,7 @@
        null
       ],
       [
-       "<uuid:31>",
+       "<uuid:35>",
        "<time>",
        "agent_loop",
        "tool_advertisement",
@@ -1904,7 +2172,7 @@
        null
       ],
       [
-       "<uuid:32>",
+       "<uuid:36>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1915,7 +2183,7 @@
          "stop_reason": "tool_calls"
         }
        },
-       5981,
+       5976,
        101,
        0,
        "desktop:parity-undo",
@@ -1928,7 +2196,7 @@
        null
       ],
       [
-       "<uuid:33>",
+       "<uuid:37>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1939,8 +2207,8 @@
          "stop_reason": "tool_calls"
         }
        },
-       6132,
-       47,
+       6127,
+       43,
        1,
        "desktop:parity-undo",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -1952,7 +2220,55 @@
        null
       ],
       [
-       "<uuid:34>",
+       "<uuid:38>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "stop_reason": "tool_calls"
+        }
+       },
+       6195,
+       49,
+       2,
+       "desktop:parity-undo",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       null,
+       null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:39>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "stop_reason": "tool_calls"
+        }
+       },
+       6275,
+       50,
+       3,
+       "desktop:parity-undo",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       null,
+       null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:40>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1963,9 +2279,9 @@
          "stop_reason": "stop"
         }
        },
-       6271,
-       45,
-       2,
+       6354,
+       59,
+       4,
        "desktop:parity-undo",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
@@ -1999,7 +2315,7 @@
      ],
      "rows": [
       [
-       "<uuid:35>",
+       "<uuid:41>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "write_file",
@@ -2060,7 +2376,7 @@
        "<node>"
       ],
       [
-       "<uuid:36>",
+       "<uuid:42>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "write_file",
@@ -2073,7 +2389,7 @@
        {
         "$json": {
          "input": {
-          "content": "widgets: 99",
+          "content": "widgets: 99\n",
           "path": "/tmp/prometheus-parity/ws/scratch/inventory.txt"
          },
          "name": "write_file"
@@ -2121,7 +2437,7 @@
        "<node>"
       ],
       [
-       "<uuid:37>",
+       "<uuid:43>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "_loop_transition",
@@ -2140,7 +2456,7 @@
        "<node>"
       ],
       [
-       "<uuid:38>",
+       "<uuid:44>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "bash",
@@ -2153,7 +2469,7 @@
        {
         "$json": {
          "input": {
-          "command": "cd /tmp/prometheus-parity/ws/scratch && od -c greeting.txt && od -c inventory.txt"
+          "command": "cd /tmp/prometheus-parity/ws/scratch && cat -A greeting.txt inventory.txt"
          },
          "name": "bash"
         }
@@ -2207,7 +2523,173 @@
        "<node>"
       ],
       [
-       "<uuid:39>",
+       "<uuid:45>",
+       "<time>",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "_loop_transition",
+       1,
+       0,
+       null,
+       null,
+       null,
+       null,
+       null,
+       0,
+       0,
+       null,
+       null,
+       null,
+       "<node>"
+      ],
+      [
+       "<uuid:46>",
+       "<time>",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "write_file",
+       1,
+       0,
+       "<ms>",
+       null,
+       null,
+       "",
+       {
+        "$json": {
+         "input": {
+          "content": "hello parity\n",
+          "path": "/tmp/prometheus-parity/ws/scratch/greeting.txt"
+         },
+         "name": "write_file"
+        }
+       },
+       0,
+       0,
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "desktop:parity-undo",
+       {
+        "$json": {
+         "description": "Create or overwrite a file with UTF-8 text content, written verbatim. Handles any text-based format (.md, .py, .json, .csv, .svg, .html). For binary or converted formats (.pdf, .docx, .xlsx, images), write the source as text with this tool, then convert it via bash (e.g. pandoc, python-docx, libreoffice) — do not refuse these formats.",
+         "name": "write_file",
+         "parameters": {
+          "description": "Arguments for the file write tool.",
+          "properties": {
+           "content": {
+            "description": "Full file contents",
+            "title": "Content",
+            "type": "string"
+           },
+           "create_directories": {
+            "default": true,
+            "description": "Missing parent directories are created by default, so a write to a new folder succeeds without a preceding mkdir.",
+            "title": "Create Directories",
+            "type": "boolean"
+           },
+           "path": {
+            "description": "Path of the file to write",
+            "title": "Path",
+            "type": "string",
+            "x-prometheus-path": "file",
+            "x-prometheus-path-access": "write"
+           }
+          },
+          "required": [
+           "path",
+           "content"
+          ],
+          "title": "FileWriteToolInput",
+          "type": "object"
+         }
+        }
+       },
+       "<node>"
+      ],
+      [
+       "<uuid:47>",
+       "<time>",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "_loop_transition",
+       1,
+       0,
+       null,
+       null,
+       null,
+       null,
+       null,
+       0,
+       0,
+       null,
+       null,
+       null,
+       "<node>"
+      ],
+      [
+       "<uuid:48>",
+       "<time>",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "bash",
+       1,
+       0,
+       "<ms>",
+       null,
+       null,
+       "",
+       {
+        "$json": {
+         "input": {
+          "command": "cd /tmp/prometheus-parity/ws/scratch && cat -A greeting.txt && echo --- && cat -A inventory.txt"
+         },
+         "name": "bash"
+        }
+       },
+       0,
+       0,
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "desktop:parity-undo",
+       {
+        "$json": {
+         "description": "Run a short shell command in the local repository. For work that outlives this turn (long builds, downloads, file watches) use task_create instead of 'nohup … &' — a backgrounded Bash job is killed at the timeout and left untracked.",
+         "name": "bash",
+         "parameters": {
+          "description": "Arguments for the bash tool.",
+          "properties": {
+           "command": {
+            "description": "Shell command to execute",
+            "title": "Command",
+            "type": "string"
+           },
+           "cwd": {
+            "anyOf": [
+             {
+              "type": "string"
+             },
+             {
+              "type": "null"
+             }
+            ],
+            "default": null,
+            "description": "Working directory override",
+            "title": "Cwd"
+           },
+           "timeout_seconds": {
+            "default": 30,
+            "description": "Seconds before the command is killed. Raise it for a known-slow command rather than retrying after a timeout.",
+            "maximum": 600,
+            "minimum": 1,
+            "title": "Timeout Seconds",
+            "type": "integer"
+           }
+          },
+          "required": [
+           "command"
+          ],
+          "title": "BashToolInput",
+          "type": "object"
+         }
+        }
+       },
+       "<node>"
+      ],
+      [
+       "<uuid:49>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "_loop_transition",
