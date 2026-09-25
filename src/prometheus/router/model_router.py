@@ -729,8 +729,9 @@ class ModelRouter:
         self._simple_provider: Any | None = None
         self._auxiliary_cache: dict[str, Any] = {}
 
-        # Task-type rule provider cache (Phase 1.5); keyed by "provider:model"
-        self._task_rule_providers: dict[str, Any] = {}
+        # Task-type rule provider cache (Phase 1.5); keyed by the provider
+        # config each rule builds — see _route_by_task_type.
+        self._task_rule_providers: dict[tuple[tuple[str, Any], ...], Any] = {}
 
         # Task classifier (Phase 1.5); used by _route_by_task_type
         self.classifier = TaskClassifier()
@@ -1051,15 +1052,21 @@ class ModelRouter:
             if classification.confidence < rule.min_confidence:
                 continue
 
-            cache_key = f"{rule.provider}:{rule.model}"
+            provider_cfg: dict[str, Any] = {
+                "provider": rule.provider,
+                "model": rule.model,
+            }
+            if rule.base_url:
+                provider_cfg["base_url"] = rule.base_url
+            # Keyed on the WHOLE config the provider is built from. The key was
+            # "provider:model", so two rules naming one model on two hosts (two
+            # llama.cpp boxes, say) shared whichever provider was built first,
+            # and the second rule's requests went to the first rule's host.
+            # Deriving the key from provider_cfg means a field added to it
+            # later is in the key without anyone having to remember.
+            cache_key = tuple(sorted(provider_cfg.items()))
             if cache_key not in self._task_rule_providers:
                 from prometheus.providers.registry import ProviderRegistry
-                provider_cfg: dict[str, Any] = {
-                    "provider": rule.provider,
-                    "model": rule.model,
-                }
-                if rule.base_url:
-                    provider_cfg["base_url"] = rule.base_url
                 try:
                     self._task_rule_providers[cache_key] = ProviderRegistry.create(
                         provider_cfg

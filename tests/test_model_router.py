@@ -17,6 +17,7 @@ from prometheus.router.model_router import (
     RouteDecision,
     RouteReason,
     RouterConfig,
+    RoutingRule,
     OVERRIDE_PRESETS,
     TaskClassifier,
     TaskType,
@@ -199,6 +200,44 @@ class TestFallback:
     def test_get_fallback_empty_returns_none(self):
         r = _make_router(fallback_chain=[])
         assert r.get_fallback() is None
+
+
+# -- Task-type rule provider cache -------------------------------------------
+
+CODE_MSG = "write a python function to parse json"
+REASONING_MSG = "explain the tradeoffs of immutable data structures in depth"
+
+
+class TestTaskRuleProviderCache:
+    """Real providers, not a mocked registry: what matters is the host each
+    decision's provider will actually send to."""
+
+    def test_same_model_on_two_hosts_reaches_each_host(self):
+        # Two llama.cpp boxes serving one model. Keyed on "provider:model",
+        # the second rule was handed the provider built for the first box.
+        r = _make_router(task_rules=[
+            RoutingRule(TaskType.CODE_GENERATION, "llama_cpp", "qwen3.8-27b",
+                        base_url="http://gpu-a:8080"),
+            RoutingRule(TaskType.REASONING, "llama_cpp", "qwen3.8-27b",
+                        base_url="http://gpu-b:8080"),
+        ])
+        code = r.route(CODE_MSG)
+        reasoning = r.route(REASONING_MSG)
+
+        assert code.reason == reasoning.reason == RouteReason.TASK_RULE
+        assert code.provider._base_url == "http://gpu-a:8080"
+        assert reasoning.provider._base_url == "http://gpu-b:8080"
+
+    def test_rules_naming_one_endpoint_share_one_provider(self):
+        # The other direction: the key must not grow fields that do not
+        # change the endpoint (task_type here), or the cache stops caching.
+        r = _make_router(task_rules=[
+            RoutingRule(TaskType.CODE_GENERATION, "llama_cpp", "qwen3.8-27b",
+                        base_url="http://gpu-a:8080"),
+            RoutingRule(TaskType.REASONING, "llama_cpp", "qwen3.8-27b",
+                        base_url="http://gpu-a:8080"),
+        ])
+        assert r.route(CODE_MSG).provider is r.route(REASONING_MSG).provider
 
 
 # -- Auxiliary ---------------------------------------------------------------
