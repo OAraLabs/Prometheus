@@ -650,14 +650,14 @@ def test_case_variants_collapse_to_one_canonical_page():
         store = _make_store(tmp)
         wiki_root = Path(tmp) / "wiki"
 
-        _seed(store, "place", "OAra-mini", "hosted the daemon", 0.9)
-        _seed(store, "place", "OAra-mini", "has 25GB RAM", 0.8)
-        _seed(store, "place", "oara-mini", "rebooted tuesday", 0.7)
+        _seed(store, "place", "Host-A.example", "hosted the daemon", 0.9)
+        _seed(store, "place", "Host-A.example", "has 25GB RAM", 0.8)
+        _seed(store, "place", "host-a.example", "rebooted tuesday", 0.7)
 
         compiler = WikiCompiler(store=store, wiki_root=wiki_root)
         compiler.compile([
-            _make_fact("OAra-mini", "hosted the daemon", entity_type="place"),
-            _make_fact("oara-mini", "rebooted tuesday", entity_type="place"),
+            _make_fact("Host-A.example", "hosted the daemon", entity_type="place"),
+            _make_fact("host-a.example", "rebooted tuesday", entity_type="place"),
         ])
 
         topic_files = list((wiki_root / "topics").glob("*.md"))
@@ -665,7 +665,7 @@ def test_case_variants_collapse_to_one_canonical_page():
             f"case variants must not create separate pages, got {topic_files}"
         )
         page = topic_files[0]
-        assert page.stem == "OAra-mini"  # canonical = most mentions, first-seen
+        assert page.stem == "Host-A.example"  # canonical = most mentions, first-seen
         text = page.read_text(encoding="utf-8")
         # canonical page absorbs facts from every spelling
         assert "hosted the daemon" in text
@@ -680,22 +680,30 @@ def test_compile_prunes_stale_case_variant_pages():
         store = _make_store(tmp)
         wiki_root = Path(tmp) / "wiki"
 
-        _seed(store, "place", "OAra-mini", "hosted the daemon", 0.9)
-        _seed(store, "place", "OAra-mini", "has 25GB RAM", 0.8)
+        _seed(store, "place", "Host-A.example", "hosted the daemon", 0.9)
+        _seed(store, "place", "Host-A.example", "has 25GB RAM", 0.8)
 
         compiler = WikiCompiler(store=store, wiki_root=wiki_root)
         compiler.compile([
-            _make_fact("OAra-mini", "hosted the daemon", entity_type="place"),
+            _make_fact("Host-A.example", "hosted the daemon", entity_type="place"),
         ])
-        canonical = wiki_root / "topics" / "OAra-mini.md"
+        canonical = wiki_root / "topics" / "Host-A.example.md"
         assert canonical.exists()
 
         # Simulate a stale page from an earlier spelling
-        stale = wiki_root / "topics" / "oara-mini.md"
-        stale.write_text("# oara-mini\n", encoding="utf-8")
+        stale = wiki_root / "topics" / "host-a.example.md"
+        stale.write_text("# host-a.example\n", encoding="utf-8")
+        if stale.samefile(canonical):
+            # A case-insensitive filesystem (the macOS default): the "stale"
+            # write went INTO the canonical page, because two names differing
+            # only in case are one file. The duplicate this test prunes cannot
+            # exist here, and both assertions below cannot hold at once.
+            store.close()
+            pytest.skip("case-insensitive filesystem: a case-variant page "
+                        "cannot coexist with its canonical page. SKIPPED IS NOT PASSED.")
 
         compiler.compile([
-            _make_fact("OAra-mini", "has 25GB RAM", entity_type="place"),
+            _make_fact("Host-A.example", "has 25GB RAM", entity_type="place"),
         ])
         assert canonical.exists(), "canonical page must survive"
         assert not stale.exists(), "stale case-variant page must be pruned"

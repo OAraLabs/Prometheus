@@ -159,7 +159,11 @@ class TestWriteInsideWorkspaceStillWorks:
         assert (workspace / "made.txt").read_text() == "hello"
 
     def test_edit_inside_lands_unprompted(self, workspace):
-        res = _run(_bash(workspace), "sed -i 's/inside/edited/' seed.txt", workspace)
+        # `-i.bak`, not bare `-i`: BSD sed (macOS) reads the argument after a
+        # bare -i as the backup suffix, so the GNU spelling fails there with
+        # "unterminated substitute" before any write is attempted. With an
+        # attached suffix both seds edit in place (write a temp file, rename).
+        res = _run(_bash(workspace), "sed -i.bak 's/inside/edited/' seed.txt", workspace)
         assert not res.is_error, res.output
         assert (workspace / "seed.txt").read_text() == "edited\n"
 

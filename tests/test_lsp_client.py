@@ -58,9 +58,13 @@ def mock_process():
 # URI helpers
 # ------------------------------------------------------------------
 
-def test_path_to_uri():
-    uri = _path_to_uri("/home/will/test.py")
-    assert uri == "file:///home/will/test.py"
+def test_path_to_uri(tmp_path):
+    # A path with no symlink in it on any host. _path_to_uri resolves, and a
+    # literal "/home/will" resolves to /System/Volumes/Data/home/will on
+    # macOS, where /home is a symlink.
+    target = tmp_path.resolve() / "test.py"
+    uri = _path_to_uri(str(target))
+    assert uri == f"file://{target}"
 
 
 def test_uri_to_path():

@@ -295,13 +295,18 @@ def test_a_live_display_with_no_a11y_bus_is_refused(tmp_path, monkeypatch):
     The display here is a REAL listening socket, so this exercises the real
     connect() rather than relying on the host having one.
     """
+    import shutil
     import socket
+    import tempfile
+    from pathlib import Path
 
     from prometheus.computer import driver as _driver
     from prometheus.computer.driver import STATE_ACT_ONLY, check_preconditions
 
-    x11 = tmp_path / "X11-unix"
-    x11.mkdir()
+    # Not tmp_path: on macOS its path puts the socket past the 104-byte
+    # AF_UNIX limit and bind() raises before the probe runs. X servers keep
+    # their sockets in a short dir under /tmp too, so one stands in here.
+    x11 = Path(tempfile.mkdtemp(prefix="x11-", dir="/tmp"))
     monkeypatch.setattr(_driver, "X11_SOCKET_DIR", str(x11))
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.bind(str(x11 / "X7"))
@@ -317,3 +322,4 @@ def test_a_live_display_with_no_a11y_bus_is_refused(tmp_path, monkeypatch):
         )
     finally:
         sock.close()
+        shutil.rmtree(x11, ignore_errors=True)
