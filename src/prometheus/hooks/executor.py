@@ -17,6 +17,7 @@ import fnmatch
 import json
 import logging
 import os
+import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,7 +78,8 @@ class HookExecutor:
                 results.append(await self._run_command_hook(
                     hook, event, payload, position=position))
             elif isinstance(hook, HttpHookDefinition):
-                results.append(await self._run_http_hook(hook, event, payload))
+                results.append(await self._run_http_hook(
+                    hook, event, payload, position=position))
             elif isinstance(hook, PromptHookDefinition):
                 results.append(await self._run_prompt_like_hook(
                     hook, event, payload, agent_mode=False, position=position))
@@ -116,6 +118,9 @@ class HookExecutor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=_command_environment(hook, event, payload),
+                # Its own process group, so a timeout can stop everything the
+                # hook started, not just bash: see _kill_process_group.
+                start_new_session=True,
             )
         except Exception as exc:  # noqa: BLE001 — a hook failure must not look like a tool failure
             label = hook_label(event, position, hook)
@@ -131,14 +136,21 @@ class HookExecutor:
                 timeout=hook.timeout_seconds,
             )
         except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-            return HookResult(
-                hook_type=hook.type,
-                success=False,
-                blocked=hook.block_on_failure,
-                reason=f"command hook timed out after {hook.timeout_seconds}s",
-            )
+            # process.kill() alone signalled only bash. Anything bash had
+            # started (the `sleep` in `sleep 4; echo ...`, both halves of a
+            # pipeline, a backgrounded job) kept the output pipes open, and
+            # waiting for the process means waiting for those pipes, so a 1 s
+            # timeout returned after 4 s (WP-X.26). The whole group goes now.
+            label = hook_label(event, position, hook)
+            detail = f"timed out after {hook.timeout_seconds}s"
+            _kill_process_group(process)
+            try:
+                await asyncio.wait_for(process.wait(), timeout=_REAP_GRACE_SECONDS)
+            except asyncio.TimeoutError:
+                # Only a process that left the group (setsid) can still hold
+                # the pipes. Stop waiting for it: the deadline is the point.
+                detail += "; a process it started left its group and was not stopped"
+            return _failed_hook_result(hook, event, label, "timeout", detail, started)
 
         output = "\n".join(
             part for part in (
@@ -161,14 +173,23 @@ class HookExecutor:
         hook: HttpHookDefinition,
         event: HookEvent,
         payload: dict[str, Any],
+        *,
+        position: int,
     ) -> HookResult:
+        # httpx's timeout is PER PHASE: connect, each read, each write. A
+        # server that sends a byte every half second never trips a 1 s read
+        # timeout, and such a hook ran as long as the server liked, then
+        # reported success (WP-X.26). timeout_seconds is now the total.
+        started = time.monotonic()
+        deadline = asyncio.timeout(hook.timeout_seconds)
         try:
-            async with httpx.AsyncClient(timeout=hook.timeout_seconds) as client:
-                response = await client.post(
-                    hook.url,
-                    json={"event": event.value, "payload": payload},
-                    headers=hook.headers,
-                )
+            async with deadline:
+                async with httpx.AsyncClient(timeout=hook.timeout_seconds) as client:
+                    response = await client.post(
+                        hook.url,
+                        json={"event": event.value, "payload": payload},
+                        headers=hook.headers,
+                    )
             success = response.is_success
             output = response.text
             return HookResult(
@@ -180,6 +201,11 @@ class HookExecutor:
                 metadata={"status_code": response.status_code},
             )
         except Exception as exc:
+            if isinstance(exc, TimeoutError) and deadline.expired():
+                return _failed_hook_result(
+                    hook, event, hook_label(event, position, hook), "timeout",
+                    f"timed out after {hook.timeout_seconds}s", started,
+                )
             return HookResult(
                 hook_type=hook.type,
                 success=False,
@@ -272,6 +298,29 @@ class HookExecutor:
             blocked=hook.block_on_failure,
             reason=parsed.get("reason", "hook rejected the event"),
         )
+
+
+#: After SIGKILL of a timed-out command hook's group, how long to wait for its
+#: output pipes to close before giving up on them.
+_REAP_GRACE_SECONDS = 2.0
+
+
+def _kill_process_group(process: asyncio.subprocess.Process) -> None:
+    """SIGKILL a command hook's whole process group.
+
+    The hook runs with ``start_new_session=True``, so bash leads a group whose
+    id is bash's own pid. That id stays valid while ANY member lives, even
+    after bash itself has exited and left a backgrounded child holding the
+    pipes, which is why it is used directly instead of ``os.getpgid``.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
 
 
 def _failed_hook_result(
