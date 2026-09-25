@@ -13,7 +13,7 @@
 1. With no pillar loaded, a turn runs exactly as it does today. Section 16 lists everything that runs and explains why nothing changes.
 2. Built-in behavior (the default hooks, [Appendix A](#appendix-a-inventory-of-built-in-behavior)) always runs first, in a fixed order. No pillar replaces the security gate or the adapter.
 3. A pillar can only add restrictions: escalate a tool call to the human, refuse it, or stop the run. It can never let through anything the gate blocked or sent for approval.
-4. A pillar changes a value in one way only: by answering a **decision point** with an option id from a table that open code built. It may do that only where the default abstains, and only when the operator names that pillar for that point in config. Every decision flag is off by default. A pillar's route choice is limited to the primary and local routes unless the operator allows cloud routes. A local route has a local provider type and an endpoint at a loopback, private-range or tailnet address (section 6.3).
+4. A pillar changes a value in one way only: by answering a **decision point** with an option id from a table that open code built. It may do that only where the default abstains, and only when the operator names that pillar for that point in config. Every decision flag is off by default. A pillar's route choice is limited to the primary and local routes unless the operator allows cloud routes. A local route has a local provider type and an endpoint at a loopback, private-range or tailnet address (section 6.3). The `route` and `tool_choice` flags stay locked until their preconditions are met (section 6.3).
 5. Every bounded decision uses one shape: the `Chooser` shape from `computer/chooser.py`. A request carries options and context. The answer is an option id or `abstain`, plus a confidence and the backend's name and version.
 6. Hooks never run on the daemon's event loop. The daemon enforces deadlines by stopping its wait, not by trying to cancel work. One session's hook can never delay another session's turn.
 7. A hook that times out, errors or returns something invalid leaves the turn on today's behavior. The daemon logs a WARNING and writes a telemetry row with the real outcome. Nothing ever reads as if the hook ran.
@@ -219,9 +219,20 @@ An invalid response is never partly applied. The daemon discards it, the turn co
 - **`halt` at `pre_tool_use`.** The call is refused and the turn ends once the round's results are in history.
 - **`halt` at `after_tool_results`.** The turn ends going forward, like the repeat-detector halt (`:2477-2517`).
 - **Wording.** A halt message must never claim that something which already happened was prevented. This follows the boundary-escape wording (`_boundary_escape_text`, `:2673`).
-- **`escalate` when no one can approve.** On a system-origin call there is nobody to ask, so `escalate` becomes `veto`. This matches how the loop treats an approval with no prompt available (`:4424-4438`).
+- **`escalate` on a system-origin call becomes `veto`.** This is a rule of this contract, and it is stricter than the loop today. Today a gate `APPROVE` on a system-origin call is handled like any other approval (`:4381-4384`):
+  - it goes to the approval queue when one is enabled (`permissions/checker.py:1579`, wired at `daemon.py:1375-1405`);
+  - it is refused when there is none (`permissions/checker.py:1605-1607`, refused at `engine/agent_loop.py:4409-4423`). The shipped config leaves the queue off.
 
-**A pillar veto is best-effort.** It does not apply if the pillar times out, errors or is tripped. The security gate is the boundary. Nothing that must be blocked may depend on a pillar.
+  A pillar's `escalate` gets no such path. On a system-origin call it is a `veto`.
+
+**A pillar veto is best-effort.** It applies only if it arrives as a valid answer in time; the next paragraph lists every way it can miss. The security gate is the boundary, and nothing that must be blocked may depend on a pillar.
+
+**A veto that isn't delivered is recorded as not applied.** If a hook's veto doesn't arrive as a valid answer in time:
+- **The turn goes on without it.** That hook's verdict counts as `none`, and the turn goes ahead exactly as if that hook weren't installed (section 9.2). For a tool call, the outcome is today's decision (operator hooks, then the gate), raised only by verdicts that other hooks delivered in time (section 7).
+- **The row records the miss.** Its `hook_calls` row keeps the real outcome, with no verdict and `applied = 0` (section 13). The outcome is `timeout`, `error`, `invalid`, `busy`, `tripped`, `crashed` or `budget_exhausted`, and the row is never `ok`.
+- **A late answer changes nothing.** An answer that arrives after the deadline is discarded and recorded as `late` (section 9.2). It is never applied.
+
+A missed veto is never recorded, displayed or reported as a check that ran and let the action through. A pass and a miss look different in the row: a pass is `ok` with verdict `none`, and a miss is any other outcome with no verdict.
 
 ---
 
@@ -287,7 +298,7 @@ WP-4.2 should move `ChoiceRequest` and `Choice` into one shared module, with com
 This follows the 2026-09-20 ruling:
 
 - **The default answers first and wins wherever it answers.** In that region no pillar is consulted for the decision. A pillar may still observe the event, and may veto where the event allows it.
-- **A pillar decides only where the default abstains**, and only when `pillars.decide.<point>` names that pillar. Every point is off by default, and at most one pillar may be named per point. `tool_choice` is also locked off until WP-1.2 has measured its cost (section 6.3).
+- **A pillar decides only where the default abstains**, and only when `pillars.decide.<point>` names that pillar. Every point is off by default, and at most one pillar may be named per point. `tool_choice` is also locked off until WP-1.2 has measured its cost, and `route` until pillar-picked connections are pinned (section 6.3).
 - If the pillar abstains, times out, errors, answers invalid or stale, is busy or is tripped, the result is **the default's own fallback, which is today's behavior** in that region.
 - **A timeout limits delay. It is not what keeps things safe**, because a fast wrong answer passes a timeout. What keeps a pillar's decision safe:
   1. open code builds the option table;
@@ -316,7 +327,7 @@ Constraints that apply to specific points:
 **What counts as a local route** (decision 17, amended in review). A route is local only when **both** of these hold:
 
 1. **Its provider type is local.** Types today: `llama_cpp`, `ollama`, `lm_studio` and `vllm` (`providers/registry.py:140`, `:167`).
-2. **Its endpoint resolves only to local addresses.** "Endpoint" means the address the daemon's HTTP client will actually connect to for that route (details below), not the text in its config.
+2. **Its endpoint resolves only to local addresses.** "Endpoint" means the host of the base URL that the serving provider will actually use, resolved and reached directly (details below). It is not the text in the route's config.
 
    | Kind | Ranges |
    |---|---|
@@ -331,7 +342,10 @@ Constraints that apply to specific points:
 Which address gets classified:
 - **The base URL the serving provider will use.** For `lm_studio` and `vllm`, and any route with `base_url_env`, that comes from `_resolve_base_url` (`providers/registry.py:183-219`, used at `:392`): the config `base_url`, then the environment (`base_url_env`, `VLLM_BASE_URL`, `LM_STUDIO_BASE_URL`), then the default. A classifier that read only the config would call a `vllm` route with `VLLM_BASE_URL` set to an internet host local.
 - **The provider instance that will actually serve the route.** Today the router caches task-rule providers by `provider:model` alone (`router/model_router.py:1054`). So two rules that differ only in `base_url` share whichever instance was built first. Before WP-4.2 offers such a route, it must key that cache by endpoint or build its own instances.
-- **The proxy, when a proxy carries the request.** Provider and probe clients are httpx clients with the default `trust_env=True` (`providers/llama_cpp.py:812`, `providers/ollama.py:134`, `providers/openai_compat.py:287`, `providers/backends.py:543`). When `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` (or the macOS system proxy) applies to the route's URL and `NO_PROXY` doesn't exclude it, the connection goes to the proxy, loopback included. The route is then local only if the proxy's own address is local by the table above. Otherwise it is cloud.
+- **Directly, never through a proxy.**
+  - Provider and probe clients are httpx clients with the default `trust_env=True` (`providers/llama_cpp.py:812`, `providers/ollama.py:134`, `providers/openai_compat.py:287`, `providers/backends.py:543`). So today, an environment proxy that applies to a route's URL carries even a loopback request, and the proxy resolves the name itself. Environment proxies here means `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` or the macOS system proxy.
+  - Classification and pillar-picked requests therefore connect directly to the resolved address and ignore environment proxies. That is part of what pinning (below) means.
+  - Requests the default routes still go through the proxy, as today.
 
 How addresses are judged:
 - An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is judged by the IPv4 address inside it, the unwrapping `security/url_guard.py` already does (`:125-127`).
@@ -339,28 +353,89 @@ How addresses are judged:
 - Anything else is **cloud**. That includes an address that can't be resolved, a resolution that fails or times out, and a provider type that isn't in the local list.
 - These ranges are an explicit list, **not** "any address that isn't publicly routable". `url_guard.is_blocked_address` (`security/url_guard.py:107`) answers that wider question. It counts reserved, multicast, unspecified and the rest of Python's `is_private`, and it counts the tailnet only when `block_tailnet` is set, which is off by default (`:104`, `:139-140`). It is the precedent for how to check an address, not the definition of local.
 
-**When a route is classified.** Never per turn, and never on the turn path.
-- **A backend-registry route** (a named `backends.*` entry, or a `llama_cpp` or `ollama` primary, `providers/backends.py:305-329`) is classified at load and again each time it is probed.
-  - Probes run only when something reads the registry after the cached status has passed its TTL, 60 s by default (`providers/backends.py:108`, `:357-361`, `:392-398`). The readers are boot, the `/backends` command, the web Backends view and Anatomy.
-  - Nothing re-probes on a timer, so a classification can be much older than the TTL.
-- **Every other route** is built straight from config and never probed (`router/model_router.py:989`, `:1020`, `:1054-1066`, `:1101`). That covers a `vllm` or `lm_studio` primary, per-session presets, task rules, the smart-routing simple provider, escalation and the router's fallback chain. Such a route is classified once, when the route table is built at load, and not again while the daemon runs.
+**Ollama cloud models.** Ollama can serve cloud-hosted models through a local `ollama` server: the request goes to the local address, and Ollama forwards it to ollama.com. Checked against Ollama's own source, it identifies these models in two ways:
+- **By name** (Ollama 0.18 and later, `internal/modelref/modelref.go`).
+  - A model name whose last `:`-separated part is `cloud` or ends in `-cloud`, compared case-insensitively, is a cloud model. Examples: `gemma4:cloud`, `gpt-oss:120b-cloud`, `gpt-oss:20b:cloud`.
+  - For such a name, the local server answers `/api/show` and chat calls by proxying them to ollama.com, with no marker in the response.
+- **By manifest** (Ollama 0.12 and later, `api/types.go`).
+  - A model whose local manifest records a remote host, such as a pulled cloud model or a copy of one under another name, carries non-empty `remote_host` and `remote_model` in `/api/tags` and `/api/show` (`ListModelResponse` and `ShowResponse`, both `omitempty`).
+  - Native `/api/chat` and `/api/generate` responses carry them too. `/v1/*` responses and `/api/ps` never do.
+
+So an `ollama` route is **cloud** when, for the model it will send, any of these is true:
+- **It has a cloud name.** The name is checked first, and a cloud-named model is cloud without a call to `/api/show`, so re-classification never reaches ollama.com.
+- **Ollama reports it as remote.** `/api/show` or `/api/tags` reports a non-empty `remote_host` or `remote_model`.
+- **It can't be checked,** because `/api/show` fails or no model is known.
+
+Which model is checked, the one the route will actually send:
+- **For a named backend,** the configured `model`, else the probe's pick: loaded first, then first pulled (`providers/backends.py:594-597`). The router copies that pick into the route (`router/model_router.py:538-539`).
+- **For an `ollama` primary,** `model.model` as sent (`daemon.py:699`). The router doesn't copy the probe's pick for the primary (`router/model_router.py:513-515`), so the classification checks the name that is sent.
+
+A pinned pillar-picked request sends that model and no other. Today's probe calls `/api/tags`, `/api/ps` and `/api/show` (`providers/backends.py:582-617`) but reads neither field; WP-4.2 adds the check.
+
+What can't be detected:
+- **Anything Ollama doesn't report.** A modified Ollama, or another server that answers the Ollama API, can forward upstream without these markers and so looks local. Ollamas older than 0.12 have neither cloud models nor these fields.
+- **A change between classifications.** The daemon's Ollama provider uses `/v1/chat/completions` (`providers/ollama.py:123`), whose responses carry no remote marker. A model that becomes remote between classifications isn't seen until the next re-classification. One example is `ollama cp` of a cloud model onto a local name.
+- **The server's cloud setting, on older servers.** On Ollama 0.17 and later, `GET /api/status` reports whether cloud features are disabled (`cloud.disabled`, `cloud.source`). The endpoint is marked experimental. Doctor shows it where present, but it doesn't replace the per-model checks. An older server, or one that isn't Ollama, can't say.
+
+Operator levers at the source:
+- Setting `OLLAMA_NO_CLOUD=1`, or `disable_ollama_cloud` in `~/.ollama/server.json`, and restarting Ollama rules out its cloud models.
+- On Ollama 0.18 and later, a model name ending in `:local` makes the server refuse a model that would be served remotely.
+
+**When a route is classified.** Only while `pillars.decide.route` is on, meaning it names a loaded pillar and its lock is lifted.
+- **With the flag off, or locked as it is in v1, nothing is classified.** There is no resolution, no probe and no row, and doctor shows "not classified: route flag off" (or locked).
+- **While the flag is on, when it takes effect at load,** every candidate route is classified. A candidate is any route with a local provider type.
+- **In the background, once per TTL** (60 s by default, `providers/backends.py:108`), every candidate route is re-classified, whatever its last verdict.
+  - A route marked cloud by a transient failure or by staleness therefore comes back on the next tick.
+  - Registry backends are re-probed, and other routes are re-resolved. For `ollama` routes this includes the model check above.
+- **The background work keeps its own state.** It doesn't write the backend registry's cached status. The default routing, the compactor's per-backend windows (`context/compactor.py:339`, `:433`), and the model and vision fill-in for backend overrides (`router/model_router.py:536-541`) therefore see exactly what they see today.
+- **Today's on-demand probes are unchanged and don't classify.** Those are boot, the `/backends` command, the web Backends view, Anatomy, and switching to a backend with `/<name>` (`providers/backends.py:357-361`, `:392-398`, `gateway/commands.py:590`).
+- **A classification older than twice the TTL counts as cloud.** The route leaves the option table until a fresh classification brings it back. A stalled background task therefore fails closed.
+- **Never per turn, and never on the turn path.**
 - **Each classification writes a `subsystem_runs` row** (`subsystem: pillars`, `operation: classify_route`) with the route, the verdict, a reason code, the addresses it judged and the time. Doctor reads it (section 13).
+
+**Pinning.** Pinning applies to routes offered because they are local.
+- **What happens.** A pillar-picked request to such a route connects directly to the address that was classified, never to a fresh DNS answer and never through an environment proxy. It keeps the hostname for the `Host` header and the TLS server name.
+- **Why.** Today every model request opens a new client and resolves the name again (`providers/llama_cpp.py:812`, `providers/ollama.py:134`, `providers/openai_compat.py:287`). Without a pin, a hostname whose answers vary (round-robin, split-horizon, a short TTL) could reach an address no classification saw.
+- **Names are fine.** Tailnet names are normal and allowed; no IP literal is required.
+- **When the answer changes.** If the background re-classification sees a new answer, the pin moves to it when it is local, and the route leaves the table when it isn't.
+- **What isn't pinned.** Picking the primary runs exactly as the default would, unpinned. A route offered only under `route_allow_cloud` connects as it does today. Requests that the default routes are unchanged.
+
+**The route flag is locked until pinning exists.** Like `tool_choice`, `pillars.decide.route` can't be turned on anywhere until pinning is implemented. The implementation ships it locked:
+- a config that sets it loads with the flag off and logs one WARNING;
+- doctor shows the flag's state as "locked: connection pinning not implemented" whenever the lock is in force, and ✗ when the config also sets it.
+
+Lifting the lock is an edit to this section that records that pinning is in place.
 
 **What the check can't see.** It classifies the address the daemon connects to. It does not see where the content goes after that, so these pass as local:
 - a local port that forwards somewhere else: an SSH tunnel, `socat`, a port-forward;
 - a local gateway, such as LiteLLM, in front of a hosted API;
-- a local Ollama serving an Ollama cloud model;
+- a local Ollama forwarding a model upstream that Ollama doesn't mark (above);
 - a machine shared into your tailnet from someone else's;
 - a carrier-NAT address in `100.64.0.0/10`.
 
-It also classifies one resolution while each request resolves the name again: every model request opens a new client (`providers/llama_cpp.py:812`, `providers/ollama.py:134`, `providers/openai_compat.py:287`). So a hostname whose answers vary (round-robin, split-horizon, a short TTL) can connect to an address no classification saw. An IP-literal base URL avoids that. Knowing what listens behind a local route's address is the operator's job.
+Knowing what listens behind a local route's address is the operator's job.
 
-**The limit is on the pick, not on recovery.** If a pillar-picked route fails, today's recovery runs unchanged:
-- the terminal-failure fallback to `model.fallback` (`engine/fallback.py:201`, applied at `engine/agent_loop.py:1788`);
-- the circuit-breaker switch to `router.fallback` (`:2359-2371`);
-- tool-call escalation to `router.escalation` (`:4037`).
+**Recovery from a failed pick.** When a pillar-picked route fails, the turn goes first to the route it would have taken without the pillar: the primary. Today's recovery then applies from there, unchanged.
 
-Those targets are the operator's own configuration, and they may be hosted. So a pillar-picked local route that fails can end with the turn on a hosted API, by way of a fallback the operator configured.
+"Fails" means any of these:
+- **The round raises before any output has streamed,** whatever the error kind. That includes connection failures and timeouts that today end the turn: today only `auth` and `billing` count as terminal (`engine/fallback.py:37`).
+- **The context pre-flight refuses** the picked model's window (`engine/agent_loop.py:1743-1786`).
+- **The circuit breaker trips,** for any reason (`:2343-2447`). That includes trips that today's loop would end with a diagnostic.
+- **A tool call would be escalated** to `router.escalation` (`:4037`). Instead, the call gets today's retry prompt on the primary.
+
+The move to the primary:
+- **Fresh recovery state.** The primary gets a fresh circuit breaker, so today's model switch and one-shot diagnose-and-recover (`:1429`, `:2388`) apply to it in full.
+- **Prompt and catalog.** The identity line is rewritten for the primary, as today's fallback does. After a first-round failure nothing has been sent yet, so the tool catalog is re-resolved for the primary. After a later failure, the run keeps its frozen catalog, as today's circuit-breaker switch does (`:2375-2377`).
+- **The rest of the turn stays on the primary.**
+
+What this guarantees, and what it doesn't:
+- **Recovery adds no destination.** After a failed pick, the turn goes only to the primary and, from there, to the operator's configured targets: `model.fallback` (`engine/fallback.py:201`, applied at `engine/agent_loop.py:1788`), `router.fallback` and `router.escalation`. Today's routing and recovery already use those destinations.
+- **The worst case before any output has streamed** is today's path plus one failed attempt.
+- **A later failure carries the turn so far.** If the pick fails after its first round, what moves to the primary, and on to those targets, includes the picked model's tool calls and their results. Their side effects aren't undone.
+- **Once output has streamed, a round isn't moved** (`engine/fallback.py:68`, `decide`), the same rule as today's fallback. A pillar-picked route that fails mid-reply ends the turn as a failed turn, where the primary might have succeeded.
+- **The failed attempt itself** is bounded only by the first-hop check above.
+
+**Not covered: Telegram's teacher escalation.** On Telegram, a turn whose reply trips the failure detector is sent, after the turn, to a cloud teacher (`gateway/telegram.py:2064`, `escalation/teacher.py:505-512`). Its gate judges the session's configured model (`gateway/telegram.py:2111-2124`, `:2155`), not the picked route, and this contract doesn't change that. So on Telegram, a pillar-picked local turn whose reply trips the detector can reach the teacher when the primary's reply might not have.
 
 **Why the endpoint test is needed: today's code decides "local" by provider type or name, never by where the endpoint is.** A `llama_cpp` provider pointed at someone else's server passes as local at every site below, and a `vllm` one at every site whose list includes it:
 
@@ -403,7 +478,7 @@ Nothing in the protocol can express a decrease.
 **What a pillar can never do in `hooks/1`:**
 - allow something the gate denied, or skip the approval prompt;
 - change a tool call's arguments, or which tool runs;
-- pick any route but the primary or a **local route**, unless the operator set `pillars.decide.route_allow_cloud`. A local route has a local provider type **and** an endpoint that resolved only to addresses in the section 6.3 table (loopback, private-range (RFC 1918, link-local, IPv6 ULA) or tailnet) when it was last classified. A local provider type pointed at someone else's server is not local. This limits the pick. It does not change the operator's recovery targets (section 6.3);
+- pick any route but the primary or a **local route**, unless the operator set `pillars.decide.route_allow_cloud`. A local route has a local provider type **and** an endpoint that resolved only to addresses in the section 6.3 table (loopback, private-range (RFC 1918, link-local, IPv6 ULA) or tailnet). It was checked directly, not through a proxy, in a classification no older than twice the TTL. A local provider type pointed at someone else's server is not local. Neither is an Ollama model that is cloud-named, reported as served upstream, or can't be checked. A pillar-picked request to a local route connects directly to the pinned, classified address. If the picked route fails, the turn goes to the primary first, then today's recovery (section 6.3);
 - add a tool to the advertised catalog;
 - widen the workspace or write boundary;
 - change `origin`;
@@ -459,7 +534,7 @@ It must never read as if the hook ran:
 - no verdict, annotation or decision applied from such a call;
 - no text shown to the person or the model implying the check happened.
 
-A surface that shows check status (for example "verified") must read it from the row, and a `timeout` must display as "not checked". A result that arrives after its deadline is discarded and recorded as `late`. It is never applied to a later event.
+A surface that shows check status (for example "verified") must read it from the row, and any outcome other than `ok` must display as "not checked". A result that arrives after its deadline is discarded and recorded as `late`. It is never applied to a later event.
 
 ---
 
@@ -572,7 +647,7 @@ A pillar never runs with some of its subscriptions silently dropped. A `unix` pi
 pillars:
   load: []                  # pillars to load, in declared order. Empty or absent = none.
   decide:                   # at most one pillar per point; false = off (the default)
-    route: false
+    route: false              # locked off until pillar-picked connections are pinned (section 6.3)
     route_allow_cloud: false  # true lets the route table include routes that aren't local (section 6.3)
     tool_choice: false        # locked off until WP-1.2 measures a forced round's cache cost (section 6.3)
   budgets:
@@ -597,8 +672,8 @@ Installing a package is not enough for a pillar to load: it must also be listed 
 | `session_id` | For description only. NULL for ephemeral sessions, the same rule `tool_calls` follows (`engine/agent_loop.py:4588`). |
 | `turn_id`, `round_index` | |
 | `deadline_ms`, `duration_ms` | `duration_ms` is NULL when nothing was measured (`busy`, `tripped`), following the schema-v2 rule for `tool_calls.latency_ms`. |
-| `outcome` | `ok`, `abstain`, `timeout`, `error`, `invalid`, `stale`, `late`, `busy`, `tripped`, `crashed`, `dropped`, `budget_exhausted`, `not_honored` |
-| `verdict`, `applied` | `applied` is 1 only when the daemon acted on the result. It is never 1 when the outcome isn't `ok`. |
+| `outcome` | `ok`, `abstain`, `timeout`, `error`, `invalid`, `stale`, `late`, `busy`, `tripped`, `crashed`, `dropped`, `budget_exhausted`, `not_honored`. A reply that arrives after its deadline updates that call's row from `timeout` to `late`. `verdict` stays NULL and `applied` stays 0. |
+| `verdict`, `applied` | `verdict` is NULL whenever the outcome isn't `ok`. `applied` is 1 when the daemon used the answer, including an `ok` answer of `none`, which it combined and which let the action through. It is never 1 when the outcome isn't `ok`. So a pass (`ok`, `none`, 1) and a missed veto (another outcome, NULL, 0) can't be confused. |
 | `decision_point`, `choice`, `confidence`, `backend`, `backend_version` | |
 | `reason_code` | A short code, not free text |
 
@@ -616,8 +691,12 @@ Installing a package is not enough for a pillar to load: it must also be listed 
 - the contract range this daemon supports;
 - each installed pillar: loaded, not loaded (✗ with the reason), or installed but not enabled;
 - each pillar's transport and isolation, and **which caps are actually enforced**;
-- each pillar's subscriptions (event, hook, capabilities), each decision point with its flag state, and `route_allow_cloud`;
-- each route's classification, local or cloud, read from its `classify_route` row: the reason (the provider type; a resolution that failed or timed out; a proxy outside the local ranges; or which resolved address was outside them), the addresses judged, and when the classification was made (section 6.3);
+- each pillar's subscriptions (event, hook, capabilities), each decision point with its flag state, and `route_allow_cloud`. A flag's state reads "locked: …" whenever its lock is in force (`tool_choice`: the WP-1.2 measurement; `route`: connection pinning), whether or not the config sets it;
+- each route's classification, local or cloud, read from its `classify_route` row, or "not classified: route flag off" (or locked) when there are no rows. The row gives:
+  - the reason: the provider type; a resolution that failed or timed out; an Ollama model that is cloud-named, reported as served upstream, or couldn't be checked; or which resolved address was outside the local ranges;
+  - the addresses judged and pinned;
+  - when the classification was made, and whether it is older than twice the TTL and so counts as cloud;
+  - for `ollama` routes, the server's `/api/status` cloud setting, where the server reports one (section 6.3);
 - health over the last 24 h: number of calls, p50/p95 duration, and counts of timeouts, errors, busy, crashes and drops, plus whether the pillar is tripped;
 - operator hooks from `hooks:`: event, kind, matcher, `block_on_failure`, timeout.
 
@@ -625,6 +704,7 @@ Doctor's exit code follows its existing rule (non-zero on any ✗, `cli/doctor.p
 - a configured pillar that fails to load is ✗;
 - an operator hook configured on `session_start` or `session_end` is ✗ **"configured, never fires"** (decision 4);
 - `pillars.decide.tool_choice` set while it is still locked is ✗, naming the missing WP-1.2 measurement (section 6.3);
+- `pillars.decide.route` set while it is still locked is ✗ "locked: connection pinning not implemented" (section 6.3);
 - a tripped pillar, or a p95 over target, is a warning.
 
 The decision-4 WARNING and ✗ are the v1 behavior. Their code lands with WP-4.2.
@@ -647,11 +727,13 @@ What the contract does and does not guarantee:
 - **"Pillars run locally, no outside hosts"** is a rule for pillars, and OAra's own pillars must follow it. The daemon enforces it only where the OS lets it: a daemon-launched host on Linux under systemd gets `IPAddressDeny`. Everywhere else it is a promise, not a guarantee, and doctor reports which of the two applies.
 - **Ephemeral sessions** send pillars no content (section 4.3, decision 3).
 - **A pillar's route pick stays local unless you opt in.** A pillar's route choice is limited to the primary and to local routes, unless you set `pillars.decide.route_allow_cloud` (section 6.3, decision 17). Your own per-session model choice always wins. Precisely:
-  - **Local, by type and address.** A local route has a local provider type **and** an endpoint that resolved only to loopback, private-range (RFC 1918, link-local, IPv6 ULA) or tailnet addresses. The endpoint judged is the one the daemon actually connects to: the resolved base URL, or the proxy when an environment proxy applies.
-  - **The type alone doesn't count.** A `llama_cpp` or `vllm` provider pointed at a server on the internet is **not** local, whatever its type says.
-  - **Only the first hop.** The check sees the address the daemon connects to, not where the content goes from there. A local port that forwards elsewhere passes as local: an SSH tunnel, a local gateway in front of a hosted API, a local Ollama serving a cloud model. Only you know what listens there.
-  - **As of the last classification, not live.** A backend-registry route is re-classified when it is probed, and probes run on demand, not on a timer. Every other route is classified once at load. A hostname's DNS can change after that, and each request resolves the name again. Give a route that must stay local an IP-literal base URL.
-  - **The pick, not the recovery.** If the picked route fails, your configured fallback and escalation targets still apply, and they may be hosted.
+  - **Local, by type and address.** A local route has a local provider type **and** an endpoint that resolved only to loopback, private-range (RFC 1918, link-local, IPv6 ULA) or tailnet addresses. The endpoint judged is the host of the resolved base URL, reached directly and never through an environment proxy.
+  - **The type alone doesn't count.** A `llama_cpp` or `vllm` provider pointed at a server on the internet is **not** local, whatever its type says. Neither is an Ollama model that Ollama names or marks as cloud, or one that can't be checked.
+  - **Pinned.** A pillar-picked request to a local route connects directly to the address that was classified, never to a fresh DNS answer or through a proxy. Tailnet names are fine. The route flag stays locked until pinning is implemented.
+  - **Kept fresh.** While the route flag is on, every route with a local provider type is re-classified in the background every TTL (60 s by default), and a classification older than twice the TTL counts as cloud. With the flag off, nothing is classified and nothing new runs.
+  - **Recovery adds no destination.** If the picked route fails, the turn goes to the primary first, and today's recovery applies from there, to targets today's routing already uses. The worst case before any output has streamed is today's path plus one failed attempt. A failure after the first round carries the turn so far, including what the picked model read, to the primary and its fallbacks.
+  - **Telegram's teacher escalation isn't covered.** It still judges your configured model, not the picked route, so a picked local turn whose reply trips its detector can reach the cloud teacher (section 6.3).
+  - **Only the first hop.** The check sees the address the daemon connects to, not where the content goes from there. A local port that forwards elsewhere passes as local: an SSH tunnel, a local gateway in front of a hosted API, or an Ollama that forwards a model upstream without saying so. Only you know what listens there. Setting `OLLAMA_NO_CLOUD=1` on an Ollama server rules out its cloud models at the source.
 - **What a compromised or buggy pillar can do:**
   - see content;
   - delay a turn by up to its deadlines;
@@ -679,7 +761,7 @@ What the contract does and does not guarantee:
 
 **Decided: A, one registry with two kinds** (decision 5). Operator hooks keep their current semantics, positions and payloads in v1. The reasons:
 
-1. **One answer to "what runs here, and in what order".** Two registries at the same event means two orderings, and doctor and telemetry would have to reconcile them. Two parallel copies of machinery that drift apart is the defect the loop already names "the two-loop defect" (CROSS-CUTTING §2, `engine/agent_loop.py:957`).
+1. **One answer to "what runs here, and in what order".** Two registries at the same event means two orderings, and doctor and telemetry would have to reconcile them. Two parallel copies of machinery that drift apart is the defect the loop's own comments call "the two-loop defect" (`engine/agent_loop.py:955-957`).
 2. **One authority rule.** Restriction-only verdicts, with the gate as the floor, apply to both kinds. Operator hooks can only block today, so they already fit.
 3. **One vocabulary.** An operator can later move a check from a command hook to a pillar without renaming events.
 
@@ -727,7 +809,7 @@ A pillar that is installed but not listed in `pillars.load` counts as not instal
 
 1. **The pillar registry is built once at boot** from `pillars.load`. With nothing listed it is empty, and it stays unchanged for the life of the daemon.
 2. **Every insertion point is a single `has_subscribers(event)` check** against that frozen registry: a dictionary lookup. With no subscribers it builds no payload, takes no lock and adds **no `await`**. The last part matters: an extra await point on the hot path changes how concurrent sessions interleave, even if it returns immediately.
-3. **Every decision point needs a flag that names a loaded pillar.** With none loaded, every flag resolves to off, and the default's own fallback runs. That is the code path that runs today.
+3. **Every decision point needs a flag that names a loaded pillar.** With none loaded, every flag resolves to off, and the default's own fallback runs. That is the code path that runs today. Route classification, at load, on probe and in the background, runs only while `pillars.decide.route` is on, so it never runs without a pillar.
 4. **Nothing is written during a turn.** There are no telemetry rows, files or sockets.
 
 **What proves it is not this document.** The proof is the full existing suite passing unchanged, identical golden-trace replay, and overhead inside the noise band, all run on the implementation (WP-4.x). Until then, "identical" is a design requirement, not a measured result.
@@ -774,17 +856,22 @@ These were decided in review on 2026-09-24, and they close WP-1.1 and WP-1.3. Ea
 16. **Post-processing after the loop, per surface.** *Accepted.* This is a known limit of v1. Two things are separate decisions: whether the Telegram-only steps move into the loop, and whether post-task hooks move off the delivery path (sections 3.1 and 9.1).
 17. **Cloud routes.** *Added in review.*
     - The `route` option table includes only the primary and local routes (section 6.3) unless the operator allows otherwise, with `pillars.decide.route_allow_cloud` (default `false`).
-    - *Amended in review:* a local route has a local provider type **and** an endpoint that resolves only to loopback, private-range (RFC 1918, link-local, IPv6 ULA) or tailnet addresses. The route is classified when it is loaded or probed, never per turn. Anything else, including an address that can't be resolved, is cloud. Today's code decides local by type alone (section 6.3).
+    - *Amended in review:* a local route has a local provider type **and** an endpoint that resolves only to loopback, private-range (RFC 1918, link-local, IPv6 ULA) or tailnet addresses. The route is classified only while the route flag is on, when the flag takes effect and then in the background at the TTL, never per turn. Anything else, including an address that can't be resolved, is cloud. Today's code decides local by type alone (section 6.3).
     - A pillar's choice must never send conversation content to a hosted API, or spend money, without the operator opting in.
     - The per-session user override still always wins.
+    - *Rulings after the amendment:*
+      - **Recovery.** A failed pillar pick goes to the primary first, and today's recovery applies from there, unchanged. The operator's fallback targets are not skipped. Recovery adds no destination. Section 6.3 states the limits: a failure after the first round carries the turn so far, and a mid-reply failure ends the turn. Telegram's teacher escalation isn't covered.
+      - **Freshness.** While `pillars.decide.route` is on, every route with a local provider type is re-probed or re-resolved in the background at the TTL, and a classification older than twice the TTL counts as cloud. With the flag off, nothing is classified and nothing new runs.
+      - **DNS.** No IP literals are required. A pillar-picked request connects to the classified address (pinned), and the route flag stays locked until pinning is implemented.
+      - **Ollama.** A model that Ollama names as cloud (case-insensitively), reports as served upstream (`remote_host` or `remote_model`), or that can't be checked, is cloud.
 
-    Applied in sections 0, 6.2, 6.3, 7, 12, 13 and 14. Section 6.3 also states what the rule can't guarantee: it sees only the first hop, a classification has an age, and recovery targets are unchanged.
+    Applied in sections 0, 6.2, 6.3, 7, 12, 13, 14 and 16. Section 6.3 also states what the rule can't see: only the first hop, and what Ollama doesn't report.
 
 ---
 
 ## 18. Possible later minor versions
 
-None of these is in v1. Each would need its own decision and a minor version bump (section 12). Each is listed with what has to be true before it is considered. The last two rows, `tool_subset` and the computer-use chooser, are the documented path for Stage 5 of the Build-Out Plan (Instinct, Cognition & the Daemon Seams). "Stage 5", "computer-use Track A" and the 2026-09-20 corpus rules are defined in that plan, not in this repo.
+None of these is in v1. Each would need its own decision and a minor version bump (section 12). Each is listed with what has to be true before it is considered. Every condition is stated here in full, so it can be checked without any other document.
 
 | Candidate | Before it is considered |
 |---|---|
@@ -794,7 +881,65 @@ None of these is in v1. Each would need its own decision and a minor version bum
 | Operator `pre_tool_use` hooks after the gate (decision 6) | A decision to change what existing operator hooks see. After the move, they would see the repaired call that will actually run. |
 | Firing operator `session_start` / `session_end` hooks (decision 4) | A decision to change behavior for operators who configured them. Until then, the boot WARNING and doctor ✗ tell them the hooks never fire. |
 | `tool_subset` decision point at `before_model_call`: narrow the advertised tools for one round | Evidence of three things:<br>1. **Narrowing doesn't hide the right tool.** Measured on real turns, the tool the model needed is in the narrowed set.<br>2. **The model can always ask for the full list,** so a wrong narrowing costs a round, not the task. `tool_search` is the precedent: it is in the shipped always-loaded set (`config/shipped_defaults.py:37`), an empty query returns every tool and skill name (`tools/tool_search.py:149-155`), and what it finds arrives as a tool result (`context/dynamic_tools.py:239-248`). A narrowed round must always keep `tool_search`.<br>3. **The prefix-cache cost is measured.** The catalog is frozen for the run today because changing the tools block invalidates the provider's cached prefix (`engine/agent_loop.py:1207-1211`, the #120 bug class). |
-| Computer-use chooser decision point: the `Chooser` seam in `computer/` (`computer/chooser.py:39`), consulted where `RuleChooser` abstains because nothing matched (`:81-84`). Its empty-table abstain (`:71-72`) is never reached, because the loop returns before calling the chooser when there are no candidates (`computer/loop.py:129-133`). | Two things:<br>1. Computer-use Track A is done.<br>2. The corpus rules from 2026-09-20 are met: the abstain label is mandatory, and results are split by none-correct.<br><br>The seam already has most of this shape. A live chooser belongs behind the same Protocol, and its timeout returns `abstain` (`computer/chooser.py:20-22`). Its answer is validated against the table the client built (`computer/loop.py:141`, `computer/candidates.py:156`).<br><br>The minor version must still settle three things:<br>- **Sync versus async.** `choose` is synchronous and is called on the event loop (`computer/chooser.py:44`, `computer/loop.py:137`). A pillar-backed chooser needs an async call to meet section 10.<br>- **Order.** Section 6.2 puts `RuleChooser` first, with a pillar only where it abstains. That is the reverse of the degradation order in `computer/chooser.py:16-18`.<br>- **Where it fires.** It must name the event or pipeline point the decision fires at. |
+| Computer-use chooser decision point: the `Chooser` seam in `computer/` (`computer/chooser.py:39`), consulted where `RuleChooser` abstains because nothing matched (`:81-84`). Its empty-table abstain (`:71-72`) is never reached, because the loop returns before calling the chooser when there are no candidates (`computer/loop.py:129-133`). | Two things:<br>1. **Computer use is past milestone 1 and in real use.** Milestone 1 is the candidate table, the gate rule and the validation path, proven against recorded fixtures, with the tools not registered (`computer/__init__.py:3-11`). "In real use" means the computer-use tools are registered and running, so `RuleChooser`'s abstains are measured on real sessions, not fixtures. Registration has its own preconditions ([docs/audits/COMPUTER-USE-REGISTRATION.md](../audits/COMPUTER-USE-REGISTRATION.md)).<br>2. **A decision corpus exists that meets two rules** (ruled 2026-09-20):<br>- every item carries an abstain label, because "none of these" is always a possible right answer;<br>- results are reported separately for items where none of the candidates is correct, so a chooser can't score well by never abstaining.<br><br>The seam already has most of this shape. A live chooser belongs behind the same Protocol, and its timeout returns `abstain` (`computer/chooser.py:20-22`). Its answer is validated against the table the client built (`computer/loop.py:141`, `computer/candidates.py:156`).<br><br>The minor version must still settle three things:<br>- **Sync versus async.** `choose` is synchronous and is called on the event loop (`computer/chooser.py:44`, `computer/loop.py:137`). A pillar-backed chooser needs an async call to meet section 10.<br>- **Order.** Section 6.2 puts `RuleChooser` first, with a pillar only where it abstains. That is the reverse of the degradation order in `computer/chooser.py:16-18`.<br>- **Where it fires.** It must name the event or pipeline point the decision fires at. |
+| Fail-closed veto subscriptions: an operator opt-in under which a **missed** veto at `pre_tool_use` becomes `escalate` (ask the human) instead of not applied | 1. A pillar veto operators use in practice.<br>2. Measured miss rates from `hook_calls`, showing no flood of approval prompts.<br><br>Details, costs and the recording rule are in section 18.1. |
+| Coding-run verdict point: a Cognition verifier sees a coding run's acceptance result and diff and can ask for **one more episode**, with open code deciding | Cognition's verdicts agree with the acceptance commands, measured in shadow.<br><br>Details are in section 18.2. |
+
+### 18.1 Fail-closed veto subscriptions
+
+**What it is.** A pillar veto that misses at `pre_tool_use` normally isn't applied (section 5), and that stays right for every pillar that isn't opted in.
+- **The opt-in** is the operator's, in config (for example `pillars.fail_closed: [<pillar>]`, next to `pillars.decide.*`). A manifest can never set it.
+- **For an opted-in pillar**, a missed veto at `pre_tool_use` becomes `escalate`.
+- **"Missed"** means the outcome is `timeout`, `error`, `invalid`, `busy`, `tripped` or `crashed`, decided at the deadline. A `late` answer that follows doesn't undo the escalation.
+
+**Before it is considered.**
+1. **A pillar veto operators use in practice,** where a missed check should wait for a human rather than go ahead. This doesn't make the pillar a boundary. The gate still is (section 5), and a pillar that answers `none` in time lets the call through whatever this option says (section 6.2).
+2. **Measured rates of every missed outcome,** plus time spent tripped, taken from `hook_calls`. They must show the opt-in can't flood approval prompts. A trip alone would turn every call into `escalate` for the 5-minute cooldown (section 10).
+
+**Costs the minor version must answer.**
+- **Background work.** On a system-origin call, `escalate` becomes `veto` (section 5). A dead or tripped fail-closed pillar would therefore block every system-origin agent-loop tool call it subscribes to, such as subagents, `local_agent` tasks and evals.
+  - Cron commands aren't agent-loop tool calls. They are vetted by the gate directly (`gateway/cron_scheduler.py:317-325`).
+  - Coding runs set no gate and no hook executor today (`coding/session.py:255-270`), so `pre_tool_use` doesn't fire for them.
+- **Other sessions.** The circuit breaker and the global in-flight cap are per pillar (section 10). One session's misses could send every session's tool calls to an approval prompt. The minor version must say how "one session never stalls another" still holds.
+
+**How a miss is recorded.**
+- The row keeps the real outcome, with no verdict, `applied = 0` and `reason_code = fail_closed` (section 13).
+- The approval prompt says the pillar didn't answer (for example "tool_guard didn't answer in time"). It never gives a reason the pillar didn't give (section 9.2).
+
+**Minor or major.** It adds a config key and no capability: `pre_tool_use` already allows `escalate`, and the daemon only raises `none` to `escalate`. It amends the "always falls back to the default" rule (sections 0, 9.2 and 15), for the named pillars only. Section 12's list of minor changes doesn't include an operator option like this. So that minor version must also extend section 12's list (an operator option, off by default, that changes no payload or capability), or the change is a major version.
+
+**The precedent is narrower than it looks.**
+- `command` and `http` operator hooks fail closed on a timeout or error when `block_on_failure` is set (`hooks/schemas.py:22`, `:44`, default false; `hooks/executor.py:104-112`, `:153-159`).
+- `prompt` and `agent` hooks default it to true (`hooks/schemas.py:33`, `:55`). For them it governs a negative answer, not a missed one: they apply no timeout and catch no exceptions (Appendix B.4).
+
+### 18.2 Coding-run verdict point
+
+**What it is.** A pipeline point in `CodingSession.run` (`coding/session.py:251`). A Cognition verifier sees the run's acceptance result and diff, and can ask for **one more episode** before the run is recorded as a success. An episode is another `run_loop` call, which section 1 calls a turn. Open code decides.
+
+**How it fits the contract.** It is a decision point with the options `accept` and `another_episode`:
+- **Open code builds the table.** It offers `another_episode` only while the caps are clear.
+- **The default must abstain first.** At this seam today, the default has already answered (acceptance exited 0, so accept). Section 6.2 lets a pillar decide only where the default abstains, so the default needs an abstain band here: a green run with caps to spare. That is a change to default behavior, and it needs its own WP (decision 12).
+- **Every miss means accept.** The fallback, and the result of any missed outcome, is `accept`: the green result stands.
+
+**Before it is considered.** Cognition's verdicts agree with the acceptance commands, measured in shadow: the verifier runs, its verdicts are recorded, and nothing acts on them. The seam below fires only on green runs, so the shadow run must also record verdicts on ground-truth failures (`coding/session.py:375-380`). Otherwise agreement can't be measured on failing runs.
+
+**Where it fires.** `CodingSession.run` has three success returns:
+- **`coding/session.py:371-374`: acceptance, run by the session itself, passed within the caps.** Only this one can offer another episode.
+- **`coding/session.py:292-296`: green after a pause ran past the wall cap.** No budget is left, so no grant is possible.
+- **`coding/session.py:349-352`: green at a cap, or after a stalled episode** (`coding/session.py:339`). A stall isn't a cap, but a model that made no progress gets no extra episode.
+
+**What open code keeps.**
+- **Fresh cap checks.** The cap check at `coding/session.py:335-340` runs before the acceptance run (`coding/session.py:367`), which can take up to 240 s. So the verdict point runs a fresh `over_cap(time.monotonic() - started)` (`coding/policy.py:115`) before it consults the verifier and again before any grant. The verifier's deadline is capped at the wall time left.
+- **Bounded episodes.** A granted episode is bounded by the remaining round budget (`context.max_turns`, `coding/session.py:300-304`). Like any episode today, it is checked against the wall cap only when it ends. The task manager's watchdog kills the process at `max_wall_seconds + 300` (`coding/managed.py:115`).
+- **No lost success.** A grant must never turn a success into a failure. The green tree is committed or saved before the extra episode runs. If the extra episode ends red, the saved green result is what is reported.
+- **Untrusted verifier text.** A decision carries no text (section 4.4). For the verifier to say why, the point must also allow `annotate`, with a fixed slot: a request-only note on the extra episode's first request, under section 5's rules (labeled, untrusted, provenance `pillar`). It never goes in as the trusted `orchestrator` message the seam uses today (`coding/session.py:359-363`, `:376-380`). Without `annotate`, no verifier text reaches the model.
+
+**Missing input.** Today the diff stat is produced only by `_finish` (`coding/session.py:449`, `_commit_artifact` at `:195-205`), after the verdict. It is `HEAD~1..HEAD`, which misses commits the model made itself. The verifier needs a diff against the commit the branch was cut from (record it at `_prepare_branch`, `:192-193`), including untracked files, taken before `_finish`.
+
+**Which process.** Coding runs are a `prometheus code` child process (`coding/managed.py:91-115`, `__main__.py:793`), not the daemon. The minor version must say:
+- how that process reaches the pillar (a `unix` transport, or a relay through the daemon);
+- whose caps and circuit breaker apply;
+- which budget class the point uses.
 
 ---
 
