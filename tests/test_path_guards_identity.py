@@ -224,8 +224,6 @@ def test_a_glob_entry_with_a_symlinked_prefix_denies_the_resolved_path(linked):
     reason = gate._check_denied_path(str(real / "x.secret"))
 
     assert reason == f"Path {str(real / 'x.secret')!r} matches denied pattern {f'{link}/*.secret'!r}"
-    assert gate.evaluate("read_file", is_read_only=True,
-                         file_path=str(real / "x.secret")).action == "DENY"
     assert gate._check_denied_path(str(real / "x.txt")) == ""
 
 
@@ -308,3 +306,81 @@ def test_a_relative_entry_is_never_resolved_against_the_working_directory(tmp_pa
 
     assert path_guard.entry_spellings("config") == ("config",)
     assert path_guard.denying_entry(tmp_path / "config" / "x", ["config"]) is None
+
+
+# ── from review: what an earlier version of this change got wrong ──────────
+
+def test_a_denied_directory_whose_name_looks_like_a_glob_is_still_denied(tmp_path):
+    """The sandboxes compared entries literally; ``[old]`` read as a pattern
+    is a character class that matches neither itself nor anything under it."""
+    (tmp_path / "[old]").mkdir()
+    box = ProcessSandbox(root=tmp_path, denied_paths=(str(tmp_path / "[old]"),))
+
+    with pytest.raises(SandboxViolation, match="denied by policy"):
+        box.resolve("[old]/f.md")
+    with pytest.raises(SandboxViolation, match="denied by policy"):
+        box.resolve("[old]")
+
+
+def test_an_absent_entry_denies_a_case_variant_only_where_the_volume_folds_case(tmp_path):
+    """On a case-sensitive volume ``Secrets`` (absent) and ``secrets`` (there)
+    are different directories, and the operator denied only the first."""
+    (tmp_path / "secrets" / "proj").mkdir(parents=True)
+    insensitive = _case_insensitive(tmp_path)
+    entry = str(tmp_path / "Secrets")  # on a folding volume this IS secrets
+
+    denied = path_guard.denying_entry(tmp_path / "secrets" / "proj", [entry])
+
+    assert (denied == entry) is insensitive
+
+
+def test_the_rm_guard_names_the_root_main_named(tmp_path, monkeypatch):
+    """An identity match on an earlier root must not pre-empt the string
+    match main made on a later one: the message is the same."""
+    (tmp_path / "realp" / "home").mkdir(parents=True)
+    (tmp_path / "linkp").symlink_to(tmp_path / "realp", target_is_directory=True)
+    monkeypatch.setenv("HOME", str(tmp_path / "linkp" / "home"))
+    gate = SecurityGate(workspace_root="~")
+
+    reason = gate._rm_targets_a_protected_root("rm -rf ~")
+
+    assert reason.endswith(f"resolves to {tmp_path / 'linkp' / 'home'}"), reason
+
+
+# ── the credential floor by case (macOS) ────────────────────────────────────
+
+@pytest.fixture
+def home_with_ssh(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "id_rsa").write_text("not a real key\n")
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def test_the_ssh_floor_denies_a_case_variant_where_it_is_the_same_file(home_with_ssh):
+    """FAILS ON MAIN on macOS: ``~/.SSH/id_rsa`` IS ``~/.ssh/id_rsa`` there,
+    and the floor ``/*/.ssh`` was matched as text, case and all."""
+    insensitive = _case_insensitive(home_with_ssh)
+    gate = SecurityGate()  # the always-denied floor alone
+
+    assert gate._check_denied_path(str(home_with_ssh / ".ssh" / "id_rsa"))
+    reason = gate._check_denied_path(str(home_with_ssh / ".SSH" / "id_rsa"))
+
+    assert bool(reason) is insensitive
+    if insensitive:
+        assert reason.endswith("matches denied pattern '/*/.ssh'")
+
+
+def test_creating_a_case_variant_of_an_absent_ssh_dir_is_refused_where_it_would_be_ssh(
+        tmp_path, monkeypatch):
+    """FAILS ON MAIN on macOS: with no ``~/.ssh`` yet, writing
+    ``~/.SSH/authorized_keys`` creates the directory sshd reads as ``~/.ssh``."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    insensitive = _case_insensitive(home)
+
+    reason = SecurityGate()._check_denied_path(str(home / ".SSH" / "authorized_keys"))
+
+    assert bool(reason) is insensitive

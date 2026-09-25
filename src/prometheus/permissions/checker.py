@@ -1570,13 +1570,16 @@ class SecurityGate:
                     target = Path(token.rstrip("/") or "/").expanduser()
                 except (OSError, RuntimeError):  # pragma: no cover
                     continue
+                # Main's comparison first, across every root, so a command it
+                # blocked names the same root; identity only for what it missed.
                 follow = token.endswith("/")
-                for root in roots:
-                    if target == root or _rm_would_remove(target, root, follow=follow):
-                        return (
-                            "Blocked: recursive rm aimed at a protected root — "
-                            f"{token!r} resolves to {root}"
-                        )
+                hit = next((r for r in roots if target == r), None) or next(
+                    (r for r in roots if _rm_would_remove(target, r, follow=follow)), None)
+                if hit is not None:
+                    return (
+                        "Blocked: recursive rm aimed at a protected root — "
+                        f"{token!r} resolves to {hit}"
+                    )
         return ""
 
     def _is_always_blocked(self, command: str) -> bool:

@@ -19,9 +19,10 @@ from __future__ import annotations
 import fnmatch
 import functools
 import os
+import sys
 import unicodedata
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, NamedTuple
 
 
 def assert_path_under_roots(
@@ -199,7 +200,30 @@ def file_identity(path: str | Path, *, follow_symlinks: bool = True) -> tuple[in
     return (st.st_dev, st.st_ino)
 
 
-def inside_by_identity(candidate: Path, prefixes: Iterable[Path]) -> Path | None:
+#: ``_PC_CASE_SENSITIVE`` in Darwin's <sys/unistd.h>; Python has no name for it.
+_DARWIN_PC_CASE_SENSITIVE = 11
+
+
+def volume_folds_case(directory: str | Path) -> bool:
+    """Whether the volume holding ``directory`` treats names differing only
+    in case as one name. Asked of the volume, not assumed from the OS: a Mac
+    can mount a case-sensitive APFS volume. Anything that can't answer (every
+    Linux filesystem here) is taken as case-sensitive, which is what ext4 is.
+    """
+    if sys.platform != "darwin":
+        return False
+    try:
+        return os.pathconf(directory, _DARWIN_PC_CASE_SENSITIVE) == 0
+    except (OSError, ValueError):
+        return False
+
+
+def inside_by_identity(
+    candidate: Path,
+    prefixes: Iterable[Path],
+    *,
+    absent_only_where_case_folds: bool = False,
+) -> Path | None:
     """The protected directory ``candidate`` is inside, by file identity.
 
     ``resolve()`` follows symlinks but folds neither case nor firmlinks. On
@@ -214,7 +238,11 @@ def inside_by_identity(candidate: Path, prefixes: Iterable[Path]) -> Path | None
     the ancestor that IS its parent (by identity) is found, and the next
     component of the destination is compared with the protected name folded
     for case. That refuses ``~/.SSH`` on a case-sensitive volume too, where
-    it is merely a confusing name.
+    it is merely a confusing name: the download guard's choice (#574).
+    ``absent_only_where_case_folds`` keeps that comparison to volumes that
+    fold case, for readers of a configured deny list, where on a
+    case-sensitive volume the other name is a different, existing directory
+    the operator never denied (WP-X.27).
     """
     existing: dict[tuple[int, int], Path] = {}
     absent: dict[tuple[int, int], list[Path]] = {}
@@ -235,9 +263,11 @@ def inside_by_identity(candidate: Path, prefixes: Iterable[Path]) -> Path | None
         hit = existing.get(key)
         if hit is not None:
             return hit
-        if i > 0:  # the component of the destination directly below `ancestor`
+        if i > 0 and key in absent:  # the component of the destination directly below `ancestor`
+            if absent_only_where_case_folds and not volume_folds_case(ancestor):
+                continue
             below = fold_component(chain[i - 1].name)
-            for prefix in absent.get(key, ()):
+            for prefix in absent[key]:
                 if below == fold_component(prefix.name):
                     return prefix
     return None
@@ -268,9 +298,9 @@ def entry_spellings(entry: str) -> tuple[str, ...]:
     it against the daemon's working directory is the defect
     ``checker._normalise_denied_path`` refuses to start on.
 
-    Cached: a deny list is fixed for the life of the process, and the prune
-    layer asks once per search result. What a path IS is still checked live,
-    per call, by :func:`denying_entry`'s identity pass.
+    Cached for the life of the process, as the gate already resolves its
+    literal entries once at start: a symlink in an entry that is repointed
+    later keeps its old target denied too (never less denied) until restart.
     """
     prefix, rest = split_literal_prefix(entry)
     if not Path(prefix).is_absolute():
@@ -283,59 +313,175 @@ def entry_spellings(entry: str) -> tuple[str, ...]:
     return (entry,) if other == entry else (entry, other)
 
 
+#: The Data volume's own spelling of a firmlinked directory on macOS
+#: (``/System/Volumes/Data/private/etc`` IS ``/private/etc``).
+_DATA_VOLUME = "/System/Volumes/Data/"
+
+
+def _loose(text: str) -> str:
+    """A path as a case- and normalisation-folding volume might equate it,
+    firmlinks included. Only a filter: identity decides."""
+    if text.startswith(_DATA_VOLUME):
+        text = text[len(_DATA_VOLUME) - 1:]
+    if text.isascii():  # NFC is the identity and casefold is lower() for ASCII
+        return text.lower()
+    return "/".join(fold_component(part) for part in text.split("/"))
+
+
+@functools.lru_cache(maxsize=1024)
+def _entry_forms(entry: str) -> tuple[tuple[str, str, tuple[str, ...] | None], ...]:
+    """``(spelling, loose spelling, literal words)`` for each spelling of an
+    absolute entry; nothing for a relative one, which is never resolved.
+
+    ``literal words`` is None for a literal entry. For a glob, it is the
+    loose form of each wildcard-free component: a path that lacks any of
+    them cannot match, which rules out nearly every path before fnmatch.
+    """
+    if not Path(entry).is_absolute():
+        return ()
+    forms = []
+    for spelling in entry_spellings(entry):
+        folded = _loose(spelling)
+        words = None
+        if is_glob_pattern(spelling):
+            words = tuple(w for w in folded.split("/") if w and not is_glob_pattern(w))
+        forms.append((spelling, folded, words))
+    return tuple(forms)
+
+
+def _literal_under(text: str, entry: str) -> bool:
+    """``text`` is ``entry`` or under it, comparing whole components."""
+    return text == entry or text.startswith(entry.rstrip("/") + "/")
+
+
+class _Plan(NamedTuple):
+    entries: tuple[str, ...]
+    glob_entries: tuple[str, ...]
+    other_spellings: tuple[tuple[str, str, bool], ...]
+    forms: tuple[tuple[str, str, str, tuple[str, ...] | None], ...]
+
+
+@functools.lru_cache(maxsize=64)
+def _plan(entries: tuple[str, ...]) -> _Plan:
+    """A deny list compiled once: readers pass the same list on every call,
+    and the prune layer calls once per search result."""
+    kept = tuple(e for e in entries if e)
+    return _Plan(
+        entries=kept,
+        glob_entries=tuple(e for e in kept if is_glob_pattern(e)),
+        other_spellings=tuple(
+            (e, s, is_glob_pattern(s)) for e in kept for s in entry_spellings(e)[1:]),
+        forms=tuple((e, *form) for e in kept for form in _entry_forms(e)),
+    )
+
+
 def denying_entry(resolved_path: str | Path, entries: Iterable[str]) -> str | None:
     """The first entry that denies an already-resolved path, or None.
 
     THE decision for every reader of a deny list (the gate, workspace binding,
-    the grep/glob prune layer, the coding sandboxes). Three passes, each
-    broader than the last, so that whatever matched before still names the
-    same entry:
+    the grep/glob prune layer, the coding sandboxes). Its passes only ever
+    add denials, and whatever an earlier pass denies names the same entry it
+    did before:
 
-    1. each entry exactly as given (``denied_entry_matches``: a glob matches
-       the path or anything under it; a literal matches whole components);
-    2. each entry with its literal directories resolved
+    1. each entry exactly as given: ``denied_entry_matches``, main's
+       comparison (a glob matches the path or anything under it; a literal
+       matches whole components);
+    2. a glob entry as a literal path too: a directory named ``[old]`` holds
+       glob characters and was compared as a name by the sandboxes;
+    3. each entry with its literal directories resolved
        (:func:`entry_spellings`), for an entry that runs through a symlink;
-    3. by identity: a literal entry through :func:`inside_by_identity`; a glob
-       entry by finding the ancestor that IS its literal prefix and matching
-       the rest of the path against the rest of the pattern. This catches
-       what no spelling does: case and firmlinks on macOS, and a directory
-       reached through a path the entry never named.
+    4. by identity, for what no spelling shows: case and Unicode
+       normalisation on a volume that folds them, and macOS firmlinks. Only
+       entries whose folded spelling could name the path are asked, so a path
+       nowhere near a denied one costs no ``stat``. A literal entry goes
+       through :func:`inside_by_identity`; a glob entry is matched with each
+       path component spelled as the pattern spells it, wherever the volume
+       says both names are one entry.
     """
-    path = Path(resolved_path)
-    text = str(path)
-    entries = [e for e in entries if e]
-    for entry in entries:
+    text = str(resolved_path)
+    plan = _plan(tuple(entries))
+    for entry in plan.entries:
         if denied_entry_matches(text, entry):
             return entry
-    for entry in entries:
-        for spelling in entry_spellings(entry)[1:]:
-            if denied_entry_matches(text, spelling):
-                return entry
+    for entry in plan.glob_entries:
+        if _literal_under(text, entry):
+            return entry
+    for entry, spelling, glob in plan.other_spellings:
+        if denied_entry_matches(text, spelling) or (glob and _literal_under(text, spelling)):
+            return entry
+    loose = _loose(text)
     literal: dict[Path, str] = {}
-    globs: list[tuple[str, str, str]] = []
-    for entry in entries:
-        if not Path(entry).is_absolute():
-            continue  # never resolved against the cwd; pass 1 already compared it
-        if is_glob_pattern(entry):
-            prefix, rest = split_literal_prefix(entry)
-            globs.append((entry, prefix, rest))
-        else:
-            for spelling in entry_spellings(entry):
-                literal.setdefault(Path(spelling), entry)
+    globs: list[tuple[str, str]] = []
+    for entry, spelling, folded, words in plan.forms:
+        if words is not None:
+            if all(w in loose for w in words) and denied_entry_matches(loose, folded):
+                globs.append((entry, spelling))
+        elif _literal_under(loose, folded):  # also covers an absent entry's variant
+            literal.setdefault(Path(spelling), entry)
+    if not literal and not globs:
+        return None
+    path = Path(text)
     if literal:
-        hit = inside_by_identity(path, literal)
+        hit = inside_by_identity(path, literal, absent_only_where_case_folds=True)
         if hit is not None:
             return literal[hit]
-    if globs:
-        ancestors = [(a, file_identity(a)) for a in path.parents]
-        for entry, prefix, rest in globs:
-            key = file_identity(prefix)
-            if key is None:
+    for entry, spelling in globs:
+        prefix, rest = split_literal_prefix(spelling)
+        key = file_identity(prefix)
+        if key is None:
+            continue
+        for ancestor in path.parents:
+            if file_identity(ancestor) != key:
                 continue
-            for ancestor, identity in ancestors:
-                if identity != key:
-                    continue
-                rel = path.relative_to(ancestor).as_posix()
-                if fnmatch.fnmatch(rel, rest) or fnmatch.fnmatch(rel, rest.rstrip("/") + "/*"):
-                    return entry
+            rel = path.relative_to(ancestor).as_posix()
+            if _glob_rest_matches(rel, rest):
+                return entry
+            canonical = _as_the_pattern_spells_it(ancestor, rel, rest)
+            if canonical != rel and _glob_rest_matches(canonical, rest):
+                return entry
     return None
+
+
+def _glob_rest_matches(rel: str, rest: str) -> bool:
+    return fnmatch.fnmatch(rel, rest) or fnmatch.fnmatch(rel, rest.rstrip("/") + "/*")
+
+
+def _as_the_pattern_spells_it(ancestor: Path, rel: str, rest: str) -> str:
+    """``rel`` with each component that differs from one of the pattern's
+    literal components only by case spelled as the pattern spells it, where
+    that is the same directory entry.
+
+    Same entry means both names exist and are one file, or, on a volume that
+    folds case, neither exists yet (creating one creates the other: #574's
+    rule for a protected directory that isn't there yet). A name beside a
+    differently cased one on a case-sensitive volume is its own entry and is
+    left alone, as are components with a wildcard in them.
+    """
+    literals = {
+        fold_component(part): part
+        for part in rest.split("/")
+        if part and not is_glob_pattern(part)
+    }
+    if not literals:
+        return rel
+    out: list[str] = []
+    parent = ancestor
+    for part in rel.split("/"):
+        spelled = literals.get(fold_component(part))
+        if spelled is not None and spelled != part:
+            as_given = file_identity(parent / part, follow_symlinks=False)
+            as_spelled = file_identity(parent / spelled, follow_symlinks=False)
+            if as_given is not None and as_given == as_spelled:
+                part = spelled
+            elif as_given is None and as_spelled is None and _nearest_folds_case(parent):
+                part = spelled
+        out.append(part)
+        parent = parent / part
+    return "/".join(out)
+
+
+def _nearest_folds_case(directory: Path) -> bool:
+    for candidate in (directory, *directory.parents):
+        if file_identity(candidate) is not None:
+            return volume_folds_case(candidate)
+    return False
