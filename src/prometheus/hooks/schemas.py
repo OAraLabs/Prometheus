@@ -20,6 +20,11 @@ class CommandHookDefinition(BaseModel):
     timeout_seconds: int = Field(default=30, ge=1, le=600)
     matcher: str | None = None
     block_on_failure: bool = False
+    # Names of daemon environment variables this hook may see, beyond the
+    # minimal set every command hook gets (PATH, HOME, USER, LANG, LC_*,
+    # TMPDIR, SHELL) and its payload variables. Exact names, no patterns.
+    # Empty by default: provider keys and PROMETHEUS_API_TOKEN stay behind.
+    env_allowlist: list[str] = Field(default_factory=list)
 
 
 class PromptHookDefinition(BaseModel):

@@ -15,7 +15,9 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import json
+import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,6 +36,15 @@ from prometheus.hooks.schemas import (
 )
 from prometheus.hooks.types import AggregatedHookResult, HookResult
 from prometheus.providers.base import ApiMessageCompleteEvent, ApiMessageRequest, ModelProvider
+
+log = logging.getLogger(__name__)
+
+# What every command hook inherits from the daemon's environment, when set.
+# Everything else — provider API keys, PROMETHEUS_API_TOKEN, gateway tokens —
+# stays behind unless the hook names it in `env_allowlist`. See
+# `_command_environment`.
+BASE_ENV_NAMES = ("PATH", "HOME", "USER", "LANG", "TMPDIR", "SHELL")
+BASE_ENV_PREFIXES = ("LC_",)
 
 
 @dataclass
@@ -59,17 +70,20 @@ class HookExecutor:
     async def execute(self, event: HookEvent, payload: dict[str, Any]) -> AggregatedHookResult:
         """Execute all matching hooks for an event."""
         results: list[HookResult] = []
-        for hook in self._registry.get(event):
+        for position, hook in enumerate(self._registry.get(event), start=1):
             if not _matches_hook(hook, payload):
                 continue
             if isinstance(hook, CommandHookDefinition):
-                results.append(await self._run_command_hook(hook, event, payload))
+                results.append(await self._run_command_hook(
+                    hook, event, payload, position=position))
             elif isinstance(hook, HttpHookDefinition):
                 results.append(await self._run_http_hook(hook, event, payload))
             elif isinstance(hook, PromptHookDefinition):
-                results.append(await self._run_prompt_like_hook(hook, event, payload, agent_mode=False))
+                results.append(await self._run_prompt_like_hook(
+                    hook, event, payload, agent_mode=False, position=position))
             elif isinstance(hook, AgentHookDefinition):
-                results.append(await self._run_prompt_like_hook(hook, event, payload, agent_mode=True))
+                results.append(await self._run_prompt_like_hook(
+                    hook, event, payload, agent_mode=True, position=position))
         return AggregatedHookResult(results=results)
 
     async def _run_command_hook(
@@ -77,24 +91,39 @@ class HookExecutor:
         hook: CommandHookDefinition,
         event: HookEvent,
         payload: dict[str, Any],
+        *,
+        position: int,
     ) -> HookResult:
         # $ARGUMENTS IS A SHELL PARAMETER, NOT A TEXT SPLICE. See
         # _payload_environment below for why that distinction is the whole
         # fix — the command string is passed to bash EXACTLY as the operator
         # wrote it, and the model-controlled payload only ever arrives as the
         # VALUE of a variable.
-        process = await asyncio.create_subprocess_exec(
-            "/bin/bash",
-            "-lc",
-            hook.command,
-            cwd=str(self._context.cwd),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env={
-                **os.environ,
-                **_payload_environment(event, payload),
-            },
-        )
+        #
+        # A hook that cannot START — a working directory that no longer
+        # exists, no /bin/bash, a payload the environment cannot carry — used
+        # to raise out of `execute`, and the loop reported the hook's failure
+        # as the tool's ("Tool X raised an exception"). It now fails the way a
+        # prompt/agent hook does: a HookResult honoring block_on_failure, a
+        # reason naming the hook, one WARNING.
+        started = time.monotonic()
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "/bin/bash",
+                "-lc",
+                hook.command,
+                cwd=str(self._context.cwd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=_command_environment(hook, event, payload),
+            )
+        except Exception as exc:  # noqa: BLE001 — a hook failure must not look like a tool failure
+            label = hook_label(event, position, hook)
+            log.debug("hook %s failed to start", label, exc_info=True)
+            return _failed_hook_result(
+                hook, event, label, "error",
+                f"failed to start ({type(exc).__name__})", started,
+            )
 
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -165,6 +194,47 @@ class HookExecutor:
         payload: dict[str, Any],
         *,
         agent_mode: bool,
+        position: int,
+    ) -> HookResult:
+        """Run a prompt/agent hook inside its deadline; never raise.
+
+        These hooks await the daemon's own provider, and nothing bounded that
+        wait or caught what it raised. A stalled provider stalled the tool
+        call. A raise escaped `execute` into `_execute_tool_call`, where
+        `_safe_execute` reported it as "Tool X raised an exception" — and at
+        `post_tool_use` the tool has already run, so the model was told a call
+        failed whose side effects had landed, and could run it again.
+
+        So the deadline is `timeout_seconds`, and any failure becomes a
+        HookResult that honors `block_on_failure`, with a reason naming the
+        hook and one WARNING. `asyncio.CancelledError` is not an Exception and
+        still propagates: a cancelled turn stays cancelled.
+        """
+        label = hook_label(event, position, hook)
+        started = time.monotonic()
+        deadline = asyncio.timeout(hook.timeout_seconds)
+        try:
+            async with deadline:
+                return await self._ask_prompt_like_hook(hook, payload, agent_mode=agent_mode)
+        except Exception as exc:  # noqa: BLE001 — a hook failure must not look like a tool failure
+            # Only OUR deadline is a timeout. A TimeoutError the provider
+            # raised on its own is an error like any other.
+            if isinstance(exc, TimeoutError) and deadline.expired():
+                return _failed_hook_result(
+                    hook, event, label, "timeout",
+                    f"timed out after {hook.timeout_seconds}s", started,
+                )
+            log.debug("hook %s raised", label, exc_info=True)
+            return _failed_hook_result(
+                hook, event, label, "error", f"raised {type(exc).__name__}", started,
+            )
+
+    async def _ask_prompt_like_hook(
+        self,
+        hook: PromptHookDefinition | AgentHookDefinition,
+        payload: dict[str, Any],
+        *,
+        agent_mode: bool,
     ) -> HookResult:
         prompt = _inject_arguments(hook.prompt, payload)
         prefix = (
@@ -204,12 +274,98 @@ class HookExecutor:
         )
 
 
+def _failed_hook_result(
+    hook: HookDefinition,
+    event: HookEvent,
+    label: str,
+    outcome: str,
+    detail: str,
+    started: float,
+) -> HookResult:
+    """A hook that did not produce an answer: one WARNING, one failed result.
+
+    The result honors `block_on_failure`, and its reason names the hook. The
+    detail carries an exception's TYPE only, here and in the log: its text can
+    quote the payload (a provider echoing its request), and the reason reaches
+    the model and the telemetry row. Callers log the traceback at DEBUG.
+    """
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    if event is HookEvent.POST_TOOL_USE:
+        # The loop discards post_tool_use results: the call has already run
+        # and block_on_failure cannot undo it, so don't claim it blocked.
+        consequence = "the call already ran; its result is unchanged"
+    elif hook.block_on_failure:
+        consequence = "blocking the call (block_on_failure)"
+    else:
+        consequence = "continuing"
+    log.warning(
+        "hook %s outcome=%s (%s) after %d ms — %s",
+        label, outcome, detail, elapsed_ms, consequence,
+    )
+    return HookResult(
+        hook_type=hook.type,
+        success=False,
+        blocked=hook.block_on_failure,
+        reason=f"{label} {detail}",
+        metadata={"outcome": outcome, "duration_ms": elapsed_ms},
+    )
+
+
+def hook_label(event: HookEvent, position: int, hook: HookDefinition) -> str:
+    """How logs, block reasons and `oara doctor` name one configured hook.
+
+    Hooks have no names in config, so this is the event, the hook's 1-based
+    position in that event's list, its kind and its matcher — enough to find
+    the entry in `hooks:`.
+    """
+    label = f"{event.value} {hook.type} hook #{position}"
+    matcher = getattr(hook, "matcher", None)
+    if matcher:
+        label += f" (matcher {matcher!r})"
+    return label
+
+
 def _matches_hook(hook: HookDefinition, payload: dict[str, Any]) -> bool:
     matcher = getattr(hook, "matcher", None)
     if not matcher:
         return True
     subject = str(payload.get("tool_name") or payload.get("prompt") or payload.get("event") or "")
     return fnmatch.fnmatch(subject, matcher)
+
+
+def _command_environment(
+    hook: CommandHookDefinition,
+    event: HookEvent,
+    payload: dict[str, Any],
+) -> dict[str, str]:
+    """The whole environment a command hook runs with. Nothing else is inherited.
+
+    Command hooks used to get ``{**os.environ, **payload}``: the daemon's
+    entire environment, which holds every provider API key, the daemon's own
+    ``PROMETHEUS_API_TOKEN`` and any gateway token. A hook script — or
+    anything it runs — could read and forward all of them.
+
+    Now a hook gets only what a shell needs to behave normally
+    (`BASE_ENV_NAMES`, plus ``LC_*``), then each variable the operator names
+    in the hook's ``env_allowlist``, then the payload variables. The payload
+    goes last so an allowlisted name can never replace it. A name on the
+    allowlist that the daemon doesn't have is left unset.
+
+    The shell is still ``bash -l``, so the operator's own login files still
+    run and can export what they like. This bounds what the daemon hands over,
+    not what the operator's profile adds.
+    """
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name in BASE_ENV_NAMES or name.startswith(BASE_ENV_PREFIXES)
+    }
+    for name in hook.env_allowlist:
+        value = os.environ.get(name)
+        if value is not None:
+            env[name] = value
+    env.update(_payload_environment(event, payload))
+    return env
 
 
 def _payload_environment(event: HookEvent, payload: dict[str, Any]) -> dict[str, str]:
