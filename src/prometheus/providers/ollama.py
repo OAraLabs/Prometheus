@@ -90,6 +90,13 @@ class OllamaProvider(ModelProvider):
             "messages": messages,
             "stream": True,
             "options": {"num_predict": request.max_tokens},
+            # Ollama's OpenAI-compatible endpoint sends the usage chunk only
+            # when asked (measured on 0.23.0: without this the stream carries
+            # no ``usage`` at all), so every ollama round recorded 0/0 tokens.
+            # The same field llama_cpp and openai_compat send. Accounting-only:
+            # generation is unaffected, and a server that predates
+            # stream_options ignores the unknown field and simply sends none.
+            "stream_options": {"include_usage": True},
         }
 
         if self._force_json:

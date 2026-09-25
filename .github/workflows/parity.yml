@@ -1,8 +1,9 @@
 name: Parity
 
 # WP-1.2 — the golden-trace parity harness, run beside the full suite (ci.yml)
-# on every PR that touches the daemon seams: engine/, hooks/, router/,
-# adapter/. It boots a REAL daemon from this checkout, replays the recorded
+# on every PR that touches the daemon seams (engine/, hooks/, router/,
+# adapter/) OR any code that shapes the requests the daemon sends to the model
+# (see the path list). It boots a REAL daemon from this checkout, replays the recorded
 # turns in tests/fixtures/parity/ through it against a model server that
 # answers from the recording, and fails on any difference in tool calls, gate
 # decisions, checkpoints, memory writes, telemetry rows, final replies — or in
@@ -18,10 +19,38 @@ name: Parity
 on:
   pull_request:
     paths:
+      # The daemon seams.
       - "src/prometheus/engine/**"
       - "src/prometheus/hooks/**"
       - "src/prometheus/router/**"
       - "src/prometheus/adapter/**"
+      # Everything else that shapes a request the replay fingerprints. The
+      # replay diffs every request body byte for byte, so a change to ANY of
+      # these can stale the golden traces — and until 2026-09-25 none of them
+      # ran this job: an ollama.py payload field (stream_options) staled
+      # model_switch and repaired_tool_call without anything noticing. Each
+      # entry was traced to the request on the recorded scenarios' path.
+      - "src/prometheus/providers/**"   # the payload itself; boot probes; model name
+      - "src/prometheus/context/**"     # system prompt, identity line, compaction request
+      - "src/prometheus/daemon.py"      # boot wiring: provider, prompt build, max_tokens
+      - "src/prometheus/__main__.py"    # tool set and order, adapter tier, coding bootstrap
+      - "src/prometheus/config/**"      # config defaults, paths written into prompts, profiles
+      - "config/model_registry.yaml"    # decides the adapter tier: tools vs grammar
+      - "src/prometheus/tools/**"       # tool schemas, grammar source, tool-result text
+      - "src/prometheus/skills/**"      # "# Available Skills" in every system prompt
+      - "src/prometheus/memory/**"      # memory tool schema/results, recall, LCM history
+      - "src/prometheus/permissions/**" # schema path annotations, refusal text as tool results
+      - "src/prometheus/security/**"    # deny predicate, bash environment
+      - "src/prometheus/web/**"         # user message, history, title request, backend switch
+      - "src/prometheus/api/**"         # per-call tool_choice
+      - "src/prometheus/learning/**"    # compaction request, loop envelope, nudge hook
+      - "src/prometheus/coding/**"      # coding_run's whole request stream
+      - "src/prometheus/tasks/**"       # launches the coding_run process (cwd, env)
+      - "src/prometheus/symbiote/**"    # github_search input model is in the grammar
+      - "src/prometheus/utils/**"       # concatenated into the boot system prompt
+      - "uv.lock"                       # pydantic renders schemas and error text in requests
+      - "pyproject.toml"                # `uv sync` below re-resolves from it
+      # The instrument itself.
       - "scripts/parity/**"
       - "scripts/parity_harness.py"
       - "tests/fixtures/parity/**"
