@@ -1,126 +1,15 @@
 {
  "steps": [
   {
-   "end": "chat_done",
-   "error_event": null,
-   "messages": [
-    {
-     "content": "Reply with exactly the word: one",
-     "content_json": {
-      "$json": [
-       {
-        "text": "Reply with exactly the word: one",
-        "type": "text"
-       }
-      ]
-     },
-     "is_trusted": true,
-     "provenance": "user",
-     "role": "user"
-    },
-    {
-     "content": "one",
-     "content_json": {
-      "$json": [
-       {
-        "text": "one",
-        "type": "text"
-       }
-      ]
-     },
-     "is_trusted": false,
-     "provenance": "user",
-     "role": "assistant"
-    }
-   ],
-   "op": "chat",
-   "reply": "one",
-   "session": "desktop:parity-switch"
-  },
-  {
    "op": "model",
    "result": {
-    "auth": null,
+    "auth": "api_key",
     "available": true,
-    "backend": "alt",
-    "detail": null,
-    "health": {
-     "changed_at": null,
-     "error": null,
-     "latency_ms": "<ms>",
-     "n_ctx": 32768,
-     "ok": true,
-     "probed": true,
-     "probed_at": "<time>",
-     "stale": false
-    },
     "is_default": false,
-    "key": "alt",
-    "label": "alt · qwen2.5:7b-instruct",
-    "model": "qwen2.5:7b-instruct",
-    "provider": "ollama",
-    "vision": false
-   },
-   "status": 200
-  },
-  {
-   "end": "chat_done",
-   "error_event": null,
-   "messages": [
-    {
-     "content": "Reply with exactly the word: two",
-     "content_json": {
-      "$json": [
-       {
-        "text": "Reply with exactly the word: two",
-        "type": "text"
-       }
-      ]
-     },
-     "is_trusted": true,
-     "provenance": "user",
-     "role": "user"
-    },
-    {
-     "content": "two",
-     "content_json": {
-      "$json": [
-       {
-        "text": "two",
-        "type": "text"
-       }
-      ]
-     },
-     "is_trusted": false,
-     "provenance": "user",
-     "role": "assistant"
-    }
-   ],
-   "op": "chat",
-   "reply": "two",
-   "session": "desktop:parity-switch"
-  },
-  {
-   "op": "model",
-   "result": {
-    "auth": null,
-    "available": true,
-    "backend": "local",
-    "health": {
-     "changed_at": null,
-     "error": null,
-     "latency_ms": "<ms>",
-     "n_ctx": 32768,
-     "ok": true,
-     "probed": true,
-     "probed_at": "<time>",
-     "stale": false
-    },
-    "is_default": true,
-    "key": "local",
-    "label": "Local",
-    "model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-    "provider": "llama_cpp",
+    "key": "claude",
+    "label": "Claude · claude-haiku-4-5",
+    "model": "claude-haiku-4-5",
+    "provider": "anthropic",
     "vision": true
    },
    "status": 200
@@ -130,11 +19,11 @@
    "error_event": null,
    "messages": [
     {
-     "content": "Reply with exactly the word: three",
+     "content": "Parity check. Reply with one short friendly sentence that contains the word 'harbor'. Do not use any tools.",
      "content_json": {
       "$json": [
        {
-        "text": "Reply with exactly the word: three",
+        "text": "Parity check. Reply with one short friendly sentence that contains the word 'harbor'. Do not use any tools.",
         "type": "text"
        }
       ]
@@ -144,11 +33,11 @@
      "role": "user"
     },
     {
-     "content": "three",
+     "content": "I'm ready to help you build great software — I harbor no doubts about that! 🚀",
      "content_json": {
       "$json": [
        {
-        "text": "three",
+        "text": "I'm ready to help you build great software — I harbor no doubts about that! 🚀",
         "type": "text"
        }
       ]
@@ -159,11 +48,14 @@
     }
    ],
    "op": "chat",
-   "reply": "three",
-   "session": "desktop:parity-switch"
+   "reply": "I'm ready to help you build great software — I harbor no doubts about that! 🚀",
+   "session": "desktop:parity-hosted"
   }
  ],
  "stores": {
+  "home/.config/prometheus/env": {
+   "text": "ANTHROPIC_API_KEY=parity-dummy-key\n"
+  },
   "home/.prometheus/.daemon_started": {
    "replaced": "<boot-specific>"
   },
@@ -293,19 +185,19 @@
      "rows": [
       [
        "<uuid:1>",
-       "desktop:parity-switch",
+       "desktop:parity-hosted",
        0,
        "user",
-       "Reply with exactly the word: one",
+       "Parity check. Reply with one short friendly sentence that contains the word 'harbor'. Do not use any tools.",
        {
         "$json": [
          {
-          "text": "Reply with exactly the word: one",
+          "text": "Parity check. Reply with one short friendly sentence that contains the word 'harbor'. Do not use any tools.",
           "type": "text"
          }
         ]
        },
-       8,
+       26,
        "<time>",
        0,
        "user",
@@ -313,99 +205,19 @@
       ],
       [
        "<uuid:2>",
-       "desktop:parity-switch",
+       "desktop:parity-hosted",
        1,
        "assistant",
-       "one",
+       "I'm ready to help you build great software — I harbor no doubts about that! 🚀",
        {
         "$json": [
          {
-          "text": "one",
+          "text": "I'm ready to help you build great software — I harbor no doubts about that! 🚀",
           "type": "text"
          }
         ]
        },
-       0,
-       "<time>",
-       0,
-       "user",
-       0
-      ],
-      [
-       "<uuid:3>",
-       "desktop:parity-switch",
-       2,
-       "user",
-       "Reply with exactly the word: two",
-       {
-        "$json": [
-         {
-          "text": "Reply with exactly the word: two",
-          "type": "text"
-         }
-        ]
-       },
-       8,
-       "<time>",
-       0,
-       "user",
-       1
-      ],
-      [
-       "<uuid:4>",
-       "desktop:parity-switch",
-       3,
-       "assistant",
-       "two",
-       {
-        "$json": [
-         {
-          "text": "two",
-          "type": "text"
-         }
-        ]
-       },
-       0,
-       "<time>",
-       0,
-       "user",
-       0
-      ],
-      [
-       "<uuid:5>",
-       "desktop:parity-switch",
-       4,
-       "user",
-       "Reply with exactly the word: three",
-       {
-        "$json": [
-         {
-          "text": "Reply with exactly the word: three",
-          "type": "text"
-         }
-        ]
-       },
-       8,
-       "<time>",
-       0,
-       "user",
-       1
-      ],
-      [
-       "<uuid:6>",
-       "desktop:parity-switch",
-       5,
-       "assistant",
-       "three",
-       {
-        "$json": [
-         {
-          "text": "three",
-          "type": "text"
-         }
-        ]
-       },
-       1,
+       19,
        "<time>",
        0,
        "user",
@@ -419,22 +231,10 @@
      ],
      "rows": [
       [
-       "Reply with exactly the word: one"
+       "Parity check. Reply with one short friendly sentence that contains the word 'harbor'. Do not use any tools."
       ],
       [
-       "one"
-      ],
-      [
-       "Reply with exactly the word: two"
-      ],
-      [
-       "two"
-      ],
-      [
-       "Reply with exactly the word: three"
-      ],
-      [
-       "three"
+       "I'm ready to help you build great software — I harbor no doubts about that! 🚀"
       ]
      ]
     },
@@ -459,57 +259,29 @@
       [
        1,
        {
-        "$bytes_sha256": "f18311a94c727d23",
+        "$bytes_sha256": "802e40a08e421a76",
         "len": 2
        }
       ],
       [
        10,
        {
-        "$bytes_sha256": "f6397b8610799458",
-        "len": 27
+        "$bytes_sha256": "e3375560c1eb04e1",
+        "len": 15
        }
       ],
       [
        137438953473,
        {
-        "$bytes_sha256": "77b593d5ec9c22b6",
-        "len": 65
+        "$bytes_sha256": "cb00a37bc407d985",
+        "len": 191
        }
       ],
       [
        274877906945,
        {
-        "$bytes_sha256": "e0d5a17f456ad378",
-        "len": 13
-       }
-      ],
-      [
-       412316860417,
-       {
-        "$bytes_sha256": "bf86d867e36a7837",
-        "len": 64
-       }
-      ],
-      [
-       549755813889,
-       {
-        "$bytes_sha256": "1940e632abbc904f",
-        "len": 13
-       }
-      ],
-      [
-       687194767361,
-       {
-        "$bytes_sha256": "72872b3c407c7796",
-        "len": 65
-       }
-      ],
-      [
-       824633720833,
-       {
-        "$bytes_sha256": "80de91700435c4db",
-        "len": 15
+        "$bytes_sha256": "43de7c8ae41ad2cc",
+        "len": 144
        }
       ]
      ]
@@ -523,42 +295,14 @@
       [
        1,
        {
-        "$bytes_sha256": "67586e98fad27da0",
+        "$bytes_sha256": "f299791cddd3d666",
         "len": 1
        }
       ],
       [
        2,
        {
-        "$bytes_sha256": "4bf5122f344554c5",
-        "len": 1
-       }
-      ],
-      [
-       3,
-       {
-        "$bytes_sha256": "67586e98fad27da0",
-        "len": 1
-       }
-      ],
-      [
-       4,
-       {
-        "$bytes_sha256": "4bf5122f344554c5",
-        "len": 1
-       }
-      ],
-      [
-       5,
-       {
-        "$bytes_sha256": "67586e98fad27da0",
-        "len": 1
-       }
-      ],
-      [
-       6,
-       {
-        "$bytes_sha256": "4bf5122f344554c5",
+        "$bytes_sha256": "dc0e9c3658a1a3ed",
         "len": 1
        }
       ]
@@ -581,38 +325,6 @@
       ],
       [
        2,
-       {
-        "$bytes_sha256": "e3b0c44298fc1c14",
-        "len": 0
-       },
-       2
-      ],
-      [
-       3,
-       {
-        "$bytes_sha256": "e3b0c44298fc1c14",
-        "len": 0
-       },
-       2
-      ],
-      [
-       4,
-       {
-        "$bytes_sha256": "e3b0c44298fc1c14",
-        "len": 0
-       },
-       2
-      ],
-      [
-       5,
-       {
-        "$bytes_sha256": "e3b0c44298fc1c14",
-        "len": 0
-       },
-       2
-      ],
-      [
-       6,
        {
         "$bytes_sha256": "e3b0c44298fc1c14",
         "len": 0
@@ -740,8 +452,8 @@
      ],
      "rows": [
       [
-       "desktop:parity-switch",
-       "Testing Single Word Reply",
+       "desktop:parity-hosted",
+       "Parity Check Harbor Reply",
        "<time>"
       ]
      ]
@@ -1103,7 +815,7 @@
      ],
      "rows": [
       [
-       "<uuid:7>",
+       "<uuid:3>",
        "<time>",
        "tool_registration",
        "TaskCreateTool",
@@ -1128,7 +840,7 @@
        null
       ],
       [
-       "<uuid:8>",
+       "<uuid:4>",
        "<time>",
        "tool_registration",
        "GitHubSearchTool",
@@ -1153,7 +865,7 @@
        null
       ],
       [
-       "<uuid:9>",
+       "<uuid:5>",
        "<time>",
        "tool_registration",
        "SymbioteScoutTool",
@@ -1178,7 +890,7 @@
        null
       ],
       [
-       "<uuid:10>",
+       "<uuid:6>",
        "<time>",
        "tool_registration",
        "SymbioteHarvestTool",
@@ -1203,7 +915,7 @@
        null
       ],
       [
-       "<uuid:11>",
+       "<uuid:7>",
        "<time>",
        "tool_registration",
        "SymbioteGraftTool",
@@ -1228,7 +940,7 @@
        null
       ],
       [
-       "<uuid:12>",
+       "<uuid:8>",
        "<time>",
        "tool_registration",
        "SymbioteStatusTool",
@@ -1253,7 +965,7 @@
        null
       ],
       [
-       "<uuid:13>",
+       "<uuid:9>",
        "<time>",
        "tool_registration",
        "SkillTool",
@@ -1278,7 +990,7 @@
        null
       ],
       [
-       "<uuid:14>",
+       "<uuid:10>",
        "<time>",
        "tool_registration",
        "MemoryTool",
@@ -1303,7 +1015,7 @@
        null
       ],
       [
-       "<uuid:15>",
+       "<uuid:11>",
        "<time>",
        "tool_registration",
        "TodoWriteTool",
@@ -1328,7 +1040,7 @@
        null
       ],
       [
-       "<uuid:16>",
+       "<uuid:12>",
        "<time>",
        "tool_registration",
        "VaultSearchTool",
@@ -1353,7 +1065,7 @@
        null
       ],
       [
-       "<uuid:17>",
+       "<uuid:13>",
        "<time>",
        "tool_registration",
        "VaultReadTool",
@@ -1378,7 +1090,7 @@
        null
       ],
       [
-       "<uuid:18>",
+       "<uuid:14>",
        "<time>",
        "tool_registration",
        "AnatomyTool",
@@ -1403,7 +1115,7 @@
        null
       ],
       [
-       "<uuid:19>",
+       "<uuid:15>",
        "<time>",
        "tool_registration",
        "BrowserTool",
@@ -1428,7 +1140,7 @@
        null
       ],
       [
-       "<uuid:20>",
+       "<uuid:16>",
        "<time>",
        "tool_registration",
        "SessionsListTool",
@@ -1453,7 +1165,7 @@
        null
       ],
       [
-       "<uuid:21>",
+       "<uuid:17>",
        "<time>",
        "tool_registration",
        "SessionsSendTool",
@@ -1478,7 +1190,7 @@
        null
       ],
       [
-       "<uuid:22>",
+       "<uuid:18>",
        "<time>",
        "tool_registration",
        "SessionsSpawnTool",
@@ -1503,7 +1215,7 @@
        null
       ],
       [
-       "<uuid:23>",
+       "<uuid:19>",
        "<time>",
        "tool_registration",
        "TaskGetTool",
@@ -1528,7 +1240,7 @@
        null
       ],
       [
-       "<uuid:24>",
+       "<uuid:20>",
        "<time>",
        "tool_registration",
        "TaskListTool",
@@ -1553,7 +1265,7 @@
        null
       ],
       [
-       "<uuid:25>",
+       "<uuid:21>",
        "<time>",
        "tool_registration",
        "TaskUpdateTool",
@@ -1578,7 +1290,7 @@
        null
       ],
       [
-       "<uuid:26>",
+       "<uuid:22>",
        "<time>",
        "tool_registration",
        "TaskStopTool",
@@ -1603,7 +1315,7 @@
        null
       ],
       [
-       "<uuid:27>",
+       "<uuid:23>",
        "<time>",
        "tool_registration",
        "TaskOutputTool",
@@ -1628,7 +1340,7 @@
        null
       ],
       [
-       "<uuid:28>",
+       "<uuid:24>",
        "<time>",
        "tool_registration",
        "ImageGenerateTool",
@@ -1653,7 +1365,7 @@
        null
       ],
       [
-       "<uuid:29>",
+       "<uuid:25>",
        "<time>",
        "tool_registration",
        "KlingVideoTool",
@@ -1678,7 +1390,7 @@
        null
       ],
       [
-       "<uuid:30>",
+       "<uuid:26>",
        "<time>",
        "agent_loop",
        "tool_advertisement",
@@ -1686,18 +1398,18 @@
        "success",
        {
         "$json": {
-         "advertised": 11,
-         "deferred_active": true,
+         "advertised": 51,
+         "deferred_active": false,
          "profile": "full",
          "registered_total": 51,
-         "source": "auto → enabled (local provider, tier light)"
+         "source": "auto → disabled (cloud provider)"
         }
        },
        null,
        null,
        null,
-       "desktop:parity-switch",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "desktop:parity-hosted",
+       "claude-haiku-4-5",
        null,
        null,
        null,
@@ -1706,7 +1418,7 @@
        null
       ],
       [
-       "<uuid:31>",
+       "<uuid:27>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1714,123 +1426,19 @@
        "success",
        {
         "$json": {
-         "stop_reason": "stop"
+         "stop_reason": "end_turn"
         }
        },
-       5931,
-       2,
+       348,
+       25,
        0,
-       "desktop:parity-switch",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       0,
-       null,
-       null,
-       "<node>",
-       "local",
-       null
-      ],
-      [
-       "<uuid:32>",
-       "<time>",
-       "agent_loop",
-       "tool_advertisement",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "advertised": 11,
-         "deferred_active": true,
-         "profile": "full",
-         "registered_total": 51,
-         "source": "auto → enabled (local provider, tier full)"
-        }
-       },
-       null,
-       null,
-       null,
-       "desktop:parity-switch",
-       "qwen2.5:7b-instruct",
+       "desktop:parity-hosted",
+       "claude-haiku-4-5",
        null,
        null,
        null,
        "<node>",
-       null,
-       null
-      ],
-      [
-       "<uuid:33>",
-       "<time>",
-       "agent_loop",
-       "loop_round",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "stop_reason": "stop"
-        }
-       },
-       2579,
-       2,
-       0,
-       "desktop:parity-switch",
-       "qwen2.5:7b-instruct",
-       null,
-       null,
-       null,
-       "<node>",
-       "unknown",
-       null
-      ],
-      [
-       "<uuid:34>",
-       "<time>",
-       "agent_loop",
-       "tool_advertisement",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "advertised": 11,
-         "deferred_active": true,
-         "profile": "full",
-         "registered_total": 51,
-         "source": "auto → enabled (local provider, tier light)"
-        }
-       },
-       null,
-       null,
-       null,
-       "desktop:parity-switch",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       null,
-       null,
-       null,
-       "<node>",
-       null,
-       null
-      ],
-      [
-       "<uuid:35>",
-       "<time>",
-       "agent_loop",
-       "loop_round",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "stop_reason": "stop"
-        }
-       },
-       5975,
-       2,
-       0,
-       "desktop:parity-switch",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       0,
-       null,
-       null,
-       "<node>",
-       "local",
+       "metered",
        null
       ]
      ]

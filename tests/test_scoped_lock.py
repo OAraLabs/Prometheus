@@ -36,13 +36,7 @@ class TestScopedLock:
 
         ok2, reason = acquire_daemon_lock()
         assert not ok2
-        from prometheus.gateway.status import _process_start_time
-        if _process_start_time(os.getpid()) is None:
-            # No /proc (macOS): the lock cannot confirm the holder is the same
-            # process, and says so. Still a refusal, which is what this tests.
-            assert "appears to be running" in reason.lower()
-        else:
-            assert "already running" in reason.lower() or "race" in reason.lower()
+        assert "already running" in reason.lower() or "race" in reason.lower()
 
         release_daemon_lock()
 

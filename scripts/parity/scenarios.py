@@ -13,6 +13,7 @@ committed — the same reason the deliberate-regression check exists.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -46,7 +47,8 @@ class Scenario:
     name: str
     covers: str
     steps: list[dict]
-    # Files the harness creates before boot: {"cwd"|"ws/<name>": {relpath: text}}
+    # Files the harness creates before boot: {"cwd"|"ws/<name>"|"home/<dir>": {relpath: text}}
+    # ("home/..." is the daemon's isolated HOME — e.g. the env file it loads at boot)
     files: dict[str, dict[str, str]] = field(default_factory=dict)
     git_repos: tuple[str, ...] = ()          # which of ``files`` get `git init` + one commit
     config: dict[str, Any] = field(default_factory=dict)  # overrides on the harness base
@@ -92,7 +94,16 @@ def _req_tools(ev: Evidence) -> list[str]:
 
 def _req_repair(ev: Evidence) -> list[str]:
     repaired = [r for r in ev.tool_rows() if (r.get("repairs") or 0) > 0]
-    return _need(bool(repaired), "no tool_calls row with repairs > 0 — the adapter repaired nothing")
+    # The final reply must quote the file it read. Parity does not grade
+    # answers, but a golden in which the agent misreports a file it has just
+    # read looks like a tool-result bug to anyone reading it later — so a
+    # misquoting sample fails at record time like any other unmet requirement.
+    chats = [s for s in ev.steps if s.get("op") == "chat"]
+    reply = (chats[-1].get("reply") or "") if chats else ""
+    return (_need(bool(repaired), "no tool_calls row with repairs > 0 — the adapter repaired nothing")
+            + _need("answer file says" in reply.lower(),
+                    "the final reply does not quote the file ('answer file says') — "
+                    "a misquoting sample"))
 
 
 def _req_gate(ev: Evidence) -> list[str]:
@@ -137,6 +148,18 @@ def _req_workspace(ev: Evidence) -> list[str]:
 def _req_switch(ev: Evidence) -> list[str]:
     return _need({"primary", "alt"} <= set(ev.upstream_labels),
                  f"turns were served by {sorted(set(ev.upstream_labels))}, not both models")
+
+
+def _req_hosted(ev: Evidence) -> list[str]:
+    hosted = [r for r, label in zip(ev.requests, ev.upstream_labels) if label == "hosted"]
+    named = [r for r in hosted
+             if "(provider: anthropic)" in json.dumps(r, ensure_ascii=False)]
+    chat = next((s for s in ev.steps if s["op"] == "chat"), {})
+    return (_need(len(hosted) == 1, f"expected the turn's one model call on the hosted "
+                                    f"upstream, got {len(hosted)}")
+            + _need(bool(named), "the hosted request's identity line does not name the "
+                                 "anthropic provider — the routing step did not rewrite it")
+            + _need(bool((chat.get("reply") or "").strip()), "no final reply"))
 
 
 def _req_memory(ev: Evidence) -> list[str]:
@@ -278,6 +301,27 @@ SCENARIOS: list[Scenario] = [
              "message": "Reply with exactly the word: three"},
         ],
         require=_req_switch,
+    ),
+    Scenario(
+        name="hosted_route",
+        # The routing step's other half. Every other trace routes to the primary
+        # or to a local backend; this turn is sent by a per-session override to a
+        # HOSTED provider, so the swap of provider, model and adapter (tier off,
+        # the cloud catalog) and the identity-line rewrite for a model that is
+        # not the local backend are all in the recorded request. The daemon holds
+        # a fake key from the env file it loads at boot; the recording proxy
+        # forwarded the operator's (see model_server.upstream_keys).
+        covers="a per-session /claude override routes a turn to a hosted provider "
+               "(anthropic): provider, model, adapter and identity-line swap",
+        files={"home/.config/prometheus": {"env": "ANTHROPIC_API_KEY=parity-dummy-key\n"}},
+        config={"slash_commands": {"claude": {"base_url": "{{HOSTED_URL}}/v1"}}},
+        steps=[
+            {"op": "model", "session": "desktop:parity-hosted", "key": "claude"},
+            {"op": "chat", "session": "desktop:parity-hosted",
+             "message": "Parity check. Reply with one short friendly sentence that "
+                        "contains the word 'harbor'. Do not use any tools."},
+        ],
+        require=_req_hosted,
     ),
     Scenario(
         name="memory_write",

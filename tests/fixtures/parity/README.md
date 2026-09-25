@@ -30,6 +30,20 @@ uv run python scripts/parity_harness.py record --scenario NAME \
     --upstream-primary <llama.cpp URL> --upstream-alt <ollama URL>
 ```
 
+`hosted_route` routes its turn to a hosted provider (a `/claude` override), so
+recording it also needs the hosted API and the operator's key:
+
+```bash
+env ANTHROPIC_API_KEY=<key> uv run python scripts/parity_harness.py record \
+    --scenario hosted_route --upstream-primary <llama.cpp URL> \
+    --upstream-alt <ollama URL> --upstream-hosted https://api.anthropic.com
+```
+
+The daemon under test never holds that key. It gets an obviously fake one from
+the env file the scenario writes into its isolated HOME, and the recording proxy
+puts the real key on the forwarded request in its place. Request headers are not
+recorded, so no trace can contain it. A replay needs no key and no network.
+
 Never edit `*.expected.json` by hand, and never add a normalization rule to make
 a diff go away. A rule may be added only for a field that is **shown** to differ
 between two runs of unchanged code. Record the evidence in the rule's `why`.

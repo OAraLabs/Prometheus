@@ -3,7 +3,8 @@
 One stdlib HTTP server, two modes:
 
 RECORD — every request is forwarded to a real upstream model server
-(llama.cpp / Ollama, both OpenAI-compatible) and the exchange is saved. The
+(llama.cpp / Ollama, both OpenAI-compatible; or, for a hosted route, a hosted
+API such as Anthropic's) and the exchange is saved. The
 UPSTREAM's response is sanitized before the daemon sees it (see
 ``sanitize_upstream``), so a private identifier the model server publishes —
 the GGUF's path under someone's home, say — never enters the daemon, and so
@@ -30,6 +31,12 @@ benchmark subtracts model time using exactly these.
 ``GET`` probes (``/props``, ``/v1/models``, ``/api/tags`` …) are answered from
 the most recent recording of that path. They are not diffed: how often the
 daemon probes a backend is a timer, not a turn.
+
+A HOSTED upstream needs a real API key, and the daemon under test never holds
+one: it is given an obviously fake key, and the recording proxy puts the
+operator's key on the forwarded request in its place (``upstream_keys``). The
+key lives in this process's memory for one recording and is written nowhere —
+an ``Exchange`` carries no request headers, so no trace can contain it.
 """
 
 from __future__ import annotations
@@ -46,7 +53,16 @@ from typing import Any
 
 from parity.normalize import bind_response, fingerprint, normalize_request
 
-COMPLETIONS_PATHS = ("/v1/chat/completions",)
+# Model calls: matched, consumed, timed and DIFFED. Everything else is a probe.
+# "/v1/messages" is Anthropic's Messages API — a turn routed to the hosted
+# provider (a /claude override) is a model call like any other, and filing it as
+# a probe would take it out of the diff entirely.
+COMPLETIONS_PATHS = ("/v1/chat/completions", "/v1/messages")
+
+# Request headers the proxy passes upstream besides Content-Type: the provider
+# protocol version the hosted API requires. Local providers send none of them,
+# so a local recording forwards exactly what it did before.
+_FORWARDED_HEADERS = ("anthropic-version", "anthropic-beta")
 
 # Upstream-published values that are private to the recording machine. The
 # daemon reads some of them (the served model id is echoed into telemetry and
@@ -118,6 +134,10 @@ class Served:
 class ServerState:
     mode: str                                   # "record" | "replay"
     upstreams: dict[str, str] = field(default_factory=dict)  # label -> base URL
+    # label -> the operator's API key for that upstream (record mode, hosted
+    # upstreams only). Put on the forwarded request in place of the daemon's
+    # fake key; never stored in an Exchange, never written anywhere.
+    upstream_keys: dict[str, str] = field(default_factory=dict, repr=False)
     route: dict[int, str] = field(default_factory=dict)      # listen port -> upstream label
     recorded: list[Exchange] = field(default_factory=list)   # record: grows; replay: fixed
     consumed: set[int] = field(default_factory=set)
@@ -184,13 +204,35 @@ def _make_handler(state: ServerState):
             return self.rfile.read(length) if length else b""
 
         # -- RECORD ---------------------------------------------------------
+        def _upstream_headers(self) -> dict[str, str]:
+            headers = {"Content-Type": self.headers.get("Content-Type", "application/json")}
+            for name in _FORWARDED_HEADERS:
+                if self.headers.get(name):
+                    headers[name] = self.headers[name]
+            # The daemon's key is fake by construction; the operator's goes on
+            # the forwarded request instead, in the scheme the daemon used.
+            # Without a key for this upstream, no credential is forwarded at all.
+            key = state.upstream_keys.get(self.upstream_label)
+            if key:
+                if self.headers.get("x-api-key"):
+                    headers["x-api-key"] = key
+                if self.headers.get("Authorization"):
+                    headers["Authorization"] = f"Bearer {key}"
+            return headers
+
         def _forward(self, method: str, raw: bytes) -> None:
+            if self.upstream_label not in state.upstreams:
+                self._send(502, "application/json", json.dumps({"error": {
+                    "message": f"parity record: no upstream for {self.upstream_label!r} "
+                               f"(this scenario needs --upstream-{self.upstream_label})",
+                    "type": "parity_no_upstream"}}).encode())
+                return
             base = urllib.parse.urlsplit(state.upstreams[self.upstream_label])
             conn_cls = (http.client.HTTPSConnection if base.scheme == "https"
                         else http.client.HTTPConnection)
             conn = conn_cls(base.hostname, base.port, timeout=900)
             try:
-                headers = {"Content-Type": self.headers.get("Content-Type", "application/json")}
+                headers = self._upstream_headers()
                 conn.request(method, self.path, body=raw or None, headers=headers)
                 resp = conn.getresponse()
                 body = resp.read().decode("utf-8", errors="replace")
