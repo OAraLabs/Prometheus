@@ -97,11 +97,11 @@
      "role": "user"
     },
     {
-     "content": "The file `42` contains the single line: `the answer is: forty-two`.",
+     "content": "The file named `42` contains the following content:\n```\nthe answer file says: forty-two\n```",
      "content_json": {
       "$json": [
        {
-        "text": "The file `42` contains the single line: `the answer is: forty-two`.",
+        "text": "The file named `42` contains the following content:\n```\nthe answer file says: forty-two\n```",
         "type": "text"
        }
       ]
@@ -112,7 +112,7 @@
     }
    ],
    "op": "chat",
-   "reply": "The file `42` contains the single line: `the answer is: forty-two`.",
+   "reply": "The file named `42` contains the following content:\n```\nthe answer file says: forty-two\n```",
    "session": "desktop:parity-repair"
   }
  ],
@@ -336,16 +336,16 @@
        "desktop:parity-repair",
        3,
        "assistant",
-       "The file `42` contains the single line: `the answer is: forty-two`.",
+       "The file named `42` contains the following content:\n```\nthe answer file says: forty-two\n```",
        {
         "$json": [
          {
-          "text": "The file `42` contains the single line: `the answer is: forty-two`.",
+          "text": "The file named `42` contains the following content:\n```\nthe answer file says: forty-two\n```",
           "type": "text"
          }
         ]
        },
-       16,
+       22,
        "<time>",
        0,
        "user",
@@ -375,7 +375,7 @@
        ""
       ],
       [
-       "The file `42` contains the single line: `the answer is: forty-two`."
+       "The file named `42` contains the following content:\n```\nthe answer file says: forty-two\n```"
       ]
      ]
     },
@@ -400,7 +400,7 @@
       [
        1,
        {
-        "$bytes_sha256": "75906df1d8a5c529",
+        "$bytes_sha256": "0f2e64419cf137a2",
         "len": 2
        }
       ],
@@ -428,8 +428,8 @@
       [
        412316860417,
        {
-        "$bytes_sha256": "393d2c7e9b1dcd99",
-        "len": 107
+        "$bytes_sha256": "40b3ec0eb61117ee",
+        "len": 121
        }
       ]
      ]
@@ -464,7 +464,7 @@
       [
        4,
        {
-        "$bytes_sha256": "ef6cbd2161eaea79",
+        "$bytes_sha256": "4d7b3ef7300acf70",
         "len": 1
        }
       ]
@@ -1709,7 +1709,7 @@
         }
        },
        2680,
-       20,
+       24,
        1,
        "desktop:parity-repair",
        "qwen2.5:7b-instruct",
