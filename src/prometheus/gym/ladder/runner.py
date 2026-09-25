@@ -39,6 +39,13 @@ from prometheus.gym.ladder.record import (
     record_summary,
 )
 from prometheus.gym.ladder.suite import LadderSuite, LadderTask
+from prometheus.gym.ladder.tiers import (
+    ADAPTER_TIERS,
+    ProviderRetryCounter,
+    counts_for_row,
+    forced_adapter_factory,
+    instrument_adapter,
+)
 from prometheus.gym.ladder.verdict import ERROR, FAIL, FORMAT_MISS, PASS, UNSCORED, Verdict, decide
 from prometheus.gym.runner import (
     _probe_kv_cache,
@@ -142,7 +149,9 @@ LADDER_RECORD_VERSION = 1
 
 # llama.cpp/HF quant tokens as they appear in GGUF file names.
 _QUANT_RE = re.compile(
-    r"(?<![A-Za-z0-9])((?:UD-)?(?:I?Q\d(?:_[A-Z0-9]+)*|BF16|F16|F32|MXFP4))(?=[.\-_]|$)",
+    # IQ*/Q* k-quants, upstream ternary TQ1_0/TQ2_0, PrismML's ternary PQ2_0 /
+    # PTQ1_0 (their llama.cpp fork), float and MXFP4 files.
+    r"(?<![A-Za-z0-9])((?:UD-)?(?:(?:I|T|P|PT)?Q\d(?:_[A-Z0-9]+)*|BF16|F16|F32|MXFP4))(?=[.\-_]|$)",
     re.IGNORECASE,
 )
 
@@ -402,16 +411,21 @@ async def run_task(
         live_web=task.web == "live",
     )
     adapter = pipeline["adapter_factory"]()
+    # Observation only: counts text-recovered calls, retries and aborts; every
+    # adapter method still returns exactly what it would have.
+    adapter_counts = instrument_adapter(adapter)
+    tier_start = getattr(adapter, "tier", None)
     if (
         pipeline["model_cfg"].get("grammar_enforcement", True)
         and hasattr(provider, "set_grammar")
         and adapter is not None
     ):
         grammar = adapter.generate_grammar(registry)
-        if grammar:
-            provider.set_grammar(grammar)
-            if hasattr(provider, "set_grammar_source"):
-                provider.set_grammar_source(adapter.enforcer, registry.to_api_schema())
+        # Set even when None (tier off builds none): a provider object reused
+        # across runs must not carry a grammar the current adapter did not make.
+        provider.set_grammar(grammar)
+        if grammar and hasattr(provider, "set_grammar_source"):
+            provider.set_grammar_source(adapter.enforcer, registry.to_api_schema())
 
     seed = expand_deep(task.seed, sandbox.workspace)
     messages = build_seed_messages(seed) if seed else []
@@ -443,6 +457,10 @@ async def run_task(
         # telemetry rows carry.
         session_id="system",
         tool_call_observer=_observe,
+        # The loop treats tier "off" as a cloud provider and skips
+        # microcompaction. A forced-off LOCAL run must not inherit that — it
+        # is a loop behaviour, not something the adapter layer adds.
+        microcompact_on_cloud=bool(pipeline.get("tier_forced")),
     )
 
     error, halted, stopped_by = "", "", "done"
@@ -450,12 +468,14 @@ async def run_task(
     set_telemetry_handle(tel)
     wall_start = time.time()
     t0 = time.monotonic()
+    retry_counter = ProviderRetryCounter()
     try:
         async def _drive() -> None:
             async for _ in run_loop(context, messages, session_id=session_id):
                 pass
 
-        await asyncio.wait_for(_drive(), timeout=task.timeout_s)
+        with retry_counter:
+            await asyncio.wait_for(_drive(), timeout=task.timeout_s)
     except asyncio.TimeoutError:
         stopped_by = "timeout"
         halted = f"time budget exceeded ({task.timeout_s:.0f}s)"
@@ -556,6 +576,12 @@ async def run_task(
         "tool_uses_emitted": tool_uses,
         "tools_called": [e.exec_name for e in transcript.tool_events],
         "trace": trace_of(transcript),
+        "adapter_tier_start": tier_start,
+        # The circuit breaker can bump the tier mid-run (off → light → full) on
+        # a COPY of the adapter; that run then belongs to neither tier.
+        "adapter_tier_end": getattr(context.adapter, "tier", None),
+        "adapter_counts": counts_for_row(adapter_counts),
+        "provider_http_retries": retry_counter.count,
         "final_text_head": final[:300],
         # Whole, so a verdict can be audited against what the reader read (the
         # END of the reply). Local DB only; reports never render it.
@@ -606,10 +632,28 @@ async def run_ladder(
     expect_model_match: str | None = None,
     expect_adapter_tier: str | None = None,
     strict_quant: bool = False,
+    force_adapter_tier: str | None = None,
     progress: bool = True,
 ) -> list[dict[str, Any]]:
+    """Run ``tasks`` against one contestant and record every run.
+
+    ``force_adapter_tier`` makes this a tier-sweep arm: the rung's checks still
+    run (the endpoint must serve the rung's model and quantization, and the
+    daemon's own tier pick must equal the rung's), then every run uses the
+    daemon's adapter for the FORCED tier. Its rows are filed under no rung —
+    ``rung`` is None and ``tier_sweep`` says what was forced and what the
+    daemon would have picked — so a sweep never mixes into the rung table.
+    """
     if not tasks:
         raise LadderPreflightError("no tasks selected")
+    if force_adapter_tier is not None:
+        if force_adapter_tier not in ADAPTER_TIERS:
+            raise LadderPreflightError(
+                f"unknown adapter tier {force_adapter_tier!r}; expected one of {ADAPTER_TIERS}")
+        if not rung:
+            raise LadderPreflightError(
+                "a tier sweep is a sweep OF a rung: pass the rung, so the endpoint is proven "
+                "to serve that rung's model before any tier is forced")
     from prometheus.config.paths import config_dir_path
     from prometheus.gym.ladder.fixtures import SandboxError
 
@@ -685,6 +729,12 @@ async def run_ladder(
                 f"selection gives {probe_adapter.tier!r} for {model_name!r} — "
                 f"config/model_registry.yaml and the rung disagree"
             )
+        daemon_tier = probe_adapter.tier
+        if force_adapter_tier is not None:
+            pipeline["adapter_factory"] = forced_adapter_factory(
+                force_adapter_tier, pipeline["model_cfg"], config.get("adapter"))
+            pipeline["tier_forced"] = True
+            probe_adapter = pipeline["adapter_factory"]()
         kv = await _probe_kv_cache(pipeline["provider"])
         bash_floor = bash_write_floor()
         thinking = await _probe_thinking(pipeline["provider"])
@@ -713,7 +763,10 @@ async def run_ladder(
             "suite_sha": suite.sha256,
             "harness_commit": harness_commit(),
             "run_label": run_label,
-            "rung": rung,
+            "rung": None if force_adapter_tier else rung,
+            "tier_sweep": ({"of": rung, "forced_tier": force_adapter_tier,
+                            "daemon_tier": daemon_tier} if force_adapter_tier else None),
+            "adapter_tier_forced": force_adapter_tier is not None,
             "provider": contestant.provider,
             "model": model_name,
             "served_model": identity["served_model"],
@@ -736,7 +789,9 @@ async def run_ladder(
         if progress:
             print(f"  model {model_name} ({contestant.provider}), quant {quant or 'unreported'}"
                   f" [{static['quantization_source']}], adapter {static['adapter_tier']}/"
-                  f"{static['adapter_strictness']}, thinking suppression "
+                  f"{static['adapter_strictness']}"
+                  + (f" (FORCED; the daemon picks {daemon_tier})" if force_adapter_tier else "")
+                  + ", thinking suppression "
                   f"{thinking['status']}, judge {static['judge_model'] or 'none'}")
             print(f"  {len(tasks)} task(s) × {runs_per_task} → {db}")
 

@@ -376,7 +376,9 @@ def render_report(rows: list[dict[str, Any]], *, title: str, class_order: list[s
         f"- model: `{first['model']}` via `{first['provider']}`"
         + (f", served as `{', '.join(first['served_models'])}`" if first.get("served_models") else ""),
         f"- quantization: `{first.get('quantization')}` ({first.get('quantization_source')})",
-        f"- adapter: tier `{first.get('adapter_tier')}`, base strictness `{first.get('adapter_strictness')}`",
+        f"- adapter: tier `{first.get('adapter_tier')}`, base strictness `{first.get('adapter_strictness')}`"
+        + (f" — **FORCED** for a tier sweep of rung `{first['tier_sweep']['of']}` (the daemon picks "
+           f"`{first['tier_sweep']['daemon_tier']}`)" if first.get("tier_sweep") else ""),
         f"- KV cache: k={first.get('kv_cache', {}).get('k') or 'unknown'} "
         f"v={first.get('kv_cache', {}).get('v') or 'unknown'} "
         f"({first.get('kv_cache', {}).get('source')})",
@@ -453,3 +455,172 @@ def render_report(rows: list[dict[str, Any]], *, title: str, class_order: list[s
         per_field.append(f"| `{f}` | {filled}/{len(rows)} |")
     lines += ["| field | rows populated |", "|---|---:|", *per_field, ""]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tier sweep: the same model, server and tasks at adapter tier off / light / full
+# ---------------------------------------------------------------------------
+
+TIER_ORDER = ("off", "light", "full")
+
+
+def forced_tier(row: dict[str, Any]) -> str | None:
+    sweep = row.get("tier_sweep") or {}
+    return sweep.get("forced_tier")
+
+
+def tier_bumped(row: dict[str, Any]) -> bool:
+    """The circuit breaker moved the run to another tier mid-run. Such a run is
+    a hybrid (the bumped copy keeps the old validator and retry budget) and
+    belongs to neither tier."""
+    seen = (row.get("adapter_counts") or {}).get("tiers_seen") or []
+    start, end = row.get("adapter_tier_start"), row.get("adapter_tier_end")
+    return len(seen) > 1 or (start is not None and end is not None and start != end)
+
+
+def _per_run(rs: list[dict[str, Any]], key: str) -> str:
+    vals = [(r.get("adapter_counts") or {}).get(key) for r in rs]
+    return _fmt(_mean(vals), ".2f")
+
+
+def _tier_row(name: str, rs: list[dict[str, Any]]) -> str:
+    n = len(rs)
+    passed = sum(1 for r in rs if r["verdict"] == "pass")
+    lo, hi = wilson(passed, n)
+    p, d = accuracy(rs)
+    calls = sum(r.get("tool_calls") or 0 for r in rs)
+    ok = sum(r.get("tool_calls_ok") or 0 for r in rs)
+    excl = sum(r.get("tool_calls_excluded") or 0 for r in rs)
+    breaker = sum(1 for r in rs if r.get("stopped_by") == "circuit_breaker")
+    return (
+        f"| {name} | {n} | " + (f"{passed}/{n} ({lo:.2f}–{hi:.2f})" if n else "—")
+        + f" | {_ratio(p, d)} | {sum(1 for r in rs if r['verdict'] == 'format_miss')} "
+        f"| {_ratio(ok, calls - excl)} | {_fmt(_mean([r.get('tool_calls') for r in rs]), '.2f')} "
+        f"| {_fmt(_mean([r.get('repairs') for r in rs]), '.2f')} "
+        f"| {_per_run(rs, 'adapter_retries')} / {_per_run(rs, 'adapter_aborts')} "
+        f"| {_per_run(rs, 'calls_from_text')} | {_per_run(rs, 'text_calls_missed')} "
+        f"| {_per_run(rs, 'xml_markup_turns')} | {breaker} "
+        f"| {sum(r.get('tool_calls_denied') or 0 for r in rs)} / {sum(r.get('tool_calls_blocked') or 0 for r in rs)} "
+        f"| {_fmt(_mean([r.get('rounds') for r in rs]), '.1f')} "
+        f"| {_fmt(_mean([r.get('input_tokens') for r in rs]))} / {_fmt(_mean([r.get('output_tokens') for r in rs]))} "
+        f"| {_fmt(_mean([r['duration_ms'] / 1000 for r in rs]), '.1f')} |"
+    )
+
+
+def _task_pass_rates(rs: list[dict[str, Any]]) -> dict[str, float]:
+    by_task: dict[str, list[int]] = defaultdict(list)
+    for r in rs:
+        by_task[r["task_id"]].append(1 if r["verdict"] == "pass" else 0)
+    return {t: sum(v) / len(v) for t, v in by_task.items()}
+
+
+def paired_difference(
+    a: dict[str, float], b: dict[str, float], *, resamples: int = 2000, seed: int = 0,
+) -> tuple[int, float, float, float, int]:
+    """(tasks, mean of b − a over tasks both arms ran, 95% bootstrap interval
+    over tasks, tasks whose majority verdict flips). Deterministic (seeded):
+    re-rendering a report gives the same interval."""
+    import random
+
+    tasks = sorted(set(a) & set(b))
+    diffs = [b[t] - a[t] for t in tasks]
+    if not diffs:
+        return 0, 0.0, 0.0, 0.0, 0
+    mean = sum(diffs) / len(diffs)
+    rng = random.Random(seed)
+    boots = sorted(
+        sum(diffs[rng.randrange(len(diffs))] for _ in diffs) / len(diffs)
+        for _ in range(resamples)
+    )
+    lo, hi = boots[int(0.025 * resamples)], boots[int(0.975 * resamples) - 1]
+    flips = sum(1 for t in tasks if (a[t] > 0.5) != (b[t] > 0.5))
+    return len(tasks), mean, lo, hi, flips
+
+
+def render_tier_sweep(rows: list[dict[str, Any]], *, class_order: list[str]) -> str:
+    """One model at each forced adapter tier: what the adapter layer adds.
+
+    Main figures leave out runs the circuit breaker bumped to another tier
+    (they are hybrids); those are counted on their own. Task success is
+    pass ÷ ALL runs — a tier's effect often shows up as format misses or
+    halts, which accuracy (pass ÷ pass + fail) would hide."""
+    swept = [r for r in rows if forced_tier(r)]
+    if not swept:
+        return "# Tier sweep\n\nNo forced-tier rows.\n"
+    first = swept[0]
+    by_tier: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    bumped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for r in swept:
+        (bumped if tier_bumped(r) else by_tier)[forced_tier(r) or "?"].append(r)
+    tiers = [t for t in TIER_ORDER if t in by_tier or t in bumped]
+    labels = sorted({r["run_label"] for r in swept})
+    head = ("| tier | runs | task success (95% CI) | accuracy | format miss | tool-call success "
+            "| calls / run | repairs / run | adapter retries / aborts per run | calls from text / run "
+            "| text calls missed / run | XML-markup turns / run | breaker halts | denied / blocked "
+            "| rounds | tokens in / out | time s |")
+    sep = "|---|---:|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---|---:|---|---:|"
+    lines = [
+        f"# Tier sweep — `{first['tier_sweep']['of']}`",
+        "",
+        f"- model: `{first['model']}` via `{first['provider']}`, quantization `{first.get('quantization')}`;"
+        f" the daemon picks tier `{first['tier_sweep']['daemon_tier']}` for it",
+        f"- suite `{first['suite']}` (sha `{first['suite_sha'][:12]}`), harness `{first.get('harness_commit')}`",
+        f"- run labels: {', '.join(f'`{x}`' for x in labels)}",
+        f"- thinking suppression: `{first.get('thinking_suppression')}`",
+        "",
+        "Each tier is the daemon's own adapter for that tier (only the tier decision is forced).",
+        "Tier `off` is never what the daemon uses for a local model — it measures what the server's",
+        "own parser does with no adapter behind it. Runs the circuit breaker bumped to another",
+        "tier are hybrids and are left out of the main figures (counted below).",
+        "",
+        "## By tier",
+        "",
+        head, sep,
+    ]
+    for t in tiers:
+        lines.append(_tier_row(t, by_tier.get(t, [])))
+    for cid in [c for c in class_order if any(r["task_class"] == c for r in swept)]:
+        lines += ["", f"### {cid}", "", head, sep]
+        for t in tiers:
+            lines.append(_tier_row(t, [r for r in by_tier.get(t, []) if r["task_class"] == cid]))
+    lines += [
+        "",
+        "## Paired by task (task success; bumped runs left out)",
+        "",
+        "Every tier ran the same tasks, so each task is compared with itself: the mean per-task",
+        "difference in pass rate, a 95% bootstrap interval over tasks, and how many tasks flip.",
+        "",
+        "| comparison | tasks | mean difference | 95% interval | tasks flipped |",
+        "|---|---:|---:|---|---:|",
+    ]
+    rates = {t: _task_pass_rates(by_tier.get(t, [])) for t in tiers}
+    for a, b in (("off", "light"), ("light", "full"), ("off", "full")):
+        if a in rates and b in rates:
+            n, mean, lo, hi, flips = paired_difference(rates[a], rates[b])
+            lines.append(f"| {b} − {a} | {n} | {mean:+.3f} | {lo:+.3f} – {hi:+.3f} | {flips} |")
+    lines += [
+        "",
+        "## Left out and infrastructure",
+        "",
+        "| tier | bumped runs (left out) | stopped by (main runs) | provider HTTP retries |",
+        "|---|---:|---|---:|",
+    ]
+    for t in tiers:
+        main = by_tier.get(t, [])
+        stops: dict[str, int] = defaultdict(int)
+        for r in main:
+            stops[r.get("stopped_by") or "?"] += 1
+        lines.append(
+            f"| {t} | {len(bumped.get(t, []))} | "
+            + ", ".join(f"{k} {v}" for k, v in sorted(stops.items()))
+            + f" | {sum(r.get('provider_http_retries') or 0 for r in main + bumped.get(t, []))} |"
+        )
+    lines += [
+        "",
+        "Counters: *adapter retries / aborts* are the adapter's own decisions after a rejected call;",
+        "*calls from text* are tool calls the adapter recovered from the reply's text; *text calls",
+        "missed* are calls tier off left in the text that light/full would have recovered;",
+        "*XML-markup turns* are replies carrying `<tool_call>` / `<function=` markup. Provider HTTP",
+        "retries are the transport's, not the adapter's.",
+    ]
+    return "\n".join(lines) + "\n"

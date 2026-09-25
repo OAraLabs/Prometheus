@@ -1386,3 +1386,225 @@ class TestCLIRefusals:
         r = _cli("--report-only", "--run-label", "nope", "--telemetry-db", str(tmp_path / "t.db"),
                  "--report", str(out))
         assert r.returncode == 1 and out.read_text() == "the real report", r.stdout
+
+
+# ---------------------------------------------------------------------------
+# Tier sweep — the daemon's adapter at a forced tier, counted, never filed
+# under a rung
+# ---------------------------------------------------------------------------
+
+QWEN_27B = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+BONSAI = "Ternary-Bonsai-2-27B-PQ2_0.gguf"
+
+
+def _adapter_fp(a):
+    return (a.tier, type(a.formatter).__name__, a._base_strictness.value, a.retry.max_retries)
+
+
+@pytest.mark.parametrize("model", [QWEN_27B, BONSAI])
+def test_a_forced_tier_is_the_daemons_own_adapter_for_that_tier(model):
+    import prometheus.__main__ as daemon
+    from prometheus.gym.ladder.tiers import forced_adapter_factory
+
+    cfg = {"provider": "llama_cpp", "model": model}
+    real = daemon._get_adapter_tier
+    daemon_pick = daemon.create_adapter(cfg, {})
+    # Forcing the daemon's own pick changes nothing.
+    assert _adapter_fp(forced_adapter_factory(daemon_pick.tier, cfg, {})()) == _adapter_fp(daemon_pick)
+    # 'off' for a local model is exactly what the daemon builds for a cloud provider.
+    cloud = daemon.create_adapter({"provider": "openai", "model": model}, {})
+    assert _adapter_fp(forced_adapter_factory("off", cfg, {})()) == _adapter_fp(cloud)
+    assert {t: _adapter_fp(forced_adapter_factory(t, cfg, {})()) for t in ("light", "full")} == {
+        "light": ("light", "QwenFormatter", "NONE", 1),
+        "full": ("full", "QwenFormatter", "MEDIUM", 3),
+    }
+    assert daemon._get_adapter_tier is real, "the daemon's tier decision was not restored"
+    with pytest.raises(ValueError):
+        forced_adapter_factory("medium", cfg, {})
+
+
+def test_the_counters_observe_and_never_change_what_the_adapter_returns(tmp_path):
+    import copy
+
+    from prometheus.adapter.retry import RetryAction
+    from prometheus.gym.ladder.tiers import counts_for_row, forced_adapter_factory, instrument_adapter
+
+    registry = fx.build_ladder_registry(tmp_path)
+    cfg = {"provider": "llama_cpp", "model": BONSAI}
+    text = 'Reading it.\n{"name": "read_file", "arguments": {"path": "a.txt"}}'
+
+    def calls(blocks):
+        return [(b.name, b.input) for b in blocks]
+
+    plain, counted = (forced_adapter_factory("light", cfg, {})() for _ in range(2))
+    counts = instrument_adapter(counted)
+    assert calls(counted.extract_tool_calls(text, registry)) == calls(plain.extract_tool_calls(text, registry)) != []
+    assert counts["calls_from_text"] == 1
+    counted.extract_tool_calls("<tool_call>\n<function=read_file>\n</function>\n</tool_call>", registry)
+    assert counts["xml_markup_turns"] == 1
+    # light allows one retry, then aborts — each decision counted, unchanged
+    assert counted.handle_retry("read_file", "bad", registry)[0] == RetryAction.RETRY
+    assert counted.handle_retry("read_file", "bad", registry)[0] == RetryAction.ABORT
+    assert (counts["adapter_retries"], counts["adapter_aborts"]) == (1, 1)
+    # A breaker tier bump works on a copy: same counter dict, new tier seen.
+    bumped = copy.copy(counted)
+    bumped.tier = "full"
+    bumped.extract_tool_calls("no call here", registry)
+    assert counts_for_row(counts)["tiers_seen"] == ["full", "light"]
+
+    off = forced_adapter_factory("off", cfg, {})()
+    off_counts = instrument_adapter(off)
+    assert off.extract_tool_calls(text, registry) == []  # tier off never looks
+    assert off_counts["text_calls_missed"] == 1           # ...but light/full would have recovered it
+
+
+class _TextToolCall(ModelProvider):
+    """Round 1: a tool call written as TEXT. Round 2: the answer. Records grammars."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.grammars: list = ["stale grammar from an earlier run"]
+
+    def set_grammar(self, grammar):  # noqa: ANN001
+        self.grammars.append(grammar)
+
+    async def stream_message(self, request):  # noqa: ANN001
+        self.calls += 1
+        ws = os.environ["PROMETHEUS_WORKSPACE_DIR"].rsplit("/home/", 1)[0] + "/ws"
+        text = (f'{{"name": "read_file", "arguments": {{"path": "{ws}/n.txt"}}}}'
+                if self.calls == 1 else "The file says 41.\nANSWER: 41")
+        yield ApiMessageCompleteEvent(
+            message=ConversationMessage(role="assistant", content=[TextBlock(text=text)]),
+            usage=UsageSnapshot(input_tokens=30, output_tokens=12), stop_reason="stop")
+
+
+TEXT_CALL_TASK = """  - id: tc
+    prompt: "Read {workspace}/n.txt. End with `ANSWER: <n>`."
+    setup_files: {n.txt: "41\\n"}
+    score: {expect_answer: '41', answer_shape: '\\d+'}
+    reference: {answer: "ANSWER: 41"}
+"""
+
+
+@pytest.mark.parametrize("tier, verdict, from_text, missed, grammar_is_none", [
+    ("off", "format_miss", 0, 1, True),  # the text call is left as the reply: no tool ran
+    ("light", "pass", 1, 0, False),  # recovered from the text and run
+])
+def test_a_forced_tier_run_counts_what_the_adapter_did(tmp_path, tier, verdict, from_text, missed,
+                                                        grammar_is_none):
+    from prometheus.__main__ import create_security_gate
+    from prometheus.gym.ladder.tiers import forced_adapter_factory
+
+    suite, task = _one_task(tmp_path, TEXT_CALL_TASK, "max_rounds: 4, max_tool_calls: 3")
+    sandbox = fx.Sandbox(tmp_path / "sb")
+    prev = sandbox.activate()
+    provider = _TextToolCall()
+    try:
+        sandbox.reset()
+        model_cfg = {"provider": "llama_cpp", "model": BONSAI, "grammar_enforcement": True}
+        pipeline = {"provider": provider,
+                    "adapter_factory": forced_adapter_factory(tier, model_cfg, {}),
+                    "security_gate": create_security_gate({"workspace_root": str(sandbox.workspace)}),
+                    "model_name": BONSAI, "model_cfg": model_cfg, "tier_forced": True}
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        row = asyncio.run(lr.run_task(task, suite, pipeline, sandbox=sandbox, tel=tel, judge=None,
+                                      run_label="t", run_idx=0, static={"model": BONSAI, "run_label": "t"}))
+    finally:
+        fx.Sandbox.restore(prev)
+    assert row["verdict"] == verdict, row["fail_reasons"]
+    assert (row["adapter_tier_start"], row["adapter_tier_end"]) == (tier, tier)
+    counts = row["adapter_counts"]
+    assert (counts["calls_from_text"], counts["text_calls_missed"]) == (from_text, missed)
+    assert row["provider_http_retries"] == 0
+    # The grammar is always set for the run — None at off clears a stale one.
+    assert (provider.grammars[-1] is None) is grammar_is_none
+
+
+def _sweep_ladder(tmp_path, monkeypatch, *, force, expect_tier="full", rung="r27b-pq2"):
+    from prometheus.__main__ import create_adapter, create_security_gate
+
+    suite, task = _one_task(tmp_path, TEXT_CALL_TASK, "max_rounds: 4, max_tool_calls: 3")
+    monkeypatch.setattr(lr, "preflight_endpoint", lambda config: None)
+
+    async def identity(provider, base_url, model):
+        return {"served_model": BONSAI, "quantization": "PQ2_0",
+                "quantization_source": "gguf-filename", "parameter_size": None}
+
+    async def kv(provider):
+        return {"k": None, "v": None, "source": "unreported"}
+
+    async def thinking(provider):
+        return {"status": "supported", "detail": "test"}
+
+    def build(config):
+        model_cfg = dict(config["model"], grammar_enforcement=True)
+        return {"provider": _TextToolCall(), "adapter_factory": lambda: create_adapter(model_cfg, {}),
+                "security_gate": create_security_gate({"workspace_root": config["security"]["workspace_root"]}
+                                                      if "security" in config else {}),
+                "model_name": model_cfg["model"], "model_cfg": model_cfg}
+
+    monkeypatch.setattr(lr, "probe_identity", identity)
+    monkeypatch.setattr(lr, "_probe_kv_cache", kv)
+    monkeypatch.setattr(lr, "_probe_thinking", thinking)
+    monkeypatch.setattr(lr, "build_pipeline", build)
+    return asyncio.run(lr.run_ladder(
+        suite, [task], lr.Contestant(provider="llama_cpp", base_url="http://x"),
+        run_label="sweep-light", judge_pin=None, telemetry_db=tmp_path / "t.db",
+        workdir=tmp_path / "sb", rung=rung, expect_model_match="ternary-bonsai-2-27b",
+        expect_adapter_tier=expect_tier, strict_quant=True, force_adapter_tier=force, progress=False))
+
+
+class TestTierSweep:
+
+    def test_sweep_rows_are_filed_under_no_rung(self, tmp_path, monkeypatch):
+        (row,) = _sweep_ladder(tmp_path, monkeypatch, force="light")
+        assert row["rung"] is None
+        assert row["tier_sweep"] == {"of": "r27b-pq2", "forced_tier": "light", "daemon_tier": "full"}
+        assert (row["adapter_tier"], row["adapter_tier_forced"], row["adapter_tier_start"]) == (
+            "light", True, "light")
+
+    def test_a_sweep_still_runs_the_rungs_checks(self, tmp_path, monkeypatch):
+        with pytest.raises(lr.LadderPreflightError, match="sweep OF a rung"):
+            _sweep_ladder(tmp_path, monkeypatch, force="light", rung=None)
+        # The rung says light, the daemon picks full: refused even though a tier is forced.
+        with pytest.raises(lr.LadderPreflightError, match="expects adapter tier"):
+            _sweep_ladder(tmp_path, monkeypatch, force="full", expect_tier="light")
+
+    def test_sweep_labels_never_enter_the_rung_table_and_get_their_own_report(self, tmp_path, monkeypatch):
+        _sweep_ladder(tmp_path, monkeypatch, force="light")
+        db = str(tmp_path / "t.db")
+        r = _cli("--compare", "sweep-light", "--telemetry-db", db, "--report", str(tmp_path / "c.md"))
+        assert r.returncode == 1 and "tier-sweep runs" in r.stdout, r.stdout
+        out = tmp_path / "sweep.md"
+        r = _cli("--tier-report", "sweep-light", "--telemetry-db", db, "--report", str(out))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "# Tier sweep — `r27b-pq2`" in out.read_text()
+        r = _cli("--force-adapter-tier", "light", "--base-url", "http://127.0.0.1:9", "--no-judge",
+                 "--telemetry-db", db)
+        assert r.returncode == 2 and "needs --rung" in r.stdout
+
+
+def _sweep_row(task, tier, verdict, *, bumped=False, retries=0):
+    return {"run_label": f"s-{tier}", "task_id": task, "task_class": "single_tool", "verdict": verdict,
+            "tier_sweep": {"of": "r27b-pq2", "forced_tier": tier, "daemon_tier": "full"},
+            "adapter_tier_start": tier, "adapter_tier_end": "full" if bumped else tier,
+            "adapter_counts": {"tiers_seen": [tier, "full"] if bumped else [tier], "adapter_retries": retries,
+                               "adapter_aborts": 0, "calls_from_text": 0, "text_calls_missed": 0,
+                               "xml_markup_turns": 0},
+            "model": BONSAI, "provider": "llama_cpp", "quantization": "PQ2_0", "suite": "ladder-v1",
+            "suite_sha": "0" * 64, "tool_calls": 1, "tool_calls_ok": 1, "repairs": 0, "rounds": 2,
+            "duration_ms": 1000.0, "stopped_by": "done"}
+
+
+def test_the_tier_report_leaves_bumped_runs_out_and_pairs_tasks():
+    rows = [_sweep_row("a", "off", "fail"), _sweep_row("b", "off", "fail"),
+            _sweep_row("a", "light", "pass", retries=1), _sweep_row("b", "light", "pass"),
+            _sweep_row("c", "light", "fail", bumped=True)]
+    report = rec.render_tier_sweep(rows, class_order=["single_tool"])
+    lines = report.splitlines()
+    light = next(ln for ln in lines if ln.startswith("| light |"))
+    assert light.startswith("| light | 2 | 2/2 ")  # the bumped run is not in the main figures
+    assert "| light − off | 2 | +1.000 |" in report
+    left_out = next(ln for ln in lines if ln.startswith("| light | 1 |"))  # counted apart
+    assert "done 2" in left_out
+    assert rec.paired_difference({"a": 0.0, "b": 1.0}, {"a": 1.0, "b": 1.0})[:2] == (2, 0.5)

@@ -43,9 +43,11 @@ import yaml
 
 from prometheus.gym.ladder.record import (
     check_empty_fields,
+    forced_tier,
     load_rows,
     render_ladder_table,
     render_report,
+    render_tier_sweep,
 )
 from prometheus.gym.ladder.runner import (
     DEFAULT_TELEMETRY_DB,
@@ -97,6 +99,11 @@ def main() -> int:
     ap.add_argument("--compare", default=None,
                     help="comma list of run labels: write the cross-model ladder table "
                          "(accuracy next to format-miss rate) and exit")
+    ap.add_argument("--force-adapter-tier", default=None, choices=["off", "light", "full"],
+                    help="tier-sweep arm: run the rung's model with the daemon's adapter for "
+                         "THIS tier (needs --rung; rows are not filed under the rung)")
+    ap.add_argument("--tier-report", default=None,
+                    help="comma list of tier-sweep run labels: write the per-tier report and exit")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
@@ -107,6 +114,23 @@ def main() -> int:
     suite = load_suite(args.suite)
     db = Path(os.path.expanduser(args.telemetry_db))
 
+    if args.tier_report:
+        labels = _csv(args.tier_report) or []
+        conn = sqlite3.connect(str(db))
+        swept = [r for label in labels for r in load_rows(conn, label)]
+        conn.close()
+        unforced = sorted({r["run_label"] for r in swept if not forced_tier(r)})
+        if not swept or unforced:
+            print(f"❌ {'no rows for ' + str(labels) if not swept else 'not tier-sweep labels: ' + str(unforced)}"
+                  f" in {db}; no report written")
+            return 1
+        out = (Path(args.report) if args.report
+               else REPO / "gym" / "results" / "ladder" / f"tier-sweep-{labels[0]}.md")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(render_tier_sweep(swept, class_order=list(CLASS_IDS)))
+        print(f"📄 tier-sweep report → {out}")
+        return 0
+
     if args.compare:
         labels = _csv(args.compare) or []
         conn = sqlite3.connect(str(db))
@@ -115,6 +139,11 @@ def main() -> int:
         empty = [label for label, rows in by_label.items() if not rows]
         if empty:
             print(f"❌ no rows for {empty} in {db}; no table written")
+            return 1
+        forced = [label for label, rows in by_label.items() if any(forced_tier(r) for r in rows)]
+        if forced:
+            print(f"❌ {forced} are tier-sweep runs (adapter tier forced) — they never go in the "
+                  "rung table; use --tier-report")
             return 1
         out = (Path(args.report) if args.report
                else REPO / "gym" / "results" / "ladder" / f"ladder-{'-vs-'.join(labels)}.md")
@@ -125,6 +154,10 @@ def main() -> int:
 
     if not args.report_only:
         rung_spec, judge_model = None, args.judge_model
+        if args.force_adapter_tier and not args.rung:
+            print("❌ --force-adapter-tier needs --rung: a tier sweep is a sweep OF a rung, and the "
+                  "rung's checks prove the endpoint serves that rung's model")
+            return 2
         if args.rung:
             rungs = yaml.safe_load(RUNGS.read_text())
             rung_spec = next((r for r in rungs["rungs"] if r["id"] == args.rung), None)
@@ -196,6 +229,7 @@ def main() -> int:
                 rung=args.rung, expect_model_match=(rung_spec or {}).get("match"),
                 expect_adapter_tier=(rung_spec or {}).get("adapter_tier"),
                 strict_quant=rung_spec is not None,
+                force_adapter_tier=args.force_adapter_tier,
             ))
         except LadderPreflightError as exc:
             print(f"\n❌ refused: {exc}")
