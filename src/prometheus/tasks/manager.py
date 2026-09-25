@@ -26,6 +26,7 @@ import logging
 import os
 import shlex
 import signal
+import sys
 import time
 import weakref
 from collections.abc import Mapping
@@ -297,7 +298,12 @@ class BackgroundTaskManager:
                 raise ValueError(
                     "Local agent tasks require ANTHROPIC_API_KEY or an explicit command override"
                 )
-            cmd = ["python", "-m", "prometheus"]
+            # The daemon's OWN interpreter, not whatever `python` is on PATH.
+            # A Mac has no `python` at all ("command not found"), and where
+            # one exists it is rarely the interpreter Prometheus is installed
+            # in (a Homebrew install lives in its own venv), so the child died
+            # before it started: "No module named ..." (WP-X.24).
+            cmd = [sys.executable, "-m", "prometheus"]
             if model:
                 cmd.extend(["--model", model])
             command = " ".join(shlex.quote(part) for part in cmd)
