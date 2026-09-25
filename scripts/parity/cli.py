@@ -56,8 +56,8 @@ def cmd_record(args: argparse.Namespace) -> int:
             print(f"[record] {name}: {scenario.covers}", flush=True)
             out = Runner(scenario, mode="record", root=args.root, src_root=SRC_ROOT,
                          config_text=config_text, upstreams=upstreams).run()
-            problems = list(out.errors)
-            if scenario.require is not None and not out.errors:
+            problems = list(out.errors) + list(out.step_failures)
+            if scenario.require is not None and not problems:
                 problems += scenario.require(out.evidence())
             n_comp = sum(1 for ex in out.exchanges
                          if ex.method == "POST" and ex.path in COMPLETIONS_PATHS)

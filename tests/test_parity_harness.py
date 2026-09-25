@@ -213,6 +213,20 @@ def test_an_unexpected_new_store_is_a_diff_not_ignored():
     assert res.exit_code == 1 and "other" in res.diffs
 
 
+def test_a_daemon_step_failure_is_a_diff_not_a_harness_error():
+    """No checkpoint to restore is the DAEMON's behaviour: exit 1, not 2."""
+    expected = cmp.expected_from(_run([{"op": "restore_latest", "result": {"restored": []}}], {}),
+                                 Path("/"))
+    run = _run([{"op": "restore_latest", "error": "no checkpoint to restore"}], {})
+    run.step_failures.append("step restore_latest: no checkpoint to restore")
+    res = cmp.compare(run, expected, Path("/"))
+    assert res.exit_code == 1 and "steps" in res.diffs
+
+
+def test_checkpoint_blobs_are_filed_under_checkpoints():
+    assert cmp.categorize("home/.prometheus/checkpoints/blobs/5c/5c70", None) == "checkpoints"
+
+
 def test_a_harness_error_is_never_reported_as_parity():
     run = _run([], {})
     run.errors.append("daemon did not answer")

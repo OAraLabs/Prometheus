@@ -39,6 +39,8 @@ CATEGORIES: list[tuple[str, str, str | None]] = [
 
 
 def categorize(path: str, table: str | None) -> str:
+    if "/checkpoints/" in path:           # the store and its content-addressed blobs
+        return "checkpoints"
     for cat, suffix, tbl in CATEGORIES:
         if path.endswith(suffix) and (tbl is None or tbl == table):
             return cat
@@ -59,6 +61,7 @@ class CompareResult:
     extra_requests: int = 0
     missing_requests: int = 0
     harness_errors: list[str] = field(default_factory=list)
+    step_failures: list[str] = field(default_factory=list)
 
     @property
     def exit_code(self) -> int:
@@ -83,7 +86,8 @@ def _udiff(a: Any, b: Any, label: str, context: int = 2, limit: int = 60) -> lis
 
 def compare(out: RunOutput, expected: dict, root: Path) -> CompareResult:
     actual = normalize_observables({"steps": out.steps, "stores": out.stores}, root)
-    res = CompareResult(actual=actual, harness_errors=list(out.errors))
+    res = CompareResult(actual=actual, harness_errors=list(out.errors),
+                        step_failures=list(out.step_failures))
 
     # Requests (divergence at the provider boundary).
     for s in out.served:
@@ -134,6 +138,8 @@ def render_report(name: str, res: CompareResult) -> str:
     lines = [f"[replay] {name}: {'HARNESS ERROR' if res.exit_code == 2 else 'DIFF'}"]
     for err in res.harness_errors:
         lines.append(f"  harness error: {err}")
+    for fail in res.step_failures:
+        lines.append(f"  step failed: {fail}")
     if res.request_mismatches:
         lines.append(f"  model requests that differ from the recording: {len(res.request_mismatches)}")
     if res.extra_requests:

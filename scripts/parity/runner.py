@@ -113,7 +113,8 @@ class RunOutput:
     boot_seconds: float | None
     shutdown: str
     daemon_log: Path
-    errors: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)          # the harness could not run
+    step_failures: list[str] = field(default_factory=list)   # the daemon misbehaved (diffed)
 
     def evidence(self) -> Evidence:
         if self.mode == "record":
@@ -143,6 +144,7 @@ class Runner:
         self.server = ModelServer(self.state)
         self.turn_timeout = turn_timeout
         self.steps: list[dict] = []
+        self.step_failures: list[str] = []
         self.turns: list[TurnTiming] = []
         self.rss: list[dict] = []
 
@@ -345,8 +347,12 @@ class Runner:
                 raise HarnessError(f"WebSocket auth never answered 'connected' ({ws.error})")
             for step in self.scenario.steps:
                 result = self._step(inst, ws, step)
+                # A step that fails because of what the DAEMON did (no
+                # checkpoint to restore, a turn that never finished) is
+                # behaviour: it stays in the step result and is DIFFED. Only
+                # the harness failing to drive the daemon at all is an error.
                 if "error" in result:
-                    errors.append(f"step {step['op']}: {result['error']}")
+                    self.step_failures.append(f"step {step['op']}: {result['error']}")
                 self.steps.append(result)
                 self.rss.append({"at": f"after {step['op']}", **inst.rss_kb()})
             self._settle()
@@ -369,7 +375,8 @@ class Runner:
             exchanges=list(self.state.recorded),
             served=served, unconsumed=unconsumed, turns=self.turns,
             wall_offset_ns=wall_offset, rss=self.rss, boot_seconds=inst.boot_seconds,
-            shutdown=shutdown, daemon_log=inst.log_path, errors=errors)
+            shutdown=shutdown, daemon_log=inst.log_path, errors=errors,
+            step_failures=self.step_failures)
 
 
 def clean_root(root: Path) -> None:
