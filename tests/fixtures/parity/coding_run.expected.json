@@ -1,0 +1,2270 @@
+{
+ "steps": [
+  {
+   "op": "code",
+   "result": {
+    "error": null,
+    "report": {
+     "acceptance_exit": 0,
+     "acceptance_output_tail": "calc ok\n",
+     "branch": "coding/cparity01",
+     "diff_stat": "calc.py | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)",
+     "episodes": 4,
+     "model_usage_note": "per-round tokens + thinking flag are in telemetry.subsystem_runs (subsystem='agent_loop', session_id=coding:<task_id>)",
+     "reason": "acceptance command exited 0",
+     "rounds_used": 8,
+     "sandbox_root": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>",
+     "status": "success",
+     "task_id": "cparity01",
+     "wall_seconds": "<ms>"
+    },
+    "return_code": 0,
+    "status": "completed"
+   }
+  }
+ ],
+ "stores": {
+  "home/.prometheus/.daemon_started": {
+   "replaced": "<boot-specific>"
+  },
+  "home/.prometheus/MEMORY.md": {
+   "text": ""
+  },
+  "home/.prometheus/USER.md": {
+   "text": ""
+  },
+  "home/.prometheus/checkpoints/checkpoints.db": {
+   "sqlite": {
+    "checkpoint_files": {
+     "columns": [
+      "checkpoint_id",
+      "rel_path",
+      "sha256",
+      "size",
+      "mtime",
+      "mode"
+     ],
+     "rows": []
+    },
+    "checkpoint_skipped": {
+     "columns": [
+      "checkpoint_id",
+      "rel_path",
+      "reason"
+     ],
+     "rows": []
+    },
+    "checkpoints": {
+     "columns": [
+      "id",
+      "session_id",
+      "workspace",
+      "label",
+      "created_at",
+      "files",
+      "bytes",
+      "skipped"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/COMMIT_EDITMSG": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/HEAD": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/config": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/description": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/hooks/applypatch-msg.sample": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/hooks/commit-msg.sample": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/hooks/fsmonitor-watchman.sample": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/hooks/post-update.sample": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/hooks/pre-applypatch.sample": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/hooks/pre-commit.sample": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/hooks/pre-merge-commit.sample": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/hooks/pre-push.sample": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/hooks/pre-rebase.sample": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/hooks/pre-receive.sample": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/hooks/prepare-commit-msg.sample": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/hooks/push-to-checkout.sample": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/hooks/sendemail-validate.sample": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/hooks/update.sample": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/index": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/info/exclude": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/packed-refs": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/refs/heads/coding/cparity01": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/refs/heads/main": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/.git/refs/remotes/origin/HEAD": {
+   "replaced": "<git-internal>"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/calc.py": {
+   "text": "def add(a, b):\n    \"\"\"Return the sum of a and b.\"\"\"\n    return a + b\n"
+  },
+  "home/.prometheus/coding/cparity01-<epoch>/test_calc.py": {
+   "text": "from calc import add\n\nassert add(2, 3) == 5, add(2, 3)\nassert add(-1, 1) == 0, add(-1, 1)\nprint(\"calc ok\")\n"
+  },
+  "home/.prometheus/data/archive.jsonl": {
+   "jsonl": [
+    {
+     "data": {
+      "args": {
+       "config": "/tmp/prometheus-parity/home/.prometheus/prometheus.yaml",
+       "debug": false,
+       "telegram_only": false
+      }
+     },
+     "timestamp": "<time>",
+     "type": "daemon_start"
+    },
+    {
+     "data": {},
+     "timestamp": "<time>",
+     "type": "daemon_shutdown"
+    }
+   ]
+  },
+  "home/.prometheus/data/devices.db": {
+   "sqlite": {
+    "activity_tokens": {
+     "columns": [
+      "device_id",
+      "session_id",
+      "activity_token",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "api_devices": {
+     "columns": [
+      "id",
+      "name",
+      "platform",
+      "token_sha256",
+      "created_at",
+      "last_seen_at",
+      "revoked_at",
+      "apns_token",
+      "apns_environment",
+      "apns_bundle_id",
+      "push_failures",
+      "last_push_at",
+      "last_push_status"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/data/lcm.db": {
+   "sqlite": {
+    "checkpoints": {
+     "columns": [
+      "id",
+      "task_id",
+      "step_number",
+      "goal_hash",
+      "goal_description",
+      "messages_json",
+      "tool_calls_json",
+      "divergence_score",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "lcm_messages": {
+     "columns": [
+      "id",
+      "session_id",
+      "turn_index",
+      "role",
+      "content",
+      "content_json",
+      "token_count",
+      "timestamp",
+      "compacted",
+      "provenance",
+      "is_trusted"
+     ],
+     "rows": []
+    },
+    "lcm_messages_fts": {
+     "columns": [
+      "content"
+     ],
+     "rows": []
+    },
+    "lcm_messages_fts_config": {
+     "columns": [
+      "k",
+      "v"
+     ],
+     "rows": [
+      [
+       "version",
+       4
+      ]
+     ]
+    },
+    "lcm_messages_fts_data": {
+     "columns": [
+      "id",
+      "block"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "e3b0c44298fc1c14",
+        "len": 0
+       }
+      ],
+      [
+       10,
+       {
+        "$bytes_sha256": "837885c8f8091aea",
+        "len": 7
+       }
+      ]
+     ]
+    },
+    "lcm_messages_fts_docsize": {
+     "columns": [
+      "id",
+      "sz"
+     ],
+     "rows": []
+    },
+    "lcm_messages_fts_idx": {
+     "columns": [
+      "segid",
+      "term",
+      "pgno"
+     ],
+     "rows": []
+    },
+    "lcm_summaries": {
+     "columns": [
+      "id",
+      "session_id",
+      "parent_ids",
+      "source_message_ids",
+      "summary_text",
+      "depth",
+      "token_count",
+      "created_at",
+      "is_leaf"
+     ],
+     "rows": []
+    },
+    "lcm_summaries_fts": {
+     "columns": [
+      "summary_text"
+     ],
+     "rows": []
+    },
+    "lcm_summaries_fts_config": {
+     "columns": [
+      "k",
+      "v"
+     ],
+     "rows": [
+      [
+       "version",
+       4
+      ]
+     ]
+    },
+    "lcm_summaries_fts_data": {
+     "columns": [
+      "id",
+      "block"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "e3b0c44298fc1c14",
+        "len": 0
+       }
+      ],
+      [
+       10,
+       {
+        "$bytes_sha256": "837885c8f8091aea",
+        "len": 7
+       }
+      ]
+     ]
+    },
+    "lcm_summaries_fts_docsize": {
+     "columns": [
+      "id",
+      "sz"
+     ],
+     "rows": []
+    },
+    "lcm_summaries_fts_idx": {
+     "columns": [
+      "segid",
+      "term",
+      "pgno"
+     ],
+     "rows": []
+    },
+    "message_client_ids": {
+     "columns": [
+      "session_id",
+      "row_id",
+      "client_msg_id",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "session_backends": {
+     "columns": [
+      "session_id",
+      "key",
+      "set_by",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "session_forks": {
+     "columns": [
+      "session_id",
+      "origin_session",
+      "origin_rowid",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "session_pins": {
+     "columns": [
+      "session_id",
+      "pinned_at"
+     ],
+     "rows": []
+    },
+    "session_profiles": {
+     "columns": [
+      "session_id",
+      "profile",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "session_titles": {
+     "columns": [
+      "session_id",
+      "title",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "session_tombstones": {
+     "columns": [
+      "session_id",
+      "deleted_at"
+     ],
+     "rows": []
+    },
+    "session_workspaces": {
+     "columns": [
+      "session_id",
+      "path",
+      "set_by",
+      "updated_at"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/data/security/audit.db": {
+   "sqlite": {
+    "permission_audit": {
+     "columns": [
+      "id",
+      "timestamp",
+      "tool_name",
+      "decision",
+      "trust_level",
+      "reason",
+      "tool_input_summary",
+      "user_id",
+      "session_id"
+     ],
+     "rows": [
+      [
+       1,
+       "<time>",
+       "bash",
+       "allow",
+       2,
+       "Auto-allowed",
+       "",
+       null,
+       null
+      ]
+     ]
+    }
+   }
+  },
+  "home/.prometheus/data/security/permission_audit.jsonl": {
+   "jsonl": [
+    {
+     "decision": "allow",
+     "reason": "Auto-allowed",
+     "session_id": null,
+     "timestamp": "<time>",
+     "timestamp_iso": "<time>",
+     "tool_input_summary": "",
+     "tool_name": "bash",
+     "trust_level": 2,
+     "user_id": null
+    }
+   ]
+  },
+  "home/.prometheus/data/tasks.db": {
+   "sqlite": {
+    "tasks": {
+     "columns": [
+      "id",
+      "type",
+      "status",
+      "description",
+      "cwd",
+      "output_file",
+      "command",
+      "prompt",
+      "created_at",
+      "started_at",
+      "ended_at",
+      "return_code",
+      "metadata",
+      "session_id",
+      "notify_target",
+      "on_complete",
+      "reengage_prompt",
+      "timeout_seconds",
+      "artifact_path",
+      "error",
+      "spec"
+     ],
+     "rows": [
+      [
+       "<task:1>",
+       "local_agent",
+       "completed",
+       "coding task cparity01: calc.add returns the wrong result. Fix add() in calc.py so that it returns the sum. Do not modify test_calc.py.",
+       "/tmp/prometheus-parity/home",
+       "/tmp/prometheus-parity/home/.prometheus/data/tasks/<task:1>.log",
+       "<python> -m prometheus code --repo /tmp/prometheus-parity/ws/calc --task 'calc.add returns the wrong result. Fix add() in calc.py so that it returns the sum. Do not modify test_calc.py.' --acceptance 'python test_calc.py' --task-id cparity01 --max-rounds 12 --max-wall-seconds 900 --control-dir /tmp/prometheus-parity/home/.prometheus/coding/control/cparity01",
+       null,
+       "<time>",
+       "<time>",
+       "<time>",
+       0,
+       {
+        "$json": {}
+       },
+       "coding:cparity01",
+       null,
+       "notify",
+       null,
+       1200,
+       null,
+       null,
+       {
+        "$json": {}
+       }
+      ]
+     ]
+    }
+   }
+  },
+  "home/.prometheus/data/training.db": {
+   "sqlite": {
+    "training_pairs": {
+     "columns": [
+      "id",
+      "timestamp",
+      "pair_source",
+      "model_id",
+      "tool_name",
+      "context",
+      "rejected",
+      "chosen",
+      "meta",
+      "context_hash"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/memory.db": {
+   "sqlite": {
+    "extractor_cursors": {
+     "columns": [
+      "scope",
+      "last_row_id",
+      "updated_at"
+     ],
+     "rows": [
+      [
+       "*",
+       0,
+       "<time>"
+      ]
+     ]
+    },
+    "memories": {
+     "columns": [
+      "id",
+      "entity_type",
+      "entity_name",
+      "relationship",
+      "fact",
+      "confidence",
+      "source_event_ids",
+      "last_mentioned",
+      "mention_count",
+      "tags",
+      "timestamp",
+      "manual"
+     ],
+     "rows": []
+    },
+    "memories_fts": {
+     "columns": [
+      "id",
+      "entity_name",
+      "fact"
+     ],
+     "rows": []
+    },
+    "memories_fts_config": {
+     "columns": [
+      "k",
+      "v"
+     ],
+     "rows": [
+      [
+       "version",
+       4
+      ]
+     ]
+    },
+    "memories_fts_data": {
+     "columns": [
+      "id",
+      "block"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "df3f619804a92fdb",
+        "len": 4
+       }
+      ],
+      [
+       10,
+       {
+        "$bytes_sha256": "837885c8f8091aea",
+        "len": 7
+       }
+      ]
+     ]
+    },
+    "memories_fts_docsize": {
+     "columns": [
+      "id",
+      "sz"
+     ],
+     "rows": []
+    },
+    "memories_fts_idx": {
+     "columns": [
+      "segid",
+      "term",
+      "pgno"
+     ],
+     "rows": []
+    },
+    "messages": {
+     "columns": [
+      "id",
+      "session_id",
+      "role",
+      "content",
+      "timestamp",
+      "compressed"
+     ],
+     "rows": []
+    },
+    "messages_fts": {
+     "columns": [
+      "id",
+      "content"
+     ],
+     "rows": []
+    },
+    "messages_fts_config": {
+     "columns": [
+      "k",
+      "v"
+     ],
+     "rows": [
+      [
+       "version",
+       4
+      ]
+     ]
+    },
+    "messages_fts_data": {
+     "columns": [
+      "id",
+      "block"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "709e80c88487a241",
+        "len": 3
+       }
+      ],
+      [
+       10,
+       {
+        "$bytes_sha256": "837885c8f8091aea",
+        "len": 7
+       }
+      ]
+     ]
+    },
+    "messages_fts_docsize": {
+     "columns": [
+      "id",
+      "sz"
+     ],
+     "rows": []
+    },
+    "messages_fts_idx": {
+     "columns": [
+      "segid",
+      "term",
+      "pgno"
+     ],
+     "rows": []
+    },
+    "summaries": {
+     "columns": [
+      "id",
+      "source_message_ids",
+      "summary_text",
+      "level",
+      "timestamp"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/node/node.key": {
+   "replaced": "<boot-specific>"
+  },
+  "home/.prometheus/node/node.pub": {
+   "replaced": "<boot-specific>"
+  },
+  "home/.prometheus/prometheus.yaml": {
+   "replaced": "<harness-input>"
+  },
+  "home/.prometheus/telemetry.db": {
+   "sqlite": {
+    "circuit_breaker_diagnostics": {
+     "columns": [
+      "id",
+      "timestamp",
+      "model_id",
+      "adapter_tier",
+      "tool_name",
+      "failure_category",
+      "config_drift",
+      "raw_sample",
+      "recovered",
+      "recovery_method",
+      "golden_reference"
+     ],
+     "rows": []
+    },
+    "schema_meta": {
+     "columns": [
+      "key",
+      "value"
+     ],
+     "rows": [
+      [
+       "latency_nullable_since",
+       "0.0"
+      ],
+      [
+       "billing_recorded_since",
+       "<time>"
+      ],
+      [
+       "created_at",
+       "<time>"
+      ],
+      [
+       "created_by",
+       "prometheus telemetry v3"
+      ],
+      [
+       "schema_version",
+       "3"
+      ]
+     ]
+    },
+    "signal_events": {
+     "columns": [
+      "id",
+      "timestamp",
+      "signal_type",
+      "payload",
+      "source_subsystem",
+      "read_at"
+     ],
+     "rows": []
+    },
+    "silent_failures": {
+     "columns": [
+      "id",
+      "timestamp",
+      "subsystem",
+      "operation",
+      "exception_type",
+      "exception_msg",
+      "traceback",
+      "context",
+      "response_body"
+     ],
+     "rows": []
+    },
+    "subsystem_runs": {
+     "columns": [
+      "id",
+      "timestamp",
+      "subsystem",
+      "operation",
+      "duration_ms",
+      "outcome",
+      "summary_json",
+      "input_tokens",
+      "output_tokens",
+      "round_index",
+      "session_id",
+      "model",
+      "thinking",
+      "cached_input_tokens",
+      "cache_write_tokens",
+      "node_id",
+      "billing_mode",
+      "billing_marker"
+     ],
+     "rows": [
+      [
+       "<uuid:1>",
+       "<time>",
+       "tool_registration",
+       "TaskCreateTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskCreateTool",
+         "module_path": "prometheus.tools.builtin.task_create"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:2>",
+       "<time>",
+       "tool_registration",
+       "GitHubSearchTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "GitHubSearchTool",
+         "module_path": "prometheus.symbiote.github_search"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:3>",
+       "<time>",
+       "tool_registration",
+       "SymbioteScoutTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SymbioteScoutTool",
+         "module_path": "prometheus.tools.builtin.symbiote_scout"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:4>",
+       "<time>",
+       "tool_registration",
+       "SymbioteHarvestTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SymbioteHarvestTool",
+         "module_path": "prometheus.tools.builtin.symbiote_harvest"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:5>",
+       "<time>",
+       "tool_registration",
+       "SymbioteGraftTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SymbioteGraftTool",
+         "module_path": "prometheus.tools.builtin.symbiote_graft"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:6>",
+       "<time>",
+       "tool_registration",
+       "SymbioteStatusTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SymbioteStatusTool",
+         "module_path": "prometheus.tools.builtin.symbiote_status"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:7>",
+       "<time>",
+       "tool_registration",
+       "SkillTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SkillTool",
+         "module_path": "prometheus.tools.builtin.skill"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:8>",
+       "<time>",
+       "tool_registration",
+       "MemoryTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "MemoryTool",
+         "module_path": "prometheus.memory.hermes_memory_tool"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:9>",
+       "<time>",
+       "tool_registration",
+       "TodoWriteTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TodoWriteTool",
+         "module_path": "prometheus.tools.builtin.todo_write"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:10>",
+       "<time>",
+       "tool_registration",
+       "VaultSearchTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "VaultSearchTool",
+         "module_path": "prometheus.tools.builtin.vault"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:11>",
+       "<time>",
+       "tool_registration",
+       "VaultReadTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "VaultReadTool",
+         "module_path": "prometheus.tools.builtin.vault"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:12>",
+       "<time>",
+       "tool_registration",
+       "AnatomyTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "AnatomyTool",
+         "module_path": "prometheus.tools.builtin.anatomy"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:13>",
+       "<time>",
+       "tool_registration",
+       "BrowserTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "BrowserTool",
+         "module_path": "prometheus.tools.builtin.browser"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:14>",
+       "<time>",
+       "tool_registration",
+       "SessionsListTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SessionsListTool",
+         "module_path": "prometheus.tools.builtin.sessions_list"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:15>",
+       "<time>",
+       "tool_registration",
+       "SessionsSendTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SessionsSendTool",
+         "module_path": "prometheus.tools.builtin.sessions_send"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:16>",
+       "<time>",
+       "tool_registration",
+       "SessionsSpawnTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SessionsSpawnTool",
+         "module_path": "prometheus.tools.builtin.sessions_spawn"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:17>",
+       "<time>",
+       "tool_registration",
+       "TaskGetTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskGetTool",
+         "module_path": "prometheus.tools.builtin.task_get"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:18>",
+       "<time>",
+       "tool_registration",
+       "TaskListTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskListTool",
+         "module_path": "prometheus.tools.builtin.task_list"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:19>",
+       "<time>",
+       "tool_registration",
+       "TaskUpdateTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskUpdateTool",
+         "module_path": "prometheus.tools.builtin.task_update"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:20>",
+       "<time>",
+       "tool_registration",
+       "TaskStopTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskStopTool",
+         "module_path": "prometheus.tools.builtin.task_stop"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:21>",
+       "<time>",
+       "tool_registration",
+       "TaskOutputTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskOutputTool",
+         "module_path": "prometheus.tools.builtin.task_output"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:22>",
+       "<time>",
+       "tool_registration",
+       "ImageGenerateTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "ImageGenerateTool",
+         "module_path": "prometheus.tools.builtin.image_generate"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:23>",
+       "<time>",
+       "tool_registration",
+       "KlingVideoTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "KlingVideoTool",
+         "module_path": "prometheus.tools.builtin.video_generate"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:24>",
+       "<time>",
+       "agent_loop",
+       "tool_advertisement",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "advertised": 6,
+         "deferred_active": false,
+         "profile": null,
+         "registered_total": 6,
+         "source": "no tool loader (registry direct)"
+        }
+       },
+       null,
+       null,
+       null,
+       "coding:cparity01",
+       "",
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:25>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "stop_reason": "stop"
+        }
+       },
+       641,
+       59,
+       0,
+       "coding:cparity01",
+       "",
+       1,
+       null,
+       null,
+       "<node>",
+       "unknown",
+       null
+      ],
+      [
+       "<uuid:26>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "stop_reason": "stop"
+        }
+       },
+       794,
+       109,
+       1,
+       "coding:cparity01",
+       "",
+       1,
+       null,
+       null,
+       "<node>",
+       "unknown",
+       null
+      ],
+      [
+       "<uuid:27>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "stop_reason": "stop"
+        }
+       },
+       1118,
+       153,
+       2,
+       "coding:cparity01",
+       "",
+       1,
+       null,
+       null,
+       "<node>",
+       "unknown",
+       null
+      ],
+      [
+       "<uuid:28>",
+       "<time>",
+       "agent_loop",
+       "tool_advertisement",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "advertised": 6,
+         "deferred_active": false,
+         "profile": null,
+         "registered_total": 6,
+         "source": "no tool loader (registry direct)"
+        }
+       },
+       null,
+       null,
+       null,
+       "coding:cparity01",
+       "",
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:29>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "stop_reason": "stop"
+        }
+       },
+       1255,
+       135,
+       0,
+       "coding:cparity01",
+       "",
+       1,
+       null,
+       null,
+       "<node>",
+       "unknown",
+       null
+      ],
+      [
+       "<uuid:30>",
+       "<time>",
+       "agent_loop",
+       "tool_advertisement",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "advertised": 6,
+         "deferred_active": false,
+         "profile": null,
+         "registered_total": 6,
+         "source": "no tool loader (registry direct)"
+        }
+       },
+       null,
+       null,
+       null,
+       "coding:cparity01",
+       "",
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:31>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "stop_reason": "stop"
+        }
+       },
+       1377,
+       188,
+       0,
+       "coding:cparity01",
+       "",
+       1,
+       null,
+       null,
+       "<node>",
+       "unknown",
+       null
+      ],
+      [
+       "<uuid:32>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "stop_reason": "stop"
+        }
+       },
+       1632,
+       30,
+       1,
+       "coding:cparity01",
+       "",
+       1,
+       null,
+       null,
+       "<node>",
+       "unknown",
+       null
+      ],
+      [
+       "<uuid:33>",
+       "<time>",
+       "agent_loop",
+       "tool_advertisement",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "advertised": 6,
+         "deferred_active": false,
+         "profile": null,
+         "registered_total": 6,
+         "source": "no tool loader (registry direct)"
+        }
+       },
+       null,
+       null,
+       null,
+       "coding:cparity01",
+       "",
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:34>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "stop_reason": "stop"
+        }
+       },
+       1749,
+       81,
+       0,
+       "coding:cparity01",
+       "",
+       1,
+       null,
+       null,
+       "<node>",
+       "unknown",
+       null
+      ],
+      [
+       "<uuid:35>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "stop_reason": "stop"
+        }
+       },
+       1897,
+       164,
+       1,
+       "coding:cparity01",
+       "",
+       1,
+       null,
+       null,
+       "<node>",
+       "unknown",
+       null
+      ],
+      [
+       "<uuid:36>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "stop_reason": "stop"
+        }
+       },
+       2043,
+       138,
+       2,
+       "coding:cparity01",
+       "",
+       1,
+       null,
+       null,
+       "<node>",
+       "unknown",
+       null
+      ],
+      [
+       "<uuid:37>",
+       "<time>",
+       "coding_mode",
+       "acceptance",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "exit_code": 0,
+         "output_tail": "calc ok\n",
+         "timed_out": false
+        }
+       },
+       null,
+       null,
+       null,
+       "coding:cparity01",
+       "",
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:38>",
+       "<time>",
+       "coding_mode",
+       "run",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "acceptance_exit": 0,
+         "branch": "coding/cparity01",
+         "episodes": 4,
+         "reason": "acceptance command exited 0",
+         "rounds": 8,
+         "status": "success",
+         "task_id": "cparity01",
+         "wall_seconds": "<ms>"
+        }
+       },
+       null,
+       null,
+       null,
+       "coding:cparity01",
+       "",
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ]
+     ]
+    },
+    "tool_calls": {
+     "columns": [
+      "id",
+      "timestamp",
+      "model",
+      "tool_name",
+      "success",
+      "retries",
+      "latency_ms",
+      "error_type",
+      "error_detail",
+      "raw_model_output",
+      "parsed_tool_call",
+      "is_golden",
+      "repairs",
+      "served_model",
+      "session_id",
+      "tool_schema",
+      "node_id"
+     ],
+     "rows": [
+      [
+       "<uuid:39>",
+       "<time>",
+       "",
+       "code_view",
+       1,
+       0,
+       "<ms>",
+       null,
+       null,
+       "```json\n{\"name\": \"code_view\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>\"}}\n```",
+       {
+        "$json": {
+         "input": {
+          "path": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>"
+         },
+         "name": "code_view"
+        }
+       },
+       0,
+       0,
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "coding:cparity01",
+       {
+        "$json": {
+         "description": "View a file with line numbers, or list a directory. Always view a file before editing it — code_str_replace requires the exact current text. Optional view_range narrows to [start, end] lines.",
+         "name": "code_view",
+         "parameters": {
+          "properties": {
+           "path": {
+            "description": "File or directory path, relative to the repo root.",
+            "title": "Path",
+            "type": "string"
+           },
+           "view_range": {
+            "anyOf": [
+             {
+              "items": {
+               "type": "integer"
+              },
+              "type": "array"
+             },
+             {
+              "type": "null"
+             }
+            ],
+            "default": null,
+            "description": "Optional [start_line, end_line] (1-based, inclusive) for files.",
+            "title": "View Range"
+           }
+          },
+          "required": [
+           "path"
+          ],
+          "title": "CodeViewArgs",
+          "type": "object"
+         }
+        }
+       },
+       "<node>"
+      ],
+      [
+       "<uuid:40>",
+       "<time>",
+       "",
+       "_loop_transition",
+       1,
+       0,
+       null,
+       null,
+       null,
+       null,
+       null,
+       0,
+       0,
+       null,
+       null,
+       null,
+       "<node>"
+      ],
+      [
+       "<uuid:41>",
+       "<time>",
+       "",
+       "code_view",
+       1,
+       0,
+       "<ms>",
+       null,
+       null,
+       "```json\n{\"name\": \"code_view\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py\"}}\n```\n```json\n{\"name\": \"code_view\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/test_calc.py\"}}\n```",
+       {
+        "$json": {
+         "input": {
+          "path": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py"
+         },
+         "name": "code_view"
+        }
+       },
+       0,
+       0,
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "coding:cparity01",
+       {
+        "$json": {
+         "description": "View a file with line numbers, or list a directory. Always view a file before editing it — code_str_replace requires the exact current text. Optional view_range narrows to [start, end] lines.",
+         "name": "code_view",
+         "parameters": {
+          "properties": {
+           "path": {
+            "description": "File or directory path, relative to the repo root.",
+            "title": "Path",
+            "type": "string"
+           },
+           "view_range": {
+            "anyOf": [
+             {
+              "items": {
+               "type": "integer"
+              },
+              "type": "array"
+             },
+             {
+              "type": "null"
+             }
+            ],
+            "default": null,
+            "description": "Optional [start_line, end_line] (1-based, inclusive) for files.",
+            "title": "View Range"
+           }
+          },
+          "required": [
+           "path"
+          ],
+          "title": "CodeViewArgs",
+          "type": "object"
+         }
+        }
+       },
+       "<node>"
+      ],
+      [
+       "<uuid:42>",
+       "<time>",
+       "",
+       "code_view",
+       1,
+       0,
+       "<ms>",
+       null,
+       null,
+       "```json\n{\"name\": \"code_view\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py\"}}\n```\n```json\n{\"name\": \"code_view\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/test_calc.py\"}}\n```",
+       {
+        "$json": {
+         "input": {
+          "path": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/test_calc.py"
+         },
+         "name": "code_view"
+        }
+       },
+       0,
+       0,
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "coding:cparity01",
+       {
+        "$json": {
+         "description": "View a file with line numbers, or list a directory. Always view a file before editing it — code_str_replace requires the exact current text. Optional view_range narrows to [start, end] lines.",
+         "name": "code_view",
+         "parameters": {
+          "properties": {
+           "path": {
+            "description": "File or directory path, relative to the repo root.",
+            "title": "Path",
+            "type": "string"
+           },
+           "view_range": {
+            "anyOf": [
+             {
+              "items": {
+               "type": "integer"
+              },
+              "type": "array"
+             },
+             {
+              "type": "null"
+             }
+            ],
+            "default": null,
+            "description": "Optional [start_line, end_line] (1-based, inclusive) for files.",
+            "title": "View Range"
+           }
+          },
+          "required": [
+           "path"
+          ],
+          "title": "CodeViewArgs",
+          "type": "object"
+         }
+        }
+       },
+       "<node>"
+      ],
+      [
+       "<uuid:43>",
+       "<time>",
+       "",
+       "_loop_transition",
+       1,
+       0,
+       null,
+       null,
+       null,
+       null,
+       null,
+       0,
+       0,
+       null,
+       null,
+       null,
+       "<node>"
+      ],
+      [
+       "<uuid:44>",
+       "<time>",
+       "",
+       "code_str_replace",
+       1,
+       0,
+       "<ms>",
+       null,
+       null,
+       "```json\n{\"name\": \"code_str_replace\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py\", \"old_str\": \"    return a - b\", \"new_str\": \"    return a + b\"}}\n```\n\n<tool_call>\n<function=code_str_replace>\n<parameter=path>\n/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py\n</parameter>\n<parameter=old_str>\n    return a - b\n</parameter>\n<parameter=new_str>\n    return a + b\n</parameter>\n</function>\n</tool_call>",
+       {
+        "$json": {
+         "input": {
+          "new_str": "    return a + b",
+          "old_str": "    return a - b",
+          "path": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py"
+         },
+         "name": "code_str_replace"
+        }
+       },
+       0,
+       0,
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "coding:cparity01",
+       {
+        "$json": {
+         "description": "Replace text in a file. old_str must match exactly once (whitespace included). If it matches zero or multiple times nothing is changed and the error tells you which — re-view the file and widen old_str with surrounding lines until it is unique.",
+         "name": "code_str_replace",
+         "parameters": {
+          "properties": {
+           "new_str": {
+            "description": "Replacement text.",
+            "title": "New Str",
+            "type": "string"
+           },
+           "old_str": {
+            "description": "Exact text to replace — must appear EXACTLY ONCE in the file, including whitespace and indentation.",
+            "title": "Old Str",
+            "type": "string"
+           },
+           "path": {
+            "description": "File to edit, relative to the repo root.",
+            "title": "Path",
+            "type": "string"
+           }
+          },
+          "required": [
+           "path",
+           "old_str",
+           "new_str"
+          ],
+          "title": "CodeStrReplaceArgs",
+          "type": "object"
+         }
+        }
+       },
+       "<node>"
+      ],
+      [
+       "<uuid:45>",
+       "<time>",
+       "",
+       "_loop_transition",
+       1,
+       0,
+       null,
+       null,
+       null,
+       null,
+       null,
+       0,
+       0,
+       null,
+       null,
+       null,
+       "<node>"
+      ],
+      [
+       "<uuid:46>",
+       "<time>",
+       "",
+       "_loop_transition",
+       0,
+       0,
+       null,
+       "stripped_to_empty",
+       "stripped=1",
+       null,
+       null,
+       0,
+       0,
+       null,
+       null,
+       null,
+       "<node>"
+      ],
+      [
+       "<uuid:47>",
+       "<time>",
+       "",
+       "code_run",
+       1,
+       0,
+       "<ms>",
+       null,
+       null,
+       "```json\n{\"name\": \"code_run\", \"arguments\": {\"command\": \"cd /tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch> && python test_calc.py\"}}\n```",
+       {
+        "$json": {
+         "input": {
+          "command": "cd /tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch> && python test_calc.py"
+         },
+         "name": "code_run"
+        }
+       },
+       0,
+       0,
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "coding:cparity01",
+       {
+        "$json": {
+         "description": "Run a shell command in the repo root (sandboxed). Use this to run the test suite and the task's acceptance command — a coding task is only done when its acceptance command exits 0 here. The exit code is reported in the output; a failing command is a normal result to read and act on, not a tool error.",
+         "name": "code_run",
+         "parameters": {
+          "properties": {
+           "command": {
+            "description": "Shell command to run in the repo root (tests, builds, git).",
+            "title": "Command",
+            "type": "string"
+           },
+           "timeout_seconds": {
+            "anyOf": [
+             {
+              "type": "number"
+             },
+             {
+              "type": "null"
+             }
+            ],
+            "default": null,
+            "description": "Optional wall-clock cap for this command (default: sandbox default).",
+            "title": "Timeout Seconds"
+           }
+          },
+          "required": [
+           "command"
+          ],
+          "title": "CodeRunArgs",
+          "type": "object"
+         }
+        }
+       },
+       "<node>"
+      ],
+      [
+       "<uuid:48>",
+       "<time>",
+       "",
+       "_loop_transition",
+       1,
+       0,
+       null,
+       null,
+       null,
+       null,
+       null,
+       0,
+       0,
+       null,
+       null,
+       null,
+       "<node>"
+      ]
+     ]
+    }
+   }
+  },
+  "ws/calc/.git/COMMIT_EDITMSG": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/HEAD": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/config": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/description": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/hooks/applypatch-msg.sample": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/hooks/commit-msg.sample": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/hooks/fsmonitor-watchman.sample": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/hooks/post-update.sample": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/hooks/pre-applypatch.sample": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/hooks/pre-commit.sample": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/hooks/pre-merge-commit.sample": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/hooks/pre-push.sample": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/hooks/pre-rebase.sample": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/hooks/pre-receive.sample": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/hooks/prepare-commit-msg.sample": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/hooks/push-to-checkout.sample": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/hooks/sendemail-validate.sample": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/hooks/update.sample": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/index": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/info/exclude": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/.git/refs/heads/main": {
+   "replaced": "<git-internal>"
+  },
+  "ws/calc/calc.py": {
+   "text": "def add(a, b):\n    \"\"\"Return the sum of a and b.\"\"\"\n    return a - b\n"
+  },
+  "ws/calc/test_calc.py": {
+   "text": "from calc import add\n\nassert add(2, 3) == 5, add(2, 3)\nassert add(-1, 1) == 0, add(-1, 1)\nprint(\"calc ok\")\n"
+  }
+ }
+}
