@@ -132,6 +132,9 @@ milestones, errors that change the plan.
 # claiming to be the primary — the exact production bug the router's own comment records.
 
 _MODEL_LINE_RE = re.compile(r"^- Model: .*$", re.MULTILINE)
+# The model and the provider the line currently names, if it names a provider.
+_LINE_PROVIDER_RE = re.compile(r"^- Model: (?P<name>.*?) \(provider: (?P<provider>[^)]+)\)",
+                               re.MULTILINE)
 
 # Appended when the model serving this turn is NOT the local backend. Without it, an overridden
 # cloud model reads the local GPU node's "Loaded:" entry out of the Infrastructure/ANATOMY
@@ -140,6 +143,23 @@ _NOT_THE_LOCAL_BACKEND = (
     " — the ACTIVE model serving this conversation; any model in the"
     " Infrastructure section is a separate local backend, not you"
 )
+
+
+def model_display_name(model_name: str) -> str:
+    """The name the ``- Model:`` line shows for a model.
+
+    A llama.cpp server reports the model it loaded as the GGUF's PATH
+    (``/models/Qwen3.8-27B-UD-Q4_K_XL.gguf``), and that is what the daemon
+    detects at boot. The prompt names the model, not where its file lives, so
+    a ``.gguf`` path is shown as the file name without its directory or
+    extension. Anything else — a registry name, a hosted model id — is shown
+    as it is. Display only: telemetry, registry matching and the router keep
+    the raw id, and both writers of the line (boot and rewrite) go through
+    here so they cannot disagree.
+    """
+    if model_name.lower().endswith(".gguf"):
+        return model_name.rsplit("/", 1)[-1][: -len(".gguf")] or model_name
+    return model_name
 
 
 def rewrite_model_identity(
@@ -162,8 +182,24 @@ def rewrite_model_identity(
 
     So callers must answer the real question — "is the model serving this turn the local
     backend?" — rather than one that happened to correlate with it.
+
+    A ``provider_name`` that is empty or ``"unknown"`` is a caller that has no name to give (a
+    decision built without one), not a provider called "unknown". If the line already names
+    THIS model, its provider stands: the rewrite never downgrades a known provider to a
+    placeholder — that is how every primary turn came to be told ``(provider: unknown)`` over a
+    boot line that said ``llama_cpp``. For any other model the line says ``unknown``: the prompt
+    carries the line from turn to turn, so inheriting the previous turn's provider would pair a
+    new model with it — a local model shown as ``(provider: anthropic)`` is a false statement,
+    worse than a placeholder.
     """
-    line = f"- Model: {model_name} (provider: {provider_name})"
+    display = model_display_name(model_name)
+    if not provider_name or provider_name == "unknown":
+        current = _LINE_PROVIDER_RE.search(system_prompt)
+        if current is not None and current.group("name") == display:
+            provider_name = current.group("provider")
+        else:
+            provider_name = "unknown"
+    line = f"- Model: {display} (provider: {provider_name})"
     if not serving_is_local_backend:
         line += _NOT_THE_LOCAL_BACKEND
     return _MODEL_LINE_RE.sub(line, system_prompt, count=1)
@@ -182,7 +218,7 @@ def _format_environment_section(env: EnvironmentInfo) -> str:
     ]
 
     if env.model_name:
-        model_line = f"- Model: {env.model_name}"
+        model_line = f"- Model: {model_display_name(env.model_name)}"
         if env.model_provider:
             model_line += f" (provider: {env.model_provider})"
         lines.append(model_line)

@@ -9,10 +9,10 @@
      "acceptance_output_tail": "calc ok\n",
      "branch": "coding/cparity01",
      "diff_stat": "calc.py | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)",
-     "episodes": 4,
+     "episodes": 1,
      "model_usage_note": "per-round tokens + thinking flag are in telemetry.subsystem_runs (subsystem='agent_loop', session_id=coding:<task_id>)",
      "reason": "acceptance command exited 0",
-     "rounds_used": 8,
+     "rounds_used": 5,
      "sandbox_root": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>",
      "status": "success",
      "task_id": "cparity01",
@@ -1431,7 +1431,7 @@
         }
        },
        641,
-       59,
+       32,
        0,
        "coding:cparity01",
        "",
@@ -1454,8 +1454,8 @@
          "stop_reason": "stop"
         }
        },
-       794,
-       109,
+       733,
+       86,
        1,
        "coding:cparity01",
        "",
@@ -1478,8 +1478,8 @@
          "stop_reason": "stop"
         }
        },
-       1118,
-       153,
+       861,
+       76,
        2,
        "coding:cparity01",
        "",
@@ -1494,28 +1494,24 @@
        "<uuid:28>",
        "<time>",
        "agent_loop",
-       "tool_advertisement",
+       "loop_round",
        "<ms>",
        "success",
        {
         "$json": {
-         "advertised": 6,
-         "deferred_active": false,
-         "profile": null,
-         "registered_total": 6,
-         "source": "no tool loader (registry direct)"
+         "stop_reason": "stop"
         }
        },
-       null,
-       null,
-       null,
+       988,
+       41,
+       3,
        "coding:cparity01",
        "",
-       null,
+       1,
        null,
        null,
        "<node>",
-       null,
+       "unknown",
        null
       ],
       [
@@ -1530,9 +1526,9 @@
          "stop_reason": "stop"
         }
        },
-       1255,
-       135,
-       0,
+       1104,
+       76,
+       4,
        "coding:cparity01",
        "",
        1,
@@ -1546,180 +1542,28 @@
        "<uuid:30>",
        "<time>",
        "agent_loop",
-       "tool_advertisement",
+       "loop_round",
        "<ms>",
        "success",
        {
         "$json": {
-         "advertised": 6,
-         "deferred_active": false,
-         "profile": null,
-         "registered_total": 6,
-         "source": "no tool loader (registry direct)"
+         "stop_reason": "stop"
         }
        },
-       null,
-       null,
-       null,
+       1187,
+       101,
+       5,
        "coding:cparity01",
        "",
-       null,
+       1,
        null,
        null,
        "<node>",
-       null,
+       "unknown",
        null
       ],
       [
        "<uuid:31>",
-       "<time>",
-       "agent_loop",
-       "loop_round",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "stop_reason": "stop"
-        }
-       },
-       1377,
-       188,
-       0,
-       "coding:cparity01",
-       "",
-       1,
-       null,
-       null,
-       "<node>",
-       "unknown",
-       null
-      ],
-      [
-       "<uuid:32>",
-       "<time>",
-       "agent_loop",
-       "loop_round",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "stop_reason": "stop"
-        }
-       },
-       1632,
-       30,
-       1,
-       "coding:cparity01",
-       "",
-       1,
-       null,
-       null,
-       "<node>",
-       "unknown",
-       null
-      ],
-      [
-       "<uuid:33>",
-       "<time>",
-       "agent_loop",
-       "tool_advertisement",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "advertised": 6,
-         "deferred_active": false,
-         "profile": null,
-         "registered_total": 6,
-         "source": "no tool loader (registry direct)"
-        }
-       },
-       null,
-       null,
-       null,
-       "coding:cparity01",
-       "",
-       null,
-       null,
-       null,
-       "<node>",
-       null,
-       null
-      ],
-      [
-       "<uuid:34>",
-       "<time>",
-       "agent_loop",
-       "loop_round",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "stop_reason": "stop"
-        }
-       },
-       1749,
-       81,
-       0,
-       "coding:cparity01",
-       "",
-       1,
-       null,
-       null,
-       "<node>",
-       "unknown",
-       null
-      ],
-      [
-       "<uuid:35>",
-       "<time>",
-       "agent_loop",
-       "loop_round",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "stop_reason": "stop"
-        }
-       },
-       1897,
-       164,
-       1,
-       "coding:cparity01",
-       "",
-       1,
-       null,
-       null,
-       "<node>",
-       "unknown",
-       null
-      ],
-      [
-       "<uuid:36>",
-       "<time>",
-       "agent_loop",
-       "loop_round",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "stop_reason": "stop"
-        }
-       },
-       2043,
-       138,
-       2,
-       "coding:cparity01",
-       "",
-       1,
-       null,
-       null,
-       "<node>",
-       "unknown",
-       null
-      ],
-      [
-       "<uuid:37>",
        "<time>",
        "coding_mode",
        "acceptance",
@@ -1745,7 +1589,7 @@
        null
       ],
       [
-       "<uuid:38>",
+       "<uuid:32>",
        "<time>",
        "coding_mode",
        "run",
@@ -1755,9 +1599,9 @@
         "$json": {
          "acceptance_exit": 0,
          "branch": "coding/cparity01",
-         "episodes": 4,
+         "episodes": 1,
          "reason": "acceptance command exited 0",
-         "rounds": 8,
+         "rounds": 5,
          "status": "success",
          "task_id": "cparity01",
          "wall_seconds": "<ms>"
@@ -1799,7 +1643,7 @@
      ],
      "rows": [
       [
-       "<uuid:39>",
+       "<uuid:33>",
        "<time>",
        "",
        "code_view",
@@ -1808,11 +1652,18 @@
        "<ms>",
        null,
        null,
-       "```json\n{\"name\": \"code_view\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>\"}}\n```",
+       {
+        "$json": {
+         "arguments": {
+          "path": "calc.py"
+         },
+         "name": "code_view"
+        }
+       },
        {
         "$json": {
          "input": {
-          "path": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>"
+          "path": "calc.py"
          },
          "name": "code_view"
         }
@@ -1860,7 +1711,7 @@
        "<node>"
       ],
       [
-       "<uuid:40>",
+       "<uuid:34>",
        "<time>",
        "",
        "_loop_transition",
@@ -1879,7 +1730,7 @@
        "<node>"
       ],
       [
-       "<uuid:41>",
+       "<uuid:35>",
        "<time>",
        "",
        "code_view",
@@ -1888,11 +1739,11 @@
        "<ms>",
        null,
        null,
-       "```json\n{\"name\": \"code_view\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py\"}}\n```\n```json\n{\"name\": \"code_view\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/test_calc.py\"}}\n```",
+       "{\"name\": \"code_view\", \"arguments\": {\"path\": \"test_calc.py\"}}\n\n<tool_call>\n<function=code_view>\n<parameter=path>\ntest_calc.py\n</parameter>\n</function>\n</tool_call>",
        {
         "$json": {
          "input": {
-          "path": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py"
+          "path": "test_calc.py"
          },
          "name": "code_view"
         }
@@ -1940,68 +1791,7 @@
        "<node>"
       ],
       [
-       "<uuid:42>",
-       "<time>",
-       "",
-       "code_view",
-       1,
-       0,
-       "<ms>",
-       null,
-       null,
-       "```json\n{\"name\": \"code_view\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py\"}}\n```\n```json\n{\"name\": \"code_view\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/test_calc.py\"}}\n```",
-       {
-        "$json": {
-         "input": {
-          "path": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/test_calc.py"
-         },
-         "name": "code_view"
-        }
-       },
-       0,
-       0,
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       "coding:cparity01",
-       {
-        "$json": {
-         "description": "View a file with line numbers, or list a directory. Always view a file before editing it — code_str_replace requires the exact current text. Optional view_range narrows to [start, end] lines.",
-         "name": "code_view",
-         "parameters": {
-          "properties": {
-           "path": {
-            "description": "File or directory path, relative to the repo root.",
-            "title": "Path",
-            "type": "string"
-           },
-           "view_range": {
-            "anyOf": [
-             {
-              "items": {
-               "type": "integer"
-              },
-              "type": "array"
-             },
-             {
-              "type": "null"
-             }
-            ],
-            "default": null,
-            "description": "Optional [start_line, end_line] (1-based, inclusive) for files.",
-            "title": "View Range"
-           }
-          },
-          "required": [
-           "path"
-          ],
-          "title": "CodeViewArgs",
-          "type": "object"
-         }
-        }
-       },
-       "<node>"
-      ],
-      [
-       "<uuid:43>",
+       "<uuid:36>",
        "<time>",
        "",
        "_loop_transition",
@@ -2020,7 +1810,7 @@
        "<node>"
       ],
       [
-       "<uuid:44>",
+       "<uuid:37>",
        "<time>",
        "",
        "code_str_replace",
@@ -2029,13 +1819,13 @@
        "<ms>",
        null,
        null,
-       "```json\n{\"name\": \"code_str_replace\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py\", \"old_str\": \"    return a - b\", \"new_str\": \"    return a + b\"}}\n```\n\n<tool_call>\n<function=code_str_replace>\n<parameter=path>\n/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py\n</parameter>\n<parameter=old_str>\n    return a - b\n</parameter>\n<parameter=new_str>\n    return a + b\n</parameter>\n</function>\n</tool_call>",
+       "<tool_call>\n{\"name\": \"code_str_replace\", \"arguments\": {\"path\": \"calc.py\", \"old_str\": \"    return a - b\", \"new_str\": \"    return a + b\"}}\n</function>\n</tool_call>",
        {
         "$json": {
          "input": {
           "new_str": "    return a + b",
           "old_str": "    return a - b",
-          "path": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py"
+          "path": "calc.py"
          },
          "name": "code_str_replace"
         }
@@ -2079,7 +1869,7 @@
        "<node>"
       ],
       [
-       "<uuid:45>",
+       "<uuid:38>",
        "<time>",
        "",
        "_loop_transition",
@@ -2098,7 +1888,7 @@
        "<node>"
       ],
       [
-       "<uuid:46>",
+       "<uuid:39>",
        "<time>",
        "",
        "_loop_transition",
@@ -2117,7 +1907,7 @@
        "<node>"
       ],
       [
-       "<uuid:47>",
+       "<uuid:40>",
        "<time>",
        "",
        "code_run",
@@ -2126,11 +1916,11 @@
        "<ms>",
        null,
        null,
-       "```json\n{\"name\": \"code_run\", \"arguments\": {\"command\": \"cd /tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch> && python test_calc.py\"}}\n```",
+       "{\"name\": \"code_run\", \"arguments\": {\"command\": \"python test_calc.py\"}}\n\n<tool_call>\n<function=code_run>\n<parameter=command>\npython test_calc.py\n</parameter>\n</function>\n</tool_call>",
        {
         "$json": {
          "input": {
-          "command": "cd /tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch> && python test_calc.py"
+          "command": "python test_calc.py"
          },
          "name": "code_run"
         }
@@ -2175,7 +1965,7 @@
        "<node>"
       ],
       [
-       "<uuid:48>",
+       "<uuid:41>",
        "<time>",
        "",
        "_loop_transition",

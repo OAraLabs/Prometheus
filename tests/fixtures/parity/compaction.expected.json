@@ -130,97 +130,11 @@
      "role": "user"
     },
     {
-     "content": {
-      "$json": {
-       "arguments": {
-        "pattern": "words"
-       },
-       "name": "lcm_grep"
-      }
-     },
+     "content": "amber, birch, cobalt",
      "content_json": {
       "$json": [
        {
-        "text": {
-         "$json": {
-          "arguments": {
-           "pattern": "words"
-          },
-          "name": "lcm_grep"
-         }
-        },
-        "type": "text"
-       },
-       {
-        "id": "<toolu:1>",
-        "input": {
-         "pattern": "words"
-        },
-        "name": "lcm_grep",
-        "type": "tool_use"
-       }
-      ]
-     },
-     "is_trusted": false,
-     "provenance": "user",
-     "role": "assistant"
-    },
-    {
-     "content": "",
-     "content_json": {
-      "$json": [
-       {
-        "content": "Invalid input for lcm_grep: 1 validation error for LCMGrepInput\nquery\n  Field required [type=missing, input_value={'pattern': 'words'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.12/v/missing",
-        "is_error": true,
-        "tool_use_id": "<toolu:1>",
-        "type": "tool_result"
-       }
-      ]
-     },
-     "is_trusted": false,
-     "provenance": "user",
-     "role": "user"
-    },
-    {
-     "content": "",
-     "content_json": {
-      "$json": [
-       {
-        "id": "z5MwOtmmWXffBKPN5fQVqAZ4yqggzCi2",
-        "input": {
-         "operation": "list"
-        },
-        "name": "memory",
-        "type": "tool_use"
-       }
-      ]
-     },
-     "is_trusted": false,
-     "provenance": "user",
-     "role": "assistant"
-    },
-    {
-     "content": "",
-     "content_json": {
-      "$json": [
-       {
-        "content": "(no entries)",
-        "is_error": false,
-        "tool_use_id": "z5MwOtmmWXffBKPN5fQVqAZ4yqggzCi2",
-        "type": "tool_result"
-       }
-      ]
-     },
-     "is_trusted": false,
-     "provenance": "user",
-     "role": "user"
-    },
-    {
-     "content": "I couldn't retrieve the three words from conversation history — the `lcm_grep` call failed and memory is empty, so I have no reliable record of them. I won't guess.\n\nCould you send the three words again (or confirm the three you have), and I'll do the rest of the exercise: pick two, keep one, and swap the first two. If you'd also like me to remember them via the `memory` tool for next time, say the word.",
-     "content_json": {
-      "$json": [
-       {
-        "text": "I couldn't retrieve the three words from conversation history — the `lcm_grep` call failed and memory is empty, so I have no reliable record of them. I won't guess.\n\nCould you send the three words again (or confirm the three you have), and I'll do the rest of the exercise: pick two, keep one, and swap the first two. If you'd also like me to remember them via the `memory` tool for next time, say the word.",
+        "text": "amber, birch, cobalt",
         "type": "text"
        }
       ]
@@ -231,7 +145,7 @@
     }
    ],
    "op": "chat",
-   "reply": "I couldn't retrieve the three words from conversation history — the `lcm_grep` call failed and memory is empty, so I have no reliable record of them. I won't guess.\n\nCould you send the three words again (or confirm the three you have), and I'll do the rest of the exercise: pick two, keep one, and swap the first two. If you'd also like me to remember them via the `memory` tool for next time, say the word.",
+   "reply": "amber, birch, cobalt",
    "session": "desktop:parity-compact"
   }
  ],
@@ -508,126 +422,16 @@
        "desktop:parity-compact",
        7,
        "assistant",
-       {
-        "$json": {
-         "arguments": {
-          "pattern": "words"
-         },
-         "name": "lcm_grep"
-        }
-       },
+       "amber, birch, cobalt",
        {
         "$json": [
          {
-          "text": {
-           "$json": {
-            "arguments": {
-             "pattern": "words"
-            },
-            "name": "lcm_grep"
-           }
-          },
-          "type": "text"
-         },
-         {
-          "id": "<toolu:1>",
-          "input": {
-           "pattern": "words"
-          },
-          "name": "lcm_grep",
-          "type": "tool_use"
-         }
-        ]
-       },
-       12,
-       "<time>",
-       0,
-       "user",
-       0
-      ],
-      [
-       "<uuid:9>",
-       "desktop:parity-compact",
-       8,
-       "user",
-       "",
-       {
-        "$json": [
-         {
-          "content": "Invalid input for lcm_grep: 1 validation error for LCMGrepInput\nquery\n  Field required [type=missing, input_value={'pattern': 'words'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.12/v/missing",
-          "is_error": true,
-          "tool_use_id": "<toolu:1>",
-          "type": "tool_result"
-         }
-        ]
-       },
-       0,
-       "<time>",
-       0,
-       "user",
-       0
-      ],
-      [
-       "<uuid:10>",
-       "desktop:parity-compact",
-       9,
-       "assistant",
-       "",
-       {
-        "$json": [
-         {
-          "id": "z5MwOtmmWXffBKPN5fQVqAZ4yqggzCi2",
-          "input": {
-           "operation": "list"
-          },
-          "name": "memory",
-          "type": "tool_use"
-         }
-        ]
-       },
-       0,
-       "<time>",
-       0,
-       "user",
-       0
-      ],
-      [
-       "<uuid:11>",
-       "desktop:parity-compact",
-       10,
-       "user",
-       "",
-       {
-        "$json": [
-         {
-          "content": "(no entries)",
-          "is_error": false,
-          "tool_use_id": "z5MwOtmmWXffBKPN5fQVqAZ4yqggzCi2",
-          "type": "tool_result"
-         }
-        ]
-       },
-       0,
-       "<time>",
-       0,
-       "user",
-       0
-      ],
-      [
-       "<uuid:12>",
-       "desktop:parity-compact",
-       11,
-       "assistant",
-       "I couldn't retrieve the three words from conversation history — the `lcm_grep` call failed and memory is empty, so I have no reliable record of them. I won't guess.\n\nCould you send the three words again (or confirm the three you have), and I'll do the rest of the exercise: pick two, keep one, and swap the first two. If you'd also like me to remember them via the `memory` tool for next time, say the word.",
-       {
-        "$json": [
-         {
-          "text": "I couldn't retrieve the three words from conversation history — the `lcm_grep` call failed and memory is empty, so I have no reliable record of them. I won't guess.\n\nCould you send the three words again (or confirm the three you have), and I'll do the rest of the exercise: pick two, keep one, and swap the first two. If you'd also like me to remember them via the `memory` tool for next time, say the word.",
+          "text": "amber, birch, cobalt",
           "type": "text"
          }
         ]
        },
-       101,
+       5,
        "<time>",
        0,
        "user",
@@ -662,26 +466,7 @@
        "What were the three words, in order? Answer in one line."
       ],
       [
-       {
-        "$json": {
-         "arguments": {
-          "pattern": "words"
-         },
-         "name": "lcm_grep"
-        }
-       }
-      ],
-      [
-       ""
-      ],
-      [
-       ""
-      ],
-      [
-       ""
-      ],
-      [
-       "I couldn't retrieve the three words from conversation history — the `lcm_grep` call failed and memory is empty, so I have no reliable record of them. I won't guess.\n\nCould you send the three words again (or confirm the three you have), and I'll do the rest of the exercise: pick two, keep one, and swap the first two. If you'd also like me to remember them via the `memory` tool for next time, say the word."
+       "amber, birch, cobalt"
       ]
      ]
     },
@@ -706,15 +491,15 @@
       [
        1,
        {
-        "$bytes_sha256": "0e6b1fb5cfd5e406",
-        "len": 3
+        "$bytes_sha256": "bf37c3988f6d7c36",
+        "len": 2
        }
       ],
       [
        10,
        {
-        "$bytes_sha256": "4a1d8551e380a9a4",
-        "len": 36
+        "$bytes_sha256": "5c19cbb477341170",
+        "len": 33
        }
       ],
       [
@@ -769,15 +554,8 @@
       [
        1099511627777,
        {
-        "$bytes_sha256": "0a2c49d989c966ad",
-        "len": 72
-       }
-      ],
-      [
-       1236950581249,
-       {
-        "$bytes_sha256": "9487f5d99c0ab111",
-        "len": 547
+        "$bytes_sha256": "43bedeb59450f4fe",
+        "len": 38
        }
       ]
      ]
@@ -840,35 +618,7 @@
       [
        8,
        {
-        "$bytes_sha256": "67586e98fad27da0",
-        "len": 1
-       }
-      ],
-      [
-       9,
-       {
-        "$bytes_sha256": "6e340b9cffb37a98",
-        "len": 1
-       }
-      ],
-      [
-       10,
-       {
-        "$bytes_sha256": "6e340b9cffb37a98",
-        "len": 1
-       }
-      ],
-      [
-       11,
-       {
-        "$bytes_sha256": "6e340b9cffb37a98",
-        "len": 1
-       }
-      ],
-      [
-       12,
-       {
-        "$bytes_sha256": "4ae81572f06e1b88",
+        "$bytes_sha256": "084fed08b978af4d",
         "len": 1
        }
       ]
@@ -939,14 +689,6 @@
       ],
       [
        8,
-       {
-        "$bytes_sha256": "e3b0c44298fc1c14",
-        "len": 0
-       },
-       2
-      ],
-      [
-       9,
        {
         "$bytes_sha256": "e3b0c44298fc1c14",
         "len": 0
@@ -1075,7 +817,7 @@
      "rows": [
       [
        "desktop:parity-compact",
-       "Memory Game Starting",
+       "Memory Game Starting Amber",
        "<time>"
       ]
      ]
@@ -1112,36 +854,9 @@
       "user_id",
       "session_id"
      ],
-     "rows": [
-      [
-       1,
-       "<time>",
-       "memory",
-       "allow",
-       2,
-       "Auto-allowed (user-initiated)",
-       "",
-       null,
-       null
-      ]
-     ]
+     "rows": []
     }
    }
-  },
-  "home/.prometheus/data/security/permission_audit.jsonl": {
-   "jsonl": [
-    {
-     "decision": "allow",
-     "reason": "Auto-allowed (user-initiated)",
-     "session_id": null,
-     "timestamp": "<time>",
-     "timestamp_iso": "<time>",
-     "tool_input_summary": "",
-     "tool_name": "memory",
-     "trust_level": 2,
-     "user_id": null
-    }
-   ]
   },
   "home/.prometheus/data/tasks.db": {
    "sqlite": {
@@ -1432,11 +1147,11 @@
        "context_compaction_noop",
        {
         "$json": {
-         "over_by": 5094,
+         "over_by": 5088,
          "session_id": "desktop:parity-compact",
          "span_messages": 0,
          "threshold": 573,
-         "tokens_before": 5667
+         "tokens_before": 5661
         }
        },
        "context_compactor",
@@ -1448,11 +1163,11 @@
        "context_compaction_noop",
        {
         "$json": {
-         "over_by": 5121,
+         "over_by": 5115,
          "session_id": "desktop:parity-compact",
          "span_messages": 2,
          "threshold": 573,
-         "tokens_before": 5694
+         "tokens_before": 5688
         }
        },
        "context_compactor",
@@ -1467,13 +1182,13 @@
          "cache_hit": false,
          "converged": false,
          "duration_ms": "<ms>",
-         "over_by": 5117,
+         "over_by": 5114,
          "session_id": "desktop:parity-compact",
          "span_messages": 4,
          "summarizer_input_omitted": 0,
          "threshold": 573,
-         "tokens_after": 5690,
-         "tokens_before": 5721
+         "tokens_after": 5687,
+         "tokens_before": 5715
         }
        },
        "context_compactor",
@@ -1488,55 +1203,13 @@
          "cache_hit": false,
          "converged": false,
          "duration_ms": "<ms>",
-         "over_by": 5130,
+         "over_by": 5137,
          "session_id": "desktop:parity-compact",
          "span_messages": 6,
          "summarizer_input_omitted": 0,
          "threshold": 573,
-         "tokens_after": 5703,
-         "tokens_before": 5750
-        }
-       },
-       "context_compactor",
-       null
-      ],
-      [
-       5,
-       "<time>",
-       "context_compaction",
-       {
-        "$json": {
-         "cache_hit": false,
-         "converged": false,
-         "duration_ms": "<ms>",
-         "over_by": 5212,
-         "session_id": "desktop:parity-compact",
-         "span_messages": 8,
-         "summarizer_input_omitted": 0,
-         "threshold": 573,
-         "tokens_after": 5785,
-         "tokens_before": 5879
-        }
-       },
-       "context_compactor",
-       null
-      ],
-      [
-       6,
-       "<time>",
-       "context_compaction",
-       {
-        "$json": {
-         "cache_hit": false,
-         "converged": false,
-         "duration_ms": "<ms>",
-         "over_by": 5198,
-         "session_id": "desktop:parity-compact",
-         "span_messages": 10,
-         "summarizer_input_omitted": 0,
-         "threshold": 573,
-         "tokens_after": 5771,
-         "tokens_before": 5937
+         "tokens_after": 5710,
+         "tokens_before": 5744
         }
        },
        "context_compactor",
@@ -1581,7 +1254,7 @@
      ],
      "rows": [
       [
-       "<uuid:13>",
+       "<uuid:9>",
        "<time>",
        "tool_registration",
        "TaskCreateTool",
@@ -1606,7 +1279,7 @@
        null
       ],
       [
-       "<uuid:14>",
+       "<uuid:10>",
        "<time>",
        "tool_registration",
        "GitHubSearchTool",
@@ -1631,7 +1304,7 @@
        null
       ],
       [
-       "<uuid:15>",
+       "<uuid:11>",
        "<time>",
        "tool_registration",
        "SymbioteScoutTool",
@@ -1656,7 +1329,7 @@
        null
       ],
       [
-       "<uuid:16>",
+       "<uuid:12>",
        "<time>",
        "tool_registration",
        "SymbioteHarvestTool",
@@ -1681,7 +1354,7 @@
        null
       ],
       [
-       "<uuid:17>",
+       "<uuid:13>",
        "<time>",
        "tool_registration",
        "SymbioteGraftTool",
@@ -1706,7 +1379,7 @@
        null
       ],
       [
-       "<uuid:18>",
+       "<uuid:14>",
        "<time>",
        "tool_registration",
        "SymbioteStatusTool",
@@ -1731,7 +1404,7 @@
        null
       ],
       [
-       "<uuid:19>",
+       "<uuid:15>",
        "<time>",
        "tool_registration",
        "SkillTool",
@@ -1756,7 +1429,7 @@
        null
       ],
       [
-       "<uuid:20>",
+       "<uuid:16>",
        "<time>",
        "tool_registration",
        "MemoryTool",
@@ -1781,7 +1454,7 @@
        null
       ],
       [
-       "<uuid:21>",
+       "<uuid:17>",
        "<time>",
        "tool_registration",
        "TodoWriteTool",
@@ -1806,7 +1479,7 @@
        null
       ],
       [
-       "<uuid:22>",
+       "<uuid:18>",
        "<time>",
        "tool_registration",
        "VaultSearchTool",
@@ -1831,7 +1504,7 @@
        null
       ],
       [
-       "<uuid:23>",
+       "<uuid:19>",
        "<time>",
        "tool_registration",
        "VaultReadTool",
@@ -1856,7 +1529,7 @@
        null
       ],
       [
-       "<uuid:24>",
+       "<uuid:20>",
        "<time>",
        "tool_registration",
        "AnatomyTool",
@@ -1881,7 +1554,7 @@
        null
       ],
       [
-       "<uuid:25>",
+       "<uuid:21>",
        "<time>",
        "tool_registration",
        "BrowserTool",
@@ -1906,7 +1579,7 @@
        null
       ],
       [
-       "<uuid:26>",
+       "<uuid:22>",
        "<time>",
        "tool_registration",
        "SessionsListTool",
@@ -1931,7 +1604,7 @@
        null
       ],
       [
-       "<uuid:27>",
+       "<uuid:23>",
        "<time>",
        "tool_registration",
        "SessionsSendTool",
@@ -1956,7 +1629,7 @@
        null
       ],
       [
-       "<uuid:28>",
+       "<uuid:24>",
        "<time>",
        "tool_registration",
        "SessionsSpawnTool",
@@ -1981,7 +1654,7 @@
        null
       ],
       [
-       "<uuid:29>",
+       "<uuid:25>",
        "<time>",
        "tool_registration",
        "TaskGetTool",
@@ -2006,7 +1679,7 @@
        null
       ],
       [
-       "<uuid:30>",
+       "<uuid:26>",
        "<time>",
        "tool_registration",
        "TaskListTool",
@@ -2031,7 +1704,7 @@
        null
       ],
       [
-       "<uuid:31>",
+       "<uuid:27>",
        "<time>",
        "tool_registration",
        "TaskUpdateTool",
@@ -2056,7 +1729,7 @@
        null
       ],
       [
-       "<uuid:32>",
+       "<uuid:28>",
        "<time>",
        "tool_registration",
        "TaskStopTool",
@@ -2081,7 +1754,7 @@
        null
       ],
       [
-       "<uuid:33>",
+       "<uuid:29>",
        "<time>",
        "tool_registration",
        "TaskOutputTool",
@@ -2106,7 +1779,7 @@
        null
       ],
       [
-       "<uuid:34>",
+       "<uuid:30>",
        "<time>",
        "tool_registration",
        "ImageGenerateTool",
@@ -2131,7 +1804,7 @@
        null
       ],
       [
-       "<uuid:35>",
+       "<uuid:31>",
        "<time>",
        "tool_registration",
        "KlingVideoTool",
@@ -2153,6 +1826,110 @@
        null,
        "<node>",
        null,
+       null
+      ],
+      [
+       "<uuid:32>",
+       "<time>",
+       "agent_loop",
+       "tool_advertisement",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "advertised": 11,
+         "deferred_active": true,
+         "profile": "full",
+         "registered_total": 51,
+         "source": "auto → enabled (local provider, tier light)"
+        }
+       },
+       null,
+       null,
+       null,
+       "desktop:parity-compact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:33>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "stop_reason": "stop"
+        }
+       },
+       5939,
+       3,
+       0,
+       "desktop:parity-compact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       null,
+       null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:34>",
+       "<time>",
+       "agent_loop",
+       "tool_advertisement",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "advertised": 11,
+         "deferred_active": true,
+         "profile": "full",
+         "registered_total": 51,
+         "source": "auto → enabled (local provider, tier light)"
+        }
+       },
+       null,
+       null,
+       null,
+       "desktop:parity-compact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:35>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "stop_reason": "stop"
+        }
+       },
+       5969,
+       3,
+       0,
+       "desktop:parity-compact",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       null,
+       null,
+       "<node>",
+       "local",
        null
       ],
       [
@@ -2186,110 +1963,6 @@
       [
        "<uuid:37>",
        "<time>",
-       "agent_loop",
-       "loop_round",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "stop_reason": "stop"
-        }
-       },
-       5944,
-       3,
-       0,
-       "desktop:parity-compact",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       0,
-       null,
-       null,
-       "<node>",
-       "local",
-       null
-      ],
-      [
-       "<uuid:38>",
-       "<time>",
-       "agent_loop",
-       "tool_advertisement",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "advertised": 11,
-         "deferred_active": true,
-         "profile": "full",
-         "registered_total": 51,
-         "source": "auto → enabled (local provider, tier light)"
-        }
-       },
-       null,
-       null,
-       null,
-       "desktop:parity-compact",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       null,
-       null,
-       null,
-       "<node>",
-       null,
-       null
-      ],
-      [
-       "<uuid:39>",
-       "<time>",
-       "agent_loop",
-       "loop_round",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "stop_reason": "stop"
-        }
-       },
-       5974,
-       3,
-       0,
-       "desktop:parity-compact",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       0,
-       null,
-       null,
-       "<node>",
-       "local",
-       null
-      ],
-      [
-       "<uuid:40>",
-       "<time>",
-       "agent_loop",
-       "tool_advertisement",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "advertised": 11,
-         "deferred_active": true,
-         "profile": "full",
-         "registered_total": 51,
-         "source": "auto → enabled (local provider, tier light)"
-        }
-       },
-       null,
-       null,
-       null,
-       "desktop:parity-compact",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       null,
-       null,
-       null,
-       "<node>",
-       null,
-       null
-      ],
-      [
-       "<uuid:41>",
-       "<time>",
        "context_compactor",
        "summarize_span",
        "<ms>",
@@ -2300,7 +1973,7 @@
           "session_id": "desktop:parity-compact",
           "span_messages": 4
          },
-         "output_chars": 51
+         "output_chars": 61
         }
        },
        null,
@@ -2316,7 +1989,7 @@
        null
       ],
       [
-       "<uuid:42>",
+       "<uuid:38>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -2327,7 +2000,7 @@
          "stop_reason": "stop"
         }
        },
-       5971,
+       5969,
        3,
        0,
        "desktop:parity-compact",
@@ -2340,7 +2013,7 @@
        null
       ],
       [
-       "<uuid:43>",
+       "<uuid:39>",
        "<time>",
        "agent_loop",
        "tool_advertisement",
@@ -2368,7 +2041,7 @@
        null
       ],
       [
-       "<uuid:44>",
+       "<uuid:40>",
        "<time>",
        "context_compactor",
        "summarize_span",
@@ -2380,7 +2053,7 @@
           "session_id": "desktop:parity-compact",
           "span_messages": 6
          },
-         "output_chars": 93
+         "output_chars": 139
         }
        },
        null,
@@ -2396,7 +2069,7 @@
        null
       ],
       [
-       "<uuid:45>",
+       "<uuid:41>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -2407,113 +2080,9 @@
          "stop_reason": "stop"
         }
        },
-       5986,
-       15,
+       5988,
+       8,
        0,
-       "desktop:parity-compact",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       0,
-       null,
-       null,
-       "<node>",
-       "local",
-       null
-      ],
-      [
-       "<uuid:46>",
-       "<time>",
-       "context_compactor",
-       "summarize_span",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "context": {
-          "session_id": "desktop:parity-compact",
-          "span_messages": 8
-         },
-         "output_chars": 183
-        }
-       },
-       null,
-       null,
-       null,
-       null,
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       null,
-       null,
-       null,
-       "<node>",
-       "local",
-       null
-      ],
-      [
-       "<uuid:47>",
-       "<time>",
-       "agent_loop",
-       "loop_round",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "stop_reason": "tool_calls"
-        }
-       },
-       6057,
-       26,
-       1,
-       "desktop:parity-compact",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       0,
-       null,
-       null,
-       "<node>",
-       "local",
-       null
-      ],
-      [
-       "<uuid:48>",
-       "<time>",
-       "context_compactor",
-       "summarize_span",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "context": {
-          "session_id": "desktop:parity-compact",
-          "span_messages": 10
-         },
-         "output_chars": 322
-        }
-       },
-       null,
-       null,
-       null,
-       null,
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       null,
-       null,
-       null,
-       "<node>",
-       "local",
-       null
-      ],
-      [
-       "<uuid:49>",
-       "<time>",
-       "agent_loop",
-       "loop_round",
-       "<ms>",
-       "success",
-       {
-        "$json": {
-         "stop_reason": "stop"
-        }
-       },
-       6026,
-       101,
-       2,
        "desktop:parity-compact",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
@@ -2545,179 +2114,7 @@
       "tool_schema",
       "node_id"
      ],
-     "rows": [
-      [
-       "<uuid:50>",
-       "<time>",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       "lcm_grep",
-       1,
-       0,
-       null,
-       "lucky_guess",
-       "Tool lcm_grep called without being in prompt schema",
-       null,
-       null,
-       0,
-       0,
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       null,
-       null,
-       "<node>"
-      ],
-      [
-       "<uuid:51>",
-       "<time>",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       "lcm_grep",
-       0,
-       0,
-       null,
-       "input_validation",
-       "1 validation error for LCMGrepInput\nquery\n  Field required [type=missing, input_value={'pattern': 'words'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.12/v/missing",
-       null,
-       {
-        "$json": {
-         "input": {
-          "pattern": "words"
-         },
-         "name": "lcm_grep"
-        }
-       },
-       0,
-       0,
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       null,
-       null,
-       "<node>"
-      ],
-      [
-       "<uuid:52>",
-       "<time>",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       "_loop_transition",
-       0,
-       0,
-       null,
-       "tool_error_retry",
-       null,
-       null,
-       null,
-       0,
-       0,
-       null,
-       null,
-       null,
-       "<node>"
-      ],
-      [
-       "<uuid:53>",
-       "<time>",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       "memory",
-       1,
-       0,
-       "<ms>",
-       null,
-       null,
-       "",
-       {
-        "$json": {
-         "input": {
-          "operation": "list"
-         },
-         "name": "memory"
-        }
-       },
-       0,
-       0,
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       "desktop:parity-compact",
-       {
-        "$json": {
-         "description": "Manage persistent memory entries. Call 'add' when the user shares a durable fact about themselves (preferences, key contacts, ongoing projects) or about the system (infrastructure, conventions, decisions) that should persist across sessions. Use 'replace' to update, 'remove' to delete, 'list' to read all entries.",
-         "name": "memory",
-         "parameters": {
-          "description": "Arguments for memory management.",
-          "properties": {
-           "entry": {
-            "anyOf": [
-             {
-              "type": "string"
-             },
-             {
-              "type": "null"
-             }
-            ],
-            "default": null,
-            "description": "Entry text for add/remove, or new entry text for replace.",
-            "title": "Entry"
-           },
-           "old_entry": {
-            "anyOf": [
-             {
-              "type": "string"
-             },
-             {
-              "type": "null"
-             }
-            ],
-            "default": null,
-            "description": "Existing entry text to match for replace.",
-            "title": "Old Entry"
-           },
-           "operation": {
-            "description": "Operation: 'add', 'replace', 'remove', or 'list'.",
-            "enum": [
-             "add",
-             "replace",
-             "remove",
-             "list"
-            ],
-            "title": "Operation",
-            "type": "string"
-           },
-           "target": {
-            "default": "memory",
-            "description": "File target: 'memory' (MEMORY.md) or 'user' (USER.md).",
-            "enum": [
-             "memory",
-             "user"
-            ],
-            "title": "Target",
-            "type": "string"
-           }
-          },
-          "required": [
-           "operation"
-          ],
-          "title": "MemoryToolInput",
-          "type": "object"
-         }
-        }
-       },
-       "<node>"
-      ],
-      [
-       "<uuid:54>",
-       "<time>",
-       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       "_loop_transition",
-       1,
-       0,
-       null,
-       null,
-       null,
-       null,
-       null,
-       0,
-       0,
-       null,
-       null,
-       null,
-       "<node>"
-      ]
-     ]
+     "rows": []
     }
    }
   }

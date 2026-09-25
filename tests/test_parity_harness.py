@@ -393,6 +393,127 @@ def test_the_repair_scenario_refuses_a_reply_that_misquotes_the_file():
     assert any("repairs > 0" in p for p in require(ev(0, quoted)))
 
 
+def test_the_compaction_scenario_refuses_a_reply_that_does_not_answer():
+    """compaction's golden must show a compacted history still answering: the
+    three words, in order, and nothing the game never had. The first committed
+    sample could not recall them, and a live sample invented a fourth word and
+    a memory write; both are refused at record time — and the compactor must
+    still have run."""
+    require = BY_NAME["compaction"].require
+
+    def ev(reply: str, ran: bool = True) -> Evidence:
+        stores = {"home/.prometheus/telemetry.db": {"sqlite": {"subsystem_runs": {
+            "columns": ["subsystem"], "rows": [["context_compactor"]] if ran else []}}}}
+        steps = [{"op": "chat", "reply": "noted"}] * 3 + [{"op": "chat", "reply": reply}]
+        return Evidence(stores=stores, steps=steps, requests=[], upstream_labels=[])
+
+    assert require(ev("amber, birch, cobalt")) == []
+    assert require(ev("The three words, in order: **amber**, **birch**, **cobalt**.")) == []
+    # "Answer in one line": a three-line list answers the words but not the ask.
+    listed = require(ev("1. **amber**\n2. **birch**\n3. **cobalt**"))
+    assert listed == ["the final reply is not one line (3 lines)"], listed
+    refused = require(ev("I couldn't retrieve the three words from conversation history — "
+                         "the `lcm_grep` call failed and memory is empty, so I won't guess."))
+    assert refused and "in order" in refused[0]
+    invented = require(ev('Done. Now "crimson" is also saved in memory — 4 words in total '
+                          '(amber, birch, cobalt, crimson), stored as a single durable fact '
+                          'in MEMORY.md.'))
+    assert any("never had: ['crimson']" in p for p in invented), invented
+    assert any("never happened" in p for p in invented), invented
+    assert require(ev("cobalt, birch, amber")), "wrong order is not an answer"
+    assert require(ev("amber, birch, cobalt", ran=False)) == ["the context compactor never ran"]
+
+
+# ── every rule applied while re-recording, now committed ────────────────────
+
+def _tel(**tables) -> dict:
+    """A telemetry.db dump with the given tables: name=(columns, rows)."""
+    return {"home/.prometheus/telemetry.db": {"sqlite": {
+        t: {"columns": cols, "rows": rows} for t, (cols, rows) in tables.items()}}}
+
+
+def _chat(reply: str) -> dict:
+    return {"op": "chat", "reply": reply}
+
+
+def _ev(*, stores=None, steps=(), requests=(), labels=()) -> Evidence:
+    return Evidence(stores=stores or {}, steps=list(steps), requests=list(requests),
+                    upstream_labels=list(labels))
+
+
+TOOL_OK = _tel(tool_calls=(["tool_name", "success"], [["glob", 1], ["read_file", 1]]))
+GATE = {**_tel(tool_calls=(["tool_name", "error_type"], [["read_file", "permission_denied"]])),
+        "home/.prometheus/data/security/audit.db": {"sqlite": {"permission_audit": {
+            "columns": ["decision"], "rows": [["DENY"]]}}}}
+COMPACTED = _tel(subsystem_runs=(["subsystem"], [["context_compactor"]]))
+UNDO = [{"op": "tree", "label": "after-turn", "tree": {"a": 1}}, None,
+        {"op": "restore_latest", "result": {"restored": ["x"]}},
+        {"op": "tree", "label": "after-undo", "tree": {"b": 2}}]
+ATLAS_REQ = [{"messages": [{"role": "system", "content": "# Project Atlas\n- codename ATLAS-7."}]}]
+CODE_OK = [{"op": "code", "result": {"report": {"status": "success", "acceptance_exit": 0}}}]
+# What pydantic puts in a tool result: the offending input, truncated, epoch and all.
+PYDANTIC = ("1 validation error for CodeViewInput\npath\n  Field required [type=missing, "
+            "input_value={'file_path': '/tmp/prome...g/cparity01-1790371638'}, input_type=dict]")
+HOSTED_REQ = [{"system": "- Model: claude-haiku-4-5 (provider: anthropic) — the ACTIVE model"}]
+SWITCH_REQS = [{"messages": [{"content": "one"}]}, {"messages": [{"content": "title"}]},
+               {"messages": [{"content": "two"}]}]
+MEMORY = {"home/.prometheus/MEMORY.md": "- the parity canary colour is teal"}
+
+
+def _undo(reply: str) -> list[dict]:
+    return [s if s is not None else _chat(reply) for s in UNDO]
+
+
+# (scenario, a sample that passes, [(a sample that must be refused, a fragment of the reason)])
+RECORDING_RULES = [
+    ("plain_chat", _ev(steps=[_chat("Hello from the lighthouse!")]),
+     [(_ev(steps=[_chat("Hello there!")]), "lighthouse")]),
+    ("tool_calls", _ev(stores=TOOL_OK, steps=[_chat("**Sprockets: 11**")]),
+     [(_ev(stores=TOOL_OK, steps=[_chat("There are eleven sprockets.")]), "sprocket count")]),
+    ("gate_blocked", _ev(stores=GATE, steps=[_chat("Both were refused by the security gate.")]),
+     [(_ev(stores=GATE, steps=[_chat("Done, here are the results.")]), "refusals")]),
+    ("checkpoint_undo", _ev(steps=_undo("Done.")),
+     [(_ev(steps=_undo("")), "no final reply")]),
+    ("compaction", _ev(stores=COMPACTED, steps=[_chat("noted")] * 3 + [_chat("amber, birch, cobalt")]),
+     [(_ev(stores=COMPACTED, steps=[_chat("noted")] * 3
+           + [_chat("I can't be certain, but: amber, birch, cobalt")]), "hedges"),
+      (_ev(stores=COMPACTED, steps=[_chat("noted")] * 3
+           + [_chat("amber\nbirch\ncobalt\n\nThose were the words.\nAnything else?")]), "one line")]),
+    ("coding_run", _ev(steps=CODE_OK, requests=[{"messages": [{"role": "tool", "content": "1\tdef add"}]}]),
+     [(_ev(steps=CODE_OK, requests=[{"messages": [{"role": "tool", "content": PYDANTIC}]}]),
+       "not replayable")]),
+    ("linked_workspace", _ev(stores=TOOL_OK, requests=ATLAS_REQ,
+                             steps=[_chat("Codename: ATLAS-7. Tally for blue: 9")]),
+     [(_ev(stores=TOOL_OK, requests=ATLAS_REQ, steps=[_chat("The codename is ATLAS-7.")]),
+       "blue tally")]),
+    ("model_switch", _ev(steps=[_chat("one"), _chat("two"), _chat("three")], requests=SWITCH_REQS,
+                         labels=["primary", "primary", "alt"]),
+     [(_ev(steps=[_chat("one"), _chat("one"), _chat("three")], requests=SWITCH_REQS,
+           labels=["primary", "primary", "alt"]), "one, two, three"),
+      (_ev(steps=[_chat("one"), _chat("two"), _chat("three")],
+           requests=SWITCH_REQS + SWITCH_REQS[1:2], labels=["primary", "primary", "alt", "primary"]),
+       "identical completion request")]),
+    ("hosted_route", _ev(steps=[{"op": "model"}, _chat("Welcome to the harbor!")],
+                         requests=HOSTED_REQ, labels=["hosted"]),
+     [(_ev(steps=[{"op": "model"}, _chat("Welcome aboard!")], requests=HOSTED_REQ, labels=["hosted"]),
+       "harbor")]),
+    ("memory_write", _ev(stores=MEMORY, steps=[_chat("Saved.")]),
+     [(_ev(stores=MEMORY, steps=[_chat("")]), "no final reply")]),
+]
+
+
+@pytest.mark.parametrize("name,good,bads", RECORDING_RULES, ids=[r[0] for r in RECORDING_RULES])
+def test_every_recording_rule_refuses_the_sample_it_was_written_for(name, good, bads):
+    """The rules applied by hand while re-recording (WP-X.14), committed so the
+    next re-record inherits them. Each refuses the shape that was thrown away,
+    and a sample that answers passes."""
+    require = BY_NAME[name].require
+    assert require(good) == [], require(good)
+    for bad, fragment in bads:
+        problems = require(bad)
+        assert any(fragment in p for p in problems), (name, fragment, problems)
+
+
 @pytest.mark.parametrize("name", sorted(BY_NAME))
 def test_committed_files_are_fixed_points_of_the_current_rules(name):
     """A rule added without `rebaseline` would make replay and recording

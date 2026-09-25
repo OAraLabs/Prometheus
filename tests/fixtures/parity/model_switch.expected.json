@@ -741,7 +741,7 @@
      "rows": [
       [
        "desktop:parity-switch",
-       "Testing Single Word Reply",
+       "One",
        "<time>"
       ]
      ]
@@ -1717,7 +1717,7 @@
          "stop_reason": "stop"
         }
        },
-       5931,
+       5926,
        2,
        0,
        "desktop:parity-switch",
@@ -1821,7 +1821,7 @@
          "stop_reason": "stop"
         }
        },
-       5975,
+       5970,
        2,
        0,
        "desktop:parity-switch",

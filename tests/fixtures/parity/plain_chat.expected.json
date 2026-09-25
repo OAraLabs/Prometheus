@@ -19,11 +19,11 @@
      "role": "user"
     },
     {
-     "content": "All good — your lighthouse is shining bright on this one!",
+     "content": "All systems are green and humming like a steady lighthouse!",
      "content_json": {
       "$json": [
        {
-        "text": "All good — your lighthouse is shining bright on this one!",
+        "text": "All systems are green and humming like a steady lighthouse!",
         "type": "text"
        }
       ]
@@ -34,7 +34,7 @@
     }
    ],
    "op": "chat",
-   "reply": "All good — your lighthouse is shining bright on this one!",
+   "reply": "All systems are green and humming like a steady lighthouse!",
    "session": "desktop:parity-plain"
   }
  ],
@@ -191,11 +191,11 @@
        "desktop:parity-plain",
        1,
        "assistant",
-       "All good — your lighthouse is shining bright on this one!",
+       "All systems are green and humming like a steady lighthouse!",
        {
         "$json": [
          {
-          "text": "All good — your lighthouse is shining bright on this one!",
+          "text": "All systems are green and humming like a steady lighthouse!",
           "type": "text"
          }
         ]
@@ -217,7 +217,7 @@
        "Parity check. Reply with one short friendly sentence that contains the word 'lighthouse'. Do not use any tools."
       ],
       [
-       "All good — your lighthouse is shining bright on this one!"
+       "All systems are green and humming like a steady lighthouse!"
       ]
      ]
     },
@@ -263,7 +263,7 @@
       [
        274877906945,
        {
-        "$bytes_sha256": "f8d0782f1a653c07",
+        "$bytes_sha256": "0c6f7dc920a36406",
         "len": 107
        }
       ]
@@ -436,7 +436,7 @@
      "rows": [
       [
        "desktop:parity-plain",
-       "Parity Check with Lighthouse",
+       "Lighthouse Parity Check",
        "<time>"
       ]
      ]
@@ -1412,8 +1412,8 @@
          "stop_reason": "stop"
         }
        },
-       5948,
-       14,
+       5943,
+       13,
        0,
        "desktop:parity-plain",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
