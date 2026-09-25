@@ -351,3 +351,44 @@ async def test_an_http_hook_whose_connection_setup_is_slow_but_in_time_succeeds(
         assert one.output == "ok"
     finally:
         server.shutdown()
+
+
+class _RecordingProxy(BaseHTTPRequestHandler):
+    """A forward proxy that answers every request itself and records it."""
+
+    seen: list[str] = []
+
+    def do_POST(self):
+        _RecordingProxy.seen.append(self.path)  # absolute URL through a proxy
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.send_response(200)
+        self.send_header("Content-Length", "7")
+        self.end_headers()
+        self.wfile.write(b"proxied")
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_an_http_hook_still_goes_through_the_environment_proxy(tmp_path, monkeypatch):
+    """Making the transport cancel-safe must not change routing: a host whose
+    egress is a proxy (HTTP_PROXY, or the system proxy on macOS) still sends
+    its hooks through it. (An earlier version of this change passed its own
+    transport=, which makes httpx skip environment proxies altogether.)"""
+    _RecordingProxy.seen = []
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), _RecordingProxy)
+    threading.Thread(target=proxy.serve_forever, daemon=True).start()
+    for name in ("NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{proxy.server_address[1]}")
+    try:
+        hook = HttpHookDefinition(url="http://hooks.example.invalid/hook",
+                                  timeout_seconds=3, block_on_failure=True)
+        _, result = await _run(hook, tmp_path)
+        [one] = result.results
+        assert one.success is True, one.reason
+        assert one.output == "proxied"
+        assert _RecordingProxy.seen == ["http://hooks.example.invalid/hook"]
+    finally:
+        proxy.shutdown()

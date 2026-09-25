@@ -186,15 +186,16 @@ class HookExecutor:
         #
         # The deadline arrives as a cancellation, which can land anywhere,
         # including inside httpcore's TLS handshake, whose cleanup runs only on
-        # an Exception. The transport is made cancel-safe for exactly that
-        # case (_cancel_safe_transport); httpx's own per-phase limits are as
-        # before.
+        # an Exception. The client is built exactly as before (so environment
+        # and system proxies still apply) and its pools are then made
+        # cancel-safe for exactly that case (_make_cancel_safe); httpx's own
+        # per-phase limits are as before.
         started = time.monotonic()
         deadline = asyncio.timeout(hook.timeout_seconds)
         try:
             async with deadline:
-                async with httpx.AsyncClient(timeout=hook.timeout_seconds,
-                                             transport=_cancel_safe_transport()) as client:
+                async with httpx.AsyncClient(timeout=hook.timeout_seconds) as client:
+                    _make_cancel_safe(client)
                     response = await client.post(
                         hook.url,
                         json={"event": event.value, "payload": payload},
@@ -372,23 +373,29 @@ class _CancelSafeBackend(httpcore.AsyncNetworkBackend):
         await self._inner.sleep(seconds)
 
 
-def _cancel_safe_transport() -> httpx.AsyncHTTPTransport:
-    """httpx's default transport, with its pool's backend made cancel-safe.
+def _make_cancel_safe(client: httpx.AsyncClient) -> None:
+    """Give every connection pool ``client`` holds a cancel-safe backend.
 
-    httpx 0.28 takes no network backend, but the httpcore pool it builds does,
-    and uses it lazily for every connection, so it is swapped in after
-    construction. A proxy from the environment is mounted by the client as a
-    separate transport and is not covered. If a future httpx moves the
-    attribute, the hook still runs, and this says so (the TLS-stall test in
+    That is the direct transport and each proxy transport httpx mounted from
+    the environment or the system settings, so a proxy's CONNECT-tunnel
+    handshake is covered too. The client itself is built exactly as before:
+    passing ``transport=`` instead would make httpx skip environment proxies
+    altogether. httpx 0.28 has no public way to pass a network backend, but
+    the httpcore pool each transport holds uses its ``_network_backend``
+    lazily for every connection, so it is swapped in place. If a future httpx
+    moves it, the hook still runs, and this says so (the TLS-stall test in
     tests/test_hook_timeouts.py would fail too).
     """
-    transport = httpx.AsyncHTTPTransport()
-    pool = getattr(transport, "_pool", None)
-    backend = getattr(pool, "_network_backend", None)
-    if backend is None:
-        log.warning("http hooks: this httpx has no pool backend to wrap; a hook "
-                    "that times out in a TLS handshake may leak its socket")
-        return transport
+    transports = [client._transport, *(t for t in client._mounts.values() if t is not None)]
+    for transport in transports:
+        pool = getattr(transport, "_pool", None)
+        backend = getattr(pool, "_network_backend", None)
+        if backend is None:
+            log.warning("http hooks: %s has no pool backend to wrap; a hook that "
+                        "times out in a TLS handshake may leak its socket",
+                        type(transport).__name__)
+        elif not isinstance(backend, _CancelSafeBackend):
+            pool._network_backend = _CancelSafeBackend(backend)
     pool._network_backend = _CancelSafeBackend(backend)
     return transport
 
