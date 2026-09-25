@@ -333,7 +333,7 @@ def _command_launch(command: str, env: dict[str, str]) -> tuple[list[str], dict[
     of that role; ``exit $?`` hands its status through. The command reaches the
     inner bash as a positional argument, never as script text of the leader.
 
-    The leader must add nothing the command would see:
+    The leader keeps out of the hook what it can:
 
     - Its own stderr goes to /dev/null (the command keeps the real one), so
       when the command dies from a signal the leader's job-status line
@@ -346,9 +346,12 @@ def _command_launch(command: str, env: dict[str, str]) -> tuple[list[str], dict[
       operator's profile. The leader gets it as an argument instead and
       exports it, unchanged, for the command's login bash only.
 
-    Two differences remain, both documented in the hooks contract (§15): the
-    command's ``$PPID`` is the leader, not the daemon, and a command killed by
-    a signal reports 128+n (the leader's ``exit``), not -n.
+    Differences that remain, listed in the hooks contract (§15): the command's
+    ``$PPID`` is the leader, not the daemon; ``SHLVL`` is one higher; a command
+    killed by a signal reports 128+n (the leader's ``exit``), not -n; a warning
+    bash prints while starting up, before the script redirects stderr (bash 5.2,
+    an ``LC_ALL`` naming a missing locale), appears twice; and a fork failure
+    in the leader itself leaves no message.
     """
     env = dict(env)
     argv = ["/bin/bash", "--norc", "-c", _SESSION_LEADER_SCRIPT, "prometheus-hook", command]
