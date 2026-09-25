@@ -89,7 +89,12 @@ class OllamaProvider(ModelProvider):
             "model": request.model,
             "messages": messages,
             "stream": True,
-            "options": {"num_predict": request.max_tokens},
+            # The OpenAI-compatible endpoint reads the top-level max_tokens (and
+            # maps it to num_predict itself); its request has no ``options``
+            # field, so ``options.num_predict`` was dropped silently and every
+            # turn ran unbounded (measured on 0.23.0: options.num_predict=5 ->
+            # 150 tokens, finish "stop"; max_tokens=5 -> 5 tokens, "length").
+            "max_tokens": request.max_tokens,
             # Ollama's OpenAI-compatible endpoint sends the usage chunk only
             # when asked (measured on 0.23.0: without this the stream carries
             # no ``usage`` at all), so every ollama round recorded 0/0 tokens.
