@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import socketserver
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -179,6 +180,22 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
 
+class _StubServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer without the reverse DNS lookup.
+
+    HTTPServer.server_bind() calls socket.getfqdn(host) AFTER bind() and
+    BEFORE listen(). On the macOS CI runner that lookup outlasted the 10 s the
+    tests wait: the port was bound but refused connections, and the stub had
+    printed nothing, so three tests failed at setup on every run while it came
+    up in 0.1 s everywhere else. The name is only used in the Server header,
+    which nothing here reads.
+    """
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def main() -> None:
     global MODE, SCRIPT
     parser = argparse.ArgumentParser(description=__doc__)
@@ -201,7 +218,8 @@ def main() -> None:
             for s in script
         ), "--script must be a JSON list of {name, arguments} objects"
         SCRIPT = script
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    print(f"firstlight stub model starting on 127.0.0.1:{args.port}", flush=True)
+    server = _StubServer(("127.0.0.1", args.port), Handler)
     print(f"firstlight stub model listening on 127.0.0.1:{args.port} mode={MODE}",
           flush=True)
     server.serve_forever()
