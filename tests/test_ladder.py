@@ -291,6 +291,12 @@ class TestPredicates:
          ("fail", True)),
         # the answer line written at the end of the last sentence is still the line
         ("The port configured in settings.ini is 48217. ANSWER: 48217", "48217", NUM, ("pass", True)),
+        # REAL reply (Bonsai 2 27B smoke, 2026-09-25), verbatim: the value is stated, and the
+        # "no" belongs to the NEXT sentence — it negates nothing the reply committed to
+        ("The function `reconcile_ledger_v3` is defined in `src/billing/settle.py`. Let me confirm "
+         "there's no other definition elsewhere.\n\n", SETTLE, PY_PATH, ("pass", False)),
+        # ...while a negation in the value's own sentence still commits to nothing
+        ("It is not in src/billing/settle.py.", SETTLE, PY_PATH, ("miss", False)),
     ])
     def test_the_reader_credits_or_fails_only_what_is_unambiguous(self, text, expect, shape, want):
         from prometheus.gym.ladder.verdict import read_answer

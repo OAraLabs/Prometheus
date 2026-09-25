@@ -216,7 +216,11 @@ five answer-line replies; four were misread, and each is now pinned verbatim in
 `tests/test_ladder.py`. `ANSWER: (1, 2, 1, 4)` and two committed "there is none" answers
 (`ANSWER: No request ID found for HTTP status 503.`) had been format misses, but all three are
 wrong answers and now fail. `…is 48217. ANSWER: 48217` had passed but was recorded as missing
-its answer line.
+its answer line. The Bonsai 2 27B smoke's 33 answer-line replies, graded blind by two graders
+who agreed on all 33, disagreed with the reader once: "…is defined in `src/billing/settle.py`.
+Let me confirm there's no other definition elsewhere." — the "no" in the second sentence had
+made a stated answer a format miss. A negation now disqualifies a value only in the sentence
+that states it (`It is not 48217` is still a format miss).
 
 Each limit says which way it moves a score. *Down* is the costly direction: a right answer counted
 as wrong.
@@ -262,11 +266,19 @@ The judge is `PrometheusJudge` (OpenAI-compatible, JSON-schema constrained decod
 
 For the rungs, the pin is in `rungs.yaml`: **`qwen2.5:14b-instruct` on the mini's ollama**, one
 judge for every rung so judged pass rates compare across rungs. It is not any rung's model
-(tested), it is a different generation from all of them, and it fits on the mini's card during a
-ladder window. It is weaker than the 27B rung it grades; that is why judged tasks are a
-minority (six of 92, all in `qa`), why each rubric states concrete pass/fail criteria and carries a reference answer, and
-why a report shows judged and mechanical verdicts separately (the `decided by` column). A `--rung`
-run cannot override the pin.
+(tested) and it is a different generation from all of them. It is weaker than the 27B rung it
+grades; that is why judged tasks are a minority (six of 92, all in `qa`), why each rubric states
+concrete pass/fail criteria and carries a reference answer, and why a report shows judged and
+mechanical verdicts separately (the `decided by` column). A `--rung` run cannot override the pin.
+
+**Where the judge runs is undecided, and until it is, rung runs use `--no-judge`** (the six judged
+tasks are recorded `unscored`; `--no-judge` works with `--rung`). The first run serves two rungs
+on the mini's 3090 Ti, and at Ollama's default context there (32k, chosen from VRAM) this judge
+needs about 14.8 GiB — it does not fit beside any rung in the ~11.7 GiB the card has free (an
+earlier version of this page said it did; it does not). Options for the full runs: re-pin to the
+already-resident `qwen2.5:7b-instruct` (no extra memory, weaker); serve the 14b's existing file
+with the mini's llama-server at 8k context in a window with its cover-traffic user paused; or a
+judge on another machine.
 
 ## Where each field lives in `telemetry.db`
 

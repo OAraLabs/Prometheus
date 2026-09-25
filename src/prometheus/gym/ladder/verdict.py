@@ -328,11 +328,20 @@ def read_value(region: str | None, expect: str, shape: str | None, *, committed:
             if m.group(0).strip()
         }
     if _NEGATION.search(region):
-        # "It is not 48217" commits to nothing. But a committed line that names
-        # no value of the answer's kind and denies there is one ("No request ID
-        # found", "... does not contain a definition") is a wrong answer where
-        # the task has one — it was not missed, it was answered wrongly.
-        return FAIL_READ if committed and shape and not candidates else MISS_READ
+        if not candidates:
+            # A committed line that names no value of the answer's kind and
+            # denies there is one ("No request ID found", "... does not contain
+            # a definition") is a wrong answer where the task has one — it was
+            # not missed, it was answered wrongly.
+            return FAIL_READ if committed and shape else MISS_READ
+        # "It is not 48217" commits to nothing. A negation qualifies a value only
+        # in the sentence that states it: "... is defined in X. Let me confirm
+        # there's no other definition." still commits to X (a real reply).
+        for sentence in re.split(r"(?<=[.!?])\s+", region):
+            if _NEGATION.search(sentence) and re.search(
+                rf"(?<!\w)(?:{shape})(?!\w)", sentence, re.IGNORECASE
+            ):
+                return MISS_READ
     if len(candidates) == 1:
         (only,) = candidates
         if re.fullmatch(expect, only, re.IGNORECASE):
