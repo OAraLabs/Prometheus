@@ -314,18 +314,21 @@ def entry_spellings(entry: str) -> tuple[str, ...]:
 
 
 #: The Data volume's own spelling of a firmlinked directory on macOS
-#: (``/System/Volumes/Data/private/etc`` IS ``/private/etc``).
-_DATA_VOLUME = "/System/Volumes/Data/"
+#: (``/System/Volumes/Data/private/etc`` IS ``/private/etc``), folded: the
+#: volume folds the prefix's case too, so it is stripped after folding.
+_DATA_VOLUME = "/system/volumes/data/"
 
 
 def _loose(text: str) -> str:
     """A path as a case- and normalisation-folding volume might equate it,
     firmlinks included. Only a filter: identity decides."""
-    if text.startswith(_DATA_VOLUME):
-        text = text[len(_DATA_VOLUME) - 1:]
     if text.isascii():  # NFC is the identity and casefold is lower() for ASCII
-        return text.lower()
-    return "/".join(fold_component(part) for part in text.split("/"))
+        folded = text.lower()
+    else:
+        folded = "/".join(fold_component(part) for part in text.split("/"))
+    if folded.startswith(_DATA_VOLUME):
+        folded = folded[len(_DATA_VOLUME) - 1:]
+    return folded
 
 
 @functools.lru_cache(maxsize=1024)
@@ -342,10 +345,12 @@ def _entry_forms(entry: str) -> tuple[tuple[str, str, tuple[str, ...] | None], .
     forms = []
     for spelling in entry_spellings(entry):
         folded = _loose(spelling)
-        words = None
         if is_glob_pattern(spelling):
             words = tuple(w for w in folded.split("/") if w and not is_glob_pattern(w))
-        forms.append((spelling, folded, words))
+            forms.append((spelling, folded, words))
+        # Every spelling is also a literal path: a directory named ``[old]``
+        # (or a link resolving to one) is compared by identity as a name too.
+        forms.append((spelling, folded, None))
     return tuple(forms)
 
 
@@ -435,6 +440,10 @@ def denying_entry(resolved_path: str | Path, entries: Iterable[str]) -> str | No
                 continue
             rel = path.relative_to(ancestor).as_posix()
             if _glob_rest_matches(rel, rest):
+                return entry
+            # On a volume that folds case, ``.ENV`` IS ``.env``: match the
+            # wildcard part folded as well, as the volume compares names.
+            if _nearest_folds_case(path) and _glob_rest_matches(_loose(rel), _loose(rest)):
                 return entry
             canonical = _as_the_pattern_spells_it(ancestor, rel, rest)
             if canonical != rel and _glob_rest_matches(canonical, rest):

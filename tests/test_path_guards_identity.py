@@ -384,3 +384,89 @@ def test_creating_a_case_variant_of_an_absent_ssh_dir_is_refused_where_it_would_
     reason = SecurityGate()._check_denied_path(str(home / ".SSH" / "authorized_keys"))
 
     assert bool(reason) is insensitive
+
+
+# ── from the second review: the prefilter, the floor's wildcard part, and
+#    keeping main's words where main already refused ──────────────────────
+
+def test_a_firmlink_spelling_in_any_case_is_still_the_denied_directory():
+    """On macOS ``/system/volumes/data/private/etc`` (any case) IS
+    ``/private/etc``. Where there is no Data volume the path is simply absent."""
+    firmlinked = Path("/System/Volumes/Data/private/etc").exists()
+    gate = SecurityGate(denied_paths=["/etc"])
+
+    for spelling in ("/System/Volumes/Data/private/etc/hosts",
+                     "/system/volumes/data/private/etc/hosts",
+                     "/SYSTEM/Volumes/Data/private/etc/hosts"):
+        assert bool(gate._check_denied_path(spelling)) is firmlinked, spelling
+
+
+def test_the_env_floor_denies_a_case_variant_of_its_wildcard_part(tmp_path, monkeypatch):
+    """FAILS ON MAIN on macOS: ``~/.config/app/.ENV`` IS ``.env`` there, and
+    ``*env`` in the floor ``/*/.config/*/*env`` was matched as text."""
+    home = tmp_path / "home"
+    (home / ".config" / "app").mkdir(parents=True)
+    (home / ".config" / "app" / ".env").write_text("TOKEN=not-real\n")
+    monkeypatch.setenv("HOME", str(home))
+    insensitive = _case_insensitive(home)
+
+    reason = SecurityGate()._check_denied_path(str(home / ".config" / "app" / ".ENV"))
+
+    assert bool(reason) is insensitive
+
+
+def test_a_link_to_a_glob_named_directory_is_compared_as_a_name(tmp_path):
+    (tmp_path / "[old]").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "[old]", target_is_directory=True)
+    insensitive = _case_insensitive(tmp_path)
+
+    denied = path_guard.denying_entry(tmp_path / "[OLD]" / "f", [str(tmp_path / "link")])
+
+    assert (denied is not None) is insensitive
+
+
+def test_documents_keep_the_gates_words_for_what_the_gate_refused(tmp_path, monkeypatch):
+    """The documents API ran the sandbox, then the gate. The sandbox now
+    refuses glob entries too; the 403 must still carry the gate's reason, as
+    it did when the gate was the only layer to refuse them."""
+    from prometheus.config.shipped_defaults import SHIPPED_DENIED_PATHS
+    from prometheus.documents import DocumentsError, DocumentsService
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".config" / "app").mkdir(parents=True)
+    (tmp_path / ".config" / "app" / ".env").write_text("TOKEN=not-real\n")
+    denied = list(SHIPPED_DENIED_PATHS)
+    svc = DocumentsService(tmp_path, denied_paths=denied, gate=SecurityGate(denied_paths=denied))
+
+    with pytest.raises(DocumentsError) as exc:
+        svc.read(".config/app/.env")
+
+    assert exc.value.status == 403
+    assert exc.value.message == (
+        f"denied by SecurityGate: Path {str(tmp_path / '.config' / 'app' / '.env')!r} "
+        "matches denied pattern '/*/.config/*/*env'")
+
+
+def test_the_sandbox_names_the_entry_its_literal_comparison_named(tmp_path):
+    """A glob listed first must not take the message from the literal entry
+    main's sandbox matched."""
+    (tmp_path / "data").mkdir()
+    box = ProcessSandbox(root=tmp_path, denied_paths=(f"{tmp_path}/*", str(tmp_path / "data")))
+
+    with pytest.raises(SandboxViolation) as exc:
+        box.resolve("data/a.key")
+
+    assert str(exc.value).endswith(f"(denied root: {tmp_path / 'data'})")
+
+
+def test_the_rm_guard_names_the_operand_main_named(tmp_path, monkeypatch):
+    """Two operands: main blocked on the second, by its spelling; the first
+    is a protected root only by identity (``~/ws/..`` IS ``~``)."""
+    home = tmp_path / "home"
+    (home / "ws").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    gate = SecurityGate(workspace_root=str(home / "ws"))
+
+    reason = gate._rm_targets_a_protected_root("rm -rf ~/ws/.. ~/.prometheus")
+
+    assert "'~/.prometheus' resolves to" in reason, reason

@@ -71,6 +71,18 @@ class SandboxViolation(Exception):
     """A path resolved outside the sandbox root or into a denied path."""
 
 
+class SandboxPolicyDenial(SandboxViolation):
+    """A deny-list denial the sandbox's literal comparison did not make
+    before WP-X.27: a glob entry, or a path that is a denied one only by
+    identity. ``path`` is the resolved path, so a caller that also runs the
+    SecurityGate over the same list can give the gate's own reason, as it
+    did when the gate was the only layer to refuse these."""
+
+    def __init__(self, message: str, path: Path):
+        super().__init__(message)
+        self.path = path
+
+
 class SandboxConstructionError(Exception):
     """bwrap itself failed to start the sandboxed process.
 
@@ -162,13 +174,22 @@ class ProcessSandbox(Sandbox):
                 f"path escapes the sandbox: {path!r} → {real} "
                 f"(root: {self.root})"
             )
-        # The shared deny-list decision (WP-X.27): a glob entry is a pattern,
-        # not a directory named ``*`` for is_relative_to to compare.
+        # The literal comparison first, unchanged, so what it denied names the
+        # same entry in the same words; then the shared deny-list decision
+        # (WP-X.27) for what it missed: a glob entry is a pattern, not a
+        # directory named ``*`` for is_relative_to to compare.
+        for denied in self.denied_paths:
+            if real == denied or real.is_relative_to(denied):
+                raise SandboxViolation(
+                    f"path is denied by policy: {path!r} → {real} "
+                    f"(denied root: {denied})"
+                )
         denied = denying_entry(real, [str(d) for d in self.denied_paths])
         if denied is not None:
-            raise SandboxViolation(
+            raise SandboxPolicyDenial(
                 f"path is denied by policy: {path!r} → {real} "
-                f"(denied root: {denied})"
+                f"(denied root: {denied})",
+                real,
             )
         return real
 
@@ -874,12 +895,19 @@ class DockerSandbox(Sandbox):
                 f"(root: {self._root})"
             )
 
-        # The same decision as ProcessSandbox (WP-X.27).
+        # The same two stages as ProcessSandbox (WP-X.27).
+        for denied in self._denied_paths:
+            if real == denied or real.is_relative_to(denied):
+                raise SandboxViolation(
+                    f"path is denied by policy: {path!r} → {real} "
+                    f"(denied root: {denied})"
+                )
         denied = denying_entry(real, [str(d) for d in self._denied_paths])
         if denied is not None:
-            raise SandboxViolation(
+            raise SandboxPolicyDenial(
                 f"path is denied by policy: {path!r} → {real} "
-                f"(denied root: {denied})"
+                f"(denied root: {denied})",
+                real,
             )
 
         return real

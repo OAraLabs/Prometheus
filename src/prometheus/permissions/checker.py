@@ -1558,6 +1558,7 @@ class SecurityGate:
         allowed to write.
         """
         roots = self._protected_roots()
+        operands: list[tuple[str, Path]] = []
         for call in _RM_CALL.findall(command):
             if not _RM_RECURSIVE_FLAG.search(call):
                 continue
@@ -1567,20 +1568,22 @@ class SecurityGate:
                 if not (token.startswith("/") or token.startswith("~")):
                     continue  # relative target — see the docstring
                 try:
-                    target = Path(token.rstrip("/") or "/").expanduser()
+                    operands.append((token, Path(token.rstrip("/") or "/").expanduser()))
                 except (OSError, RuntimeError):  # pragma: no cover
                     continue
-                # Main's comparison first, across every root, so a command it
-                # blocked names the same root; identity only for what it missed.
-                follow = token.endswith("/")
-                hit = next((r for r in roots if target == r), None) or next(
-                    (r for r in roots if _rm_would_remove(target, r, follow=follow)), None)
-                if hit is not None:
-                    return (
-                        "Blocked: recursive rm aimed at a protected root — "
-                        f"{token!r} resolves to {hit}"
-                    )
-        return ""
+        # The comparison as spelled first, over every operand and root, so a
+        # command it blocked names the same operand and root; identity only
+        # for what it missed (WP-X.27).
+        hit = next(((t, r) for t, target in operands for r in roots if target == r), None) or next(
+            ((t, r) for t, target in operands for r in roots
+             if _rm_would_remove(target, r, follow=t.endswith("/"))), None)
+        if hit is None:
+            return ""
+        token, root = hit
+        return (
+            "Blocked: recursive rm aimed at a protected root — "
+            f"{token!r} resolves to {root}"
+        )
 
     def _is_always_blocked(self, command: str) -> bool:
         if any(r.search(command) for r in self._blocked_re):
