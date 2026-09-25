@@ -78,10 +78,11 @@ def is_denied(path: Path | str, denied: Sequence[str]) -> bool:
     ⚠ SHARES THE PREDICATE, NOT THE RESOLVER, and the difference is
     load-bearing. This said "the SAME matcher the gate uses", which is false
     and was read by two people as meaning the gate inherited this function's
-    behaviour. What is actually shared is ``denied_entry_matches`` — the
-    comparison. The gate (``checker.py``) and workspace binding
-    (``context/workspace.py``) each resolve the path THEMSELVES and call that
-    predicate directly; neither goes through ``matches_any_denied``. So when
+    behaviour. What is actually shared is ``path_guard.denying_entry`` — the
+    decision (since WP-X.27 it also compares each entry's resolved spelling
+    and, failing that, file identity). The gate (``checker.py``) and workspace
+    binding (``context/workspace.py``) each resolve the path THEMSELVES and
+    call it directly; neither goes through ``matches_any_denied``. So when
     the resolver here failed open, it did not follow that the write gate did
     — and it did not. Say which part is shared, because "same matcher" made
     a read/disclosure bug look like a write-gate bug.

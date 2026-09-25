@@ -6,9 +6,7 @@
 
 from __future__ import annotations
 
-import os
 import re
-import unicodedata
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -16,6 +14,8 @@ import httpx
 from pydantic import BaseModel, Field
 
 from prometheus.permissions.path_schema import PATH_FIELD_WRITE
+# #574's identity helpers, shared since WP-X.27 with every other path guard.
+from prometheus.security.path_guard import inside_by_identity
 # Both fetching tools use the ONE hook, from the security module — not one
 # importing a private helper from its sibling, which is how two callers drift.
 from prometheus.security.url_guard import (
@@ -214,61 +214,6 @@ def _protected_prefixes() -> list[Path]:
     return prefixes
 
 
-def _fold(name: str) -> str:
-    """A path component as a case-insensitive, normalisation-insensitive
-    volume compares it (APFS folds case, and ``ſ`` as ``s``)."""
-    return unicodedata.normalize("NFC", name).casefold()
-
-
-def _inside_by_identity(candidate: Path, prefixes: list[Path]) -> Path | None:
-    """The protected directory ``candidate`` is inside, by file identity.
-
-    ``resolve()`` follows symlinks but folds neither case nor firmlinks. On
-    macOS's case-insensitive volumes ``~/.SSH`` IS ``~/.ssh``, and
-    ``/System/Volumes/Data/private/etc`` IS ``/private/etc``; no string
-    comparison sees that. So each existing ancestor of the destination is
-    compared with each protected directory by (device, inode).
-
-    A protected directory that does not exist yet (a fresh account's
-    ``~/.ssh``) has no identity to compare, and writing ``~/.SSH/...`` would
-    CREATE it, as the directory sshd then reads as ``~/.ssh``. So for those,
-    the ancestor that IS its parent (by identity) is found, and the next
-    component of the destination is compared with the protected name folded
-    for case. That refuses ``~/.SSH`` on a case-sensitive volume too, where
-    it is merely a confusing name.
-    """
-    existing: dict[tuple[int, int], Path] = {}
-    absent: dict[tuple[int, int], list[Path]] = {}
-    for prefix in prefixes:
-        try:
-            st = os.stat(prefix)
-            existing.setdefault((st.st_dev, st.st_ino), prefix)
-            continue
-        except OSError:
-            pass
-        try:
-            parent = os.stat(prefix.parent)
-        except OSError:
-            continue  # neither it nor its parent exists (/proc on macOS)
-        absent.setdefault((parent.st_dev, parent.st_ino), []).append(prefix)
-    chain = (candidate, *candidate.parents)
-    for i, ancestor in enumerate(chain):
-        try:
-            st = os.stat(ancestor)
-        except OSError:
-            continue  # not created yet, or not reachable: its parents still are
-        key = (st.st_dev, st.st_ino)
-        hit = existing.get(key)
-        if hit is not None:
-            return hit
-        if i > 0:  # the component of the destination directly below `ancestor`
-            below = _fold(chain[i - 1].name)
-            for prefix in absent.get(key, ()):
-                if below == _fold(prefix.name):
-                    return prefix
-    return None
-
-
 def _resolve_destination(url: str, requested: str | None) -> Path:
     """Resolve the destination path. Apply path-traversal guard and reject
     common system paths (``/etc``, ``/sys``, ``/boot``).
@@ -287,7 +232,7 @@ def _resolve_destination(url: str, requested: str | None) -> Path:
         if candidate.is_relative_to(forbidden):
             raise ValueError(
                 f"Destination {candidate} is in a protected path ({forbidden})")
-    inside = _inside_by_identity(candidate, prefixes)
+    inside = inside_by_identity(candidate, prefixes)
     if inside is not None:
         raise ValueError(
             f"Destination {candidate} is in a protected path ({inside})")

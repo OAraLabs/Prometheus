@@ -50,6 +50,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+from prometheus.security.path_guard import denying_entry
+
 log = logging.getLogger(__name__)
 
 # What a sandboxed process inherits. Everything else — tokens, API keys,
@@ -160,12 +162,14 @@ class ProcessSandbox(Sandbox):
                 f"path escapes the sandbox: {path!r} → {real} "
                 f"(root: {self.root})"
             )
-        for denied in self.denied_paths:
-            if real == denied or real.is_relative_to(denied):
-                raise SandboxViolation(
-                    f"path is denied by policy: {path!r} → {real} "
-                    f"(denied root: {denied})"
-                )
+        # The shared deny-list decision (WP-X.27): a glob entry is a pattern,
+        # not a directory named ``*`` for is_relative_to to compare.
+        denied = denying_entry(real, [str(d) for d in self.denied_paths])
+        if denied is not None:
+            raise SandboxViolation(
+                f"path is denied by policy: {path!r} → {real} "
+                f"(denied root: {denied})"
+            )
         return real
 
     # ------------------------------------------------------------------
@@ -712,7 +716,7 @@ class DockerSandbox(Sandbox):
         # a per-backend behaviour difference nothing advertised.
         self.default_timeout_seconds = default_timeout_seconds
         self._denied_paths = tuple(
-            Path(p).resolve() for p in denied_paths
+            Path(p).expanduser().resolve() for p in denied_paths
         )
         self._network_isolation = network_isolation
         self._image = image or DOCKER_IMAGE
@@ -870,12 +874,13 @@ class DockerSandbox(Sandbox):
                 f"(root: {self._root})"
             )
 
-        for denied in self._denied_paths:
-            if real == denied or real.is_relative_to(denied):
-                raise SandboxViolation(
-                    f"path is denied by policy: {path!r} → {real} "
-                    f"(denied root: {denied})"
-                )
+        # The same decision as ProcessSandbox (WP-X.27).
+        denied = denying_entry(real, [str(d) for d in self._denied_paths])
+        if denied is not None:
+            raise SandboxViolation(
+                f"path is denied by policy: {path!r} → {real} "
+                f"(denied root: {denied})"
+            )
 
         return real
 
