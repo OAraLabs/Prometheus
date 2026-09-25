@@ -352,7 +352,13 @@ async def test_the_old_construction_would_have_leaked_into_all_of_them(manager, 
     """
     import shlex
 
-    cmd = ["python", "-m", "prometheus", "--headless", "--api-key", FAKE_KEY]
+    # The removed line built `python -m prometheus --headless --api-key <key>`.
+    # What matters here is the STRING it persisted, and create_agent_task
+    # really launches the command it is given: replaying it verbatim started
+    # a bare `python` from PATH (a Prometheus, wherever one resolves; exit 127
+    # on a Mac, where none does). Same shape, same key, a child that does
+    # nothing: this interpreter running `pass`.
+    cmd = [sys.executable, "-c", "pass", "--api-key", FAKE_KEY]
     old_command = " ".join(shlex.quote(part) for part in cmd)
 
     assert FAKE_KEY in old_command, (
