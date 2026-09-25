@@ -35,6 +35,13 @@ DEFAULT_ROOT = Path("/tmp/prometheus-parity")
 # repo's pre-commit hook blocks 32+ char values bound to a token-named key.
 # The daemon listens on harness-chosen ports and lives for one scenario.
 API_TOKEN = "parity-test-token"
+# PINNED, like SHELL and TZ: file modes are recorded (checkpoint_files.mode),
+# and the host umask decides them. The first CI replay differed from the
+# recording in exactly that column — 0664 on the recording host, 0644 on the
+# runner — so the recording host's umask is fixed for everything the daemon
+# and the harness create.
+UMASK = 0o002
+FILE_MODE = 0o666 & ~UMASK
 
 
 ROOT_MARKER = ".parity-root"
@@ -171,7 +178,7 @@ class Instance:
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "prometheus", "--config", str(self.config_path), "daemon"],
             cwd=self.cwd, env=self.env(), stdout=log, stderr=subprocess.STDOUT,
-            start_new_session=True,
+            start_new_session=True, umask=UMASK,
         )
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:

@@ -23,7 +23,7 @@ from typing import Any
 
 import yaml
 
-from parity.instance import API_TOKEN, HarnessError, Instance, http
+from parity.instance import API_TOKEN, FILE_MODE, UMASK, HarnessError, Instance, http
 from parity.model_server import COMPLETIONS_PATHS, Exchange, ModelServer, ServerState
 from parity.observe import snapshot, tree
 from parity.scenarios import Evidence, Scenario
@@ -156,6 +156,7 @@ class Runner:
                 p = base / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(text, encoding="utf-8")
+                p.chmod(FILE_MODE)            # not the host umask (see instance.UMASK)
         for where in self.scenario.git_repos:
             repo = self.root / where
             env = {"HOME": str(self.root / "home"), "PATH": "/usr/bin:/bin",
@@ -165,7 +166,8 @@ class Runner:
                    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z"}
             for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "-A"],
                         ["git", "commit", "-q", "-m", "parity fixture"]):
-                subprocess.run(cmd, cwd=repo, env=env, check=True, capture_output=True)
+                subprocess.run(cmd, cwd=repo, env=env, check=True, capture_output=True,
+                               umask=UMASK)
 
     # -- steps ------------------------------------------------------------
     def _tool_rows(self, inst: Instance, session: str) -> list[tuple[float, float]]:

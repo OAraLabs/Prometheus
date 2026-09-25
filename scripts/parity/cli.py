@@ -178,6 +178,21 @@ def cmd_stability(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def warm_bytecode() -> None:
+    """Compile the daemon's source and its venv before timing it.
+
+    PINNED, like the umask: the daemon runs with PYTHONDONTWRITEBYTECODE, so a
+    tree without __pycache__ recompiles every module on every boot — and the
+    lazily-imported ones mid-turn. Measured: a cold tree read about 2-3 ms/round
+    slower and ~3 MB heavier than a warm one, the same code on the same host.
+    A deployed venv is warm, so warm is the state worth measuring.
+    """
+    import compileall
+    import sysconfig
+    for root in (SRC_ROOT / "src", Path(sysconfig.get_paths()["purelib"])):
+        compileall.compile_dir(str(root), quiet=1, workers=0)
+
+
 def cmd_bench(args: argparse.Namespace) -> int:
     """Daemon overhead per round (p50/p95) and RSS, over repeated replays."""
     import platform
@@ -186,6 +201,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     from parity.compare import compare
     names = args.scenario or traces.available(SRC_ROOT)
     per_run: list[dict] = []
+    warm_bytecode()
     with RootLock(args.root):
         for r in range(args.runs):
             pooled: list[float] = []
