@@ -23,8 +23,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpcore
 import httpx
+
+# httpcore is httpx's transport layer today, used here only to make a TLS
+# handshake cut off by a hook's deadline close its socket (_make_cancel_safe).
+# It is declared as a dependency, but it is httpx's internals: if it is missing
+# or its network classes move, http hooks still run, without that wrapping,
+# and each one says so in a WARNING. Nothing else here needs it.
+try:
+    import httpcore
+    _NETWORK_STREAM = httpcore.AsyncNetworkStream
+    _NETWORK_BACKEND = httpcore.AsyncNetworkBackend
+except (ImportError, AttributeError):
+    _NETWORK_STREAM = _NETWORK_BACKEND = None
 
 from prometheus.engine.messages import ConversationMessage
 from prometheus.hooks.events import HookEvent
@@ -367,60 +378,73 @@ _REAP_GRACE_SECONDS = 2.0
 _KILL_INTERVAL_SECONDS = 0.05
 
 
-class _CancelSafeStream(httpcore.AsyncNetworkStream):
-    """A network stream that closes its socket when a TLS handshake is cut off.
+def _cancel_safe_backend_class():
+    """The cancel-safe backend class, or None when httpcore can't provide
+    the bases it wraps (see the import at the top)."""
+    if _NETWORK_STREAM is None or _NETWORK_BACKEND is None:
+        return None
 
-    httpcore's ``start_tls`` closes the stream only on an ``Exception``. An
-    http hook's total deadline cancels the request, and a cancellation that
-    lands in the handshake left the socket open for as long as the server
-    held it: one leaked fd per timed-out hook against a stalled TLS endpoint.
-    """
+    class _CancelSafeStream(_NETWORK_STREAM):
+        """A network stream that closes its socket when a TLS handshake is cut off.
 
-    def __init__(self, stream: httpcore.AsyncNetworkStream) -> None:
-        self._stream = stream
+        httpcore's ``start_tls`` closes the stream only on an ``Exception``. An
+        http hook's total deadline cancels the request, and a cancellation that
+        lands in the handshake left the socket open for as long as the server
+        held it: one leaked fd per timed-out hook against a stalled TLS endpoint.
+        """
 
-    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
-        return await self._stream.read(max_bytes, timeout)
+        def __init__(self, stream) -> None:
+            self._stream = stream
 
-    async def write(self, buffer: bytes, timeout: float | None = None) -> None:
-        await self._stream.write(buffer, timeout)
+        async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+            return await self._stream.read(max_bytes, timeout)
 
-    async def aclose(self) -> None:
-        await self._stream.aclose()
+        async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+            await self._stream.write(buffer, timeout)
 
-    async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
-        try:
-            tls = await self._stream.start_tls(ssl_context, server_hostname, timeout)
-        except BaseException:
+        async def aclose(self) -> None:
+            await self._stream.aclose()
+
+        async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
             try:
-                await self._stream.aclose()
-            except BaseException:  # noqa: BLE001 — the original exception wins
-                pass
-            raise
-        return _CancelSafeStream(tls)
+                tls = await self._stream.start_tls(ssl_context, server_hostname, timeout)
+            except BaseException:
+                try:
+                    await self._stream.aclose()
+                except BaseException:  # noqa: BLE001 — the original exception wins
+                    pass
+                raise
+            return _CancelSafeStream(tls)
 
-    def get_extra_info(self, info: str):
-        return self._stream.get_extra_info(info)
+        def get_extra_info(self, info: str):
+            return self._stream.get_extra_info(info)
+
+    class _CancelSafeBackend(_NETWORK_BACKEND):
+        """httpcore's own backend, handing out cancel-safe streams."""
+
+        def __init__(self, inner) -> None:
+            self._inner = inner
+
+        async def connect_tcp(self, host, port, timeout=None, local_address=None,
+                              socket_options=None):
+            return _CancelSafeStream(await self._inner.connect_tcp(
+                host, port, timeout=timeout, local_address=local_address,
+                socket_options=socket_options))
+
+        async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+            return _CancelSafeStream(await self._inner.connect_unix_socket(
+                path, timeout=timeout, socket_options=socket_options))
+
+        async def sleep(self, seconds: float) -> None:
+            await self._inner.sleep(seconds)
+
+    return _CancelSafeBackend
 
 
-class _CancelSafeBackend(httpcore.AsyncNetworkBackend):
-    """httpcore's own backend, handing out cancel-safe streams."""
-
-    def __init__(self, inner: httpcore.AsyncNetworkBackend) -> None:
-        self._inner = inner
-
-    async def connect_tcp(self, host, port, timeout=None, local_address=None,
-                          socket_options=None):
-        return _CancelSafeStream(await self._inner.connect_tcp(
-            host, port, timeout=timeout, local_address=local_address,
-            socket_options=socket_options))
-
-    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
-        return _CancelSafeStream(await self._inner.connect_unix_socket(
-            path, timeout=timeout, socket_options=socket_options))
-
-    async def sleep(self, seconds: float) -> None:
-        await self._inner.sleep(seconds)
+try:
+    _CancelSafeBackend = _cancel_safe_backend_class()
+except Exception:  # noqa: BLE001 — a changed httpcore must not stop hooks loading
+    _CancelSafeBackend = None
 
 
 def _make_cancel_safe(client: httpx.AsyncClient) -> None:
@@ -436,14 +460,19 @@ def _make_cancel_safe(client: httpx.AsyncClient) -> None:
     moves it, the hook still runs, and this says so (the TLS-stall test in
     tests/test_hook_timeouts.py would fail too).
     """
-    transports = [client._transport, *(t for t in client._mounts.values() if t is not None)]
+    try:
+        transports = [client._transport, *(t for t in client._mounts.values() if t is not None)]
+    except AttributeError:
+        transports = [client]  # httpx moved them: warn once, below, and go on
     for transport in transports:
         pool = getattr(transport, "_pool", None)
         backend = getattr(pool, "_network_backend", None)
-        if backend is None:
-            log.warning("http hooks: %s has no pool backend to wrap; a hook that "
+        if backend is None or _CancelSafeBackend is None:
+            log.warning("http hooks: %s has no pool backend to wrap (%s); a hook that "
                         "times out in a TLS handshake may leak its socket",
-                        type(transport).__name__)
+                        type(transport).__name__,
+                        "httpcore's network classes are not importable"
+                        if _CancelSafeBackend is None else "httpx moved it")
         elif not isinstance(backend, _CancelSafeBackend):
             pool._network_backend = _CancelSafeBackend(backend)
 

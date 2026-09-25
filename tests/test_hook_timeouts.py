@@ -541,3 +541,86 @@ async def test_an_http_hook_still_runs_if_httpx_moves_its_pool(tmp_path, monkeyp
         assert any("no pool backend to wrap" in m for m in _warnings(caplog))
     finally:
         server.shutdown()
+
+
+# ── httpcore is httpx's internals, not ours ─────────────────────────────────
+
+_WITHOUT_HTTPCORE = r'''
+import asyncio, json, logging, os, sys, threading, types
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import httpcore as _real_httpcore  # today's httpx needs it, lazily, at request time
+import httpx
+
+# While the executor loads, httpcore is what a future httpx could leave behind:
+# not installed at all, or installed with its network classes moved. httpx
+# keeps its own transport (here: today's, restored below), as it would then.
+if sys.argv[1] == "missing":
+    sys.modules["httpcore"] = None          # `import httpcore` raises ImportError
+else:
+    sys.modules["httpcore"] = types.ModuleType("httpcore")  # no network classes
+
+records = []
+class _Keep(logging.Handler):
+    def emit(self, record):
+        records.append(record)
+logging.getLogger("prometheus.hooks.executor").addHandler(_Keep(logging.WARNING))
+
+from prometheus.hooks import executor as ex
+sys.modules["httpcore"] = _real_httpcore
+from prometheus.hooks.events import HookEvent
+from prometheus.hooks.registry import HookRegistry
+from prometheus.hooks.schemas import CommandHookDefinition, HttpHookDefinition
+
+class _Ok(BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        body = b"http-ok"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), _Ok)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+registry = HookRegistry()
+registry.add(HookEvent.PRE_TOOL_USE, CommandHookDefinition(command="echo command-ok", timeout_seconds=10))
+registry.add(HookEvent.PRE_TOOL_USE, HttpHookDefinition(
+    url=f"http://127.0.0.1:{server.server_address[1]}/hook", timeout_seconds=10))
+executor = ex.HookExecutor(registry, ex.HookExecutionContext(cwd=Path.cwd(), provider=None, default_model="x"))
+result = asyncio.run(executor.execute(HookEvent.PRE_TOOL_USE, {"tool_name": "bash"}))
+server.shutdown()
+print(json.dumps({
+    "wrapper": ex._CancelSafeBackend is not None,
+    "results": [[r.success, r.output] for r in result.results],
+    "warnings": [r.getMessage() for r in records],
+}))
+'''
+
+
+@pytest.mark.parametrize("how", ["missing", "moved"])
+def test_hooks_still_run_without_httpcores_network_classes(how, tmp_path):
+    """httpcore is httpx's transport layer, used here only for the cancel-safe
+    TLS wrapping. If a future httpx drops it or moves its network classes,
+    loading the executor must not fail: every hook would break. Instead the
+    wrapping is skipped, with the WARNING, and hooks run. httpcore is taken
+    away only while the executor loads (today's httpx itself imports it at
+    request time), in a child process of this interpreter, so the missing
+    module can't leak into other tests."""
+    import json
+    import subprocess
+
+    env = {k: v for k, v in os.environ.items() if k.lower() not in (
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy")}
+    proc = subprocess.run([sys.executable, "-c", _WITHOUT_HTTPCORE, how],
+                          cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    got = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert got["wrapper"] is False
+    assert got["results"] == [[True, "command-ok"], [True, "http-ok"]]
+    assert any("no pool backend to wrap (httpcore's network classes are not importable)" in w
+               for w in got["warnings"]), got["warnings"]
