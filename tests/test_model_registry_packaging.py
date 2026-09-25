@@ -59,6 +59,13 @@ def _unavailable(what: str, detail: str):
     pytest.skip(f"{what} unavailable here: {detail[:200]}")
 
 
+# What `uv build --offline` prints when the backend is simply not cached. Any
+# OTHER failure is the build itself failing, which is what these tests exist
+# to catch: a wheel built from an sdist that lost the registry fails with
+# "Forced include not found", and that must never read as "unavailable".
+_UNAVAILABLE_MARKERS = ("network was disabled", "network connectivity is disabled")
+
+
 def _uv_build(kind: str, out: Path, *source: str) -> Path:
     if shutil.which("uv") is None:
         _unavailable("uv", "not on PATH")
@@ -67,7 +74,10 @@ def _uv_build(kind: str, out: Path, *source: str) -> Path:
         cwd=REPO, capture_output=True, text=True,
     )
     if proc.returncode != 0:
-        _unavailable(f"{kind} build", proc.stderr.strip())
+        err = proc.stderr.strip()
+        if any(m in err.lower() for m in _UNAVAILABLE_MARKERS):
+            _unavailable(f"{kind} build", err)
+        pytest.fail(f"the {kind} build FAILED (not unavailable):\n{err[-2500:]}")
     pattern = "*.whl" if kind == "wheel" else "*.tar.gz"
     built = list(out.glob(pattern))
     assert len(built) == 1, f"expected one {kind}, got {built}"
@@ -173,3 +183,25 @@ def test_a_wheel_built_from_the_sdist_ships_the_registry(tmp_path):
         "a wheel built from the sdist (Homebrew's path) has no "
         "prometheus/config/model_registry.yaml, so a Homebrew install runs "
         "every local model at adapter tier 'full'")
+
+
+def test_an_sdist_that_lost_the_registry_fails_the_check_not_skips_it(tmp_path):
+    """The regression this file guards, made on purpose: an sdist without
+    config/model_registry.yaml. Building Homebrew's wheel from it must FAIL
+    the check, loudly and with the build's own error, never skip."""
+    import tarfile
+
+    sdist = _uv_build("sdist", tmp_path / "sdist")
+    unpacked = tmp_path / "unpacked"
+    with tarfile.open(sdist) as tf:
+        tf.extractall(unpacked, filter="data")
+    [root] = list(unpacked.iterdir())
+    (root / "config" / "model_registry.yaml").unlink()
+    broken_dir = tmp_path / "broken"
+    broken_dir.mkdir()
+    broken = broken_dir / sdist.name
+    with tarfile.open(broken, "w:gz") as tf:
+        tf.add(root, arcname=root.name)
+
+    with pytest.raises(pytest.fail.Exception, match="Forced include not found"):
+        _uv_build("wheel", tmp_path / "from-broken", str(broken))
