@@ -57,6 +57,15 @@ def _profile_loaded() -> bool:
     return ok
 
 
+needs_aa_exec = pytest.mark.skipif(
+    shutil.which("aa-exec") is None,
+    reason=(
+        "aa-exec is not installed (no AppArmor userspace: macOS, or a Linux "
+        "without apparmor-utils). The path under test runs aa-exec for real. "
+        "SKIPPED IS NOT PASSED."
+    ),
+)
+
 needs_profile = pytest.mark.skipif(
     not _profile_loaded(),
     reason=(
@@ -219,6 +228,7 @@ class TestRefusesRatherThanRunningUnconfined:
         )
         assert "bash REFUSED" in res.output
 
+    @needs_aa_exec
     def test_absent_profile_message_names_the_reason_and_the_fix(self):
         res = _run(
             BashTool(confinement="required", confinement_profile="no-such-profile-xyz"),
@@ -251,6 +261,14 @@ class TestRefusesRatherThanRunningUnconfined:
             stderr = ""
 
         monkeypatch.setattr(C.subprocess, "run", lambda *a, **k: _Fake())
+        # aa-exec must LOOK installed, or the preflight stops at "not
+        # installed" before it reaches the label check under test (always the
+        # case on macOS). subprocess.run is stubbed, so nothing executes it.
+        monkeypatch.setattr(
+            C.shutil, "which",
+            lambda name, *a, **k: "/usr/sbin/aa-exec" if name == "aa-exec"
+            else shutil.which(name, *a, **k),
+        )
         ok, detail = C.preflight("prometheus-bash", force=True)
         assert ok is False
         assert "transition did not happen" in detail
@@ -501,6 +519,14 @@ class TestTheControlsThemselves:
         assert not inside
         assert "could not read" in why
 
+    @pytest.mark.skipif(
+        not Path(_TUNABLE_FILES[0]).exists(),
+        reason=(
+            f"{_TUNABLE_FILES[0]} does not exist on this host (no AppArmor), so "
+            "@{HOMEDIRS} cannot be read and there is no glob to be outside of. "
+            "SKIPPED IS NOT PASSED."
+        ),
+    )
     def test_the_guard_rejects_a_home_outside_the_profile_glob(self, monkeypatch):
         """A home one level too deep is outside @{HOME} — the original defect.
 

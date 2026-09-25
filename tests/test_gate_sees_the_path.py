@@ -425,7 +425,11 @@ class TestDirectoryRootsAreInScope:
             tool, {"root": "/home/will/.ssh"}, schema=self._schema(tool),
         )
         assert unknown is None
-        assert path == "/home/will/.ssh", "the gate cannot rule on what it cannot see"
+        # The gate rules on the resolved path, as the relative-root test below
+        # asserts too. On Linux that is the same string; on macOS /home is a
+        # firmlink to /System/Volumes/Data/home.
+        assert path == str(Path("/home/will/.ssh").resolve()), (
+            "the gate cannot rule on what it cannot see")
 
     @pytest.mark.parametrize("tool", ["grep", "glob"])
     def test_relative_root_resolves_against_base_not_unknown(self, tool, tmp_path):

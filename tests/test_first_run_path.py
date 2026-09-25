@@ -165,6 +165,10 @@ class TestGpuDetectionNeverRaises:
         def _boom(*a, **k):
             raise subprocess.TimeoutExpired(cmd="nvidia-smi", timeout=5)
         monkeypatch.setattr(gi.subprocess, "run", _boom)
+        # Linux, as in the two tests above: on Apple Silicon _detect_gpu
+        # answers "Apple Silicon (unified memory)" after nvidia-smi fails,
+        # which is correct there and is not the path under test.
+        monkeypatch.setattr(gi.platform, "system", lambda: "Linux")
         hw = gi.detect_hardware()
         assert hw["has_gpu"] is False
 

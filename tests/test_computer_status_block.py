@@ -25,7 +25,10 @@ THE THREE PROPERTIES THESE TESTS HOLD
 from __future__ import annotations
 
 import inspect
+import shutil
 import socket
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -64,11 +67,23 @@ HOST_SESSION_PATHS = ("/run/" + "user/", "/tmp/.X11" + "-unix")
 # host's session, so these answer the same way on any machine.
 
 
+def short_socket_dir() -> Path:
+    """A directory for AF_UNIX sockets whose paths fit on every host.
+
+    A socket path is capped at 104 bytes on macOS (108 on Linux). pytest's
+    `tmp_path` there sits under /private/var/folders/<id>/T/pytest-of-<user>/
+    and a per-test directory, which put `X11-unix/X1` at about 120 bytes, so
+    `bind()` raised "AF_UNIX path too long" before the probe ran. A real X
+    server keeps its sockets in a short directory under /tmp too, so this is
+    the faithful stand-in, and the probe still connects to a real listener.
+    """
+    return Path(tempfile.mkdtemp(prefix="x11-", dir="/tmp"))
+
+
 @pytest.fixture
 def substrate(tmp_path, monkeypatch):
     """Build a substrate. Returns a callable: substrate(act=..., observe=...)."""
-    x11_dir = tmp_path / "X11-unix"
-    x11_dir.mkdir()
+    x11_dir = short_socket_dir()
     monkeypatch.setattr(driver, "X11_SOCKET_DIR", str(x11_dir))
     listeners: list[socket.socket] = []
     # A fresh display NUMBER per build: one test exercises several substrates,
@@ -115,6 +130,7 @@ def substrate(tmp_path, monkeypatch):
     yield build
     for s_ in listeners:
         s_.close()
+    shutil.rmtree(x11_dir, ignore_errors=True)
 
 
 # ── 1. BOTH HALVES, INDEPENDENTLY ───────────────────────────────────────────
