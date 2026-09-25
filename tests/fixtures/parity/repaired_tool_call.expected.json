@@ -1,0 +1,1840 @@
+{
+ "steps": [
+  {
+   "op": "model",
+   "result": {
+    "auth": null,
+    "available": true,
+    "backend": "alt",
+    "detail": null,
+    "health": {
+     "changed_at": null,
+     "error": null,
+     "latency_ms": "<ms>",
+     "n_ctx": 32768,
+     "ok": true,
+     "probed": true,
+     "probed_at": "<time>",
+     "stale": false
+    },
+    "is_default": false,
+    "key": "alt",
+    "label": "alt · qwen2.5:7b-instruct",
+    "model": "qwen2.5:7b-instruct",
+    "provider": "ollama",
+    "vision": false
+   },
+   "status": 200
+  },
+  {
+   "end": "chat_done",
+   "error_event": null,
+   "messages": [
+    {
+     "content": "This is a sandboxed test of tool-call repair. Emit exactly the following tool call, byte for byte. The number is deliberate: the file is literally named 42, and the path must stay an unquoted number.\n\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": 42}}\n</tool_call>\n\nAfter the result comes back, tell me what the file says.",
+     "content_json": {
+      "$json": [
+       {
+        "text": "This is a sandboxed test of tool-call repair. Emit exactly the following tool call, byte for byte. The number is deliberate: the file is literally named 42, and the path must stay an unquoted number.\n\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": 42}}\n</tool_call>\n\nAfter the result comes back, tell me what the file says.",
+        "type": "text"
+       }
+      ]
+     },
+     "is_trusted": true,
+     "provenance": "user",
+     "role": "user"
+    },
+    {
+     "content": {
+      "$json": {
+       "arguments": {
+        "path": 42
+       },
+       "name": "read_file"
+      }
+     },
+     "content_json": {
+      "$json": [
+       {
+        "text": {
+         "$json": {
+          "arguments": {
+           "path": 42
+          },
+          "name": "read_file"
+         }
+        },
+        "type": "text"
+       },
+       {
+        "id": "<toolu:1>",
+        "input": {
+         "path": 42
+        },
+        "name": "read_file",
+        "type": "tool_use"
+       }
+      ]
+     },
+     "is_trusted": false,
+     "provenance": "user",
+     "role": "assistant"
+    },
+    {
+     "content": "",
+     "content_json": {
+      "$json": [
+       {
+        "content": "     1\tthe answer file says: forty-two",
+        "is_error": false,
+        "tool_use_id": "<toolu:1>",
+        "type": "tool_result"
+       }
+      ]
+     },
+     "is_trusted": false,
+     "provenance": "user",
+     "role": "user"
+    },
+    {
+     "content": "The file named `42` contains the following content:\n```\nthe answer file says: forty-two\n```",
+     "content_json": {
+      "$json": [
+       {
+        "text": "The file named `42` contains the following content:\n```\nthe answer file says: forty-two\n```",
+        "type": "text"
+       }
+      ]
+     },
+     "is_trusted": false,
+     "provenance": "user",
+     "role": "assistant"
+    }
+   ],
+   "op": "chat",
+   "reply": "The file named `42` contains the following content:\n```\nthe answer file says: forty-two\n```",
+   "session": "desktop:parity-repair"
+  }
+ ],
+ "stores": {
+  "cwd/42": {
+   "text": "the answer file says: forty-two\n"
+  },
+  "home/.prometheus/.daemon_started": {
+   "replaced": "<boot-specific>"
+  },
+  "home/.prometheus/MEMORY.md": {
+   "text": ""
+  },
+  "home/.prometheus/USER.md": {
+   "text": ""
+  },
+  "home/.prometheus/checkpoints/checkpoints.db": {
+   "sqlite": {
+    "checkpoint_files": {
+     "columns": [
+      "checkpoint_id",
+      "rel_path",
+      "sha256",
+      "size",
+      "mtime",
+      "mode"
+     ],
+     "rows": []
+    },
+    "checkpoint_skipped": {
+     "columns": [
+      "checkpoint_id",
+      "rel_path",
+      "reason"
+     ],
+     "rows": []
+    },
+    "checkpoints": {
+     "columns": [
+      "id",
+      "session_id",
+      "workspace",
+      "label",
+      "created_at",
+      "files",
+      "bytes",
+      "skipped"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/data/archive.jsonl": {
+   "jsonl": [
+    {
+     "data": {
+      "args": {
+       "config": "/tmp/prometheus-parity/home/.prometheus/prometheus.yaml",
+       "debug": false,
+       "telegram_only": false
+      }
+     },
+     "timestamp": "<time>",
+     "type": "daemon_start"
+    },
+    {
+     "data": {},
+     "timestamp": "<time>",
+     "type": "daemon_shutdown"
+    }
+   ]
+  },
+  "home/.prometheus/data/devices.db": {
+   "sqlite": {
+    "activity_tokens": {
+     "columns": [
+      "device_id",
+      "session_id",
+      "activity_token",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "api_devices": {
+     "columns": [
+      "id",
+      "name",
+      "platform",
+      "token_sha256",
+      "created_at",
+      "last_seen_at",
+      "revoked_at",
+      "apns_token",
+      "apns_environment",
+      "apns_bundle_id",
+      "push_failures",
+      "last_push_at",
+      "last_push_status"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/data/lcm.db": {
+   "sqlite": {
+    "checkpoints": {
+     "columns": [
+      "id",
+      "task_id",
+      "step_number",
+      "goal_hash",
+      "goal_description",
+      "messages_json",
+      "tool_calls_json",
+      "divergence_score",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "lcm_messages": {
+     "columns": [
+      "id",
+      "session_id",
+      "turn_index",
+      "role",
+      "content",
+      "content_json",
+      "token_count",
+      "timestamp",
+      "compacted",
+      "provenance",
+      "is_trusted"
+     ],
+     "rows": [
+      [
+       "<uuid:1>",
+       "desktop:parity-repair",
+       0,
+       "user",
+       "This is a sandboxed test of tool-call repair. Emit exactly the following tool call, byte for byte. The number is deliberate: the file is literally named 42, and the path must stay an unquoted number.\n\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": 42}}\n</tool_call>\n\nAfter the result comes back, tell me what the file says.",
+       {
+        "$json": [
+         {
+          "text": "This is a sandboxed test of tool-call repair. Emit exactly the following tool call, byte for byte. The number is deliberate: the file is literally named 42, and the path must stay an unquoted number.\n\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": 42}}\n</tool_call>\n\nAfter the result comes back, tell me what the file says.",
+          "type": "text"
+         }
+        ]
+       },
+       83,
+       "<time>",
+       0,
+       "user",
+       1
+      ],
+      [
+       "<uuid:2>",
+       "desktop:parity-repair",
+       1,
+       "assistant",
+       {
+        "$json": {
+         "arguments": {
+          "path": 42
+         },
+         "name": "read_file"
+        }
+       },
+       {
+        "$json": [
+         {
+          "text": {
+           "$json": {
+            "arguments": {
+             "path": 42
+            },
+            "name": "read_file"
+           }
+          },
+          "type": "text"
+         },
+         {
+          "id": "<toolu:1>",
+          "input": {
+           "path": 42
+          },
+          "name": "read_file",
+          "type": "tool_use"
+         }
+        ]
+       },
+       12,
+       "<time>",
+       0,
+       "user",
+       0
+      ],
+      [
+       "<uuid:3>",
+       "desktop:parity-repair",
+       2,
+       "user",
+       "",
+       {
+        "$json": [
+         {
+          "content": "     1\tthe answer file says: forty-two",
+          "is_error": false,
+          "tool_use_id": "<toolu:1>",
+          "type": "tool_result"
+         }
+        ]
+       },
+       0,
+       "<time>",
+       0,
+       "user",
+       0
+      ],
+      [
+       "<uuid:4>",
+       "desktop:parity-repair",
+       3,
+       "assistant",
+       "The file named `42` contains the following content:\n```\nthe answer file says: forty-two\n```",
+       {
+        "$json": [
+         {
+          "text": "The file named `42` contains the following content:\n```\nthe answer file says: forty-two\n```",
+          "type": "text"
+         }
+        ]
+       },
+       22,
+       "<time>",
+       0,
+       "user",
+       0
+      ]
+     ]
+    },
+    "lcm_messages_fts": {
+     "columns": [
+      "content"
+     ],
+     "rows": [
+      [
+       "This is a sandboxed test of tool-call repair. Emit exactly the following tool call, byte for byte. The number is deliberate: the file is literally named 42, and the path must stay an unquoted number.\n\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": 42}}\n</tool_call>\n\nAfter the result comes back, tell me what the file says."
+      ],
+      [
+       {
+        "$json": {
+         "arguments": {
+          "path": 42
+         },
+         "name": "read_file"
+        }
+       }
+      ],
+      [
+       ""
+      ],
+      [
+       "The file named `42` contains the following content:\n```\nthe answer file says: forty-two\n```"
+      ]
+     ]
+    },
+    "lcm_messages_fts_config": {
+     "columns": [
+      "k",
+      "v"
+     ],
+     "rows": [
+      [
+       "version",
+       4
+      ]
+     ]
+    },
+    "lcm_messages_fts_data": {
+     "columns": [
+      "id",
+      "block"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "0f2e64419cf137a2",
+        "len": 2
+       }
+      ],
+      [
+       10,
+       {
+        "$bytes_sha256": "27f18fba1aa54549",
+        "len": 18
+       }
+      ],
+      [
+       137438953473,
+       {
+        "$bytes_sha256": "ebffb458cf6e33a8",
+        "len": 399
+       }
+      ],
+      [
+       274877906945,
+       {
+        "$bytes_sha256": "45a92984c566f7f7",
+        "len": 67
+       }
+      ],
+      [
+       412316860417,
+       {
+        "$bytes_sha256": "40b3ec0eb61117ee",
+        "len": 121
+       }
+      ]
+     ]
+    },
+    "lcm_messages_fts_docsize": {
+     "columns": [
+      "id",
+      "sz"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "19581e27de7ced00",
+        "len": 1
+       }
+      ],
+      [
+       2,
+       {
+        "$bytes_sha256": "67586e98fad27da0",
+        "len": 1
+       }
+      ],
+      [
+       3,
+       {
+        "$bytes_sha256": "6e340b9cffb37a98",
+        "len": 1
+       }
+      ],
+      [
+       4,
+       {
+        "$bytes_sha256": "4d7b3ef7300acf70",
+        "len": 1
+       }
+      ]
+     ]
+    },
+    "lcm_messages_fts_idx": {
+     "columns": [
+      "segid",
+      "term",
+      "pgno"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "e3b0c44298fc1c14",
+        "len": 0
+       },
+       2
+      ],
+      [
+       2,
+       {
+        "$bytes_sha256": "e3b0c44298fc1c14",
+        "len": 0
+       },
+       2
+      ],
+      [
+       3,
+       {
+        "$bytes_sha256": "e3b0c44298fc1c14",
+        "len": 0
+       },
+       2
+      ]
+     ]
+    },
+    "lcm_summaries": {
+     "columns": [
+      "id",
+      "session_id",
+      "parent_ids",
+      "source_message_ids",
+      "summary_text",
+      "depth",
+      "token_count",
+      "created_at",
+      "is_leaf"
+     ],
+     "rows": []
+    },
+    "lcm_summaries_fts": {
+     "columns": [
+      "summary_text"
+     ],
+     "rows": []
+    },
+    "lcm_summaries_fts_config": {
+     "columns": [
+      "k",
+      "v"
+     ],
+     "rows": [
+      [
+       "version",
+       4
+      ]
+     ]
+    },
+    "lcm_summaries_fts_data": {
+     "columns": [
+      "id",
+      "block"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "e3b0c44298fc1c14",
+        "len": 0
+       }
+      ],
+      [
+       10,
+       {
+        "$bytes_sha256": "837885c8f8091aea",
+        "len": 7
+       }
+      ]
+     ]
+    },
+    "lcm_summaries_fts_docsize": {
+     "columns": [
+      "id",
+      "sz"
+     ],
+     "rows": []
+    },
+    "lcm_summaries_fts_idx": {
+     "columns": [
+      "segid",
+      "term",
+      "pgno"
+     ],
+     "rows": []
+    },
+    "message_client_ids": {
+     "columns": [
+      "session_id",
+      "row_id",
+      "client_msg_id",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "session_backends": {
+     "columns": [
+      "session_id",
+      "key",
+      "set_by",
+      "updated_at"
+     ],
+     "rows": [
+      [
+       "desktop:parity-repair",
+       "alt",
+       "router",
+       "<time>"
+      ]
+     ]
+    },
+    "session_forks": {
+     "columns": [
+      "session_id",
+      "origin_session",
+      "origin_rowid",
+      "created_at"
+     ],
+     "rows": []
+    },
+    "session_pins": {
+     "columns": [
+      "session_id",
+      "pinned_at"
+     ],
+     "rows": []
+    },
+    "session_profiles": {
+     "columns": [
+      "session_id",
+      "profile",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "session_titles": {
+     "columns": [
+      "session_id",
+      "title",
+      "updated_at"
+     ],
+     "rows": [
+      [
+       "desktop:parity-repair",
+       "Sandboxed Tool-Call Repair Test",
+       "<time>"
+      ]
+     ]
+    },
+    "session_tombstones": {
+     "columns": [
+      "session_id",
+      "deleted_at"
+     ],
+     "rows": []
+    },
+    "session_workspaces": {
+     "columns": [
+      "session_id",
+      "path",
+      "set_by",
+      "updated_at"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/data/security/audit.db": {
+   "sqlite": {
+    "permission_audit": {
+     "columns": [
+      "id",
+      "timestamp",
+      "tool_name",
+      "decision",
+      "trust_level",
+      "reason",
+      "tool_input_summary",
+      "user_id",
+      "session_id"
+     ],
+     "rows": [
+      [
+       1,
+       "<time>",
+       "read_file",
+       "allow",
+       2,
+       "Auto-allowed (user-initiated)",
+       "",
+       null,
+       null
+      ]
+     ]
+    }
+   }
+  },
+  "home/.prometheus/data/security/permission_audit.jsonl": {
+   "jsonl": [
+    {
+     "decision": "allow",
+     "reason": "Auto-allowed (user-initiated)",
+     "session_id": null,
+     "timestamp": "<time>",
+     "timestamp_iso": "<time>",
+     "tool_input_summary": "",
+     "tool_name": "read_file",
+     "trust_level": 2,
+     "user_id": null
+    }
+   ]
+  },
+  "home/.prometheus/data/tasks.db": {
+   "sqlite": {
+    "tasks": {
+     "columns": [
+      "id",
+      "type",
+      "status",
+      "description",
+      "cwd",
+      "output_file",
+      "command",
+      "prompt",
+      "created_at",
+      "started_at",
+      "ended_at",
+      "return_code",
+      "metadata",
+      "session_id",
+      "notify_target",
+      "on_complete",
+      "reengage_prompt",
+      "timeout_seconds",
+      "artifact_path",
+      "error",
+      "spec"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/data/training.db": {
+   "sqlite": {
+    "training_pairs": {
+     "columns": [
+      "id",
+      "timestamp",
+      "pair_source",
+      "model_id",
+      "tool_name",
+      "context",
+      "rejected",
+      "chosen",
+      "meta",
+      "context_hash"
+     ],
+     "rows": [
+      [
+       "<hash-of-time>",
+       "<time>",
+       "schema_repair",
+       "qwen2.5:7b-instruct",
+       "read_file",
+       {
+        "$json": {
+         "kind": "lcm_ref",
+         "model": "qwen2.5:7b-instruct",
+         "session_id": "web",
+         "tool_schema": {
+          "name": "read_file",
+          "properties": [
+           "path",
+           "offset",
+           "limit"
+          ],
+          "required": [
+           "path"
+          ]
+         },
+         "ts": "<time>"
+        }
+       },
+       {
+        "$json": {
+         "input": {
+          "path": 42
+         },
+         "name": "read_file"
+        }
+       },
+       {
+        "$json": {
+         "input": {
+          "path": "42"
+         },
+         "name": "read_file"
+        }
+       },
+       {
+        "$json": {
+         "repair_log": [
+          "coerced path: int → string"
+         ]
+        }
+       },
+       "<hash-of-time>"
+      ]
+     ]
+    }
+   }
+  },
+  "home/.prometheus/memory.db": {
+   "sqlite": {
+    "extractor_cursors": {
+     "columns": [
+      "scope",
+      "last_row_id",
+      "updated_at"
+     ],
+     "rows": [
+      [
+       "*",
+       0,
+       "<time>"
+      ]
+     ]
+    },
+    "memories": {
+     "columns": [
+      "id",
+      "entity_type",
+      "entity_name",
+      "relationship",
+      "fact",
+      "confidence",
+      "source_event_ids",
+      "last_mentioned",
+      "mention_count",
+      "tags",
+      "timestamp",
+      "manual"
+     ],
+     "rows": []
+    },
+    "memories_fts": {
+     "columns": [
+      "id",
+      "entity_name",
+      "fact"
+     ],
+     "rows": []
+    },
+    "memories_fts_config": {
+     "columns": [
+      "k",
+      "v"
+     ],
+     "rows": [
+      [
+       "version",
+       4
+      ]
+     ]
+    },
+    "memories_fts_data": {
+     "columns": [
+      "id",
+      "block"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "df3f619804a92fdb",
+        "len": 4
+       }
+      ],
+      [
+       10,
+       {
+        "$bytes_sha256": "837885c8f8091aea",
+        "len": 7
+       }
+      ]
+     ]
+    },
+    "memories_fts_docsize": {
+     "columns": [
+      "id",
+      "sz"
+     ],
+     "rows": []
+    },
+    "memories_fts_idx": {
+     "columns": [
+      "segid",
+      "term",
+      "pgno"
+     ],
+     "rows": []
+    },
+    "messages": {
+     "columns": [
+      "id",
+      "session_id",
+      "role",
+      "content",
+      "timestamp",
+      "compressed"
+     ],
+     "rows": []
+    },
+    "messages_fts": {
+     "columns": [
+      "id",
+      "content"
+     ],
+     "rows": []
+    },
+    "messages_fts_config": {
+     "columns": [
+      "k",
+      "v"
+     ],
+     "rows": [
+      [
+       "version",
+       4
+      ]
+     ]
+    },
+    "messages_fts_data": {
+     "columns": [
+      "id",
+      "block"
+     ],
+     "rows": [
+      [
+       1,
+       {
+        "$bytes_sha256": "709e80c88487a241",
+        "len": 3
+       }
+      ],
+      [
+       10,
+       {
+        "$bytes_sha256": "837885c8f8091aea",
+        "len": 7
+       }
+      ]
+     ]
+    },
+    "messages_fts_docsize": {
+     "columns": [
+      "id",
+      "sz"
+     ],
+     "rows": []
+    },
+    "messages_fts_idx": {
+     "columns": [
+      "segid",
+      "term",
+      "pgno"
+     ],
+     "rows": []
+    },
+    "summaries": {
+     "columns": [
+      "id",
+      "source_message_ids",
+      "summary_text",
+      "level",
+      "timestamp"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "home/.prometheus/node/node.key": {
+   "replaced": "<boot-specific>"
+  },
+  "home/.prometheus/node/node.pub": {
+   "replaced": "<boot-specific>"
+  },
+  "home/.prometheus/prometheus.yaml": {
+   "replaced": "<harness-input>"
+  },
+  "home/.prometheus/telemetry.db": {
+   "sqlite": {
+    "circuit_breaker_diagnostics": {
+     "columns": [
+      "id",
+      "timestamp",
+      "model_id",
+      "adapter_tier",
+      "tool_name",
+      "failure_category",
+      "config_drift",
+      "raw_sample",
+      "recovered",
+      "recovery_method",
+      "golden_reference"
+     ],
+     "rows": []
+    },
+    "schema_meta": {
+     "columns": [
+      "key",
+      "value"
+     ],
+     "rows": [
+      [
+       "latency_nullable_since",
+       "0.0"
+      ],
+      [
+       "billing_recorded_since",
+       "<time>"
+      ],
+      [
+       "created_at",
+       "<time>"
+      ],
+      [
+       "created_by",
+       "prometheus telemetry v3"
+      ],
+      [
+       "schema_version",
+       "3"
+      ]
+     ]
+    },
+    "signal_events": {
+     "columns": [
+      "id",
+      "timestamp",
+      "signal_type",
+      "payload",
+      "source_subsystem",
+      "read_at"
+     ],
+     "rows": []
+    },
+    "silent_failures": {
+     "columns": [
+      "id",
+      "timestamp",
+      "subsystem",
+      "operation",
+      "exception_type",
+      "exception_msg",
+      "traceback",
+      "context",
+      "response_body"
+     ],
+     "rows": []
+    },
+    "subsystem_runs": {
+     "columns": [
+      "id",
+      "timestamp",
+      "subsystem",
+      "operation",
+      "duration_ms",
+      "outcome",
+      "summary_json",
+      "input_tokens",
+      "output_tokens",
+      "round_index",
+      "session_id",
+      "model",
+      "thinking",
+      "cached_input_tokens",
+      "cache_write_tokens",
+      "node_id",
+      "billing_mode",
+      "billing_marker"
+     ],
+     "rows": [
+      [
+       "<uuid:5>",
+       "<time>",
+       "tool_registration",
+       "TaskCreateTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskCreateTool",
+         "module_path": "prometheus.tools.builtin.task_create"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:6>",
+       "<time>",
+       "tool_registration",
+       "GitHubSearchTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "GitHubSearchTool",
+         "module_path": "prometheus.symbiote.github_search"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:7>",
+       "<time>",
+       "tool_registration",
+       "SymbioteScoutTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SymbioteScoutTool",
+         "module_path": "prometheus.tools.builtin.symbiote_scout"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:8>",
+       "<time>",
+       "tool_registration",
+       "SymbioteHarvestTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SymbioteHarvestTool",
+         "module_path": "prometheus.tools.builtin.symbiote_harvest"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:9>",
+       "<time>",
+       "tool_registration",
+       "SymbioteGraftTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SymbioteGraftTool",
+         "module_path": "prometheus.tools.builtin.symbiote_graft"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:10>",
+       "<time>",
+       "tool_registration",
+       "SymbioteStatusTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SymbioteStatusTool",
+         "module_path": "prometheus.tools.builtin.symbiote_status"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:11>",
+       "<time>",
+       "tool_registration",
+       "SkillTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SkillTool",
+         "module_path": "prometheus.tools.builtin.skill"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:12>",
+       "<time>",
+       "tool_registration",
+       "MemoryTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "MemoryTool",
+         "module_path": "prometheus.memory.hermes_memory_tool"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:13>",
+       "<time>",
+       "tool_registration",
+       "TodoWriteTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TodoWriteTool",
+         "module_path": "prometheus.tools.builtin.todo_write"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:14>",
+       "<time>",
+       "tool_registration",
+       "VaultSearchTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "VaultSearchTool",
+         "module_path": "prometheus.tools.builtin.vault"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:15>",
+       "<time>",
+       "tool_registration",
+       "VaultReadTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "VaultReadTool",
+         "module_path": "prometheus.tools.builtin.vault"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:16>",
+       "<time>",
+       "tool_registration",
+       "AnatomyTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "AnatomyTool",
+         "module_path": "prometheus.tools.builtin.anatomy"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:17>",
+       "<time>",
+       "tool_registration",
+       "BrowserTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "BrowserTool",
+         "module_path": "prometheus.tools.builtin.browser"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:18>",
+       "<time>",
+       "tool_registration",
+       "SessionsListTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SessionsListTool",
+         "module_path": "prometheus.tools.builtin.sessions_list"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:19>",
+       "<time>",
+       "tool_registration",
+       "SessionsSendTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SessionsSendTool",
+         "module_path": "prometheus.tools.builtin.sessions_send"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:20>",
+       "<time>",
+       "tool_registration",
+       "SessionsSpawnTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "SessionsSpawnTool",
+         "module_path": "prometheus.tools.builtin.sessions_spawn"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:21>",
+       "<time>",
+       "tool_registration",
+       "TaskGetTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskGetTool",
+         "module_path": "prometheus.tools.builtin.task_get"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:22>",
+       "<time>",
+       "tool_registration",
+       "TaskListTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskListTool",
+         "module_path": "prometheus.tools.builtin.task_list"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:23>",
+       "<time>",
+       "tool_registration",
+       "TaskUpdateTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskUpdateTool",
+         "module_path": "prometheus.tools.builtin.task_update"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:24>",
+       "<time>",
+       "tool_registration",
+       "TaskStopTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskStopTool",
+         "module_path": "prometheus.tools.builtin.task_stop"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:25>",
+       "<time>",
+       "tool_registration",
+       "TaskOutputTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "TaskOutputTool",
+         "module_path": "prometheus.tools.builtin.task_output"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:26>",
+       "<time>",
+       "tool_registration",
+       "ImageGenerateTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "ImageGenerateTool",
+         "module_path": "prometheus.tools.builtin.image_generate"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:27>",
+       "<time>",
+       "tool_registration",
+       "KlingVideoTool",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "class_name": "KlingVideoTool",
+         "module_path": "prometheus.tools.builtin.video_generate"
+        }
+       },
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:28>",
+       "<time>",
+       "agent_loop",
+       "tool_advertisement",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "advertised": 11,
+         "deferred_active": true,
+         "profile": "full",
+         "registered_total": 51,
+         "source": "auto → enabled (local provider, tier full)"
+        }
+       },
+       null,
+       null,
+       null,
+       "desktop:parity-repair",
+       "qwen2.5:7b-instruct",
+       null,
+       null,
+       null,
+       "<node>",
+       null,
+       null
+      ],
+      [
+       "<uuid:29>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "stop_reason": "stop"
+        }
+       },
+       0,
+       0,
+       0,
+       "desktop:parity-repair",
+       "qwen2.5:7b-instruct",
+       null,
+       null,
+       null,
+       "<node>",
+       "unknown",
+       null
+      ],
+      [
+       "<uuid:30>",
+       "<time>",
+       "agent_loop",
+       "loop_round",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "stop_reason": "stop"
+        }
+       },
+       0,
+       0,
+       1,
+       "desktop:parity-repair",
+       "qwen2.5:7b-instruct",
+       null,
+       null,
+       null,
+       "<node>",
+       "unknown",
+       null
+      ]
+     ]
+    },
+    "tool_calls": {
+     "columns": [
+      "id",
+      "timestamp",
+      "model",
+      "tool_name",
+      "success",
+      "retries",
+      "latency_ms",
+      "error_type",
+      "error_detail",
+      "raw_model_output",
+      "parsed_tool_call",
+      "is_golden",
+      "repairs",
+      "served_model",
+      "session_id",
+      "tool_schema",
+      "node_id"
+     ],
+     "rows": [
+      [
+       "<uuid:31>",
+       "<time>",
+       "qwen2.5:7b-instruct",
+       "read_file",
+       1,
+       0,
+       "<ms>",
+       null,
+       null,
+       {
+        "$json": {
+         "arguments": {
+          "path": 42
+         },
+         "name": "read_file"
+        }
+       },
+       {
+        "$json": {
+         "input": {
+          "path": "42"
+         },
+         "name": "read_file"
+        }
+       },
+       0,
+       1,
+       null,
+       "desktop:parity-repair",
+       {
+        "$json": {
+         "description": "Read a text file from the local repository.",
+         "name": "read_file",
+         "parameters": {
+          "description": "Arguments for the file read tool.",
+          "properties": {
+           "limit": {
+            "default": 200,
+            "description": "Number of lines to return",
+            "maximum": 2000,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+           },
+           "offset": {
+            "default": 0,
+            "description": "Zero-based starting line",
+            "minimum": 0,
+            "title": "Offset",
+            "type": "integer"
+           },
+           "path": {
+            "description": "Path of the file to read",
+            "title": "Path",
+            "type": "string",
+            "x-prometheus-path": "file",
+            "x-prometheus-path-access": "read"
+           }
+          },
+          "required": [
+           "path"
+          ],
+          "title": "FileReadToolInput",
+          "type": "object"
+         }
+        }
+       },
+       "<node>"
+      ],
+      [
+       "<uuid:32>",
+       "<time>",
+       "qwen2.5:7b-instruct",
+       "_loop_transition",
+       1,
+       0,
+       null,
+       null,
+       null,
+       null,
+       null,
+       0,
+       0,
+       null,
+       null,
+       null,
+       "<node>"
+      ]
+     ]
+    }
+   }
+  }
+ }
+}

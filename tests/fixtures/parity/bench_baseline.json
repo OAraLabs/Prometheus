@@ -1,0 +1,483 @@
+{
+ "format": 1,
+ "measured_on": "the mini (Prometheus host), under its normal background load; bytecode warm",
+ "method": "stub-provider replay (scripts/parity/bench.py); model time excluded",
+ "sessions": [
+  {
+   "python": "3.11.15",
+   "runs": 10,
+   "scenarios": [
+    "checkpoint_undo",
+    "coding_run",
+    "compaction",
+    "gate_blocked",
+    "linked_workspace",
+    "memory_write",
+    "model_switch",
+    "plain_chat",
+    "repaired_tool_call",
+    "tool_calls"
+   ],
+   "per_run": [
+    {
+     "run": 1,
+     "rounds": 28,
+     "p50_ms": 16.993658,
+     "p95_ms": 35.03229035,
+     "mean_ms": 19.004024107142858,
+     "max_hwm_mb": 99.63671875,
+     "max_rss_mb": 99.63671875,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 25.714209,
+      "coding_run": NaN,
+      "compaction": 13.6987515,
+      "gate_blocked": 23.336116500000003,
+      "linked_workspace": 19.516515,
+      "memory_write": 29.9262905,
+      "model_switch": 17.845101,
+      "plain_chat": 17.903517,
+      "repaired_tool_call": 23.9024985,
+      "tool_calls": 16.944212
+     }
+    },
+    {
+     "run": 2,
+     "rounds": 28,
+     "p50_ms": 16.5644135,
+     "p95_ms": 32.33896445,
+     "mean_ms": 18.36021757142857,
+     "max_hwm_mb": 99.71484375,
+     "max_rss_mb": 99.71484375,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 25.712774,
+      "coding_run": NaN,
+      "compaction": 13.085789,
+      "gate_blocked": 23.953221,
+      "linked_workspace": 19.8758605,
+      "memory_write": 18.34472,
+      "model_switch": 16.051539,
+      "plain_chat": 18.027756,
+      "repaired_tool_call": 23.518571,
+      "tool_calls": 16.733426
+     }
+    },
+    {
+     "run": 3,
+     "rounds": 28,
+     "p50_ms": 16.41862,
+     "p95_ms": 30.792162199999993,
+     "mean_ms": 18.10534007142857,
+     "max_hwm_mb": 99.64453125,
+     "max_rss_mb": 99.64453125,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 24.98239,
+      "coding_run": NaN,
+      "compaction": 13.326727,
+      "gate_blocked": 22.989514,
+      "linked_workspace": 19.554495,
+      "memory_write": 18.8996745,
+      "model_switch": 17.638279,
+      "plain_chat": 18.340582,
+      "repaired_tool_call": 20.1525045,
+      "tool_calls": 16.875546
+     }
+    },
+    {
+     "run": 4,
+     "rounds": 28,
+     "p50_ms": 16.867992,
+     "p95_ms": 31.658403549999992,
+     "mean_ms": 18.22083057142857,
+     "max_hwm_mb": 99.58984375,
+     "max_rss_mb": 99.58984375,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 27.427099,
+      "coding_run": NaN,
+      "compaction": 12.440151499999999,
+      "gate_blocked": 23.539175,
+      "linked_workspace": 19.698053,
+      "memory_write": 17.7060735,
+      "model_switch": 18.702337,
+      "plain_chat": 18.555868,
+      "repaired_tool_call": 20.6646315,
+      "tool_calls": 16.285961
+     }
+    },
+    {
+     "run": 5,
+     "rounds": 28,
+     "p50_ms": 16.4655575,
+     "p95_ms": 31.913765449999993,
+     "mean_ms": 18.194056392857142,
+     "max_hwm_mb": 99.65234375,
+     "max_rss_mb": 99.65234375,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 24.495364,
+      "coding_run": NaN,
+      "compaction": 14.014733,
+      "gate_blocked": 24.1793425,
+      "linked_workspace": 20.6693155,
+      "memory_write": 20.6032995,
+      "model_switch": 16.451987,
+      "plain_chat": 18.588477,
+      "repaired_tool_call": 20.3298955,
+      "tool_calls": 16.665751
+     }
+    },
+    {
+     "run": 6,
+     "rounds": 28,
+     "p50_ms": 16.212300499999998,
+     "p95_ms": 31.441249699999993,
+     "mean_ms": 18.006873071428572,
+     "max_hwm_mb": 99.65625,
+     "max_rss_mb": 99.65625,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 24.275739,
+      "coding_run": NaN,
+      "compaction": 12.627827,
+      "gate_blocked": 23.345564500000002,
+      "linked_workspace": 21.032108,
+      "memory_write": 19.686287,
+      "model_switch": 15.588337,
+      "plain_chat": 18.603816,
+      "repaired_tool_call": 21.3695335,
+      "tool_calls": 19.672652
+     }
+    },
+    {
+     "run": 7,
+     "rounds": 28,
+     "p50_ms": 16.0797365,
+     "p95_ms": 30.64447539999999,
+     "mean_ms": 17.999622285714285,
+     "max_hwm_mb": 99.3828125,
+     "max_rss_mb": 99.3828125,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 25.375724,
+      "coding_run": NaN,
+      "compaction": 13.7617825,
+      "gate_blocked": 22.861719,
+      "linked_workspace": 20.166621,
+      "memory_write": 18.4096285,
+      "model_switch": 17.137398,
+      "plain_chat": 18.17643,
+      "repaired_tool_call": 21.60416,
+      "tool_calls": 16.610309
+     }
+    },
+    {
+     "run": 8,
+     "rounds": 28,
+     "p50_ms": 15.8283795,
+     "p95_ms": 35.13542694999998,
+     "mean_ms": 18.463874142857144,
+     "max_hwm_mb": 99.484375,
+     "max_rss_mb": 99.484375,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 26.99885,
+      "coding_run": NaN,
+      "compaction": 12.620252,
+      "gate_blocked": 29.429456000000002,
+      "linked_workspace": 19.6960105,
+      "memory_write": 18.4040125,
+      "model_switch": 15.458058,
+      "plain_chat": 17.784407,
+      "repaired_tool_call": 22.048092500000003,
+      "tool_calls": 17.762509
+     }
+    },
+    {
+     "run": 9,
+     "rounds": 28,
+     "p50_ms": 16.507018000000002,
+     "p95_ms": 35.249402499999995,
+     "mean_ms": 18.133804,
+     "max_hwm_mb": 99.71484375,
+     "max_rss_mb": 99.71484375,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 24.302842,
+      "coding_run": NaN,
+      "compaction": 12.9718845,
+      "gate_blocked": 23.478709,
+      "linked_workspace": 19.823027500000002,
+      "memory_write": 18.1204465,
+      "model_switch": 15.238574,
+      "plain_chat": 18.37931,
+      "repaired_tool_call": 26.420686500000002,
+      "tool_calls": 16.858184
+     }
+    },
+    {
+     "run": 10,
+     "rounds": 28,
+     "p50_ms": 16.1296685,
+     "p95_ms": 31.97709064999999,
+     "mean_ms": 17.916180035714284,
+     "max_hwm_mb": 99.67578125,
+     "max_rss_mb": 99.67578125,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 27.67357,
+      "coding_run": NaN,
+      "compaction": 12.8049975,
+      "gate_blocked": 23.951423499999997,
+      "linked_workspace": 20.08784,
+      "memory_write": 17.534799,
+      "model_switch": 15.023428,
+      "plain_chat": 17.758129,
+      "repaired_tool_call": 22.899558499999998,
+      "tool_calls": 17.534228
+     }
+    }
+   ]
+  },
+  {
+   "python": "3.11.15",
+   "runs": 10,
+   "scenarios": [
+    "checkpoint_undo",
+    "coding_run",
+    "compaction",
+    "gate_blocked",
+    "linked_workspace",
+    "memory_write",
+    "model_switch",
+    "plain_chat",
+    "repaired_tool_call",
+    "tool_calls"
+   ],
+   "per_run": [
+    {
+     "run": 1,
+     "rounds": 28,
+     "p50_ms": 17.50543,
+     "p95_ms": 37.57161994999999,
+     "mean_ms": 19.797139035714284,
+     "max_hwm_mb": 99.4921875,
+     "max_rss_mb": 99.4921875,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 25.768198,
+      "coding_run": NaN,
+      "compaction": 14.978551,
+      "gate_blocked": 24.111507500000002,
+      "linked_workspace": 20.1507205,
+      "memory_write": 27.600156,
+      "model_switch": 18.948279,
+      "plain_chat": 18.685726,
+      "repaired_tool_call": 22.169635,
+      "tool_calls": 19.412364
+     }
+    },
+    {
+     "run": 2,
+     "rounds": 28,
+     "p50_ms": 17.6825805,
+     "p95_ms": 32.98156964999999,
+     "mean_ms": 18.759533642857143,
+     "max_hwm_mb": 99.47265625,
+     "max_rss_mb": 99.47265625,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 24.918393,
+      "coding_run": NaN,
+      "compaction": 12.932292,
+      "gate_blocked": 25.159551,
+      "linked_workspace": 19.653046,
+      "memory_write": 19.0016885,
+      "model_switch": 18.920799,
+      "plain_chat": 18.255084,
+      "repaired_tool_call": 22.600593,
+      "tool_calls": 19.84528
+     }
+    },
+    {
+     "run": 3,
+     "rounds": 28,
+     "p50_ms": 16.909368999999998,
+     "p95_ms": 33.685132599999996,
+     "mean_ms": 18.472402464285715,
+     "max_hwm_mb": 99.421875,
+     "max_rss_mb": 99.421875,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 24.923613,
+      "coding_run": NaN,
+      "compaction": 12.003633,
+      "gate_blocked": 23.464387000000002,
+      "linked_workspace": 19.337865,
+      "memory_write": 17.703169,
+      "model_switch": 18.453949,
+      "plain_chat": 18.346943,
+      "repaired_tool_call": 21.4031995,
+      "tool_calls": 17.082799
+     }
+    },
+    {
+     "run": 4,
+     "rounds": 28,
+     "p50_ms": 16.911942500000002,
+     "p95_ms": 30.178241549999996,
+     "mean_ms": 18.45556942857143,
+     "max_hwm_mb": 99.46875,
+     "max_rss_mb": 99.46875,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 26.120255,
+      "coding_run": NaN,
+      "compaction": 13.6139705,
+      "gate_blocked": 22.5463035,
+      "linked_workspace": 19.3832195,
+      "memory_write": 18.9674895,
+      "model_switch": 19.671459,
+      "plain_chat": 18.190624,
+      "repaired_tool_call": 20.424941,
+      "tool_calls": 17.550499
+     }
+    },
+    {
+     "run": 5,
+     "rounds": 28,
+     "p50_ms": 15.510189,
+     "p95_ms": 32.48407989999999,
+     "mean_ms": 17.879887642857145,
+     "max_hwm_mb": 99.6796875,
+     "max_rss_mb": 99.6796875,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 24.955603,
+      "coding_run": NaN,
+      "compaction": 12.103501999999999,
+      "gate_blocked": 24.162741500000003,
+      "linked_workspace": 20.672626,
+      "memory_write": 18.542908,
+      "model_switch": 15.534369,
+      "plain_chat": 17.829421,
+      "repaired_tool_call": 20.6098715,
+      "tool_calls": 17.357614
+     }
+    },
+    {
+     "run": 6,
+     "rounds": 28,
+     "p50_ms": 16.421162,
+     "p95_ms": 34.0220637,
+     "mean_ms": 18.43345832142857,
+     "max_hwm_mb": 99.38671875,
+     "max_rss_mb": 99.38671875,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 26.453289,
+      "coding_run": NaN,
+      "compaction": 13.137855,
+      "gate_blocked": 23.138304,
+      "linked_workspace": 19.29119,
+      "memory_write": 18.2540765,
+      "model_switch": 18.565869,
+      "plain_chat": 18.480388,
+      "repaired_tool_call": 25.250734,
+      "tool_calls": 17.897452
+     }
+    },
+    {
+     "run": 7,
+     "rounds": 28,
+     "p50_ms": 16.445219,
+     "p95_ms": 32.23290169999999,
+     "mean_ms": 18.414658250000002,
+     "max_hwm_mb": 99.53515625,
+     "max_rss_mb": 99.53515625,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 25.501365,
+      "coding_run": NaN,
+      "compaction": 13.368131,
+      "gate_blocked": 23.459599499999996,
+      "linked_workspace": 21.503711,
+      "memory_write": 21.0209725,
+      "model_switch": 17.995844,
+      "plain_chat": 18.152773,
+      "repaired_tool_call": 21.397675999999997,
+      "tool_calls": 16.536069
+     }
+    },
+    {
+     "run": 8,
+     "rounds": 28,
+     "p50_ms": 15.797612,
+     "p95_ms": 30.946499849999995,
+     "mean_ms": 17.978554607142858,
+     "max_hwm_mb": 99.3671875,
+     "max_rss_mb": 99.3671875,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 26.784334,
+      "coding_run": NaN,
+      "compaction": 13.6513445,
+      "gate_blocked": 23.233946000000003,
+      "linked_workspace": 19.8696755,
+      "memory_write": 18.3103135,
+      "model_switch": 15.794544,
+      "plain_chat": 18.895147,
+      "repaired_tool_call": 20.13184,
+      "tool_calls": 17.680309
+     }
+    },
+    {
+     "run": 9,
+     "rounds": 28,
+     "p50_ms": 16.166966000000002,
+     "p95_ms": 32.71380194999999,
+     "mean_ms": 18.245370428571427,
+     "max_hwm_mb": 99.46484375,
+     "max_rss_mb": 99.46484375,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 26.693953,
+      "coding_run": NaN,
+      "compaction": 12.874758499999999,
+      "gate_blocked": 25.086314,
+      "linked_workspace": 20.055999,
+      "memory_write": 19.897118,
+      "model_switch": 15.921466,
+      "plain_chat": 19.46616,
+      "repaired_tool_call": 20.4967405,
+      "tool_calls": 16.733659
+     }
+    },
+    {
+     "run": 10,
+     "rounds": 28,
+     "p50_ms": 16.3772115,
+     "p95_ms": 31.61517614999999,
+     "mean_ms": 18.134470785714285,
+     "max_hwm_mb": 99.54296875,
+     "max_rss_mb": 99.54296875,
+     "invalid": [],
+     "by_scenario_p50": {
+      "checkpoint_undo": 25.076994,
+      "coding_run": NaN,
+      "compaction": 12.641596,
+      "gate_blocked": 23.5871495,
+      "linked_workspace": 19.0447435,
+      "memory_write": 18.9557125,
+      "model_switch": 16.060061,
+      "plain_chat": 18.001992,
+      "repaired_tool_call": 21.929367,
+      "tool_calls": 18.295374
+     }
+    }
+   ]
+  }
+ ]
+}
