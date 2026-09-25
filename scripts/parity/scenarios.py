@@ -82,15 +82,30 @@ def _need(cond: bool, msg: str) -> list[str]:
     return [] if cond else [msg]
 
 
+# Every check below that reads a reply holds the sample to the question it
+# was asked. Parity does not grade answers, but a golden is read by people,
+# and one in which the agent does not answer (or answers something else)
+# looks like a daemon bug to whoever opens it next. These rules were applied
+# by hand while re-recording (WP-X.14) and live here so the next re-record
+# inherits them.
+def _final_reply(ev: Evidence) -> str:
+    chats = [s for s in ev.steps if s.get("op") == "chat"]
+    return ((chats[-1].get("reply") or "") if chats else "").lower()
+
+
 def _req_plain(ev: Evidence) -> list[str]:
     reply = ev.steps[0].get("reply") or ""
     return (_need(bool(reply.strip()), "no final reply")
-            + _need(not ev.tool_rows(), "plain chat must call no tool"))
+            + _need(not ev.tool_rows(), "plain chat must call no tool")
+            + _need("lighthouse" in reply.lower(),
+                    "the reply does not contain 'lighthouse', the word it was asked for"))
 
 
 def _req_tools(ev: Evidence) -> list[str]:
     ok = [r for r in ev.tool_rows() if r.get("success") == 1]
-    return _need(len(ok) >= 2, f"expected >=2 successful tool calls, got {len(ok)}")
+    return (_need(len(ok) >= 2, f"expected >=2 successful tool calls, got {len(ok)}")
+            + _need("11" in _final_reply(ev),
+                    "the reply does not give the sprocket count (11) it read from inventory.txt"))
 
 
 def _req_repair(ev: Evidence) -> list[str]:
@@ -111,8 +126,12 @@ def _req_gate(ev: Evidence) -> list[str]:
     denies = [r for r in ev.rows("audit.db", "permission_audit")
               if str(r.get("decision", "")).upper().startswith("DENY")]
     blocked = [r for r in ev.tool_rows() if r.get("error_type") == "permission_denied"]
+    reply = _final_reply(ev)
     return (_need(bool(denies), "no DENY row in the permission audit")
-            + _need(bool(blocked), "no permission_denied tool_calls row"))
+            + _need(bool(blocked), "no permission_denied tool_calls row")
+            + _need(any(w in reply for w in ("den", "block", "refus", "not allowed",
+                                             "permission", "forbid")),
+                    "the reply does not report the refusals it was told to report"))
 
 
 def _req_checkpoint(ev: Evidence) -> list[str]:
@@ -122,7 +141,8 @@ def _req_checkpoint(ev: Evidence) -> list[str]:
     before = next((s for s in ev.steps if s["op"] == "tree" and s.get("label") == "after-turn"), {})
     after = next((s for s in ev.steps if s["op"] == "tree" and s.get("label") == "after-undo"), {})
     return (_need(touched > 0, "restore touched no file")
-            + _need(before.get("tree") != after.get("tree"), "undo did not change the workspace"))
+            + _need(before.get("tree") != after.get("tree"), "undo did not change the workspace")
+            + _need(bool(_final_reply(ev).strip()), "no final reply"))
 
 
 COMPACTION_WORDS = ("amber", "birch", "cobalt")
@@ -153,28 +173,65 @@ def _req_compaction(ev: Evidence) -> list[str]:
     extra = sorted({a or b or c for a, b, c in listed} - set(COMPACTION_WORDS))
     claimed = [w for w in ("fourth", "four words", "4 words", "memory", "saved", "stored")
                if w in reply]
+    # "Answer in one line": one line, with room for a trailing remark, and no
+    # hedging — a sample that cannot say the words with confidence is the
+    # failure this golden must not show.
+    lines = [ln for ln in reply.splitlines() if ln.strip()]
+    hedges = [w for w in ("couldn", "can't", "cannot", "unable", "guess", "retriev") if w in reply]
     return (_need(bool(sig or runs), "the context compactor never ran")
             + _need(in_order, "the final reply does not give amber, birch, cobalt in order")
             + _need(not extra, f"the final reply lists a word the game never had: {extra}")
-            + _need(not claimed, f"the final reply claims what never happened: {claimed}"))
+            + _need(not claimed, f"the final reply claims what never happened: {claimed}")
+            + _need(len(lines) <= 2, f"the final reply is not one line ({len(lines)} lines)")
+            + _need(not hedges, f"the final reply hedges: {hedges}"))
+
+
+# A pydantic validation error quoted into a tool result carries the offending
+# input in a TRUNCATED repr — "input_value={'file_path': '/tmp/prome...g/
+# cparity01-1790371638'}" — and the coding-clone-epoch normalization
+# (anchored on "/coding/") cannot see the epoch in it. It survives into the
+# request, so the sample differs on every replay. Seen on a sample where the
+# model called code_view(file_path=…) instead of path.
+_PYDANTIC_PER_RUN_VALUE = re.compile(r"input_value=\{[^}]*\b1[0-9]{9}\b")
 
 
 def _req_coding(ev: Evidence) -> list[str]:
     code = next((s for s in ev.steps if s["op"] == "code"), {})
     report = (code.get("result") or {}).get("report") or {}
+    leaking = [m.group(0)[:80] for r in ev.requests
+               for m in _PYDANTIC_PER_RUN_VALUE.finditer(json.dumps(r, ensure_ascii=False))]
     return (_need(report.get("status") == "success", f"coding run status {report.get('status')!r}")
-            + _need(report.get("acceptance_exit") == 0, "acceptance command did not pass"))
+            + _need(report.get("acceptance_exit") == 0, "acceptance command did not pass")
+            + _need(not leaking, "a tool result carries a pydantic error repr with a per-run "
+                                 f"value the normalizer cannot see — not replayable: {leaking[:1]}"))
 
 
 def _req_workspace(ev: Evidence) -> list[str]:
     in_prompt = any("ATLAS-7" in str(r) for r in ev.requests)
+    reply = _final_reply(ev)
     return (_need(in_prompt, "the workspace's project instructions never reached the model")
-            + _need(len(ev.tool_rows()) >= 1, "no tool ran in the workspace"))
+            + _need(len(ev.tool_rows()) >= 1, "no tool ran in the workspace")
+            + _need("atlas-7" in reply and "9" in reply,
+                    "the reply does not give the codename (ATLAS-7) and the blue tally (9)"))
 
 
 def _req_switch(ev: Evidence) -> list[str]:
-    return _need({"primary", "alt"} <= set(ev.upstream_labels),
-                 f"turns were served by {sorted(set(ev.upstream_labels))}, not both models")
+    replies = [(s.get("reply") or "").lower() for s in ev.steps if s.get("op") == "chat"]
+    answered = (len(replies) == 3
+                and all(w in r for w, r in zip(("one", "two", "three"), replies)))
+    # Two identical completion requests are the session-title race: a second
+    # title task scheduled by turn 2's chat_done while turn 1's was still in
+    # flight (engine/session_titles.py checks for an existing title BEFORE
+    # asking the model, and nothing marks one as in flight). A replay
+    # reproduces the second request only when the timing recurs, so such a
+    # sample is refused; record the alt turn live, not from a stand-in.
+    distinct = len({json.dumps(r, sort_keys=True, ensure_ascii=False) for r in ev.requests})
+    return (_need({"primary", "alt"} <= set(ev.upstream_labels),
+                  f"turns were served by {sorted(set(ev.upstream_labels))}, not both models")
+            + _need(answered, "the three turns did not answer one, two, three")
+            + _need(distinct == len(ev.requests),
+                    f"{len(ev.requests) - distinct} identical completion request(s) — the "
+                    f"session-title race; a replay reproduces it only by luck"))
 
 
 def _req_hosted(ev: Evidence) -> list[str]:
@@ -186,12 +243,15 @@ def _req_hosted(ev: Evidence) -> list[str]:
                                     f"upstream, got {len(hosted)}")
             + _need(bool(named), "the hosted request's identity line does not name the "
                                  "anthropic provider — the routing step did not rewrite it")
-            + _need(bool((chat.get("reply") or "").strip()), "no final reply"))
+            + _need(bool((chat.get("reply") or "").strip()), "no final reply")
+            + _need("harbor" in (chat.get("reply") or "").lower(),
+                    "the reply does not contain 'harbor', the word it was asked for"))
 
 
 def _req_memory(ev: Evidence) -> list[str]:
     wrote = any(p.endswith("MEMORY.md") and "teal" in str(d) for p, d in ev.stores.items())
-    return _need(wrote, "MEMORY.md does not hold the fact")
+    return (_need(wrote, "MEMORY.md does not hold the fact")
+            + _need(bool(_final_reply(ev).strip()), "no final reply"))
 
 
 def ws(name: str) -> str:
