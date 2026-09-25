@@ -143,14 +143,16 @@ class HookExecutor:
             # timeout returned after 4 s (WP-X.26). The whole group goes now.
             label = hook_label(event, position, hook)
             detail = f"timed out after {hook.timeout_seconds}s"
-            _kill_process_group(process)
-            try:
-                await asyncio.wait_for(process.wait(), timeout=_REAP_GRACE_SECONDS)
-            except asyncio.TimeoutError:
-                # Only a process that left the group (setsid) can still hold
-                # the pipes. Stop waiting for it: the deadline is the point.
-                detail += "; a process it started left its group and was not stopped"
+            leftover = await _stop_process_group(process)
+            if leftover:
+                detail += f"; {leftover}"
             return _failed_hook_result(hook, event, label, "timeout", detail, started)
+        except asyncio.CancelledError:
+            # A cancelled turn, Ctrl-C, daemon shutdown. The hook runs in its
+            # own session, so no terminal signal reaches it: if we do not stop
+            # its group here, nothing will. Don't wait for it; just stop it.
+            _kill_process_group(process)
+            raise
 
         output = "\n".join(
             part for part in (
@@ -180,11 +182,18 @@ class HookExecutor:
         # server that sends a byte every half second never trips a 1 s read
         # timeout, and such a hook ran as long as the server liked, then
         # reported success (WP-X.26). timeout_seconds is now the total.
+        #
+        # Connection setup is left to httpx's own connect timer, set so the TCP
+        # connect plus the TLS handshake (each gets the connect timeout) end
+        # inside the total. Cancelling httpcore in the middle of start_tls
+        # skips its cleanup and leaks the socket; its own timeout closes it.
         started = time.monotonic()
         deadline = asyncio.timeout(hook.timeout_seconds)
+        timeouts = httpx.Timeout(hook.timeout_seconds,
+                                 connect=hook.timeout_seconds * _HTTP_CONNECT_SHARE)
         try:
             async with deadline:
-                async with httpx.AsyncClient(timeout=hook.timeout_seconds) as client:
+                async with httpx.AsyncClient(timeout=timeouts) as client:
                     response = await client.post(
                         hook.url,
                         json={"event": event.value, "payload": payload},
@@ -205,6 +214,12 @@ class HookExecutor:
                 return _failed_hook_result(
                     hook, event, hook_label(event, position, hook), "timeout",
                     f"timed out after {hook.timeout_seconds}s", started,
+                )
+            if isinstance(exc, httpx.TimeoutException):
+                return _failed_hook_result(
+                    hook, event, hook_label(event, position, hook), "timeout",
+                    f"timed out ({type(exc).__name__}, deadline "
+                    f"{hook.timeout_seconds}s)", started,
                 )
             return HookResult(
                 hook_type=hook.type,
@@ -300,27 +315,59 @@ class HookExecutor:
         )
 
 
-#: After SIGKILL of a timed-out command hook's group, how long to wait for its
-#: output pipes to close before giving up on them.
+#: After a command hook times out, how long to keep killing its process group
+#: and waiting for its output pipes to close before giving up on them.
 _REAP_GRACE_SECONDS = 2.0
+_KILL_INTERVAL_SECONDS = 0.05
+
+#: Share of an http hook's timeout that httpx may spend on the TCP connect,
+#: and again on the TLS handshake: 2 x 0.4 keeps connection setup inside it.
+_HTTP_CONNECT_SHARE = 0.4
 
 
-def _kill_process_group(process: asyncio.subprocess.Process) -> None:
-    """SIGKILL a command hook's whole process group.
+def _kill_process_group(process: asyncio.subprocess.Process) -> bool:
+    """SIGKILL a command hook's whole process group. False once it is empty.
 
     The hook runs with ``start_new_session=True``, so bash leads a group whose
     id is bash's own pid. That id stays valid while ANY member lives, even
     after bash itself has exited and left a backgrounded child holding the
-    pipes, which is why it is used directly instead of ``os.getpgid``.
+    pipes, which is why it is used directly instead of ``os.getpgid``. Bash is
+    a member, so it needs no separate kill (and ``process.kill()`` could reap
+    it behind asyncio's back on Python 3.11/3.12).
     """
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
-    try:
-        process.kill()
     except ProcessLookupError:
+        return False
+    except PermissionError:
         pass
+    return True
+
+
+async def _stop_process_group(process: asyncio.subprocess.Process) -> str | None:
+    """Kill the group until the hook's output pipes close. None when they do.
+
+    The pipes, not bash's exit, are what the timeout was waiting on, so that is
+    what is waited for: the rest of ``communicate()``, which ends only at EOF on
+    both. The kill repeats, because a child being forked at the instant of one
+    SIGKILL can miss it. After the grace, whatever still holds the pipes is
+    named: a process that left the group (setsid), or one SIGKILL did not end.
+    """
+    deadline = time.monotonic() + _REAP_GRACE_SECONDS
+    drain = asyncio.ensure_future(process.communicate())
+    try:
+        while True:
+            group_alive = _kill_process_group(process)
+            done, _ = await asyncio.wait({drain}, timeout=_KILL_INTERVAL_SECONDS)
+            if done:
+                return None
+            if time.monotonic() >= deadline:
+                if group_alive:
+                    return "a process in its group did not exit after SIGKILL"
+                return "a process it started left its group and was not stopped"
+    finally:
+        if not drain.done():
+            drain.cancel()
 
 
 def _failed_hook_result(

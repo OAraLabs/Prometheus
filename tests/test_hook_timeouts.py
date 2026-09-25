@@ -27,6 +27,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
+import socket
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -174,24 +177,138 @@ async def test_an_http_hook_timeout_is_a_total_deadline(trickle_url, tmp_path, c
     assert "outcome=timeout" in warning
 
 
+def _escapee(pid_file: Path, seconds: int) -> str:
+    """A child that leaves the hook's process group (setsid) and records its pid."""
+    code = (f"import os,time; os.setsid(); open({str(pid_file)!r},'w').write(str(os.getpid())); "
+            f"time.sleep({seconds})")
+    return f"({sys.executable} -c {code!r})"
+
+
+async def _reap_escapee(pid_file: Path) -> None:
+    """Kill the escapee and let its pipes close before the test's loop does,
+    so no subprocess transport is finalised on a closed loop."""
+    try:
+        os.kill(int(pid_file.read_text()), signal.SIGKILL)
+    except (OSError, ValueError):
+        pass
+    await asyncio.sleep(0.3)
+
+
+@pytest.mark.parametrize("bash_waits", [True, False], ids=["bash-waits", "bash-already-exited"])
 @pytest.mark.asyncio
 async def test_a_process_that_leaves_the_group_cannot_hold_the_hook_past_the_grace(
-        tmp_path, caplog):
+        bash_waits, tmp_path, caplog):
     """The one thing a process-group kill cannot reach: a child that called
-    setsid() itself. The executor stops waiting for it after a short grace
-    and says so in the one WARNING, instead of blocking the call."""
-    import sys
-
+    setsid() itself. The executor stops waiting for it after a short grace and
+    names it in the one WARNING, instead of blocking the call. Whether bash is
+    still waiting for it or has already exited, it is what holds the pipes."""
     from prometheus.hooks import executor as ex
 
     caplog.set_level(logging.WARNING, logger=EXECUTOR_LOGGER)
-    hook = CommandHookDefinition(
-        command=f"({sys.executable} -c 'import os,time; os.setsid(); time.sleep(6)') & wait",
-        timeout_seconds=TIMEOUT)
+    pid_file = tmp_path / "escapee.pid"
+    tail = "& wait" if bash_waits else "& echo started"
+    hook = CommandHookDefinition(command=f"{_escapee(pid_file, 6)} {tail}",
+                                 timeout_seconds=TIMEOUT)
+    try:
+        elapsed, result = await _run(hook, tmp_path)
 
-    elapsed, result = await _run(hook, tmp_path)
+        assert elapsed < TIMEOUT + ex._REAP_GRACE_SECONDS + MARGIN, f"returned after {elapsed:.2f}s"
+        [one] = result.results
+        assert "left its group" in one.reason, one.reason
+        assert len(_warnings(caplog)) == 1
+    finally:
+        await _reap_escapee(pid_file)
 
-    assert elapsed < TIMEOUT + ex._REAP_GRACE_SECONDS + MARGIN, f"returned after {elapsed:.2f}s"
-    [one] = result.results
-    assert "left its group" in one.reason
-    assert len(_warnings(caplog)) == 1
+
+@pytest.mark.asyncio
+async def test_cancelling_a_command_hook_stops_what_it_started(tmp_path):
+    """A cancelled turn (or Ctrl-C, or daemon shutdown) cancels the hook. It
+    runs in its own session, so no terminal signal reaches it: the executor
+    must stop its group itself, or the hook's children outlive the turn."""
+    pid_file = tmp_path / "child.pid"
+    hook = CommandHookDefinition(command=f"sleep 30 & echo $! > {pid_file}; wait",
+                                 timeout_seconds=20)
+    registry = HookRegistry()
+    registry.add(HookEvent.PRE_TOOL_USE, hook)
+    executor = HookExecutor(
+        registry, HookExecutionContext(cwd=tmp_path, provider=None, default_model="stub"))
+
+    task = asyncio.create_task(executor.execute(HookEvent.PRE_TOOL_USE, {"tool_name": "bash"}))
+    for _ in range(100):
+        if pid_file.exists() and pid_file.read_text().strip():
+            break
+        await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    pid = int(pid_file.read_text())
+    assert _gone(pid), f"the cancelled hook's child {pid} is still running"
+    await asyncio.sleep(0.3)  # let the killed hook's pipes close on this loop
+
+
+class _StalledTls:
+    """Accepts TCP, reads the ClientHello, never answers. Counts client closes."""
+
+    def __init__(self) -> None:
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        self.closed_by_client = 0
+        self._stop = threading.Event()
+        self._conns: list[socket.socket] = []
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        self.sock.settimeout(0.2)
+        while not self._stop.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                continue
+            self._conns.append(conn)
+            threading.Thread(target=self._hold, args=(conn,), daemon=True).start()
+
+    def _hold(self, conn: socket.socket) -> None:
+        conn.settimeout(0.2)
+        while not self._stop.is_set():
+            try:
+                if conn.recv(4096) == b"":
+                    self.closed_by_client += 1
+                    return
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+
+    def close(self) -> None:
+        self._stop.set()
+        for c in self._conns:
+            c.close()
+        self.sock.close()
+
+
+@pytest.mark.asyncio
+async def test_an_https_hook_that_times_out_in_the_handshake_closes_its_socket(tmp_path):
+    """The total deadline must not cancel httpcore mid-handshake: start_tls
+    closes the stream only on an Exception, so a cancel there leaked one socket
+    per timed-out call for as long as the server held the handshake open.
+    Every connection this hook opened must be closed by the time it returns."""
+    server = _StalledTls()
+    try:
+        hook = HttpHookDefinition(url=f"https://127.0.0.1:{server.port}/hook",
+                                  timeout_seconds=TIMEOUT, block_on_failure=True)
+        for _ in range(3):
+            elapsed, result = await _run(hook, tmp_path)
+            assert elapsed < TIMEOUT + MARGIN, f"returned after {elapsed:.2f}s"
+            [one] = result.results
+            assert one.success is False and one.blocked is True
+        for _ in range(40):
+            if server.closed_by_client == 3:
+                break
+            await asyncio.sleep(0.05)
+        assert server.closed_by_client == 3, (
+            f"the hook left {3 - server.closed_by_client} of 3 connections open")
+    finally:
+        server.close()
