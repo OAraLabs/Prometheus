@@ -6,7 +6,9 @@ user overrides, adapter auto-adjustment, and config loading.
 
 from __future__ import annotations
 
+import logging
 import os
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,6 +19,7 @@ from prometheus.router.model_router import (
     RouteDecision,
     RouteReason,
     RouterConfig,
+    RoutingRule,
     OVERRIDE_PRESETS,
     TaskClassifier,
     TaskType,
@@ -199,6 +202,136 @@ class TestFallback:
     def test_get_fallback_empty_returns_none(self):
         r = _make_router(fallback_chain=[])
         assert r.get_fallback() is None
+
+
+# -- Task-type rule provider cache -------------------------------------------
+
+CODE_MSG = "write a python function to parse json"
+REASONING_MSG = "explain the tradeoffs of immutable data structures in depth"
+# What YAML builds from `0x` + 4000 hex digits: the loader takes it, but
+# repr() and str() refuse it (past Python's 4300-digit conversion limit).
+HUGE_INT = 1 << 16000
+
+
+class TestTaskRuleProviderCache:
+    """Real providers, not a mocked registry: what matters is the host each
+    decision's provider will actually send to."""
+
+    @pytest.fixture(autouse=True)
+    def _huge_int_stays_unprintable(self, caplog):
+        # HUGE_INT tests nothing once PYTHONINTMAXSTRDIGITS=0 lifts the limit,
+        # so pin the default. And keep the router's DEBUG line off: it formats
+        # the rule's config, which pytest's capture handler re-raises on where
+        # production handlers swallow it.
+        old = sys.get_int_max_str_digits()
+        sys.set_int_max_str_digits(4300)
+        caplog.set_level(logging.INFO, logger="prometheus.router.model_router")
+        yield
+        sys.set_int_max_str_digits(old)
+
+    def test_same_model_on_two_hosts_reaches_each_host(self):
+        # Two llama.cpp boxes serving one model. Keyed on "provider:model",
+        # the second rule was handed the provider built for the first box.
+        r = _make_router(task_rules=[
+            RoutingRule(TaskType.CODE_GENERATION, "llama_cpp", "qwen3.8-27b",
+                        base_url="http://gpu-a:8080"),
+            RoutingRule(TaskType.REASONING, "llama_cpp", "qwen3.8-27b",
+                        base_url="http://gpu-b:8080"),
+        ])
+        code = r.route(CODE_MSG)
+        reasoning = r.route(REASONING_MSG)
+
+        assert code.reason == reasoning.reason == RouteReason.TASK_RULE
+        assert code.provider._base_url == "http://gpu-a:8080"
+        assert reasoning.provider._base_url == "http://gpu-b:8080"
+
+    def test_rules_naming_one_endpoint_share_one_provider(self):
+        # The other direction: the key must not grow fields that do not
+        # change the endpoint (task_type here), or the cache stops caching.
+        r = _make_router(task_rules=[
+            RoutingRule(TaskType.CODE_GENERATION, "llama_cpp", "qwen3.8-27b",
+                        base_url="http://gpu-a:8080"),
+            RoutingRule(TaskType.REASONING, "llama_cpp", "qwen3.8-27b",
+                        base_url="http://gpu-a:8080"),
+        ])
+        code, reasoning = r.route(CODE_MSG), r.route(REASONING_MSG)
+
+        assert code.reason == reasoning.reason == RouteReason.TASK_RULE
+        assert code.provider is reasoning.provider
+
+    def test_same_host_different_model_gets_its_own_provider(self):
+        # vllm, not llama_cpp: llama.cpp ignores the model, vllm sends it.
+        r = _make_router(task_rules=[
+            RoutingRule(TaskType.CODE_GENERATION, "vllm", "model-a",
+                        base_url="http://gpu-a:8000/v1"),
+            RoutingRule(TaskType.REASONING, "vllm", "model-b",
+                        base_url="http://gpu-a:8000/v1"),
+        ])
+
+        assert r.route(CODE_MSG).provider._model == "model-a"
+        assert r.route(REASONING_MSG).provider._model == "model-b"
+
+    def test_same_host_different_provider_gets_its_own_provider(self):
+        from prometheus.providers.llama_cpp import LlamaCppProvider
+        from prometheus.providers.openai_compat import OpenAICompatProvider
+
+        r = _make_router(task_rules=[
+            RoutingRule(TaskType.CODE_GENERATION, "llama_cpp", "qwen3.8-27b",
+                        base_url="http://gpu-a:8080"),
+            RoutingRule(TaskType.REASONING, "vllm", "qwen3.8-27b",
+                        base_url="http://gpu-a:8080"),
+        ])
+
+        assert isinstance(r.route(CODE_MSG).provider, LlamaCppProvider)
+        assert isinstance(r.route(REASONING_MSG).provider, OpenAICompatProvider)
+
+    @pytest.mark.parametrize("base_url", [None, ""])
+    def test_rule_without_base_url_reaches_the_default_host(self, base_url):
+        # base_url stays out of the config when unset: passing it through
+        # would fail the llama.cpp build (None) or aim it at "" instead.
+        r = _make_router(task_rules=[
+            RoutingRule(TaskType.CODE_GENERATION, "llama_cpp", "qwen3.8-27b",
+                        base_url=base_url),
+        ])
+        decision = r.route(CODE_MSG)
+
+        assert decision.reason == RouteReason.TASK_RULE
+        assert decision.provider._base_url == "http://localhost:8080"
+
+    @pytest.mark.parametrize("malformed", [
+        {"base_url": ["http://gpu-a:8080"]},
+        {"base_url": {"host": "gpu-a", "port": 8080}},
+        {"base_url": HUGE_INT},
+        {"provider": ["llama_cpp"]},
+    ])
+    def test_malformed_rule_still_falls_through_to_primary(self, malformed):
+        # YAML can put a list, a map or an unprintable int where a string
+        # belongs. Building that provider fails, and a rule whose provider
+        # cannot be built falls through to the next branch. A key made from
+        # the raw values raised (unhashable type: 'list') out of route() before
+        # it got that far, and a repr() key made outside the try raised on
+        # HUGE_INT.
+        fields = {"provider": "llama_cpp", "model": "qwen3.8-27b", **malformed}
+        r = _make_router(task_rules=[RoutingRule(TaskType.CODE_GENERATION, **fields)])
+
+        decision = r.route(CODE_MSG)
+
+        assert decision.reason == RouteReason.PRIMARY
+        assert decision.provider is r.primary_provider
+
+    @pytest.mark.parametrize("field", ["provider", "model"])
+    def test_unprintable_rule_field_falls_through_instead_of_raising(self, field):
+        # origin/main raised here: its f-string key printed provider and model
+        # outside the try. A rule that cannot be keyed now falls through like
+        # one that cannot be built. For the model, llama.cpp would otherwise
+        # build fine and route a turn whose model cannot be printed.
+        fields = {"provider": "llama_cpp", "model": "qwen3.8-27b", field: HUGE_INT}
+        r = _make_router(task_rules=[RoutingRule(TaskType.CODE_GENERATION, **fields)])
+
+        decision = r.route(CODE_MSG)
+
+        assert decision.reason == RouteReason.PRIMARY
+        assert decision.provider is r.primary_provider
 
 
 # -- Auxiliary ---------------------------------------------------------------
