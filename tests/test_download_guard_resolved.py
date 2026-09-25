@@ -17,15 +17,17 @@ prefix is itself reached through a symlink, the two never meet:
   ``~/.SSH`` is ``~/.ssh``, ``/private/ETC`` and
   ``/System/Volumes/Data/private/etc`` are ``/private/etc``. ``resolve()``
   follows symlinks but folds neither, so no string comparison catches these;
-  the guard also compares by file identity (device, inode).
+  the guard also compares by file identity (device, inode), and for a
+  protected directory that does not exist yet, by its parent's identity and
+  its name folded for case.
 
 WHAT IS MEASURED
 ----------------
 For every protected root, a destination under it is refused when written as
 the root, as the resolved root, and through a symlink pointing at it; plus
 ``~/.ssh`` under a symlinked ``$HOME``, a case-folded ``~/.SSH`` where the
-filesystem folds case, and the Data-volume spelling of ``/etc`` where it
-exists. Other spellings are not claimed. Cases that cannot differ on a given
+filesystem folds case, ``~/.SSH`` (and ``~/.ſſh``) when ``~/.ssh`` does not
+exist yet, and the Data-volume spelling of ``/etc`` where it exists. Other spellings are not claimed. Cases that cannot differ on a given
 host (``/sys`` is not a symlink anywhere this runs) pass on origin/main too;
 they are here so a root that IS a symlink somewhere needs no new test. The
 roots come from this file's list AND the module's, so a root added to the
@@ -46,6 +48,13 @@ URL = "https://example.com/probe.bin"
 # This file's own list (so it measures any revision, including one without the
 # module constant) UNION the module's (so a root added there is exercised too).
 # A root dropped from the module fails its cases below: it is still listed here.
+# A revision without the constant (origin/main) falls back to this file's list;
+# a revision that has the new guard but renamed the constant must fail loudly
+# here, not quietly shrink to the five roots below.
+assert hasattr(download_file, "_PROTECTED_ROOTS") or not hasattr(
+    download_file, "_protected_prefixes"), (
+    "download_file has _protected_prefixes but no _PROTECTED_ROOTS: update this "
+    "file so the roots the module protects are still the roots it tests")
 PROTECTED_ROOTS = tuple(sorted(
     {"/etc", "/sys", "/boot", "/proc", "/dev"}
     | set(getattr(download_file, "_PROTECTED_ROOTS", ()))
@@ -88,6 +97,20 @@ def test_ssh_under_a_symlinked_home_is_refused(tmp_path, monkeypatch):
                      str(real_home / ".ssh" / "authorized_keys")):
         with pytest.raises(ValueError, match="protected path"):
             _resolve_destination(URL, spelling)
+
+
+def test_a_case_folded_spelling_of_a_not_yet_created_ssh_is_refused(tmp_path, monkeypatch):
+    """A fresh account has no ~/.ssh, so there is no directory to compare
+    identities with, and ~/.SSH/authorized_keys would CREATE it: on a volume
+    that folds case, as the directory sshd reads as ~/.ssh. Refused on every
+    OS (on a case-sensitive one ~/.SSH is only a confusing name)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    for spelling in ("~/.SSH/authorized_keys", "~/.\u017f\u017fh/authorized_keys"):
+        with pytest.raises(ValueError, match="protected path"):
+            _resolve_destination(URL, spelling)
+    assert not (home / ".ssh").exists()
 
 
 def test_a_case_folded_spelling_of_ssh_is_refused(tmp_path, monkeypatch):
