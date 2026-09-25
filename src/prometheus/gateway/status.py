@@ -47,19 +47,15 @@ def _process_alive(pid: int) -> bool:
 
 
 def _process_start_time(pid: int) -> float | None:
-    """The process's start time, as recorded in the lock and compared for equality.
+    """Read process start time from /proc on Linux (the lock's ``start_time``).
 
-    Linux: ``starttime`` from /proc/<pid>/stat, in clock ticks since boot.
-    macOS: the kernel's start time from sysctl, in epoch seconds.
-
-    This used to be the /proc read alone. macOS has no /proc, so it returned
-    None for every process: every lock there recorded ``start_time: null``,
-    and a stale lock whose PID had been reused by any other process blocked
-    the daemon from starting ("appears to be running") until the lock was
-    deleted by hand (WP-X.24).
+    Clock ticks since boot, and None where there is no /proc (macOS). That
+    meaning is part of the lock FORMAT and must not change: a daemon from an
+    older release reads ``start_time`` with exactly this function, and a
+    non-null value it cannot reproduce makes it delete the lock as stale. The
+    precise, cross-platform start time lives in ``started_epoch`` instead
+    (:func:`_process_started_epoch`), which older releases ignore.
     """
-    if sys.platform == "darwin":
-        return _darwin_start_time(pid)
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
         # Field 22 (0-indexed: 21) is starttime in clock ticks
@@ -96,7 +92,14 @@ def _darwin_start_time(pid: int) -> float | None:
 
 
 def _process_started_epoch(pid: int) -> float | None:
-    """When ``pid`` started, in epoch seconds, for comparing with ``started_at``."""
+    """When ``pid`` started, in epoch seconds: the lock's ``started_epoch``.
+
+    macOS: exact, from sysctl. Linux: boot time plus the /proc start ticks.
+    Before WP-X.24 the only start time was the /proc read, so on macOS every
+    lock said ``start_time: null`` and a stale lock whose PID now belonged to
+    another process blocked startup ("appears to be running") until someone
+    deleted it by hand.
+    """
     if sys.platform == "darwin":
         return _darwin_start_time(pid)
     ticks = _process_start_time(pid)
@@ -139,11 +142,18 @@ def acquire_daemon_lock() -> tuple[bool, str]:
             if old_start is not None and current_start is not None and old_start == current_start:
                 return False, f"Daemon already running (PID {old_pid})"
             if old_start is None:
-                # No start time in the lock: written on macOS before WP-X.24,
-                # or where it could not be read. The lock still says WHEN it
-                # was written, and a process that started later is not its
-                # writer. Otherwise it can't be verified: assume it's running.
-                if not _started_after_lock_was_written(old_pid, existing.get("started_at")):
+                # No /proc start time: macOS, or where /proc could not be read.
+                # A lock from WP-X.24 on carries `started_epoch`, compared
+                # exactly. One without it (an older release) is judged by WHEN
+                # it was written: a process that started later is not its
+                # writer. Anything else can't be verified: assume it's running.
+                old_epoch = existing.get("started_epoch")
+                current_epoch = (_process_started_epoch(old_pid)
+                                 if isinstance(old_epoch, (int, float)) else None)
+                if current_epoch is not None:
+                    if current_epoch == old_epoch:
+                        return False, f"Daemon already running (PID {old_pid})"
+                elif not _started_after_lock_was_written(old_pid, existing.get("started_at")):
                     return False, f"Daemon appears to be running (PID {old_pid})"
         # Stale lock — clean it up
         logger.info("Removing stale daemon lock (PID %d no longer running)", old_pid)
@@ -153,6 +163,7 @@ def acquire_daemon_lock() -> tuple[bool, str]:
     record = {
         "pid": os.getpid(),
         "start_time": _process_start_time(os.getpid()),
+        "started_epoch": _process_started_epoch(os.getpid()),
         "started_at": time.time(),
         "argv": " ".join(os.sys.argv),
     }

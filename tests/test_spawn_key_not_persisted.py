@@ -76,6 +76,19 @@ def manager(tmp_path, monkeypatch):
     )
     mgr = BackgroundTaskManager()
     mgr.store = TaskStore(tmp_path / "tasks.db")
+
+    # THE CHILD IS A REAL AGENT NOW (WP-X.24). While the command was a bare
+    # `python`, it died at once on most hosts; with the daemon's interpreter it
+    # starts Prometheus, which resolves its OWN config, and conftest's
+    # in-process isolation does not reach a child. In a checkout with a live
+    # config/prometheus.yaml it would be a live agent. So the prompt is kept
+    # from it: the agent starts, prints its banner and waits, and never runs a
+    # turn. Nothing here asserts on prompt delivery; conftest shuts every
+    # manager down after the test.
+    async def _prompt_withheld(task_id: str, data: str) -> None:
+        return None
+
+    monkeypatch.setattr(mgr, "write_to_task", _prompt_withheld)
     return mgr
 
 
