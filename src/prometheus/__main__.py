@@ -403,10 +403,26 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
 def _has_native_tool_calling(model_name: str) -> bool:
     """Check model_registry.yaml for native function_calling capability."""
     import yaml
-    from pathlib import Path
 
-    registry_path = Path(__file__).resolve().parents[2] / "config" / "model_registry.yaml"
-    if not registry_path.exists():
+    from prometheus.config.model_registry import (
+        ModelRegistryNotFound,
+        get_model_registry_path,
+    )
+
+    # This used to look only at <repo>/config/, three parents up from this
+    # file, and return False when nothing was there. An installed package has
+    # no <repo>, so every pip and Homebrew install got "no native tool
+    # calling" for every model, meaning adapter tier "full", and nothing said
+    # so. The resolver finds the copy the wheel ships, and a missing registry
+    # is now a WARNING, because it changes the tier.
+    try:
+        registry_path = get_model_registry_path()
+    except ModelRegistryNotFound as exc:
+        log.warning(
+            "model registry: NOT FOUND (%s). Reporting NO native tool calling "
+            "for %r, so a local model gets adapter tier 'full', which may be "
+            "wrong", exc, model_name,
+        )
         return False
     try:
         data = yaml.safe_load(registry_path.read_text()) or {}
