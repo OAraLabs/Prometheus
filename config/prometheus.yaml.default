@@ -1224,9 +1224,15 @@ mcp:
 #       - type: command
 #         command: "echo checking $ARGUMENTS"   # $ARGUMENTS = JSON payload
 #         block_on_failure: false               # true = a nonzero exit blocks the tool
+#         env_allowlist: []                     # daemon env vars this hook may see
 #     post_tool_use:
 #       - type: http
 #         url: "http://localhost:9090/hook"
+#
+# Command hooks do NOT inherit the daemon's environment. Each gets PATH, HOME,
+# USER, LANG, LC_*, TMPDIR, SHELL, the payload variables, and the names in its
+# own env_allowlist, nothing else. Provider API keys and PROMETHEUS_API_TOKEN
+# stay behind unless you list them. `oara doctor` shows each hook's list.
   # Each entry is a server name -> {command, args, connectionTimeoutMs}.
   # Populated in the live config; empty here.
 hooks: {}
