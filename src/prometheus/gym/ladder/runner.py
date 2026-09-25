@@ -557,6 +557,9 @@ async def run_task(
         "tools_called": [e.exec_name for e in transcript.tool_events],
         "trace": trace_of(transcript),
         "final_text_head": final[:300],
+        # Whole, so a verdict can be audited against what the reader read (the
+        # END of the reply). Local DB only; reports never render it.
+        "final_text": final,
         **metrics,
     }
     record_summary(tel, summary)

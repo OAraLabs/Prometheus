@@ -1060,7 +1060,39 @@ CAP_TASK = """  - id: cap
 """
 
 
+class _LongAnswer(ModelProvider):
+    """One round: a long working-out, the committed answer on the last line."""
+
+    async def stream_message(self, request):  # noqa: ANN001
+        text = "Working it out step by step. " * 20 + "\nANSWER: 1081"
+        yield ApiMessageCompleteEvent(
+            message=ConversationMessage(role="assistant", content=[TextBlock(text=text)]),
+            usage=UsageSnapshot(input_tokens=40, output_tokens=150), stop_reason="stop")
+
+
+ANSWER_TASK = """  - id: mult
+    prompt: "What is 47 times 23? End your reply with a final line `ANSWER: <the number>`."
+    score:
+      expect_answer: '1[,\\s]?081'
+      answer_shape: '-?\\d+(?:[,\\s]\\d{3})*'
+    reference: {answer: "ANSWER: 1081"}
+"""
+
+
 class TestRunOutcomes:
+
+    def test_the_whole_final_reply_is_recorded_for_audit(self, tmp_path):
+        # The reader reads the END of the reply; a hand-check of its verdicts
+        # needs what it read, not the first 300 characters.
+        row = _run(tmp_path, _LongAnswer(), ANSWER_TASK)
+        assert row["verdict"] == "pass", row
+        assert len(row["final_text"]) > 300 and row["final_text"].endswith("ANSWER: 1081")
+        conn = sqlite3.connect(tmp_path / "telemetry.db")
+        try:
+            (stored,) = rec.load_rows(conn, "t")
+        finally:
+            conn.close()
+        assert stored["final_text"] == row["final_text"]
 
     def test_the_tool_call_cap_is_a_fail_and_its_message_is_not_the_answer(self, tmp_path):
         # The cap message "Tool iteration limit reached (4/3)" contains a 3;
