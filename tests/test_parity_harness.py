@@ -227,6 +227,11 @@ def test_checkpoint_blobs_are_filed_under_checkpoints():
     assert cmp.categorize("home/.prometheus/checkpoints/blobs/5c/5c70", None) == "checkpoints"
 
 
+def test_workspace_files_have_their_own_category():
+    assert cmp.categorize("ws/scratch/inventory.txt", None) == "workspace_files"
+    assert cmp.categorize("cwd/inventory.txt", None) == "workspace_files"
+
+
 def test_a_harness_error_is_never_reported_as_parity():
     run = _run([], {})
     run.errors.append("daemon did not answer")

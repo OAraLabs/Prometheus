@@ -41,6 +41,8 @@ CATEGORIES: list[tuple[str, str, str | None]] = [
 def categorize(path: str, table: str | None) -> str:
     if "/checkpoints/" in path:           # the store and its content-addressed blobs
         return "checkpoints"
+    if path.startswith(("ws/", "cwd/")):  # the files the agent's tools act on
+        return "workspace_files"
     for cat, suffix, tbl in CATEGORIES:
         if path.endswith(suffix) and (tbl is None or tbl == table):
             return cat
@@ -146,8 +148,8 @@ def render_report(name: str, res: CompareResult) -> str:
         lines.append(f"  model requests the recording has no answer for: {res.extra_requests}")
     if res.missing_requests:
         lines.append(f"  recorded model requests the daemon never made: {res.missing_requests}")
-    for cat in ("model_requests", "tool_calls", "gate_decisions", "checkpoints", "memory", "telemetry",
-                "final_reply", "steps", "other"):
+    for cat in ("model_requests", "tool_calls", "gate_decisions", "checkpoints",
+                "workspace_files", "memory", "telemetry", "final_reply", "steps", "other"):
         if cat in res.diffs:
             lines.append(f"  -- {cat} --")
             lines.extend("    " + ln for ln in res.diffs[cat])
