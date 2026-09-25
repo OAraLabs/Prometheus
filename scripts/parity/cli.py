@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -12,7 +14,7 @@ from pathlib import Path
 from parity import traces
 from parity.instance import DEFAULT_ROOT, HarnessError, RootLock
 from parity.model_server import COMPLETIONS_PATHS
-from parity.runner import RunOutput, Runner, build_config
+from parity.runner import RunOutput, Runner, build_config, uses_hosted
 from parity.scenarios import BY_NAME, SCENARIOS
 
 SRC_ROOT = Path(__file__).resolve().parents[2]
@@ -39,6 +41,13 @@ def _model_identity(out: RunOutput) -> dict:
                 ident.setdefault(ex.upstream, str(ids[0]).rsplit("/", 1)[-1])
         if ex.path == "/props" and isinstance(body, dict) and body.get("build_info"):
             ident[f"{ex.upstream}_server"] = f"llama.cpp {body['build_info']}"
+    for ex in out.exchanges:
+        # A hosted API publishes no probe; the model it served is named in the
+        # stream's message_start event.
+        if ex.method == "POST" and ex.path == "/v1/messages":
+            m = re.search(r'"model"\s*:\s*"([^"]+)"', ex.body)
+            if m:
+                ident.setdefault(ex.upstream, m.group(1))
     served = [ex.upstream for ex in out.exchanges
               if ex.method == "POST" and ex.path in COMPLETIONS_PATHS]
     ident["completions_by_backend"] = json.dumps({u: served.count(u) for u in sorted(set(served))})
@@ -48,14 +57,30 @@ def _model_identity(out: RunOutput) -> dict:
 def cmd_record(args: argparse.Namespace) -> int:
     names = args.scenario or [s.name for s in SCENARIOS]
     upstreams = {"primary": args.upstream_primary, "alt": args.upstream_alt}
+    keys: dict[str, str] = {}
+    if args.upstream_hosted:
+        # Read once, held in memory for this recording, handed to the proxy only.
+        key = os.environ.get(args.hosted_key_env, "")
+        if not key:
+            raise HarnessError(f"--upstream-hosted needs the operator's API key in "
+                               f"${args.hosted_key_env} (the daemon under test only "
+                               f"ever holds a fake one)")
+        upstreams["hosted"] = args.upstream_hosted
+        keys["hosted"] = key
     failed = 0
     with RootLock(args.root):
         for name in names:
             scenario = BY_NAME[name]
             config_text = build_config(SRC_ROOT, scenario)
             print(f"[record] {name}: {scenario.covers}", flush=True)
+            if uses_hosted(config_text) and "hosted" not in upstreams:
+                failed += 1
+                print(f"[record] {name}: NOT SAVED — it routes to a hosted provider; "
+                      f"pass --upstream-hosted", flush=True)
+                continue
             out = Runner(scenario, mode="record", root=args.root, src_root=SRC_ROOT,
-                         config_text=config_text, upstreams=upstreams).run()
+                         config_text=config_text, upstreams=upstreams,
+                         upstream_keys=keys).run()
             problems = list(out.errors) + list(out.step_failures)
             if scenario.require is not None and not problems:
                 problems += scenario.require(out.evidence())
@@ -300,6 +325,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="llama.cpp server URL the primary model is proxied to")
     r.add_argument("--upstream-alt", required=True,
                    help="second backend (Ollama) URL, for the model switch")
+    r.add_argument("--upstream-hosted",
+                   help="hosted API base URL (e.g. https://api.anthropic.com), for the "
+                        "scenarios that route a turn to a hosted provider")
+    r.add_argument("--hosted-key-env", default="ANTHROPIC_API_KEY",
+                   help="environment variable holding the operator's key for "
+                        "--upstream-hosted (default ANTHROPIC_API_KEY)")
     r.add_argument("--keep-failed", action="store_true")
     r.set_defaults(fn=cmd_record)
 

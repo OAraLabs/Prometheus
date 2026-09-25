@@ -28,7 +28,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 from parity import compare as cmp  # noqa: E402
 from parity import normalize as norm  # noqa: E402
 from parity import traces  # noqa: E402
-from parity.model_server import Exchange, ModelServer, ServerState  # noqa: E402
+from parity.model_server import COMPLETIONS_PATHS, Exchange, ModelServer, ServerState  # noqa: E402
 from parity.runner import RunOutput  # noqa: E402
 from parity.scenarios import BY_NAME, SCENARIOS, Evidence  # noqa: E402
 
@@ -176,6 +176,117 @@ def test_probes_are_answered_without_being_consumed(replay_server):
     assert state.consumed == set()
 
 
+# ── a hosted upstream (a turn routed to /claude) ────────────────────────────
+
+def _anthropic_stream(text: str) -> str:
+    return ('event: content_block_delta\ndata: ' + json.dumps(
+        {"type": "content_block_delta", "delta": {"type": "text_delta", "text": text}})
+        + '\n\nevent: message_stop\ndata: {"type": "message_stop"}\n\n')
+
+
+def _post_messages(port: int, body: dict, headers: dict | None = None) -> tuple[int, str]:
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/messages",
+                                 data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", **(headers or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
+def test_an_anthropic_messages_call_is_a_model_call_not_a_probe():
+    """Filed as a probe, the hosted turn's request would never be diffed."""
+    recorded = [Exchange("POST", "/v1/messages", 200, "text/event-stream",
+                         _anthropic_stream("hosted"), request=norm.normalize_request({"q": 1}),
+                         upstream="hosted")]
+    state = ServerState(mode="replay", recorded=recorded)
+    server = ModelServer(state)
+    port = server.start(["hosted"])["hosted"]
+    try:
+        code, body = _post_messages(port, {"q": 2})
+    finally:
+        server.stop()
+    assert code == 200 and "hosted" in body
+    assert [(s.recorded_index, s.matched) for s in state.served] == [(0, False)]
+    assert state.consumed == {0}
+
+
+class _Upstream:
+    """A stand-in for a real model server: answers, and remembers what it was sent."""
+
+    def __init__(self) -> None:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        seen = self.seen = []
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                seen.append({k.lower(): v for k, v in self.headers.items()})
+                body = _anthropic_stream("upstream").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def stop(self) -> None:
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+def test_record_forwards_the_operators_key_never_the_daemons_and_saves_neither():
+    upstream = _Upstream()
+    state = ServerState(mode="record",
+                        upstreams={"hosted": upstream.url, "primary": upstream.url},
+                        upstream_keys={"hosted": "operator-sample-key"})
+    server = ModelServer(state)
+    ports = server.start(["hosted", "primary"])
+    try:
+        _post_messages(ports["hosted"], {"q": 1}, {"x-api-key": "parity-dummy-key",
+                                                   "anthropic-version": "2023-06-01"})
+        _post_messages(ports["primary"], {"q": 2}, {"Authorization": "Bearer parity-dummy-key"})
+    finally:
+        server.stop()
+        upstream.stop()
+    hosted, primary = upstream.seen
+    assert hosted["x-api-key"] == "operator-sample-key"
+    assert hosted["anthropic-version"] == "2023-06-01"
+    # A local upstream gets what it always got: no credential at all.
+    assert "authorization" not in primary and "x-api-key" not in primary
+    saved = json.dumps([ex.to_json() for ex in state.recorded])
+    assert "operator-sample-key" not in saved and "parity-dummy-key" not in saved
+    assert "operator-sample-key" not in repr(state)
+
+
+def test_record_without_the_hosted_upstream_refuses_instead_of_dropping_the_connection():
+    state = ServerState(mode="record", upstreams={})
+    server = ModelServer(state)
+    port = server.start(["hosted"])["hosted"]
+    try:
+        code, body = _post_messages(port, {"q": 1})
+    finally:
+        server.stop()
+    assert code == 502 and "--upstream-hosted" in body
+    assert state.recorded == []
+
+
+def test_only_a_scenario_that_names_the_hosted_url_gets_the_third_listener():
+    from parity.runner import build_config, uses_hosted
+    hosted = {s.name for s in SCENARIOS if uses_hosted(build_config(REPO, s))}
+    assert hosted == {"hosted_route"}
+
+
 # ── the differ ──────────────────────────────────────────────────────────────
 
 def _run(steps: list, stores: dict) -> RunOutput:
@@ -241,7 +352,8 @@ def test_a_harness_error_is_never_reported_as_parity():
 # ── the committed traces ────────────────────────────────────────────────────
 
 REQUIRED = {"plain_chat", "tool_calls", "repaired_tool_call", "gate_blocked",
-            "checkpoint_undo", "compaction", "coding_run", "linked_workspace", "model_switch"}
+            "checkpoint_undo", "compaction", "coding_run", "linked_workspace", "model_switch",
+            "hosted_route"}
 
 
 def test_every_required_scenario_is_recorded():
@@ -255,7 +367,7 @@ def test_each_trace_still_exercises_its_subject(name):
     trace = traces.load_trace(REPO, name)
     expected = traces.load_expected(REPO, name)
     completions = [e for e in trace["exchanges"]
-                   if e["method"] == "POST" and e["path"] == "/v1/chat/completions"]
+                   if e["method"] == "POST" and e["path"] in COMPLETIONS_PATHS]
     ev = Evidence(stores=expected["stores"], steps=expected["steps"],
                   requests=[e["request"] for e in completions],
                   upstream_labels=[e["upstream"] for e in completions])
