@@ -75,7 +75,9 @@ def _uv_build(kind: str, out: Path, *source: str) -> Path:
     )
     if proc.returncode != 0:
         err = proc.stderr.strip()
-        if any(m in err.lower() for m in _UNAVAILABLE_MARKERS):
+        # uv wraps its messages at ~80 columns, so match on collapsed whitespace.
+        flat = " ".join(err.split()).lower()
+        if any(m in flat for m in _UNAVAILABLE_MARKERS):
             _unavailable(f"{kind} build", err)
         pytest.fail(f"the {kind} build FAILED (not unavailable):\n{err[-2500:]}")
     pattern = "*.whl" if kind == "wheel" else "*.tar.gz"
@@ -196,7 +198,9 @@ def test_an_sdist_that_lost_the_registry_fails_the_check_not_skips_it(tmp_path):
     with tarfile.open(sdist) as tf:
         tf.extractall(unpacked, filter="data")
     [root] = list(unpacked.iterdir())
-    (root / "config" / "model_registry.yaml").unlink()
+    # missing_ok: if the sdist already lost it (the real regression), this
+    # test still measures the helper, not the unlink.
+    (root / "config" / "model_registry.yaml").unlink(missing_ok=True)
     broken_dir = tmp_path / "broken"
     broken_dir.mkdir()
     broken = broken_dir / sdist.name
