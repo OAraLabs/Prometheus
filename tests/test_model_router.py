@@ -239,6 +239,24 @@ class TestTaskRuleProviderCache:
         ])
         assert r.route(CODE_MSG).provider is r.route(REASONING_MSG).provider
 
+    @pytest.mark.parametrize("malformed", [
+        {"base_url": ["http://gpu-a:8080"]},
+        {"base_url": {"host": "gpu-a", "port": 8080}},
+        {"provider": ["llama_cpp"]},
+    ])
+    def test_malformed_rule_still_falls_through_to_primary(self, malformed):
+        # YAML can put a list or a map where a string belongs. Building that
+        # provider fails, and a rule whose provider cannot be built falls
+        # through to the next branch. A key hashed from the raw values raised
+        # (unhashable type: 'list') out of route() before it got that far.
+        fields = {"provider": "llama_cpp", "model": "qwen3.8-27b", **malformed}
+        r = _make_router(task_rules=[RoutingRule(TaskType.CODE_GENERATION, **fields)])
+
+        decision = r.route(CODE_MSG)
+
+        assert decision.reason == RouteReason.PRIMARY
+        assert decision.provider is r.primary_provider
+
 
 # -- Auxiliary ---------------------------------------------------------------
 

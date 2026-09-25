@@ -731,7 +731,7 @@ class ModelRouter:
 
         # Task-type rule provider cache (Phase 1.5); keyed by the provider
         # config each rule builds — see _route_by_task_type.
-        self._task_rule_providers: dict[tuple[tuple[str, Any], ...], Any] = {}
+        self._task_rule_providers: dict[tuple[tuple[str, str], ...], Any] = {}
 
         # Task classifier (Phase 1.5); used by _route_by_task_type
         self.classifier = TaskClassifier()
@@ -1064,7 +1064,11 @@ class ModelRouter:
             # and the second rule's requests went to the first rule's host.
             # Deriving the key from provider_cfg means a field added to it
             # later is in the key without anyone having to remember.
-            cache_key = tuple(sorted(provider_cfg.items()))
+            #
+            # repr(), not the raw values: YAML can put a list or a map in any
+            # of these fields, and hashing one would raise out of route()
+            # before the try below could let the malformed rule fall through.
+            cache_key = tuple((k, repr(v)) for k, v in provider_cfg.items())
             if cache_key not in self._task_rule_providers:
                 from prometheus.providers.registry import ProviderRegistry
                 try:
