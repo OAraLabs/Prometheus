@@ -399,11 +399,32 @@ EXTRA = [
     ("tailnet name", re.compile(r"\.ts\.net\b|tailscale", re.I)),
 ]
 
+# Product text the daemon SHIPS, which a request can carry verbatim: a tool's
+# own description names the product, not a host. Exempted as exact phrases
+# only, never by pattern, and each must exist verbatim in src/ (checked below),
+# so this list cannot hide anything the recording host contributed. The first
+# (and only) one arrived with hosted_route: the dashboard tool is deferred on
+# local tiers, so a cloud-routed request is the first to carry its description.
+SHIPPED_TEXT = [
+    "names the Tailscale or LAN address",       # tools/builtin/dashboard.py
+]
+
+
+def test_every_shipped_text_exemption_is_verbatim_source_text():
+    src = "\n".join(p.read_text(encoding="utf-8")
+                    for p in (REPO / "src" / "prometheus").rglob("*.py"))
+    for phrase in SHIPPED_TEXT:
+        assert phrase in src, f"{phrase!r} is no longer shipped text; drop the exemption"
+        assert not any(rx.search(phrase) for label, rx in EXTRA if label != "tailnet name")
+
 
 @pytest.mark.parametrize("path", sorted(FIXTURES.glob("*.json")), ids=lambda p: p.name)
 def test_committed_traces_carry_no_private_identifier(path):
     text = path.read_text(encoding="utf-8")
-    hits = [(label, m.group(0)) for label, rx in EXTRA for m in rx.finditer(text)]
+    scanned = text
+    for phrase in SHIPPED_TEXT:
+        scanned = scanned.replace(phrase, "")
+    hits = [(label, m.group(0)) for label, rx in EXTRA for m in rx.finditer(scanned)]
     checks, placeholder, allowlist = _hook_checks()
     for label, pattern, skip_ph, _scope, icase in checks:
         rx = re.compile(_ere_to_python(pattern), re.IGNORECASE if icase == "1" else 0)
