@@ -374,6 +374,25 @@ def test_each_trace_still_exercises_its_subject(name):
     assert BY_NAME[name].require(ev) == []
 
 
+def test_the_repair_scenario_refuses_a_reply_that_misquotes_the_file():
+    """repaired_tool_call's golden must show the agent reporting the file it read:
+    a sample whose final reply misquotes it is refused at record time, like any
+    other unmet requirement — and a repair is still required."""
+    require = BY_NAME["repaired_tool_call"].require
+
+    def ev(repairs: int, reply: str) -> Evidence:
+        stores = {"home/.prometheus/telemetry.db": {"sqlite": {"tool_calls": {
+            "columns": ["tool_name", "repairs"], "rows": [["read_file", repairs]]}}}}
+        steps = [{"op": "model"}, {"op": "chat", "reply": reply}]
+        return Evidence(stores=stores, steps=steps, requests=[], upstream_labels=[])
+
+    quoted = "The file named `42` contains:\n```\nthe answer file says: forty-two\n```"
+    assert require(ev(1, quoted)) == []
+    misquoted = require(ev(1, "The file `42` contains the single line: `the answer is: forty-two`."))
+    assert misquoted and "misquoting" in misquoted[0]
+    assert any("repairs > 0" in p for p in require(ev(0, quoted)))
+
+
 @pytest.mark.parametrize("name", sorted(BY_NAME))
 def test_committed_files_are_fixed_points_of_the_current_rules(name):
     """A rule added without `rebaseline` would make replay and recording

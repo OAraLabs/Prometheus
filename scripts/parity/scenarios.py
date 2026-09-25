@@ -94,7 +94,16 @@ def _req_tools(ev: Evidence) -> list[str]:
 
 def _req_repair(ev: Evidence) -> list[str]:
     repaired = [r for r in ev.tool_rows() if (r.get("repairs") or 0) > 0]
-    return _need(bool(repaired), "no tool_calls row with repairs > 0 — the adapter repaired nothing")
+    # The final reply must quote the file it read. Parity does not grade
+    # answers, but a golden in which the agent misreports a file it has just
+    # read looks like a tool-result bug to anyone reading it later — so a
+    # misquoting sample fails at record time like any other unmet requirement.
+    chats = [s for s in ev.steps if s.get("op") == "chat"]
+    reply = (chats[-1].get("reply") or "") if chats else ""
+    return (_need(bool(repaired), "no tool_calls row with repairs > 0 — the adapter repaired nothing")
+            + _need("answer file says" in reply.lower(),
+                    "the final reply does not quote the file ('answer file says') — "
+                    "a misquoting sample"))
 
 
 def _req_gate(ev: Evidence) -> list[str]:
