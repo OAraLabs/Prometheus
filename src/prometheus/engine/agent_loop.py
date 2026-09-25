@@ -1105,8 +1105,8 @@ async def _run_loop(
     #
     # DELIBERATELY AFTER the ModelRouter block (#462). The deferral decision and
     # the profile filter both read ``context.adapter`` and ``context.model``,
-    # and the routing stage (engine/stages/routing.py) REASSIGNS both when a
-    # session routes to a named backend. Resolving the advertisement BEFORE routing described a model that
+    # and the routing stage REASSIGNS both when a session routes to a named
+    # backend. Resolving the advertisement BEFORE routing described a model that
     # was not the one about to be called: a session whose override sent it to
     # the local GGUF inherited the cloud model's "deferral disabled" decision
     # and shipped all 55 schemas into a 32,768-token window — a 34,020-token
