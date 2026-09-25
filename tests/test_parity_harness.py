@@ -302,3 +302,38 @@ def test_committed_traces_carry_no_private_identifier(path):
                 continue
             hits.append((label, line.strip()[:120]))
     assert hits == []
+
+
+# ── the overhead judgement (bench --baseline) ───────────────────────────────
+
+from parity import bench  # noqa: E402
+
+
+def _session(p50s: list[float]) -> list[dict]:
+    return [{"p50_ms": v, "mean_ms": v + 2, "max_hwm_mb": 100.0} for v in p50s]
+
+
+BASE = [_session([18.6, 19.1, 19.3, 19.9, 20.3]), _session([16.0, 16.9, 17.1, 17.6, 18.6])]
+
+
+def test_bench_passes_a_session_inside_the_band():
+    assert bench.judge(_session([17.5, 18.0, 18.4, 19.0, 19.5]), BASE, 10.0)[0] == 0
+
+
+def test_bench_flags_a_ten_ms_per_round_regression():
+    shifted = _session([v + 10 for v in [16.0, 16.9, 17.1, 17.6, 18.6]])
+    code, lines = bench.judge(shifted, BASE, 10.0)
+    assert code == 1 and "REGRESSION" in lines[-1]
+
+
+def test_bench_refuses_to_judge_with_a_band_too_wide_for_the_budget():
+    wide = [_session([15.0, 15.5, 16.0]), _session([22.0, 22.5, 23.0])]
+    assert bench.judge(_session([18.0, 18.5, 19.0]), wide, 10.0)[0] == 2
+
+
+def test_committed_baseline_can_resolve_a_ten_ms_budget():
+    base = json.loads((FIXTURES / "bench_baseline.json").read_text())
+    sessions = [s["per_run"] for s in base["sessions"]]
+    medians = [bench.statistics.median([r["p50_ms"] for r in s]) for s in sessions]
+    assert max(medians) - min(medians) < 5.0
+    assert all(not r["invalid"] for s in sessions for r in s)

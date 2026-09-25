@@ -129,3 +129,57 @@ def band(values: list[float]) -> str:
     spread = (hi - lo) / 2
     rel = f" (±{100 * spread / med:.0f}%)" if med else ""
     return f"median {med:.1f}, range {lo:.1f}–{hi:.1f}{rel}"
+
+
+# ---------------------------------------------------------------------------
+# Regression judgement against a committed baseline
+# ---------------------------------------------------------------------------
+#
+# The benchmark is only useful if its noise band is narrower than the smallest
+# regression it must catch. The budget is PER ROUND (default 10 ms, the hook
+# budget WP-1.2 is sized for). The rule:
+#
+#   * the statistic is the MEDIAN of a session's per-run p50s — one number per
+#     session, robust to a single slow run;
+#   * a session is FLAGGED when it exceeds the baseline's median by more than
+#     half the budget, so a full-budget regression clears the threshold with
+#     half a budget to spare;
+#   * the judgement REFUSES (exit 2) when the baseline cannot resolve that:
+#     if two baseline sessions of the same code already differ by half a
+#     budget, a flag would be a coin toss, and a pass would prove nothing.
+#
+# Measured on stub-provider replay only: a live model's timing band is far
+# wider than any hook budget, so a regression would hide in it.
+
+
+def judge(new_runs: list[dict], sessions: list[list[dict]], budget_ms: float) -> tuple[int, list[str]]:
+    base_all = [r["p50_ms"] for s in sessions for r in s]
+    base_median = statistics.median(base_all)
+    session_medians = [statistics.median([r["p50_ms"] for r in s]) for s in sessions]
+    drift = (max(session_medians) - min(session_medians)) if len(sessions) > 1 else \
+        (max(base_all) - min(base_all)) / 2
+    threshold = budget_ms / 2
+    new_median = statistics.median([r["p50_ms"] for r in new_runs])
+    delta = new_median - base_median
+    mean_delta = (statistics.median([r["mean_ms"] for r in new_runs])
+                  - statistics.median([r["mean_ms"] for s in sessions for r in s]))
+    rss_delta = (statistics.median([r["max_hwm_mb"] for r in new_runs])
+                 - statistics.median([r["max_hwm_mb"] for s in sessions for r in s]))
+    lines = [
+        f"baseline: {len(sessions)} session(s), {len(base_all)} runs; per-run p50 "
+        f"{min(base_all):.1f}–{max(base_all):.1f} ms, median {base_median:.1f} ms; "
+        f"session medians {', '.join(f'{m:.1f}' for m in session_medians)} ms "
+        f"(drift {drift:.1f} ms)",
+        f"this session: median p50 {new_median:.1f} ms  (Δ {delta:+.1f} ms; "
+        f"mean Δ {mean_delta:+.1f} ms; peak RSS Δ {rss_delta:+.1f} MB)",
+        f"budget {budget_ms:.0f} ms/round -> flag above Δ +{threshold:.1f} ms",
+    ]
+    if drift >= threshold:
+        lines.append(f"CANNOT JUDGE: the baseline's own drift ({drift:.1f} ms) is not below half "
+                     f"the budget ({threshold:.1f} ms) — the band is too wide to resolve it")
+        return 2, lines
+    if delta > threshold:
+        lines.append(f"REGRESSION: +{delta:.1f} ms per round (p50) is outside the noise band")
+        return 1, lines
+    lines.append("within the noise band")
+    return 0, lines

@@ -219,7 +219,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
               "no baseline is reported", flush=True)
         return 1
     summary = {
-        "host": platform.node() and "the recording host", "python": platform.python_version(),
+        "python": platform.python_version(),
         "runs": len(per_run), "scenarios": names,
         "p50_ms": bench.band([r["p50_ms"] for r in per_run]),
         "p95_ms": bench.band([r["p95_ms"] for r in per_run]),
@@ -235,6 +235,32 @@ def cmd_bench(args: argparse.Namespace) -> int:
     if args.out:
         args.out.write_text(json.dumps(summary, indent=1))
         print(f"[bench] wrote {args.out}")
+    if args.baseline:
+        base = json.loads(args.baseline.read_text())
+        code, lines = bench.judge(per_run, [s["per_run"] for s in base["sessions"]],
+                                  args.budget_ms)
+        print("\n[bench] against " + str(args.baseline.relative_to(SRC_ROOT)
+                                          if args.baseline.is_relative_to(SRC_ROOT) else args.baseline))
+        for ln in lines:
+            print(f"  {ln}")
+        return code
+    return 0
+
+
+def cmd_baseline(args: argparse.Namespace) -> int:
+    """Combine `bench --out` sessions into the committed baseline file."""
+    sessions = []
+    for path in args.sessions:
+        s = json.loads(path.read_text())
+        sessions.append({"python": s.get("python"), "runs": s["runs"],
+                         "scenarios": s["scenarios"], "per_run": s["per_run"]})
+    args.out.write_text(json.dumps({
+        "format": 1,
+        "measured_on": args.host_label,
+        "method": "stub-provider replay (scripts/parity/bench.py); model time excluded",
+        "sessions": sessions,
+    }, indent=1) + "\n")
+    print(f"[baseline] {len(sessions)} session(s) -> {args.out}")
     return 0
 
 
@@ -275,7 +301,17 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--scenario", action="append")
     b.add_argument("--runs", type=int, default=10)
     b.add_argument("--out", type=Path)
+    b.add_argument("--baseline", type=Path,
+                   help="judge this session against a baseline file (exit 1 = regression)")
+    b.add_argument("--budget-ms", type=float, default=10.0,
+                   help="smallest per-round regression the band must catch (default 10)")
     b.set_defaults(fn=cmd_bench)
+
+    bl = sub.add_parser("baseline", help="combine bench sessions into a baseline file")
+    bl.add_argument("sessions", type=Path, nargs="+")
+    bl.add_argument("--out", type=Path, required=True)
+    bl.add_argument("--host-label", default="the recording host")
+    bl.set_defaults(fn=cmd_baseline)
 
     rb = sub.add_parser("rebaseline", help="re-derive expected.json from the raw recording")
     rb.add_argument("--scenario", action="append")
