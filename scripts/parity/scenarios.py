@@ -14,6 +14,7 @@ committed — the same reason the deliberate-regression check exists.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -124,12 +125,38 @@ def _req_checkpoint(ev: Evidence) -> list[str]:
             + _need(before.get("tree") != after.get("tree"), "undo did not change the workspace"))
 
 
+COMPACTION_WORDS = ("amber", "birch", "cobalt")
+
+
 def _req_compaction(ev: Evidence) -> list[str]:
     sig = [r for r in ev.rows("telemetry.db", "signal_events")
            if str(r.get("signal_type", "")).startswith("context_compaction")]
     runs = [r for r in ev.rows("telemetry.db", "subsystem_runs")
             if r.get("subsystem") == "context_compactor"]
-    return _need(bool(sig or runs), "the context compactor never ran")
+    # The last turn asks "What were the three words, in order? Answer in one
+    # line." The reply must give them, in order, and nothing the game never
+    # had. Parity does not grade answers, but this golden exists to show a
+    # compacted history still answering: a sample that cannot recall the words
+    # (the first committed one), or that lists a fourth word and a memory write
+    # that never happened (a live sample), shows the opposite, so it is refused
+    # at record time like any other unmet requirement.
+    chats = [s for s in ev.steps if s.get("op") == "chat"]
+    reply = ((chats[-1].get("reply") or "") if chats else "").lower()
+    at = [reply.find(w) for w in COMPACTION_WORDS]
+    in_order = all(p >= 0 for p in at) and at == sorted(at)
+    # Every word the reply quotes, numbers, or appends to the list must be one
+    # of the three.
+    listed = re.findall(r"[\"'“‘]([a-z]+)[\"'”’]"
+                        r"|^\s*\d+[.)]\s*\**([a-z]+)"
+                        r"|cobalt\**\s*(?:,\s*(?:and\s+)?|\s+and\s+)\**([a-z]+)",
+                        reply, re.M)
+    extra = sorted({a or b or c for a, b, c in listed} - set(COMPACTION_WORDS))
+    claimed = [w for w in ("fourth", "four words", "4 words", "memory", "saved", "stored")
+               if w in reply]
+    return (_need(bool(sig or runs), "the context compactor never ran")
+            + _need(in_order, "the final reply does not give amber, birch, cobalt in order")
+            + _need(not extra, f"the final reply lists a word the game never had: {extra}")
+            + _need(not claimed, f"the final reply claims what never happened: {claimed}"))
 
 
 def _req_coding(ev: Evidence) -> list[str]:

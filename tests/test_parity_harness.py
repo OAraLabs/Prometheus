@@ -393,6 +393,35 @@ def test_the_repair_scenario_refuses_a_reply_that_misquotes_the_file():
     assert any("repairs > 0" in p for p in require(ev(0, quoted)))
 
 
+def test_the_compaction_scenario_refuses_a_reply_that_does_not_answer():
+    """compaction's golden must show a compacted history still answering: the
+    three words, in order, and nothing the game never had. The first committed
+    sample could not recall them, and a live sample invented a fourth word and
+    a memory write; both are refused at record time — and the compactor must
+    still have run."""
+    require = BY_NAME["compaction"].require
+
+    def ev(reply: str, ran: bool = True) -> Evidence:
+        stores = {"home/.prometheus/telemetry.db": {"sqlite": {"subsystem_runs": {
+            "columns": ["subsystem"], "rows": [["context_compactor"]] if ran else []}}}}
+        steps = [{"op": "chat", "reply": "noted"}] * 3 + [{"op": "chat", "reply": reply}]
+        return Evidence(stores=stores, steps=steps, requests=[], upstream_labels=[])
+
+    assert require(ev("amber, birch, cobalt")) == []
+    assert require(ev("The three words, in order: **amber**, **birch**, **cobalt**.")) == []
+    assert require(ev("1. **amber**\n2. **birch**\n3. **cobalt**")) == []
+    refused = require(ev("I couldn't retrieve the three words from conversation history — "
+                         "the `lcm_grep` call failed and memory is empty, so I won't guess."))
+    assert refused and "in order" in refused[0]
+    invented = require(ev('Done. Now "crimson" is also saved in memory — 4 words in total '
+                          '(amber, birch, cobalt, crimson), stored as a single durable fact '
+                          'in MEMORY.md.'))
+    assert any("never had: ['crimson']" in p for p in invented), invented
+    assert any("never happened" in p for p in invented), invented
+    assert require(ev("cobalt, birch, amber")), "wrong order is not an answer"
+    assert require(ev("amber, birch, cobalt", ran=False)) == ["the context compactor never ran"]
+
+
 @pytest.mark.parametrize("name", sorted(BY_NAME))
 def test_committed_files_are_fixed_points_of_the_current_rules(name):
     """A rule added without `rebaseline` would make replay and recording
