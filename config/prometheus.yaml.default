@@ -1222,7 +1222,7 @@ mcp:
 #   hooks:
 #     pre_tool_use:
 #       - type: command
-#         command: "echo checking $ARGUMENTS"   # $ARGUMENTS = JSON payload
+#         command: 'echo "checking $ARGUMENTS"' # $ARGUMENTS = JSON payload, QUOTED
 #         block_on_failure: false               # true = a nonzero exit blocks the tool
 #         env_allowlist: []                     # daemon env vars this hook may see
 #     post_tool_use:

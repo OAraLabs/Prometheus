@@ -16,6 +16,9 @@ COMMAND HOOKS INHERITED THE DAEMON'S WHOLE ENVIRONMENT
 LANG, LC_*, TMPDIR and SHELL, the names in its own `env_allowlist`, and the
 payload variables. Nothing else.
 
+A COMMAND hook that cannot start (its working directory gone, no bash) raised
+the same way, and now fails the same way.
+
 The environment tests plant SENTINEL values rather than asking whether a name
 is set: the hook shell is `bash -l`, and an operator's login files may export
 a real key under the same name. What this change bounds is what the daemon
@@ -82,12 +85,12 @@ class RaisingProvider(ModelProvider):
         yield  # pragma: no cover
 
 
-def _executor(event: HookEvent, hook, provider: ModelProvider, tmp_path: Path) -> HookExecutor:
+def _executor(event: HookEvent, hook, provider: ModelProvider, cwd: Path) -> HookExecutor:
     registry = HookRegistry()
     registry.add(event, hook)
     return HookExecutor(
         registry,
-        HookExecutionContext(cwd=tmp_path, provider=provider, default_model="stub"),
+        HookExecutionContext(cwd=cwd, provider=provider, default_model="stub"),
     )
 
 
@@ -170,14 +173,14 @@ class _NoteTool(BaseTool):
         return ToolResult(output=f"appended {len(arguments.text)} bytes to notes.txt")
 
 
-def _loop_with(hook_event: HookEvent, hook, tmp_path: Path):
+def _loop_with(hook_event: HookEvent, hook, cwd: Path):
     tool = _NoteTool()
     tools = ToolRegistry()
     tools.register(tool)
     context = LoopContext(
         provider=None, model="stub", system_prompt="", max_tokens=1024,
         tool_registry=tools,
-        hook_executor=_executor(hook_event, hook, RaisingProvider(), tmp_path),
+        hook_executor=_executor(hook_event, hook, RaisingProvider(), cwd),
     )
     call = SimpleNamespace(id="toolu_1", name="write_note",
                            input={"text": PAYLOAD_SENTINEL})
@@ -204,6 +207,7 @@ async def test_raising_post_tool_use_hook_leaves_the_tool_result_as_returned(
     [warning] = _warnings(caplog)
     assert f"post_tool_use {kind} hook #1" in warning.getMessage()
     assert "outcome=error" in warning.getMessage()
+    assert "the call already ran" in warning.getMessage()
 
 
 @pytest.mark.parametrize("kind", ["prompt", "agent"])
@@ -239,6 +243,62 @@ async def test_raising_pre_tool_use_hook_without_block_lets_the_tool_run(tmp_pat
     assert tool.runs == 1
     assert block.is_error is False
     assert block.content == f"appended {len(PAYLOAD_SENTINEL)} bytes to notes.txt"
+
+
+# ---------------------------------------------------------------------------
+# (a) a command hook that cannot start gets the same treatment
+# ---------------------------------------------------------------------------
+#
+# The hook's working directory is the daemon's cwd at boot. If that directory
+# is removed while the daemon runs, create_subprocess_exec raises before bash
+# exists, and that raise used to escape `execute` like the prompt hooks' did.
+
+@pytest.mark.asyncio
+async def test_command_hook_that_cannot_start_blocks_naming_the_hook(tmp_path, caplog):
+    hook = CommandHookDefinition(command="true", block_on_failure=True)
+    context, call, tool = _loop_with(HookEvent.PRE_TOOL_USE, hook, tmp_path / "gone")
+
+    caplog.set_level(logging.WARNING, logger=EXECUTOR_LOGGER)
+    block = await _safe_execute(context, call, raw_model_output=None)
+
+    assert tool.runs == 0
+    assert block.is_error is True
+    assert "raised an exception" not in block.content
+    assert block.content == (
+        "pre_tool_use command hook #1 failed to start (FileNotFoundError)")
+    [warning] = _warnings(caplog)
+    assert "pre_tool_use command hook #1" in warning.getMessage()
+    assert "blocking the call" in warning.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_command_hook_that_cannot_start_after_the_call_leaves_the_result(
+        tmp_path, caplog):
+    hook = CommandHookDefinition(command="true", block_on_failure=True)
+    context, call, tool = _loop_with(HookEvent.POST_TOOL_USE, hook, tmp_path / "gone")
+
+    caplog.set_level(logging.WARNING, logger=EXECUTOR_LOGGER)
+    block = await _safe_execute(context, call, raw_model_output=None)
+
+    assert tool.runs == 1
+    assert block.is_error is False
+    assert block.content == f"appended {len(PAYLOAD_SENTINEL)} bytes to notes.txt"
+    [warning] = _warnings(caplog)
+    message = warning.getMessage()
+    assert "post_tool_use command hook #1 outcome=error (failed to start (FileNotFoundError))" in message
+    assert "the call already ran" in message
+    assert "blocking" not in message
+
+
+@pytest.mark.asyncio
+async def test_command_hook_that_cannot_start_without_block_lets_the_tool_run(tmp_path):
+    hook = CommandHookDefinition(command="true")  # block_on_failure defaults to False
+    context, call, tool = _loop_with(HookEvent.PRE_TOOL_USE, hook, tmp_path / "gone")
+
+    block = await _safe_execute(context, call, raw_model_output=None)
+
+    assert tool.runs == 1
+    assert block.is_error is False
 
 
 # ---------------------------------------------------------------------------
