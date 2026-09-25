@@ -253,6 +253,16 @@ async def test_the_key_is_not_in_the_task_output(manager, tmp_path):
     )
 
 
+@pytest.mark.xfail(
+    sys.platform == "darwin", strict=True,
+    reason=(
+        "WP-X.24: the command replayed here, like tasks/manager.py:300, "
+        "starts a BARE `python`. macOS has no `python` on PATH (and where one "
+        "exists it is not the daemon's interpreter), so the child dies before "
+        "argparse can echo the key. STRICT: fixing the bare `python` makes "
+        "this pass on macOS, and the marking must be removed with the fix."
+    ),
+)
 async def test_the_old_flags_would_have_echoed_the_key_into_the_output(
     manager, tmp_path
 ):

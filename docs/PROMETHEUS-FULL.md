@@ -286,7 +286,7 @@ class HookEvent(str, Enum):
     POST_TOOL_USE = "post_tool_use"
 
 # schemas.py — Pydantic hook definitions
-CommandHookDefinition(command, timeout_seconds=30, matcher=None, block_on_failure=False)
+CommandHookDefinition(command, timeout_seconds=30, matcher=None, block_on_failure=False, env_allowlist=[])
 HttpHookDefinition(url, headers={}, timeout_seconds=30, matcher=None, block_on_failure=False)
 PromptHookDefinition(prompt, model=None, timeout_seconds=30, matcher=None, block_on_failure=True)
 AgentHookDefinition(prompt, model=None, timeout_seconds=60, matcher=None, block_on_failure=True)
@@ -318,7 +318,10 @@ class HookExecutor:
     async def execute(event: HookEvent, payload: dict) -> AggregatedHookResult
     def update_registry(registry: HookRegistry) -> None
     # Runs all hooks registered for event whose matcher matches payload["tool_name"]
-    # Command hooks: /bin/bash -lc; sets PROMETHEUS_HOOK_EVENT + PROMETHEUS_HOOK_PAYLOAD env vars
+    # Command hooks: /bin/bash -lc; sets PROMETHEUS_HOOK_EVENT + PROMETHEUS_HOOK_PAYLOAD env vars;
+    #   env is PATH, HOME, USER, LANG, LC_*, TMPDIR, SHELL + the hook's env_allowlist, nothing inherited
+    # Prompt/agent hooks: bounded by timeout_seconds; a timeout or raise is a failed HookResult
+    #   (blocked = block_on_failure) and one WARNING, never an exception out of execute()
     # HTTP hooks: POST {event, payload} JSON
     # Prompt/agent hooks: calls provider.stream_message(), parses {"ok": bool} JSON response
 ```
