@@ -427,7 +427,7 @@ class TestDirectoryRootsAreInScope:
         assert unknown is None
         # The gate rules on the resolved path, as the relative-root test below
         # asserts too. On Linux that is the same string; on macOS /home is a
-        # firmlink to /System/Volumes/Data/home.
+        # symlink to /System/Volumes/Data/home.
         assert path == str(Path("/home/will/.ssh").resolve()), (
             "the gate cannot rule on what it cannot see")
 

@@ -63,7 +63,8 @@ HOST_SESSION_PATHS = ("/run/" + "user/", "/tmp/.X11" + "-unix")
 #
 # So: a real AF_UNIX listener stands in for the X display (the probe really
 # connects to it — that is the property under test), and a real file stands in
-# for the accessibility bus socket. Both live in tmp_path. Nothing reads the
+# for the accessibility bus socket. The listener lives in a short directory
+# under /tmp (see short_socket_dir), the bus file in tmp_path. Nothing reads the
 # host's session, so these answer the same way on any machine.
 
 
