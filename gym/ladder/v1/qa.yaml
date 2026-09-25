@@ -5,8 +5,9 @@
 # the check is tight, right_answers that it credits other spellings.
 # On the ANSWER line, a wrong value of the answer_shape fails, and so does one
 # clean token of the wrong kind; a sentence is scored on its one value of the
-# answer_shape; a hedge ("or"), a negation, a parenthetical or a list is a
-# FORMAT MISS (format_misses), never a wrong answer.
+# answer_shape; a line denying there is an answer ("none found") fails; a hedge
+# ("or"), a negation next to a value, a parenthetical or a list is a FORMAT MISS
+# (format_misses), never a wrong answer.
 # A reply with NO answer line is read only for its last line: the right value
 # there passes (alone, or as the one value of the answer_shape in a sentence),
 # a bare wrong value of the answer_shape fails, and anything else — prose, a

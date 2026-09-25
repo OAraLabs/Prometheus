@@ -51,7 +51,7 @@ criterion in `suite.yaml`. The first cut **populates four** of them and **defers
 class has its definition and nothing else, and the loader refuses a task file for it until a later
 work package makes it active.
 
-### Populated (suite v1, sha `807e51a67771`)
+### Populated (suite v1, sha `45df225d3b36`)
 
 **92 tasks.** Every task names its difficulty within its class; the report breaks pass rates out
 by it. Three per class are tagged `smoke: true`.
@@ -111,7 +111,8 @@ Every task ends in one of four verdicts, decided in this order:
    **A value is read from the reply's `ANSWER:` line.** Every task whose verdict is a value
    in the reply ends its prompt with *End your reply with a final line `ANSWER: <…>`*, and
    `expect_answer` full-matches one short pattern against that line — the last line that
-   starts with `ANSWER` or `Final answer` and a colon, undecorated (bold, code ticks, quotes, a
+   starts with `ANSWER` or `Final answer` and a colon (or ends a sentence with one: `…is 48217.
+   ANSWER: 48217`), undecorated (bold, code ticks, quotes, a
    trailing full stop, `$…$`, `\boxed{…}`). The reply may discuss anything above it:
    distractors, a derivation, rows quoted from a file. Two rounds of the audit showed why: a
    pattern searched anywhere in free text either passes a reply that mentions the right value
@@ -127,7 +128,8 @@ Every task ends in one of four verdicts, decided in this order:
    | an `ANSWER:` line with exactly the right value (any spelling the task accepts) | pass |
    | an `ANSWER:` line with exactly a value of the answer's kind (`answer_shape`), or one clean token, that is wrong | fail |
    | an `ANSWER:` line holding a sentence with exactly one value of the answer's kind | scored on that value |
-   | an `ANSWER:` line with a hedge (`Saturn or Jupiter`), a list, a negation or a parenthetical (`12,600 (minutes)`, `3712 (from base.ini)`) | format miss |
+   | an `ANSWER:` line that denies there is an answer and names no value of its kind (`No request ID found for HTTP status 503.`) | fail |
+   | an `ANSWER:` line with a hedge (`Saturn or Jupiter`), a list, a negation next to a value (`It is not 48217`) or a parenthetical (`12,600 (minutes)`, `3712 (from base.ini)`) | format miss |
    | no line; the last line is exactly the right value, or states it as its only value of that kind (`The configured port is 48217.`) | pass — `answer_format_ok = false` |
    | no line; the last line is exactly a wrong value of the answer's kind (`1071`) | fail — `answer_format_ok = false` |
    | no line; anything else — a procedure, a question back, a sign-off, a quoted file, a list of two or more items | format miss |
@@ -139,8 +141,8 @@ Every task ends in one of four verdicts, decided in this order:
    Before any of that, the answer line is read generously: a value on the lines below a bare
    `ANSWER:` label (a list, a fenced block, display math — each read whole, so a list of two
    candidates is a format miss), LaTeX (`$…$`, `\boxed{}`, `\text{}`, `\%`, `1{,}081`), the
-   prompt's own `<…>` placeholder brackets copied, and Unicode hyphens are all read as the value
-   they spell. None of those rules can turn a wrong value into a right one. A list is never
+   prompt's own `<…>` placeholder brackets copied, a value wholly inside one pair of brackets (a
+   tuple: `(1, 2, 1, 4)`), and Unicode hyphens are all read as the value they spell. None of those rules can turn a wrong value into a right one. A list is never
    decided by its last item, with a label or without: that would make the verdict depend on the
    order the model listed its candidates in.
 2. **Acceptance tests** — `{unittest} <modules>`, run by the *harness* in the workspace after
@@ -208,6 +210,13 @@ probed it through every answer-line task. The one defect they found that broke t
 rule itself — a list of candidates decided by whichever item came last — was fixed and pinned;
 everything else they found is listed here instead of fixed. From here on the reader changes only
 where it misreads a **real** reply (the smoke's hand-check), never for an invented one.
+
+Real replies have changed it once so far. A dry run of the smoke on `qwen2.5:7b-instruct` gave
+five answer-line replies; four were misread, and each is now pinned verbatim in
+`tests/test_ladder.py`. `ANSWER: (1, 2, 1, 4)` and two committed "there is none" answers
+(`ANSWER: No request ID found for HTTP status 503.`) had been format misses, but all three are
+wrong answers and now fail. `…is 48217. ANSWER: 48217` had passed but was recorded as missing
+its answer line.
 
 Each limit says which way it moves a score. *Down* is the costly direction: a right answer counted
 as wrong.

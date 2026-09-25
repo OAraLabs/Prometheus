@@ -235,6 +235,8 @@ class TestPredicates:
     PLANET = r"(?:the planet )?(?:mercury|venus|earth|mars|jupiter|saturn|uranus|neptune)"
     NUM = r"-?\d+(?:[,\s]\d{3})*(?:\.\d+)?"
     REGION = r"(?:region\s*=\s*)?[a-z]+-[a-z]+-\d+"
+    MUT, MUT_SHAPE = r"1[\s,]+2[\s,]+1[\s,]+3", r"-?\d+(?:[\s,]+-?\d+)*"
+    SETTLE, PY_PATH = r"(?:(?:\./|/\S*/)?src/)?billing/settle\.py(?::\d+)?", r"[\w./-]+\.py(?::\d+)?"
 
     @pytest.mark.parametrize("text, expect, shape, want", [
         # a hedge commits to nothing: two candidate values -> format miss
@@ -275,6 +277,20 @@ class TestPredicates:
          ("miss", False)),
         ("Possible regions:\n- aurora-basin-42\n\n- cinder-coast-17", "aurora-basin-42", REGION,
          ("miss", False)),
+        # REAL replies (qwen2.5:7b dry run, 2026-09-25) the reader misread — verbatim
+        # but for the sandbox path. A tuple's own brackets are not a qualifier:
+        ("So the final answer:\n\nANSWER: (1, 2, 1, 4)", MUT, MUT_SHAPE, ("fail", True)),
+        ("ANSWER: (1, 2, 1, 3)", MUT, MUT_SHAPE, ("pass", True)),
+        # a committed line that denies there is an answer, naming no value of its kind:
+        ("It appears that the function `reconcile_ledger_v3` is not defined in any Python file "
+         "within this project. \n\nANSWER: /tmp/sb/ws does not contain a definition for "
+         "`reconcile_ledger_v3`.", SETTLE, PY_PATH, ("fail", True)),
+        ("Given that no matches were found for the 503 status code in `logs/access.log`, it "
+         "appears there might be an issue with the log or the search criteria.\n\nANSWER: No "
+         "request ID found for HTTP status 503.", r"(?:req-)?f36ea8da", r"(?:req-)?[0-9a-f]{8}",
+         ("fail", True)),
+        # the answer line written at the end of the last sentence is still the line
+        ("The port configured in settings.ini is 48217. ANSWER: 48217", "48217", NUM, ("pass", True)),
     ])
     def test_the_reader_credits_or_fails_only_what_is_unambiguous(self, text, expect, shape, want):
         from prometheus.gym.ladder.verdict import read_answer

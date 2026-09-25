@@ -160,7 +160,7 @@ def _resolve(workspace: Path, rel: str) -> Path:
 # hedge with two candidate values, a value qualified by a parenthetical — is a
 # FORMAT MISS: never credited, never counted as wrong.
 _ANSWER_LINE = re.compile(
-    r"^[ \t>*_`#-]*(?:final[ \t]+)?answer[ \t*_`]*[:=][ \t]*(?P<value>.*?)[ \t]*$",
+    r"(?:^|(?<=[.!?])[ \t]+)[ \t>*_`#-]*(?:final[ \t]+)?answer[ \t*_`]*[:=][ \t]*(?P<value>.*?)[ \t]*$",
     re.IGNORECASE | re.MULTILINE,
 )
 _DECORATION = re.compile(r"^[\s*_`\"'“”‘’]+|[\s*_`\"'“”‘’]+$")
@@ -313,9 +313,12 @@ def read_value(region: str | None, expect: str, shape: str | None, *, committed:
         return PASS_READ
     if shape and re.fullmatch(shape, region, re.IGNORECASE):
         return FAIL_READ
+    inner = re.fullmatch(r"\(([^()]+)\)", region)
+    if inner:  # the whole value in one pair — a tuple's own brackets, not a qualifier
+        return read_value(inner.group(1), expect, shape, committed=committed)
     # A parenthetical may be commentary, a qualifier ("(minutes)") or a hedge
-    # ("(or Jupiter)"); a hedge or a negation commits to nothing. Unreadable.
-    if "(" in region or ")" in region or _HEDGE.search(region) or _NEGATION.search(region):
+    # ("(or Jupiter)"); a hedge commits to nothing. Unreadable.
+    if "(" in region or ")" in region or _HEDGE.search(region):
         return MISS_READ
     candidates = set()
     if shape:
@@ -324,6 +327,12 @@ def read_value(region: str | None, expect: str, shape: str | None, *, committed:
             for m in re.finditer(rf"(?<!\w)(?:{shape})(?!\w)", region, re.IGNORECASE)
             if m.group(0).strip()
         }
+    if _NEGATION.search(region):
+        # "It is not 48217" commits to nothing. But a committed line that names
+        # no value of the answer's kind and denies there is one ("No request ID
+        # found", "... does not contain a definition") is a wrong answer where
+        # the task has one — it was not missed, it was answered wrongly.
+        return FAIL_READ if committed and shape and not candidates else MISS_READ
     if len(candidates) == 1:
         (only,) = candidates
         if re.fullmatch(expect, only, re.IGNORECASE):
