@@ -13,15 +13,23 @@ prefix is itself reached through a symlink, the two never meet:
 * any host whose ``$HOME`` is reached through a symlink: ``~/.ssh/...``
   resolved into the link's target, never under ``Path.home() / ".ssh"``.
 
-THE PROPERTY
-------------
-For EVERY protected prefix, a destination under it is refused however it is
-spelled: as written, as the resolved path, and through a symlink that points
-at it. Cases that cannot differ on a given host (``/sys`` is not a symlink
-anywhere this runs) pass on origin/main too. They are here because "every
-prefix" is the claim, and a future prefix that IS a symlink somewhere must
-not need its own test. The cases that fail on origin/main are the ``/etc``
-ones on macOS and the symlinked-HOME one everywhere.
+* macOS volumes fold case, and firmlinks give one directory two names:
+  ``~/.SSH`` is ``~/.ssh``, ``/private/ETC`` and
+  ``/System/Volumes/Data/private/etc`` are ``/private/etc``. ``resolve()``
+  follows symlinks but folds neither, so no string comparison catches these;
+  the guard also compares by file identity (device, inode).
+
+WHAT IS MEASURED
+----------------
+For every protected root, a destination under it is refused when written as
+the root, as the resolved root, and through a symlink pointing at it; plus
+``~/.ssh`` under a symlinked ``$HOME``, a case-folded ``~/.SSH`` where the
+filesystem folds case, and the Data-volume spelling of ``/etc`` where it
+exists. Other spellings are not claimed. Cases that cannot differ on a given
+host (``/sys`` is not a symlink anywhere this runs) pass on origin/main too;
+they are here so a root that IS a symlink somewhere needs no new test. The
+roots come from this file's list AND the module's, so a root added to the
+module is exercised without editing this file.
 """
 
 from __future__ import annotations
@@ -35,14 +43,13 @@ from prometheus.tools.builtin.download_file import _resolve_destination
 
 URL = "https://example.com/probe.bin"
 
-# Spelled out here rather than imported, so this file measures the guard on
-# any revision, including one that predates the module constant.
-PROTECTED_ROOTS = ("/etc", "/sys", "/boot", "/proc", "/dev")
-
-
-def test_the_guard_still_protects_every_root_this_file_checks():
-    """If the module's list shrinks, the tests below stop covering it."""
-    assert set(PROTECTED_ROOTS) <= set(getattr(download_file, "_PROTECTED_ROOTS", ()))
+# This file's own list (so it measures any revision, including one without the
+# module constant) UNION the module's (so a root added there is exercised too).
+# A root dropped from the module fails its cases below: it is still listed here.
+PROTECTED_ROOTS = tuple(sorted(
+    {"/etc", "/sys", "/boot", "/proc", "/dev"}
+    | set(getattr(download_file, "_PROTECTED_ROOTS", ()))
+))
 
 
 @pytest.mark.parametrize("root", PROTECTED_ROOTS)
@@ -81,6 +88,27 @@ def test_ssh_under_a_symlinked_home_is_refused(tmp_path, monkeypatch):
                      str(real_home / ".ssh" / "authorized_keys")):
         with pytest.raises(ValueError, match="protected path"):
             _resolve_destination(URL, spelling)
+
+
+def test_a_case_folded_spelling_of_ssh_is_refused(tmp_path, monkeypatch):
+    """~/.SSH on a volume that folds case is the same directory as ~/.ssh."""
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    folded = home / ".SSH"
+    if not (folded.exists() and folded.samefile(home / ".ssh")):
+        pytest.skip("this filesystem is case-sensitive: .SSH is a different "
+                    "directory here, not a spelling of .ssh")
+    with pytest.raises(ValueError, match="protected path"):
+        _resolve_destination(URL, "~/.SSH/authorized_keys")
+
+
+@pytest.mark.skipif(not Path("/System/Volumes/Data/private/etc").is_dir(),
+                    reason="no macOS Data-volume firmlink on this host")
+def test_the_data_volume_spelling_of_etc_is_refused():
+    """/System/Volumes/Data/private/etc is /private/etc through a firmlink."""
+    with pytest.raises(ValueError, match="protected path"):
+        _resolve_destination(URL, "/System/Volumes/Data/private/etc/prometheus-probe.bin")
 
 
 def test_an_ordinary_destination_is_still_allowed(tmp_path):

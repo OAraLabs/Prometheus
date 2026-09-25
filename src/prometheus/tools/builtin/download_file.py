@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -212,6 +213,34 @@ def _protected_prefixes() -> list[Path]:
     return prefixes
 
 
+def _inside_by_identity(candidate: Path, prefixes: list[Path]) -> Path | None:
+    """The protected directory ``candidate`` is inside, by file identity.
+
+    ``resolve()`` follows symlinks but folds neither case nor firmlinks. On
+    macOS's case-insensitive volumes ``~/.SSH`` IS ``~/.ssh``, and
+    ``/System/Volumes/Data/private/etc`` IS ``/private/etc``; no string
+    comparison sees that. So each existing ancestor of the destination is
+    compared with each existing protected directory by (device, inode): one
+    stat per ancestor, whatever the spelling.
+    """
+    protected: dict[tuple[int, int], Path] = {}
+    for prefix in prefixes:
+        try:
+            st = os.stat(prefix)
+        except OSError:
+            continue  # absent here (/proc on macOS): nothing to be inside
+        protected.setdefault((st.st_dev, st.st_ino), prefix)
+    for ancestor in (candidate, *candidate.parents):
+        try:
+            st = os.stat(ancestor)
+        except OSError:
+            continue  # not created yet, or not reachable: its parents still are
+        hit = protected.get((st.st_dev, st.st_ino))
+        if hit is not None:
+            return hit
+    return None
+
+
 def _resolve_destination(url: str, requested: str | None) -> Path:
     """Resolve the destination path. Apply path-traversal guard and reject
     common system paths (``/etc``, ``/sys``, ``/boot``).
@@ -225,10 +254,15 @@ def _resolve_destination(url: str, requested: str | None) -> Path:
         Path.cwd() / candidate
     ).resolve()
 
-    for forbidden in _protected_prefixes():
+    prefixes = _protected_prefixes()
+    for forbidden in prefixes:
         if candidate.is_relative_to(forbidden):
             raise ValueError(
                 f"Destination {candidate} is in a protected path ({forbidden})")
+    inside = _inside_by_identity(candidate, prefixes)
+    if inside is not None:
+        raise ValueError(
+            f"Destination {candidate} is in a protected path ({inside})")
 
     if derived:
         # THE INVARIANT THE FORBIDDEN LIST CANNOT EXPRESS: when the URL chose the
