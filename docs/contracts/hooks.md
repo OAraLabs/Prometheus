@@ -13,7 +13,7 @@
 1. With no pillar loaded, a turn runs exactly as it does today. Section 16 lists everything that runs and explains why nothing changes.
 2. Built-in behavior (the default hooks, [Appendix A](#appendix-a-inventory-of-built-in-behavior)) always runs first, in a fixed order. No pillar replaces the security gate or the adapter.
 3. A pillar can only add restrictions: escalate a tool call to the human, refuse it, or stop the run. It can never let through anything the gate blocked or sent for approval.
-4. A pillar changes a value in one way only: by answering a **decision point** with an option id from a table that open code built. It may do that only where the default abstains, and only when the operator names that pillar for that point in config. Every decision flag is off by default. A pillar's route choice never sends conversation content to a hosted API unless the operator allows cloud routes.
+4. A pillar changes a value in one way only: by answering a **decision point** with an option id from a table that open code built. It may do that only where the default abstains, and only when the operator names that pillar for that point in config. Every decision flag is off by default. A pillar's route choice is limited to the primary and local routes unless the operator allows cloud routes. A local route has a local provider type and an endpoint at a loopback, private-range or tailnet address (section 6.3).
 5. Every bounded decision uses one shape: the `Chooser` shape from `computer/chooser.py`. A request carries options and context. The answer is an option id or `abstain`, plus a confidence and the backend's name and version.
 6. Hooks never run on the daemon's event loop. The daemon enforces deadlines by stopping its wait, not by trying to cancel work. One session's hook can never delay another session's turn.
 7. A hook that times out, errors or returns something invalid leaves the turn on today's behavior. The daemon logs a WARNING and writes a telemetry row with the real outcome. Nothing ever reads as if the hook ran.
@@ -294,13 +294,13 @@ This follows the 2026-09-20 ruling:
   2. the returned id is validated against that table;
   3. every downstream default still runs: each tool call the model makes afterwards still goes through the adapter, the security gate and the approval prompt;
   4. the operator turned the point on;
-  5. for `route`, the table holds no hosted API unless the operator allowed cloud routes (decision 17).
+  5. for `route`, the table holds only the primary and local routes (section 6.3) unless the operator allowed cloud routes (decision 17).
 
 ### 6.3 Decision points in v1
 
 | Point | Event | Options (built by) | Default | Default abstains when | Fallback |
 |---|---|---|---|---|---|
-| `route` | `turn_start` | The primary, plus routes served by a box the operator runs. Cloud routes are included only with `pillars.decide.route_allow_cloud: true` (router) | `ModelRouter.route` (`router/model_router.py:747`) | The router reaches its primary branch (`:791-792`) because no per-session override, escalation, smart-routing or task rule answered | The primary, as today |
+| `route` | `turn_start` | The primary, plus **local routes** as defined below. Any other route is included only with `pillars.decide.route_allow_cloud: true` (router) | `ModelRouter.route` (`router/model_router.py:747`) | The router reaches its primary branch (`:791-792`) because no per-session override, escalation, smart-routing or task rule answered | The primary, as today |
 | `tool_choice` | `before_model_call` | `auto`, `none`, `required`, and `tool:<name>` for each advertised tool (loop) | The caller's `tool_choice`, or the one resolved from `mode` (`engine/agent_loop.py:1076`), with first-round forcing (`:1086-1091`, `:1559-1561`) | The round's directive is `auto` and came from `mode`, not from the caller | `auto`, as today |
 | `compaction_span` | `compaction_candidates` | Cut points the compactor considered | `_select_span_end` (`context/compactor.py:504`) | **Never, today** | — |
 | `skill_draft` | `skill_draft_score` | `keep`, `discard` | SkillCreator Stage 0/1 plus the name-collision check (`learning/skill_creator.py:214-291`) | **Never, today** | — |
@@ -310,10 +310,71 @@ Constraints that apply to specific points:
 - **`route`: the person's choice wins.** A per-session user override (`/claude`, `/local`, …) always answers, so a pillar can never overrule the person's own choice of model.
 - **`route`: local unless the operator opts in** (decision 17). A pillar's choice must never send conversation content to a hosted API, or spend money, without the operator opting in. So the option table holds:
   - the primary, which is where the turn goes anyway when the pillar abstains. If the primary is a hosted API, picking it changes nothing: the operator already sends every unrouted turn there;
-  - routes served by a box the operator runs: the providers in `_LOCAL_PROVIDERS` (`providers/registry.py:167`), and named backends, which may only use local providers (`providers/backends.py:95`);
-  - any other route, including every hosted API, **only** when `pillars.decide.route_allow_cloud` is `true`. The default is `false`.
+  - every route that is **local**, as defined below;
+  - any other route, **only** when `pillars.decide.route_allow_cloud` is `true`. The default is `false`.
 
-  A route whose provider can't be classified is treated as cloud and left out.
+**What counts as a local route** (decision 17, amended in review). A route is local only when **both** of these hold:
+
+1. **Its provider type is local.** Types today: `llama_cpp`, `ollama`, `lm_studio` and `vllm` (`providers/registry.py:140`, `:167`).
+2. **Its endpoint resolves only to local addresses.** "Endpoint" means the address the daemon's HTTP client will actually connect to for that route (details below), not the text in its config.
+
+   | Kind | Ranges |
+   |---|---|
+   | Loopback | `127.0.0.0/8`, `::1` |
+   | Private range (RFC 1918) | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` |
+   | Link-local | `169.254.0.0/16`, `fe80::/10` |
+   | IPv6 unique local (ULA) | `fc00::/7` |
+   | Tailnet: RFC 6598 shared address space, which Tailscale assigns from | `100.64.0.0/10`, `fd7a:115c:a1e0::/48` (the second is inside ULA already) |
+
+   An address in `100.64.0.0/10` does not prove a tailnet peer: carrier-grade NAT uses the same block.
+
+Which address gets classified:
+- **The base URL the serving provider will use.** For `lm_studio` and `vllm`, and any route with `base_url_env`, that comes from `_resolve_base_url` (`providers/registry.py:183-219`, used at `:392`): the config `base_url`, then the environment (`base_url_env`, `VLLM_BASE_URL`, `LM_STUDIO_BASE_URL`), then the default. A classifier that read only the config would call a `vllm` route with `VLLM_BASE_URL` set to an internet host local.
+- **The provider instance that will actually serve the route.** Today the router caches task-rule providers by `provider:model` alone (`router/model_router.py:1054`). So two rules that differ only in `base_url` share whichever instance was built first. Before WP-4.2 offers such a route, it must key that cache by endpoint or build its own instances.
+- **The proxy, when a proxy carries the request.** Provider and probe clients are httpx clients with the default `trust_env=True` (`providers/llama_cpp.py:812`, `providers/ollama.py:134`, `providers/openai_compat.py:287`, `providers/backends.py:543`). When `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY` (or the macOS system proxy) applies to the route's URL and `NO_PROXY` doesn't exclude it, the connection goes to the proxy, loopback included. The route is then local only if the proxy's own address is local by the table above. Otherwise it is cloud.
+
+How addresses are judged:
+- An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is judged by the IPv4 address inside it, the unwrapping `security/url_guard.py` already does (`:125-127`).
+- A hostname is resolved, and **every** address it returns must be in the table. One address outside it makes the route cloud.
+- Anything else is **cloud**. That includes an address that can't be resolved, a resolution that fails or times out, and a provider type that isn't in the local list.
+- These ranges are an explicit list, **not** "any address that isn't publicly routable". `url_guard.is_blocked_address` (`security/url_guard.py:107`) answers that wider question. It counts reserved, multicast, unspecified and the rest of Python's `is_private`, and it counts the tailnet only when `block_tailnet` is set, which is off by default (`:104`, `:139-140`). It is the precedent for how to check an address, not the definition of local.
+
+**When a route is classified.** Never per turn, and never on the turn path.
+- **A backend-registry route** (a named `backends.*` entry, or a `llama_cpp` or `ollama` primary, `providers/backends.py:305-329`) is classified at load and again each time it is probed.
+  - Probes run only when something reads the registry after the cached status has passed its TTL, 60 s by default (`providers/backends.py:108`, `:357-361`, `:392-398`). The readers are boot, the `/backends` command, the web Backends view and Anatomy.
+  - Nothing re-probes on a timer, so a classification can be much older than the TTL.
+- **Every other route** is built straight from config and never probed (`router/model_router.py:989`, `:1020`, `:1054-1066`, `:1101`). That covers a `vllm` or `lm_studio` primary, per-session presets, task rules, the smart-routing simple provider, escalation and the router's fallback chain. Such a route is classified once, when the route table is built at load, and not again while the daemon runs.
+- **Each classification writes a `subsystem_runs` row** (`subsystem: pillars`, `operation: classify_route`) with the route, the verdict, a reason code, the addresses it judged and the time. Doctor reads it (section 13).
+
+**What the check can't see.** It classifies the address the daemon connects to. It does not see where the content goes after that, so these pass as local:
+- a local port that forwards somewhere else: an SSH tunnel, `socat`, a port-forward;
+- a local gateway, such as LiteLLM, in front of a hosted API;
+- a local Ollama serving an Ollama cloud model;
+- a machine shared into your tailnet from someone else's;
+- a carrier-NAT address in `100.64.0.0/10`.
+
+It also classifies one resolution while each request resolves the name again: every model request opens a new client (`providers/llama_cpp.py:812`, `providers/ollama.py:134`, `providers/openai_compat.py:287`). So a hostname whose answers vary (round-robin, split-horizon, a short TTL) can connect to an address no classification saw. An IP-literal base URL avoids that. Knowing what listens behind a local route's address is the operator's job.
+
+**The limit is on the pick, not on recovery.** If a pillar-picked route fails, today's recovery runs unchanged:
+- the terminal-failure fallback to `model.fallback` (`engine/fallback.py:201`, applied at `engine/agent_loop.py:1788`);
+- the circuit-breaker switch to `router.fallback` (`:2359-2371`);
+- tool-call escalation to `router.escalation` (`:4037`).
+
+Those targets are the operator's own configuration, and they may be hosted. So a pillar-picked local route that fails can end with the turn on a hosted API, by way of a fallback the operator configured.
+
+**Why the endpoint test is needed: today's code decides "local" by provider type or name, never by where the endpoint is.** A `llama_cpp` provider pointed at someone else's server passes as local at every site below, and a `vllm` one at every site whose list includes it:
+
+| Site | What it decides, by name only |
+|---|---|
+| `providers/registry.py:140`, `:167` | `_LOCAL_OPENAI_COMPAT_PROVIDERS` and `_LOCAL_PROVIDERS` ("providers that serve from a box you own"). The base URL is whatever config or the environment says (`:147-156`, `:183-219`). |
+| `providers/registry.py:467-469` | `is_cloud()`, "costs money" |
+| `providers/backends.py:95`, `:233`, `:307` | A named backend, and a primary that enters the registry, must be `llama_cpp` or `ollama`. A backend's `base_url` is checked only for an `http(s)` scheme (`:239-240`), so any host passes. |
+| `router/model_router.py:447-450`, `:486-494` | Whether an override is a cloud preset or a local backend depends on where it came from. `slash_commands.<name>` can replace a preset's provider and `base_url` (`:470-471`, `:481-482`). |
+| `router/model_router.py:1181-1195`, `__main__.py:440` | The adapter tier. Tier `off` is the runtime "is cloud" signal (`engine/agent_loop.py:857`, `:3272`, `context/dynamic_tools.py:235`). |
+| `engine/fallback.py:242` | The fallback's `is_local_backend` is `provider_name in ("llama_cpp", "ollama")` |
+| `telemetry/tracker.py:50` | `_CLOUD_PROVIDERS` labels telemetry and training data (read at `:897` and `engine/agent_loop.py:2984`). `telemetry/tracker.py:65` (`_LOCAL_PROVIDERS`) is a name list too, read only by drift-guard tests. |
+
+This contract changes none of those. It defines local for the `route` decision point only, and WP-4.2 implements that classification.
 - **`tool_choice`: locked until measured.** This flag can't be turned on anywhere, on any install, until the parity harness (WP-1.2) has measured the llama.cpp prefix-cache cost of a forced round. A forced round withholds native tools so the grammar path fires (`:1572-1579`), and that changes the cached prompt prefix. The implementation (WP-4.2) ships the flag locked: a config that sets it loads with the flag off, logs one WARNING, and doctor shows ✗ naming the missing measurement. Lifting the lock is an edit to this section that records the measurement.
 - **`tool_choice`: one round only.** A pillar-set directive binds one round, and a pillar may set at most one round per turn. This mirrors first-round forcing.
 - **`tool_choice`: forcing must never raise.** Today a forced `{tool: X}` that the provider doesn't honor raises (`:2032-2040`). A round forced by a pillar must instead record the outcome as `not_honored` and continue.
@@ -342,7 +403,7 @@ Nothing in the protocol can express a decrease.
 **What a pillar can never do in `hooks/1`:**
 - allow something the gate denied, or skip the approval prompt;
 - change a tool call's arguments, or which tool runs;
-- route a turn to a hosted API, or to anything that costs money, unless the operator set `pillars.decide.route_allow_cloud`;
+- pick any route but the primary or a **local route**, unless the operator set `pillars.decide.route_allow_cloud`. A local route has a local provider type **and** an endpoint that resolved only to addresses in the section 6.3 table (loopback, private-range (RFC 1918, link-local, IPv6 ULA) or tailnet) when it was last classified. A local provider type pointed at someone else's server is not local. This limits the pick. It does not change the operator's recovery targets (section 6.3);
 - add a tool to the advertised catalog;
 - widen the workspace or write boundary;
 - change `origin`;
@@ -461,7 +522,7 @@ The daemon never imports a pillar's code, so no pillar crash can take the daemon
 ## 12. Versioning and the manifest
 
 - The contract version is `hooks/MAJOR.MINOR`. This document is `hooks/1.0`.
-- **A minor version** may add optional payload fields, events, decision points, outcome codes, or transports. It never removes, renames or retypes anything, and never widens an existing event's capabilities. A pillar only ever receives events it subscribed to, and new optional fields must be safe to ignore.
+- **A minor version** may add optional payload fields, events, decision points, outcome codes, or transports. It never removes, renames or retypes anything, and never widens an existing event's capabilities. A pillar only ever receives events it subscribed to, and new optional fields must be safe to ignore. Adding a decision point to an existing event is a minor change: the point is off by default and reachable only by a subscription that declares `decide:<point>`, so no existing subscription gains a capability.
 - **A major version** is anything else.
 - The daemon declares the range it supports: one major version and a minor range, for example `hooks/1.0–1.2`.
 - A pillar declares the version it needs, for example `requires: hooks/1.1`. It loads if and only if the majors match and its minor is within the daemon's range.
@@ -512,7 +573,7 @@ pillars:
   load: []                  # pillars to load, in declared order. Empty or absent = none.
   decide:                   # at most one pillar per point; false = off (the default)
     route: false
-    route_allow_cloud: false  # true lets the route table include hosted APIs (section 6.3)
+    route_allow_cloud: false  # true lets the route table include routes that aren't local (section 6.3)
     tool_choice: false        # locked off until WP-1.2 measures a forced round's cache cost (section 6.3)
   budgets:
     instinct_deadline_ms: 100
@@ -556,6 +617,7 @@ Installing a package is not enough for a pillar to load: it must also be listed 
 - each installed pillar: loaded, not loaded (✗ with the reason), or installed but not enabled;
 - each pillar's transport and isolation, and **which caps are actually enforced**;
 - each pillar's subscriptions (event, hook, capabilities), each decision point with its flag state, and `route_allow_cloud`;
+- each route's classification, local or cloud, read from its `classify_route` row: the reason (the provider type; a resolution that failed or timed out; a proxy outside the local ranges; or which resolved address was outside them), the addresses judged, and when the classification was made (section 6.3);
 - health over the last 24 h: number of calls, p50/p95 duration, and counts of timeouts, errors, busy, crashes and drops, plus whether the pillar is tripped;
 - operator hooks from `hooks:`: event, kind, matcher, `block_on_failure`, timeout.
 
@@ -584,14 +646,19 @@ What the contract does and does not guarantee:
 - **Content is labeled** (section 4.2), so a well-behaved pillar can avoid being steered by text it received. The label protects the pillar from the payload. It does not protect you from the pillar.
 - **"Pillars run locally, no outside hosts"** is a rule for pillars, and OAra's own pillars must follow it. The daemon enforces it only where the OS lets it: a daemon-launched host on Linux under systemd gets `IPAddressDeny`. Everywhere else it is a promise, not a guarantee, and doctor reports which of the two applies.
 - **Ephemeral sessions** send pillars no content (section 4.3, decision 3).
-- **Routing stays local unless you opt in.** A pillar's route choice can't send your conversation to a hosted API, or spend money, unless you set `pillars.decide.route_allow_cloud` (section 6.3, decision 17). Your own per-session model choice always wins.
+- **A pillar's route pick stays local unless you opt in.** A pillar's route choice is limited to the primary and to local routes, unless you set `pillars.decide.route_allow_cloud` (section 6.3, decision 17). Your own per-session model choice always wins. Precisely:
+  - **Local, by type and address.** A local route has a local provider type **and** an endpoint that resolved only to loopback, private-range (RFC 1918, link-local, IPv6 ULA) or tailnet addresses. The endpoint judged is the one the daemon actually connects to: the resolved base URL, or the proxy when an environment proxy applies.
+  - **The type alone doesn't count.** A `llama_cpp` or `vllm` provider pointed at a server on the internet is **not** local, whatever its type says.
+  - **Only the first hop.** The check sees the address the daemon connects to, not where the content goes from there. A local port that forwards elsewhere passes as local: an SSH tunnel, a local gateway in front of a hosted API, a local Ollama serving a cloud model. Only you know what listens there.
+  - **As of the last classification, not live.** A backend-registry route is re-classified when it is probed, and probes run on demand, not on a timer. Every other route is classified once at load. A hostname's DNS can change after that, and each request resolves the name again. Give a route that must stay local an IP-literal base URL.
+  - **The pick, not the recovery.** If the picked route fails, your configured fallback and escalation targets still apply, and they may be hosted.
 - **What a compromised or buggy pillar can do:**
   - see content;
   - delay a turn by up to its deadlines;
   - stop turns (a denial of service);
   - put labeled notes in front of the model, which can steer it;
   - decide within the option tables of the decision points the operator turned on.
-- **What it cannot do:** execute a tool, change a tool call's arguments or which tool runs, get past the gate or the approval prompt, route to a hosted API you didn't allow, or write memory.
+- **What it cannot do:** execute a tool, change a tool call's arguments or which tool runs, get past the gate or the approval prompt, route to a non-local endpoint you didn't allow, or write memory.
 
 ---
 
@@ -706,17 +773,18 @@ These were decided in review on 2026-09-24, and they close WP-1.1 and WP-1.3. Ea
 15. **Where the telemetry goes.** *Accepted.* A new `hook_calls` table (section 13).
 16. **Post-processing after the loop, per surface.** *Accepted.* This is a known limit of v1. Two things are separate decisions: whether the Telegram-only steps move into the loop, and whether post-task hooks move off the delivery path (sections 3.1 and 9.1).
 17. **Cloud routes.** *Added in review.*
-    - The `route` option table includes only local providers unless the operator allows otherwise, with `pillars.decide.route_allow_cloud` (default `false`).
+    - The `route` option table includes only the primary and local routes (section 6.3) unless the operator allows otherwise, with `pillars.decide.route_allow_cloud` (default `false`).
+    - *Amended in review:* a local route has a local provider type **and** an endpoint that resolves only to loopback, private-range (RFC 1918, link-local, IPv6 ULA) or tailnet addresses. The route is classified when it is loaded or probed, never per turn. Anything else, including an address that can't be resolved, is cloud. Today's code decides local by type alone (section 6.3).
     - A pillar's choice must never send conversation content to a hosted API, or spend money, without the operator opting in.
     - The per-session user override still always wins.
 
-    Applied in sections 6.3, 7, 12 and 14.
+    Applied in sections 0, 6.2, 6.3, 7, 12, 13 and 14. Section 6.3 also states what the rule can't guarantee: it sees only the first hop, a classification has an age, and recovery targets are unchanged.
 
 ---
 
 ## 18. Possible later minor versions
 
-None of these is in v1. Each would need its own decision and a minor version bump (section 12). Each is listed with what has to be true before it is considered.
+None of these is in v1. Each would need its own decision and a minor version bump (section 12). Each is listed with what has to be true before it is considered. The last two rows, `tool_subset` and the computer-use chooser, are the documented path for Stage 5 of the Build-Out Plan (Instinct, Cognition & the Daemon Seams). "Stage 5", "computer-use Track A" and the 2026-09-20 corpus rules are defined in that plan, not in this repo.
 
 | Candidate | Before it is considered |
 |---|---|
@@ -725,6 +793,8 @@ None of these is in v1. Each would need its own decision and a minor version bum
 | `http` transport on loopback (decision 13) | A real pillar that can't use a unix socket. Section 11 has the design. |
 | Operator `pre_tool_use` hooks after the gate (decision 6) | A decision to change what existing operator hooks see. After the move, they would see the repaired call that will actually run. |
 | Firing operator `session_start` / `session_end` hooks (decision 4) | A decision to change behavior for operators who configured them. Until then, the boot WARNING and doctor ✗ tell them the hooks never fire. |
+| `tool_subset` decision point at `before_model_call`: narrow the advertised tools for one round | Evidence of three things:<br>1. **Narrowing doesn't hide the right tool.** Measured on real turns, the tool the model needed is in the narrowed set.<br>2. **The model can always ask for the full list,** so a wrong narrowing costs a round, not the task. `tool_search` is the precedent: it is in the shipped always-loaded set (`config/shipped_defaults.py:37`), an empty query returns every tool and skill name (`tools/tool_search.py:149-155`), and what it finds arrives as a tool result (`context/dynamic_tools.py:239-248`). A narrowed round must always keep `tool_search`.<br>3. **The prefix-cache cost is measured.** The catalog is frozen for the run today because changing the tools block invalidates the provider's cached prefix (`engine/agent_loop.py:1207-1211`, the #120 bug class). |
+| Computer-use chooser decision point: the `Chooser` seam in `computer/` (`computer/chooser.py:39`), consulted where `RuleChooser` abstains because nothing matched (`:81-84`). Its empty-table abstain (`:71-72`) is never reached, because the loop returns before calling the chooser when there are no candidates (`computer/loop.py:129-133`). | Two things:<br>1. Computer-use Track A is done.<br>2. The corpus rules from 2026-09-20 are met: the abstain label is mandatory, and results are split by none-correct.<br><br>The seam already has most of this shape. A live chooser belongs behind the same Protocol, and its timeout returns `abstain` (`computer/chooser.py:20-22`). Its answer is validated against the table the client built (`computer/loop.py:141`, `computer/candidates.py:156`).<br><br>The minor version must still settle three things:<br>- **Sync versus async.** `choose` is synchronous and is called on the event loop (`computer/chooser.py:44`, `computer/loop.py:137`). A pillar-backed chooser needs an async call to meet section 10.<br>- **Order.** Section 6.2 puts `RuleChooser` first, with a pillar only where it abstains. That is the reverse of the degradation order in `computer/chooser.py:16-18`.<br>- **Where it fires.** It must name the event or pipeline point the decision fires at. |
 
 ---
 
