@@ -132,8 +132,9 @@ milestones, errors that change the plan.
 # claiming to be the primary — the exact production bug the router's own comment records.
 
 _MODEL_LINE_RE = re.compile(r"^- Model: .*$", re.MULTILINE)
-# The provider the line currently names, if it names one.
-_LINE_PROVIDER_RE = re.compile(r"^- Model: .*?\(provider: ([^)]+)\)", re.MULTILINE)
+# The model and the provider the line currently names, if it names a provider.
+_LINE_PROVIDER_RE = re.compile(r"^- Model: (?P<name>.*?) \(provider: (?P<provider>[^)]+)\)",
+                               re.MULTILINE)
 
 # Appended when the model serving this turn is NOT the local backend. Without it, an overridden
 # cloud model reads the local GPU node's "Loaded:" entry out of the Infrastructure/ANATOMY
@@ -183,18 +184,22 @@ def rewrite_model_identity(
     backend?" — rather than one that happened to correlate with it.
 
     A ``provider_name`` that is empty or ``"unknown"`` is a caller that has no name to give (a
-    decision built without one), not a provider called "unknown": the provider the line already
-    names stands. The rewrite never downgrades a known provider to a placeholder — that is how
-    every primary turn came to be told ``(provider: unknown)`` over a boot line that said
-    ``llama_cpp``.
+    decision built without one), not a provider called "unknown". If the line already names
+    THIS model, its provider stands: the rewrite never downgrades a known provider to a
+    placeholder — that is how every primary turn came to be told ``(provider: unknown)`` over a
+    boot line that said ``llama_cpp``. For any other model the line says ``unknown``: the prompt
+    carries the line from turn to turn, so inheriting the previous turn's provider would pair a
+    new model with it — a local model shown as ``(provider: anthropic)`` is a false statement,
+    worse than a placeholder.
     """
+    display = model_display_name(model_name)
     if not provider_name or provider_name == "unknown":
         current = _LINE_PROVIDER_RE.search(system_prompt)
-        if current is not None:
-            provider_name = current.group(1)
-        elif not provider_name:
+        if current is not None and current.group("name") == display:
+            provider_name = current.group("provider")
+        else:
             provider_name = "unknown"
-    line = f"- Model: {model_display_name(model_name)} (provider: {provider_name})"
+    line = f"- Model: {display} (provider: {provider_name})"
     if not serving_is_local_backend:
         line += _NOT_THE_LOCAL_BACKEND
     return _MODEL_LINE_RE.sub(line, system_prompt, count=1)

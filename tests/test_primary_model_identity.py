@@ -155,6 +155,23 @@ def test_a_line_that_never_named_a_provider_still_says_so():
     assert out == "- Model: qwen3.8-27b (provider: unknown)"
 
 
+def test_the_lines_provider_stands_only_for_the_same_model():
+    """The prompt carries the line from turn to turn. A later decision built without a
+    provider must not pair its model with the previous turn's provider: a local model
+    shown as "(provider: anthropic)" is a false statement, worse than "unknown"."""
+    cloud = "- Model: claude-haiku-4-5-20251001 (provider: anthropic)" + NOT_LOCAL
+    for no_name in ("", "unknown"):
+        out = rewrite_model_identity(cloud, model_name="qwen3.5:9b", provider_name=no_name,
+                                     serving_is_local_backend=True)
+        assert out == "- Model: qwen3.5:9b (provider: unknown)", (no_name, out)
+    # The same model with an empty provider keeps it — also when the caller names the
+    # model by its raw served id and the line by its display name (the primary's own case).
+    for name in (SERVED_ID, "Qwen3.8-27B-UD-Q4_K_XL"):
+        out = rewrite_model_identity(PRIMARY_LINE, model_name=name, provider_name="",
+                                     serving_is_local_backend=True)
+        assert out == PRIMARY_LINE, (name, out)
+
+
 def test_fallback_and_override_lines_are_unchanged():
     boot = "# Environment\n" + PRIMARY_LINE + "\n- Git: yes"
     # A fallback to a second local backend (the agent loop's recovery caller).
