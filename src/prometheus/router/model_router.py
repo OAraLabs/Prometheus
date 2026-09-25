@@ -1083,12 +1083,33 @@ class ModelRouter:
 
     # ── Primary + fallback (OpenClaw pattern) ─────────────────────
 
+    @property
+    def primary_provider_name(self) -> str:
+        """The primary's provider name, from the SAME source telemetry uses.
+
+        Every other branch names its provider from the config it was built
+        from; the primary is handed in as an instance, and the one thing
+        that already names an instance is the telemetry helper (an explicit
+        ``provider_name`` attribute, else the class). Sharing it is what
+        keeps the identity line and the telemetry rows agreeing about the
+        primary. Read per route, not cached: a getattr and a class-name
+        check, and a provider swapped under the router is named by what it
+        is. Imported lazily — the router sits below the loop, and the
+        helper lives in engine/agent_loop.py until a later change moves it.
+        """
+        from prometheus.engine.agent_loop import _provider_name_for_telemetry
+        return _provider_name_for_telemetry(self.primary_provider)
+
     def _route_primary(self) -> RouteDecision:
         return RouteDecision(
             provider=self.primary_provider,
             adapter=self.primary_adapter,
             reason=RouteReason.PRIMARY,
             model_name=self.primary_model,
+            # Without this the routing step rewrote the boot line's
+            # "(provider: llama_cpp)" to "(provider: unknown)" on every
+            # primary turn — the one route that never had a name to give.
+            provider_name=self.primary_provider_name,
         )
 
     def get_fallback(self, failed_provider_name: str = "") -> RouteDecision | None:

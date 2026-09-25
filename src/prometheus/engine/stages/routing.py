@@ -9,9 +9,11 @@ Nothing is pluggable here yet. With nothing registered, the stage costs one
 plain function call: no await, no payload building, no registry lookup
 (contract section 16).
 
-The identity-line rewrite behaves exactly as before, including the primary
-route's ``(provider: unknown)``: fixing that changes the prompt the model is
-sent, so it is its own change.
+The identity-line rewrite names the provider the RouteDecision carries. The
+primary route carries one since WP-X.14 (``ModelRouter._route_primary``);
+before that it carried none and every primary turn was told ``(provider:
+unknown)`` over a boot line that said ``llama_cpp``. The rewrite itself never
+downgrades a known provider (``rewrite_model_identity``).
 """
 
 from __future__ import annotations
@@ -136,7 +138,9 @@ def route_turn(
                     context.system_prompt = rewrite_model_identity(
                         context.system_prompt,
                         model_name=decision.model_name or "unknown",
-                        provider_name=decision.provider_name or "unknown",
+                        # Empty for a decision built without one; the rewrite then keeps
+                        # the provider the line already names instead of downgrading it.
+                        provider_name=decision.provider_name,
                         # A named local backend IS local serving, even though the
                         # route reason is "user override".
                         serving_is_local_backend=(
