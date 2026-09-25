@@ -93,7 +93,7 @@ def _leaves(a: Any, b: Any, path: str = "") -> list[tuple[str, Any, Any]]:
             if x != y:
                 out += _leaves(x, y, f"{path}[{i}]")
         return out
-    return [(path or ".", a, b)]
+    return [(path, a, b)]
 
 
 class _Missing:
