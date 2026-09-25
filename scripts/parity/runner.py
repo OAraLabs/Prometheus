@@ -84,6 +84,12 @@ def build_config(src_root: Path, scenario: Scenario) -> str:
     return yaml.safe_dump(cfg, sort_keys=True, default_flow_style=False)
 
 
+def uses_hosted(config_text: str) -> bool:
+    """Whether a scenario routes to the HOSTED upstream. Only such a scenario
+    gets the third listener, so every other replay runs exactly as recorded."""
+    return "{{HOSTED_URL}}" in config_text
+
+
 def render_config(text: str, subs: dict[str, str]) -> str:
     for key, val in subs.items():
         text = text.replace(f"'{{{{{key}}}}}'", val).replace(f"{{{{{key}}}}}", val)
@@ -132,6 +138,7 @@ class RunOutput:
 class Runner:
     def __init__(self, scenario: Scenario, *, mode: str, root: Path, src_root: Path,
                  config_text: str, upstreams: dict[str, str] | None = None,
+                 upstream_keys: dict[str, str] | None = None,
                  recorded: list[Exchange] | None = None,
                  turn_timeout: float = 900.0) -> None:
         self.scenario = scenario
@@ -140,6 +147,7 @@ class Runner:
         self.src_root = src_root
         self.config_text = config_text
         self.state = ServerState(mode=mode, upstreams=upstreams or {},
+                                 upstream_keys=dict(upstream_keys or {}),
                                  recorded=list(recorded or []))
         self.server = ModelServer(self.state)
         self.turn_timeout = turn_timeout
@@ -327,10 +335,13 @@ class Runner:
     # -- the run ----------------------------------------------------------
     def run(self) -> RunOutput:
         wall_offset = time.time_ns() - time.monotonic_ns()
-        ports = self.server.start(["primary", "alt"])
+        labels = ["primary", "alt"] + (["hosted"] if uses_hosted(self.config_text) else [])
+        ports = self.server.start(labels)
         subs = {"MODEL_URL": f"http://127.0.0.1:{ports['primary']}",
                 "ALT_URL": f"http://127.0.0.1:{ports['alt']}",
                 "API_TOKEN": API_TOKEN}
+        if "hosted" in ports:
+            subs["HOSTED_URL"] = f"http://127.0.0.1:{ports['hosted']}"
         inst = Instance(self.root, self.src_root, render_config(self.config_text, subs))
         errors: list[str] = []
         shutdown = "never started"
