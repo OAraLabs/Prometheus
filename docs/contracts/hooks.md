@@ -597,7 +597,7 @@ v1 has exactly two transports. Both use one payload schema (sections 4 and 6), a
 
 The daemon never imports a pillar's code, so no pillar crash can take the daemon down. A `unix` service that dies has its calls resolve as `crashed` in the same way. The daemon reconnects with the same backoff, but restarting the service is up to whoever launched it.
 
-**Host environment.** A host process gets a minimal environment. It does **not** inherit the daemon's environment, which holds provider API keys and the daemon token. Pillars must not. Operator command hooks inherited it until #571 (Appendix B.5); since #571 they get `PATH`, `HOME`, `USER`, `LANG`, `LC_*`, `TMPDIR`, `SHELL`, their payload variables and the names in their own `env_allowlist`, nothing else (`hooks/executor.py`, `_command_environment`).
+**Host environment.** A host process gets a minimal environment. It does **not** inherit the daemon's environment, which holds provider API keys and the daemon token. Pillars must not. Operator command hooks inherited it until #571 (Appendix B.5); since #571 the daemon hands them `PATH`, `HOME`, `USER`, `LANG`, `LC_*`, `TMPDIR`, `SHELL`, their payload variables and the names in their own `env_allowlist`, nothing else (`hooks/executor.py`, `_command_environment`). Their shell is still `bash -l`, so the operator's own login files run and can export more.
 
 ---
 
@@ -761,7 +761,8 @@ What the contract does and does not guarantee:
 - A hook can block a call (`block_on_failure`) or observe. It cannot annotate or modify.
 - `prompt` and `agent` hooks send the payload to the daemon's configured model provider, which may be a hosted API. `http` hooks may target any URL.
 - So operator hooks do not meet the pillar rules: they are not local-only, and they do not fall back to the default on failure (they honor `block_on_failure` instead).
-- Since #571 every kind has a working deadline, and a hook's failure no longer escapes as the tool's. A `prompt`/`agent` hook that times out or raises, or a `command` hook that cannot start, becomes a failed result that honors `block_on_failure`, names the hook, and logs one WARNING. Command hooks get a minimal environment plus a per-hook `env_allowlist`, not the daemon's (Appendix B.4 and B.5, fixed in #571).
+- Since #571 a `prompt`/`agent` hook that times out or raises, or a `command` hook that cannot start, becomes a failed result that honors `block_on_failure`, names the hook, and logs one WARNING, instead of escaping as the tool's failure. Command hooks get a minimal environment plus a per-hook `env_allowlist`, not the daemon's (Appendix B.4 and B.5, fixed in #571).
+- Two deadlines are still not total. A `command` hook's timeout kills its `bash`, not the processes `bash` started, so a compound command or pipeline whose children keep its output open holds the call until they exit (measured: `sleep 4; echo …` with a 1 s timeout returned after 4 s). An `http` hook's timeout is httpx's, per phase (connect, read, write), not a total.
 
 **The options**
 - **A. One registry.** Operator hooks and pillar hooks are two kinds of entry in one registry and one dispatcher. They share the event catalogue, ordering, telemetry and doctor listing, and keep separate rules.
@@ -803,7 +804,7 @@ What the contract does and does not guarantee:
 - **Operator hooks, exactly as today:**
   - `pre_tool_use` at `engine/agent_loop.py:3902` and `post_tool_use` at `:4633`;
   - the same payloads and the same `block_on_failure`;
-  - the same missing timeout for `prompt` and `agent` hooks;
+  - their own timeouts: since #571 a `prompt` or `agent` hook is bounded by its `timeout_seconds` (before #571 it had none, Appendix B.4), and a hook that times out, raises, or (for `command`) cannot start fails with one WARNING and honors `block_on_failure`;
   - `session_start` and `session_end` still never fire for operator hooks.
 - **One addition, deliberately (decision 4).** If an operator hook is configured on `session_start` or `session_end`, boot logs one WARNING and doctor shows ✗ "configured, never fires". This happens at boot and in doctor only. No turn runs differently, and with no such hook configured, nothing is added at all.
 - **Nothing else.**
@@ -920,7 +921,8 @@ None of the candidates below (the table, 18.1 and 18.2) is in v1. Each would nee
 
 **The operator-hook precedent.**
 - `command` and `http` operator hooks fail closed on a timeout or error when `block_on_failure` is set (`hooks/schemas.py:22`, `:44`, default false; `hooks/executor.py:104-112`, `:153-159`). Since #571 that includes a `command` hook that cannot start.
-- `prompt` and `agent` hooks default it to true (`hooks/schemas.py:33`, `:55`). Until #571 it governed only a negative answer, not a missed one, because they applied no timeout and caught no exceptions (Appendix B.4). Since #571 a timeout or an error fails closed too, so all four kinds now treat a missed answer the way this option would treat a missed veto.
+- `prompt` and `agent` hooks default it to true (`hooks/schemas.py:33`, `:55`). Until #571 it governed only a negative answer, not a missed one, because they applied no timeout and caught no exceptions (Appendix B.4). Since #571 a timeout or an error fails closed too.
+- So all four kinds can now fail closed on a missed answer, but fail closed means something different there: an operator hook that misses with `block_on_failure` set REFUSES the call (`engine/agent_loop.py:3908-3922`, no approval path), where this option would turn a missed veto into `escalate` and take the gate's approval path.
 
 ### 18.2 Coding-run verdict point
 
