@@ -219,29 +219,22 @@ async def test_the_key_is_not_in_the_task_output(manager, tmp_path):
     )
 
 
-@pytest.mark.xfail(
-    sys.platform == "darwin", strict=True,
-    reason=(
-        "WP-X.24: the command replayed here, like tasks/manager.py:300, "
-        "starts a BARE `python`. macOS has no `python` on PATH (and where one "
-        "exists it is not the daemon's interpreter), so the child dies before "
-        "argparse can echo the key. STRICT: fixing the bare `python` makes "
-        "this pass on macOS, and the marking must be removed with the fix."
-    ),
-)
 async def test_the_old_flags_would_have_echoed_the_key_into_the_output(
     manager, tmp_path
 ):
     """Mutation check for the sink above: prove the capture really sees stderr.
 
-    Replays the removed command verbatim. If this does not find the key, the
-    test above is measuring nothing.
+    Replays the removed flags. If this does not find the key, the test above
+    is measuring nothing. The interpreter is the daemon's own, as the fixed
+    command's is: the old spelling's bare `python` died before argparse ran on
+    any host without a `python` that has Prometheus installed (a Mac has none
+    at all), which proved nothing about the flags (WP-X.24).
     """
     import shlex
 
     old_command = " ".join(
         shlex.quote(p) for p in
-        ["python", "-m", "prometheus", "--headless", "--api-key", FAKE_KEY]
+        [sys.executable, "-m", "prometheus", "--headless", "--api-key", FAKE_KEY]
     )
     record = await manager.create_agent_task(
         prompt="p", description="d", cwd=str(tmp_path), command=old_command,
@@ -356,3 +349,42 @@ async def test_the_old_construction_would_have_leaked_into_all_of_them(manager, 
         "the byte scan cannot see a key that IS in the database — it is "
         "reading the wrong files, and its clean verdict above means nothing"
     )
+
+
+# --------------------------------------------------------------------------
+# The child is Prometheus, started by the daemon's own interpreter (WP-X.24)
+# --------------------------------------------------------------------------
+BANNER = "interactive mode"
+
+
+async def test_an_agent_task_starts_prometheus_with_the_daemons_interpreter(
+    manager, tmp_path
+):
+    """The spawn must actually start Prometheus.
+
+    The command was `python -m prometheus`. A Mac has no `python` on PATH, so
+    every agent task died with "command not found", and where a `python`
+    exists it is rarely the interpreter Prometheus is installed in (a
+    Homebrew or deploy venv): "No module named ...". test_the_key_is_not_in_
+    the_task_output above passed through all of it, because an error message
+    is output with no key in it. So this asserts what the output must
+    contain: the interactive banner that only a started Prometheus prints.
+    """
+    import shlex
+
+    record = await manager.create_agent_task(
+        prompt="do the thing", description="spawned agent",
+        cwd=str(tmp_path), api_key=FAKE_KEY,
+    )
+    assert shlex.split(record.command)[0] == sys.executable, record.command
+    text = ""
+    for _ in range(200):
+        if record.output_file.exists():
+            text = record.output_file.read_text(encoding="utf-8", errors="replace")
+            if BANNER in text:
+                break
+        await asyncio.sleep(0.1)
+    await manager.stop_task(record.id)
+    assert BANNER in text, (
+        f"the agent task never started Prometheus. Captured:\n{text[:800]}")
+    assert FAKE_KEY not in text
