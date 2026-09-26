@@ -7973,10 +7973,13 @@ class TestVisibleMemorySkillsWiring:
             assert hasattr(TelegramAdapter, attr), f"missing {attr}"
 
     def test_skills_list_includes_auto_state(self, tmp_path, monkeypatch):
-        """test_skills_list_includes_usage — /skills list reflects mtime + state."""
+        """test_skills_list_includes_usage — /skills list reflects the file date + state
+        when no load counter is wired (the counter path: test_skills_last_used.py)."""
         # Redirect config dir so the test doesn't read the real ~/.prometheus.
         from prometheus.config import paths
         monkeypatch.setattr(paths, "get_config_dir", lambda: tmp_path)
+        # Another test may leave a process-wide telemetry handle set.
+        monkeypatch.setattr("prometheus.telemetry.tracker.get_telemetry_handle", lambda: None)
 
         auto = tmp_path / "skills" / "auto"
         auto.mkdir(parents=True)
@@ -7986,7 +7989,7 @@ class TestVisibleMemorySkillsWiring:
         from prometheus.gateway import commands
         out = commands.cmd_skills_auto_list()
         assert "hello" in out
-        assert "d ago" in out  # mtime annotation present
+        assert "modified" in out and "d ago" in out  # the file date, labelled as one
 
     def test_curator_run_immediate_returns_report(self, tmp_path):
         """test_curator_run_immediate_returns_report — `/curator run` summary."""

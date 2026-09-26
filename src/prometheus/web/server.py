@@ -3310,10 +3310,13 @@ def create_app(
 
     @app.get("/api/skills/list")
     async def get_skills_list():
-        """Auto-skills with state, pinned flag, last-used mtime.
+        """Auto-skills with state, pinned flag, file mtime and recorded use.
 
         Mirrors the cmd_skills_auto_list shape so the Beacon panel and
         the Telegram /skills command can be reasoned about together.
+        ``loads`` and ``last_loaded_at`` come from the skill-load counter
+        (0 and null when no load is recorded, or no counter is wired);
+        ``last_modified`` is the file's mtime, which is not a use.
         """
         try:
             from prometheus.config.paths import get_config_dir
@@ -3324,6 +3327,14 @@ def create_app(
         auto_dir = get_config_dir() / "skills" / "auto"
         if not auto_dir.is_dir():
             return []
+
+        from prometheus.gateway.commands import skill_loads_for
+
+        tel = getattr(app.state, "telemetry", None)
+        try:
+            stats = tel.skill_load_stats() if hasattr(tel, "skill_load_stats") else {}
+        except Exception:  # a read failure must not break the list
+            stats = {}
 
         store = SkillStateStore()
         rows: list[dict[str, Any]] = []
@@ -3336,12 +3347,15 @@ def create_app(
                 mtime = path.stat().st_mtime
             except OSError:
                 mtime = 0.0
+            loads = skill_loads_for(path, stats) or {}
             rows.append({
                 "name": name,
                 "pinned": rec.pinned,
                 "state": rec.state,
                 "first_seen_at": rec.first_seen_at,
                 "last_modified": mtime,
+                "loads": loads.get("loads", 0),
+                "last_loaded_at": loads.get("last_loaded_at"),
                 "size_bytes": path.stat().st_size if path.exists() else 0,
                 "notes": rec.notes,
             })

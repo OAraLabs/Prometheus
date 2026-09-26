@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from prometheus.config.paths import get_config_dir
+from prometheus.learning.trace_format import format_trace
 from prometheus.skills.loader import _parse_skill_markdown, load_skill_registry
 from prometheus.skills.similarity import DEFAULT_THRESHOLD, skill_text
 
@@ -95,7 +96,8 @@ Task description: {task_description}
 Final response to the user (how the task actually ended):
 {final_text}
 
-Tool call trace (failed calls are marked [ERROR]):
+Tool call trace, one call per line as tool(input) → result, both cut short
+(failed calls are marked [ERROR]):
 {trace}
 
 Existing skills (do NOT re-create these):
@@ -627,15 +629,10 @@ class SkillCreator:
     def _format_trace(trace: list[dict[str, Any]]) -> str:
         """Format a tool trace into readable text, marking failed calls.
 
-        Stage 0 skips any-error traces outright, so ``[ERROR]`` only
-        reaches a prompt if that check is ever relaxed — the marker keeps
-        Stage 1 honest independently of Stage 0's configuration.
+        Each call shows what it was given (``learning/trace_format``):
+        redacted, then cut. Stage 0 skips any-error traces outright, so
+        ``[ERROR]`` only reaches a prompt if that check is ever relaxed —
+        the marker keeps Stage 1 honest independently of Stage 0's
+        configuration.
         """
-        lines: list[str] = []
-        for i, call in enumerate(trace, 1):
-            tool = call.get("tool_name", "unknown")
-            args = call.get("arguments", {})
-            result = str(call.get("result", ""))[:200]
-            flag = " [ERROR]" if call.get("is_error") else ""
-            lines.append(f"{i}. {tool}({args}) → {result}{flag}")
-        return "\n".join(lines)
+        return format_trace(trace, mark_errors=True)
