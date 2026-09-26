@@ -564,6 +564,19 @@ def create_app(
             )
             return None, "unknown"
 
+    def _skill_loads_block() -> dict[str, Any]:
+        """Loads per skill, most-loaded first: the status view of the skill-load counter."""
+        tel = getattr(app.state, "telemetry", None)
+        if tel is None or not hasattr(tel, "skill_load_stats"):
+            return {"available": False}
+        stats = tel.skill_load_stats()
+        skills = sorted(
+            ({"name": name, "source": s.get("source"), "loads": s["loads"],
+              "last_loaded_at": s["last_loaded_at"]} for name, s in stats.items()),
+            key=lambda s: (-s["loads"], s["name"]),
+        )
+        return {"total": sum(s["loads"] for s in skills), "skills": skills}
+
     def _context_block() -> dict[str, Any]:
         """The budget in force, plus the inputs that produced it.
 
@@ -956,6 +969,11 @@ def create_app(
             # no budget at all, which is why a wrong one could sit on the
             # Beacon panel unchallenged.
             "context": _context_block(),
+            # Skill use, from the load counter (tools/builtin/skill.py). Before
+            # it nothing counted a load, and "last used" everywhere was file
+            # mtime. {"available": False} when there is no telemetry to ask —
+            # not zeros, which would claim nothing was loaded.
+            "skill_loads": _skill_loads_block(),
             # Every local backend this install knows about and what each was
             # last seen serving — from the registry's CACHE (no I/O on a status
             # call; `stale` says the TTL lapsed, `probed: false` says nothing
@@ -1308,8 +1326,11 @@ def create_app(
           never typed. Filter or badge on ``provenance != "user"``. ``is_trusted``
           distinguishes machinery-authored injections (true) from third-party data
           the model must treat as untrusted (false).
-        * ``ordinal`` is ``turn_index`` (the in-memory list position) — an explicitly
-          NON-UNIQUE display position that repeats across restart/trim. Do not key on it.
+        * ``ordinal`` is ``turn_index``: the message's prompt position, unique within its
+          session (docs/audits/LCM-TURN-INDEX-DUPLICATES.md). It orders a session the way
+          the model saw it, which can differ from ``message_id`` order when a message
+          sent mid-turn was persisted before its turn's tail. It is a display order, not
+          an identity: key and page on ``message_id``.
         * ``timestamp`` is display-only — a whole turn can share one timestamp; order by
           ``message_id`` instead.
         * top-level ``watermark`` is the session's current max ``message_id`` (so a client
@@ -4463,6 +4484,10 @@ def create_app(
         if not session_mgr:
             return JSONResponse(status_code=503, content={"error": "session manager not available"})
 
+        # Restore a cold session's recent conversation first, as every send
+        # path does, or the model answers blind after a restart.
+        if hasattr(session_mgr, "rehydrate_if_cold"):
+            session_mgr.rehydrate_if_cold(f"web:{session_id}")
         session = session_mgr.get_or_create(f"web:{session_id}")
         session.add_user_message(content)
         # pre_len AFTER the user append — the index in result.messages where

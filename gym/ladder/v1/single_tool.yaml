@@ -1,0 +1,2736 @@
+# Class: single tool call — one call is enough. Every answer is planted in the
+# workspace and unguessable, so a correct answer implies the tool was used;
+# the check is on the answer, not on which tool got it.
+class: single_tool
+tasks:
+  - id: st-read-config-port
+    difficulty: easy
+    smoke: true
+    prompt: "What port is configured in settings.ini? End your reply with a final line `ANSWER: <the port number>`."
+    setup_files:
+      settings.ini: |
+        [server]
+        host = 0.0.0.0
+        port = 48217
+        workers = 4
+    score:
+      expect_answer: '(?:port\s*[:=]?\s*)?48217'
+      answer_shape: '(?:port\s*[:=]?\s*)?\d+'
+    reference:
+      answer: "settings.ini sets `port = 48217` in its [server] section.\n\nANSWER: 48217"
+      tools: [read_file]
+      wrong_answers:
+        - "ANSWER: 4"  # the worker count
+        - "ANSWER: 0.0.0.0"  # the host
+        - "The [server] section sets port = 48217 with 4 workers.\n\nANSWER: 4"  # right value in prose, the worker count committed
+        - "ANSWER: 48127"  # digits transposed
+        - "ANSWER: 8080"  # a default port, not the file's
+        - "48127"  # bare, no answer line: a wrong value of the right shape, digits transposed
+      right_answers:
+        - "ANSWER: 48217"
+        - "settings.ini has host = 0.0.0.0, port = 48217 and workers = 4; the host and the worker count are not ports.\n\nANSWER: 48217"  # walks the file, naming the other values
+        - "**ANSWER:** `48217`"
+        - "Final answer: port = 48217"
+        - "So the answer is 48217."  # bare value behind a lead-in, no answer line: credited
+        - "ANSWER: <48217>"  # the prompt's placeholder brackets copied
+        - "The configured port is 48217."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "I opened settings.ini and read its [server] section: the host, the port and the worker count are all set there."  # prose with no clear answer, no answer line
+    notes: "Reads one value from a small INI file. No look-alike port is planted: the other values are a host (0.0.0.0) and a worker count (4)."
+
+  # --- easy -------------------------------------------------------------
+
+  - id: st-read-manifest-build-tag
+    difficulty: easy
+    prompt: "What is the build_tag in manifest.json? End your reply with a final line `ANSWER: <the build_tag value>`."
+    setup_files:
+      manifest.json: |
+        {
+          "name": "tern-console",
+          "version": "4.12.0",
+          "release_channel": "heron-prod",
+          "build_tag": "heron-staging-3318",
+          "commit": "9c41e07"
+        }
+    score:
+      expect_answer: '(?:build_tag\s*[:=]\s*)?heron-staging-3318'
+      answer_shape: '(?:build_tag\s*[:=]\s*)?[a-z]+-[a-z]+-\d+'
+    reference:
+      answer: "manifest.json has \"build_tag\": \"heron-staging-3318\". (The release_channel, heron-prod, is a different field.)\n\nANSWER: heron-staging-3318"
+      tools: [read_file]
+      wrong_answers:
+        - "ANSWER: heron-prod"  # the release_channel
+        - "The build_tag field says heron-staging-3318, but the channel it ships on is heron-prod.\n\nANSWER: heron-prod"  # right value in prose, the release_channel committed
+        - "ANSWER: heron-staging-3381"  # digits transposed
+        - "ANSWER: 9c41e07"  # the commit
+        - "ANSWER: 4.12.0"  # the version
+        - "heron-staging-3381"  # bare, no answer line: digits transposed, a wrong value of the build-tag kind
+      right_answers:
+        - "ANSWER: heron-staging-3318"
+        - "manifest.json lists name tern-console, version 4.12.0, release_channel heron-prod, build_tag heron-staging-3318 and commit 9c41e07. The field asked for is build_tag, not the release_channel.\n\nANSWER: heron-staging-3318"  # walks the file in order, look-alike first
+        - "**ANSWER:** `heron-staging-3318`"
+        - "Final answer: build_tag = heron-staging-3318"
+        - "manifest.json, build_tag field:\n\nheron-staging-3318"  # bare value on the last line, no answer line: credited
+        - "ANSWER: heron\u2011staging\u20113318"  # non-breaking hyphens (U+2011)
+        - "The build_tag is heron-staging-3318."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "manifest.json has a build_tag field two lines below the release_channel, and the two values look alike."  # prose with no clear answer, no answer line
+        - "heron-prod"  # bare, no answer line: the release_channel is not a value of the build-tag kind, so it is not read as an answer
+    notes: "Reads one JSON field. release_channel heron-prod is the look-alike value two lines above build_tag."
+
+  - id: st-log-error-code
+    difficulty: easy
+    prompt: "logs/app.log has exactly one ERROR line. What error code does it report? End your reply with a final line `ANSWER: <the error code>`."
+    setup_files:
+      logs/app.log: |
+        2026-03-02T08:14:01Z INFO  boot complete in 412ms
+        2026-03-02T08:14:07Z WARN  cache warmup slow code=W-1187-LM
+        2026-03-02T08:15:22Z INFO  worker pool size=6
+        2026-03-02T08:16:40Z ERROR ledger sync failed code=E-5520-QX
+        2026-03-02T08:16:41Z INFO  retry scheduled in 30s
+    score:
+      expect_answer: '(?:code\s*[:=]\s*)?E-5520-QX'
+      answer_shape: '(?:code\s*[:=]\s*)?[A-Z]+-\d+(?:-[A-Z]+)?'
+    reference:
+      answer: "The ERROR line is `2026-03-02T08:16:40Z ERROR ledger sync failed code=E-5520-QX`.\n\nANSWER: E-5520-QX"
+      tools: [read_file]
+      wrong_answers:
+        - "ANSWER: W-1187-LM"  # the WARN line's code
+        - "The ERROR line reports E-5520-QX; the first code in the log is W-1187-LM.\n\nANSWER: W-1187-LM"  # right value in prose, the WARN code committed
+        - "ANSWER: E-5502-QX"  # digits transposed
+        - "ANSWER: E-5520"  # truncated code
+        - "W-1187-LM"  # bare, no answer line: the WARN line's code
+      right_answers:
+        - "ANSWER: E-5520-QX"
+        - "Two lines carry a code: the WARN line at 08:14:07 (cache warmup slow) has code=W-1187-LM, and the ERROR line at 08:16:40 (ledger sync failed) has code=E-5520-QX. Only the second is the ERROR.\n\nANSWER: E-5520-QX"  # walks the file in order, the WARN code first
+        - "**ANSWER:** code=E-5520-QX"
+        - "Final answer: `E-5520-QX`"
+        - "The only ERROR line is at 08:16:40.\n\nE-5520-QX"  # bare value on the last line, no answer line: credited
+        - "ANSWER:\nE-5520-QX"  # the value on the line below the label
+        - "The ERROR line reports code E-5520-QX."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "The ERROR line is the ledger sync failure at 08:16:40, and it carries a code at its end."  # prose with no clear answer, no answer line
+    notes: "Picks the code off the only ERROR line. The WARN line's W-1187-LM is the look-alike and comes first in the file."
+
+  - id: st-run-token-script
+    difficulty: easy
+    prompt: "Run `python3 tools/make_token.py` and tell me the token it prints. End your reply with a final line `ANSWER: <the token>`."
+    setup_files:
+      tools/make_token.py: |
+        import hashlib
+
+        seed = "ladder-kestrel-" + str(sum(range(1, 58)))
+        print("token:", hashlib.sha256(seed.encode()).hexdigest()[:12])
+    score:
+      expect_answer: '(?:token\s*[:=]?\s*)?d3df6407739f'
+      answer_shape: '(?:token\s*[:=]?\s*)?[0-9a-f]{8,}'
+    reference:
+      answer: "The script prints:\n\n```\ntoken: d3df6407739f\n```\n\nANSWER: d3df6407739f"
+      tools: [bash]
+      wrong_answers:
+        - "ANSWER: c200ca6f2b3c"  # seed worked by hand with range(1, 57)
+        - "The script printed token: d3df6407739f, from the seed below.\n\nANSWER: ladder-kestrel-1653"  # right value in prose, the seed committed
+        - "ANSWER: 40a41b29b8a2"  # seed worked by hand with range(1, 59)
+        - "ANSWER: d3df6407739"  # truncated to 11 characters
+        - "c200ca6f2b3c"  # bare, no answer line: the seed worked by hand with range(1, 57)
+      right_answers:
+        - "ANSWER: d3df6407739f"
+        - "The seed is \"ladder-kestrel-\" + str(sum(range(1, 58))) = ladder-kestrel-1653 (range stops at 57, so not 1711), and the script prints the first 12 hex digits of its sha256: token: d3df6407739f.\n\nANSWER: d3df6407739f"  # shows the derivation, naming the seed
+        - "**ANSWER:** `token: d3df6407739f`"
+        - "Final answer: d3df6407739f"
+        - "The script prints token: d3df6407739f.\n\nThe answer is d3df6407739f."  # bare value behind a lead-in, no answer line: credited
+        - "ANSWER: token = d3df6407739f"  # labelled with =
+        - "The script prints token: d3df6407739f"  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "I ran tools/make_token.py, and it printed a 12-character token derived from the seed."  # prose with no clear answer, no answer line
+        - "ANSWER: d3df6407739f (printed by the script)"  # a trailing note in parentheses: a parenthetical may qualify or hedge the value, so the line is not read
+    notes: "The token can only be had by running the script. The wrong tokens are seeds worked by hand off by one either way (range(1, 57) gives c200ca6f2b3c, range(1, 59) gives 40a41b29b8a2)."
+
+  - id: st-write-greeting-file
+    difficulty: easy
+    prompt: "Create the file {workspace}/greeting.txt containing exactly one line: Hello from ladder-9142"
+    score:
+      expect_file_regex: {path: greeting.txt, pattern: '\AHello from ladder-9142\n?\Z'}
+    reference:
+      answer: "Created greeting.txt."
+      files:
+        greeting.txt: |
+          Hello from ladder-9142
+      tools: [write_file]
+      wrong_files:
+        - {greeting.txt: "Hello from ladder-9142 \n"}
+        - {greeting.txt: "hello from ladder-9142\n"}
+        - {greeting.txt: "\"Hello from ladder-9142\"\n"}
+        - {greeting.txt: "Hello from ladder-9142\n\n"}  # trailing blank line
+        - {greeting.txt: "Hello from ladder-9142.\n"}  # added a full stop
+    notes: "File-checked: the regex is anchored at both ends, so extra text fails."
+
+  - id: st-grep-unique-constant
+    difficulty: easy
+    prompt: "Which file under src/ defines the constant MAX_RETRY_BUDGET_QZ? End your reply with a final line `ANSWER: <the file path>`."
+    setup_files:
+      src/app.py: |
+        from net.client import fetch
+
+
+        def main():
+            print(fetch("/status"))
+      src/core/limits.py: |
+        MAX_RETRY_BUDGET = 5
+        MAX_PAYLOAD_KB = 512
+      src/net/backoff.py: |
+        import random
+
+        MAX_RETRY_BUDGET_QZ = 11
+
+
+        def delay(attempt):
+            return min(30, 2 ** attempt) + random.random()
+      src/net/client.py: |
+        from net.backoff import delay
+
+
+        def fetch(path):
+            return {"path": path, "delay": delay(1)}
+      src/util/text.py: |
+        def slug(s):
+            return s.strip().lower().replace(" ", "-")
+    score:
+      expect_answer: '(?:(?:\./|/\S*/)?src/)?net/backoff\.py(?::\d+)?'
+      answer_shape: '[\w./-]+\.py(?::\d+)?'
+    reference:
+      answer: "`MAX_RETRY_BUDGET_QZ = 11` is on line 3 of src/net/backoff.py.\n\nANSWER: src/net/backoff.py"
+      tools: [grep]
+      wrong_answers:
+        - "ANSWER: src/core/limits.py"  # the near-miss MAX_RETRY_BUDGET
+        - "MAX_RETRY_BUDGET_QZ = 11 is in src/net/backoff.py; the budget itself lives in limits.py.\n\nANSWER: src/core/limits.py"  # right value in prose, the near-miss committed
+        - "ANSWER: src/net/client.py"  # the module that imports from backoff.py
+        - "src/core/limits.py"  # bare, no answer line: the near-miss MAX_RETRY_BUDGET
+      right_answers:
+        - "ANSWER: src/net/backoff.py"
+        - "A grep for MAX_RETRY_BUDGET hits two files: src/core/limits.py (MAX_RETRY_BUDGET = 5) and src/net/backoff.py (MAX_RETRY_BUDGET_QZ = 11). Only the second defines the _QZ constant; src/net/client.py just imports delay from it.\n\nANSWER: src/net/backoff.py"  # names the near-miss and the importer first
+        - "**ANSWER:** `./src/net/backoff.py`"
+        - "Final answer: /tmp/prometheus-ladder/ws/src/net/backoff.py"
+        - "ANSWER: net/backoff.py"  # relative to src/, as the question is
+        - "grep finds the _QZ constant in one file:\n\nsrc/net/backoff.py"  # bare path on the last line, no answer line: credited
+        - "**ANSWER:**\n\n`src/net/backoff.py`"  # the value on the line below the label
+        - "It is defined in src/net/backoff.py."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+        - "ANSWER: src/net/backoff.py:3"  # grep's path:line form
+      format_misses:
+        - "The constant is defined in the networking package, next to the delay() helper."  # prose with no clear answer, no answer line
+        - "ANSWER: src/core/limits.py, src/net/backoff.py"  # both prefix-grep hits: two candidate files and no pick, so nothing is committed
+        - "ANSWER: src/net/backoff.py or src/core/limits.py"  # hedged between two files: commits to neither
+    notes: "Finds the one file that defines MAX_RETRY_BUDGET_QZ. A grep of the prefix MAX_RETRY_BUDGET also hits src/core/limits.py."
+
+  - id: st-read-meeting-owner
+    difficulty: easy
+    prompt: "In notes/meeting-2026-02-11.md, who owns the invoice export action item? End your reply with a final line `ANSWER: <the person's name>`."
+    setup_files:
+      notes/meeting-2026-02-11.md: |
+        # Platform sync, 11 Feb
+
+        Attendees: Odalys Brennwick, Tobiah Qarsen, Mirela Vasquine
+
+        ## Action items
+
+        - [ ] Cache eviction review: owner **Tobiah Qarsen**, due 2026-02-24
+        - [ ] Invoice export: owner **Odalys Brennwick**, due 2026-02-20
+        - [x] Rotate staging keys: owner **Mirela Vasquine**
+    score:
+      expect_answer: '(?:Odalys\s+)?Brennwick'
+      answer_shape: '(?:(?:odalys|tobiah|mirela)\s+)?(?:brennwick|qarsen|vasquine)|(?!(?:thank|best|kind|warm|good|many|hope|happy|see)\s)(?-i:[A-Z][a-z]+\s+[A-Z][a-z]+)'
+    reference:
+      answer: "The action item reads \"Invoice export: owner **Odalys Brennwick**, due 2026-02-20\".\n\nANSWER: Odalys Brennwick"
+      tools: [read_file]
+      wrong_answers:
+        - "ANSWER: Tobiah Qarsen"  # the neighbouring item's owner
+        - "Odalys Brennwick owns the invoice export; Tobiah Qarsen owns the item above it.\n\nANSWER: Tobiah Qarsen"  # right value in prose, the neighbour committed
+        - "ANSWER: Mirela Vasquine"  # the staging keys owner
+        - "Tobiah Qarsen"  # bare, no answer line: the neighbouring item's owner
+      right_answers:
+        - "ANSWER: Odalys Brennwick"
+        - "All three attendees own an item: Tobiah Qarsen the cache eviction review, Odalys Brennwick the invoice export (due 2026-02-20), and Mirela Vasquine the staging key rotation.\n\nANSWER: Odalys Brennwick"  # names every owner, the neighbour first
+        - "**ANSWER:** *Brennwick*"
+        - "Final answer: odalys brennwick"
+        - "The invoice export item names its owner in bold.\n\nOdalys Brennwick"  # bare name on the last line, no answer line: credited
+        - "Final Answer: $\\text{Odalys Brennwick}$"  # LaTeX \text{}
+        - "Odalys Brennwick owns the invoice export item."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "The invoice export action item has an owner in bold and is due on 2026-02-20."  # prose with no clear answer, no answer line
+        - "ANSWER: Odalys Brennwick, Tobiah Qarsen, Mirela Vasquine"  # the attendee line: three candidate names and no pick, so nothing is committed
+        - "ANSWER: Odalys Brennwick or Tobiah Qarsen"  # hedged between adjacent items: commits to neither
+    notes: "Reads the owner of one action item. The attendee line lists all three names, and the neighbouring items belong to the other two."
+
+  - id: st-run-shell-build-id
+    difficulty: easy
+    prompt: "Run `sh build_id.sh` and report the build id it prints. End your reply with a final line `ANSWER: <the build id>`."
+    setup_files:
+      build_id.sh: |
+        #!/bin/sh
+        part1=$(printf '%s' "tern" | tr 'a-z' 'n-za-m')
+        part2=$((6173 * 7))
+        echo "build-id: ${part1}-${part2}"
+    score:
+      expect_answer: '(?:build-id\s*[:=]\s*)?grea-43211'
+      answer_shape: '(?:build-id\s*[:=]\s*)?[a-z]+-\d+'
+    reference:
+      answer: "The script prints `build-id: grea-43211`.\n\nANSWER: grea-43211"
+      tools: [bash]
+      wrong_answers:
+        - "ANSWER: tern-43211"  # the unrun input
+        - "The script prints build-id: grea-43211, built from the name tern.\n\nANSWER: tern-43211"  # right value in prose, the input committed
+        - "ANSWER: gren-43211"  # rot13 worked by hand, n mapped wrong
+        - "ANSWER: grea-42211"  # 6173 * 7 worked by hand, wrong
+        - "ANSWER: grea-6173"  # the multiplication left out
+        - "tern-43211"  # bare, no answer line: the unrun input
+      right_answers:
+        - "ANSWER: grea-43211"
+        - "part1 is \"tern\" through rot13 (tr 'a-z' 'n-za-m'), which gives \"grea\" (tern is only the input), and part2 is 6173 * 7 = 43211. The script prints build-id: grea-43211.\n\nANSWER: grea-43211"  # shows the derivation, naming the input
+        - "**ANSWER:** `build-id: grea-43211`"
+        - "Final answer: grea-43211"
+        - "So grea-43211."  # bare value behind a lead-in, no answer line: credited
+        - "ANSWER: grea\u201043211"  # a Unicode hyphen (U+2010)
+        - "The build id is grea-43211."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "The script runs rot13 over a name and multiplies two numbers to build the id."  # prose with no clear answer, no answer line
+    notes: "The id can only be had by running the script (rot13 plus arithmetic). tern is the script's input, so tern-43211 is the unrun answer."
+
+  # --- medium -----------------------------------------------------------
+
+  - id: st-glob-count-csv
+    difficulty: medium
+    prompt: "How many files with the .csv extension are there under reports/, including all of its subfolders? End your reply with a final line `ANSWER: <the number>`."
+    setup_files:
+      reports/README.md: |
+        Monthly and regional exports.
+      reports/2025/q3.csv: |
+        region,total
+        north,120
+      reports/2025/q4.csv: |
+        region,total
+        north,131
+      reports/2025/notes.txt: |
+        q4 restated
+      reports/2026/jan.csv: |
+        region,total
+        north,44
+      reports/2026/feb.csv: |
+        region,total
+        north,47
+      reports/2026/feb.csv.bak: |
+        region,total
+        north,46
+      reports/2026/mar.csv: |
+        region,total
+        north,52
+      reports/2026/archive/old_jan.csv: |
+        region,total
+        north,40
+      reports/regional/north.csv: |
+        month,total
+        jan,44
+      reports/regional/north.tsv: |
+        month	total
+        jan	44
+      data/extra.csv: |
+        a,b
+        1,2
+    score:
+      expect_answer: '(?:7|seven)(?:\s+(?:\.?csv\s+)?files)?'
+      answer_shape: '(?:\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?:\s+(?:\.?csv\s+)?files)?'
+    reference:
+      answer: "Globbing reports/**/*.csv matches:\n\n1. reports/2025/q3.csv\n2. reports/2025/q4.csv\n3. reports/2026/jan.csv\n4. reports/2026/feb.csv\n5. reports/2026/mar.csv\n6. reports/2026/archive/old_jan.csv\n7. reports/regional/north.csv\n\nANSWER: 7"
+      tools: [glob]
+      wrong_answers:
+        - "ANSWER: 8"  # counted feb.csv.bak
+        - "The glob finds 7 .csv files; with feb.csv.bak there are 8.\n\nANSWER: 8"  # right value in prose, the .bak counted in the answer
+        - "ANSWER: 6"  # skipped archive/
+        - "ANSWER: 9"  # counted feb.csv.bak and data/extra.csv
+        - "1. reports/2025/q3.csv\n2. reports/2025/q4.csv\n3. reports/2026/jan.csv\n4. reports/2026/feb.csv\n5. reports/2026/feb.csv.bak\n6. reports/2026/mar.csv\n7. reports/2026/archive/old_jan.csv\n8. reports/regional/north.csv\n\nANSWER: 8"  # an over-long list whose item 7. is not the answer
+        - "8"  # bare, no answer line: counted feb.csv.bak
+      right_answers:
+        - "ANSWER: 7"
+        - "The .csv files under reports/ are q3.csv and q4.csv in 2025/, jan.csv, feb.csv and mar.csv in 2026/, archive/old_jan.csv and regional/north.csv. feb.csv.bak ends in .bak and north.tsv in .tsv, and data/extra.csv is outside reports/; counting the .bak would give 8, and both 9.\n\nANSWER: 7"  # walks the matches and names the distractor counts
+        - "**ANSWER:** 7 .csv files"
+        - "Final answer: seven"
+        - "The recursive glob matches q3, q4, jan, feb, mar, old_jan and north.\n\n7"  # bare count on the last line, no answer line: credited
+        - "Final Answer: $\\boxed{7}$"  # LaTeX \boxed{}
+        - "There are 7 .csv files under reports/."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "The glob matches .csv files in 2025/, 2026/, 2026/archive/ and regional/ under reports/."  # prose with no clear answer, no answer line
+    notes: "Counts .csv files recursively under reports/. feb.csv.bak and data/extra.csv (outside reports/) are the distractors, giving 8 or 9."
+
+  - id: st-wc-events-log
+    difficulty: medium
+    prompt: "How many lines does data/events.log contain? End your reply with a final line `ANSWER: <the number>`."
+    setup_files:
+      data/events.log: |
+        2026-04-01T04:35:41Z event=export user=u8770 shard=3
+        2026-04-01T13:11:22Z event=upload user=u1485 shard=8
+        2026-04-01T13:51:01Z event=login user=u3824 shard=6
+        2026-04-01T12:15:14Z event=export user=u9737 shard=3
+        2026-04-01T11:55:07Z event=logout user=u1645 shard=3
+        2026-04-01T13:07:33Z event=purge user=u9238 shard=5
+        2026-04-01T04:36:13Z event=upload user=u4458 shard=2
+        2026-04-01T08:39:38Z event=logout user=u6529 shard=3
+        2026-04-01T20:25:01Z event=refresh user=u8627 shard=9
+        2026-04-01T21:32:51Z event=upload user=u1642 shard=2
+        2026-04-01T06:41:08Z event=login user=u3419 shard=6
+        2026-04-01T20:45:18Z event=upload user=u7869 shard=8
+        2026-04-02T22:25:29Z event=login user=u9233 shard=3
+        2026-04-02T01:12:51Z event=export user=u7782 shard=5
+        2026-04-02T11:29:19Z event=purge user=u3697 shard=9
+        2026-04-02T14:05:18Z event=upload user=u3425 shard=5
+        2026-04-02T01:17:40Z event=upload user=u6543 shard=6
+        2026-04-02T02:15:04Z event=refresh user=u7588 shard=3
+        2026-04-02T09:10:34Z event=export user=u6564 shard=1
+        2026-04-02T18:48:52Z event=refresh user=u7982 shard=9
+        2026-04-02T10:16:43Z event=refresh user=u1997 shard=5
+        2026-04-02T16:29:53Z event=login user=u7611 shard=3
+        2026-04-02T04:05:59Z event=logout user=u3827 shard=3
+        2026-04-02T12:08:26Z event=logout user=u2421 shard=6
+        2026-04-03T14:46:41Z event=logout user=u9005 shard=5
+        2026-04-03T14:02:13Z event=logout user=u9550 shard=2
+        2026-04-03T06:47:32Z event=purge user=u6885 shard=4
+        2026-04-03T05:01:27Z event=refresh user=u1191 shard=9
+        2026-04-03T01:07:03Z event=login user=u7762 shard=3
+        2026-04-03T19:01:03Z event=purge user=u6958 shard=9
+        2026-04-03T22:35:36Z event=upload user=u2146 shard=1
+        2026-04-03T10:42:20Z event=purge user=u6887 shard=6
+        2026-04-03T17:20:13Z event=upload user=u6563 shard=9
+        2026-04-03T20:50:43Z event=export user=u1493 shard=7
+        2026-04-03T08:27:25Z event=refresh user=u9689 shard=6
+        2026-04-03T15:37:35Z event=refresh user=u2885 shard=5
+        2026-04-04T17:52:14Z event=upload user=u7177 shard=5
+        2026-04-04T19:19:01Z event=login user=u9703 shard=8
+        2026-04-04T22:05:09Z event=upload user=u3000 shard=8
+        2026-04-04T06:40:13Z event=refresh user=u7563 shard=3
+        2026-04-04T07:19:55Z event=purge user=u5550 shard=2
+        2026-04-04T03:45:23Z event=purge user=u2891 shard=9
+        2026-04-04T05:03:29Z event=export user=u2500 shard=1
+        2026-04-04T11:13:26Z event=export user=u4053 shard=2
+        2026-04-04T04:15:15Z event=purge user=u6296 shard=1
+        2026-04-04T05:45:05Z event=refresh user=u8299 shard=9
+        2026-04-04T18:13:29Z event=refresh user=u6758 shard=5
+        2026-04-04T18:43:16Z event=refresh user=u3177 shard=8
+        2026-04-05T03:14:21Z event=export user=u6880 shard=7
+        2026-04-05T03:52:27Z event=refresh user=u5849 shard=1
+        2026-04-05T00:22:29Z event=login user=u2887 shard=2
+        2026-04-05T04:24:16Z event=logout user=u2018 shard=1
+        2026-04-05T20:06:48Z event=login user=u4098 shard=7
+        2026-04-05T20:24:39Z event=refresh user=u2383 shard=2
+        2026-04-05T16:22:11Z event=login user=u9764 shard=2
+        2026-04-05T13:35:05Z event=refresh user=u2150 shard=3
+        2026-04-05T11:01:36Z event=logout user=u8041 shard=2
+        2026-04-05T06:05:59Z event=purge user=u1258 shard=7
+        2026-04-05T16:42:57Z event=login user=u9324 shard=8
+        2026-04-05T02:13:29Z event=export user=u5682 shard=4
+        2026-04-06T15:49:35Z event=upload user=u3743 shard=2
+        2026-04-06T16:24:54Z event=refresh user=u2787 shard=3
+        2026-04-06T01:45:05Z event=upload user=u5125 shard=4
+        2026-04-06T02:16:58Z event=refresh user=u8742 shard=4
+        2026-04-06T21:38:22Z event=refresh user=u1804 shard=2
+        2026-04-06T05:21:18Z event=upload user=u8576 shard=2
+        2026-04-06T12:37:57Z event=upload user=u8020 shard=4
+        2026-04-06T13:52:21Z event=logout user=u7245 shard=8
+        2026-04-06T15:26:52Z event=upload user=u4774 shard=9
+        2026-04-06T22:57:31Z event=export user=u9936 shard=2
+        2026-04-06T18:46:59Z event=export user=u8093 shard=3
+        2026-04-06T10:18:38Z event=export user=u2766 shard=8
+        2026-04-07T04:52:32Z event=logout user=u2723 shard=2
+        2026-04-07T04:29:23Z event=login user=u7689 shard=6
+        2026-04-07T16:33:43Z event=upload user=u5453 shard=1
+        2026-04-07T08:19:18Z event=purge user=u9085 shard=2
+        2026-04-07T08:40:41Z event=refresh user=u2645 shard=2
+        2026-04-07T17:16:11Z event=refresh user=u5774 shard=6
+        2026-04-07T08:07:00Z event=logout user=u9742 shard=3
+        2026-04-07T19:45:03Z event=login user=u8945 shard=3
+        2026-04-07T12:21:52Z event=refresh user=u7220 shard=6
+        2026-04-07T15:30:38Z event=refresh user=u3124 shard=6
+        2026-04-07T02:11:53Z event=export user=u8052 shard=3
+        2026-04-07T08:14:21Z event=logout user=u2211 shard=2
+        2026-04-08T22:07:18Z event=logout user=u6617 shard=6
+        2026-04-08T22:21:41Z event=logout user=u8920 shard=7
+        2026-04-08T13:17:06Z event=export user=u8413 shard=7
+        2026-04-08T08:35:07Z event=refresh user=u9195 shard=7
+        2026-04-08T11:31:42Z event=logout user=u7383 shard=1
+        2026-04-08T07:32:19Z event=export user=u7576 shard=4
+        2026-04-08T21:30:32Z event=refresh user=u1889 shard=5
+        2026-04-08T07:41:55Z event=export user=u4608 shard=6
+        2026-04-08T09:09:57Z event=login user=u2437 shard=4
+        2026-04-08T03:12:29Z event=login user=u3395 shard=9
+        2026-04-08T11:41:02Z event=purge user=u9925 shard=8
+        2026-04-08T15:00:48Z event=purge user=u3099 shard=7
+        2026-04-09T09:37:56Z event=login user=u9408 shard=3
+        2026-04-09T18:23:57Z event=logout user=u9152 shard=7
+        2026-04-09T09:11:30Z event=export user=u8267 shard=1
+        2026-04-09T17:20:33Z event=logout user=u6579 shard=5
+        2026-04-09T09:54:03Z event=upload user=u2094 shard=6
+        2026-04-09T13:09:59Z event=export user=u9673 shard=2
+        2026-04-09T17:25:57Z event=purge user=u5850 shard=6
+        2026-04-09T14:53:30Z event=purge user=u7883 shard=4
+        2026-04-09T22:55:15Z event=logout user=u2042 shard=8
+        2026-04-09T11:20:04Z event=purge user=u6971 shard=5
+        2026-04-09T18:06:17Z event=login user=u8466 shard=7
+        2026-04-09T01:49:14Z event=upload user=u3690 shard=7
+        2026-04-10T06:55:53Z event=upload user=u1894 shard=6
+        2026-04-10T23:54:19Z event=login user=u8452 shard=6
+        2026-04-10T22:07:45Z event=export user=u3007 shard=2
+        2026-04-10T00:35:56Z event=logout user=u2028 shard=4
+        2026-04-10T02:08:42Z event=login user=u6918 shard=2
+        2026-04-10T18:04:06Z event=logout user=u3208 shard=3
+        2026-04-10T08:43:22Z event=logout user=u9392 shard=5
+        2026-04-10T02:23:24Z event=purge user=u1247 shard=3
+        2026-04-10T00:18:00Z event=logout user=u4446 shard=5
+        2026-04-10T16:02:04Z event=purge user=u9832 shard=1
+        2026-04-10T13:44:26Z event=logout user=u3869 shard=3
+        2026-04-10T04:13:08Z event=refresh user=u6031 shard=3
+        2026-04-11T07:40:24Z event=refresh user=u4375 shard=2
+        2026-04-11T12:19:37Z event=export user=u4002 shard=2
+        2026-04-11T00:55:27Z event=upload user=u2170 shard=2
+        2026-04-11T22:24:24Z event=refresh user=u5504 shard=9
+        2026-04-11T08:03:34Z event=logout user=u3539 shard=5
+        2026-04-11T23:40:29Z event=purge user=u9372 shard=3
+        2026-04-11T09:30:39Z event=purge user=u7226 shard=3
+        2026-04-11T18:17:23Z event=refresh user=u1987 shard=7
+        2026-04-11T22:03:09Z event=purge user=u2601 shard=4
+        2026-04-11T17:38:18Z event=login user=u2136 shard=6
+        2026-04-11T10:58:37Z event=purge user=u8010 shard=8
+        2026-04-11T00:51:20Z event=upload user=u6900 shard=1
+        2026-04-12T01:04:25Z event=purge user=u9616 shard=7
+        2026-04-12T12:45:52Z event=logout user=u8179 shard=6
+        2026-04-12T03:11:53Z event=logout user=u9312 shard=1
+        2026-04-12T14:26:13Z event=refresh user=u3462 shard=9
+        2026-04-12T03:43:04Z event=upload user=u7305 shard=8
+        2026-04-12T02:20:24Z event=purge user=u3909 shard=6
+        2026-04-12T18:40:18Z event=upload user=u8629 shard=6
+        2026-04-12T15:18:15Z event=login user=u7665 shard=5
+        2026-04-12T13:19:41Z event=upload user=u8171 shard=5
+        2026-04-12T01:41:34Z event=refresh user=u7643 shard=6
+        2026-04-12T09:45:23Z event=login user=u8953 shard=6
+        2026-04-12T15:11:42Z event=logout user=u9489 shard=1
+        2026-04-13T11:31:26Z event=logout user=u8067 shard=6
+        2026-04-13T16:29:05Z event=upload user=u2113 shard=9
+        2026-04-13T17:35:43Z event=purge user=u7427 shard=1
+        2026-04-13T12:09:14Z event=refresh user=u2196 shard=9
+        2026-04-13T00:25:26Z event=login user=u4712 shard=4
+        2026-04-13T09:19:40Z event=export user=u2035 shard=7
+        2026-04-13T08:37:13Z event=purge user=u9174 shard=5
+        2026-04-13T14:55:08Z event=refresh user=u7448 shard=8
+        2026-04-13T20:21:58Z event=upload user=u9453 shard=4
+        2026-04-13T22:37:48Z event=refresh user=u5984 shard=5
+        2026-04-13T01:12:25Z event=export user=u3163 shard=5
+        2026-04-13T10:01:47Z event=refresh user=u9172 shard=1
+        2026-04-14T06:33:38Z event=upload user=u3930 shard=4
+        2026-04-14T21:59:33Z event=refresh user=u9092 shard=6
+        2026-04-14T18:53:44Z event=refresh user=u1540 shard=9
+        2026-04-14T20:51:43Z event=purge user=u6442 shard=8
+        2026-04-14T03:01:53Z event=refresh user=u6440 shard=5
+        2026-04-14T22:44:21Z event=login user=u1586 shard=4
+        2026-04-14T18:35:28Z event=login user=u3156 shard=4
+        2026-04-14T22:30:02Z event=export user=u3687 shard=4
+        2026-04-14T04:20:39Z event=logout user=u1332 shard=8
+        2026-04-14T20:24:57Z event=purge user=u6048 shard=8
+        2026-04-14T07:47:57Z event=export user=u4272 shard=8
+        2026-04-14T11:35:03Z event=export user=u4410 shard=6
+        2026-04-15T10:29:21Z event=purge user=u8272 shard=8
+        2026-04-15T06:52:45Z event=login user=u3694 shard=9
+        2026-04-15T05:17:12Z event=export user=u7623 shard=9
+        2026-04-15T12:35:28Z event=logout user=u5249 shard=8
+        2026-04-15T01:22:37Z event=refresh user=u6449 shard=3
+        2026-04-15T20:15:40Z event=login user=u7908 shard=4
+        2026-04-15T04:25:06Z event=refresh user=u9950 shard=2
+        2026-04-15T06:37:19Z event=upload user=u1329 shard=2
+        2026-04-15T18:05:42Z event=upload user=u5370 shard=3
+        2026-04-15T02:07:36Z event=logout user=u9001 shard=7
+        2026-04-15T14:44:57Z event=upload user=u9744 shard=2
+        2026-04-15T22:29:59Z event=refresh user=u9393 shard=9
+        2026-04-16T02:30:48Z event=upload user=u4581 shard=6
+        2026-04-16T01:50:33Z event=export user=u7401 shard=4
+        2026-04-16T04:38:01Z event=logout user=u9658 shard=4
+        2026-04-16T17:32:01Z event=refresh user=u6731 shard=1
+        2026-04-16T17:01:16Z event=export user=u9359 shard=5
+        2026-04-16T21:26:31Z event=login user=u5955 shard=6
+        2026-04-16T13:41:47Z event=purge user=u3848 shard=4
+        2026-04-16T02:00:22Z event=export user=u7798 shard=3
+        2026-04-16T03:45:59Z event=export user=u2599 shard=4
+        2026-04-16T23:29:06Z event=logout user=u5498 shard=2
+        2026-04-16T00:23:38Z event=login user=u6836 shard=5
+        2026-04-16T12:54:10Z event=upload user=u2457 shard=1
+        2026-04-17T01:54:05Z event=upload user=u9888 shard=9
+        2026-04-17T10:23:27Z event=logout user=u2574 shard=5
+        2026-04-17T02:15:56Z event=logout user=u1605 shard=9
+        2026-04-17T01:16:26Z event=purge user=u6083 shard=8
+        2026-04-17T16:05:47Z event=refresh user=u1416 shard=7
+        2026-04-17T06:16:58Z event=logout user=u1746 shard=7
+        2026-04-17T13:02:43Z event=login user=u6862 shard=1
+        2026-04-17T15:53:25Z event=purge user=u5706 shard=1
+        2026-04-17T08:40:52Z event=purge user=u6323 shard=4
+        2026-04-17T18:08:08Z event=logout user=u2106 shard=2
+        2026-04-17T10:00:29Z event=upload user=u7962 shard=2
+        2026-04-17T18:37:35Z event=export user=u6562 shard=8
+        2026-04-18T16:06:10Z event=purge user=u5987 shard=1
+        2026-04-18T12:30:39Z event=purge user=u1519 shard=5
+        2026-04-18T11:01:59Z event=upload user=u9637 shard=2
+        2026-04-18T02:16:45Z event=purge user=u7287 shard=8
+        2026-04-18T12:14:27Z event=export user=u6346 shard=8
+        2026-04-18T17:17:06Z event=purge user=u7303 shard=9
+        2026-04-18T06:56:04Z event=upload user=u1069 shard=3
+        2026-04-18T05:04:47Z event=upload user=u9064 shard=9
+        2026-04-18T14:26:20Z event=upload user=u4369 shard=4
+        2026-04-18T18:28:02Z event=export user=u8508 shard=1
+        2026-04-18T23:45:32Z event=export user=u2299 shard=7
+        2026-04-18T13:07:33Z event=export user=u6579 shard=8
+        2026-04-19T01:59:12Z event=refresh user=u5422 shard=6
+        2026-04-19T22:02:58Z event=refresh user=u9386 shard=1
+        2026-04-19T09:33:16Z event=upload user=u8433 shard=2
+        2026-04-19T09:31:41Z event=upload user=u5371 shard=7
+        2026-04-19T11:36:23Z event=export user=u5984 shard=2
+        2026-04-19T21:02:28Z event=upload user=u6560 shard=7
+        2026-04-19T04:41:21Z event=upload user=u4668 shard=8
+        2026-04-19T09:23:54Z event=export user=u7775 shard=5
+        2026-04-19T19:47:32Z event=purge user=u7206 shard=9
+        2026-04-19T13:02:51Z event=export user=u6904 shard=3
+        2026-04-19T23:22:29Z event=upload user=u3118 shard=7
+        2026-04-19T03:54:34Z event=refresh user=u4674 shard=9
+        2026-04-20T08:07:04Z event=logout user=u3037 shard=5
+        2026-04-20T16:48:15Z event=export user=u7477 shard=1
+        2026-04-20T00:33:50Z event=upload user=u6001 shard=5
+        2026-04-20T20:21:45Z event=export user=u1001 shard=4
+        2026-04-20T03:07:07Z event=upload user=u4816 shard=9
+        2026-04-20T01:01:41Z event=purge user=u1567 shard=1
+        2026-04-20T09:58:24Z event=login user=u3092 shard=8
+        2026-04-20T19:09:53Z event=purge user=u4470 shard=4
+        2026-04-20T00:00:05Z event=login user=u5320 shard=7
+    score:
+      expect_answer: '237(?:\s+lines)?'
+      answer_shape: '\d+(?:[,\s]\d{3})*(?:\s+lines)?'
+    reference:
+      answer: "`wc -l data/events.log` reports 237.\n\nANSWER: 237"
+      tools: [bash]
+      wrong_answers:
+        - "ANSWER: 200"  # the read_file page
+        - "wc -l says 237, but read_file showed lines 1-200.\n\nANSWER: 200"  # right value in prose, the page size committed
+        - "ANSWER: 236"  # off by one
+        - "ANSWER: 238"  # off by one
+        - "ANSWER: 948"  # wc's word column
+        - "200"  # bare, no answer line: the read_file page
+      right_answers:
+        - "ANSWER: 237"
+        - "read_file only showed the first 200 lines, so I counted with wc: `237 948 12535 data/events.log` (948 is the word count, 12535 the byte count).\n\nANSWER: 237"  # names the 200-line page and the other wc columns
+        - "**ANSWER:** 237 lines"
+        - "Final answer: 237"
+        - "wc -l counted the whole file.\n\nThe answer is 237."  # bare value behind a lead-in, no answer line: credited
+        - "ANSWER: \\[237\\]"  # LaTeX display brackets
+        - "data/events.log has 237 lines."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "read_file shows only the first 200 lines, so I counted the file with wc -l instead."  # prose with no clear answer, no answer line
+    notes: "read_file shows 200 lines by default, so reading alone suggests the wrong 200; the file has 237."
+
+  - id: st-read-csv-sku-price
+    difficulty: medium
+    prompt: "In inventory.csv, what is the unit_price of the SKU QX-4471 (exactly that SKU)? End your reply with a final line `ANSWER: <the price>`."
+    setup_files:
+      inventory.csv: |
+        sku,name,unit_price,stock
+        QX-4417,Brass hinge large,81.53,40
+        QX-4471-B,Brass hinge small boxed,19.99,31
+        QX-4714,Steel latch,7.80,500
+        QX-4471,Brass hinge small,18.35,212
+        QZ-4471,Zinc hinge,18.53,90
+    score:
+      expect_answer: '(?:unit_price\s*[:=]\s*)?\$?18\.35'
+      answer_shape: '(?:unit_price\s*[:=]\s*)?\$?\d+(?:[,\s]\d{3})*\.\d{2}'
+    reference:
+      answer: "The exact row is `QX-4471,Brass hinge small,18.35,212`.\n\nANSWER: 18.35"
+      tools: [read_file]
+      wrong_answers:
+        - "ANSWER: 19.99"  # QX-4471-B, the prefix match
+        - "QX-4471 lists 18.35 and QX-4471-B lists 19.99; a grep for QX-4471 returns the -B row first.\n\nANSWER: 19.99"  # right value in prose, the prefix match committed
+        - "ANSWER: 18.53"  # QZ-4471, digits swapped
+        - "ANSWER: 81.53"  # QX-4417
+        - "ANSWER: 212"  # the stock column
+        - "19.99"  # bare, no answer line: QX-4471-B, the prefix match
+      right_answers:
+        - "ANSWER: 18.35"
+        - "Several SKUs look alike: QX-4417 is 81.53, QX-4471-B (boxed) is 19.99, QX-4714 is 7.80 and QZ-4471 is 18.53. The exact SKU QX-4471 is the row `QX-4471,Brass hinge small,18.35,212`.\n\nANSWER: 18.35"  # rules out every look-alike first
+        - "**ANSWER:** $18.35"
+        - "Final answer: unit_price = 18.35"
+        - "The exact row is QX-4471,Brass hinge small,18.35,212.\n\n18.35"  # bare value on the last line, no answer line: credited
+        - "Final Answer: $\\boxed{\\$18.35}$"  # LaTeX \boxed{} with an escaped dollar
+        - "ANSWER: \\$18.35"  # a markdown-escaped dollar
+        - "QX-4471 has a unit_price of 18.35."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "QX-4471 is the Brass hinge small row; QX-4471-B is a different SKU with its own price."  # prose with no clear answer, no answer line
+    notes: "Exact-match lookup of one CSV row. QX-4471-B (a prefix match), QX-4417, QX-4714 and QZ-4471 are look-alikes."
+
+  - id: st-grep-defines-function
+    difficulty: medium
+    smoke: true
+    prompt: "Which file in this project DEFINES the function reconcile_ledger_v3 (not one that only imports or calls it)? End your reply with a final line `ANSWER: <the file path>`."
+    setup_files:
+      src/billing/__init__.py: ""
+      src/billing/settle.py: |
+        from decimal import Decimal
+
+
+        def reconcile_ledger_v3(entries, cutoff):
+            """Sum settled entries up to the cutoff."""
+            return sum((Decimal(e["amount"]) for e in entries if e["ts"] <= cutoff),
+                       Decimal(0))
+      src/billing/legacy.py: |
+        def reconcile_ledger_v2(entries):
+            return sum(e["amount"] for e in entries)
+      src/jobs/nightly.py: |
+        from billing.settle import reconcile_ledger_v3
+
+
+        def run(batch, cutoff):
+            return reconcile_ledger_v3(batch, cutoff)
+      src/api/routes.py: |
+        from billing import settle
+
+
+        def ledger_total(req):
+            return settle.reconcile_ledger_v3(req.entries, req.cutoff)
+    score:
+      expect_answer: '(?:(?:\./|/\S*/)?src/)?billing/settle\.py(?::\d+)?'
+      answer_shape: '[\w./-]+\.py(?::\d+)?'
+    reference:
+      answer: "`def reconcile_ledger_v3(entries, cutoff):` is on line 4 of src/billing/settle.py.\n\nANSWER: src/billing/settle.py"
+      tools: [grep]
+      wrong_answers:
+        - "ANSWER: src/jobs/nightly.py"  # a caller
+        - "The def is in src/billing/settle.py; src/jobs/nightly.py imports it from there.\n\nANSWER: src/jobs/nightly.py"  # right value in prose, a caller committed
+        - "ANSWER: src/billing/legacy.py"  # the v2 decoy
+        - "ANSWER: src/api/routes.py"  # a caller
+        - "ANSWER: src/billing/__init__.py"  # the package, not the module
+        - "src/jobs/nightly.py"  # bare, no answer line: a caller
+      right_answers:
+        - "ANSWER: src/billing/settle.py"
+        - "grep finds reconcile_ledger_v3 in three files: src/jobs/nightly.py imports and calls it, src/api/routes.py calls settle.reconcile_ledger_v3, and src/billing/settle.py has the def. src/billing/legacy.py only defines reconcile_ledger_v2.\n\nANSWER: src/billing/settle.py"  # names the callers and the v2 decoy first
+        - "**ANSWER:** `./src/billing/settle.py`"
+        - "Final answer: /tmp/prometheus-ladder/ws/src/billing/settle.py"
+        - "ANSWER: billing/settle.py"  # relative to src/
+        - "The def is on line 4 of this file:\n\nsrc/billing/settle.py"  # bare path on the last line, no answer line: credited
+        - "ANSWER: <src/billing/settle.py>"  # the prompt's placeholder brackets copied
+        - "reconcile_ledger_v3 is defined in src/billing/settle.py."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+        - "ANSWER: src/billing/settle.py:4"  # grep's path:line form
+      format_misses:
+        - "grep finds reconcile_ledger_v3 in three files, and only one of them has the def."  # prose with no clear answer, no answer line
+        - "ANSWER: src/api/routes.py, src/billing/settle.py, src/jobs/nightly.py"  # every grep hit: three candidate files and no pick, so nothing is committed
+    notes: "Finds the file with the def, not a caller. A plain grep of the name hits the definer and two callers, and legacy.py defines the v2 decoy."
+
+  - id: st-write-flags-json
+    difficulty: medium
+    prompt: "Write the file {workspace}/config/flags.json containing a JSON object with exactly two keys: \"feature\" set to the string \"tern-dashboard-v2\" and \"rollout_percent\" set to the number 35."
+    acceptance: "{unittest} test_flags_json"
+    acceptance_files:
+      test_flags_json.py: |
+        import json
+        import unittest
+        from pathlib import Path
+
+
+        class FlagsJson(unittest.TestCase):
+            def test_exact_object(self):
+                data = json.loads(Path("config/flags.json").read_text())
+                self.assertEqual(data, {"feature": "tern-dashboard-v2", "rollout_percent": 35})
+                self.assertNotIsInstance(data["rollout_percent"], bool)
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      answer: "Wrote config/flags.json."
+      files:
+        config/flags.json: |
+          {
+            "feature": "tern-dashboard-v2",
+            "rollout_percent": 35
+          }
+      tools: [write_file]
+      wrong_files:
+        - {config/flags.json: '{"feature": "tern-dashboard-v2", "rollout_percent": "35"}'}
+        - {config/flags.json: '{"feature": "tern-dashboard-v2", "rollout_percent": 35, "enabled": true}'}
+        - {config/flags.json: '{"feature": "tern-dashboard-v2", "rollout": 35}'}
+        - {config/flags.json: "```json\n{\"feature\": \"tern-dashboard-v2\", \"rollout_percent\": 35}\n```\n"}  # markdown fence written into the file
+        - {config/flags.json: '{"feature": "tern-dashboard-v2", "rollout_percent": 0.35}'}  # percent as a fraction
+    notes: "Hidden unittest parses the file as JSON and compares the whole object, so key order and whitespace are free but extra keys or a string \"35\" fail."
+
+  - id: st-read-yaml-staging-timeout
+    difficulty: medium
+    prompt: "In services.yaml, what is timeout_ms for the ledger-api service in the staging environment? End your reply with a final line `ANSWER: <the number>`."
+    setup_files:
+      services.yaml: |
+        environments:
+          production:
+            services:
+              ledger-api:
+                replicas: 6
+                timeout_ms: 9100
+              search-api:
+                replicas: 4
+                timeout_ms: 3300
+          staging:
+            services:
+              search-api:
+                replicas: 1
+                timeout_ms: 2750
+              ledger-api:
+                replicas: 2
+                timeout_ms: 4450
+    score:
+      expect_answer: '(?:timeout_ms\s*[:=]\s*)?4[,\s]?450(?:\s*(?:ms|milliseconds))?'
+      answer_shape: '(?:timeout_ms\s*[:=]\s*)?\d+(?:[,\s]\d{3})*(?:\.\d+)?(?:\s*(?:ms|milliseconds))?'
+    reference:
+      answer: "Under environments.staging.services.ledger-api, timeout_ms is 4450.\n\nANSWER: 4450"
+      tools: [read_file]
+      wrong_answers:
+        - "ANSWER: 9100"  # production ledger-api
+        - "The staging ledger-api timeout is 4450 ms; production uses 9100.\n\nANSWER: 9100"  # right value in prose, production committed
+        - "ANSWER: 2750"  # staging search-api
+        - "ANSWER: 3300"  # production search-api
+        - "ANSWER: 4540"  # digits transposed
+        - "ANSWER: 2"  # the replica count
+        - "9100"  # bare, no answer line: production ledger-api
+      right_answers:
+        - "ANSWER: 4450"
+        - "Production: ledger-api 9100, search-api 3300. Staging: search-api 2750, ledger-api 4450. The staging ledger-api entry is the one asked for.\n\nANSWER: 4450"  # walks the whole file in order
+        - "**ANSWER:** 4,450 ms"
+        - "Final answer: timeout_ms: 4450"
+        - "ANSWER: 4\u00a0450"  # NBSP thousands separator
+        - "So the answer is 4450 ms."  # bare value behind a lead-in, no answer line: credited
+        - "ANSWER: 4450 milliseconds"  # the unit spelled out
+        - "ANSWER: $4{,}450$"  # LaTeX thousands separator
+        - "In staging, ledger-api has timeout_ms 4450."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "Staging ledger-api has its own timeout_ms, different from the production value."  # prose with no clear answer, no answer line
+    notes: "Nested YAML lookup. Production ledger-api (9100) and staging search-api (2750) are the look-alikes."
+
+  - id: st-run-fee-script-arg
+    difficulty: medium
+    prompt: "Run `python3 calc_fee.py 1840` and report the fee it prints. End your reply with a final line `ANSWER: <the fee>`."
+    setup_files:
+      calc_fee.py: |
+        import sys
+
+        if len(sys.argv) != 2:
+            print("usage: calc_fee.py AMOUNT")
+            sys.exit(2)
+
+        amount = int(sys.argv[1])
+        tier = 0.0375 if amount >= 1000 else 0.05
+        fee = round(amount * tier + 1.29 + (amount % 7) * 0.11, 2)
+        print(f"fee: {fee:.2f}")
+    score:
+      expect_answer: '(?:fee\s*[:=]\s*)?\$?70\.95'
+      answer_shape: '(?:fee\s*[:=]\s*)?\$?\d+(?:[,\s]\d{3})*\.\d{2}'
+    reference:
+      answer: "The script prints `fee: 70.95`.\n\nANSWER: 70.95"
+      tools: [bash]
+      wrong_answers:
+        - "ANSWER: 70.29"  # the modulo term left out
+        - "The script printed fee: 70.95; the base fee at 3.75% is 69.00.\n\nANSWER: 69.00"  # right value in prose, the base fee committed
+        - "ANSWER: 93.95"  # the other tier
+        - "ANSWER: 69.66"  # the 1.29 left out
+        - "ANSWER: 1840"  # echoed the argument
+        - "70.29"  # bare, no answer line: the modulo term left out
+      right_answers:
+        - "ANSWER: 70.95"
+        - "1840 >= 1000, so the 3.75% tier applies, not 5% (which would give 93.95): 1840 * 0.0375 = 69.00, plus 1.29, plus (1840 % 7) * 0.11 = 0.66, is 70.95. The script prints fee: 70.95.\n\nANSWER: 70.95"  # shows the derivation, naming the other tier
+        - "**ANSWER:** $70.95"
+        - "Final answer: fee: 70.95"
+        - "The script printed its fee line:\n\n70.95"  # bare value on the last line, no answer line: credited
+        - "ANSWER: fee = 70.95"  # labelled with =
+        - "Final Answer: $\\boxed{\\$70.95}$"  # LaTeX \boxed{} with an escaped dollar
+        - "The script prints fee: 70.95"  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "calc_fee.py applies the 3.75% tier to 1840 and adds a fixed charge plus a modulo term."  # prose with no clear answer, no answer line
+    notes: "The fee can only be had by running the script. The wrong fees are hand-computation slips (the other tier, or a term left out)."
+
+  - id: st-write-checklist-lines
+    difficulty: medium
+    prompt: |
+      Create the file {workspace}/deploy/checklist.txt containing exactly these three lines, in this order, and nothing else:
+      freeze merges at 14:05
+      run migration kestrel-218
+      notify ops-lark
+    score:
+      expect_file_regex: {path: deploy/checklist.txt, pattern: '\Afreeze merges at 14:05\nrun migration kestrel-218\nnotify ops-lark\n?\Z'}
+    reference:
+      answer: "Created deploy/checklist.txt with the three lines."
+      files:
+        deploy/checklist.txt: |
+          freeze merges at 14:05
+          run migration kestrel-218
+          notify ops-lark
+      tools: [write_file]
+      wrong_files:
+        - {deploy/checklist.txt: "freeze merges at 14:05\nrun migration kestrel-218\n"}
+        - {deploy/checklist.txt: "run migration kestrel-218\nfreeze merges at 14:05\nnotify ops-lark\n"}
+        - {deploy/checklist.txt: "- freeze merges at 14:05\n- run migration kestrel-218\n- notify ops-lark\n"}
+        - {deploy/checklist.txt: "1. freeze merges at 14:05\n2. run migration kestrel-218\n3. notify ops-lark\n"}  # numbered
+        - {deploy/checklist.txt: "freeze merges at 14:05\nrun migration kestrel-218\nnotify ops-lark\n\n"}  # trailing blank line
+    notes: "File-checked and anchored: extra lines, reordering or bullets fail."
+
+  - id: st-run-report-net
+    difficulty: medium
+    prompt: "Run `python3 report.py --region north` and tell me the net figure it prints. End your reply with a final line `ANSWER: <the net figure>`."
+    setup_files:
+      report.py: |
+        import sys
+
+        # Amounts in cents.
+        DATA = {
+            "north": {"gross": 1844210, "refunds": 120755},
+            "south": {"gross": 1618934, "refunds": 98410},
+            "east": {"gross": 2071102, "refunds": 143388},
+        }
+        TAX_RATE = {"north": 0.1265, "south": 0.1180, "east": 0.1340}
+
+
+        def fmt(cents):
+            return f"{cents / 100:,.2f}"
+
+
+        def report(region):
+            d = DATA[region]
+            base = d["gross"] - d["refunds"]
+            tax = round(base * TAX_RATE[region])
+            net = base - tax
+            print(f"region: {region}")
+            print(f"gross: {fmt(d['gross'])}")
+            print(f"refunds: {fmt(d['refunds'])}")
+            print(f"tax: {fmt(tax)}")
+            print(f"net: {fmt(net)}")
+
+
+        args = sys.argv[1:]
+        if len(args) == 2 and args[0] == "--region" and args[1] in DATA:
+            report(args[1])
+        else:
+            print("usage: report.py --region {north|south|east}")
+            sys.exit(2)
+    score:
+      expect_answer: '(?:net\s*[:=]\s*)?\$?15[,\s]?054\.38'
+      answer_shape: '(?:net\s*[:=]\s*)?\$?\d+(?:[,\s]\d{3})*(?:\.\d+)?'
+    reference:
+      answer: "The script prints:\n\n```\nregion: north\ngross: 18,442.10\nrefunds: 1,207.55\ntax: 2,180.17\nnet: 15,054.38\n```\n\nANSWER: 15,054.38"
+      tools: [bash]
+      wrong_answers:
+        - "ANSWER: 18,442.10"  # the gross
+        - "The last line says net: 15,054.38; before tax it is 17,234.55.\n\nANSWER: 17,234.55"  # right value in prose, gross minus refunds committed
+        - "ANSWER: 2,180.17"  # the tax line
+        - "ANSWER: 15,504.38"  # digits transposed
+        - "ANSWER: 13,411.02"  # south's net
+        - "17,234.55"  # bare, no answer line: gross minus refunds, the tax left out
+      right_answers:
+        - "ANSWER: 15,054.38"
+        - "gross 18,442.10 minus refunds 1,207.55 is 17,234.55; minus tax 2,180.17 that leaves net 15,054.38, the script's last line.\n\nANSWER: 15,054.38"  # shows the derivation through the other figures
+        - "**ANSWER:** $15054.38"
+        - "Final answer: net: 15,054.38"
+        - "ANSWER: 15\u202f054.38"  # narrow NBSP thousands separator
+        - "Therefore, 15,054.38."  # bare value behind a lead-in, no answer line: credited
+        - "ANSWER: net = 15,054.38"  # labelled with =
+        - "ANSWER: $15{,}054.38$"  # LaTeX thousands separator
+        - "The net figure for north is 15,054.38."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "report.py prints region, gross, refunds, tax and net for the north region."  # prose with no clear answer, no answer line
+    notes: "The script prints five labelled figures and only the net line answers. Gross minus refunds (17,234.55) is the tax-less slip."
+
+  # --- hard -------------------------------------------------------------
+
+  - id: st-buried-yaml-region-token
+    difficulty: hard
+    prompt: "big_config.yaml defines settings for several regions. What is the rebalance_token of the eu-west region? End your reply with a final line `ANSWER: <the rebalance_token value>`."
+    setup_files:
+      big_config.yaml: |
+        # Platform configuration (synthetic fixture).
+        version: 14
+        defaults:
+          retries: 3
+          log_level: info
+        regions:
+          us-east:
+            pool_floor: 1287
+            retry_backlog: 3729
+            ticket_ratio: 0.42
+            ticket_weight: 0.08
+            window_ttl_s: 2207
+            ticket_limit: 2121
+            probe_depth_max: 794
+            index_interval_s: 6308
+            spool_backlog: 5617
+            pool_ratio: 0.80
+            stream_interval_s: 8204
+            ledger_timeout_ms: 2731
+            stream_burst: 1919
+            ticket_size: 5424
+            stream_grace_s: 7713
+            spool_ttl_s: 8060
+            vault_ratio: 0.25
+            spool_limit: 966
+            cursor_weight: 0.25
+            pool_timeout_ms: 8766
+            vault_ttl_s: 2288
+            ticket_ttl_s: 1152
+            window_grace_s: 1538
+            shard_timeout_ms: 7772
+            ticket_interval_s: 4925
+            cursor_interval_s: 8696
+            ticket_enabled: true
+            queue_burst: 4732
+            batch_limit: 2997
+            batch_ceiling: 1230
+            window_burst: 1449
+            window_size: 1743
+            vault_grace_s: 7073
+            buffer_floor: 7585
+            queue_ratio: 0.44
+            buffer_depth_max: 4272
+            retry_burst: 2387
+            window_depth_max: 7165
+            window_timeout_ms: 977
+            cursor_ceiling: 2795
+            lease_ceiling: 4954
+            index_floor: 4969
+            window_weight: 0.58
+            retry_ceiling: 7436
+            rebalance_token: vole-amber-2291
+            pool_ceiling: 1589
+            ticket_timeout_ms: 6741
+            batch_depth_max: 3290
+            batch_enabled: true
+            relay_grace_s: 5133
+            buffer_interval_s: 7176
+            queue_interval_s: 2695
+            batch_ttl_s: 667
+            buffer_ratio: 0.55
+            index_ttl_s: 1170
+            buffer_ceiling: 638
+            batch_backlog: 7843
+            ledger_weight: 0.50
+            queue_limit: 4375
+            ledger_backlog: 1652
+            ledger_size: 3606
+          us-west:
+            spool_depth_max: 433
+            batch_limit: 4143
+            vault_depth_max: 412
+            relay_enabled: true
+            vault_limit: 7894
+            batch_grace_s: 7927
+            queue_floor: 8347
+            spool_weight: 0.07
+            buffer_floor: 5780
+            cache_timeout_ms: 1506
+            queue_ceiling: 1338
+            pool_grace_s: 7391
+            buffer_backlog: 4463
+            probe_enabled: false
+            relay_ceiling: 1088
+            cursor_floor: 225
+            probe_size: 136
+            cursor_ceiling: 8734
+            vault_backlog: 7402
+            shard_floor: 2462
+            index_limit: 3605
+            cursor_backlog: 3665
+            spool_timeout_ms: 8196
+            vault_interval_s: 4619
+            index_backlog: 205
+            index_ratio: 0.64
+            retry_floor: 2778
+            queue_backlog: 411
+            probe_interval_s: 5963
+            rebalance_token: lynx-ember-5820
+            ledger_grace_s: 6491
+            cursor_ttl_s: 4992
+            lease_floor: 2225
+            buffer_enabled: true
+            vault_ceiling: 2369
+            cursor_interval_s: 3645
+            cache_limit: 8071
+            index_timeout_ms: 5056
+            cache_floor: 4796
+            ledger_interval_s: 1061
+            lease_ttl_s: 5362
+            buffer_weight: 0.84
+            spool_ceiling: 8494
+            probe_ratio: 0.66
+            ticket_size: 7510
+            stream_depth_max: 5052
+            probe_burst: 8038
+            ticket_timeout_ms: 3228
+            relay_limit: 5877
+            retry_ttl_s: 1701
+            batch_backlog: 3838
+            index_weight: 0.77
+            buffer_ttl_s: 8959
+            cache_ceiling: 3100
+            queue_enabled: true
+            lease_grace_s: 3908
+            ticket_enabled: true
+            shard_timeout_ms: 404
+            cache_burst: 1746
+            window_interval_s: 5929
+            lease_ratio: 0.42
+          eu-central:
+            retry_depth_max: 5580
+            pool_ttl_s: 7688
+            ledger_ttl_s: 3432
+            cursor_weight: 0.16
+            stream_ttl_s: 8440
+            relay_burst: 451
+            relay_limit: 1640
+            relay_timeout_ms: 708
+            ledger_enabled: true
+            buffer_floor: 665
+            index_size: 2045
+            shard_enabled: true
+            stream_size: 6357
+            cache_burst: 3761
+            lease_depth_max: 8541
+            lease_enabled: true
+            cache_size: 5868
+            shard_ceiling: 8002
+            ticket_weight: 0.82
+            cursor_ratio: 0.55
+            cache_weight: 0.31
+            queue_burst: 4766
+            stream_limit: 4538
+            queue_backlog: 4328
+            shard_backlog: 6770
+            shard_grace_s: 5907
+            lease_ceiling: 7224
+            lease_interval_s: 3642
+            batch_enabled: false
+            vault_size: 6604
+            relay_grace_s: 4121
+            relay_enabled: false
+            cache_grace_s: 8599
+            queue_depth_max: 5608
+            pool_limit: 255
+            index_enabled: false
+            ticket_limit: 5591
+            vault_interval_s: 3373
+            vault_ttl_s: 8303
+            window_limit: 8361
+            spool_ceiling: 1780
+            rebalance_token: wren-slate-7406
+            cache_interval_s: 5468
+            stream_ratio: 0.28
+            cache_enabled: false
+            pool_burst: 8863
+            pool_weight: 0.44
+            stream_weight: 0.13
+            ledger_backlog: 1559
+            ledger_weight: 0.81
+            queue_limit: 1866
+            relay_size: 7089
+            cache_backlog: 6454
+            probe_size: 729
+            lease_timeout_ms: 168
+            shard_limit: 7551
+            ticket_interval_s: 3445
+            vault_enabled: false
+            window_ttl_s: 4704
+            shard_timeout_ms: 3936
+            window_ceiling: 2682
+          eu-west:
+            relay_backlog: 7424
+            shard_size: 6433
+            cursor_weight: 0.41
+            batch_weight: 0.71
+            queue_ttl_s: 6733
+            index_weight: 0.22
+            probe_ttl_s: 1820
+            probe_grace_s: 7545
+            lease_burst: 705
+            lease_floor: 54
+            spool_size: 1344
+            pool_depth_max: 8847
+            pool_limit: 6951
+            vault_enabled: true
+            cache_burst: 4655
+            ticket_floor: 7031
+            ledger_weight: 0.78
+            cache_grace_s: 615
+            queue_weight: 0.75
+            rebalance_token: moth-cobalt-3957
+            retry_size: 8275
+            vault_ratio: 0.65
+            spool_ceiling: 1618
+            queue_grace_s: 124
+            shard_burst: 4922
+            retry_interval_s: 7713
+            spool_enabled: false
+            stream_ceiling: 1203
+            stream_timeout_ms: 4724
+            cursor_size: 6959
+            cache_weight: 0.40
+            relay_floor: 8149
+            shard_depth_max: 3021
+            buffer_timeout_ms: 6680
+            ledger_size: 6136
+            batch_ttl_s: 4575
+            buffer_weight: 0.55
+            stream_ttl_s: 8918
+            ledger_depth_max: 7879
+            ticket_ttl_s: 4324
+            relay_timeout_ms: 3335
+            vault_size: 1251
+            batch_ratio: 0.54
+            stream_floor: 8145
+            vault_floor: 7571
+            index_burst: 1902
+            pool_floor: 7282
+            index_interval_s: 7127
+            cursor_ratio: 0.38
+            lease_weight: 0.56
+            ledger_ratio: 0.55
+            lease_enabled: false
+            probe_limit: 8722
+            cursor_enabled: true
+            cursor_limit: 5384
+            ledger_timeout_ms: 893
+            buffer_floor: 7224
+            probe_weight: 0.74
+            pool_size: 4586
+            batch_burst: 4228
+            ledger_backlog: 8404
+          ap-south:
+            shard_limit: 8360
+            retry_interval_s: 1713
+            batch_limit: 7177
+            index_ttl_s: 7526
+            window_timeout_ms: 1474
+            vault_floor: 2373
+            batch_weight: 0.49
+            cursor_limit: 2616
+            probe_ttl_s: 3575
+            cursor_ceiling: 2034
+            ticket_limit: 2824
+            buffer_backlog: 835
+            relay_depth_max: 839
+            retry_backlog: 884
+            lease_weight: 0.50
+            stream_size: 6440
+            window_interval_s: 3004
+            window_ratio: 0.76
+            window_enabled: false
+            cursor_backlog: 7383
+            index_floor: 4021
+            queue_grace_s: 2495
+            retry_grace_s: 1761
+            window_grace_s: 5137
+            window_ceiling: 2123
+            stream_ttl_s: 8722
+            retry_enabled: false
+            pool_ceiling: 7622
+            cache_ratio: 0.28
+            cache_burst: 531
+            batch_depth_max: 5305
+            ledger_weight: 0.70
+            retry_floor: 4561
+            pool_floor: 807
+            stream_burst: 1192
+            cursor_floor: 5977
+            ticket_grace_s: 4768
+            relay_enabled: true
+            lease_floor: 2311
+            shard_backlog: 6213
+            window_size: 5207
+            probe_ratio: 0.76
+            batch_ratio: 0.36
+            cache_interval_s: 4592
+            pool_weight: 0.08
+            rebalance_token: ibis-copper-1184
+            cursor_ttl_s: 4509
+            cache_timeout_ms: 3990
+            ledger_size: 6850
+            cache_limit: 5245
+            lease_size: 1503
+            batch_burst: 7228
+            batch_floor: 3765
+            relay_backlog: 8302
+            retry_ttl_s: 6506
+            ledger_depth_max: 421
+            batch_grace_s: 5400
+            vault_enabled: false
+            buffer_limit: 2834
+            relay_timeout_ms: 8754
+            lease_ratio: 0.36
+    score:
+      expect_answer: '(?:rebalance_token\s*[:=]\s*)?moth-cobalt-3957'
+      answer_shape: '(?:rebalance_token\s*[:=]\s*)?[a-z]+-[a-z]+-\d+'
+    reference:
+      answer: "eu-west starts on line 193, and its rebalance_token (line 213) is moth-cobalt-3957.\n\nANSWER: moth-cobalt-3957"
+      tools: [grep]
+      wrong_answers:
+        - "ANSWER: wren-slate-7406"  # eu-central, the region above
+        - "eu-central's token is wren-slate-7406 and eu-west's is moth-cobalt-3957.\n\nANSWER: wren-slate-7406"  # right value in prose, the region above committed
+        - "ANSWER: ibis-copper-1184"  # ap-south, the region below
+        - "ANSWER: vole-amber-2291"  # the first grep hit
+        - "ANSWER: eu-west"  # the region name
+        - "wren-slate-7406"  # bare, no answer line: eu-central, the region above
+      right_answers:
+        - "ANSWER: moth-cobalt-3957"
+        - "Every region has a rebalance_token: us-east vole-amber-2291, us-west lynx-ember-5820, eu-central wren-slate-7406, eu-west moth-cobalt-3957, ap-south ibis-copper-1184.\n\nANSWER: moth-cobalt-3957"  # walks every region in file order
+        - "**ANSWER:** `moth-cobalt-3957`"
+        - "Final answer: rebalance_token: moth-cobalt-3957"
+        - "eu-west's token is on line 213.\n\nmoth-cobalt-3957"  # bare value on the last line, no answer line: credited
+        - "ANSWER: moth\u2011cobalt\u20113957"  # non-breaking hyphens (U+2011)
+        - "The eu-west rebalance_token is moth-cobalt-3957."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "Every region in big_config.yaml has a rebalance_token, and eu-west's is past line 200."  # prose with no clear answer, no answer line
+    notes: "~316-line file where every region has the same key. The eu-west token is on line 213, past read_file's default 200 lines, with eu-central's just above it."
+
+  - id: st-buried-log-503
+    difficulty: hard
+    smoke: true
+    prompt: "logs/access.log contains exactly one request that returned HTTP status 503. What is its request id (the req-... value at the end of the line)? End your reply with a final line `ANSWER: <the request id>`."
+    setup_files:
+      logs/access.log: |
+        2026-05-14T10:01:31Z POST /api/v2/invoices 201 86ms req-d013082e
+        2026-05-14T10:02:43Z GET /api/v2/users/me 200 222ms req-47cfc45d
+        2026-05-14T10:03:17Z GET /healthz 304 284ms req-4a20b6aa
+        2026-05-14T10:04:21Z DELETE /api/v2/search 200 454ms req-f972ace0
+        2026-05-14T10:05:46Z GET /api/v2/search 404 200ms req-73accf4b
+        2026-05-14T10:06:51Z POST /api/v2/cart 200 255ms req-ca268c92
+        2026-05-14T10:07:06Z DELETE /api/v2/users/me 304 280ms req-15e694c5
+        2026-05-14T10:08:53Z DELETE /static/app.js 200 256ms req-c27c1f32
+        2026-05-14T10:09:43Z GET /api/v2/search 204 149ms req-9f7134c3
+        2026-05-14T10:10:54Z GET /static/app.js 200 428ms req-068cfcce
+        2026-05-14T10:11:16Z DELETE /api/v2/search 200 25ms req-91e19044
+        2026-05-14T10:12:14Z DELETE /healthz 404 209ms req-ba2b2acc
+        2026-05-14T10:13:37Z GET /static/app.js 304 85ms req-51cb297a
+        2026-05-14T10:14:27Z GET /api/v2/orders 400 321ms req-3957e39c
+        2026-05-14T10:15:36Z GET /api/v2/orders 200 265ms req-e2003c10
+        2026-05-14T10:16:00Z GET /api/v2/users/me 304 294ms req-db479526
+        2026-05-14T10:17:00Z GET /api/v2/search 200 407ms req-d60e6300
+        2026-05-14T10:18:16Z POST /static/app.js 200 144ms req-fa8d7810
+        2026-05-14T10:19:45Z DELETE /api/v2/orders/48767 200 118ms req-aef9ce5b
+        2026-05-14T10:20:04Z GET /api/v2/users/me 304 210ms req-546ad826
+        2026-05-14T10:21:11Z GET /api/v2/invoices 201 267ms req-4d831fed
+        2026-05-14T10:22:53Z GET /api/v2/users/me 200 213ms req-1ad7cbc7
+        2026-05-14T10:23:26Z PUT /api/v2/orders/60541 304 395ms req-d21d1fc6
+        2026-05-14T10:24:49Z GET /api/v2/orders/62922 200 239ms req-4bdea3a0
+        2026-05-14T10:25:21Z PUT /healthz 400 292ms req-f93bd4cc
+        2026-05-14T10:26:22Z GET /api/v2/invoices 200 7ms req-9c8a6c44
+        2026-05-14T10:27:48Z GET /static/app.js 200 110ms req-f16f846e
+        2026-05-14T10:28:23Z DELETE /healthz 400 72ms req-68d03637
+        2026-05-14T10:29:48Z POST /healthz 200 243ms req-d181cd5a
+        2026-05-14T10:30:55Z PUT /api/v2/orders 200 182ms req-4fee142e
+        2026-05-14T10:31:22Z GET /api/v2/cart 200 119ms req-a3c48c7c
+        2026-05-14T10:32:06Z DELETE /api/v2/invoices 200 185ms req-ff1a9bd3
+        2026-05-14T10:33:58Z PUT /api/v2/users/me 200 92ms req-00fb1765
+        2026-05-14T10:34:26Z GET /api/v2/orders/79093 200 16ms req-21c9cb7b
+        2026-05-14T10:35:08Z DELETE /api/v2/cart 200 138ms req-a8baf661
+        2026-05-14T10:36:36Z DELETE /api/v2/users/me 400 262ms req-f8701ba2
+        2026-05-14T10:37:18Z PUT /api/v2/invoices 201 101ms req-1b7b07d5
+        2026-05-14T10:38:18Z POST /healthz 200 373ms req-b5c9c15d
+        2026-05-14T10:39:56Z GET /static/app.js 204 459ms req-61e548b0
+        2026-05-14T10:40:03Z POST /healthz 201 4ms req-35443511
+        2026-05-14T10:41:29Z GET /healthz 201 460ms req-9cc20f9f
+        2026-05-14T10:42:02Z POST /api/v2/users/me 400 22ms req-4db9c136
+        2026-05-14T10:43:43Z GET /api/v2/orders 200 202ms req-660253a5
+        2026-05-14T10:44:46Z GET /api/v2/orders 200 235ms req-15c27edc
+        2026-05-14T10:45:36Z GET /api/v2/orders/62843 304 4ms req-ecef8650
+        2026-05-14T10:46:28Z GET /healthz 200 212ms req-403e488a
+        2026-05-14T10:47:04Z GET /static/app.js 200 349ms req-39f58acb
+        2026-05-14T10:48:22Z GET /static/app.js 204 453ms req-6044dccb
+        2026-05-14T10:49:11Z GET /api/v2/cart 200 214ms req-a2ea9e64
+        2026-05-14T10:50:29Z PUT /api/v2/users/me 201 223ms req-beef2650
+        2026-05-14T10:51:03Z DELETE /healthz 400 26ms req-d8289b19
+        2026-05-14T10:52:18Z DELETE /api/v2/cart 200 116ms req-77964f65
+        2026-05-14T10:53:01Z PUT /api/v2/search 201 215ms req-dbe3c197
+        2026-05-14T10:54:22Z DELETE /api/v2/invoices 200 11ms req-d9075117
+        2026-05-14T10:55:33Z GET /api/v2/invoices 400 177ms req-3d234284
+        2026-05-14T10:56:50Z GET /api/v2/cart 200 205ms req-f90c94cd
+        2026-05-14T10:57:26Z GET /static/app.js 204 195ms req-82de5acf
+        2026-05-14T10:58:31Z GET /healthz 201 374ms req-3ed1561e
+        2026-05-14T10:59:15Z GET /api/v2/cart 200 193ms req-73947aad
+        2026-05-14T11:00:02Z PUT /api/v2/orders/87868 304 14ms req-a471a023
+        2026-05-14T11:01:26Z GET /api/v2/invoices 200 253ms req-1cc2793f
+        2026-05-14T11:02:14Z PUT /api/v2/orders 201 150ms req-cc7c1f9b
+        2026-05-14T11:03:05Z GET /api/v2/users/me 201 440ms req-7fdcf158
+        2026-05-14T11:04:20Z DELETE /api/v2/orders/55737 304 134ms req-2d9361d4
+        2026-05-14T11:05:19Z PUT /api/v2/users/me 200 84ms req-5a8b5532
+        2026-05-14T11:06:46Z POST /api/v2/search 200 424ms req-867a7392
+        2026-05-14T11:07:53Z GET /healthz 200 168ms req-c74a01cb
+        2026-05-14T11:08:25Z POST /healthz 204 72ms req-1a5534b3
+        2026-05-14T11:09:46Z GET /api/v2/orders 200 466ms req-abf179c8
+        2026-05-14T11:10:38Z POST /api/v2/orders/97842 404 316ms req-4a6fef7f
+        2026-05-14T11:11:32Z POST /api/v2/search 200 396ms req-11dc16a0
+        2026-05-14T11:12:35Z POST /static/app.js 200 254ms req-90620bfa
+        2026-05-14T11:13:21Z GET /api/v2/orders 200 152ms req-1c9de372
+        2026-05-14T11:14:38Z DELETE /static/app.js 304 144ms req-fe78bec4
+        2026-05-14T11:15:23Z GET /api/v2/users/me 204 209ms req-53962b29
+        2026-05-14T11:16:32Z GET /healthz 404 57ms req-9a6eda4e
+        2026-05-14T11:17:12Z DELETE /api/v2/orders 404 119ms req-45f71174
+        2026-05-14T11:18:51Z PUT /api/v2/invoices 404 45ms req-8d60e4a3
+        2026-05-14T11:19:44Z PUT /api/v2/users/me 400 77ms req-13b35487
+        2026-05-14T11:20:21Z GET /static/app.js 201 189ms req-4c55f43e
+        2026-05-14T11:21:19Z PUT /api/v2/users/me 201 69ms req-3785a3aa
+        2026-05-14T11:22:27Z GET /static/app.js 201 444ms req-92e87041
+        2026-05-14T11:23:51Z GET /api/v2/users/me 404 48ms req-6ad3f881
+        2026-05-14T11:24:06Z POST /api/v2/cart 200 86ms req-58d81f33
+        2026-05-14T11:25:44Z POST /api/v2/search 304 8ms req-96b8da57
+        2026-05-14T11:26:23Z DELETE /api/v2/users/me 204 408ms req-9e7c218f
+        2026-05-14T11:27:21Z DELETE /api/v2/invoices 201 343ms req-543db84a
+        2026-05-14T11:28:12Z POST /api/v2/cart 400 400ms req-2964bc21
+        2026-05-14T11:29:49Z PUT /api/v2/cart 200 442ms req-9d11f20d
+        2026-05-14T11:30:11Z GET /api/v2/orders/75644 201 93ms req-bba3b63c
+        2026-05-14T11:31:31Z GET /healthz 304 104ms req-19e97e4b
+        2026-05-14T11:32:14Z DELETE /api/v2/users/me 404 178ms req-fd0f49b6
+        2026-05-14T11:33:31Z GET /api/v2/search 200 248ms req-c80dcf5c
+        2026-05-14T11:34:37Z POST /api/v2/search 304 142ms req-a263b09d
+        2026-05-14T11:35:28Z PUT /api/v2/orders/36137 201 419ms req-a8fb1a6f
+        2026-05-14T11:36:30Z GET /healthz 200 125ms req-8e015245
+        2026-05-14T11:37:10Z GET /api/v2/orders/11665 400 31ms req-ca30469d
+        2026-05-14T11:38:06Z PUT /api/v2/orders 201 160ms req-8ac9496e
+        2026-05-14T11:39:41Z GET /api/v2/users/me 200 245ms req-c9ad61da
+        2026-05-14T11:40:01Z GET /api/v2/cart 200 147ms req-74cc8733
+        2026-05-14T11:41:33Z POST /api/v2/orders 200 371ms req-32ceb00c
+        2026-05-14T11:42:11Z GET /api/v2/cart 200 37ms req-a3e19e6e
+        2026-05-14T11:43:18Z GET /api/v2/orders/99579 204 403ms req-d8a59516
+        2026-05-14T11:44:46Z DELETE /api/v2/invoices 304 185ms req-242247af
+        2026-05-14T11:45:22Z PUT /api/v2/users/me 200 280ms req-7866b34a
+        2026-05-14T11:46:22Z GET /api/v2/invoices 304 285ms req-0cfcc972
+        2026-05-14T11:47:45Z PUT /api/v2/cart 200 184ms req-14c1018c
+        2026-05-14T11:48:19Z GET /api/v2/invoices 200 413ms req-d2f1c425
+        2026-05-14T11:49:06Z GET /api/v2/search 400 181ms req-1e10d0c3
+        2026-05-14T11:50:04Z GET /api/v2/orders/65153 200 168ms req-18a6b6fe
+        2026-05-14T11:51:01Z GET /api/v2/search 200 432ms req-b8f11d16
+        2026-05-14T11:52:29Z GET /api/v2/cart 204 311ms req-4604ea35
+        2026-05-14T11:53:47Z GET /api/v2/users/me 400 46ms req-47f6a48f
+        2026-05-14T11:54:59Z GET /api/v2/search 304 176ms req-01f14322
+        2026-05-14T11:55:24Z GET /api/v2/search 200 90ms req-d15aa97f
+        2026-05-14T11:56:59Z GET /api/v2/invoices 200 274ms req-36af9b69
+        2026-05-14T11:57:33Z GET /healthz 404 436ms req-e717876b
+        2026-05-14T11:58:18Z POST /api/v2/search 502 47ms req-94cd9c71
+        2026-05-14T11:59:56Z GET /api/v2/search 200 443ms req-798d6510
+        2026-05-14T12:00:48Z PUT /api/v2/invoices 304 50ms req-5d864d67
+        2026-05-14T12:01:11Z DELETE /static/app.js 201 167ms req-21495838
+        2026-05-14T12:02:43Z GET /api/v2/cart 404 243ms req-16eb8857
+        2026-05-14T12:03:43Z DELETE /api/v2/search 200 448ms req-8186ea4e
+        2026-05-14T12:04:08Z GET /api/v2/orders/31808 200 143ms req-51759372
+        2026-05-14T12:05:20Z PUT /api/v2/users/me 404 251ms req-3e461a6c
+        2026-05-14T12:06:39Z DELETE /api/v2/orders/62595 200 186ms req-735f618e
+        2026-05-14T12:07:01Z GET /api/v2/orders/17281 200 164ms req-2908fbc4
+        2026-05-14T12:08:43Z PUT /static/app.js 200 98ms req-fd317259
+        2026-05-14T12:09:24Z DELETE /healthz 201 249ms req-cc71499a
+        2026-05-14T12:10:42Z PUT /api/v2/orders/17192 200 92ms req-45204abf
+        2026-05-14T12:11:24Z GET /api/v2/search 304 471ms req-c5d3691c
+        2026-05-14T12:12:11Z GET /api/v2/cart 201 154ms req-7af6feda
+        2026-05-14T12:13:18Z GET /api/v2/orders 304 165ms req-63d07797
+        2026-05-14T12:14:33Z PUT /api/v2/search 400 45ms req-d0b5d35a
+        2026-05-14T12:15:25Z POST /api/v2/orders/52299 304 311ms req-32028186
+        2026-05-14T12:16:57Z GET /api/v2/invoices 304 400ms req-c7c7e485
+        2026-05-14T12:17:44Z POST /api/v2/search 200 445ms req-3e58cad6
+        2026-05-14T12:18:30Z PUT /api/v2/search 200 287ms req-7e116638
+        2026-05-14T12:19:25Z POST /api/v2/invoices 200 385ms req-d37ceead
+        2026-05-14T12:20:49Z GET /static/app.js 304 440ms req-108c3905
+        2026-05-14T12:21:46Z GET /api/v2/orders/91507 400 266ms req-53e6001e
+        2026-05-14T12:22:22Z PUT /healthz 200 89ms req-be2cce43
+        2026-05-14T12:23:40Z PUT /api/v2/search 404 464ms req-05a70430
+        2026-05-14T12:24:50Z PUT /healthz 204 72ms req-9420ad42
+        2026-05-14T12:25:21Z PUT /static/app.js 200 164ms req-6e07ca0e
+        2026-05-14T12:26:13Z PUT /static/app.js 404 453ms req-3a0a532d
+        2026-05-14T12:27:39Z DELETE /healthz 200 398ms req-6b848871
+        2026-05-14T12:28:52Z GET /api/v2/orders/10650 304 255ms req-cef4571e
+        2026-05-14T12:29:34Z POST /healthz 400 59ms req-38aab029
+        2026-05-14T12:30:10Z DELETE /api/v2/search 304 259ms req-975e88c9
+        2026-05-14T12:31:15Z GET /api/v2/search 200 464ms req-6ae27fab
+        2026-05-14T12:32:38Z GET /api/v2/invoices 201 236ms req-8b33c9d4
+        2026-05-14T12:33:44Z DELETE /healthz 201 207ms req-79fb8fba
+        2026-05-14T12:34:33Z GET /static/app.js 204 300ms req-1837de05
+        2026-05-14T12:35:35Z POST /api/v2/users/me 200 438ms req-09bcea93
+        2026-05-14T12:36:36Z GET /static/app.js 200 282ms req-faa0ef3e
+        2026-05-14T12:37:43Z GET /static/app.js 304 200ms req-fa664c37
+        2026-05-14T12:38:42Z PUT /healthz 400 263ms req-b6ba2d27
+        2026-05-14T12:39:20Z GET /api/v2/invoices 200 421ms req-1e60fdb9
+        2026-05-14T12:40:37Z PUT /static/app.js 200 436ms req-eccfdc0b
+        2026-05-14T12:41:55Z GET /api/v2/search 200 313ms req-0bdfa9d8
+        2026-05-14T12:42:54Z POST /api/v2/users/me 404 81ms req-1421df4c
+        2026-05-14T12:43:58Z DELETE /healthz 204 226ms req-2874efed
+        2026-05-14T12:44:16Z PUT /api/v2/invoices 400 411ms req-041ca616
+        2026-05-14T12:45:38Z GET /api/v2/cart 204 68ms req-8520e4d7
+        2026-05-14T12:46:44Z GET /healthz 404 148ms req-d4780b5c
+        2026-05-14T12:47:45Z GET /api/v2/search 400 156ms req-762f4e5b
+        2026-05-14T12:48:28Z GET /healthz 404 337ms req-d556ad5a
+        2026-05-14T12:49:23Z GET /healthz 304 88ms req-7b52d445
+        2026-05-14T12:50:15Z GET /api/v2/cart 304 363ms req-39a997c9
+        2026-05-14T12:51:25Z PUT /api/v2/cart 304 422ms req-7b0a1aeb
+        2026-05-14T12:52:45Z PUT /api/v2/cart 304 148ms req-2b179226
+        2026-05-14T12:53:53Z DELETE /healthz 200 53ms req-08318c0d
+        2026-05-14T12:54:58Z PUT /api/v2/cart 200 385ms req-04f389f8
+        2026-05-14T12:55:20Z PUT /static/app.js 404 118ms req-8898a3ce
+        2026-05-14T12:56:06Z GET /static/app.js 200 376ms req-94bc5448
+        2026-05-14T12:57:14Z GET /api/v2/orders/19740 400 452ms req-4cbfaecb
+        2026-05-14T12:58:24Z POST /api/v2/invoices 400 34ms req-a94e3fc9
+        2026-05-14T12:59:51Z GET /api/v2/invoices 304 140ms req-38471023
+        2026-05-14T13:00:27Z PUT /api/v2/users/me 201 290ms req-b3677f12
+        2026-05-14T13:01:37Z PUT /api/v2/orders/32933 200 420ms req-bcecb051
+        2026-05-14T13:02:59Z GET /api/v2/orders 200 58ms req-3eccde51
+        2026-05-14T13:03:45Z PUT /api/v2/orders 200 91ms req-fbd2156f
+        2026-05-14T13:04:04Z PUT /api/v2/orders 200 55ms req-2a98d16b
+        2026-05-14T13:05:36Z GET /static/app.js 304 476ms req-71462d90
+        2026-05-14T13:06:05Z DELETE /api/v2/search 200 338ms req-99c9ada7
+        2026-05-14T13:07:33Z PUT /api/v2/cart 404 473ms req-abdd54d6
+        2026-05-14T13:08:23Z GET /api/v2/invoices 200 80ms req-cac6a37a
+        2026-05-14T13:09:28Z GET /api/v2/users/me 200 13ms req-1ffe7571
+        2026-05-14T13:10:52Z DELETE /api/v2/orders 200 59ms req-45b461ce
+        2026-05-14T13:11:58Z PUT /api/v2/cart 204 256ms req-90a1ac5c
+        2026-05-14T13:12:42Z GET /api/v2/invoices 200 214ms req-32b1cc01
+        2026-05-14T13:13:23Z GET /api/v2/cart 200 142ms req-73db98e9
+        2026-05-14T13:14:46Z POST /api/v2/users/me 400 245ms req-9f57e10e
+        2026-05-14T13:15:20Z POST /api/v2/users/me 404 469ms req-f0a90b65
+        2026-05-14T13:16:00Z GET /healthz 404 9ms req-95565264
+        2026-05-14T13:17:12Z DELETE /api/v2/cart 201 474ms req-e2ce43b1
+        2026-05-14T13:18:14Z DELETE /api/v2/orders/46582 200 134ms req-e9998586
+        2026-05-14T13:19:42Z GET /healthz 200 370ms req-7791d507
+        2026-05-14T13:20:15Z GET /api/v2/users/me 200 266ms req-076bb162
+        2026-05-14T13:21:00Z DELETE /api/v2/users/me 400 331ms req-cd27ed46
+        2026-05-14T13:22:58Z POST /healthz 200 188ms req-d32d9f67
+        2026-05-14T13:23:04Z POST /api/v2/cart 404 35ms req-640d2757
+        2026-05-14T13:24:12Z PUT /healthz 200 25ms req-f3fc630e
+        2026-05-14T13:25:58Z GET /healthz 200 418ms req-bf5ffdbc
+        2026-05-14T13:26:10Z GET /api/v2/users/me 304 331ms req-cbcc0ded
+        2026-05-14T13:27:28Z PUT /api/v2/cart 200 442ms req-67fa48f2
+        2026-05-14T13:28:40Z DELETE /api/v2/cart 201 46ms req-c6488dbd
+        2026-05-14T13:29:47Z DELETE /api/v2/orders 204 66ms req-14b97d8b
+        2026-05-14T13:30:41Z GET /api/v2/search 200 68ms req-33191e10
+        2026-05-14T13:31:27Z GET /api/v2/orders 200 127ms req-95d41e2b
+        2026-05-14T13:32:25Z POST /api/v2/orders/66934 200 247ms req-c9631696
+        2026-05-14T13:33:59Z GET /api/v2/search 200 25ms req-fb5f4bfa
+        2026-05-14T13:34:08Z GET /healthz 400 389ms req-74bd74ad
+        2026-05-14T13:35:09Z GET /api/v2/users/me 400 418ms req-2193decf
+        2026-05-14T13:36:55Z GET /api/v2/orders 304 18ms req-783ec1b6
+        2026-05-14T13:37:40Z PUT /api/v2/users/me 200 358ms req-ea511465
+        2026-05-14T13:38:05Z POST /api/v2/users/me 304 21ms req-695b39ab
+        2026-05-14T13:39:44Z PUT /api/v2/orders/87450 204 98ms req-7ca0979a
+        2026-05-14T13:40:05Z DELETE /healthz 200 151ms req-1f9b973a
+        2026-05-14T13:41:28Z POST /api/v2/users/me 200 119ms req-d6e1b974
+        2026-05-14T13:42:28Z GET /api/v2/search 200 246ms req-ac7c9d55
+        2026-05-14T13:43:07Z DELETE /api/v2/search 200 371ms req-e6f4b80d
+        2026-05-14T13:44:53Z GET /api/v2/orders 201 296ms req-7d7f0d43
+        2026-05-14T13:45:00Z DELETE /api/v2/orders 404 102ms req-fa4818ce
+        2026-05-14T13:46:38Z PUT /healthz 400 406ms req-004f5ee7
+        2026-05-14T13:47:42Z PUT /api/v2/users/me 201 265ms req-4b0ec25a
+        2026-05-14T13:48:05Z GET /api/v2/orders 204 55ms req-9b671c61
+        2026-05-14T13:49:30Z DELETE /api/v2/invoices 200 422ms req-01f34e97
+        2026-05-14T13:50:00Z PUT /healthz 200 466ms req-247ebc66
+        2026-05-14T13:51:02Z GET /api/v2/orders 201 138ms req-3ecc8175
+        2026-05-14T13:52:17Z GET /api/v2/orders 200 427ms req-81c885b1
+        2026-05-14T13:53:49Z GET /api/v2/orders 200 404ms req-81ab9d4c
+        2026-05-14T13:54:02Z DELETE /api/v2/orders 404 5ms req-391e0d43
+        2026-05-14T13:55:16Z GET /api/v2/orders/57648 200 416ms req-964fc2be
+        2026-05-14T13:56:02Z PUT /static/app.js 200 140ms req-5992b9b1
+        2026-05-14T13:57:12Z GET /api/v2/orders 400 174ms req-4f1120e6
+        2026-05-14T13:58:40Z GET /api/v2/orders 200 203ms req-d789d22f
+        2026-05-14T13:59:42Z DELETE /api/v2/cart 304 346ms req-e59a042b
+        2026-05-14T14:00:07Z GET /healthz 200 450ms req-9f0b08d8
+        2026-05-14T14:01:29Z POST /healthz 400 240ms req-03040e2a
+        2026-05-14T14:02:20Z PUT /api/v2/cart 400 190ms req-6e5edd19
+        2026-05-14T14:03:15Z GET /api/v2/cart 204 24ms req-17d868cf
+        2026-05-14T14:04:28Z POST /api/v2/orders 200 64ms req-456dd323
+        2026-05-14T14:05:42Z GET /healthz 304 346ms req-0ea91fae
+        2026-05-14T14:06:09Z GET /api/v2/search 200 99ms req-4ee98526
+        2026-05-14T14:07:51Z GET /api/v2/search 404 342ms req-cd25fdcd
+        2026-05-14T14:08:58Z GET /api/v2/invoices 400 460ms req-c9ba9cdf
+        2026-05-14T14:09:06Z POST /api/v2/invoices 204 328ms req-f36559f0
+        2026-05-14T14:10:29Z PUT /api/v2/invoices 404 54ms req-156e377f
+        2026-05-14T14:11:47Z GET /static/app.js 200 456ms req-3f4544d6
+        2026-05-14T14:12:15Z GET /api/v2/users/me 201 259ms req-86864c9a
+        2026-05-14T14:13:48Z PUT /api/v2/users/me 400 128ms req-6b8df8db
+        2026-05-14T14:14:19Z GET /api/v2/search 200 390ms req-5aae6e40
+        2026-05-14T14:15:29Z GET /static/app.js 304 347ms req-f7fbd55e
+        2026-05-14T14:16:11Z POST /api/v2/search 304 92ms req-c290f38e
+        2026-05-14T14:17:13Z GET /static/app.js 201 472ms req-a120a86a
+        2026-05-14T14:18:27Z POST /api/v2/orders/75547 404 126ms req-f1ae324d
+        2026-05-14T14:19:32Z GET /api/v2/users/me 201 369ms req-7cf3552e
+        2026-05-14T14:20:16Z PUT /api/v2/invoices 201 206ms req-670e103d
+        2026-05-14T14:21:29Z PUT /api/v2/invoices 200 248ms req-ee587db6
+        2026-05-14T14:22:18Z DELETE /api/v2/orders/37662 200 347ms req-9dc9b4e6
+        2026-05-14T14:23:12Z GET /api/v2/orders/53160 504 254ms req-81ac82e8
+        2026-05-14T14:24:29Z GET /api/v2/orders 204 311ms req-24b5ed9a
+        2026-05-14T14:25:03Z GET /healthz 204 164ms req-e9f1292e
+        2026-05-14T14:26:40Z GET /api/v2/orders 200 191ms req-7168a04c
+        2026-05-14T14:27:53Z GET /api/v2/orders/73333 200 359ms req-71176327
+        2026-05-14T14:28:08Z POST /api/v2/search 304 14ms req-8d4ed857
+        2026-05-14T14:29:58Z GET /api/v2/users/me 200 148ms req-a2f9c0a3
+        2026-05-14T14:30:30Z GET /api/v2/users/me 404 199ms req-073c6423
+        2026-05-14T14:31:22Z DELETE /api/v2/search 200 164ms req-315b9895
+        2026-05-14T14:32:18Z PUT /api/v2/users/me 304 348ms req-099c2541
+        2026-05-14T14:33:21Z POST /api/v2/users/me 404 5ms req-ce55cab1
+        2026-05-14T14:34:15Z PUT /api/v2/search 404 170ms req-3451127b
+        2026-05-14T14:35:52Z GET /api/v2/users/me 200 438ms req-b1e231b9
+        2026-05-14T14:36:03Z GET /api/v2/orders/58298 200 282ms req-70ff97da
+        2026-05-14T14:37:14Z POST /api/v2/search 200 206ms req-9cb9add3
+        2026-05-14T14:38:21Z POST /static/app.js 404 436ms req-c35c8cc9
+        2026-05-14T14:39:37Z GET /api/v2/invoices 204 273ms req-c7c2c72b
+        2026-05-14T14:40:52Z GET /static/app.js 200 161ms req-40222889
+        2026-05-14T14:41:43Z GET /api/v2/invoices 400 239ms req-7ba3ffbc
+        2026-05-14T14:42:08Z DELETE /api/v2/orders/24144 404 370ms req-489f5d4b
+        2026-05-14T14:43:45Z GET /api/v2/invoices 200 239ms req-61c9fedf
+        2026-05-14T14:44:47Z POST /api/v2/cart 200 19ms req-8f36e254
+        2026-05-14T14:45:28Z GET /api/v2/orders 200 422ms req-7bae8546
+        2026-05-14T14:46:51Z PUT /api/v2/search 204 172ms req-29b01fdf
+        2026-05-14T14:47:25Z GET /api/v2/invoices 304 396ms req-ca8077c8
+        2026-05-14T14:48:26Z GET /api/v2/cart 200 414ms req-372e14e2
+        2026-05-14T14:49:02Z GET /api/v2/search 201 350ms req-66f14b6b
+        2026-05-14T14:50:19Z GET /static/app.js 200 133ms req-232d64a9
+        2026-05-14T14:51:38Z GET /api/v2/invoices 201 47ms req-c4191d67
+        2026-05-14T14:52:45Z GET /api/v2/invoices 404 191ms req-de9a8c4e
+        2026-05-14T14:53:07Z DELETE /api/v2/cart 204 477ms req-1e402048
+        2026-05-14T14:54:29Z DELETE /static/app.js 200 369ms req-e023cfb9
+        2026-05-14T14:55:48Z GET /api/v2/orders/35883 304 366ms req-7023b1f1
+        2026-05-14T14:56:45Z GET /api/v2/search 304 457ms req-2193d6cb
+        2026-05-14T14:57:34Z POST /api/v2/users/me 200 29ms req-cd7bcde1
+        2026-05-14T14:58:10Z DELETE /healthz 304 222ms req-506a5837
+        2026-05-14T14:59:20Z GET /api/v2/users/me 200 135ms req-2d7f9070
+        2026-05-14T15:00:07Z GET /api/v2/invoices 200 268ms req-374079bb
+        2026-05-14T15:01:44Z POST /api/v2/orders 200 293ms req-fc3e44d3
+        2026-05-14T15:02:22Z GET /api/v2/orders/41853 201 431ms req-7dae16d4
+        2026-05-14T15:03:44Z PUT /api/v2/invoices 404 155ms req-665ccabc
+        2026-05-14T15:04:18Z PUT /healthz 200 52ms req-f0657680
+        2026-05-14T15:05:47Z GET /api/v2/search 200 431ms req-3cbee49c
+        2026-05-14T15:06:03Z PUT /api/v2/search 304 342ms req-1d445292
+        2026-05-14T15:07:31Z GET /api/v2/search 404 358ms req-799bef48
+        2026-05-14T15:08:12Z GET /static/app.js 200 112ms req-4a1abb1d
+        2026-05-14T15:09:50Z GET /static/app.js 400 427ms req-0201acca
+        2026-05-14T15:10:12Z PUT /healthz 400 480ms req-e7e7cee2
+        2026-05-14T15:11:18Z PUT /api/v2/orders/33737 503 35ms req-f36ea8da
+        2026-05-14T15:12:48Z POST /api/v2/cart 204 58ms req-7645d786
+        2026-05-14T15:13:13Z GET /healthz 200 320ms req-ddb86aa8
+        2026-05-14T15:14:36Z PUT /api/v2/invoices 200 175ms req-3c812bed
+        2026-05-14T15:15:06Z DELETE /api/v2/orders 200 236ms req-b2ce331e
+        2026-05-14T15:16:39Z POST /static/app.js 204 32ms req-9dcfde68
+        2026-05-14T15:17:52Z POST /api/v2/orders 200 150ms req-11f5adcd
+        2026-05-14T15:18:21Z GET /api/v2/cart 200 218ms req-1a529183
+        2026-05-14T15:19:39Z PUT /api/v2/search 200 165ms req-7e16a6be
+        2026-05-14T15:20:59Z DELETE /api/v2/cart 400 174ms req-eb8169d1
+        2026-05-14T15:21:57Z GET /static/app.js 404 7ms req-c57dfda0
+        2026-05-14T15:22:59Z PUT /api/v2/search 404 478ms req-54506f19
+        2026-05-14T15:23:09Z DELETE /api/v2/users/me 201 277ms req-606c68b2
+        2026-05-14T15:24:41Z GET /healthz 200 337ms req-dd385ffd
+        2026-05-14T15:25:48Z GET /static/app.js 201 475ms req-d0f76c0b
+        2026-05-14T15:26:51Z POST /api/v2/cart 200 121ms req-2a9e36c9
+        2026-05-14T15:27:53Z POST /api/v2/orders 201 273ms req-225984e0
+        2026-05-14T15:28:17Z POST /api/v2/invoices 204 396ms req-e9972152
+        2026-05-14T15:29:22Z GET /healthz 404 452ms req-46917a93
+        2026-05-14T15:30:50Z PUT /healthz 201 80ms req-9c57292e
+        2026-05-14T15:31:01Z DELETE /api/v2/orders 201 151ms req-834c087e
+        2026-05-14T15:32:43Z PUT /healthz 201 434ms req-a4312e46
+        2026-05-14T15:33:30Z GET /api/v2/search 200 121ms req-6118af68
+        2026-05-14T15:34:06Z POST /api/v2/search 200 164ms req-2e3ed1bf
+        2026-05-14T15:35:23Z GET /api/v2/search 200 249ms req-7e55a06e
+        2026-05-14T15:36:01Z GET /api/v2/orders 304 318ms req-266bec8d
+        2026-05-14T15:37:42Z GET /healthz 304 394ms req-287276d6
+        2026-05-14T15:38:56Z PUT /api/v2/cart 200 70ms req-b744cad9
+        2026-05-14T15:39:10Z GET /api/v2/orders 400 479ms req-aa5a4183
+        2026-05-14T15:40:53Z PUT /healthz 200 378ms req-1af9a6e9
+        2026-05-14T15:41:58Z DELETE /api/v2/users/me 200 305ms req-69330c1d
+        2026-05-14T15:42:11Z GET /api/v2/invoices 200 157ms req-2e613e40
+        2026-05-14T15:43:20Z PUT /api/v2/invoices 200 91ms req-77da3b5c
+        2026-05-14T15:44:41Z POST /api/v2/cart 400 54ms req-23dc6ea3
+        2026-05-14T15:45:50Z GET /api/v2/invoices 204 257ms req-dbba8078
+        2026-05-14T15:46:53Z POST /api/v2/invoices 200 19ms req-d1072d39
+        2026-05-14T15:47:49Z DELETE /healthz 200 211ms req-5f14a91f
+        2026-05-14T15:48:12Z GET /api/v2/cart 200 221ms req-589cda5e
+        2026-05-14T15:49:32Z GET /api/v2/orders 200 92ms req-fa3bd6c8
+        2026-05-14T15:50:33Z PUT /api/v2/orders/77095 304 20ms req-0b86516e
+        2026-05-14T15:51:00Z PUT /api/v2/users/me 200 112ms req-7ccedde4
+        2026-05-14T15:52:31Z POST /api/v2/search 500 376ms req-29f1eba2
+        2026-05-14T15:53:59Z POST /api/v2/orders 200 450ms req-498ac4be
+        2026-05-14T15:54:01Z POST /api/v2/search 400 136ms req-e7dacdff
+        2026-05-14T15:55:34Z GET /api/v2/cart 204 438ms req-d826e003
+        2026-05-14T15:56:39Z GET /api/v2/search 304 467ms req-70ba019f
+        2026-05-14T15:57:41Z GET /api/v2/cart 200 108ms req-ca836096
+        2026-05-14T15:58:44Z GET /api/v2/invoices 200 290ms req-aa73b9b7
+        2026-05-14T15:59:18Z POST /api/v2/orders 200 261ms req-780b98fb
+        2026-05-14T16:00:12Z PUT /api/v2/users/me 404 264ms req-93f51f88
+        2026-05-14T16:01:30Z GET /healthz 200 265ms req-1acd03e8
+        2026-05-14T16:02:37Z DELETE /healthz 400 279ms req-517bfa67
+        2026-05-14T16:03:43Z GET /api/v2/cart 200 216ms req-205c242f
+        2026-05-14T16:04:23Z GET /static/app.js 200 279ms req-04b42918
+        2026-05-14T16:05:29Z DELETE /api/v2/search 200 170ms req-aea17d46
+        2026-05-14T16:06:41Z GET /api/v2/users/me 200 239ms req-8fedfac6
+        2026-05-14T16:07:42Z GET /api/v2/orders 404 366ms req-67a5cc44
+        2026-05-14T16:08:49Z GET /healthz 304 122ms req-8310a536
+        2026-05-14T16:09:53Z PUT /api/v2/users/me 201 440ms req-af987f2a
+        2026-05-14T16:10:17Z GET /api/v2/invoices 200 478ms req-3e5a32c2
+        2026-05-14T16:11:21Z DELETE /api/v2/orders/25229 201 199ms req-27e22d54
+        2026-05-14T16:12:46Z GET /api/v2/invoices 200 9ms req-bf886a40
+        2026-05-14T16:13:30Z GET /api/v2/orders 200 385ms req-bbd093e2
+        2026-05-14T16:14:30Z PUT /api/v2/users/me 304 35ms req-0cbd1aed
+        2026-05-14T16:15:41Z GET /api/v2/users/me 400 82ms req-fe7e7c26
+        2026-05-14T16:16:53Z DELETE /healthz 200 56ms req-b4259ba5
+        2026-05-14T16:17:21Z PUT /api/v2/search 304 181ms req-96b9870a
+        2026-05-14T16:18:22Z GET /api/v2/orders/15512 200 421ms req-06be675d
+        2026-05-14T16:19:38Z GET /static/app.js 404 356ms req-060869e8
+        2026-05-14T16:20:40Z GET /healthz 304 342ms req-5d40b278
+        2026-05-14T16:21:34Z POST /api/v2/invoices 200 204ms req-fbf8f4a5
+        2026-05-14T16:22:03Z GET /static/app.js 201 215ms req-8425b4c0
+        2026-05-14T16:23:03Z GET /api/v2/orders/21102 404 315ms req-b77b4f10
+        2026-05-14T16:24:54Z GET /api/v2/orders/63917 200 374ms req-c24090d9
+        2026-05-14T16:25:58Z GET /api/v2/invoices 204 24ms req-e817263a
+        2026-05-14T16:26:03Z GET /api/v2/users/me 200 249ms req-8afa01a8
+        2026-05-14T16:27:30Z DELETE /healthz 400 350ms req-feae635e
+        2026-05-14T16:28:51Z DELETE /api/v2/orders/60685 200 134ms req-2ed6821a
+        2026-05-14T16:29:20Z DELETE /api/v2/cart 200 97ms req-6d57ae74
+        2026-05-14T16:30:06Z PUT /api/v2/invoices 304 228ms req-e2e150a1
+        2026-05-14T16:31:30Z GET /api/v2/search 200 450ms req-c4f0c254
+        2026-05-14T16:32:05Z DELETE /api/v2/orders/14276 400 465ms req-f17648d5
+        2026-05-14T16:33:12Z GET /static/app.js 200 281ms req-495d0ccd
+        2026-05-14T16:34:47Z GET /api/v2/cart 204 120ms req-a4f4d86a
+        2026-05-14T16:35:03Z GET /api/v2/users/me 200 225ms req-e7565867
+        2026-05-14T16:36:05Z GET /api/v2/cart 200 56ms req-11da9155
+        2026-05-14T16:37:16Z POST /healthz 201 240ms req-b17ec888
+        2026-05-14T16:38:11Z GET /api/v2/orders/91057 200 323ms req-cce44c5c
+        2026-05-14T16:39:32Z POST /api/v2/invoices 304 48ms req-4b2a9a79
+        2026-05-14T16:40:27Z PUT /api/v2/invoices 200 122ms req-2f1d3d78
+    score:
+      expect_answer: '(?:req-)?f36ea8da'
+      answer_shape: '(?:req-)?[0-9a-f]{8}'
+    reference:
+      answer: "Line 311 is the only 503: `2026-05-14T15:11:18Z PUT /api/v2/orders/33737 503 35ms req-f36ea8da`.\n\nANSWER: req-f36ea8da"
+      tools: [grep]
+      wrong_answers:
+        - "ANSWER: req-81ac82e8"  # the 504, just before it
+        - "The 503 is req-f36ea8da on line 311; the 504 before it is req-81ac82e8.\n\nANSWER: req-81ac82e8"  # right value in prose, the 504 committed
+        - "ANSWER: req-94cd9c71"  # the 502
+        - "ANSWER: req-29f1eba2"  # the 500
+        - "ANSWER: 33737"  # the order id in the path
+        - "req-81ac82e8"  # bare, no answer line: the 504, just before it
+      right_answers:
+        - "ANSWER: req-f36ea8da"
+        - "The 5xx lines are a 502 (req-94cd9c71), a 504 (req-81ac82e8), the 503 (req-f36ea8da, PUT /api/v2/orders/33737) and a 500 (req-29f1eba2).\n\nANSWER: req-f36ea8da"  # walks the 5xx lines in file order
+        - "**ANSWER:** `req-f36ea8da`"
+        - "Final answer: req-f36ea8da."
+        - "The only 503 is on line 311.\n\nreq-f36ea8da"  # bare value on the last line, no answer line: credited
+        - "ANSWER:\n```\nreq-f36ea8da\n```"  # the value in a code block below the label
+        - "The 503 request is req-f36ea8da."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+        - "ANSWER: f36ea8da"  # the bare hex id, without the req- prefix
+      format_misses:
+        - "The 503 is a PUT to /api/v2/orders/33737 on line 311, and its id ends the line."  # prose with no clear answer, no answer line
+    notes: "400-line log; the only 503 is on line 311, with a 502, a 504 and a 500 as distractors. The prompt defines the id as the whole req-... value."
+
+  - id: st-json-order-shipping
+    difficulty: hard
+    prompt: "In orders.json, what is the shipping_cost of order ORD-88213? End your reply with a final line `ANSWER: <the amount>`."
+    setup_files:
+      orders.json: |
+        {
+          "orders": [
+            {
+              "order_id": "ORD-85255",
+              "customer": "cust-0532",
+              "item_cost": 33.78,
+              "shipping_cost": 12.48,
+              "status": "returned"
+            },
+            {
+              "order_id": "ORD-86569",
+              "customer": "cust-0352",
+              "item_cost": 93.27,
+              "shipping_cost": 4.28,
+              "status": "delivered"
+            },
+            {
+              "order_id": "ORD-83472",
+              "customer": "cust-0348",
+              "item_cost": 313.94,
+              "shipping_cost": 14.19,
+              "status": "delivered"
+            },
+            {
+              "order_id": "ORD-89531",
+              "customer": "cust-0273",
+              "item_cost": 169.28,
+              "shipping_cost": 18.64,
+              "status": "returned"
+            },
+            {
+              "order_id": "ORD-80857",
+              "customer": "cust-0781",
+              "item_cost": 160.33,
+              "shipping_cost": 10.16,
+              "status": "shipped"
+            },
+            {
+              "order_id": "ORD-84213",
+              "customer": "cust-0548",
+              "item_cost": 187.69,
+              "shipping_cost": 10.47,
+              "status": "pending"
+            },
+            {
+              "order_id": "ORD-80187",
+              "customer": "cust-0485",
+              "item_cost": 80.27,
+              "shipping_cost": 15.1,
+              "status": "delivered"
+            },
+            {
+              "order_id": "ORD-84445",
+              "customer": "cust-0465",
+              "item_cost": 382.29,
+              "shipping_cost": 22.19,
+              "status": "shipped"
+            },
+            {
+              "order_id": "ORD-85351",
+              "customer": "cust-0108",
+              "item_cost": 360.62,
+              "shipping_cost": 5.17,
+              "status": "delivered"
+            },
+            {
+              "order_id": "ORD-82213",
+              "customer": "cust-0417",
+              "item_cost": 88.1,
+              "shipping_cost": 41.27,
+              "status": "delivered"
+            },
+            {
+              "order_id": "ORD-81730",
+              "customer": "cust-0534",
+              "item_cost": 93.86,
+              "shipping_cost": 21.09,
+              "status": "returned"
+            },
+            {
+              "order_id": "ORD-88289",
+              "customer": "cust-0970",
+              "item_cost": 223.95,
+              "shipping_cost": 3.37,
+              "status": "delivered"
+            },
+            {
+              "order_id": "ORD-87087",
+              "customer": "cust-0355",
+              "item_cost": 144.36,
+              "shipping_cost": 5.29,
+              "status": "shipped"
+            },
+            {
+              "order_id": "ORD-81308",
+              "customer": "cust-0132",
+              "item_cost": 182.32,
+              "shipping_cost": 18.34,
+              "status": "pending"
+            },
+            {
+              "order_id": "ORD-87098",
+              "customer": "cust-0951",
+              "item_cost": 298.91,
+              "shipping_cost": 9.5,
+              "status": "shipped"
+            },
+            {
+              "order_id": "ORD-83191",
+              "customer": "cust-0482",
+              "item_cost": 396.41,
+              "shipping_cost": 4.68,
+              "status": "delivered"
+            },
+            {
+              "order_id": "ORD-80125",
+              "customer": "cust-0264",
+              "item_cost": 38.02,
+              "shipping_cost": 23.81,
+              "status": "delivered"
+            },
+            {
+              "order_id": "ORD-88231",
+              "customer": "cust-0582",
+              "item_cost": 212.64,
+              "shipping_cost": 17.42,
+              "status": "shipped"
+            },
+            {
+              "order_id": "ORD-83802",
+              "customer": "cust-0194",
+              "item_cost": 138.54,
+              "shipping_cost": 11.35,
+              "status": "shipped"
+            },
+            {
+              "order_id": "ORD-83701",
+              "customer": "cust-0164",
+              "item_cost": 381.67,
+              "shipping_cost": 6.68,
+              "status": "shipped"
+            },
+            {
+              "order_id": "ORD-87178",
+              "customer": "cust-0448",
+              "item_cost": 296.57,
+              "shipping_cost": 5.06,
+              "status": "returned"
+            },
+            {
+              "order_id": "ORD-89968",
+              "customer": "cust-0496",
+              "item_cost": 277.36,
+              "shipping_cost": 8.95,
+              "status": "shipped"
+            },
+            {
+              "order_id": "ORD-87687",
+              "customer": "cust-0272",
+              "item_cost": 85.35,
+              "shipping_cost": 13.63,
+              "status": "shipped"
+            },
+            {
+              "order_id": "ORD-87093",
+              "customer": "cust-0484",
+              "item_cost": 189.53,
+              "shipping_cost": 14.25,
+              "status": "shipped"
+            },
+            {
+              "order_id": "ORD-83478",
+              "customer": "cust-0459",
+              "item_cost": 353.77,
+              "shipping_cost": 16.84,
+              "status": "pending"
+            },
+            {
+              "order_id": "ORD-87566",
+              "customer": "cust-0787",
+              "item_cost": 180.21,
+              "shipping_cost": 15.54,
+              "status": "returned"
+            },
+            {
+              "order_id": "ORD-80319",
+              "customer": "cust-0783",
+              "item_cost": 227.74,
+              "shipping_cost": 18.8,
+              "status": "shipped"
+            },
+            {
+              "order_id": "ORD-87237",
+              "customer": "cust-0366",
+              "item_cost": 95.31,
+              "shipping_cost": 8.29,
+              "status": "returned"
+            },
+            {
+              "order_id": "ORD-81389",
+              "customer": "cust-0971",
+              "item_cost": 320.48,
+              "shipping_cost": 19.05,
+              "status": "pending"
+            },
+            {
+              "order_id": "ORD-89489",
+              "customer": "cust-0185",
+              "item_cost": 274.73,
+              "shipping_cost": 22.43,
+              "status": "returned"
+            },
+            {
+              "order_id": "ORD-89046",
+              "customer": "cust-0225",
+              "item_cost": 329.92,
+              "shipping_cost": 3.79,
+              "status": "returned"
+            },
+            {
+              "order_id": "ORD-82276",
+              "customer": "cust-0813",
+              "item_cost": 232.92,
+              "shipping_cost": 19.01,
+              "status": "delivered"
+            },
+            {
+              "order_id": "ORD-88213",
+              "customer": "cust-0351",
+              "item_cost": 147.2,
+              "shipping_cost": 14.72,
+              "status": "pending"
+            },
+            {
+              "order_id": "ORD-87837",
+              "customer": "cust-0339",
+              "item_cost": 293.77,
+              "shipping_cost": 3.35,
+              "status": "pending"
+            },
+            {
+              "order_id": "ORD-83205",
+              "customer": "cust-0512",
+              "item_cost": 78.11,
+              "shipping_cost": 21.59,
+              "status": "pending"
+            },
+            {
+              "order_id": "ORD-81250",
+              "customer": "cust-0616",
+              "item_cost": 338.08,
+              "shipping_cost": 11.9,
+              "status": "delivered"
+            }
+          ]
+        }
+    score:
+      expect_answer: '(?:shipping_cost\s*[:=]\s*)?\$?14\.72'
+      answer_shape: '(?:shipping_cost\s*[:=]\s*)?\$?\d+(?:[,\s]\d{3})*\.\d{1,2}'
+    reference:
+      answer: "The ORD-88213 record has \"shipping_cost\": 14.72 (status pending).\n\nANSWER: 14.72"
+      tools: [grep]
+      wrong_answers:
+        - "ANSWER: 17.42"  # ORD-88231, ids swapped
+        - "ORD-88213 has shipping_cost 14.72 and item_cost 147.2.\n\nANSWER: 147.2"  # right value in prose, the item_cost committed
+        - "ANSWER: 41.27"  # ORD-82213
+        - "ANSWER: 147.20"  # the item_cost
+        - "ANSWER: pending"  # the status
+        - "17.42"  # bare, no answer line: ORD-88231, ids swapped
+      right_answers:
+        - "ANSWER: 14.72"
+        - "Three order ids look alike: ORD-88231 ships for 17.42 and ORD-82213 for 41.27. ORD-88213 itself has item_cost 147.2 and shipping_cost 14.72.\n\nANSWER: 14.72"  # names the look-alike orders and the item_cost first
+        - "**ANSWER:** $14.72"
+        - "Final answer: shipping_cost = 14.72"
+        - "So the answer is $14.72."  # bare value behind a lead-in, no answer line: credited
+        - "ANSWER: \\(\\$14.72\\)"  # LaTeX inline math with an escaped dollar
+        - "ORD-88213 has a shipping_cost of 14.72."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "ORD-88213 is on line 228 of orders.json, between two look-alike order ids."  # prose with no clear answer, no answer line
+    notes: "The order is on line 228 of a 36-order file. ORD-88231 and ORD-82213 are look-alike ids, and the order's own item_cost is 147.2."
+
+  - id: st-glob-list-v2-migrations
+    difficulty: hard
+    prompt: "List every file directly inside migrations/ (not in its subfolders) whose name starts with V2_ and ends with .sql. End your reply with a final line `ANSWER: <the matching file names, separated by commas>`."
+    setup_files:
+      migrations/V1_001_init.sql: |
+        CREATE TABLE ledger (id INTEGER PRIMARY KEY);
+      migrations/V1_002_users.sql: |
+        CREATE TABLE users (id INTEGER PRIMARY KEY);
+      migrations/V2_003_add_index.sql: |
+        CREATE INDEX ledger_ts ON ledger (ts);
+      migrations/V2_004_notes.md: |
+        Split ledger before dropping legacy columns.
+      migrations/V2_005_split_ledger.sql: |
+        CREATE TABLE ledger_archive AS SELECT * FROM ledger;
+      migrations/V2_006_seed.sql.bak: |
+        INSERT INTO users VALUES (1);
+      migrations/V2_008_drop_legacy.sql: |
+        ALTER TABLE ledger DROP COLUMN legacy_ref;
+      migrations/V3_009_partition.sql: |
+        -- partition ledger by month
+      migrations/archive/V2_002_old.sql: |
+        -- superseded
+    score:
+      expect_answer: '(?!.*(V2_\d+_).*\1)(?:(?:[\s,`]|\band\b)*(?:(?:\./|/[^\s,`]*/)?migrations/)?V2_(?:003_add_index|005_split_ledger|008_drop_legacy)\.sql`?){3}'
+      answer_shape: '[\w./-]+\.\w+(?:(?:\s*,\s*|\s+)(?:and\s+)?[\w./-]+\.\w+)+'
+    reference:
+      answer: "Globbing migrations/V2_*.sql (non-recursive) matches three files.\n\nANSWER: V2_003_add_index.sql, V2_005_split_ledger.sql, V2_008_drop_legacy.sql"
+      tools: [glob]
+      wrong_answers:
+        - "ANSWER: V2_003_add_index.sql, V2_005_split_ledger.sql, V2_006_seed.sql.bak, V2_008_drop_legacy.sql"  # included the .bak
+        - "The matching files are V2_003_add_index.sql, V2_005_split_ledger.sql and V2_008_drop_legacy.sql.\n\nANSWER: archive/V2_002_old.sql, V2_003_add_index.sql, V2_005_split_ledger.sql, V2_008_drop_legacy.sql"  # right list in prose, a recursive glob committed
+        - "ANSWER: V2_003_add_index.sql, V2_005_split_ledger.sql"  # missed one
+        - "ANSWER: V2_003_add_index.sql, V2_004_notes.md, V2_005_split_ledger.sql, V2_008_drop_legacy.sql"  # globbed V2_* without the .sql filter
+        - "ANSWER: V2_003_add_index.sql, V2_005_split_ledger.sql, V2_005_split_ledger.sql"  # one name twice, one missing
+        - "V2_003_add_index.sql, V2_005_split_ledger.sql"  # bare, no answer line: missed one
+        - "ANSWER: V2_003_add_index.sql, V2_005_split_ledger.sql, archive/V2_008_drop_legacy.sql"  # one name placed under archive/, the excluded subfolder
+        - "ANSWER: migrations/archive/V2_003_add_index.sql, migrations/archive/V2_005_split_ledger.sql, migrations/archive/V2_008_drop_legacy.sql"  # all three under archive/, where no such files exist
+      right_answers:
+        - "ANSWER: V2_003_add_index.sql, V2_005_split_ledger.sql, V2_008_drop_legacy.sql"
+        - "migrations/ holds V1_001_init.sql, V1_002_users.sql, V2_003_add_index.sql, V2_004_notes.md, V2_005_split_ledger.sql, V2_006_seed.sql.bak, V2_008_drop_legacy.sql and V3_009_partition.sql, plus archive/V2_002_old.sql in a subfolder. V2_004_notes.md and V2_006_seed.sql.bak do not end in .sql, and archive/ is a subfolder.\n\nANSWER: V2_003_add_index.sql, V2_005_split_ledger.sql, V2_008_drop_legacy.sql"  # walks the directory, naming every distractor
+        - "**ANSWER:** `V2_003_add_index.sql`, `V2_005_split_ledger.sql`, `V2_008_drop_legacy.sql`"
+        - "Final answer: migrations/V2_008_drop_legacy.sql, migrations/V2_005_split_ledger.sql and migrations/V2_003_add_index.sql"  # another order, with the directory prefix
+        - "The non-recursive glob matches three files:\n\nV2_003_add_index.sql, V2_005_split_ledger.sql and V2_008_drop_legacy.sql"  # bare list on the last line, no answer line: credited
+        - "ANSWER:\nV2_003_add_index.sql, V2_005_split_ledger.sql, V2_008_drop_legacy.sql"  # the value on the line below the label
+        - "ANSWER: /tmp/prometheus-ladder/ws/migrations/V2_003_add_index.sql, /tmp/prometheus-ladder/ws/migrations/V2_005_split_ledger.sql, /tmp/prometheus-ladder/ws/migrations/V2_008_drop_legacy.sql"  # absolute paths into migrations/
+      format_misses:
+        - "V2_003_add_index.sql\nV2_005_split_ledger.sql\nV2_008_drop_legacy.sql"  # one name per line, no answer line: the last line is one name, so the answer cannot be isolated
+        - "- V2_003_add_index.sql\n- V2_005_split_ledger.sql\n- V2_008_drop_legacy.sql"  # a bulleted list, no answer line
+        - "Three files directly inside migrations/ start with V2_ and end with .sql; archive/ is a subfolder."  # prose with no clear answer, no answer line
+    notes: "A non-recursive glob with two filters; V2_004_notes.md, V2_006_seed.sql.bak and archive/V2_002_old.sql are the distractors. The ANSWER line may list the three names in any order, with or without a directory prefix."
+
+  - id: st-count-warn-lines
+    difficulty: hard
+    prompt: "How many lines in logs/worker.log have the log level WARN? The level is the second whitespace-separated field on each line. End your reply with a final line `ANSWER: <the number>`."
+    setup_files:
+      logs/worker.log: |
+        2026-06-02T01:00:37Z DEBUG mailer: lease renewed for job 3222
+        2026-06-02T01:01:38Z INFO  fetcher: heartbeat ok
+        2026-06-02T01:02:44Z DEBUG mailer: lease renewed for job 4944
+        2026-06-02T01:03:46Z ERROR queue: could not write checkpoint 1833
+        2026-06-02T01:04:21Z INFO  mailer: picked up batch 7082
+        2026-06-02T01:05:50Z DEBUG janitor: cache hit ratio 0.18
+        2026-06-02T01:06:32Z DEBUG janitor: cache hit ratio 0.81
+        2026-06-02T01:07:29Z WARN  mailer: queue depth 7227 above soft limit
+        2026-06-02T01:08:40Z DEBUG queue: lease renewed for job 883
+        2026-06-02T01:09:08Z WARN  queue: job 6310 retrying after timeout
+        2026-06-02T01:10:30Z INFO  scheduler: heartbeat ok
+        2026-06-02T01:11:45Z INFO  mailer: flushed 6041 records
+        2026-06-02T01:12:47Z INFO  janitor: picked up batch 8706
+        2026-06-02T01:13:30Z DEBUG scheduler: poll returned 3765 items
+        2026-06-02T01:14:35Z WARN  fetcher: queue depth 5118 above soft limit
+        2026-06-02T01:15:23Z WARN  scheduler: slow response 64ms from upstream
+        2026-06-02T01:16:10Z INFO  janitor: picked up batch 5294
+        2026-06-02T01:17:28Z DEBUG fetcher: cache hit ratio 0.85
+        2026-06-02T01:18:54Z INFO  mailer: heartbeat ok
+        2026-06-02T01:19:38Z WARN  queue: lease for job 1407 nearly expired
+        2026-06-02T01:20:20Z INFO  fetcher: heartbeat ok
+        2026-06-02T01:21:27Z WARN  fetcher: queue depth 8001 above soft limit
+        2026-06-02T01:22:22Z WARN  fetcher: lease for job 978 nearly expired
+        2026-06-02T01:23:48Z DEBUG fetcher: cache hit ratio 0.25
+        2026-06-02T01:24:17Z INFO  janitor: flushed 5584 records
+        2026-06-02T01:25:20Z INFO  scheduler: heartbeat ok
+        2026-06-02T01:26:08Z DEBUG fetcher: cache hit ratio 0.81
+        2026-06-02T01:27:30Z INFO  mailer: picked up batch 6001
+        2026-06-02T01:28:33Z ERROR queue: job 7641 failed: upstream closed connection
+        2026-06-02T01:29:10Z INFO  queue: flushed 2809 records
+        2026-06-02T01:30:42Z DEBUG fetcher: cache hit ratio 0.76
+        2026-06-02T01:31:59Z INFO  indexer: job 4974 done in 50ms
+        2026-06-02T01:32:57Z DEBUG fetcher: lease renewed for job 3184
+        2026-06-02T01:33:57Z INFO  mailer: flushed 7904 records
+        2026-06-02T01:34:34Z DEBUG janitor: lease renewed for job 7514
+        2026-06-02T01:35:25Z ERROR mailer: job 501 failed: upstream closed connection
+        2026-06-02T01:36:21Z INFO  janitor: picked up batch 2700
+        2026-06-02T01:37:28Z INFO  queue: heartbeat ok
+        2026-06-02T01:38:58Z INFO  queue: heartbeat ok
+        2026-06-02T01:39:47Z INFO  queue: picked up batch 2269
+        2026-06-02T01:40:44Z DEBUG scheduler: cache hit ratio 0.27
+        2026-06-02T01:41:43Z INFO  scheduler: flushed 8432 records
+        2026-06-02T01:42:38Z INFO  indexer: heartbeat ok
+        2026-06-02T01:43:42Z INFO  indexer: job 8017 done in 83ms
+        2026-06-02T01:44:10Z DEBUG queue: poll returned 7456 items
+        2026-06-02T01:45:27Z DEBUG queue: poll returned 4512 items
+        2026-06-02T01:46:35Z DEBUG indexer: lease renewed for job 9014
+        2026-06-02T01:47:04Z INFO  scheduler: picked up batch 5379
+        2026-06-02T01:48:45Z INFO  janitor: heartbeat ok
+        2026-06-02T01:49:49Z INFO  scheduler: job 4440 done in 32ms
+        2026-06-02T01:50:05Z WARN  scheduler: lease for job 2710 nearly expired
+        2026-06-02T01:51:30Z WARN  janitor: queue depth 6859 above soft limit
+        2026-06-02T01:52:22Z INFO  scheduler: heartbeat ok
+        2026-06-02T01:53:56Z WARN  mailer: slow response 92ms from upstream
+        2026-06-02T01:54:45Z INFO  queue: job 6158 done in 76ms
+        2026-06-02T01:55:11Z WARN  indexer: lease for job 304 nearly expired
+        2026-06-02T01:56:26Z DEBUG queue: poll returned 4596 items
+        2026-06-02T01:57:10Z INFO  mailer: suppressed 6 duplicate WARN lines
+        2026-06-02T01:58:19Z INFO  indexer: heartbeat ok
+        2026-06-02T01:59:41Z INFO  scheduler: picked up batch 567
+        2026-06-02T02:00:24Z WARN  queue: job 5216 retrying after timeout
+        2026-06-02T02:01:16Z INFO  indexer: job 9169 done in 91ms
+        2026-06-02T02:02:32Z WARN  queue: lease for job 465 nearly expired
+        2026-06-02T02:03:55Z INFO  fetcher: flushed 7243 records
+        2026-06-02T02:04:15Z INFO  fetcher: picked up batch 5673
+        2026-06-02T02:05:11Z WARN  fetcher: queue depth 5173 above soft limit
+        2026-06-02T02:06:02Z INFO  fetcher: heartbeat ok
+        2026-06-02T02:07:06Z INFO  indexer: flushed 712 records
+        2026-06-02T02:08:13Z INFO  indexer: picked up batch 8590
+        2026-06-02T02:09:48Z INFO  indexer: flushed 8040 records
+        2026-06-02T02:10:26Z INFO  queue: flushed 4938 records
+        2026-06-02T02:11:53Z INFO  mailer: heartbeat ok
+        2026-06-02T02:12:41Z ERROR fetcher: job 1332 failed: upstream closed connection
+        2026-06-02T02:13:33Z DEBUG indexer: poll returned 412 items
+        2026-06-02T02:14:46Z INFO  fetcher: picked up batch 1106
+        2026-06-02T02:15:10Z INFO  indexer: picked up batch 2378
+        2026-06-02T02:16:56Z INFO  indexer: flushed 368 records
+        2026-06-02T02:17:34Z INFO  scheduler: heartbeat ok
+        2026-06-02T02:18:13Z DEBUG mailer: poll returned 8138 items
+        2026-06-02T02:19:58Z INFO  scheduler: heartbeat ok
+        2026-06-02T02:20:34Z INFO  fetcher: picked up batch 3637
+        2026-06-02T02:21:14Z INFO  scheduler: job 2102 done in 49ms
+        2026-06-02T02:22:12Z ERROR scheduler: job 9317 failed: upstream closed connection
+        2026-06-02T02:23:53Z WARN  janitor: slow response 28ms from upstream
+        2026-06-02T02:24:18Z DEBUG queue: lease renewed for job 2077
+        2026-06-02T02:25:09Z DEBUG indexer: cache hit ratio 0.88
+        2026-06-02T02:26:16Z DEBUG janitor: lease renewed for job 4892
+        2026-06-02T02:27:33Z INFO  queue: heartbeat ok
+        2026-06-02T02:28:05Z INFO  scheduler: flushed 2584 records
+        2026-06-02T02:29:51Z INFO  janitor: job 9729 done in 19ms
+        2026-06-02T02:30:51Z INFO  indexer: job 1722 done in 23ms
+        2026-06-02T02:31:54Z INFO  janitor: picked up batch 5751
+        2026-06-02T02:32:05Z ERROR queue: job 9627 failed: upstream closed connection
+        2026-06-02T02:33:17Z INFO  indexer: picked up batch 7567
+        2026-06-02T02:34:13Z DEBUG scheduler: cache hit ratio 0.21
+        2026-06-02T02:35:26Z WARN  scheduler: slow response 40ms from upstream
+        2026-06-02T02:36:39Z INFO  mailer: picked up batch 5402
+        2026-06-02T02:37:48Z DEBUG scheduler: lease renewed for job 9060
+        2026-06-02T02:38:09Z DEBUG fetcher: lease renewed for job 6663
+        2026-06-02T02:39:34Z INFO  janitor: heartbeat ok
+        2026-06-02T02:40:32Z INFO  queue: picked up batch 2118
+        2026-06-02T02:41:41Z INFO  scheduler: heartbeat ok
+        2026-06-02T02:42:26Z INFO  indexer: heartbeat ok
+        2026-06-02T02:43:42Z WARN  indexer: queue depth 4769 above soft limit
+        2026-06-02T02:44:44Z WARN  mailer: lease for job 432 nearly expired
+        2026-06-02T02:45:57Z ERROR indexer: job 2393 failed: upstream closed connection
+        2026-06-02T02:46:59Z INFO  janitor: flushed 7383 records
+        2026-06-02T02:47:47Z INFO  indexer: heartbeat ok
+        2026-06-02T02:48:29Z WARN  scheduler: job 1818 retrying after timeout
+        2026-06-02T02:49:10Z INFO  mailer: heartbeat ok
+        2026-06-02T02:50:16Z WARN  scheduler: job 7106 retrying after timeout
+        2026-06-02T02:51:35Z DEBUG fetcher: lease renewed for job 1892
+        2026-06-02T02:52:14Z INFO  queue: picked up batch 4123
+        2026-06-02T02:53:53Z WARN  mailer: queue depth 9860 above soft limit
+        2026-06-02T02:54:42Z DEBUG mailer: cache hit ratio 0.41
+        2026-06-02T02:55:34Z INFO  indexer: flushed 2931 records
+        2026-06-02T02:56:17Z WARN  mailer: job 4715 retrying after timeout
+        2026-06-02T02:57:18Z WARN  queue: job 6029 retrying after timeout
+        2026-06-02T02:58:35Z WARN  janitor: lease for job 9973 nearly expired
+        2026-06-02T02:59:15Z INFO  janitor: picked up batch 9950
+        2026-06-02T03:00:12Z INFO  janitor: picked up batch 3424
+        2026-06-02T03:01:10Z DEBUG queue: lease renewed for job 5178
+        2026-06-02T03:02:15Z INFO  queue: job 7322 done in 23ms
+        2026-06-02T03:03:59Z DEBUG mailer: lease renewed for job 2843
+        2026-06-02T03:04:46Z ERROR indexer: could not write checkpoint 3304
+        2026-06-02T03:05:20Z INFO  janitor: flushed 6090 records
+        2026-06-02T03:06:13Z WARN  mailer: job 5957 retrying after timeout
+        2026-06-02T03:07:57Z INFO  queue: heartbeat ok
+        2026-06-02T03:08:29Z INFO  scheduler: job 478 done in 53ms
+        2026-06-02T03:09:43Z DEBUG mailer: poll returned 3535 items
+        2026-06-02T03:10:42Z ERROR mailer: could not write checkpoint 3779
+        2026-06-02T03:11:58Z WARN  fetcher: slow response 90ms from upstream
+        2026-06-02T03:12:08Z WARN  fetcher: queue depth 6181 above soft limit
+        2026-06-02T03:13:57Z DEBUG fetcher: poll returned 5799 items
+        2026-06-02T03:14:24Z INFO  fetcher: picked up batch 5372
+        2026-06-02T03:15:56Z INFO  fetcher: picked up batch 5969
+        2026-06-02T03:16:26Z INFO  mailer: heartbeat ok
+        2026-06-02T03:17:55Z INFO  janitor: job 671 done in 79ms
+        2026-06-02T03:18:00Z ERROR queue: could not write checkpoint 612
+        2026-06-02T03:19:32Z INFO  fetcher: heartbeat ok
+        2026-06-02T03:20:00Z DEBUG queue: cache hit ratio 0.24
+        2026-06-02T03:21:21Z INFO  indexer: picked up batch 4895
+        2026-06-02T03:22:53Z WARN  janitor: queue depth 9437 above soft limit
+        2026-06-02T03:23:56Z INFO  mailer: flushed 6313 records
+        2026-06-02T03:24:32Z INFO  mailer: heartbeat ok
+        2026-06-02T03:25:33Z DEBUG indexer: lease renewed for job 5381
+        2026-06-02T03:26:51Z INFO  janitor: job 5637 done in 70ms
+        2026-06-02T03:27:28Z INFO  queue: job 6306 done in 71ms
+        2026-06-02T03:28:28Z INFO  janitor: flushed 709 records
+        2026-06-02T03:29:36Z INFO  fetcher: suppressed 2 duplicate WARN lines
+        2026-06-02T03:30:45Z INFO  queue: picked up batch 7520
+        2026-06-02T03:31:56Z INFO  queue: heartbeat ok
+        2026-06-02T03:32:21Z INFO  scheduler: heartbeat ok
+        2026-06-02T03:33:32Z INFO  janitor: picked up batch 6224
+        2026-06-02T03:34:43Z INFO  fetcher: picked up batch 1262
+        2026-06-02T03:35:50Z INFO  fetcher: job 6438 done in 30ms
+        2026-06-02T03:36:59Z INFO  mailer: heartbeat ok
+        2026-06-02T03:37:47Z INFO  mailer: picked up batch 5062
+        2026-06-02T03:38:14Z INFO  indexer: flushed 3264 records
+        2026-06-02T03:39:46Z INFO  fetcher: picked up batch 504
+        2026-06-02T03:40:13Z DEBUG mailer: lease renewed for job 4451
+        2026-06-02T03:41:15Z INFO  indexer: picked up batch 7173
+        2026-06-02T03:42:12Z DEBUG queue: lease renewed for job 7027
+        2026-06-02T03:43:30Z INFO  indexer: picked up batch 1901
+        2026-06-02T03:44:16Z INFO  janitor: job 3708 done in 17ms
+        2026-06-02T03:45:22Z DEBUG fetcher: lease renewed for job 9275
+        2026-06-02T03:46:46Z WARN  queue: job 9776 retrying after timeout
+        2026-06-02T03:47:48Z INFO  janitor: job 375 done in 69ms
+        2026-06-02T03:48:23Z DEBUG janitor: lease renewed for job 9188
+        2026-06-02T03:49:34Z WARN  scheduler: job 3215 retrying after timeout
+        2026-06-02T03:50:05Z DEBUG fetcher: poll returned 9791 items
+        2026-06-02T03:51:18Z DEBUG janitor: lease renewed for job 5865
+        2026-06-02T03:52:11Z INFO  indexer: flushed 5036 records
+        2026-06-02T03:53:49Z INFO  mailer: flushed 3706 records
+        2026-06-02T03:54:26Z DEBUG janitor: lease renewed for job 7359
+        2026-06-02T03:55:46Z INFO  scheduler: heartbeat ok
+        2026-06-02T03:56:28Z INFO  janitor: job 8931 done in 13ms
+        2026-06-02T03:57:57Z WARN  mailer: lease for job 6341 nearly expired
+        2026-06-02T03:58:37Z INFO  scheduler: flushed 760 records
+        2026-06-02T03:59:12Z INFO  janitor: heartbeat ok
+        2026-06-02T04:00:15Z INFO  scheduler: flushed 3335 records
+        2026-06-02T04:01:24Z INFO  fetcher: flushed 3235 records
+        2026-06-02T04:02:42Z INFO  fetcher: flushed 6321 records
+        2026-06-02T04:03:47Z INFO  indexer: heartbeat ok
+        2026-06-02T04:04:53Z INFO  fetcher: picked up batch 4330
+        2026-06-02T04:05:46Z INFO  mailer: flushed 3657 records
+        2026-06-02T04:06:29Z INFO  queue: job 8973 done in 53ms
+        2026-06-02T04:07:54Z INFO  indexer: heartbeat ok
+        2026-06-02T04:08:14Z INFO  janitor: picked up batch 1324
+        2026-06-02T04:09:14Z INFO  queue: job 2834 done in 56ms
+        2026-06-02T04:10:28Z DEBUG mailer: cache hit ratio 0.22
+        2026-06-02T04:11:52Z WARN  janitor: queue depth 7802 above soft limit
+        2026-06-02T04:12:58Z WARN  indexer: job 7959 retrying after timeout
+        2026-06-02T04:13:46Z DEBUG janitor: lease renewed for job 9821
+        2026-06-02T04:14:40Z DEBUG queue: cache hit ratio 0.51
+        2026-06-02T04:15:53Z DEBUG fetcher: poll returned 9801 items
+        2026-06-02T04:16:09Z DEBUG janitor: lease renewed for job 2052
+        2026-06-02T04:17:05Z DEBUG janitor: poll returned 4769 items
+        2026-06-02T04:18:50Z INFO  janitor: flushed 7179 records
+        2026-06-02T04:19:45Z DEBUG mailer: cache hit ratio 0.69
+        2026-06-02T04:20:33Z INFO  janitor: heartbeat ok
+        2026-06-02T04:21:13Z WARN  queue: job 6546 retrying after timeout
+        2026-06-02T04:22:34Z DEBUG fetcher: poll returned 4911 items
+        2026-06-02T04:23:03Z INFO  queue: picked up batch 5841
+        2026-06-02T04:24:33Z WARN  scheduler: lease for job 3270 nearly expired
+        2026-06-02T04:25:39Z INFO  indexer: picked up batch 9048
+        2026-06-02T04:26:23Z DEBUG indexer: lease renewed for job 9594
+        2026-06-02T04:27:11Z DEBUG indexer: cache hit ratio 0.36
+        2026-06-02T04:28:16Z INFO  queue: flushed 7815 records
+        2026-06-02T04:29:32Z INFO  indexer: heartbeat ok
+        2026-06-02T04:30:40Z INFO  indexer: picked up batch 1326
+        2026-06-02T04:31:34Z DEBUG indexer: lease renewed for job 5678
+        2026-06-02T04:32:18Z WARN  mailer: lease for job 6782 nearly expired
+        2026-06-02T04:33:22Z INFO  indexer: picked up batch 8195
+        2026-06-02T04:34:50Z INFO  queue: job 5676 done in 84ms
+        2026-06-02T04:35:57Z DEBUG queue: cache hit ratio 0.90
+        2026-06-02T04:36:25Z INFO  janitor: job 6832 done in 19ms
+        2026-06-02T04:37:48Z DEBUG mailer: poll returned 6854 items
+        2026-06-02T04:38:52Z INFO  mailer: job 5638 done in 93ms
+        2026-06-02T04:39:06Z INFO  mailer: flushed 2087 records
+        2026-06-02T04:40:20Z INFO  indexer: job 2965 done in 69ms
+        2026-06-02T04:41:00Z INFO  indexer: flushed 6266 records
+        2026-06-02T04:42:18Z DEBUG scheduler: cache hit ratio 0.72
+        2026-06-02T04:43:05Z INFO  mailer: flushed 9850 records
+        2026-06-02T04:44:24Z INFO  scheduler: flushed 9692 records
+        2026-06-02T04:45:29Z DEBUG queue: lease renewed for job 2660
+        2026-06-02T04:46:34Z INFO  janitor: picked up batch 9763
+        2026-06-02T04:47:56Z ERROR queue: could not write checkpoint 5090
+        2026-06-02T04:48:15Z INFO  queue: picked up batch 4196
+        2026-06-02T04:49:12Z DEBUG fetcher: poll returned 1591 items
+        2026-06-02T04:50:44Z DEBUG mailer: cache hit ratio 0.55
+        2026-06-02T04:51:11Z INFO  janitor: suppressed 3 duplicate WARN lines
+        2026-06-02T04:52:07Z DEBUG scheduler: poll returned 8223 items
+        2026-06-02T04:53:24Z DEBUG scheduler: poll returned 5220 items
+        2026-06-02T04:54:01Z INFO  janitor: flushed 7894 records
+        2026-06-02T04:55:33Z INFO  queue: flushed 622 records
+        2026-06-02T04:56:59Z INFO  indexer: heartbeat ok
+        2026-06-02T04:57:49Z WARN  scheduler: slow response 35ms from upstream
+        2026-06-02T04:58:11Z INFO  indexer: job 8749 done in 43ms
+        2026-06-02T04:59:57Z INFO  mailer: job 9168 done in 30ms
+        2026-06-02T05:00:51Z INFO  indexer: flushed 1847 records
+        2026-06-02T05:01:47Z INFO  scheduler: job 1683 done in 51ms
+        2026-06-02T05:02:20Z INFO  janitor: heartbeat ok
+        2026-06-02T05:03:06Z WARN  janitor: job 7818 retrying after timeout
+        2026-06-02T05:04:18Z INFO  indexer: heartbeat ok
+        2026-06-02T05:05:11Z INFO  indexer: job 4200 done in 91ms
+        2026-06-02T05:06:46Z INFO  scheduler: heartbeat ok
+        2026-06-02T05:07:16Z INFO  scheduler: flushed 1401 records
+        2026-06-02T05:08:36Z WARN  scheduler: slow response 58ms from upstream
+        2026-06-02T05:09:35Z INFO  janitor: job 3821 done in 24ms
+        2026-06-02T05:10:58Z WARN  indexer: lease for job 5056 nearly expired
+        2026-06-02T05:11:29Z ERROR mailer: could not write checkpoint 8084
+        2026-06-02T05:12:26Z WARN  janitor: lease for job 1606 nearly expired
+        2026-06-02T05:13:26Z DEBUG mailer: cache hit ratio 0.99
+        2026-06-02T05:14:50Z INFO  fetcher: picked up batch 5896
+        2026-06-02T05:15:23Z INFO  indexer: flushed 3267 records
+        2026-06-02T05:16:20Z DEBUG scheduler: cache hit ratio 0.61
+        2026-06-02T05:17:12Z INFO  mailer: job 6177 done in 97ms
+        2026-06-02T05:18:45Z INFO  scheduler: picked up batch 7231
+        2026-06-02T05:19:50Z INFO  mailer: picked up batch 4318
+        2026-06-02T05:20:18Z INFO  fetcher: job 4698 done in 78ms
+        2026-06-02T05:21:12Z INFO  mailer: flushed 9393 records
+        2026-06-02T05:22:23Z INFO  mailer: flushed 3854 records
+        2026-06-02T05:23:00Z WARN  janitor: slow response 77ms from upstream
+        2026-06-02T05:24:16Z DEBUG mailer: poll returned 965 items
+        2026-06-02T05:25:33Z INFO  queue: flushed 5905 records
+        2026-06-02T05:26:03Z DEBUG queue: lease renewed for job 4563
+        2026-06-02T05:27:00Z INFO  fetcher: job 2401 done in 32ms
+        2026-06-02T05:28:34Z DEBUG fetcher: cache hit ratio 0.82
+        2026-06-02T05:29:16Z INFO  indexer: job 6969 done in 63ms
+        2026-06-02T05:30:53Z DEBUG fetcher: cache hit ratio 0.81
+        2026-06-02T05:31:21Z WARN  fetcher: lease for job 1806 nearly expired
+        2026-06-02T05:32:53Z WARN  fetcher: slow response 21ms from upstream
+        2026-06-02T05:33:17Z DEBUG janitor: lease renewed for job 3310
+        2026-06-02T05:34:14Z DEBUG indexer: lease renewed for job 6737
+        2026-06-02T05:35:14Z DEBUG scheduler: lease renewed for job 3032
+        2026-06-02T05:36:41Z INFO  janitor: picked up batch 8506
+        2026-06-02T05:37:37Z INFO  queue: picked up batch 711
+        2026-06-02T05:38:38Z INFO  janitor: picked up batch 4067
+        2026-06-02T05:39:00Z INFO  fetcher: picked up batch 7536
+        2026-06-02T05:40:03Z INFO  janitor: job 9536 done in 10ms
+        2026-06-02T05:41:15Z INFO  scheduler: heartbeat ok
+        2026-06-02T05:42:00Z DEBUG scheduler: lease renewed for job 6190
+        2026-06-02T05:43:42Z INFO  mailer: heartbeat ok
+        2026-06-02T05:44:02Z INFO  indexer: picked up batch 1814
+        2026-06-02T05:45:56Z INFO  indexer: flushed 5169 records
+        2026-06-02T05:46:00Z DEBUG queue: lease renewed for job 9751
+        2026-06-02T05:47:00Z INFO  indexer: heartbeat ok
+        2026-06-02T05:48:16Z ERROR queue: job 4111 failed: upstream closed connection
+        2026-06-02T05:49:20Z DEBUG mailer: cache hit ratio 0.70
+        2026-06-02T05:50:00Z INFO  janitor: picked up batch 3322
+        2026-06-02T05:51:17Z DEBUG scheduler: poll returned 9178 items
+        2026-06-02T05:52:13Z DEBUG queue: cache hit ratio 0.69
+        2026-06-02T05:53:36Z INFO  janitor: job 794 done in 48ms
+        2026-06-02T05:54:46Z DEBUG scheduler: cache hit ratio 0.13
+        2026-06-02T05:55:14Z DEBUG scheduler: cache hit ratio 0.83
+        2026-06-02T05:56:15Z WARN  queue: queue depth 6268 above soft limit
+        2026-06-02T05:57:24Z WARN  mailer: lease for job 4849 nearly expired
+        2026-06-02T05:58:03Z DEBUG mailer: cache hit ratio 0.57
+        2026-06-02T05:59:27Z INFO  fetcher: flushed 1500 records
+    score:
+      expect_answer: '46(?:\s+(?:WARN(?:[-\s]level)?\s+)?lines)?'
+      answer_shape: '\d+(?:\s+(?:WARN(?:[-\s]level)?\s+)?lines)?'
+    reference:
+      answer: "`awk '$2 == \"WARN\"' logs/worker.log | wc -l` gives 46.\n\nANSWER: 46"
+      tools: [bash]
+      wrong_answers:
+        - "ANSWER: 49"  # the substring count
+        - "Counting the level field gives 46; grep -c WARN gives 49.\n\nANSWER: 49"  # right value in prose, the substring count committed
+        - "ANSWER: 45"  # off by one
+        - "ANSWER: 47"  # off by one
+        - "ANSWER: 3"  # only the INFO lines that mention WARN
+        - "ANSWER: 300"  # every line
+        - "49"  # bare, no answer line: the substring count
+      right_answers:
+        - "ANSWER: 46"
+        - "grep -c WARN gives 49, but three of those are INFO lines that mention WARN in the message (\"suppressed 6 duplicate WARN lines\" and two more); counting the second field gives 46.\n\nANSWER: 46"  # explains the substring trap first
+        - "**ANSWER:** 46 lines"
+        - "Final answer: 46"
+        - "Counting the second field, not the substring:\n\n46"  # bare value on the last line, no answer line: credited
+        - "ANSWER: 46 WARN level lines"  # the level named, without a hyphen
+        - "46 lines have level WARN."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "grep -c WARN over-counts, because three INFO lines mention WARN in their message."  # prose with no clear answer, no answer line
+        - "ANSWER: 46 (the level field; grep -c WARN gives 49)"  # a trailing note in parentheses: a parenthetical may qualify or hedge the value, so the line is not read (it also names 49)
+    notes: "300-line log. Three INFO lines mention WARN in their message, so a substring count gives 49 while the level field gives 46."
+
+  - id: st-csv-region-quarter
+    difficulty: hard
+    prompt: "In revenue.csv, what was the q3 revenue of the region named exactly \"Lowmarsh\"? End your reply with a final line `ANSWER: <the number>`."
+    setup_files:
+      revenue.csv: |
+        region,q1,q2,q3,q4
+        Northgate,41022,43518,45907,47110
+        Brackwater,29870,30114,31552,32008
+        Lowmarsh East,38210,39004,40117,40999
+        Highfen,51233,50871,52460,53915
+        Coldharbour Rise,22015,23380,24122,25707
+        Ashvale,33470,34018,35561,36275
+        Lowmarsh,44380,46215,48117,49302
+        Lowmarsh West,36551,37230,38904,39418
+        Pennick Downs,27714,28090,29305,30871
+        Saltmere,45902,47368,48711,50024
+        Thornby,19887,20412,21135,22760
+        Quillon Heath,31104,32577,33019,34480
+    score:
+      expect_answer: '(?:q3\s*[:=]\s*)?\$?48[,\s]?117(?:\.0+)?'
+      answer_shape: '(?:q3\s*[:=]\s*)?\$?\d+(?:[,\s]\d{3})*(?:\.\d+)?'
+    reference:
+      answer: "The exact row is `Lowmarsh,44380,46215,48117,49302`, and q3 is its fourth column.\n\nANSWER: 48117"
+      tools: [read_file]
+      wrong_answers:
+        - "ANSWER: 40117"  # Lowmarsh East
+        - "Lowmarsh's q3 is 48117; Lowmarsh East, the first substring match, has 40117.\n\nANSWER: 40117"  # right value in prose, the look-alike row committed
+        - "ANSWER: 38904"  # Lowmarsh West
+        - "ANSWER: 49302"  # the q4 column
+        - "ANSWER: 46215"  # the q2 column
+        - "40117"  # bare, no answer line: Lowmarsh East
+      right_answers:
+        - "ANSWER: 48117"
+        - "Three rows start with Lowmarsh: Lowmarsh East (q3 40117), Lowmarsh (q3 48117) and Lowmarsh West (q3 38904). Only the middle one is named exactly \"Lowmarsh\"; its q1-q4 are 44380, 46215, 48117, 49302.\n\nANSWER: 48117"  # rules out the look-alike rows and walks the columns
+        - "**ANSWER:** $48,117.00"
+        - "Final answer: 48117.0"  # computed as a float
+        - "ANSWER: 48 117"  # space thousands separator
+        - "Hence 48,117."  # bare value behind a lead-in, no answer line: credited
+        - "ANSWER: q3 = 48117"  # labelled with the column name
+        - "Final Answer: $\\boxed{48{,}117}$"  # LaTeX \boxed{} with a thousands separator
+        - "Lowmarsh had q3 revenue of 48117."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "The row named exactly Lowmarsh sits between Lowmarsh East and Lowmarsh West in revenue.csv."  # prose with no clear answer, no answer line
+    notes: "Row and column intersection. Lowmarsh East and Lowmarsh West are look-alike rows that a substring match also returns."
+
+  - id: st-log-last-deploy
+    difficulty: hard
+    prompt: "deploy.log records events in time order. Which version was the most recent one whose deploy finished successfully (a \"deploy finished\" line)? End your reply with a final line `ANSWER: <the version string>`."
+    setup_files:
+      deploy.log: |
+        2026-07-03T00:00:00Z config reload ok revision=314
+        2026-07-03T00:10:00Z cert check ok days_left=15
+        2026-07-03T00:20:00Z healthcheck ok node=n5540
+        2026-07-03T00:30:00Z config reload ok revision=154
+        2026-07-03T00:40:00Z autoscale replicas=52
+        2026-07-03T00:50:00Z config reload ok revision=2356
+        2026-07-03T01:00:00Z config reload ok revision=2803
+        2026-07-03T01:10:00Z healthcheck ok node=n8892
+        2026-07-03T01:20:00Z healthcheck ok node=n2443
+        2026-07-03T01:30:00Z autoscale replicas=5
+        2026-07-03T01:40:00Z cert check ok days_left=17
+        2026-07-03T01:50:00Z backup snapshot id=s4585 ok
+        2026-07-03T02:00:00Z autoscale replicas=11
+        2026-07-03T02:10:00Z healthcheck ok node=n8393
+        2026-07-03T02:20:00Z healthcheck ok node=n5115
+        2026-07-03T02:30:00Z autoscale replicas=44
+        2026-07-03T02:40:00Z healthcheck ok node=n2861
+        2026-07-03T02:50:00Z cert check ok days_left=23
+        2026-07-03T03:00:00Z cert check ok days_left=19
+        2026-07-03T03:10:00Z deploy started version=v7.39.0-kite
+        2026-07-03T03:20:00Z deploy finished version=v7.39.0-kite duration=234s
+        2026-07-03T03:30:00Z autoscale replicas=58
+        2026-07-03T03:40:00Z config reload ok revision=3248
+        2026-07-03T03:50:00Z config reload ok revision=3576
+        2026-07-03T04:00:00Z cert check ok days_left=26
+        2026-07-03T04:10:00Z healthcheck ok node=n3574
+        2026-07-03T04:20:00Z healthcheck ok node=n2560
+        2026-07-03T04:30:00Z healthcheck ok node=n2744
+        2026-07-03T04:40:00Z cert check ok days_left=27
+        2026-07-03T04:50:00Z autoscale replicas=2
+        2026-07-03T05:00:00Z cert check ok days_left=32
+        2026-07-03T05:10:00Z cert check ok days_left=21
+        2026-07-03T05:20:00Z autoscale replicas=19
+        2026-07-03T05:30:00Z healthcheck ok node=n6683
+        2026-07-03T05:40:00Z config reload ok revision=3054
+        2026-07-03T05:50:00Z autoscale replicas=39
+        2026-07-03T06:00:00Z autoscale replicas=43
+        2026-07-03T06:10:00Z healthcheck ok node=n3574
+        2026-07-03T06:20:00Z cert check ok days_left=50
+        2026-07-03T06:30:00Z backup snapshot id=s2932 ok
+        2026-07-03T06:40:00Z cert check ok days_left=27
+        2026-07-03T06:50:00Z backup snapshot id=s5228 ok
+        2026-07-03T07:00:00Z healthcheck ok node=n5850
+        2026-07-03T07:10:00Z config reload ok revision=4795
+        2026-07-03T07:20:00Z backup snapshot id=s2714 ok
+        2026-07-03T07:30:00Z config reload ok revision=5440
+        2026-07-03T07:40:00Z autoscale replicas=26
+        2026-07-03T07:50:00Z backup snapshot id=s9608 ok
+        2026-07-03T08:00:00Z config reload ok revision=8813
+        2026-07-03T08:10:00Z cert check ok days_left=46
+        2026-07-03T08:20:00Z config reload ok revision=427
+        2026-07-03T08:30:00Z backup snapshot id=s2780 ok
+        2026-07-03T08:40:00Z backup snapshot id=s8468 ok
+        2026-07-03T08:50:00Z healthcheck ok node=n6212
+        2026-07-03T09:00:00Z config reload ok revision=4014
+        2026-07-03T09:10:00Z deploy started version=v7.39.1-kite
+        2026-07-03T09:20:00Z deploy finished version=v7.39.1-kite duration=255s
+        2026-07-03T09:30:00Z config reload ok revision=268
+        2026-07-03T09:40:00Z healthcheck ok node=n5637
+        2026-07-03T09:50:00Z healthcheck ok node=n5321
+        2026-07-03T10:00:00Z backup snapshot id=s8797 ok
+        2026-07-03T10:10:00Z autoscale replicas=21
+        2026-07-03T10:20:00Z backup snapshot id=s4023 ok
+        2026-07-03T10:30:00Z autoscale replicas=27
+        2026-07-03T10:40:00Z config reload ok revision=8818
+        2026-07-03T10:50:00Z config reload ok revision=9486
+        2026-07-03T11:00:00Z autoscale replicas=47
+        2026-07-03T11:10:00Z cert check ok days_left=21
+        2026-07-03T11:20:00Z backup snapshot id=s9926 ok
+        2026-07-03T11:30:00Z backup snapshot id=s8659 ok
+        2026-07-03T11:40:00Z backup snapshot id=s3383 ok
+        2026-07-03T11:50:00Z deploy started version=v7.39.2-kite
+        2026-07-03T12:00:00Z deploy failed version=v7.39.2-kite reason=healthcheck-timeout
+        2026-07-03T12:10:00Z config reload ok revision=6055
+        2026-07-03T12:20:00Z config reload ok revision=8098
+        2026-07-03T12:30:00Z healthcheck ok node=n2063
+        2026-07-03T12:40:00Z config reload ok revision=5846
+        2026-07-03T12:50:00Z healthcheck ok node=n8627
+        2026-07-03T13:00:00Z healthcheck ok node=n8566
+        2026-07-03T13:10:00Z config reload ok revision=4746
+        2026-07-03T13:20:00Z autoscale replicas=24
+        2026-07-03T13:30:00Z autoscale replicas=45
+        2026-07-03T13:40:00Z backup snapshot id=s2832 ok
+        2026-07-03T13:50:00Z backup snapshot id=s5649 ok
+        2026-07-03T14:00:00Z backup snapshot id=s6030 ok
+        2026-07-03T14:10:00Z healthcheck ok node=n1695
+        2026-07-03T14:20:00Z config reload ok revision=7261
+        2026-07-03T14:30:00Z backup snapshot id=s9400 ok
+        2026-07-03T14:40:00Z config reload ok revision=7074
+        2026-07-03T14:50:00Z autoscale replicas=58
+        2026-07-03T15:00:00Z cert check ok days_left=40
+        2026-07-03T15:10:00Z backup snapshot id=s5608 ok
+        2026-07-03T15:20:00Z deploy started version=v7.40.0-kite
+        2026-07-03T15:30:00Z deploy finished version=v7.40.0-kite duration=239s
+        2026-07-03T15:40:00Z backup snapshot id=s3649 ok
+        2026-07-03T15:50:00Z config reload ok revision=5925
+        2026-07-03T16:00:00Z backup snapshot id=s3889 ok
+        2026-07-03T16:10:00Z cert check ok days_left=43
+        2026-07-03T16:20:00Z healthcheck ok node=n8501
+        2026-07-03T16:30:00Z healthcheck ok node=n8481
+        2026-07-03T16:40:00Z healthcheck ok node=n6121
+        2026-07-03T16:50:00Z autoscale replicas=51
+        2026-07-03T17:00:00Z cert check ok days_left=24
+        2026-07-03T17:10:00Z cert check ok days_left=19
+        2026-07-03T17:20:00Z healthcheck ok node=n7207
+        2026-07-03T17:30:00Z backup snapshot id=s9463 ok
+        2026-07-03T17:40:00Z cert check ok days_left=58
+        2026-07-03T17:50:00Z backup snapshot id=s7184 ok
+        2026-07-03T18:00:00Z healthcheck ok node=n4949
+        2026-07-03T18:10:00Z autoscale replicas=2
+        2026-07-03T18:20:00Z backup snapshot id=s5952 ok
+        2026-07-03T18:30:00Z config reload ok revision=2303
+        2026-07-03T18:40:00Z autoscale replicas=14
+        2026-07-03T18:50:00Z config reload ok revision=269
+        2026-07-03T19:00:00Z cert check ok days_left=58
+        2026-07-03T19:10:00Z backup snapshot id=s5532 ok
+        2026-07-03T19:20:00Z backup snapshot id=s8366 ok
+        2026-07-03T19:30:00Z healthcheck ok node=n336
+        2026-07-03T19:40:00Z config reload ok revision=1174
+        2026-07-03T19:50:00Z autoscale replicas=9
+        2026-07-03T20:00:00Z backup snapshot id=s7433 ok
+        2026-07-03T20:10:00Z autoscale replicas=9
+        2026-07-03T20:20:00Z cert check ok days_left=28
+        2026-07-03T20:30:00Z autoscale replicas=10
+        2026-07-03T20:40:00Z healthcheck ok node=n4013
+        2026-07-03T20:50:00Z healthcheck ok node=n8770
+        2026-07-03T21:00:00Z backup snapshot id=s5939 ok
+        2026-07-03T21:10:00Z backup snapshot id=s2699 ok
+        2026-07-03T21:20:00Z deploy started version=v7.41.0-kite
+        2026-07-03T21:30:00Z deploy finished version=v7.41.0-kite duration=67s
+        2026-07-03T21:40:00Z autoscale replicas=8
+        2026-07-03T21:50:00Z cert check ok days_left=45
+        2026-07-03T22:00:00Z backup snapshot id=s4406 ok
+        2026-07-03T22:10:00Z config reload ok revision=8858
+        2026-07-03T22:20:00Z autoscale replicas=59
+        2026-07-03T22:30:00Z cert check ok days_left=47
+        2026-07-03T22:40:00Z backup snapshot id=s7026 ok
+        2026-07-03T22:50:00Z backup snapshot id=s9766 ok
+        2026-07-03T23:00:00Z backup snapshot id=s1866 ok
+        2026-07-03T23:10:00Z backup snapshot id=s6903 ok
+        2026-07-03T23:20:00Z healthcheck ok node=n2081
+        2026-07-03T23:30:00Z autoscale replicas=30
+        2026-07-03T23:40:00Z autoscale replicas=32
+        2026-07-03T23:50:00Z healthcheck ok node=n5742
+        2026-07-04T00:00:00Z healthcheck ok node=n4659
+        2026-07-04T00:10:00Z backup snapshot id=s395 ok
+        2026-07-04T00:20:00Z backup snapshot id=s4610 ok
+        2026-07-04T00:30:00Z cert check ok days_left=32
+        2026-07-04T00:40:00Z cert check ok days_left=13
+        2026-07-04T00:50:00Z config reload ok revision=1754
+        2026-07-04T01:00:00Z config reload ok revision=303
+        2026-07-04T01:10:00Z config reload ok revision=806
+        2026-07-04T01:20:00Z config reload ok revision=1653
+        2026-07-04T01:30:00Z config reload ok revision=4849
+        2026-07-04T01:40:00Z config reload ok revision=6718
+        2026-07-04T01:50:00Z cert check ok days_left=50
+        2026-07-04T02:00:00Z backup snapshot id=s1818 ok
+        2026-07-04T02:10:00Z backup snapshot id=s7239 ok
+        2026-07-04T02:20:00Z healthcheck ok node=n1062
+        2026-07-04T02:30:00Z cert check ok days_left=49
+        2026-07-04T02:40:00Z autoscale replicas=24
+        2026-07-04T02:50:00Z autoscale replicas=42
+        2026-07-04T03:00:00Z cert check ok days_left=38
+        2026-07-04T03:10:00Z cert check ok days_left=56
+        2026-07-04T03:20:00Z deploy started version=v7.41.1-kite
+        2026-07-04T03:30:00Z deploy finished version=v7.41.1-kite duration=110s
+        2026-07-04T03:40:00Z autoscale replicas=43
+        2026-07-04T03:50:00Z healthcheck ok node=n6449
+        2026-07-04T04:00:00Z autoscale replicas=18
+        2026-07-04T04:10:00Z autoscale replicas=18
+        2026-07-04T04:20:00Z cert check ok days_left=15
+        2026-07-04T04:30:00Z config reload ok revision=1806
+        2026-07-04T04:40:00Z backup snapshot id=s8973 ok
+        2026-07-04T04:50:00Z config reload ok revision=3802
+        2026-07-04T05:00:00Z cert check ok days_left=27
+        2026-07-04T05:10:00Z healthcheck ok node=n3773
+        2026-07-04T05:20:00Z healthcheck ok node=n4119
+        2026-07-04T05:30:00Z healthcheck ok node=n5135
+        2026-07-04T05:40:00Z healthcheck ok node=n487
+        2026-07-04T05:50:00Z cert check ok days_left=43
+        2026-07-04T06:00:00Z deploy started version=v7.41.2-kite-rc
+        2026-07-04T06:10:00Z deploy failed version=v7.41.2-kite-rc reason=healthcheck-timeout
+        2026-07-04T06:20:00Z autoscale replicas=22
+        2026-07-04T06:30:00Z healthcheck ok node=n8798
+        2026-07-04T06:40:00Z config reload ok revision=5181
+        2026-07-04T06:50:00Z cert check ok days_left=32
+        2026-07-04T07:00:00Z config reload ok revision=7650
+        2026-07-04T07:10:00Z cert check ok days_left=35
+        2026-07-04T07:20:00Z autoscale replicas=58
+        2026-07-04T07:30:00Z autoscale replicas=56
+        2026-07-04T07:40:00Z healthcheck ok node=n2222
+        2026-07-04T07:50:00Z backup snapshot id=s8682 ok
+        2026-07-04T08:00:00Z cert check ok days_left=31
+        2026-07-04T08:10:00Z config reload ok revision=3216
+        2026-07-04T08:20:00Z backup snapshot id=s6175 ok
+        2026-07-04T08:30:00Z healthcheck ok node=n9394
+        2026-07-04T08:40:00Z deploy started version=v7.41.2-kite
+        2026-07-04T08:50:00Z deploy finished version=v7.41.2-kite duration=278s
+        2026-07-04T09:00:00Z config reload ok revision=1225
+        2026-07-04T09:10:00Z config reload ok revision=2364
+        2026-07-04T09:20:00Z cert check ok days_left=8
+        2026-07-04T09:30:00Z backup snapshot id=s4796 ok
+        2026-07-04T09:40:00Z cert check ok days_left=20
+        2026-07-04T09:50:00Z autoscale replicas=40
+        2026-07-04T10:00:00Z config reload ok revision=9700
+        2026-07-04T10:10:00Z healthcheck ok node=n9929
+        2026-07-04T10:20:00Z healthcheck ok node=n6503
+        2026-07-04T10:30:00Z healthcheck ok node=n9593
+        2026-07-04T10:40:00Z healthcheck ok node=n5552
+        2026-07-04T10:50:00Z backup snapshot id=s9882 ok
+        2026-07-04T11:00:00Z autoscale replicas=32
+        2026-07-04T11:10:00Z autoscale replicas=11
+        2026-07-04T11:20:00Z healthcheck ok node=n2208
+        2026-07-04T11:30:00Z autoscale replicas=59
+        2026-07-04T11:40:00Z healthcheck ok node=n6274
+        2026-07-04T11:50:00Z cert check ok days_left=36
+        2026-07-04T12:00:00Z config reload ok revision=1767
+        2026-07-04T12:10:00Z cert check ok days_left=54
+        2026-07-04T12:20:00Z autoscale replicas=18
+        2026-07-04T12:30:00Z config reload ok revision=4681
+        2026-07-04T12:40:00Z autoscale replicas=43
+        2026-07-04T12:50:00Z deploy started version=v7.41.3-kite
+        2026-07-04T13:00:00Z deploy finished version=v7.41.3-kite duration=205s
+        2026-07-04T13:10:00Z config reload ok revision=3092
+        2026-07-04T13:20:00Z config reload ok revision=3566
+        2026-07-04T13:30:00Z backup snapshot id=s4332 ok
+        2026-07-04T13:40:00Z cert check ok days_left=20
+        2026-07-04T13:50:00Z backup snapshot id=s6837 ok
+        2026-07-04T14:00:00Z backup snapshot id=s194 ok
+        2026-07-04T14:10:00Z backup snapshot id=s1905 ok
+        2026-07-04T14:20:00Z config reload ok revision=2252
+        2026-07-04T14:30:00Z healthcheck ok node=n2137
+        2026-07-04T14:40:00Z cert check ok days_left=44
+        2026-07-04T14:50:00Z cert check ok days_left=53
+        2026-07-04T15:00:00Z autoscale replicas=27
+        2026-07-04T15:10:00Z backup snapshot id=s7262 ok
+        2026-07-04T15:20:00Z config reload ok revision=8658
+        2026-07-04T15:30:00Z backup snapshot id=s2279 ok
+        2026-07-04T15:40:00Z backup snapshot id=s5294 ok
+        2026-07-04T15:50:00Z config reload ok revision=7270
+        2026-07-04T16:00:00Z config reload ok revision=2181
+        2026-07-04T16:10:00Z backup snapshot id=s9491 ok
+        2026-07-04T16:20:00Z cert check ok days_left=40
+        2026-07-04T16:30:00Z backup snapshot id=s4205 ok
+        2026-07-04T16:40:00Z deploy started version=v7.42.0-kite
+        2026-07-04T16:50:00Z deploy failed version=v7.42.0-kite reason=migration-timeout
+        2026-07-04T17:00:00Z cert check ok days_left=55
+        2026-07-04T17:10:00Z autoscale replicas=34
+        2026-07-04T17:20:00Z healthcheck ok node=n428
+        2026-07-04T17:30:00Z cert check ok days_left=57
+        2026-07-04T17:40:00Z cert check ok days_left=35
+        2026-07-04T17:50:00Z autoscale replicas=40
+        2026-07-04T18:00:00Z config reload ok revision=4291
+        2026-07-04T18:10:00Z autoscale replicas=55
+        2026-07-04T18:20:00Z backup snapshot id=s2486 ok
+        2026-07-04T18:30:00Z config reload ok revision=8066
+        2026-07-04T18:40:00Z healthcheck ok node=n7190
+        2026-07-04T18:50:00Z config reload ok revision=6409
+        2026-07-04T19:00:00Z backup snapshot id=s7601 ok
+        2026-07-04T19:10:00Z healthcheck ok node=n9088
+        2026-07-04T19:20:00Z cert check ok days_left=36
+        2026-07-04T19:30:00Z config reload ok revision=2962
+        2026-07-04T19:40:00Z autoscale replicas=6
+        2026-07-04T19:50:00Z healthcheck ok node=n6302
+        2026-07-04T20:00:00Z autoscale replicas=47
+        2026-07-04T20:10:00Z cert check ok days_left=40
+        2026-07-04T20:20:00Z backup snapshot id=s1580 ok
+        2026-07-04T20:30:00Z healthcheck ok node=n3009
+        2026-07-04T20:40:00Z healthcheck ok node=n7657
+        2026-07-04T20:50:00Z backup snapshot id=s9607 ok
+        2026-07-04T21:00:00Z autoscale replicas=25
+    score:
+      expect_answer: '(?:version\s*[:=]\s*)?v?7\.41\.3-kite'
+      answer_shape: '(?:version\s*[:=]\s*)?v?\d+(?:\.\d+)+(?:-[a-z0-9]+)*'
+    reference:
+      answer: "The last \"deploy finished\" line is line 223: `2026-07-04T13:00:00Z deploy finished version=v7.41.3-kite duration=205s`. The later v7.42.0-kite deploy failed (reason=migration-timeout).\n\nANSWER: v7.41.3-kite"
+      tools: [grep]
+      wrong_answers:
+        - "ANSWER: v7.42.0-kite"  # the later deploy, which failed
+        - "v7.41.3-kite finished at 13:00, and v7.42.0-kite was deployed after it.\n\nANSWER: v7.42.0-kite"  # right value in prose, the failed deploy committed
+        - "ANSWER: v7.41.2-kite"  # one finished deploy too early
+        - "ANSWER: v7.39.0-kite"  # the first grep hit
+        - "ANSWER: v7.41.2-kite-rc"  # a failed release candidate
+        - "ANSWER: v7.41.3"  # the -kite suffix dropped
+        - "v7.42.0-kite"  # bare, no answer line: the later deploy, which failed
+      right_answers:
+        - "ANSWER: v7.41.3-kite"
+        - "Finished deploys in order: v7.39.0-kite, v7.39.1-kite, v7.40.0-kite, v7.41.0-kite, v7.41.1-kite, v7.41.2-kite, v7.41.3-kite. The last deploy started, v7.42.0-kite, failed with migration-timeout, so it does not count.\n\nANSWER: v7.41.3-kite"  # walks the finished deploys and names the failed one
+        - "**ANSWER:** `7.41.3-kite`"
+        - "Final answer: version=v7.41.3-kite"
+        - "The last deploy finished line is line 223.\n\nThe answer is v7.41.3-kite."  # bare value behind a lead-in, no answer line: credited
+        - "ANSWER: $\\text{v7.41.3-kite}$"  # LaTeX \text{}
+        - "The most recent successful deploy was v7.41.3-kite."  # the right value in prose, no answer line: its one value of the answer's kind is read, and credited
+      format_misses:
+        - "deploy.log has several deploy finished lines, and a later deploy failed after the last of them."  # prose with no clear answer, no answer line
+    notes: "271-line log. The last finished deploy (v7.41.3-kite) is on line 223, and the later v7.42.0-kite started but failed."

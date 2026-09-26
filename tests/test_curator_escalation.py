@@ -16,7 +16,6 @@ The /health command (A3) is what makes these telemetry rows user-visible.
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -246,10 +245,16 @@ class TestCuratorRunRecordsTelemetry:
             provider=_FailingProvider(),
             telemetry=tel,
         )
-        # Age one skill into the stale range so auto-pass marks it
-        ancient = time.time() - 365 * 86400
-        target = c._auto_dir / "a.md"
-        os.utime(target, (ancient, ancient))
+        # Age one skill into the stale range so auto-pass marks it. Staleness
+        # is days since the last LOAD (the skill-load counter), not file mtime.
+        from prometheus.telemetry.tracker import SKILL_LOAD_OPERATION, SKILL_LOAD_SUBSYSTEM
+
+        tel.record_run(SKILL_LOAD_SUBSYSTEM, SKILL_LOAD_OPERATION, "success",
+                       summary={"skill": "a", "source": "auto", "file": "a"})
+        tel._conn.execute(
+            "UPDATE subsystem_runs SET timestamp = ? WHERE subsystem = ?",
+            (time.time() - 365 * 86400, SKILL_LOAD_SUBSYSTEM),
+        )
 
         run = asyncio.run(c.run_once())
         assert run.auto_transitions  # stage 1 did something

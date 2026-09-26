@@ -400,8 +400,26 @@ def create_tool_registry(security_cfg: dict[str, Any], security_gate=None) -> An
 # Adapter + Security
 # ---------------------------------------------------------------------------
 
-def _has_native_tool_calling(model_name: str) -> bool:
-    """Check model_registry.yaml for native function_calling capability."""
+def _registry_lookup(
+    model_name: str, *, warn: bool = True,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The ``config/model_registry.yaml`` family matching ``model_name``, and a note.
+
+    Returns ``(entry, note)``. ``entry`` is the first family (in file order)
+    whose ``match_patterns`` holds a case-insensitive substring of the name,
+    with its key under ``"key"``; None when nothing matches. ``note`` says why
+    the registry itself could not answer — missing or unreadable — so the
+    tier's fallback sentence can name it, and is None otherwise.
+
+    This used to look only at <repo>/config/, three parents up from this
+    file, and return False when nothing was there. An installed package has
+    no <repo>, so every pip and Homebrew install got "no native tool
+    calling" for every model, meaning adapter tier "full", and nothing said
+    so. The resolver finds the copy the wheel ships, and a missing registry
+    is a WARNING, because it changes the tier. ``warn=False`` is for the
+    second read ``create_adapter`` makes for its record: one warning per
+    adapter, not two.
+    """
     import yaml
 
     from prometheus.config.model_registry import (
@@ -409,62 +427,109 @@ def _has_native_tool_calling(model_name: str) -> bool:
         get_model_registry_path,
     )
 
-    # This used to look only at <repo>/config/, three parents up from this
-    # file, and return False when nothing was there. An installed package has
-    # no <repo>, so every pip and Homebrew install got "no native tool
-    # calling" for every model, meaning adapter tier "full", and nothing said
-    # so. The resolver finds the copy the wheel ships, and a missing registry
-    # is now a WARNING, because it changes the tier.
     try:
         registry_path = get_model_registry_path()
     except ModelRegistryNotFound as exc:
-        log.warning(
-            "model registry: NOT FOUND (%s). Reporting NO native tool calling "
-            "for %r, so a local model gets adapter tier 'full', which may be "
-            "wrong", exc, model_name,
-        )
-        return False
+        if warn:
+            log.warning(
+                "model registry: NOT FOUND (%s). Reporting NO native tool calling "
+                "for %r from the registry; unless the served chat template says "
+                "otherwise, a local model then gets adapter tier 'full', which may "
+                "be wrong", exc, model_name,
+            )
+        return None, f"the registry file is missing ({exc})"
     try:
         data = yaml.safe_load(registry_path.read_text()) or {}
-        models = data.get("models", {}) if isinstance(data, dict) else {}
-        name_lower = model_name.lower()
-        for _key, meta in models.items():
-            patterns = meta.get("match_patterns", [])
-            if any(p.lower() in name_lower for p in patterns):
-                fc = meta.get("capabilities", {}).get("function_calling", {})
-                return fc.get("supported", False) and fc.get("requires") is None
     except (OSError, yaml.YAMLError) as exc:
-        # Returning False here means "this model has no known function-calling
+        # Returning nothing here means "this model has no known function-calling
         # support", which is also what an unreadable registry produced — so a
-        # broken registry looked exactly like an unlisted model.
-        log.warning(
-            "model registry: UNREADABLE — cannot read %s (%s: %s); reporting "
-            "NO function-calling support for %r, which may be wrong",
-            registry_path, type(exc).__name__, exc, model_name,
-        )
-    return False
+        # broken registry looked exactly like an unlisted model. The note tells
+        # them apart on the boot line.
+        if warn:
+            log.warning(
+                "model registry: UNREADABLE — cannot read %s (%s: %s); reporting "
+                "NO function-calling support for %r from the registry, which may be "
+                "wrong", registry_path, type(exc).__name__, exc, model_name,
+            )
+        return None, f"the registry file is unreadable ({type(exc).__name__})"
+    models = data.get("models", {}) if isinstance(data, dict) else {}
+    name_lower = (model_name or "").lower()
+    for key, meta in (models or {}).items():
+        if not isinstance(meta, dict):
+            continue
+        patterns = meta.get("match_patterns", []) or []
+        if any(str(p).lower() in name_lower for p in patterns):
+            return {"key": key, **meta}, None
+    return None, None
 
 
-def _get_adapter_tier(provider_name: str, model_name: str) -> str:
-    """Determine the adapter tier from provider + model capabilities.
+def _has_native_tool_calling(model_name: str) -> bool:
+    """Does model_registry.yaml list ``model_name`` with native function calling?"""
+    entry, _note = _registry_lookup(model_name)
+    if entry is None:
+        return False
+    fc = (entry.get("capabilities") or {}).get("function_calling") or {}
+    return bool(fc.get("supported", False)) and fc.get("requires") is None
 
-    Returns "off", "light", or "full".
+
+def _resolve_adapter_tier(
+    provider_name: str, model_name: str, template: Any = None, *, warn: bool = True,
+) -> Any:
+    """The tier decision (``adapter.tier.TierDecision``) for a provider + model.
+
+    ``template`` is the served chat template's verdict (``ToolTemplate``) when a
+    probe read one — ``detect_tool_template`` on the provider at daemon boot,
+    ``_detect_tool_template_or_none`` on the CLI — else None.
     """
-    from prometheus.providers.registry import ProviderRegistry
+    from prometheus.adapter.tier import resolve_tier
 
-    # Tier 1: API enforces structure (Anthropic, OpenAI, cloud providers)
-    if provider_name == "anthropic" or ProviderRegistry.is_cloud(provider_name):
-        return "off"
-
-    # Tier 2: Model has native tool calling, but server doesn't guarantee structure
-    if _has_native_tool_calling(model_name):
-        return "light"
-
-    # Tier 3: Full adapter pipeline
-    return "full"
+    entry, note = _registry_lookup(model_name, warn=warn)
+    return resolve_tier(
+        provider_name=provider_name, model_name=model_name, template=template,
+        registry_entry=entry, registry_note=note,
+    )
 
 
-def create_adapter(model_cfg: dict[str, Any], adapter_cfg: dict[str, Any] | None = None):
+def _get_adapter_tier(provider_name: str, model_name: str, template: Any = None) -> str:
+    """The adapter tier for a provider + model: "off", "light", or "full".
+
+    Override > provider class > registry > chat template > fallback; the
+    decision with its reason is ``_resolve_adapter_tier``. THIS function is the
+    seam the ladder's tier sweep replaces to force a tier
+    (``gym/ladder/tiers.py::forced_adapter_factory``), which is why
+    ``create_adapter`` asks it with the two positional arguments that
+    replacement takes and passes ``template`` only when a probe read one.
+    """
+    return _resolve_adapter_tier(provider_name, model_name, template).tier
+
+
+def _log_tier_decision(decision: Any) -> None:
+    """One line per adapter built, every tier, saying which source decided."""
+    from prometheus.adapter.tier import TIER_SOURCE_TEXT
+
+    where = TIER_SOURCE_TEXT.get(decision.source, decision.source)
+    if decision.source == "fallback":
+        log.warning(
+            "Adapter tier: %s — %s (%s) for %s. Add a config/model_registry.yaml "
+            "entry for this model, or check that the server renders its chat "
+            "template's tool calls (llama-server: --jinja).",
+            decision.tier, decision.detail, where, decision.decided_for or "(no model name)",
+        )
+    else:
+        log.info(
+            "Adapter tier: %s — %s (%s) for %s",
+            decision.tier, decision.detail, where, decision.decided_for or "(no model name)",
+        )
+    if decision.disagreement:
+        log.warning("Adapter tier: %s", decision.disagreement)
+
+
+def create_adapter(
+    model_cfg: dict[str, Any],
+    adapter_cfg: dict[str, Any] | None = None,
+    *,
+    template: Any = None,
+):
     """Create the model adapter layer with three tiers.
 
     Tier "off"   — API enforces structure. Passthrough, no validation.
@@ -472,6 +537,12 @@ def create_adapter(model_cfg: dict[str, Any], adapter_cfg: dict[str, Any] | None
                    Keep model-specific formatter, GBNF on, validator NONE,
                    max_retries=1, adaptive strictness on.
     Tier "full"  — No native tool calling. Full validation + repair.
+
+    ``template`` is what the served chat template says about tool calling
+    (``adapter.tier.ToolTemplate``, from a probe), which decides the tier for a
+    model the registry does not list. The decision and its reason are kept on
+    the adapter as ``tier_decision`` and logged, every tier, by
+    :func:`_log_tier_decision`.
     """
     from prometheus.adapter import ModelAdapter
     from prometheus.adapter.formatter import (
@@ -480,6 +551,7 @@ def create_adapter(model_cfg: dict[str, Any], adapter_cfg: dict[str, Any] | None
         AnthropicFormatter,
         PassthroughFormatter,
     )
+    from prometheus.adapter.tier import TierDecision
 
     provider_name = model_cfg.get("provider", "llama_cpp")
     model_name = model_cfg.get("model", "")
@@ -492,29 +564,95 @@ def create_adapter(model_cfg: dict[str, Any], adapter_cfg: dict[str, Any] | None
         "unwrap_tools": acfg.get("unwrap_dict_args") or (),
     }
 
-    tier = _get_adapter_tier(provider_name, model_name)
+    # The seam decides the tier (see _get_adapter_tier); the resolver explains
+    # it. When the two disagree the seam was replaced — a tier sweep forcing a
+    # tier — and the record says so rather than claiming a source it was not.
+    if template is None:
+        tier = _get_adapter_tier(provider_name, model_name)
+    else:
+        tier = _get_adapter_tier(provider_name, model_name, template)
+    decision = _resolve_adapter_tier(provider_name, model_name, template, warn=False)
+    if decision.tier != tier:
+        decision = TierDecision(
+            tier=tier, source="forced",
+            detail=(
+                f"_get_adapter_tier was replaced and answers {tier}; the resolver "
+                f"says {decision.tier} by {decision.source}"
+            ),
+            call_format=decision.call_format, decided_for=model_name,
+        )
+    _log_tier_decision(decision)
 
     if tier == "off":
         formatter = AnthropicFormatter() if provider_name == "anthropic" else PassthroughFormatter()
-        return ModelAdapter(formatter=formatter, tier="off", **adaptive_kwargs)
-
-    if tier == "light":
-        # Keep model-specific formatter — the model was trained for a format
+        adapter = ModelAdapter(formatter=formatter, tier="off", **adaptive_kwargs)
+    elif tier == "light":
+        # Keep model-specific formatter — the model was trained for a format.
+        # A template-decided tier follows the format the template renders;
+        # a registry-decided one keeps the name rule it always had.
         if "gemma" in model_name.lower():
             formatter = GemmaFormatter()
-        elif "qwen" in model_name.lower():
-            formatter = QwenFormatter()
         else:
-            formatter = QwenFormatter()  # safe default for tool-calling models
-        log.info("Adapter tier=light for %s (native tool calling, GBNF + light validation)", model_name)
-        return ModelAdapter(formatter=formatter, tier="light", **adaptive_kwargs)
-
-    # tier == "full"
-    if "gemma" in model_name.lower():
-        formatter = GemmaFormatter()
+            formatter = QwenFormatter()  # qwen-xml, qwen-json, and the safe default
+        adapter = ModelAdapter(formatter=formatter, tier="light", **adaptive_kwargs)
     else:
-        formatter = QwenFormatter()
-    return ModelAdapter(formatter=formatter, strictness="MEDIUM", tier="full", **adaptive_kwargs)
+        # tier == "full"
+        if "gemma" in model_name.lower():
+            formatter = GemmaFormatter()
+        else:
+            formatter = QwenFormatter()
+        adapter = ModelAdapter(formatter=formatter, strictness="MEDIUM", tier="full", **adaptive_kwargs)
+    adapter.tier_decision = decision
+    return adapter
+
+
+def _detect_tool_template_or_none(model_cfg: dict[str, Any]) -> Any:
+    """The served chat template's verdict for a local provider, or None.
+
+    Synchronous, like ``_detect_model_or_fallback`` beside it: the CLI builds
+    its components before any event loop runs. llama.cpp answers from
+    ``/props``, Ollama from ``/api/show`` for the configured model; a cloud
+    provider has no template to read. A server that cannot be asked is a
+    recorded fact (``native=None``), never a boot failure.
+    """
+    import httpx as _httpx
+
+    from prometheus.adapter.tier import ToolTemplate, classify_template
+
+    provider = model_cfg.get("provider", "llama_cpp")
+    base_url = (model_cfg.get("base_url") or "").rstrip("/")
+    try:
+        if provider == "llama_cpp":
+            resp = _httpx.get(f"{base_url or 'http://localhost:8080'}/props", timeout=10.0)
+            resp.raise_for_status()
+            props = resp.json()
+            props = props if isinstance(props, dict) else {}
+            return classify_template(
+                chat_template=props.get("chat_template"), caps=props.get("chat_template_caps"),
+            )
+        if provider == "ollama":
+            model = model_cfg.get("model") or ""
+            if not model:
+                return ToolTemplate(
+                    native=None, call_format=None,
+                    evidence="no model name to ask ollama /api/show about",
+                )
+            resp = _httpx.post(
+                f"{base_url or 'http://localhost:11434'}/api/show", json={"model": model}, timeout=10.0,
+            )
+            resp.raise_for_status()
+            show = resp.json()
+            show = show if isinstance(show, dict) else {}
+            return classify_template(
+                ollama_capabilities=show.get("capabilities"), ollama_template=show.get("template"),
+            )
+    except Exception as exc:  # noqa: BLE001 — an unreachable server is recorded, not fatal
+        log.warning("Could not read the chat template from %s: %s", base_url or provider, exc)
+        return ToolTemplate(
+            native=None, call_format=None,
+            evidence=f"the server could not be asked ({type(exc).__name__})",
+        )
+    return None
 
 
 async def create_mcp_runtime(
@@ -654,6 +792,21 @@ def build_system_prompt(config: dict[str, Any]) -> str:
 # Interactive REPL
 # ---------------------------------------------------------------------------
 
+def _interactive_header_lines(context: LoopContext) -> list[str]:
+    """The model, provider and adapter tier lines the interactive mode prints.
+
+    The provider line used to print the literal text ``type(provider)`` (an
+    f-string without its braces); the tier line is the same decision the
+    daemon logs at boot, so a CLI user sees what tier — and why — before the
+    first turn.
+    """
+    lines = [f"Model: {context.model} | Provider: {type(context.provider).__name__}"]
+    decision = getattr(context.adapter, "tier_decision", None)
+    if decision is not None:
+        lines.append(f"Adapter tier: {decision.tier} — {decision.detail}")
+    return lines
+
+
 async def run_interactive(
     context: LoopContext,
     lcm_engine: Any | None,
@@ -671,11 +824,11 @@ async def run_interactive(
     ``:voice off`` leaves voice mode.
     """
     messages: list[ConversationMessage] = []
-    turn_index = 0
     voice_config = voice_config or {}
 
     print(f"Prometheus {__version__} — interactive mode")
-    print(f"Model: {context.model} | Provider: type(provider)")
+    for line in _interactive_header_lines(context):
+        print(line)
     if voice_mode:
         print("Voice mode ON. Press Enter to record, ':text' to type instead.")
     else:
@@ -748,9 +901,13 @@ async def run_interactive(
             print("Goodbye.")
             break
 
-        # Ingest to LCM
+        # Ingest to LCM. No turn_index: the store appends each row after every
+        # row the session already has. A per-turn counter here gave the user and
+        # the assistant row the SAME index (a duplicate under the UNIQUE
+        # (session_id, turn_index) index), restarted at 0 for every run, and
+        # re-used an index when a failed turn's user row was retried.
         if lcm_engine:
-            await lcm_engine.ingest(session_id, "user", user_input, turn_index=turn_index)
+            await lcm_engine.ingest(session_id, "user", user_input)
 
         messages.append(ConversationMessage.from_user_text(user_input))
 
@@ -784,9 +941,7 @@ async def run_interactive(
 
         # Ingest assistant response to LCM
         if lcm_engine and response_text:
-            await lcm_engine.ingest(
-                session_id, "assistant", response_text, turn_index=turn_index
-            )
+            await lcm_engine.ingest(session_id, "assistant", response_text)
             await lcm_engine.maybe_compact(session_id)
 
         # Voice output — speak the reply if this turn was voice-flagged
@@ -798,8 +953,6 @@ async def run_interactive(
                 await cli_voice_speak(response_text, voice_config)
             except Exception as exc:
                 log.debug("Voice playback failed: %s", exc)
-
-        turn_index += 1
 
 
 # ---------------------------------------------------------------------------
@@ -1692,7 +1845,11 @@ def main() -> None:
 
     security_gate = create_security_gate(security_cfg, getattr(args, "config", None))
     registry = create_tool_registry(security_cfg, security_gate=security_gate)
-    adapter = create_adapter(model_cfg, config.get("adapter"))
+    # The served chat template decides the tier for a model the registry does
+    # not list (WP-X.28); read the same way the daemon reads it at boot.
+    adapter = create_adapter(
+        model_cfg, config.get("adapter"), template=_detect_tool_template_or_none(model_cfg),
+    )
     lcm_engine = create_lcm_engine(provider)
     system_prompt = build_system_prompt(config)
 

@@ -26,6 +26,7 @@ from typing import Any
 from uuid import uuid4
 
 from prometheus.security.log_redaction import redact_capture as _redact
+from prometheus.security.log_redaction import redact_json_text, redact_secrets
 
 from prometheus.telemetry.db import connect_telemetry_db
 from prometheus.telemetry.latency import LatencyAggregate
@@ -95,6 +96,13 @@ NON_CALL_FAILURE_TYPES: frozenset[str] = POLICY_ERROR_TYPES | EXECUTED_ERROR_TYP
 # as a repeated string literal plus prose until /api/tools/recent shipped without it and served
 # a feed that was half loop echoes. Named so a fourth reader cannot miss it.
 SYNTHETIC_TOOL_NAME = "_loop_transition"
+
+# One ``subsystem_runs`` row per ``skill`` tool call (tools/builtin/skill.py): outcome "success"
+# is a load, "failed" a lookup that found nothing. Kept in subsystem_runs rather than a table of
+# its own on purpose: the parity harness dumps every table of every store, so a new table would
+# move every golden without a single request changing. ``skill_load_stats`` is the reader.
+SKILL_LOAD_SUBSYSTEM = "skills"
+SKILL_LOAD_OPERATION = "load"
 
 
 # FOUNDATION 1.3: the telemetry schema version. The first real version
@@ -907,7 +915,9 @@ class ToolCallTelemetry:
         from prometheus.security.log_redaction import redact_capture
         error_detail = redact_capture(error_detail)
         raw_model_output = redact_capture(raw_model_output)
-        parsed_tool_call = redact_capture(parsed_tool_call)
+        # A JSON string: redacted value by value, or a token right after an
+        # escaped newline is missed (X.37, redact_json_text).
+        parsed_tool_call = redact_json_text(parsed_tool_call)
         self._conn.execute(
             """
             INSERT INTO tool_calls
@@ -967,7 +977,8 @@ class ToolCallTelemetry:
         tool (or None if no golden trace exists). Stored for later analysis
         of "what would a cloud teacher have done differently".
         """
-        sample = (raw_sample or "")[:500]
+        # Redact before truncating: a cut can leave a token too short to match.
+        sample = redact_secrets(raw_sample or "")[:500]
         self._conn.execute(
             """
             INSERT INTO circuit_breaker_diagnostics
@@ -987,7 +998,7 @@ class ToolCallTelemetry:
                 sample,
                 1 if recovered else 0,
                 recovery_method,
-                golden_reference,
+                redact_json_text(golden_reference),
             ),
         )
         self._conn.commit()
@@ -1109,7 +1120,11 @@ class ToolCallTelemetry:
         if outcome not in {"success", "partial", "failed", "skipped"}:
             outcome = "failed"
         try:
-            summary_json = json.dumps(summary, default=str) if summary else None
+            # Redacted after serialising, so a value default=str turned into
+            # text is covered too (X.37).
+            summary_json = (
+                redact_json_text(json.dumps(summary, default=str)) if summary else None
+            )
         except Exception:
             summary_json = None
         try:
@@ -1206,7 +1221,10 @@ class ToolCallTelemetry:
 
         ts = timestamp_iso or datetime.now(timezone.utc).isoformat()
         try:
-            payload_json = json.dumps(payload or {}, default=str)
+            # A payload can carry conversation text (skill_created's
+            # trigger_task; a teacher escalation's user request and tool
+            # results), so it is redacted (X.37).
+            payload_json = redact_json_text(json.dumps(payload or {}, default=str)) or "{}"
         except Exception:
             payload_json = "{}"
 
@@ -1305,6 +1323,42 @@ class ToolCallTelemetry:
                 "read_at": row[5],
             })
         return out
+
+    def skill_load_stats(self) -> dict[str, dict[str, Any]]:
+        """Loads per skill: ``{name: {loads, last_loaded_at, source, file}}``.
+
+        Only successful loads count; a lookup that found nothing is a
+        ``failed`` row and is not a use of any skill. ``source`` and ``file``
+        (the skill file's stem) come from the most recent load, so a skill that
+        moved between sources reports where it was last served from. Empty when
+        nothing has been loaded — which is itself the answer, not an error.
+        """
+        try:
+            rows = self._conn.execute(
+                "SELECT summary_json, timestamp FROM subsystem_runs "
+                "WHERE subsystem = ? AND operation = ? AND outcome = 'success' "
+                "ORDER BY timestamp, rowid",
+                (SKILL_LOAD_SUBSYSTEM, SKILL_LOAD_OPERATION),
+            ).fetchall()
+        except sqlite3.Error:
+            log.warning("skill_load_stats: query failed", exc_info=True)
+            return {}
+        stats: dict[str, dict[str, Any]] = {}
+        for summary_json, ts in rows:
+            try:
+                summary = json.loads(summary_json or "{}")
+            except (TypeError, ValueError):
+                continue
+            name = summary.get("skill") if isinstance(summary, dict) else None
+            if not isinstance(name, str) or not name:
+                continue
+            entry = stats.setdefault(name, {"loads": 0, "last_loaded_at": 0.0,
+                                             "source": None, "file": None})
+            entry["loads"] += 1
+            entry["last_loaded_at"] = max(entry["last_loaded_at"], float(ts))
+            entry["source"] = summary.get("source")
+            entry["file"] = summary.get("file")
+        return stats
 
     def last_request_tokens(self, session_id: str) -> dict[str, Any] | None:
         """The size of the most recent prompt the agent loop SENT for one session, as the provider

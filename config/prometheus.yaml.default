@@ -870,11 +870,20 @@ learning:
   # SkillCreator — auto-generate SKILL.md from successful tool traces.
   auto_skill_creation: true
   skill_min_tool_calls: 3
-  # SkillRefiner — refine an existing auto-skill when execution deviates beneficially.
+  # SkillCreator's near-duplicate gate: a new auto skill whose name +
+  # description is at least this cosine from an existing skill is not saved.
+  # Needs the `skills` extra and the encoder files
+  # (`python -m prometheus.skills.similarity fetch`); without them the check
+  # is skipped and the log says why. 0.80 is the skill-usage audit's calibration.
+  skill_dedupe_threshold: 0.80
+  # SkillRefiner — refine an auto-skill the task LOADED (a successful `skill`
+  # call, no failed call after it, a final reply), when the execution deviated
+  # beneficially from its steps.
   skill_refinement_enabled: false
   skill_refiner_model: default
   # Curator — periodic consolidation pass over ~/.prometheus/skills/auto/.
-  # Stage 1 (auto): flip lifecycle state based on mtime (stale/archived).
+  # Stage 1 (auto): flip lifecycle state on the days since each skill's last
+  # LOAD (stale/archived); a skill with no load recorded is never stale.
   # Stage 2 (LLM): recommend consolidations (report-only) + prunings (applied:
   # file moved to auto/.archive/, NEVER deleted). Pinned skills are protected.
   # Adapted from Hermes agent/curator.py (see prometheus/learning/curator.py).

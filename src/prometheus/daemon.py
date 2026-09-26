@@ -818,6 +818,22 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     model_name,
                 )
 
+    # Chat-template tool calling. DETECTED, never assumed (WP-X.28): what the
+    # served template renders decides the adapter tier for a model the
+    # registry does not list; the registry keeps precedence for the ones it
+    # does, and a template that cannot be read leaves the tier at 'full' —
+    # said so on the boot line create_adapter logs. Same posture as vision
+    # and the context size above: the backend is asked, and its answer is
+    # recorded as what it is (native / not native / unknown).
+    tool_template: Any = None
+    if hasattr(provider, "detect_tool_template"):
+        tool_template = await provider.detect_tool_template(model_name)
+        logger.info(
+            "Chat template tool calling: %s (%s)",
+            {True: "native", False: "not native", None: "unknown"}[tool_template.native],
+            tool_template.evidence,
+        )
+
     # Backend registry — every local inference box this install knows about
     # (the primary as `local` + `backends:` in config), probed once here in
     # parallel and bounded by its own timeout, so a dead box costs one timeout
@@ -923,7 +939,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Sprint 15 wiring fix: daemon was missing adapter, security_gate,
     # model_router, and divergence_detector — all were built but not connected.
     # Phase 2: router now requires primary provider + adapter + model built first.
-    adapter = create_adapter(model_config, config.get("adapter"))
+    adapter = create_adapter(model_config, config.get("adapter"), template=tool_template)
     security_gate = create_security_gate(security_config, getattr(args, "config", None))
     model_router = create_model_router(config, provider, adapter, model_name)
     # Phase 3: wire the router back into the adapter's RetryEngine so it can
@@ -1229,6 +1245,20 @@ async def run_daemon(args: argparse.Namespace) -> None:
         logger.info("LCM engine initialised")
     except Exception as exc:
         logger.warning("LCM engine not available: %s", exc)
+
+    # One-time LCM migration: renumber the duplicate turn_index values older
+    # builds wrote (backup first) and install the trigger that refuses a
+    # repeated (session_id, turn_index) from then on. Gated by user_version, so
+    # every later start is one PRAGMA read. It runs HERE: after the engine has
+    # created the tables, and before anything that writes lcm.db is wired to
+    # it — the session manager and agent loop just below, then the gateways,
+    # the jobs and the compactor. It never raises; a failed migration rolls
+    # back and the daemon runs on without the guard.
+    # tests/test_lcm_turn_index_unique.py pins this ordering.
+    # docs/audits/LCM-TURN-INDEX-DUPLICATES.md §5.3.
+    if lcm_engine is not None:
+        from prometheus.memory.lcm_turn_index_migration import migrate_turn_index
+        migrate_turn_index(lcm_engine.conversation_store.db_path)
 
     # Wire LCM into the session manager so ChatSession.add_result_messages
     # can persist conversation messages to LCM (PR fix/memory-lcm-full-rewire,
@@ -1924,7 +1954,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
         if skill_refiner is not None:
             # Override model to match the running model_name (from_config can't know it)
             skill_refiner._model = model_name
-            agent_loop.add_post_task_hook(skill_refiner.maybe_refine_recent)
+            agent_loop.add_post_task_hook(skill_refiner.maybe_refine_loaded)
             logger.info("SkillRefiner wired to agent loop post-task hook")
         else:
             logger.info("SkillRefiner: disabled by config (learning.skill_refinement_enabled)")
