@@ -28,7 +28,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from prometheus.engine.messages import ConversationMessage, TextBlock
+from prometheus.engine.messages import ConversationMessage, TextBlock, ToolResultBlock
 from prometheus.engine.session import SessionManager
 from prometheus.web.ws_server import WebSocketBridge
 from tests.support.doubles import register_double
@@ -187,12 +187,17 @@ def test_next_message_succeeds_after_a_failed_turn(monkeypatch):
 
 
 def test_rollback_to_retreats_the_lcm_watermark():
-    """Freed positions must persist again, not be skipped as already-written."""
+    """Freed positions must persist again, not be skipped as already-written.
+
+    The discarded rows are the turn's own: a real tool result and an assistant
+    row. (A USER message sent mid-turn and already saved is kept instead; see
+    tests/test_rehydrate_always_restores.py::TestFailedTurn.)"""
     session = SessionManager().get_or_create("web:s3")
     session.add_user_message("one")
     original_len = len(session.messages)
 
-    session.messages.append(_tool_result_msg("poison"))
+    session.messages.append(ConversationMessage(
+        role="user", content=[ToolResultBlock(tool_use_id="t1", content="poison")]))
     session.messages.append(
         ConversationMessage(role="assistant", content=[TextBlock(text="half")]))
     session._lcm_persisted_len = len(session.messages)

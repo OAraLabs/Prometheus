@@ -144,7 +144,7 @@ def test_user_echo_uses_durable_rowid_and_correlates_client_msg_id(tmp_path):
     # message_id is the durable LCM rowid (int, >0) and equals the just-persisted row.
     assert isinstance(p["message_id"], int) and p["message_id"] > 0
     assert p["message_id"] == store.max_rowid("desktop:test")
-    assert p["ordinal"] == 0  # turn_index is the (non-unique) display position
+    assert p["ordinal"] == 0  # turn_index: the prompt position, unique per session
     assert p["created_at"] > 0  # #3 real timestamp
 
 

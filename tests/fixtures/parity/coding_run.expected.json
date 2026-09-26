@@ -12,7 +12,7 @@
      "episodes": 1,
      "model_usage_note": "per-round tokens + thinking flag are in telemetry.subsystem_runs (subsystem='agent_loop', session_id=coding:<task_id>)",
      "reason": "acceptance command exited 0",
-     "rounds_used": 5,
+     "rounds_used": 6,
      "sandbox_root": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>",
      "status": "success",
      "task_id": "cparity01",
@@ -1431,7 +1431,7 @@
         }
        },
        641,
-       32,
+       64,
        0,
        "coding:cparity01",
        "",
@@ -1454,8 +1454,8 @@
          "stop_reason": "stop"
         }
        },
-       733,
-       86,
+       794,
+       120,
        1,
        "coding:cparity01",
        "",
@@ -1478,8 +1478,8 @@
          "stop_reason": "stop"
         }
        },
-       861,
-       76,
+       1018,
+       142,
        2,
        "coding:cparity01",
        "",
@@ -1502,8 +1502,8 @@
          "stop_reason": "stop"
         }
        },
-       988,
-       41,
+       1456,
+       97,
        3,
        "coding:cparity01",
        "",
@@ -1526,8 +1526,8 @@
          "stop_reason": "stop"
         }
        },
-       1104,
-       76,
+       1583,
+       40,
        4,
        "coding:cparity01",
        "",
@@ -1550,8 +1550,8 @@
          "stop_reason": "stop"
         }
        },
-       1187,
-       101,
+       1646,
+       75,
        5,
        "coding:cparity01",
        "",
@@ -1601,7 +1601,7 @@
          "branch": "coding/cparity01",
          "episodes": 1,
          "reason": "acceptance command exited 0",
-         "rounds": 5,
+         "rounds": 6,
          "status": "success",
          "task_id": "cparity01",
          "wall_seconds": "<ms>"
@@ -1652,18 +1652,11 @@
        "<ms>",
        null,
        null,
-       {
-        "$json": {
-         "arguments": {
-          "path": "calc.py"
-         },
-         "name": "code_view"
-        }
-       },
+       "```json\n{\"name\": \"code_view\", \"arguments\": {\"path\": \"/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>\"}}\n```",
        {
         "$json": {
          "input": {
-          "path": "calc.py"
+          "path": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>"
          },
          "name": "code_view"
         }
@@ -1739,11 +1732,11 @@
        "<ms>",
        null,
        null,
-       "{\"name\": \"code_view\", \"arguments\": {\"path\": \"test_calc.py\"}}\n\n<tool_call>\n<function=code_view>\n<parameter=path>\ntest_calc.py\n</parameter>\n</function>\n</tool_call>",
+       "<tool_call>\n<function=code_view>\n<parameter=path>\n/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=code_view>\n<parameter=path>\n/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/test_calc.py\n</parameter>\n</function>\n</tool_call>",
        {
         "$json": {
          "input": {
-          "path": "test_calc.py"
+          "path": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py"
          },
          "name": "code_view"
         }
@@ -1794,6 +1787,67 @@
        "<uuid:36>",
        "<time>",
        "",
+       "code_view",
+       1,
+       0,
+       "<ms>",
+       null,
+       null,
+       "<tool_call>\n<function=code_view>\n<parameter=path>\n/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=code_view>\n<parameter=path>\n/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/test_calc.py\n</parameter>\n</function>\n</tool_call>",
+       {
+        "$json": {
+         "input": {
+          "path": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/test_calc.py"
+         },
+         "name": "code_view"
+        }
+       },
+       0,
+       0,
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       "coding:cparity01",
+       {
+        "$json": {
+         "description": "View a file with line numbers, or list a directory. Always view a file before editing it — code_str_replace requires the exact current text. Optional view_range narrows to [start, end] lines.",
+         "name": "code_view",
+         "parameters": {
+          "properties": {
+           "path": {
+            "description": "File or directory path, relative to the repo root.",
+            "title": "Path",
+            "type": "string"
+           },
+           "view_range": {
+            "anyOf": [
+             {
+              "items": {
+               "type": "integer"
+              },
+              "type": "array"
+             },
+             {
+              "type": "null"
+             }
+            ],
+            "default": null,
+            "description": "Optional [start_line, end_line] (1-based, inclusive) for files.",
+            "title": "View Range"
+           }
+          },
+          "required": [
+           "path"
+          ],
+          "title": "CodeViewArgs",
+          "type": "object"
+         }
+        }
+       },
+       "<node>"
+      ],
+      [
+       "<uuid:37>",
+       "<time>",
+       "",
        "_loop_transition",
        1,
        0,
@@ -1810,7 +1864,54 @@
        "<node>"
       ],
       [
-       "<uuid:37>",
+       "<uuid:38>",
+       "<time>",
+       "",
+       "code_str_replace",
+       0,
+       1,
+       null,
+       "validation_failed",
+       "Tool call validation failed and could not be repaired: 1 validation error for CodeStrReplaceArgs\npath\n  Field required [type=missing, input_value={'file': '/tmp/prometheus...tr': '    return a + b'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.12/v/missing",
+       null,
+       {
+        "$json": {
+         "input": {
+          "file": "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-<epoch>/calc.py",
+          "new_str": "    return a + b",
+          "old_str": "    return a - b"
+         },
+         "name": "code_str_replace"
+        }
+       },
+       0,
+       0,
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       null,
+       null,
+       "<node>"
+      ],
+      [
+       "<uuid:39>",
+       "<time>",
+       "",
+       "_loop_transition",
+       0,
+       0,
+       null,
+       "tool_error_retry",
+       null,
+       null,
+       null,
+       0,
+       0,
+       null,
+       null,
+       null,
+       "<node>"
+      ],
+      [
+       "<uuid:40>",
        "<time>",
        "",
        "code_str_replace",
@@ -1819,7 +1920,7 @@
        "<ms>",
        null,
        null,
-       "<tool_call>\n{\"name\": \"code_str_replace\", \"arguments\": {\"path\": \"calc.py\", \"old_str\": \"    return a - b\", \"new_str\": \"    return a + b\"}}\n</function>\n</tool_call>",
+       "<tool_call>\n<function=code_str_replace>\n<parameter=path>\ncalc.py\n</parameter>\n<parameter=old_str>\n    return a - b\n</parameter>\n<parameter=new_str>\n    return a + b\n</parameter>\n</function>\n</tool_call>",
        {
         "$json": {
          "input": {
@@ -1869,7 +1970,7 @@
        "<node>"
       ],
       [
-       "<uuid:38>",
+       "<uuid:41>",
        "<time>",
        "",
        "_loop_transition",
@@ -1888,26 +1989,7 @@
        "<node>"
       ],
       [
-       "<uuid:39>",
-       "<time>",
-       "",
-       "_loop_transition",
-       0,
-       0,
-       null,
-       "stripped_to_empty",
-       "stripped=1",
-       null,
-       null,
-       0,
-       0,
-       null,
-       null,
-       null,
-       "<node>"
-      ],
-      [
-       "<uuid:40>",
+       "<uuid:42>",
        "<time>",
        "",
        "code_run",
@@ -1916,7 +1998,7 @@
        "<ms>",
        null,
        null,
-       "{\"name\": \"code_run\", \"arguments\": {\"command\": \"python test_calc.py\"}}\n\n<tool_call>\n<function=code_run>\n<parameter=command>\npython test_calc.py\n</parameter>\n</function>\n</tool_call>",
+       "<tool_call>\n<function=code_run>\n<parameter=command>\npython test_calc.py\n</parameter>\n</function>\n</tool_call>",
        {
         "$json": {
          "input": {
@@ -1965,7 +2047,7 @@
        "<node>"
       ],
       [
-       "<uuid:41>",
+       "<uuid:43>",
        "<time>",
        "",
        "_loop_transition",

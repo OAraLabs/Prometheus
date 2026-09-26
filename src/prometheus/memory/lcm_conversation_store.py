@@ -7,6 +7,7 @@ messages as compacted, uncompacted counts).
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from pathlib import Path
@@ -15,6 +16,71 @@ from uuid import uuid4
 from prometheus.config.paths import get_lcm_db_path
 from prometheus.memory.lcm_fts5 import sanitize_fts5_query
 from prometheus.memory.lcm_types import MessagePart
+
+log = logging.getLogger(__name__)
+
+# ``turn_index`` is a message's durable prompt position: unique within its
+# session. Two schema objects serve it:
+#
+# * the plain index on ``(session_id, turn_index)``, which the readers and the
+#   guard below use (created with the table);
+# * the GUARD, a BEFORE INSERT trigger that refuses a row when another message
+#   of the same session already holds its turn_index, with RAISE(ABORT). Only
+#   the one-time migration in :mod:`prometheus.memory.lcm_turn_index_migration`
+#   creates it; the daemon runs that at start, before any writer.
+#
+# Deliberately NOT a UNIQUE index. Builds from before the guard insert with
+# ``INSERT OR REPLACE``, and REPLACE resolves a UNIQUE conflict by DELETING the
+# row that holds the key: a rollback (or a pip downgrade) would then delete
+# history on every collision. RAISE(ABORT) fails the statement whatever its
+# conflict clause, so an old build's colliding insert fails and the older row
+# stays. See docs/audits/LCM-TURN-INDEX-DUPLICATES.md.
+TURN_INDEX_INDEX = "idx_lcm_messages_session"
+TURN_INDEX_GUARD_TRIGGER = "lcm_messages_turn_index_guard"
+TURN_INDEX_GUARD_MESSAGE = (
+    "lcm_messages turn_index guard: this session already has a message at this turn_index"
+)
+# A re-insert of the SAME id is left to the statement's own conflict handling
+# (``id <> NEW.id``): an old build's same-id REPLACE still works.
+TURN_INDEX_GUARD_SQL = (
+    f"CREATE TRIGGER IF NOT EXISTS {TURN_INDEX_GUARD_TRIGGER}"
+    " BEFORE INSERT ON lcm_messages"
+    " WHEN EXISTS (SELECT 1 FROM lcm_messages"
+    "   WHERE session_id = NEW.session_id AND turn_index = NEW.turn_index"
+    "   AND id <> NEW.id)"
+    f" BEGIN SELECT RAISE(ABORT, '{TURN_INDEX_GUARD_MESSAGE}'); END"
+)
+
+_INSERT_COLUMNS = (
+    "(id, session_id, turn_index, role, content, content_json, token_count, timestamp,"
+    " compacted, provenance, is_trusted)"
+)
+
+# ON CONFLICT(id) DO NOTHING: re-inserting an id that is already stored is a
+# no-op. It is deliberately NOT ``INSERT OR REPLACE``, which resolves a
+# conflict by deleting the row that holds the key. A turn-key conflict (the
+# guard trigger) still raises and is resolved in :meth:`insert_message`.
+_INSERT_SQL = (
+    f"INSERT INTO lcm_messages {_INSERT_COLUMNS}"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)"
+    " ON CONFLICT(id) DO NOTHING"
+)
+
+# The same row, numbered by the store: the next free index in the session,
+# computed and written in ONE statement, so no other writer can take that
+# number in between. (The WHERE clause is also what lets SQLite parse the
+# upsert after an INSERT ... SELECT.)
+_INSERT_APPENDING_SQL = (
+    f"INSERT INTO lcm_messages {_INSERT_COLUMNS}"
+    " SELECT ?, ?, COALESCE(MAX(turn_index), -1) + 1, ?, ?, ?, ?, ?, 0, ?, ?"
+    " FROM lcm_messages WHERE session_id = ?"
+    " ON CONFLICT(id) DO NOTHING"
+)
+
+
+def _is_turn_key_conflict(exc: sqlite3.IntegrityError) -> bool:
+    """True when *exc* is the turn-index guard refusing a row."""
+    return TURN_INDEX_GUARD_MESSAGE in str(exc)
 
 
 class LCMConversationStore:
@@ -191,6 +257,11 @@ class LCMConversationStore:
         self._migrate_add_content_json()
         self._migrate_add_trust_fields()
 
+    @property
+    def db_path(self) -> Path:
+        """The SQLite file this store reads and writes."""
+        return self._db_path
+
     def _migrate_add_content_json(self) -> None:
         """Additive, idempotent migration for the structured-content column.
 
@@ -266,7 +337,7 @@ class LCMConversationStore:
     # Insert
     # ------------------------------------------------------------------
 
-    def add_message(self, session_id: str, msg: MessagePart) -> str:
+    def add_message(self, session_id: str, msg: MessagePart, *, append: bool = False) -> str:
         """Insert a message, forcing ``msg.session_id = session_id``.
 
         Thin adapter that closes the contract gap between ``LCMEngine``
@@ -275,44 +346,140 @@ class LCMConversationStore:
         session_id from the MessagePart). Overwrites unconditionally so
         the caller's argument always wins, matching the long-standing
         test-shim behaviour before this method landed in the class.
+        ``append`` is passed through to :meth:`insert_message`.
 
         Prefer :meth:`insert_message` for internal callers that already
         construct the MessagePart with session_id set.
         """
         msg.session_id = session_id
-        return self.insert_message(msg)
+        return self.insert_message(msg, append=append)
 
-    def insert_message(self, msg: MessagePart) -> str:
-        """Insert a message and update the FTS5 index. Returns the message id."""
+    def insert_message(self, msg: MessagePart, *, append: bool = False) -> str:
+        """Insert a message and update the FTS5 index. Returns the message id.
+
+        ``msg.turn_index`` is the row's prompt position, unique within its
+        session. With ``append=True`` the store ignores it and numbers the row
+        itself: the next free index, taken atomically. That is for callers that
+        have no prompt position of their own, such as the CLI REPL. Either way,
+        ``msg.turn_index`` and ``msg.row_id`` come back set to what was stored.
+
+        This never deletes or overwrites a stored row:
+
+        * an ``id`` that is already stored is left exactly as it is: the insert
+          is a no-op and the FTS index is not touched;
+        * a ``turn_index`` another message of the session already holds
+          (refused by the guard trigger on a migrated DB) is reassigned to the
+          next free index and retried once. The collision is recorded as a
+          silent failure (subsystem ``lcm``, operation ``turn_index_collision``),
+          so a new producer of duplicate indices shows up loudly instead of
+          costing a message.
+        """
         mid = msg.message_id or uuid4().hex
         ts = msg.timestamp or time.time()
+        requested = msg.turn_index
 
         # Trust columns are written EXPLICITLY from the MessagePart — never left
         # to the column DEFAULT — so a (task_supervisor, False) turn can never be
         # silently up-tagged to the trusted default on insert.
-        self._conn.execute(
-            "INSERT OR REPLACE INTO lcm_messages"
-            " (id, session_id, turn_index, role, content, content_json, token_count, timestamp, compacted,"
-            " provenance, is_trusted)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-            (
-                mid, msg.session_id, msg.turn_index, msg.role, msg.content, msg.content_json,
-                msg.token_count, ts, msg.provenance, 1 if msg.is_trusted else 0,
-            ),
+        values = (
+            msg.role, msg.content, msg.content_json, msg.token_count, ts,
+            msg.provenance, 1 if msg.is_trusted else 0,
         )
+        collision: sqlite3.IntegrityError | None = None
+        inserted = False
+        if append:
+            cur = self._conn.execute(
+                _INSERT_APPENDING_SQL, (mid, msg.session_id, *values, msg.session_id)
+            )
+            inserted = cur.rowcount == 1
+        else:
+            try:
+                cur = self._conn.execute(
+                    _INSERT_SQL, (mid, msg.session_id, msg.turn_index, *values)
+                )
+                inserted = cur.rowcount == 1
+            except sqlite3.IntegrityError as exc:
+                if not _is_turn_key_conflict(exc):
+                    raise
+                # The guard fires BEFORE the id conflict is looked at, so a re-insert
+                # of a stored id can trip it too. That re-insert is the no-op
+                # ON CONFLICT(id) would have made it, not a collision.
+                if self._conn.execute(
+                    "SELECT 1 FROM lcm_messages WHERE id = ?", (mid,)
+                ).fetchone() is None:
+                    collision = exc
+                    cur = self._conn.execute(
+                        _INSERT_APPENDING_SQL,
+                        (mid, msg.session_id, *values, msg.session_id),
+                    )
+                    inserted = cur.rowcount == 1
 
-        # Sync FTS index — use the rowid of the just-inserted row.
-        rowid = self._conn.execute(
-            "SELECT rowid FROM lcm_messages WHERE id = ?", (mid,)
-        ).fetchone()[0]
-        # Surface the durable rowid back to the caller (canonical wire message id).
-        msg.row_id = int(rowid)
-        self._conn.execute(
-            "INSERT OR REPLACE INTO lcm_messages_fts (rowid, content) VALUES (?, ?)",
-            (rowid, msg.content),
-        )
+        stored = self._conn.execute(
+            "SELECT rowid, turn_index FROM lcm_messages WHERE id = ?", (mid,)
+        ).fetchone()
+        # Surface the durable rowid back to the caller (canonical wire message id),
+        # and the index the row really holds.
+        msg.row_id = int(stored[0])
+        msg.turn_index = int(stored[1])
+        if inserted:
+            # Sync FTS index — use the rowid of the just-inserted row.
+            self._conn.execute(
+                "INSERT OR REPLACE INTO lcm_messages_fts (rowid, content) VALUES (?, ?)",
+                (msg.row_id, msg.content),
+            )
         self._conn.commit()
+        if collision is not None:
+            self._record_turn_index_collision(
+                msg.session_id, requested, msg.turn_index, collision
+            )
         return mid
+
+    def _record_turn_index_collision(
+        self, session_id: str, requested: int, stored: int, exc: sqlite3.IntegrityError
+    ) -> None:
+        """Make a turn-index collision LOUD. The row is safe (it was stored at
+        the next free index), but a collision means some path started numbering
+        below the session's durable maximum again, which is exactly what the
+        numbering anchor exists to prevent."""
+        log.warning(
+            "LCM turn_index collision in session %s: index %d is already taken, "
+            "stored the row at %d instead",
+            session_id, requested, stored,
+        )
+        try:
+            from prometheus.telemetry.tracker import get_telemetry_handle
+
+            tel = get_telemetry_handle()
+            if tel is not None:
+                tel.record_silent_failure(
+                    subsystem="lcm",
+                    operation="turn_index_collision",
+                    exc=exc,
+                    context={
+                        "session_id": session_id,
+                        "requested_turn_index": requested,
+                        "stored_turn_index": stored,
+                    },
+                )
+        except Exception:
+            log.warning(
+                "telemetry unavailable to record an LCM turn_index collision",
+                exc_info=True,
+            )
+
+    def next_turn_index(self, session_id: str) -> int:
+        """The lowest ``turn_index`` above every row the session holds (0 if none).
+
+        Where a session's numbering must continue after anything that restarts
+        it: a new process, ``/reset``, a rollback of a durable row, a rehydrate.
+        One indexed seek on ``(session_id, turn_index)``.
+        """
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(turn_index), -1) + 1 FROM lcm_messages"
+            " WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return int(row[0])
 
     # ------------------------------------------------------------------
     # Queries
@@ -324,7 +491,7 @@ class LCMConversationStore:
         *,
         limit: int = 500,
     ) -> list[MessagePart]:
-        """Return messages for a session ordered by turn_index ascending.
+        """Return messages for a session in prompt order: ``(turn_index, rowid)`` ascending.
 
         ⚠ NO ``since_turn``. It existed here from the initial commit and no
         caller ever passed it, in ``src/`` or in ``tests/`` — so the
@@ -338,7 +505,7 @@ class LCMConversationStore:
         """
         rows = self._conn.execute(
             "SELECT * FROM lcm_messages WHERE session_id = ?"
-            " ORDER BY turn_index ASC LIMIT ?",
+            " ORDER BY turn_index ASC, rowid ASC LIMIT ?",
             (session_id, limit),
         ).fetchall()
         return [self._row_to_message(r) for r in rows]
@@ -346,16 +513,50 @@ class LCMConversationStore:
     def get_fresh_tail(self, session_id: str, count: int) -> list[MessagePart]:
         """Return the last *count* uncompacted messages for a session.
 
-        Results are ordered oldest-first (ascending turn_index) so they can
-        be appended directly to a prompt.
+        Results are in prompt order, oldest first (ascending ``(turn_index,
+        rowid)``), so they can be appended directly to a prompt.
         """
         rows = self._conn.execute(
             "SELECT * FROM lcm_messages"
             " WHERE session_id = ? AND compacted = 0"
-            " ORDER BY turn_index DESC LIMIT ?",
+            " ORDER BY turn_index DESC, rowid DESC LIMIT ?",
             (session_id, count),
         ).fetchall()
         # Reverse so the caller gets chronological order.
+        return [self._row_to_message(r) for r in reversed(rows)]
+
+    def messages_before(
+        self,
+        session_id: str,
+        timestamp: float,
+        *,
+        limit: int,
+    ) -> list[MessagePart]:
+        """The newest *limit* messages persisted strictly before *timestamp*.
+
+        The golden-trace exporter's read: a tool call's input half is the
+        conversation just BEFORE the call. :meth:`get_messages` cannot give
+        that — it returns a session's LOWEST ``turn_index`` values, so every
+        call after a session's 500th row was paired with the rows around 500.
+
+        Selected newest-first by ``(turn_index, rowid)`` so ``limit`` keeps the
+        rows nearest the call, then returned ascending like every other read.
+        ``turn_index`` is the prompt position and rowid only breaks ties
+        between rows that share one. Not ``ORDER BY rowid``: that is PERSIST
+        order, and a message sent mid-turn is persisted before the turn's
+        tail although the model saw it after.
+
+        ``timestamp`` is compared with each row's PERSIST time, which for most
+        of a turn's rows is when the turn ends, and strictly: a row at the
+        call's own time can hold the tool's result. Compacted rows are
+        included, as in :meth:`get_messages`.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM lcm_messages"
+            " WHERE session_id = ? AND timestamp < ?"
+            " ORDER BY turn_index DESC, rowid DESC LIMIT ?",
+            (session_id, timestamp, limit),
+        ).fetchall()
         return [self._row_to_message(r) for r in reversed(rows)]
 
     def mark_compacted(self, message_ids: list[str]) -> int:
@@ -478,7 +679,7 @@ class LCMConversationStore:
         return int(row["cnt"]) if row else 0
 
     def get_all_messages(self, session_id: str) -> list[MessagePart]:
-        """All messages for a session ordered by turn_index ASC, no limit.
+        """All messages for a session in prompt order (``(turn_index, rowid)`` ASC), no limit.
 
         Includes compacted messages. Unlike :meth:`get_messages` (which
         caps at ``limit=500``), this returns the full session — used by
@@ -492,13 +693,13 @@ class LCMConversationStore:
         """
         rows = self._conn.execute(
             "SELECT * FROM lcm_messages WHERE session_id = ? "
-            "ORDER BY turn_index ASC",
+            "ORDER BY turn_index ASC, rowid ASC",
             (session_id,),
         ).fetchall()
         return [self._row_to_message(r) for r in rows]
 
     def get_uncompacted_messages(self, session_id: str) -> list[MessagePart]:
-        """All uncompacted messages for a session, turn_index ASC, no limit.
+        """All uncompacted messages for a session, ``(turn_index, rowid)`` ASC, no limit.
 
         Used by :class:`LCMCompactor` (to decide which messages to fold
         into the next summary) and :class:`LCMAssembler` (fresh-tail
@@ -508,7 +709,7 @@ class LCMConversationStore:
         """
         rows = self._conn.execute(
             "SELECT * FROM lcm_messages WHERE session_id = ? AND compacted = 0 "
-            "ORDER BY turn_index ASC",
+            "ORDER BY turn_index ASC, rowid ASC",
             (session_id,),
         ).fetchall()
         return [self._row_to_message(r) for r in rows]
@@ -566,8 +767,10 @@ class LCMConversationStore:
         include_compacted: bool = True,
     ) -> list[MessagePart]:
         """Durable, restart-stable read: messages with ``rowid > row_id``, ordered by
-        ``rowid`` ASC (insertion order — monotonic and unique, unlike ``turn_index``,
-        which is the in-memory list position and repeats across restart/trim).
+        ``rowid`` ASC (insertion order, monotonic and unique). Insertion order is not
+        always prompt order: a message sent in the middle of a turn is persisted at
+        once, ahead of the tail its turn writes when it ends, and ``turn_index``
+        (unique per session, the prompt position) is what puts it back in place.
 
         This is the canonical history + incremental cursor for the REST surface: the
         rowid is the durable message identity (the store is append-only, so rowids never

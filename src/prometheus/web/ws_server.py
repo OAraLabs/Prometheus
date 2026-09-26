@@ -706,8 +706,9 @@ class WebSocketBridge:
         (which Beacon already is) to receive the response deltas.
 
         ``client_msg_id`` (optional) is echoed on the user ``chat_message`` frame
-        alongside the canonical ``msg-{turn_index}`` id, so a client that rendered
-        the message optimistically can correlate its local id to the durable one.
+        alongside the canonical ``message_id`` (the durable LCM rowid), so a client
+        that rendered the message optimistically can correlate its local id to the
+        durable one.
 
         ``blocks`` (optional) are already-resolved content blocks — the REST
         route resolves @-references (``resolve_references``) BEFORE dispatch so
@@ -966,8 +967,8 @@ class WebSocketBridge:
 
         # Broadcast the user message. message_id is the durable, restart-stable LCM rowid
         # — the SAME canonical id GET /api/sessions/{id}/messages reports — so a client can
-        # correlate its optimistic client_msg_id to the real row. ordinal (turn_index) is a
-        # NON-UNIQUE display position only.
+        # correlate its optimistic client_msg_id to the real row. ordinal (turn_index) is the
+        # prompt position (unique per session): a display order, not an identity.
         ts = time.time()
         await self.broadcast({
             "type": "chat_message",
