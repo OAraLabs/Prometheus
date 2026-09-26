@@ -525,6 +525,40 @@ class LCMConversationStore:
         # Reverse so the caller gets chronological order.
         return [self._row_to_message(r) for r in reversed(rows)]
 
+    def messages_before(
+        self,
+        session_id: str,
+        timestamp: float,
+        *,
+        limit: int,
+    ) -> list[MessagePart]:
+        """The newest *limit* messages persisted strictly before *timestamp*.
+
+        The golden-trace exporter's read: a tool call's input half is the
+        conversation just BEFORE the call. :meth:`get_messages` cannot give
+        that — it returns a session's LOWEST ``turn_index`` values, so every
+        call after a session's 500th row was paired with the rows around 500.
+
+        Selected newest-first by ``(turn_index, rowid)`` so ``limit`` keeps the
+        rows nearest the call, then returned ascending like every other read.
+        ``turn_index`` is the prompt position and rowid only breaks ties
+        between rows that share one. Not ``ORDER BY rowid``: that is PERSIST
+        order, and a message sent mid-turn is persisted before the turn's
+        tail although the model saw it after.
+
+        ``timestamp`` is compared with each row's PERSIST time, which for most
+        of a turn's rows is when the turn ends, and strictly: a row at the
+        call's own time can hold the tool's result. Compacted rows are
+        included, as in :meth:`get_messages`.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM lcm_messages"
+            " WHERE session_id = ? AND timestamp < ?"
+            " ORDER BY turn_index DESC, rowid DESC LIMIT ?",
+            (session_id, timestamp, limit),
+        ).fetchall()
+        return [self._row_to_message(r) for r in reversed(rows)]
+
     def mark_compacted(self, message_ids: list[str]) -> int:
         """Mark messages as compacted. Returns the number of rows affected."""
         if not message_ids:
