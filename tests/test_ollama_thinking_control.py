@@ -108,8 +108,9 @@ def sse(*, reasoning: str = "", content: str = "", finish: str = "stop",
 
 class FakeOllama:
     """Routes by path. ``show`` maps a model to its /api/show answer: a dict
-    (the JSON body), or an int (that HTTP status). ``completions`` is the queue
-    of SSE bodies /v1/chat/completions answers with, in order."""
+    (the JSON body), bytes (a raw body), or an int (that HTTP status).
+    ``completions`` is the queue /v1/chat/completions answers with, in order:
+    SSE bytes, an int (that status), or a (status, json body) pair."""
 
     def __init__(self, show: dict | None = None, completions: list[bytes] | None = None):
         self.show = show or {}
@@ -119,6 +120,7 @@ class FakeOllama:
 
     def handler(self, req: httpx.Request) -> httpx.Response:
         if req.url.path == "/api/show":
+            assert req.method == "POST", req.method     # the only method /api/show takes
             self.show_calls.append(req.content)
             answer = self.show.get(json.loads(req.content).get("model"), 404)
             if isinstance(answer, int):
@@ -127,8 +129,13 @@ class FakeOllama:
                 return httpx.Response(200, content=answer)
             return httpx.Response(200, json=answer)
         assert req.url.path == "/v1/chat/completions", req.url.path
+        assert req.method == "POST", req.method
         self.chat_calls.append(req.content)
         body = self.completions.pop(0)
+        if isinstance(body, int):
+            return httpx.Response(body, json={"error": "unavailable"})
+        if isinstance(body, tuple):
+            return httpx.Response(body[0], json=body[1])
         return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
 
     @property
@@ -146,6 +153,11 @@ THINKING = show("completion", "tools", "thinking")
 
 @pytest.fixture
 def fake(monkeypatch):
+    import prometheus.providers.retry as retry
+
+    # The transport retry's backoff is read per attempt; no real waiting here.
+    monkeypatch.setattr(retry, "BASE_DELAY", 0.0)
+    monkeypatch.setattr(retry, "MAX_DELAY", 0.0)
     server = FakeOllama()
     real = httpx.AsyncClient
 
@@ -222,19 +234,39 @@ async def test_a_cloud_model_is_never_asked_and_gets_todays_bytes(fake, name):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("case", sorted(MAIN_BYTES))
 @pytest.mark.parametrize("suppress", [None, True])
-async def test_a_thinking_model_gets_thinking_off_by_default(fake, suppress):
+async def test_a_thinking_model_gets_thinking_off_by_default(fake, case, suppress):
     fake.show = {QWEN25: THINKING}
-    await run(_provider(), _request(suppress_thinking=suppress))
+    await run(_provider(case), _request(case, suppress_thinking=suppress))
     # Exactly today's body plus the one field /v1 honours ("think" is dropped).
-    assert fake.chat_calls == [MAIN_BYTES["plain"][:-1] + b',"reasoning_effort":"none"}']
+    assert fake.chat_calls == [MAIN_BYTES[case][:-1] + b',"reasoning_effort":"none"}']
 
 
 @pytest.mark.asyncio
-async def test_a_caller_that_opts_in_gets_ollamas_own_default_thinking_on(fake):
+@pytest.mark.parametrize("case", sorted(MAIN_BYTES))
+async def test_a_caller_that_opts_in_gets_ollamas_own_default_thinking_on(fake, case):
     fake.show = {QWEN25: THINKING}
-    await run(_provider(), _request(suppress_thinking=False))
-    assert fake.chat_calls == [MAIN_BYTES["plain"]]
+    await run(_provider(case), _request(case, suppress_thinking=False))
+    assert fake.chat_calls == [MAIN_BYTES[case]]
+
+
+@pytest.mark.asyncio
+async def test_a_harmony_model_also_gets_thinking_off_by_default(fake):
+    # gpt-oss is excluded from the RETRY ("none" cannot stop its analysis
+    # channel), not from the default: "none" is valid and drops its Reasoning line.
+    fake.show = {GPT_OSS: show("completion", "tools", "thinking", family="gptoss")}
+    await run(_provider(), _request(model=GPT_OSS))
+    assert fake.chat_bodies[0]["reasoning_effort"] == "none"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["cloudy:7b", "qwen3:8b-wordcloud", "pointcloud-qwen3:8b"])
+async def test_a_local_name_that_merely_mentions_cloud_is_still_asked(fake, name):
+    fake.show = {name: THINKING}
+    await run(_provider(), _request(model=name))
+    assert [json.loads(b) for b in fake.show_calls] == [{"model": name}]
+    assert fake.chat_bodies[0]["reasoning_effort"] == "none"
 
 
 @pytest.mark.asyncio
@@ -249,6 +281,69 @@ async def test_the_capability_is_asked_once_per_model_and_a_failure_is_not_remem
     await run(p, _request(model=QWEN35))           # another model: its own question
     assert [json.loads(b)["model"] for b in fake.show_calls] == [QWEN25, QWEN25, QWEN35]
     assert ["reasoning_effort" in b for b in fake.chat_bodies] == [False, True, True, False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unreadable", [b"not json", {"details": {"family": "qwen35"}}],
+                         ids=["bad-json", "no-capabilities"])
+async def test_an_unreadable_answer_is_not_remembered_either(fake, unreadable):
+    p = _provider()
+    fake.show = {QWEN35: unreadable}
+    fake.completions = [sse(content="a")] * 2
+    await run(p, _request(model=QWEN35))
+    fake.show = {QWEN35: THINKING}
+    await run(p, _request(model=QWEN35))
+    assert len(fake.show_calls) == 2
+    assert ["reasoning_effort" in b for b in fake.chat_bodies] == [False, True]
+
+
+# ---------------------------------------------------------------------------
+# A server that refuses reasoning_effort "none" (Ollama 0.11.5-0.12.3 pass it
+# through as a think level and answer 400 "invalid think value")
+# ---------------------------------------------------------------------------
+
+OLD_SERVER_400 = (400, {"error": "invalid think value: \"none\" (must be \"high\", \"medium\", "
+                                 "\"low\", true, or false)"})
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_refuses_the_field_gets_todays_request_from_then_on(fake, tel):
+    p = _provider()
+    fake.show = {QWEN35: THINKING}
+    fake.completions = [OLD_SERVER_400, sse(content="four"), sse(content="five")]
+    _, done = await run(p, _request(model=QWEN35))
+    assert done.message.text == "four"                       # the turn is answered, not failed
+    await run(p, _request(model=QWEN35))
+    first, fallback, later = fake.chat_bodies
+    assert first["reasoning_effort"] == "none"
+    assert "reasoning_effort" not in fallback and "reasoning_effort" not in later
+    assert fake.chat_calls[1] == fake.chat_calls[2] == MAIN_BYTES["plain"].replace(
+        QWEN25.encode(), QWEN35.encode())
+    assert tel.calls == []
+
+
+@pytest.mark.asyncio
+async def test_any_other_400_is_still_an_error(fake):
+    fake.show = {QWEN35: THINKING}
+    fake.completions = [(400, {"error": "messages: invalid role"})]
+    with pytest.raises(httpx.HTTPStatusError):
+        await run(_provider(), _request(model=QWEN35))
+    assert len(fake.chat_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_retry_when_the_server_refuses_thinking_off(fake, tel):
+    # Opt-in turn spent its budget; the thinking-off retry is refused: the
+    # first attempt stands, and the model is not asked with the field again.
+    p = _provider()
+    fake.show = {QWEN35: THINKING}
+    fake.completions = [BUDGET_SPENT, OLD_SERVER_400, BUDGET_SPENT]
+    _, done = await run(p, _request(model=QWEN35, suppress_thinking=False))
+    assert (done.message.text, done.stop_reason) == ("", "length")
+    assert len(fake.chat_calls) == 2
+    await run(p, _request(model=QWEN35, suppress_thinking=False))   # spends it again...
+    assert len(fake.chat_calls) == 3                                 # ...and is not retried
+    assert [c["context"]["retried_with_thinking_off"] for c in tel.calls] == [True, False]
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +362,16 @@ async def test_streamed_reasoning_is_a_thinking_block_never_reply_text(fake, new
     assert thinking_blocks(done) == ["The user wants two."]
     # completion_tokens already counts the thought: reported as the server did.
     assert (done.usage.input_tokens, done.usage.output_tokens) == (40, 17)
+
+
+@pytest.mark.asyncio
+async def test_reasoning_content_is_accepted_too(fake):
+    chunk = {"choices": [{"index": 0, "delta": {"reasoning_content": "rc thought"},
+                          "finish_reason": None}]}
+    fake.show = {QWEN35: 500}
+    fake.completions = [f"data: {json.dumps(chunk)}\n\n".encode() + sse(content="yes")]
+    _, done = await run(_provider(), _request(model=QWEN35))
+    assert (done.message.text, thinking_blocks(done)) == ("yes", ["rc thought"])
 
 
 @pytest.mark.asyncio
@@ -312,7 +417,9 @@ async def test_thinking_on_and_the_budget_spent_is_recorded_and_retried_once_thi
     assert second == {**first, "reasoning_effort": "none"}     # the one retry, thinking off
     assert (deltas, done.message.text, done.stop_reason) == (["ok"], "ok", "stop")
     assert thinking_blocks(done) == ["Let me think about this at length"]
-    assert (done.usage.input_tokens, done.usage.output_tokens) == (102, 67)   # both spent
+    # One prompt (sent twice): input is its size, the meter's figure; both
+    # attempts' output was really generated.
+    assert (done.usage.input_tokens, done.usage.output_tokens) == (52, 67)
 
     (rec,) = tel.calls
     assert (rec["subsystem"], rec["operation"], rec["exc_type"]) == (
@@ -328,12 +435,77 @@ async def test_thinking_on_and_the_budget_spent_is_recorded_and_retried_once_thi
 @pytest.mark.asyncio
 async def test_a_retry_that_still_only_thinks_is_recorded_and_not_retried_again(fake, tel):
     fake.show = {QWEN35: THINKING}
-    fake.completions = [BUDGET_SPENT, BUDGET_SPENT]
+    fake.completions = [BUDGET_SPENT,
+                        sse(reasoning="Still pondering", finish="stop", usage=(51, 9))]
     _, done = await run(_provider(), _request(model=QWEN35, suppress_thinking=False))
     assert len(fake.chat_calls) == 2
-    assert [c["context"]["retried_with_thinking_off"] for c in tel.calls] == [True, False]
+    assert [(c["context"]["retried_with_thinking_off"], c["context"]["finish_reason"],
+             c["context"]["output_tokens"], c["context"]["reasoning_chars"]) for c in tel.calls] == [
+        (True, "length", 64, len("Let me think about this at length")),
+        (False, "stop", 9, len("Still pondering")),
+    ]
     # No answer — and the thought is still not the answer.
-    assert done.message.text == "" and thinking_blocks(done)
+    assert (done.message.text, done.stop_reason) == ("", "stop")
+    assert thinking_blocks(done) == ["Let me think about this at length\n\nStill pondering"]
+    assert (done.usage.input_tokens, done.usage.output_tokens) == (51, 73)
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_stops_mid_thought_is_recorded_and_retried(fake, tel):
+    # Not only a spent budget: EOS inside the thought ("stop") answers nothing too.
+    fake.show = {QWEN35: THINKING}
+    fake.completions = [sse(reasoning="Hmm", finish="stop", usage=(40, 12)),
+                        sse(content="yes", usage=(41, 2))]
+    _, done = await run(_provider(), _request(model=QWEN35, suppress_thinking=False))
+    assert done.message.text == "yes" and len(fake.chat_calls) == 2
+    assert tel.calls[0]["context"]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_whitespace_is_not_an_answer_and_silence_is_not_a_thought(fake, tel):
+    fake.show = {QWEN35: THINKING}
+    fake.completions = [sse(reasoning="Thinking", content="\n\n", finish="length"),
+                        sse(content="ok"),
+                        sse(content="", finish="stop")]            # nothing at all
+    p = _provider()
+    _, done = await run(p, _request(model=QWEN35, suppress_thinking=False))
+    assert done.message.text == "ok" and len(tel.calls) == 1        # "\n\n" was not an answer
+    _, empty = await run(p, _request(model=QWEN35, suppress_thinking=False))
+    assert empty.message.text == "" and len(fake.chat_calls) == 3   # no thought: no record, no retry
+    assert len(tel.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_retry_keeps_the_tools(fake, tel):
+    # Coding sessions opt in AND carry tools: the retry is the same request,
+    # thinking off — never a request that lost its tools.
+    fake.show = {QWEN35: THINKING}
+    fake.completions = [BUDGET_SPENT, sse(content="done")]
+    await run(_provider("tools"), _request("tools", model=QWEN35, suppress_thinking=False))
+    first, second = fake.chat_bodies
+    assert "tools" in first and second == {**first, "reasoning_effort": "none"}
+
+
+@pytest.mark.asyncio
+async def test_a_transient_failure_of_the_retry_never_reruns_the_spent_attempt(fake, tel):
+    fake.show = {QWEN35: THINKING}
+    fake.completions = [BUDGET_SPENT, 503, sse(content="ok")]
+    _, done = await run(_provider(), _request(model=QWEN35, suppress_thinking=False))
+    assert done.message.text == "ok"
+    assert ["reasoning_effort" in b for b in fake.chat_bodies] == [False, True, True]
+    assert len(tel.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_retry_that_keeps_failing_leaves_the_first_attempt(fake, tel):
+    fake.show = {QWEN35: THINKING}
+    fake.completions = [BUDGET_SPENT] + [503] * 10
+    _, done = await run(_provider(), _request(model=QWEN35, suppress_thinking=False))
+    assert (done.message.text, done.stop_reason) == ("", "length")
+    assert thinking_blocks(done) == ["Let me think about this at length"]
+    assert ["reasoning_effort" in b for b in fake.chat_bodies][0] is False
+    assert all("reasoning_effort" in b for b in fake.chat_bodies[1:])   # attempt 1 never re-run
+    assert len(tel.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -343,8 +515,8 @@ async def test_no_retry_when_thinking_off_is_not_a_fix(fake, tel, setup):
     if setup == "thinking-already-off":
         fake.show, suppress = {QWEN35: THINKING}, None      # "none" was already sent
     elif setup == "gpt-oss":
-        model = GPT_OSS                                      # "none" cannot stop harmony
-        fake.show = {GPT_OSS: show("completion", "tools", "thinking", family="gptoss")}
+        model = "my-reasoner:latest"                         # harmony by FAMILY, not by name:
+        fake.show = {model: show("completion", "tools", "thinking", family="gptoss")}
     else:
         fake.show = {QWEN35: 500}                            # not known to think: no control
     fake.completions = [BUDGET_SPENT]
