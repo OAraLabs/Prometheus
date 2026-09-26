@@ -71,13 +71,22 @@ def rehydrate(sid: str, rows: list[MessagePart]):
     restored = mgr.rehydrate_if_cold(sid)
     messages = mgr.get_or_create(sid).messages
     tokens = sum(max(1, len(m.content_json) // 4) for m in messages)
-    how = ("nothing" if not restored else
-           "window (as before)" if "(window " in details.last else "newest turn (new)")
     shortened = re.search(r"(\d+) tool payload", details.last)
     left_out = re.search(r"(\d+) message\(s\) left out", details.last)
+    n_short = int(shortened.group(1)) if shortened else 0
+    n_left = int(left_out.group(1)) if left_out else 0
+    if not restored:
+        how = "nothing"
+    elif "(window " in details.last:
+        how = "window (as before)"
+    elif n_left:
+        how = "newest turn: request + newest rounds"
+    elif n_short:
+        how = "newest turn: tool payloads shortened"
+    else:
+        how = "newest turn: as it is"
     return {"restored": restored, "tokens": tokens if restored else 0, "how": how,
-            "shortened": int(shortened.group(1)) if shortened else 0,
-            "left_out": int(left_out.group(1)) if left_out else 0}
+            "shortened": n_short, "left_out": n_left}
 
 
 con = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro&immutable=1", uri=True)
