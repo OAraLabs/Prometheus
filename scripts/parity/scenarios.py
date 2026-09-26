@@ -195,18 +195,15 @@ def _req_compaction(ev: Evidence) -> list[str]:
 _PYDANTIC_PER_RUN_VALUE = re.compile(r"input_value=\{[^}]*\b1[0-9]{9}\b")
 
 
-def _executed_from_xml(row: dict) -> bool:
-    """Did this executed call come from a Qwen XML block in the model's reply?
+def _call_in_text(row: dict) -> bool:
+    """Did the model's reply TEXT carry this executed call (the tier-full shape)?
 
-    Not "does the reply carry XML somewhere": a reply can hold a JSON call
-    that ran beside an XML call that failed validation, and the executed
-    row's raw text then carries ``<function=`` without the reader having
-    executed anything from it (seen live, 2026-09-25). The executed call's
-    validated name and arguments must be a call the XML reader yields from
-    that reply.
+    At tier full the tools are withheld from the request and the call is read
+    out of the reply's text — as JSON, or as the Qwen XML the reader learned in
+    #582. At light the server parses the call natively and the text carries
+    nothing the reader would yield. The reader itself is the oracle.
     """
-    if row.get("success") != 1 or "<function=" not in (row.get("raw_model_output") or ""):
-        return False
+    raw = row.get("raw_model_output") or ""
     parsed = row.get("parsed_tool_call")
     if isinstance(parsed, str):
         try:
@@ -215,18 +212,24 @@ def _executed_from_xml(row: dict) -> bool:
             return False
     if isinstance(parsed, dict) and set(parsed) == {"$json"}:
         parsed = parsed["$json"]          # the store dump marks a decoded JSON column
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("input"), dict):
+    if not raw or not isinstance(parsed, dict) or not isinstance(parsed.get("input"), dict):
         return False
-    from prometheus.adapter.enforcer import parse_xml_tool_calls
+    from prometheus.adapter.enforcer import StructuredOutputEnforcer
 
-    # The validated input may carry defaults the model never wrote; every
-    # argument the XML block does carry must be there, as written.
     validated = {k: str(v) for k, v in parsed["input"].items()}
     return any(
         b.name == parsed.get("name")
         and all(validated.get(k) == str(v) for k, v in b.input.items())
-        for b in parse_xml_tool_calls(row["raw_model_output"])
+        for b in StructuredOutputEnforcer().extract_tool_calls(raw)
     )
+
+
+def _coding_requests(ev: Evidence) -> list:
+    """The coding subprocess's completion requests — the ones whose history
+    holds the task's opening message — as distinct from the daemon's own
+    (its boot probe, which carries no tools by design)."""
+    return [r for r in ev.requests
+            if "Begin the coding task" in json.dumps(r, ensure_ascii=False)]
 
 
 def _req_coding(ev: Evidence) -> list[str]:
@@ -234,23 +237,32 @@ def _req_coding(ev: Evidence) -> list[str]:
     report = (code.get("result") or {}).get("report") or {}
     leaking = [m.group(0)[:80] for r in ev.requests
                for m in _PYDANTIC_PER_RUN_VALUE.finditer(json.dumps(r, ensure_ascii=False))]
-    # WP-X.28 PR 1: the coding path runs the primary at tier full (its adapter is
-    # built from the config's model HINT, blank here), and the production 27B
-    # writes its template's Qwen XML calls there. The recording before PR 1
-    # held one such call that the reader could not read: dropped as a parse
-    # disagreement, retried with feedback. This golden must show the reader at
-    # work — an executed call read from a reply carrying the XML — and carry no
-    # such disagreement, or it records the bug instead of the fix.
-    xml_executed = [r for r in ev.tool_rows() if _executed_from_xml(r)]
+    # WP-X.28 PR 2c: the coding run resolves its tier like a chat turn — the
+    # served model's name and template, not the blank config hint that put
+    # every coding run at tier full (#582 recorded that shape: requests with
+    # model "" and no tools, the 27B's XML calls read out of the text). This
+    # golden must show the light-tier shape: every coding request names the
+    # served model and carries the tools natively, at least one executed
+    # call came from the server's parser rather than the reply's text, and
+    # no request carries the parse-disagreement feedback.
+    coding = _coding_requests(ev)
+    unnamed = [r for r in coding if not r.get("model")]
+    toolless = [r for r in coding if not r.get("tools")]
+    executed = [r for r in ev.tool_rows() if r.get("success") == 1 and r.get("parsed_tool_call")]
+    native = [r for r in executed if not _call_in_text(r)]
     fed_back = [r for r in ev.requests
                 if "tool-call markup that could not be parsed" in json.dumps(r, ensure_ascii=False)]
     return (_need(report.get("status") == "success", f"coding run status {report.get('status')!r}")
             + _need(report.get("acceptance_exit") == 0, "acceptance command did not pass")
             + _need(not leaking, "a tool result carries a pydantic error repr with a per-run "
                                  f"value the normalizer cannot see — not replayable: {leaking[:1]}")
-            + _need(bool(xml_executed), "no executed tool call is one the XML reader yields from its "
-                                        "own reply (<function=) — the sample does not show the XML "
-                                        "reader at work")
+            + _need(bool(coding), "no completion request carries the coding task")
+            + _need(not unnamed, f"{len(unnamed)} coding request(s) carry no served model name — "
+                                 "the adapter was built for the blank hint")
+            + _need(not toolless, f"{len(toolless)} coding request(s) carry no native tools — "
+                                  "the run is not at the chat turn's tier")
+            + _need(bool(native), "no executed tool call came from the server's own parser — every "
+                                  "one was read out of the reply's text, the tier-full shape")
             + _need(not fed_back, "a request carries the parse-disagreement feedback — an "
                                   "envelope the reader could not read; the sample records the bug"))
 
