@@ -1,0 +1,823 @@
+# Class: multi-step tool use — each step needs the previous step's result.
+class: multi_step
+tasks:
+  - id: ms-find-csv-sum-write
+    difficulty: easy
+    smoke: true
+    prompt: >
+      Under data/, find the CSV file whose name contains "q3", add up its
+      "amount" column, and write just the total (a plain number) to
+      {workspace}/total.txt.
+    setup_files:
+      data/sales_q2.csv: "id,amount\n1,10\n2,20\n"
+      data/sales_q3.csv: "id,amount\n1,125\n2,310\n3,47\n4,1000\n"
+      data/notes.txt: "q3 numbers are provisional\n"
+    score:
+      expect_file: total.txt
+      expect_file_regex: {path: total.txt, pattern: '\A\s*1482(\.0+)?\s*\Z'}
+    reference:
+      files: {total.txt: "1482\n"}
+      tools: [glob, read_file, write_file]
+      wrong_files:
+        - {"total.txt": "30\n"}  # summed the q2 file
+        - {"total.txt": "1512\n"}  # summed every CSV
+
+  # ---------------------------------------------------------------- easy ---
+
+  - id: ms-pointer-copy-line
+    difficulty: easy
+    notes: "easy — read a pointer file, open the file it names, write one line."
+    prompt: >
+      The file inbox/latest.txt holds the name of another file in inbox/. Open
+      that file and write its third line, exactly as it appears, to
+      {workspace}/third_line.txt.
+    setup_files:
+      inbox/latest.txt: "memo-0419.txt\n"
+      inbox/memo-0418.txt: "From: ops-desk\nSubject: rollback\nrollback window closes at 04:00 for heron-vault-1180\nthanks\n"
+      inbox/memo-0419.txt: "From: ops-desk\nSubject: rotation\nrotate the tern-cellar-6627 credentials before friday\nthanks\n"
+      inbox/memo-0420.txt: "From: build-bot\nSubject: nightly\nnightly build 3310 is green\n"
+    score:
+      expect_file_regex:
+        path: third_line.txt
+        pattern: '\A\s*rotate the tern-cellar-6627 credentials before friday\s*\Z'
+    reference:
+      files: {third_line.txt: "rotate the tern-cellar-6627 credentials before friday\n"}
+      tools: [read_file, read_file, write_file]
+      wrong_files:
+        - {"third_line.txt": "rollback window closes at 04:00 for heron-vault-1180\n"}  # neighbouring memo
+        - {"third_line.txt": "Subject: rotation\n"}  # second line
+
+  - id: ms-grep-key-owner
+    difficulty: easy
+    notes: >
+      easy — search for the one file that sets a key, then read another field of
+      it; export.ini only mentions retention in a comment, so a loose grep for
+      "retention" lands on team-cormorant-9035.
+    prompt: >
+      Exactly one file under config/ sets retention_days. Find that file and
+      tell me the value of the owner field in it. End your reply with a final
+      line `ANSWER: <the owner>`.
+    setup_files:
+      config/ingest.ini: "[ingest]\nowner = team-pelican-2208\nbatch = 500\n"
+      config/archive.ini: "[archive]\nowner = team-sandpiper-4471\nretention_days = 213\ncompress = true\n"
+      config/export.ini: "[export]\nowner = team-cormorant-9035\nformat = parquet\n# retention is set elsewhere\n"
+    score:
+      expect_answer: '(owner\s*[:=]\s*)?team-sandpiper-4471'
+      answer_shape: '(owner\s*[:=]\s*)?team-[a-z]+-\d+'
+    reference:
+      answer: "config/archive.ini is the only file that sets retention_days (= 213), and its owner field is team-sandpiper-4471.\n\nANSWER: team-sandpiper-4471"
+      tools: [grep, read_file]
+      wrong_answers:
+        - "ANSWER: team-cormorant-9035"  # the grep trap: export.ini's retention comment
+        - "config/archive.ini sets retention_days, and its owner is team-sandpiper-4471.\n\nANSWER: team-pelican-2208"  # right in prose, wrong answer line
+        - "ANSWER: 213"  # the retention_days value, not the owner
+        - "ANSWER: config/archive.ini"  # the file, not its owner
+        - "team-cormorant-9035"  # no answer line, but a bare owner of the right shape: the grep trap
+      right_answers:
+        - "ANSWER: team-sandpiper-4471"
+        - "grep for retention matches two files: config/export.ini (owner team-cormorant-9035) only has a comment, '# retention is set elsewhere', and config/ingest.ini (team-pelican-2208) does not mention it at all. config/archive.ini sets retention_days = 213, and its owner field is team-sandpiper-4471.\n\nANSWER: team-sandpiper-4471"
+        - "**ANSWER:** `owner = team-sandpiper-4471`"
+        - "Final answer: Team-Sandpiper-4471"
+        - "config/archive.ini sets retention_days = 213.\n\nSo the answer is team-sandpiper-4471."  # no answer line: the bare last line is credited
+        - "### Answer:\n`team-sandpiper-4471`"  # empty label, the value on the next line
+        - "ANSWER: <team-sandpiper-4471>"  # the prompt's placeholder brackets, copied
+        - "**ANSWER:** owner = `team-sandpiper-4471`"  # backticks round the value only
+        - "ANSWER: team‑sandpiper‑4471"  # non-breaking hyphens
+        - "config/archive.ini sets retention_days = 213; its owner is team-sandpiper-4471."  # no answer line, but the one owner in the prose is the right one: credited
+      format_misses:
+        - "ANSWER: team-sandpiper-4471, team-cormorant-9035"  # two owners on the line: commits to neither
+        - "config/archive.ini sets retention_days and is owned by team-sandpiper-4471; config/export.ini, owned by team-cormorant-9035, only mentions retention in a comment."  # no answer line, two owners in the prose
+        - "Two files mention retention (config/archive.ini and config/export.ini), so I can't tell which owner you mean."  # no answer line, no clear answer
+
+  - id: ms-count-open-todos
+    difficulty: easy
+    notes: "easy — find the .todo file, count open items (not done ones, not the .md distractor)."
+    prompt: >
+      Under notes/, find the file whose name ends in .todo. Count the lines in
+      it that start with "- [ ]" (open items; "- [x]" lines are done) and write
+      just that count to {workspace}/open_count.txt.
+    setup_files:
+      notes/week37.md: "# week 37\n- [ ] draft the wren migration\n- [ ] book the quarry room\n- [ ] reply to the lantern survey\n"
+      notes/week38.todo: |
+        # week 38
+        - [ ] rotate the staging keys
+        - [x] merge the pelican patch
+        - [ ] write the release notes for 4.2
+        - [ ] fix the flaky ingest test
+        - [x] archive the march reports
+        - [ ] review the budget sheet
+        - [ ] update the on-call rota
+        - [ ] rename the orchid bucket
+        - [x] close the stale tickets
+        - [ ] ping the vendor about invoices
+        - [ ] benchmark the new cache
+        - [x] prune old branches
+        - [ ] refresh the demo data
+        - [ ] trim the dashboard panels
+        - [ ] migrate the cron registry
+        - [x] tag release 4.1
+        - [ ] answer the audit questions
+      notes/README.txt: "One file per week. .todo files are the live lists.\n"
+    score:
+      expect_file_regex: {path: open_count.txt, pattern: '\A\s*12\s*\Z'}
+    reference:
+      files: {open_count.txt: "12\n"}
+      tools: [glob, read_file, write_file]
+      wrong_files:
+        - {"open_count.txt": "15\n"}  # counted the week37.md items too
+        - {"open_count.txt": "17\n"}  # counted done items too
+
+  - id: ms-glob-count-orders
+    difficulty: easy
+    notes: "easy — recursive find, then write the count. Near-miss names (orders_, order-, .bak, refund_) must not count."
+    prompt: >
+      How many files named order_*.json are there anywhere under fixtures/,
+      including subfolders? Write just the number to
+      {workspace}/order_count.txt.
+    setup_files:
+      fixtures/order_1001.json: "{\"id\": 1001}\n"
+      fixtures/order_template.txt: "{\"id\": null}\n"
+      fixtures/2026/order_1002.json: "{\"id\": 1002}\n"
+      fixtures/2026/03/order_1003.json: "{\"id\": 1003}\n"
+      fixtures/2026/03/order_1004.json: "{\"id\": 1004}\n"
+      fixtures/2026/03/order_1005.json: "{\"id\": 1005}\n"
+      fixtures/2026/03/order-1012.json: "{\"id\": 1012}\n"
+      fixtures/2026/04/order_1006.json: "{\"id\": 1006}\n"
+      fixtures/2026/04/order_1007.json: "{\"id\": 1007}\n"
+      fixtures/2026/04/refund_1008.json: "{\"id\": 1008}\n"
+      fixtures/archive/orders_summary.json: "{\"count\": 3}\n"
+      fixtures/archive/old/order_0998.json: "{\"id\": 998}\n"
+      fixtures/archive/old/order_0999.json: "{\"id\": 999}\n"
+      fixtures/archive/old/order_0997.json.bak: "{\"id\": 997}\n"
+      fixtures/drafts/order_1009.json: "{\"id\": 1009}\n"
+      fixtures/drafts/order_1011.json: "{\"id\": 1011}\n"
+    score:
+      expect_file_regex: {path: order_count.txt, pattern: '\A\s*11\s*\Z'}
+    reference:
+      files: {order_count.txt: "11\n"}
+      tools: [glob, write_file]
+      wrong_files:
+        - {"order_count.txt": "13\n"}  # counted order-1012 and orders_summary
+        - {"order_count.txt": "12\n"}  # counted the hyphenated order-1012
+
+  - id: ms-json-max-write
+    difficulty: easy
+    notes: "easy — locate the one JSON file, pick the max p99 (close runner-up, p50 distractor), write the name."
+    prompt: >
+      Somewhere under metrics/ there is exactly one JSON file. It lists
+      services with their p50 and p99 latency in milliseconds. Write the name
+      of the service with the highest p99 to {workspace}/slowest.txt (just the
+      name).
+    setup_files:
+      metrics/README.txt: "Daily latency snapshots live in the daily/ folder.\n"
+      metrics/daily/latency-0310.json: |
+        {"window": "2026-03-10T00:00Z/24h",
+         "services": [
+          {"name": "atlas-gate", "p50": 41, "p99": 912},
+          {"name": "tarn-index", "p50": 95, "p99": 1869},
+          {"name": "brine-cache", "p50": 212, "p99": 1640},
+          {"name": "quill-router", "p50": 38, "p99": 1873},
+          {"name": "sable-auth", "p50": 17, "p99": 388}
+         ]}
+    score:
+      expect_file_regex: {path: slowest.txt, pattern: '\A\s*quill-router\s*\Z'}
+    reference:
+      files: {slowest.txt: "quill-router\n"}
+      tools: [glob, read_file, write_file]
+      wrong_files:
+        - {"slowest.txt": "tarn-index\n"}  # runner-up p99
+        - {"slowest.txt": "brine-cache\n"}  # highest p50
+
+  - id: ms-version-codename
+    difficulty: easy
+    notes: >
+      easy — read VERSION, then look that exact version up in the changelog; the
+      unreleased 2.15.0 entry on top and the other 2.14.x releases are the
+      distractors.
+    prompt: >
+      Read the VERSION file to see which version is deployed, then look that
+      version up in CHANGELOG.md and tell me its codename. End your reply with a
+      final line `ANSWER: <the codename>`.
+    setup_files:
+      VERSION: "2.14.3\n"
+      CHANGELOG.md: |
+        # Changelog
+
+        ## 2.15.0 (unreleased) — codename: marble-finch-91
+        - new export queue
+
+        ## 2.14.3 — codename: amber-lantern-58
+        - fix the retry storm in the sync worker
+
+        ## 2.14.2 — codename: slate-otter-12
+        - faster cold start
+
+        ## 2.14.0 — codename: coral-heron-40
+        - first release of the 2.14 line
+    score:
+      expect_answer: '(codename\s*[:=]\s*)?amber-lantern-58'
+      answer_shape: '(codename\s*[:=]\s*)?[a-z]+-[a-z]+-\d+'
+    reference:
+      answer: "VERSION says 2.14.3 is deployed, and CHANGELOG.md lists 2.14.3 with the codename amber-lantern-58.\n\nANSWER: amber-lantern-58"
+      tools: [read_file, read_file]
+      wrong_answers:
+        - "ANSWER: marble-finch-91"  # the top entry: unreleased 2.15.0
+        - "VERSION is 2.14.3, and the 2.14.3 entry's codename is amber-lantern-58.\n\nANSWER: slate-otter-12"  # right in prose, wrong answer line
+        - "ANSWER: coral-heron-40"  # matched the 2.14 line, not the exact version
+        - "ANSWER: 2.14.3"  # the version, not its codename
+        - "The top entry of CHANGELOG.md is the newest release.\n\nThe answer is marble-finch-91."  # no answer line, but a bare codename of the right shape: the unreleased one
+      right_answers:
+        - "ANSWER: amber-lantern-58"
+        - "VERSION contains 2.14.3. In CHANGELOG.md the top entry is 2.15.0 (unreleased, marble-finch-91), which is not deployed; below it, 2.14.3 has the codename amber-lantern-58 (2.14.2 is slate-otter-12 and 2.14.0 is coral-heron-40).\n\nANSWER: amber-lantern-58"
+        - "**ANSWER:** `codename: amber-lantern-58`"
+        - "Final answer: Amber-Lantern-58."
+        - "amber-lantern-58"  # no answer line: the bare value is credited
+        - "ANSWER: $\\boxed{\\text{amber-lantern-58}}$"  # LaTeX: \text{} inside \boxed{} inside $...$
+        - "Version 2.14.3 is deployed; its codename is amber-lantern-58."  # no answer line, but the one codename in the prose is the right one: credited
+      format_misses:
+        - "ANSWER: amber-lantern-58 or marble-finch-91"  # hedged between deployed and unreleased: commits to neither
+        - "Version 2.14.3 is deployed with codename amber-lantern-58; the unreleased 2.15.0 will be marble-finch-91."  # no answer line, two codenames in the prose
+        - "CHANGELOG.md has codenames for 2.15.0, 2.14.3, 2.14.2 and 2.14.0; the deployed one is whichever matches VERSION."  # no answer line, no clear answer
+
+  # -------------------------------------------------------------- medium ---
+
+  - id: ms-grep-service-owner
+    difficulty: medium
+    notes: >
+      medium — search → config → team file (three dependent reads); a substring
+      grep for ledger-sync also hits the near-miss ledger-sync-archive in
+      svc-02.conf, which leads to heron's PG-6618-HR.
+    prompt: >
+      One of the files in services/ configures the service called exactly
+      ledger-sync. That file's contact line names a team file. What pager code
+      is listed in that team file? End your reply with a final line
+      `ANSWER: <the pager code>`.
+    setup_files:
+      services/svc-01.conf: "service = billing-api\ncontact = teams/osprey.md\nport = 7101\n"
+      services/svc-02.conf: "service = ledger-sync-archive\ncontact = teams/heron.md\nport = 7102\n"
+      services/svc-03.conf: "service = ledger-sync\ncontact = teams/kestrel.md\nport = 7103\n"
+      services/svc-04.conf: "service = report-mailer\ncontact = teams/osprey.md\nport = 7104\n"
+      teams/osprey.md: "# Osprey\npager: PG-2290-OS\nchannel: osprey-ops\n"
+      teams/heron.md: "# Heron\npager: PG-6618-HR\nchannel: heron-ops\n"
+      teams/kestrel.md: "# Kestrel\npager: PG-7351-KX\nchannel: kestrel-ops\n"
+    score:
+      expect_answer: '(pager( code)?\s*[:=]\s*)?PG-7351-KX'
+      answer_shape: '(pager( code)?\s*[:=]\s*)?PG-\d{4}-[A-Z]{2}'
+    reference:
+      answer: "ledger-sync is configured in services/svc-03.conf, whose contact line points to teams/kestrel.md; that file lists the pager code PG-7351-KX.\n\nANSWER: PG-7351-KX"
+      tools: [grep, read_file, read_file]
+      wrong_answers:
+        - "ANSWER: PG-6618-HR"  # the near-miss ledger-sync-archive → heron
+        - "services/svc-03.conf configures ledger-sync and names teams/kestrel.md, whose pager is PG-7351-KX.\n\nANSWER: PG-2290-OS"  # right in prose, wrong answer line
+        - "ANSWER: teams/kestrel.md"  # the team file, not its pager code
+        - "ANSWER: kestrel-ops"  # the channel line, not the pager line
+        - "PG-6618-HR"  # no answer line, but a bare pager code of the right shape: the near miss
+      right_answers:
+        - "ANSWER: PG-7351-KX"
+        - "grep for ledger-sync matches two files: services/svc-02.conf, but that is ledger-sync-archive (teams/heron.md, pager PG-6618-HR), and services/svc-03.conf, which is exactly ledger-sync. Its contact is teams/kestrel.md, and that file lists pager: PG-7351-KX. (osprey's PG-2290-OS belongs to billing-api and report-mailer.)\n\nANSWER: PG-7351-KX"
+        - "**ANSWER:** `pager: pg-7351-kx`"
+        - "Final answer: PG-7351-KX."
+        - "svc-03.conf → teams/kestrel.md.\n\nTherefore, PG-7351-KX."  # no answer line: the bare last line is credited
+        - "ANSWER:\n```\nPG-7351-KX\n```"  # empty label, the value in a fenced block below it
+        - "ledger-sync is in services/svc-03.conf → teams/kestrel.md; the pager code is PG-7351-KX."  # no answer line, but the one pager code in the prose is the right one: credited
+      format_misses:
+        - "ANSWER: PG-7351-KX or PG-6618-HR"  # hedged between the answer and the near miss: commits to neither
+        - "ledger-sync points to teams/kestrel.md with pager PG-7351-KX, and ledger-sync-archive to teams/heron.md with pager PG-6618-HR."  # no answer line, two pager codes in the prose
+        - "Both services/svc-02.conf and services/svc-03.conf mention ledger-sync, so the pager could be heron's or kestrel's."  # no answer line, no clear answer
+
+  - id: ms-latest-log-first-error
+    difficulty: medium
+    notes: "medium — pick the newest dated log, then the FIRST error in it (a later error and an older log are distractors)."
+    prompt: >
+      logs/ holds one log per day, named app-YYYY-MM-DD.log. In the most
+      recent day's log, find the FIRST line whose level is ERROR and write its
+      request id (the value after req=) to {workspace}/first_error.txt.
+    setup_files:
+      logs/app-2026-02-28.log: |
+        2026-02-28T09:00:00 INFO req=r-30011-a started
+        2026-02-28T09:00:04 ERROR req=r-30017-c upstream closed
+      logs/app-2026-03-05.log: |
+        2026-03-05T08:12:00 INFO req=r-41020-d started
+        2026-03-05T08:12:09 ERROR req=r-41026-k disk quota
+      logs/app-2026-03-12.log: |
+        2026-03-12T07:58:10 INFO req=r-58200-m started
+        2026-03-12T07:58:31 WARN req=r-58207-t slow response (ERROR budget 12%)
+        2026-03-12T07:59:02 INFO req=r-58209-p cache warm
+        2026-03-12T08:01:45 ERROR req=r-58213-q token expired
+        2026-03-12T08:02:10 INFO req=r-58220-s retry ok
+        2026-03-12T08:05:55 ERROR req=r-58240-z write timeout
+      logs/app-2026-03-09.log: |
+        2026-03-09T10:00:00 INFO req=r-44100-f started
+        2026-03-09T10:00:07 ERROR req=r-44102-b schema mismatch
+    score:
+      expect_file_regex: {path: first_error.txt, pattern: '\A\s*(req=)?r-58213-q\s*\Z'}
+    reference:
+      files: {first_error.txt: "r-58213-q\n"}
+      tools: [glob, read_file, write_file]
+      wrong_files:
+        - {"first_error.txt": "r-58207-t\n"}  # WARN line with ERROR in its message
+        - {"first_error.txt": "r-58240-z\n"}  # last error, not first
+
+  - id: ms-semver-latest-codename
+    difficulty: medium
+    smoke: true
+    notes: "medium — compare versions numerically (text order picks v1.9.3), then read that file."
+    prompt: >
+      releases/ has one notes file per version, named vMAJOR.MINOR.PATCH.txt.
+      Find the HIGHEST version — compare the numbers numerically, not as text —
+      and write the codename from its notes file to
+      {workspace}/latest_codename.txt (just the codename).
+    setup_files:
+      releases/v1.2.11.txt: "codename: dusk-marten-15\nnotes: legacy line\n"
+      releases/v1.9.3.txt: "codename: ember-wren-88\nnotes: last of the 1.9 line\n"
+      releases/v1.9.12.txt: "codename: frost-plover-27\nnotes: backport build\n"
+      releases/v1.10.0.txt: "codename: cobalt-ibis-7304\nnotes: new storage engine\n"
+      releases/v1.1.40.txt: "codename: moss-grebe-63\nnotes: very old\n"
+    score:
+      expect_file_regex:
+        path: latest_codename.txt
+        pattern: '\A\s*(codename:\s*)?cobalt-ibis-7304\s*\Z'
+    reference:
+      files: {latest_codename.txt: "cobalt-ibis-7304\n"}
+      tools: [glob, read_file, write_file]
+      wrong_files:
+        - {"latest_codename.txt": "ember-wren-88\n"}  # text-sorted v1.9.3
+        - {"latest_codename.txt": "frost-plover-27\n"}  # v1.9.12
+
+  - id: ms-template-render
+    difficulty: medium
+    notes: "medium — read a template and a vars file, substitute every placeholder (one repeats), write the exact result."
+    prompt: >
+      Render templates/notice.tmpl: replace each {{key}} placeholder with the
+      value of that key from vars/notice.json, and write the result to
+      {workspace}/out/notice.txt. Keep every other character of the template
+      unchanged.
+    setup_files:
+      templates/notice.tmpl: "Maintenance for {{service}} starts at {{start}} and lasts {{minutes}} minutes.\nTicket: {{ticket}} ({{service}})\n"
+      vars/notice.json: "{\"service\": \"quartz-relay\", \"start\": \"02:30 UTC\", \"minutes\": 45, \"ticket\": \"CHG-60417\", \"owner\": \"team-lapwing\"}\n"
+    score:
+      expect_file_regex:
+        path: out/notice.txt
+        pattern: '\A\s*Maintenance for quartz-relay starts at 02:30 UTC and lasts 45 minutes\.[ \t]*\r?\nTicket: CHG-60417 \(quartz-relay\)\s*\Z'
+    reference:
+      files: {out/notice.txt: "Maintenance for quartz-relay starts at 02:30 UTC and lasts 45 minutes.\nTicket: CHG-60417 (quartz-relay)\n"}
+      tools: [read_file, read_file, write_file]
+      wrong_files:
+        - {"out/notice.txt": "Maintenance for quartz-relay starts at 02:30 UTC and lasts 45 minutes.\nTicket: CHG-60417 ({{service}})\n"}  # replaced only the first {{service}}
+        - {"out/notice.txt": "Maintenance for {{service}} starts at {{start}} and lasts {{minutes}} minutes.\nTicket: {{ticket}} ({{service}})\n"}  # template copied unrendered
+
+  - id: ms-run-script-low-stock
+    difficulty: medium
+    notes: "medium — run a script, filter its output (< 10, the 10 is a boundary), sort, write."
+    prompt: >
+      Run `sh tools/stock_report.sh` in the working directory. It prints one
+      line per SKU: the SKU and its quantity on hand. Write the SKUs whose
+      quantity is below 10 to {workspace}/reorder.txt, one per line, sorted
+      alphabetically, and nothing else.
+    setup_files:
+      tools/stock_report.sh: |
+        #!/bin/sh
+        # on hand = received - shipped - damaged
+        line() { echo "$1 $(( $2 - $3 - $4 ))"; }
+        line SKU-TEAL-118 140 131 2
+        line SKU-ONYX-402 75 22 0
+        line SKU-AMBER-077 64 51 3
+        line SKU-CORAL-913 90 85 2
+        line SKU-JADE-250 30 17 1
+        line SKU-PLUM-664 48 46 2
+        line SKU-SAGE-481 55 14 0
+        line SKU-RUST-339 120 108 3
+    score:
+      expect_file_regex:
+        path: reorder.txt
+        pattern: '\A\s*SKU-CORAL-913[ \t]*\r?\nSKU-PLUM-664[ \t]*\r?\nSKU-RUST-339[ \t]*\r?\nSKU-TEAL-118\s*\Z'
+    reference:
+      files: {reorder.txt: "SKU-CORAL-913\nSKU-PLUM-664\nSKU-RUST-339\nSKU-TEAL-118\n"}
+      tools: [bash, write_file]
+      wrong_files:
+        - {"reorder.txt": "SKU-AMBER-077\nSKU-CORAL-913\nSKU-PLUM-664\nSKU-RUST-339\nSKU-TEAL-118\n"}  # included the boundary qty 10
+        - {"reorder.txt": "SKU-TEAL-118\nSKU-CORAL-913\nSKU-PLUM-664\nSKU-RUST-339\n"}  # script order, not sorted
+
+  - id: ms-config-chain-3hop
+    difficulty: medium
+    notes: >
+      medium — three dependent reads (deploy → env → secrets); the prod chain
+      (cinder-coast-17) is the distractor, baited by current.toml's "switched
+      from prod" comment and by a grep that finds both region lines.
+    prompt: >
+      deploy/current.toml says which environment file is active. Follow it:
+      the environment file names a secrets file, and that secrets file has a
+      region line. Which region is it? End your reply with a final line
+      `ANSWER: <the region>`.
+    setup_files:
+      deploy/current.toml: "# switched from prod on 2026-03-01\nenv_file = \"envs/canary.json\"\n"
+      envs/prod.json: "{\"name\": \"prod\", \"secrets_ref\": \"vault/prod-keys.txt\", \"replicas\": 6}\n"
+      envs/canary.json: "{\"name\": \"canary\", \"secrets_ref\": \"vault/canary-keys.txt\", \"replicas\": 2}\n"
+      vault/prod-keys.txt: "key_id=kp-1182\nregion=cinder-coast-17\n"
+      vault/canary-keys.txt: "key_id=kc-5530\nregion=aurora-basin-42\n"
+    score:
+      expect_answer: '(region\s*[:=]\s*)?aurora-basin-42'
+      answer_shape: '(region\s*[:=]\s*)?[a-z]+-[a-z]+-\d+'
+    reference:
+      answer: "deploy/current.toml → envs/canary.json → vault/canary-keys.txt, whose region line is region=aurora-basin-42.\n\nANSWER: aurora-basin-42"
+      tools: [read_file, read_file, read_file]
+      wrong_answers:
+        - "ANSWER: cinder-coast-17"  # the prod chain
+        - "current.toml points to envs/canary.json, whose secrets file vault/canary-keys.txt has region=aurora-basin-42.\n\nANSWER: cinder-coast-17"  # right in prose, wrong answer line
+        - "ANSWER: canary"  # the environment, not the region
+        - "ANSWER: kc-5530"  # the key_id line, not the region line
+        - "region=cinder-coast-17"  # no answer line, but a bare region of the right shape: the prod chain
+      right_answers:
+        - "ANSWER: aurora-basin-42"
+        - "deploy/current.toml has a comment saying it was switched from prod, but its env_file is envs/canary.json. That names vault/canary-keys.txt as its secrets file (prod's would be vault/prod-keys.txt with region=cinder-coast-17), and vault/canary-keys.txt has region=aurora-basin-42.\n\nANSWER: aurora-basin-42"
+        - "**ANSWER:** `region=aurora-basin-42`"
+        - "Final answer: Aurora-Basin-42"
+        - "current.toml → envs/canary.json → vault/canary-keys.txt.\n\nThe final answer is aurora-basin-42."  # no answer line: the bare last line is credited
+        - "ANSWER: region=aurora‐basin‐42"  # unicode hyphens
+        - "current.toml → envs/canary.json → vault/canary-keys.txt: the region is aurora-basin-42."  # no answer line, but the one region in the prose is the right one: credited
+      format_misses:
+        - "ANSWER: region=aurora‐basin‐42 (from vault/canary-keys.txt)"  # a parenthetical on the line may qualify the value: unreadable, never credited
+        - "ANSWER: aurora-basin-42 or cinder-coast-17"  # hedged between both chains: commits to neither
+        - "The canary chain ends at region aurora-basin-42 and the prod chain at region cinder-coast-17."  # no answer line, two regions in the prose
+        - "current.toml was switched from prod, so the region is whatever the canary secrets file says."  # no answer line, no clear answer
+
+  - id: ms-aggregate-transfers
+    difficulty: medium
+    notes: "medium — aggregate across three logs (sum only OK bytes, count FAIL), exact two-line report."
+    prompt: |
+      Every file in transfers/ is a log with lines of the form
+      `<time> <LEVEL> bytes=<n>`. Across ALL of those files, add up the bytes
+      on the lines whose level is OK, and count the lines whose level is FAIL.
+      Write a two-line report to {workspace}/transfer_report.txt, exactly:
+      total_bytes=<sum>
+      fail_count=<count>
+    setup_files:
+      transfers/east.log: |
+        09:00:01 OK bytes=18422
+        09:03:17 FAIL bytes=5120
+        09:05:44 OK bytes=733
+        09:10:02 RETRY bytes=2048
+        09:12:30 OK bytes=40961
+      transfers/west.log: |
+        10:01:00 OK bytes=1207
+        10:04:12 FAIL bytes=900
+        10:09:59 FAIL bytes=77
+        10:15:31 OK bytes=26314
+      transfers/north.log: |
+        11:00:00 OK bytes=5
+        11:02:02 RETRY bytes=3333
+        11:07:45 OK bytes=9870
+        11:11:11 FAIL bytes=4096
+    score:
+      expect_file_regex:
+        path: transfer_report.txt
+        pattern: '\A\s*total_bytes=97512[ \t]*\r?\nfail_count=4\s*\Z'
+    reference:
+      files: {transfer_report.txt: "total_bytes=97512\nfail_count=4\n"}
+      tools: [glob, read_file, read_file, read_file, write_file]
+      wrong_files:
+        - {"transfer_report.txt": "total_bytes=113086\nfail_count=4\n"}  # summed bytes on every line
+        - {"transfer_report.txt": "fail_count=4\ntotal_bytes=97512\n"}  # lines swapped
+
+  - id: ms-profile-include-fallback
+    difficulty: medium
+    notes: >
+      medium — pointer → profile → included base file for the key the profile
+      does not set; day.ini's batch_size = 96 is the distractor, and a model that
+      stops at night.ini finds no batch_size at all.
+    prompt: >
+      run.cfg names the active profile file. A profile may include another
+      file; keys the profile sets itself win, and anything it does not set
+      comes from the included file. What is the effective value of batch_size
+      for the active profile? End your reply with a final line
+      `ANSWER: <the batch_size value>`.
+    setup_files:
+      run.cfg: "profile = profiles/night.ini\n"
+      profiles/night.ini: "include = profiles/base.ini\nworkers = 12\nqueue = night-lane-3\n"
+      profiles/day.ini: "include = profiles/base.ini\nbatch_size = 96\nworkers = 8\n"
+      profiles/base.ini: "batch_size = 3712\nworkers = 4\nqueue = default\n"
+    score:
+      expect_answer: '(batch_size\s*[:=]\s*)?3[, \u00a0\u202f]?712(\.0+)?'
+      answer_shape: '(batch_size\s*[:=]\s*)?\d{1,3}([, \u00a0\u202f]?\d{3})*(\.\d+)?'
+    reference:
+      answer: "run.cfg points to profiles/night.ini. It does not set batch_size itself, so the value comes from its include, profiles/base.ini: batch_size = 3712.\n\nANSWER: 3712"
+      tools: [read_file, read_file, read_file]
+      wrong_answers:
+        - "ANSWER: 96"  # day.ini's override
+        - "The active profile is profiles/night.ini, which does not set batch_size, so it inherits 3712 from profiles/base.ini.\n\nANSWER: 96"  # right in prose, wrong answer line
+        - "ANSWER: 12"  # night.ini's workers, not batch_size
+        - "ANSWER: 37120"  # a digit too many
+        - "ANSWER: 13,712"  # not the value
+        - "96"  # no answer line, but a bare number: day.ini's override
+      right_answers:
+        - "ANSWER: 3712"
+        - "run.cfg says profile = profiles/night.ini. night.ini sets workers = 12 and queue = night-lane-3 but no batch_size, so it falls through to its include, profiles/base.ini, which has batch_size = 3712. (profiles/day.ini sets batch_size = 96, but day is not the active profile.)\n\nANSWER: 3712"
+        - "**ANSWER:** 3\u202f712"
+        - "Final answer: batch_size = 3,712.0"
+        - "ANSWER: $3712$"
+        - "So the answer is 3712."  # no answer line: the bare last line is credited
+        - "run.cfg -> night.ini -> base.ini.\n\n**Final Answer:**\n\\[\\boxed{3712}\\]"  # empty label, the value on the next line in \[ \]
+        - "ANSWER: <3712>"  # the prompt's placeholder brackets, copied
+        - "Final Answer: $\\boxed{3{,}712}$"  # LaTeX thousands separator
+        - "run.cfg points to profiles/night.ini, which inherits batch_size = 3712 from profiles/base.ini."  # no answer line, but the one value in the prose is the right one: credited
+      format_misses:
+        - "ANSWER: 96 or 3712"  # hedged between the profiles: commits to neither
+        - "The effective batch_size is 3712, inherited from profiles/base.ini because profiles/night.ini does not set it."  # no answer line; prose with a negation in it is not read as a commitment
+        - "profiles/night.ini does not set batch_size, so it comes from the file it includes."  # no answer line, no clear answer
+
+  # ---------------------------------------------------------------- hard ---
+
+  - id: ms-csv-join-region-total
+    difficulty: hard
+    smoke: true
+    notes: "hard — join two CSVs and filter on an exact region (northeast is a substring trap)."
+    prompt: >
+      data/orders.csv has order_id, customer_id and amount; data/customers.csv
+      maps each customer_id to a region. Add up the amount of every order
+      placed by a customer whose region is exactly "north", and write just the
+      total to {workspace}/north_total.txt.
+    setup_files:
+      data/customers.csv: |
+        customer_id,region,tier
+        C-101,north,gold
+        C-102,south,silver
+        C-103,northeast,gold
+        C-104,north,bronze
+        C-105,west,silver
+        C-106,north,silver
+        C-107,south,gold
+      data/orders.csv: |
+        order_id,customer_id,amount
+        O-5001,C-101,420
+        O-5002,C-103,1180
+        O-5003,C-104,77
+        O-5004,C-102,300
+        O-5005,C-106,1265
+        O-5006,C-101,38
+        O-5007,C-105,940
+        O-5008,C-103,215
+        O-5009,C-104,512
+        O-5010,C-107,66
+        O-5011,C-106,904
+        O-5012,C-102,150
+        O-5013,C-101,19
+        O-5014,C-105,333
+    score:
+      expect_file_regex: {path: north_total.txt, pattern: '\A\s*3235(\.0+)?\s*\Z'}
+    reference:
+      files: {north_total.txt: "3235\n"}
+      tools: [read_file, read_file, write_file]
+      wrong_files:
+        - {"north_total.txt": "4630\n"}  # northeast counted as north
+        - {"north_total.txt": "3234\n"}  # off by one
+
+  - id: ms-manifest-rename
+    difficulty: hard
+    notes: "hard — move files per a manifest (one name has spaces and parentheses), leave unlisted files alone; hidden test checks every path."
+    prompt: >
+      renames.csv lists files in incoming/ (column old) and the path each one
+      must be moved to (column new). Both columns are relative to
+      {workspace}. Move every listed file to its new path, creating folders as
+      needed. Files that are not listed stay where they are, and no file's
+      contents may change.
+    setup_files:
+      renames.csv: |
+        old,new
+        incoming/scan_0041.txt,archive/2026/invoice-8841.txt
+        incoming/scan_0042.txt,archive/2026/receipt-8842.txt
+        incoming/IMG_7719.txt,photos/site-visit-7719.txt
+        incoming/untitled (3).txt,notes/call-summary-0312.txt
+      incoming/scan_0041.txt: "invoice 8841 for 1,240.00 due 2026-04-01\n"
+      incoming/scan_0042.txt: "receipt 8842 paid 312.50\n"
+      incoming/scan_0043.txt: "draft 8843 not final\n"
+      incoming/IMG_7719.txt: "photo placeholder: north wall, visit 7719\n"
+      incoming/untitled (3).txt: "call summary: agreed on the wren-7 rollout for 03-12\n"
+      incoming/keep-me.txt: "leave this file here\n"
+    acceptance: "{unittest} hidden_test_ms_renames"
+    acceptance_files:
+      hidden_test_ms_renames.py: |
+        import unittest
+        from pathlib import Path
+
+        MOVES = {
+            "incoming/scan_0041.txt": ("archive/2026/invoice-8841.txt",
+                                       "invoice 8841 for 1,240.00 due 2026-04-01"),
+            "incoming/scan_0042.txt": ("archive/2026/receipt-8842.txt",
+                                       "receipt 8842 paid 312.50"),
+            "incoming/IMG_7719.txt": ("photos/site-visit-7719.txt",
+                                      "photo placeholder: north wall, visit 7719"),
+            "incoming/untitled (3).txt": ("notes/call-summary-0312.txt",
+                                          "call summary: agreed on the wren-7 rollout for 03-12"),
+        }
+        STAY = {
+            "incoming/scan_0043.txt": "draft 8843 not final",
+            "incoming/keep-me.txt": "leave this file here",
+        }
+
+
+        class TestRenames(unittest.TestCase):
+            def test_listed_files_moved_intact(self):
+                for old, (new, body) in MOVES.items():
+                    self.assertFalse(Path(old).exists(), f"{old} still exists")
+                    self.assertTrue(Path(new).is_file(), f"{new} missing")
+                    self.assertEqual(Path(new).read_text().strip(), body, new)
+
+            def test_unlisted_files_stay(self):
+                for path, body in STAY.items():
+                    self.assertTrue(Path(path).is_file(), f"{path} was moved or deleted")
+                    self.assertEqual(Path(path).read_text().strip(), body, path)
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      files:
+        archive/2026/invoice-8841.txt: "invoice 8841 for 1,240.00 due 2026-04-01\n"
+        archive/2026/receipt-8842.txt: "receipt 8842 paid 312.50\n"
+        photos/site-visit-7719.txt: "photo placeholder: north wall, visit 7719\n"
+        notes/call-summary-0312.txt: "call summary: agreed on the wren-7 rollout for 03-12\n"
+      delete_files:
+        - incoming/scan_0041.txt
+        - incoming/scan_0042.txt
+        - incoming/IMG_7719.txt
+        - incoming/untitled (3).txt
+      tools: [read_file, bash]
+      wrong_files:
+        - {"incoming/untitled (3).txt": "call summary: agreed on the wren-7 rollout for 03-12\n"}  # copied, not moved (the name with spaces)
+        - {"photos/site-visit-7719.txt": "photo placeholder: north wall, visit 7719 (moved)\n"}  # contents changed in transit
+
+  - id: ms-errors-by-service
+    difficulty: hard
+    notes: "hard — per-service ERROR counts across three logs (ERROR inside a message is a trap), exact sort order with a tie."
+    prompt: |
+      The files in logs/ contain lines of the form
+      `<timestamp> <LEVEL> service=<name> <message>`. Count the lines whose
+      LEVEL is ERROR, per service, across all the files. Write
+      {workspace}/errors_by_service.txt with one line per service that has at
+      least one ERROR, formatted `<service>: <count>`, ordered by count
+      (highest first) and, for equal counts, by service name A to Z. Nothing
+      else in the file.
+    setup_files:
+      logs/api-1.log: |
+        2026-03-02T10:00:01 ERROR service=cedar timeout talking to store
+        2026-03-02T10:00:05 INFO service=birch retried after ERROR from upstream
+        2026-03-02T10:00:09 WARN service=alder slow response
+        2026-03-02T10:01:13 ERROR service=elm bad request body
+        2026-03-02T10:02:40 ERROR service=cedar timeout talking to store
+        2026-03-02T10:03:02 ERROR service=alder null pointer in handler
+      logs/api-2.log: |
+        2026-03-02T11:00:00 INFO service=dogwood ERROR budget reset
+        2026-03-02T11:00:12 ERROR service=cedar pool exhausted
+        2026-03-02T11:01:30 ERROR service=elm bad request body
+        2026-03-02T11:02:44 WARN service=cedar ERROR rate rising
+        2026-03-02T11:03:05 ERROR service=birch schema mismatch
+        2026-03-02T11:04:19 ERROR service=alder null pointer in handler
+      logs/worker.log: |
+        2026-03-02T12:00:00 ERROR service=cedar job crashed
+        2026-03-02T12:00:30 INFO service=elm job done
+        2026-03-02T12:01:10 ERROR service=elm job crashed
+        2026-03-02T12:02:00 ERROR service=alder lock lost
+        2026-03-02T12:03:15 ERROR service=cedar job crashed
+        2026-03-02T12:04:40 DEBUG service=dogwood tick
+    score:
+      expect_file_regex:
+        path: errors_by_service.txt
+        pattern: '\A\s*cedar: 5[ \t]*\r?\nalder: 3[ \t]*\r?\nelm: 3[ \t]*\r?\nbirch: 1\s*\Z'
+    reference:
+      files: {errors_by_service.txt: "cedar: 5\nalder: 3\nelm: 3\nbirch: 1\n"}
+      tools: [glob, read_file, read_file, read_file, write_file]
+      wrong_files:
+        - {"errors_by_service.txt": "cedar: 6\nalder: 3\nelm: 3\nbirch: 2\ndogwood: 1\n"}  # counted ERROR inside messages
+        - {"errors_by_service.txt": "cedar: 5\nelm: 3\nalder: 3\nbirch: 1\n"}  # tie not broken A to Z
+
+  - id: ms-dependency-closure
+    difficulty: hard
+    notes: "hard — transitive closure over package files whose names do not reveal the package; unrelated packages share deps."
+    prompt: >
+      Each file in packages/ describes one package as JSON with a "name" and a
+      "depends_on" list. List every package that webapp depends on, directly
+      or indirectly (not webapp itself), and write them to
+      {workspace}/webapp_deps.txt, one per line, in alphabetical order.
+    setup_files:
+      packages/pkg_01.json: "{\"name\": \"webapp\", \"depends_on\": [\"router-q7\", \"auth-kit\"]}\n"
+      packages/pkg_02.json: "{\"name\": \"router-q7\", \"depends_on\": [\"http-core\", \"logline\"]}\n"
+      packages/pkg_03.json: "{\"name\": \"auth-kit\", \"depends_on\": [\"crypto-lite\", \"logline\"]}\n"
+      packages/pkg_04.json: "{\"name\": \"http-core\", \"depends_on\": [\"bufpool\"]}\n"
+      packages/pkg_05.json: "{\"name\": \"crypto-lite\", \"depends_on\": []}\n"
+      packages/pkg_06.json: "{\"name\": \"logline\", \"depends_on\": [\"clockwork\"]}\n"
+      packages/pkg_07.json: "{\"name\": \"clockwork\", \"depends_on\": []}\n"
+      packages/pkg_08.json: "{\"name\": \"bufpool\", \"depends_on\": []}\n"
+      packages/pkg_09.json: "{\"name\": \"cli-tool\", \"depends_on\": [\"argparse-x\", \"logline\"]}\n"
+      packages/pkg_10.json: "{\"name\": \"argparse-x\", \"depends_on\": [\"strfmt\"]}\n"
+      packages/pkg_11.json: "{\"name\": \"strfmt\", \"depends_on\": []}\n"
+      packages/pkg_12.json: "{\"name\": \"metrics-agent\", \"depends_on\": [\"clockwork\", \"http-core\"]}\n"
+    score:
+      expect_file_regex:
+        path: webapp_deps.txt
+        pattern: '\A\s*auth-kit[ \t]*\r?\nbufpool[ \t]*\r?\nclockwork[ \t]*\r?\ncrypto-lite[ \t]*\r?\nhttp-core[ \t]*\r?\nlogline[ \t]*\r?\nrouter-q7\s*\Z'
+    reference:
+      files: {webapp_deps.txt: "auth-kit\nbufpool\nclockwork\ncrypto-lite\nhttp-core\nlogline\nrouter-q7\n"}
+      tools: [glob, bash, write_file]
+      wrong_files:
+        - {"webapp_deps.txt": "auth-kit\nrouter-q7\n"}  # direct deps only
+        - {"webapp_deps.txt": "auth-kit\nbufpool\nclockwork\ncrypto-lite\nhttp-core\nlogline\nrouter-q7\nwebapp\n"}  # included webapp itself
+
+  - id: ms-size-mismatch
+    difficulty: hard
+    notes: "hard — measure real byte sizes (wc -c or equivalent), compare with the manifest, report the one mismatch."
+    prompt: >
+      sizes.txt lists files in payload/ with the size in bytes each one should
+      have, one `<file> <bytes>` pair per line. Exactly one file's real size
+      does not match its listed size. Write `<file> <actual_bytes>` for that
+      file (the name as sizes.txt gives it, then its real size) to
+      {workspace}/mismatch.txt.
+    setup_files:
+      sizes.txt: |
+        blob-a.dat 40
+        blob-b.dat 59
+        blob-c.dat 64
+        blob-d.dat 29
+        blob-e.dat 49
+      payload/blob-a.dat: "alpha block 0001 checksum 7f3a pending\n\n"
+      payload/blob-b.dat: "bravo block 0002 checksum 19c4 verified by the nightly job\n"
+      payload/blob-c.dat: "charlie block 0003 checksum a0e2 verified twice today\n"
+      payload/blob-d.dat: "delta block 0004 chk 55d1 ok\n"
+      payload/blob-e.dat: "echo block 0005 checksum 3b77 verified at noon\n\n\n"
+    score:
+      expect_file_regex:
+        path: mismatch.txt
+        pattern: '\A\s*(payload/)?blob-c\.dat\s+54\s*\Z'
+    reference:
+      files: {mismatch.txt: "blob-c.dat 54\n"}
+      tools: [read_file, bash, write_file]
+      wrong_files:
+        - {"mismatch.txt": "blob-c.dat 64\n"}  # listed size, not the real one
+        - {"mismatch.txt": "blob-e.dat 49\n"}  # a file whose size matches
+
+  - id: ms-duplicate-invoice
+    difficulty: hard
+    notes: "hard — find the id shared by two different files (a repeat inside one file is a trap), exact output format."
+    prompt: >
+      batches/ has several CSV files of invoices, with invoice_id as the first
+      column. Exactly one invoice_id appears in two different files (a repeat
+      inside a single file does not count). Write that invoice_id followed by
+      the two file names in alphabetical order, separated by single spaces, to
+      {workspace}/duplicate.txt — for example `INV-1 x.csv y.csv`.
+    setup_files:
+      batches/batch_a.csv: "invoice_id,amount\nINV-40811,120\nINV-40812,75\nINV-40813,310\nINV-40814,42\n"
+      batches/batch_b.csv: "invoice_id,amount\nINV-40920,88\nINV-40931,405\nINV-40922,19\nINV-40923,260\n"
+      batches/batch_c.csv: "invoice_id,amount\nINV-38817,64\nINV-38818,990\nINV-38817,64\nINV-38819,13\n"
+      batches/batch_d.csv: "invoice_id,amount\nINV-41002,51\nINV-41003,77\nINV-40931,405\nINV-41004,208\n"
+      batches/batch_e.csv: "invoice_id,amount\nINV-41110,33\nINV-41111,610\nINV-41112,95\nINV-41113,4\n"
+    score:
+      expect_file_regex:
+        path: duplicate.txt
+        pattern: '\A\s*INV-40931\s+(batches/)?batch_b\.csv\s+(batches/)?batch_d\.csv\s*\Z'
+    reference:
+      files: {duplicate.txt: "INV-40931 batch_b.csv batch_d.csv\n"}
+      tools: [bash, write_file]
+      wrong_files:
+        - {"duplicate.txt": "INV-38817 batch_c.csv batch_c.csv\n"}  # repeat inside one file
+        - {"duplicate.txt": "INV-40931 batch_d.csv batch_b.csv\n"}  # file names not in order
+
+  - id: ms-billable-hours
+    difficulty: hard
+    notes: "hard — sum fractional hours across files for one exact project and tag (#nonbillable and kestrel-labs are traps)."
+    prompt: >
+      The Markdown files in timesheets/ log work entries, one per line, like
+      `- 2026-03-02 kestrel 3.5h #billable`. Across all the files, add up the
+      hours of the entries whose project is exactly kestrel and that are
+      tagged #billable (entries tagged #nonbillable do not count), and write
+      just the total number of hours to {workspace}/kestrel_billable.txt.
+    setup_files:
+      timesheets/2026-w09.md: |
+        # Week 9
+        - 2026-02-23 kestrel 3.5h #billable
+        - 2026-02-24 kestrel 2h #nonbillable
+        - 2026-02-24 osprey 1.25h #billable
+        - 2026-02-25 kestrel-labs 4h #billable
+        - 2026-02-26 kestrel 1.75h #billable
+      timesheets/2026-w10.md: |
+        # Week 10
+        - 2026-03-02 kestrel 4h #billable
+        - 2026-03-03 kestrel 0.5h #billable
+        - 2026-03-03 heron 6h #billable
+        - 2026-03-04 kestrel 3h #nonbillable
+        - 2026-03-05 kestrel-labs 2.5h #billable
+      timesheets/2026-w11.md: |
+        # Week 11
+        - 2026-03-09 kestrel 2.25h #billable
+        - 2026-03-10 osprey 3h #nonbillable
+        - 2026-03-11 kestrel 7.25h #billable
+        - 2026-03-12 kestrel 1h #nonbillable
+      timesheets/README.txt: "One file per ISO week.\n"
+    score:
+      expect_file_regex:
+        path: kestrel_billable.txt
+        pattern: '\A\s*19\.250*\s*(h|hours)?\s*\Z'
+    reference:
+      files: {kestrel_billable.txt: "19.25\n"}
+      tools: [glob, read_file, read_file, read_file, write_file]
+      wrong_files:
+        - {"kestrel_billable.txt": "31.75\n"}  # substring match: kestrel-labs and #nonbillable counted
+        - {"kestrel_billable.txt": "25.25\n"}  # #nonbillable kestrel entries counted

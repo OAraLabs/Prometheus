@@ -30,6 +30,10 @@ def _mock_ollama(monkeypatch) -> list[dict]:
     seen: list[dict] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/show":
+            # The capability question (WP-X.35): unknown here, so the chat
+            # request is exactly the one this test was written against.
+            return httpx.Response(404, json={"error": "not found"})
         body = json.loads(req.content)
         seen.append(body)
         limit = body.get("max_tokens")  # the only length field the endpoint reads

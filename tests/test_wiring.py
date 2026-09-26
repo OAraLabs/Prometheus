@@ -5706,7 +5706,7 @@ class TestLcmContextResolver:
         from prometheus.sentinel.golden_trace_exporter import lcm_context_resolver
 
         class _Boom:
-            def get_messages(self, *a, **kw):
+            def messages_before(self, *a, **kw):
                 raise RuntimeError("db gone")
 
         resolver = lcm_context_resolver(_Boom())
@@ -5807,8 +5807,11 @@ class _FakeConvStore:
     def __init__(self, messages_by_session: dict[str, list]):
         self._by_session = messages_by_session
 
-    def get_messages(self, session_id: str, limit: int = 500, **kw):
-        return self._by_session.get(session_id, [])[:limit]
+    def messages_before(self, session_id: str, timestamp: float, *, limit: int):
+        # NOT filtered by time, so the resolver's own strictly-before check
+        # is what these tests exercise. The real store's read is covered by
+        # tests/test_golden_trace_context_window.py.
+        return self._by_session.get(session_id, [])[-limit:]
 
 
 def _conv_store_for(session_id: str, *, at: float | None = None) -> _FakeConvStore:

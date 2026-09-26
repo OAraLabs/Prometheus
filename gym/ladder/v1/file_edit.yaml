@@ -1,0 +1,3105 @@
+# Class: file edits with an acceptance command. The harness runs the command
+# after the agent stops; acceptance_files restore pristine tests first.
+class: file_edit
+tasks:
+  - id: fe-fix-last-n
+    difficulty: easy
+    smoke: true
+    prompt: >
+      The function last_n in {workspace}/textutil.py returns one element too few. Fix it so
+      the tests in test_textutil.py pass. You can run them with
+      `python3 -m unittest -q test_textutil`.
+    setup_files:
+      textutil.py: |
+        def last_n(items, n):
+            """Return the last n items of a list (all of them if n >= len)."""
+            if n <= 0:
+                return []
+            return items[-(n - 1):]
+      test_textutil.py: &fe_last_n_tests |
+        import unittest
+        from textutil import last_n
+
+
+        class LastN(unittest.TestCase):
+            def test_basic(self):
+                self.assertEqual(last_n([1, 2, 3, 4], 2), [3, 4])
+
+            def test_more_than_len(self):
+                self.assertEqual(last_n([1, 2], 5), [1, 2])
+
+            def test_just_over_len(self):
+                self.assertEqual(last_n([1, 2], 3), [1, 2])
+                self.assertEqual(last_n([1, 2, 3], 5), [1, 2, 3])
+
+            def test_zero(self):
+                self.assertEqual(last_n([1, 2], 0), [])
+
+            def test_one(self):
+                self.assertEqual(last_n(["a", "b", "c"], 1), ["c"])
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    acceptance: "{unittest} test_textutil"
+    acceptance_files:
+      test_textutil.py: *fe_last_n_tests
+    reference:
+      files:
+        textutil.py: |
+          def last_n(items, n):
+              """Return the last n items of a list (all of them if n >= len)."""
+              if n <= 0:
+                  return []
+              return items[-n:]
+      wrong_files:
+        # over-correction: one element too many
+        - textutil.py: |
+            def last_n(items, n):
+                """Return the last n items of a list (all of them if n >= len)."""
+                if n <= 0:
+                    return []
+                return items[-n - 1:]
+        # len(items) - n goes negative and WRAPS when len < n < 2*len:
+        # last_n([1, 2], 3) -> [2]. Only n >= 2*len clamps to the whole list.
+        - textutil.py: |
+            def last_n(items, n):
+                """Return the last n items of a list (all of them if n >= len)."""
+                if n <= 0:
+                    return []
+                return items[len(items) - n:]
+
+  # ---------------------------------------------------------------- easy
+  - id: fe-free-shipping-threshold
+    difficulty: easy
+    notes: "easy — wrong comparison (> instead of >=); visible tests."
+    prompt: >
+      Customers report being charged shipping on orders that should ship free.
+      Fix the bug in {workspace}/shipping.py so the tests in test_shipping.py
+      pass. You can run them with `python3 -m unittest -q test_shipping`.
+    setup_files:
+      shipping.py: |
+        FREE_SHIPPING_MIN = 50.00
+        FLAT_FEE = 4.95
+
+
+        def shipping_fee(subtotal):
+            """Shipping fee for an order subtotal.
+
+            Orders of FREE_SHIPPING_MIN or more ship free; every other order
+            pays FLAT_FEE.
+            """
+            if subtotal > FREE_SHIPPING_MIN:
+                return 0.0
+            return FLAT_FEE
+      test_shipping.py: &fe_shipping_tests |
+        import unittest
+
+        from shipping import shipping_fee
+
+
+        class ShippingFee(unittest.TestCase):
+            def test_small_order_pays(self):
+                self.assertEqual(shipping_fee(12.40), 4.95)
+
+            def test_large_order_is_free(self):
+                self.assertEqual(shipping_fee(80.00), 0.0)
+
+            def test_exactly_the_threshold_is_free(self):
+                self.assertEqual(shipping_fee(50.00), 0.0)
+
+            def test_just_below_the_threshold_pays(self):
+                self.assertEqual(shipping_fee(49.99), 4.95)
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    acceptance: "{unittest} test_shipping"
+    acceptance_files:
+      test_shipping.py: *fe_shipping_tests
+    reference:
+      files:
+        shipping.py: |
+          FREE_SHIPPING_MIN = 50.00
+          FLAT_FEE = 4.95
+
+
+          def shipping_fee(subtotal):
+              """Shipping fee for an order subtotal.
+
+              Orders of FREE_SHIPPING_MIN or more ship free; every other order
+              pays FLAT_FEE.
+              """
+              if subtotal >= FREE_SHIPPING_MIN:
+                  return 0.0
+              return FLAT_FEE
+      wrong_files:
+        # Lowered the threshold instead of fixing the comparison: 49.99 ships free.
+        - shipping.py: |
+            FREE_SHIPPING_MIN = 49.00
+            FLAT_FEE = 4.95
+
+
+            def shipping_fee(subtotal):
+                """Shipping fee for an order subtotal.
+
+                Orders of FREE_SHIPPING_MIN or more ship free; every other order
+                pays FLAT_FEE.
+                """
+                if subtotal > FREE_SHIPPING_MIN:
+                    return 0.0
+                return FLAT_FEE
+
+  - id: fe-contact-label-key
+    difficulty: easy
+    notes: "easy — wrong dict key; visible tests."
+    prompt: >
+      mailing_label in {workspace}/contacts.py raises a KeyError for every
+      contact. Fix it so the tests in test_contacts.py pass. You can run them
+      with `python3 -m unittest -q test_contacts`.
+    setup_files:
+      contacts.py: |
+        def load_contacts(rows):
+            """Turn [name, email, city] rows into contact dicts."""
+            return [{"name": n, "email": e, "city": c} for n, e, c in rows]
+
+
+        def mailing_label(record):
+            """One-line label for a contact dict made by load_contacts()."""
+            return f"{record['name']} <{record['e-mail']}> ({record['city']})"
+      test_contacts.py: &fe_contacts_tests |
+        import unittest
+
+        from contacts import load_contacts, mailing_label
+
+
+        class Labels(unittest.TestCase):
+            def test_label(self):
+                rec = {"name": "Ivo Tarrant", "email": "ivo@mail.example", "city": "Fennick"}
+                self.assertEqual(mailing_label(rec), "Ivo Tarrant <ivo@mail.example> (Fennick)")
+
+            def test_from_rows(self):
+                recs = load_contacts([["Suvi Okal", "suvi@mail.example", "Brannow"]])
+                self.assertEqual(mailing_label(recs[0]), "Suvi Okal <suvi@mail.example> (Brannow)")
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    acceptance: "{unittest} test_contacts"
+    acceptance_files:
+      test_contacts.py: *fe_contacts_tests
+    reference:
+      files:
+        contacts.py: |
+          def load_contacts(rows):
+              """Turn [name, email, city] rows into contact dicts."""
+              return [{"name": n, "email": e, "city": c} for n, e, c in rows]
+
+
+          def mailing_label(record):
+              """One-line label for a contact dict made by load_contacts()."""
+              return f"{record['name']} <{record['email']}> ({record['city']})"
+      wrong_files:
+        # "Fixed" the producer instead of the reader: load_contacts emits "e-mail".
+        - contacts.py: |
+            def load_contacts(rows):
+                """Turn [name, email, city] rows into contact dicts."""
+                return [{"name": n, "e-mail": e, "city": c} for n, e, c in rows]
+
+
+            def mailing_label(record):
+                """One-line label for a contact dict made by load_contacts()."""
+                return f"{record['name']} <{record['e-mail']}> ({record['city']})"
+
+  - id: fe-average-rating-division
+    difficulty: easy
+    notes: "easy — integer division where true division is meant; visible tests."
+    prompt: >
+      average_rating in {workspace}/ratings.py returns 4 for the scores [4, 5]
+      instead of 4.5. Fix it so the tests in test_ratings.py pass. You can run
+      them with `python3 -m unittest -q test_ratings`.
+    setup_files:
+      ratings.py: |
+        def average_rating(scores):
+            """Mean of a list of 1-5 star scores, rounded to 2 decimals.
+
+            Returns 0.0 for an empty list.
+            """
+            if not scores:
+                return 0.0
+            return round(sum(scores) // len(scores), 2)
+      test_ratings.py: &fe_ratings_tests |
+        import unittest
+
+        from ratings import average_rating
+
+
+        class Average(unittest.TestCase):
+            def test_half(self):
+                self.assertEqual(average_rating([4, 5]), 4.5)
+
+            def test_rounded(self):
+                self.assertEqual(average_rating([5, 4, 4]), 4.33)
+
+            def test_single(self):
+                self.assertEqual(average_rating([3]), 3.0)
+
+            def test_empty(self):
+                self.assertEqual(average_rating([]), 0.0)
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    acceptance: "{unittest} test_ratings"
+    acceptance_files:
+      test_ratings.py: *fe_ratings_tests
+    reference:
+      files:
+        ratings.py: |
+          def average_rating(scores):
+              """Mean of a list of 1-5 star scores, rounded to 2 decimals.
+
+              Returns 0.0 for an empty list.
+              """
+              if not scores:
+                  return 0.0
+              return round(sum(scores) / len(scores), 2)
+      wrong_files:
+        # True division, but rounded to a whole number.
+        - ratings.py: |
+            def average_rating(scores):
+                """Mean of a list of 1-5 star scores, rounded to 2 decimals.
+
+                Returns 0.0 for an empty list.
+                """
+                if not scores:
+                    return 0.0
+                return round(sum(scores) / len(scores))
+        # Floor division cast to float: 4.0, not 4.5.
+        - ratings.py: |
+            def average_rating(scores):
+                """Mean of a list of 1-5 star scores, rounded to 2 decimals.
+
+                Returns 0.0 for an empty list.
+                """
+                if not scores:
+                    return 0.0
+                return round(float(sum(scores) // len(scores)), 2)
+
+  - id: fe-service-json-retries
+    difficulty: easy
+    notes: >
+      easy — two value edits in a nested JSON config; hidden check compares the
+      whole document type-strictly (true is not 1, 11 is not 11.0) and rejects
+      duplicate keys (an added "max_retries": 11 beside the old 3 is not an edit).
+    prompt: >
+      In {workspace}/config/service.json, set the queue's max_retries to 11 and
+      turn shadow_writes on. Leave every other setting exactly as it is; the
+      file must stay valid JSON.
+    setup_files:
+      config/service.json: |
+        {
+          "service": "quillmark-indexer",
+          "listen_port": 7342,
+          "worker_pool_size": 6,
+          "queue": {
+            "name": "ingest-jobs",
+            "max_retries": 3,
+            "visibility_timeout_s": 45
+          },
+          "features": {
+            "dedupe": true,
+            "shadow_writes": false
+          }
+        }
+    acceptance: "{unittest} hidden_check_service_json"
+    acceptance_files:
+      hidden_check_service_json.py: |
+        import json
+        import unittest
+        from pathlib import Path
+
+        EXPECTED = {
+            "service": "quillmark-indexer",
+            "listen_port": 7342,
+            "worker_pool_size": 6,
+            "queue": {"name": "ingest-jobs", "max_retries": 11, "visibility_timeout_s": 45},
+            "features": {"dedupe": True, "shadow_writes": True},
+        }
+
+
+        def _no_duplicate_keys(pairs):
+            # json.loads silently keeps the LAST of two equal keys.
+            keys = [k for k, _ in pairs]
+            dupes = sorted({k for k in keys if keys.count(k) > 1})
+            if dupes:
+                raise AssertionError(f"duplicate keys in one object: {dupes}")
+            return dict(pairs)
+
+
+        class ServiceConfig(unittest.TestCase):
+            def test_config(self):
+                data = json.loads(Path("config/service.json").read_text(),
+                                  object_pairs_hook=_no_duplicate_keys)
+                self.assertEqual(data, EXPECTED)
+                # == treats 1 as True and 11.0 as 11; the JSON text does not.
+                self.assertEqual(json.dumps(data, sort_keys=True, indent=1),
+                                 json.dumps(EXPECTED, sort_keys=True, indent=1))
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      files:
+        config/service.json: |
+          {
+            "service": "quillmark-indexer",
+            "listen_port": 7342,
+            "worker_pool_size": 6,
+            "queue": {
+              "name": "ingest-jobs",
+              "max_retries": 11,
+              "visibility_timeout_s": 45
+            },
+            "features": {
+              "dedupe": true,
+              "shadow_writes": true
+            }
+          }
+      wrong_files:
+        # shadow_writes set to the string "true", not the boolean.
+        - config/service.json: |
+            {
+              "service": "quillmark-indexer",
+              "listen_port": 7342,
+              "worker_pool_size": 6,
+              "queue": {
+                "name": "ingest-jobs",
+                "max_retries": 11,
+                "visibility_timeout_s": 45
+              },
+              "features": {
+                "dedupe": true,
+                "shadow_writes": "true"
+              }
+            }
+        # Only max_retries changed.
+        - config/service.json: |
+            {
+              "service": "quillmark-indexer",
+              "listen_port": 7342,
+              "worker_pool_size": 6,
+              "queue": {
+                "name": "ingest-jobs",
+                "max_retries": 11,
+                "visibility_timeout_s": 45
+              },
+              "features": {
+                "dedupe": true,
+                "shadow_writes": false
+              }
+            }
+        # shadow_writes set to the integer 1, not the boolean (1 == True in Python).
+        - config/service.json: |
+            {
+              "service": "quillmark-indexer",
+              "listen_port": 7342,
+              "worker_pool_size": 6,
+              "queue": {
+                "name": "ingest-jobs",
+                "max_retries": 11,
+                "visibility_timeout_s": 45
+              },
+              "features": {
+                "dedupe": true,
+                "shadow_writes": 1
+              }
+            }
+        # max_retries written as the float 11.0 (11.0 == 11 in Python).
+        - config/service.json: |
+            {
+              "service": "quillmark-indexer",
+              "listen_port": 7342,
+              "worker_pool_size": 6,
+              "queue": {
+                "name": "ingest-jobs",
+                "max_retries": 11.0,
+                "visibility_timeout_s": 45
+              },
+              "features": {
+                "dedupe": true,
+                "shadow_writes": true
+              }
+            }
+        # A second max_retries ADDED after the untouched 3; json.loads keeps the last.
+        - config/service.json: |
+            {
+              "service": "quillmark-indexer",
+              "listen_port": 7342,
+              "worker_pool_size": 6,
+              "queue": {
+                "name": "ingest-jobs",
+                "max_retries": 3,
+                "max_retries": 11,
+                "visibility_timeout_s": 45
+              },
+              "features": {
+                "dedupe": true,
+                "shadow_writes": true
+              }
+            }
+
+  - id: fe-settings-ini
+    difficulty: easy
+    notes: "easy — change one INI value and add one key to another section; hidden check via configparser."
+    prompt: >
+      Edit {workspace}/settings.ini: set the level in the [logging] section to
+      WARNING, and add a new setting retention_days with the value 21 to the
+      [export] section. Do not change anything else.
+    setup_files:
+      settings.ini: |
+        [server]
+        port = 8315
+        workers = 4
+
+        [logging]
+        level = DEBUG
+        file = logs/tallyhub.log
+
+        [export]
+        format = csv
+        compress = false
+    acceptance: "{unittest} hidden_check_settings_ini"
+    acceptance_files:
+      hidden_check_settings_ini.py: |
+        import configparser
+        import unittest
+
+        EXPECTED = {
+            "server": {"port": "8315", "workers": "4"},
+            "logging": {"level": "WARNING", "file": "logs/tallyhub.log"},
+            "export": {"format": "csv", "compress": "false", "retention_days": "21"},
+        }
+
+
+        class Settings(unittest.TestCase):
+            def test_settings(self):
+                cp = configparser.ConfigParser(interpolation=None)
+                with open("settings.ini") as fh:
+                    cp.read_file(fh)
+                got = {s: dict(cp[s]) for s in cp.sections()}
+                self.assertEqual(got, EXPECTED)
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      files:
+        settings.ini: |
+          [server]
+          port = 8315
+          workers = 4
+
+          [logging]
+          level = WARNING
+          file = logs/tallyhub.log
+
+          [export]
+          format = csv
+          compress = false
+          retention_days = 21
+      wrong_files:
+        # retention_days added to the wrong section.
+        - settings.ini: |
+            [server]
+            port = 8315
+            workers = 4
+
+            [logging]
+            level = WARNING
+            file = logs/tallyhub.log
+            retention_days = 21
+
+            [export]
+            format = csv
+            compress = false
+        # Level left at DEBUG.
+        - settings.ini: |
+            [server]
+            port = 8315
+            workers = 4
+
+            [logging]
+            level = DEBUG
+            file = logs/tallyhub.log
+
+            [export]
+            format = csv
+            compress = false
+            retention_days = 21
+
+  - id: fe-word-count-ignore-case
+    difficulty: easy
+    notes: "easy — add one keyword argument to an existing function; hidden tests."
+    prompt: >
+      Add a keyword argument ignore_case to word_counts in
+      {workspace}/wordstats.py, defaulting to False. When it is True, every word
+      is lowercased before it is counted, so "The" and "the" are counted
+      together under the key "the". With the default, the behaviour must not
+      change.
+    setup_files:
+      wordstats.py: |
+        import re
+
+        _WORD = re.compile(r"[A-Za-z']+")
+
+
+        def word_counts(text):
+            """Count how often each word occurs in text.
+
+            Words are runs of letters and apostrophes. Returns a dict
+            mapping word -> count.
+            """
+            counts = {}
+            for word in _WORD.findall(text):
+                counts[word] = counts.get(word, 0) + 1
+            return counts
+    acceptance: "{unittest} hidden_test_wordstats"
+    acceptance_files:
+      hidden_test_wordstats.py: |
+        import unittest
+
+        from wordstats import word_counts
+
+        TEXT = "The owl and the Owl's twin saw THE owl"
+
+
+        class WordCounts(unittest.TestCase):
+            def test_default_is_case_sensitive(self):
+                self.assertEqual(
+                    word_counts(TEXT),
+                    {"The": 1, "owl": 2, "and": 1, "the": 1, "Owl's": 1, "twin": 1,
+                     "saw": 1, "THE": 1},
+                )
+
+            def test_explicit_false(self):
+                self.assertEqual(word_counts("A a", ignore_case=False), {"A": 1, "a": 1})
+
+            def test_ignore_case(self):
+                self.assertEqual(
+                    word_counts(TEXT, ignore_case=True),
+                    {"the": 3, "owl": 2, "and": 1, "owl's": 1, "twin": 1, "saw": 1},
+                )
+
+            def test_empty(self):
+                self.assertEqual(word_counts("", ignore_case=True), {})
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      files:
+        wordstats.py: |
+          import re
+
+          _WORD = re.compile(r"[A-Za-z']+")
+
+
+          def word_counts(text, ignore_case=False):
+              """Count how often each word occurs in text.
+
+              Words are runs of letters and apostrophes. Returns a dict
+              mapping word -> count. With ignore_case=True words are
+              lowercased before counting.
+              """
+              counts = {}
+              for word in _WORD.findall(text):
+                  if ignore_case:
+                      word = word.lower()
+                  counts[word] = counts.get(word, 0) + 1
+              return counts
+      wrong_files:
+        # Lowercases always, so the default behaviour changed.
+        - wordstats.py: |
+            import re
+
+            _WORD = re.compile(r"[A-Za-z']+")
+
+
+            def word_counts(text, ignore_case=False):
+                counts = {}
+                for word in _WORD.findall(text):
+                    word = word.lower()
+                    counts[word] = counts.get(word, 0) + 1
+                return counts
+        # Lowercases the keys afterwards: merged keys overwrite instead of adding up.
+        - wordstats.py: |
+            import re
+
+            _WORD = re.compile(r"[A-Za-z']+")
+
+
+            def word_counts(text, ignore_case=False):
+                counts = {}
+                for word in _WORD.findall(text):
+                    counts[word] = counts.get(word, 0) + 1
+                if ignore_case:
+                    counts = {w.lower(): n for w, n in counts.items()}
+                return counts
+
+  # -------------------------------------------------------------- medium
+  - id: fe-mutable-default-tags
+    difficulty: medium
+    smoke: true
+    notes: "medium — mutable default argument that also mutates the caller's list; visible tests (they pin append order, so a set-based fix fails)."
+    prompt: >
+      add_tag in {workspace}/tagging.py gives wrong results when it is called
+      more than once, and it changes lists passed to it. Fix it so it behaves
+      as its docstring says and the tests in test_tagging.py pass. You can run
+      them with `python3 -m unittest -q test_tagging`.
+    setup_files:
+      tagging.py: |
+        def add_tag(tag, tags=[]):
+            """Return a list of tags with tag appended (no duplicates).
+
+            If tags is given, a NEW list is returned and the argument is left
+            unchanged; if it is omitted, the result is a list holding just tag.
+            """
+            if tag not in tags:
+                tags.append(tag)
+            return tags
+      test_tagging.py: &fe_tagging_tests |
+        import unittest
+
+        from tagging import add_tag
+
+
+        class AddTag(unittest.TestCase):
+            def test_fresh_list_on_every_call(self):
+                self.assertEqual(add_tag("urgent"), ["urgent"])
+                self.assertEqual(add_tag("billing"), ["billing"])
+                self.assertEqual(add_tag("urgent"), ["urgent"])
+
+            def test_argument_is_not_changed(self):
+                existing = ["red"]
+                result = add_tag("blue", existing)
+                self.assertEqual(result, ["red", "blue"])
+                self.assertEqual(existing, ["red"])
+                self.assertIsNot(result, existing)
+
+            def test_no_duplicates(self):
+                existing = ["red", "green"]
+                result = add_tag("red", existing)
+                self.assertEqual(result, ["red", "green"])
+                # Still a NEW list, even when nothing was added.
+                self.assertIsNot(result, existing)
+                self.assertEqual(existing, ["red", "green"])
+
+            def test_appends_at_the_end(self):
+                self.assertEqual(add_tag("blue", ["red", "green"]), ["red", "green", "blue"])
+                self.assertEqual(add_tag("a", ["d", "c", "b"]), ["d", "c", "b", "a"])
+                tags = ["billing", "q3", "west", "vip", "renewal", "legal", "emea"]
+                self.assertEqual(add_tag("urgent", tags), tags + ["urgent"])
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    acceptance: "{unittest} test_tagging"
+    acceptance_files:
+      test_tagging.py: *fe_tagging_tests
+    reference:
+      files:
+        tagging.py: |
+          def add_tag(tag, tags=None):
+              """Return a list of tags with tag appended (no duplicates).
+
+              If tags is given, a NEW list is returned and the argument is left
+              unchanged; if it is omitted, the result is a list holding just tag.
+              """
+              result = list(tags) if tags is not None else []
+              if tag not in result:
+                  result.append(tag)
+              return result
+      wrong_files:
+        # Fixed the shared default, but still appends to the caller's list.
+        - tagging.py: |
+            def add_tag(tag, tags=None):
+                """Return a list of tags with tag appended (no duplicates).
+
+                If tags is given, a NEW list is returned and the argument is left
+                unchanged; if it is omitted, the result is a list holding just tag.
+                """
+                if tags is None:
+                    tags = []
+                if tag not in tags:
+                    tags.append(tag)
+                return tags
+        # Copies only when it adds: a duplicate returns the CALLER's list, so a
+        # later append to the result still changes the argument.
+        - tagging.py: |
+            def add_tag(tag, tags=None):
+                """Return a list of tags with tag appended (no duplicates).
+
+                If tags is given, a NEW list is returned and the argument is left
+                unchanged; if it is omitted, the result is a list holding just tag.
+                """
+                tags = tags or []
+                if tag in tags:
+                    return tags
+                return tags + [tag]
+        # Set-based: new list, no duplicates, but the order is the set's, not
+        # "tag appended". The acceptance runner's -I ignores PYTHONHASHSEED, so
+        # string hashing is random per run: the old tests passed this under
+        # 1453 of 4000 hash seeds, the two short cases in test_appends_at_the_end
+        # alone under 26, and with its 8-tag case under none.
+        - tagging.py: |
+            def add_tag(tag, tags=None):
+                """Return a list of tags with tag appended (no duplicates).
+
+                If tags is given, a NEW list is returned and the argument is left
+                unchanged; if it is omitted, the result is a list holding just tag.
+                """
+                return list(set(tags or []) | {tag})
+        - tagging.py: |
+            def add_tag(tag, tags=None):
+                """Return a list of tags with tag appended (no duplicates).
+
+                If tags is given, a NEW list is returned and the argument is left
+                unchanged; if it is omitted, the result is a list holding just tag.
+                """
+                return list(set((tags or []) + [tag]))
+
+  - id: fe-changelog-unreleased-fixed
+    difficulty: medium
+    notes: >
+      medium — place an entry in the right release and create the missing
+      subsection; hidden check pins the whole Unreleased block (so #412 must
+      stay under Added) and proves nothing else in the file changed (against a
+      pristine copy written at check time).
+    prompt: |
+      Record this fix in {workspace}/CHANGELOG.md, under the Unreleased release,
+      in a "### Fixed" section. The Unreleased release has no Fixed section
+      yet: create it after its Added section, following the format the file
+      already uses. Add exactly this line:
+
+      - Export no longer drops the last row when the input has no trailing newline (#427)
+
+      Do not change anything else in the file.
+    setup_files:
+      CHANGELOG.md: &fe_changelog_md |
+        # Changelog
+
+        All notable changes to Driftwood are documented here.
+
+        ## [Unreleased]
+
+        ### Added
+        - `driftwood export --since` filters exported rows by date (#412)
+
+        ## [1.8.0] - 2026-07-02
+
+        ### Added
+        - Parquet output for `driftwood export` (#398)
+
+        ### Fixed
+        - Timestamps in CSV output keep their UTC offset (#401)
+        - `driftwood sync` retries on HTTP 503 (#404)
+
+        ## [1.7.2] - 2026-05-19
+
+        ### Fixed
+        - Crash when the config file is empty (#389)
+    acceptance: "{unittest} hidden_check_changelog"
+    acceptance_files:
+      pristine_CHANGELOG.md: *fe_changelog_md
+      hidden_check_changelog.py: |
+        import unittest
+        from pathlib import Path
+
+        ENTRY = ("- Export no longer drops the last row when the input has no "
+                 "trailing newline (#427)")
+
+
+        def nonblank(text):
+            return [line.rstrip() for line in text.splitlines() if line.strip()]
+
+
+        def unreleased_bounds(lines):
+            start = lines.index("## [Unreleased]")
+            end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith("## "))
+            return start, end
+
+
+        class Changelog(unittest.TestCase):
+            def setUp(self):
+                self.lines = nonblank(Path("CHANGELOG.md").read_text())
+                self.orig = nonblank(Path("pristine_CHANGELOG.md").read_text())
+
+            def test_entry_appears_once(self):
+                self.assertEqual(self.lines.count(ENTRY), 1)
+
+            def test_entry_is_under_unreleased_fixed(self):
+                start, end = unreleased_bounds(self.lines)
+                block = self.lines[start:end]
+                # The whole Unreleased release, blank lines aside: #412 stays
+                # under Added, and Fixed (holding only the new entry) follows it.
+                self.assertEqual(block, [
+                    "## [Unreleased]",
+                    "### Added",
+                    "- `driftwood export --since` filters exported rows by date (#412)",
+                    "### Fixed",
+                    ENTRY,
+                ])
+
+            def test_nothing_else_changed(self):
+                lines = list(self.lines)
+                lines.remove(ENTRY)
+                start, end = unreleased_bounds(lines)
+                del lines[lines.index("### Fixed", start, end)]
+                self.assertEqual(lines, self.orig)
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      files:
+        CHANGELOG.md: |
+          # Changelog
+
+          All notable changes to Driftwood are documented here.
+
+          ## [Unreleased]
+
+          ### Added
+          - `driftwood export --since` filters exported rows by date (#412)
+
+          ### Fixed
+          - Export no longer drops the last row when the input has no trailing newline (#427)
+
+          ## [1.8.0] - 2026-07-02
+
+          ### Added
+          - Parquet output for `driftwood export` (#398)
+
+          ### Fixed
+          - Timestamps in CSV output keep their UTC offset (#401)
+          - `driftwood sync` retries on HTTP 503 (#404)
+
+          ## [1.7.2] - 2026-05-19
+
+          ### Fixed
+          - Crash when the config file is empty (#389)
+      wrong_files:
+        # Appended to the last Fixed section it found: 1.8.0, not Unreleased.
+        - CHANGELOG.md: |
+            # Changelog
+
+            All notable changes to Driftwood are documented here.
+
+            ## [Unreleased]
+
+            ### Added
+            - `driftwood export --since` filters exported rows by date (#412)
+
+            ## [1.8.0] - 2026-07-02
+
+            ### Added
+            - Parquet output for `driftwood export` (#398)
+
+            ### Fixed
+            - Timestamps in CSV output keep their UTC offset (#401)
+            - `driftwood sync` retries on HTTP 503 (#404)
+            - Export no longer drops the last row when the input has no trailing newline (#427)
+
+            ## [1.7.2] - 2026-05-19
+
+            ### Fixed
+            - Crash when the config file is empty (#389)
+        # Right release, but filed under Added with no Fixed section.
+        - CHANGELOG.md: |
+            # Changelog
+
+            All notable changes to Driftwood are documented here.
+
+            ## [Unreleased]
+
+            ### Added
+            - `driftwood export --since` filters exported rows by date (#412)
+            - Export no longer drops the last row when the input has no trailing newline (#427)
+
+            ## [1.8.0] - 2026-07-02
+
+            ### Added
+            - Parquet output for `driftwood export` (#398)
+
+            ### Fixed
+            - Timestamps in CSV output keep their UTC offset (#401)
+            - `driftwood sync` retries on HTTP 503 (#404)
+
+            ## [1.7.2] - 2026-05-19
+
+            ### Fixed
+            - Crash when the config file is empty (#389)
+        # Fixed inserted right under the "### Added" HEADING, not after the Added
+        # section: Added is left empty and #412 now sits under Fixed.
+        - CHANGELOG.md: |
+            # Changelog
+
+            All notable changes to Driftwood are documented here.
+
+            ## [Unreleased]
+
+            ### Added
+
+            ### Fixed
+            - Export no longer drops the last row when the input has no trailing newline (#427)
+            - `driftwood export --since` filters exported rows by date (#412)
+
+            ## [1.8.0] - 2026-07-02
+
+            ### Added
+            - Parquet output for `driftwood export` (#398)
+
+            ### Fixed
+            - Timestamps in CSV output keep their UTC offset (#401)
+            - `driftwood sync` retries on HTTP 503 (#404)
+
+            ## [1.7.2] - 2026-05-19
+
+            ### Fixed
+            - Crash when the config file is empty (#389)
+        # Same misplaced heading, new entry appended after #412: #412 moved to Fixed.
+        - CHANGELOG.md: |
+            # Changelog
+
+            All notable changes to Driftwood are documented here.
+
+            ## [Unreleased]
+
+            ### Added
+            ### Fixed
+            - `driftwood export --since` filters exported rows by date (#412)
+            - Export no longer drops the last row when the input has no trailing newline (#427)
+
+            ## [1.8.0] - 2026-07-02
+
+            ### Added
+            - Parquet output for `driftwood export` (#398)
+
+            ### Fixed
+            - Timestamps in CSV output keep their UTC offset (#401)
+            - `driftwood sync` retries on HTTP 503 (#404)
+
+            ## [1.7.2] - 2026-05-19
+
+            ### Fixed
+            - Crash when the config file is empty (#389)
+
+  - id: fe-version-bump-two-files
+    difficulty: medium
+    notes: >
+      medium — consistent version bump in two files with a same-valued
+      distractor (a dependency pin) that a blind replace-all breaks.
+    prompt: >
+      Release prep: bump brindle-sync's own version from 2.3.1 to 2.4.0. The
+      version is recorded in two places, {workspace}/pyproject.toml and
+      {workspace}/brindle_sync/__init__.py, and both must agree. Do not touch
+      the brindle-core dependency or MIN_CORE_VERSION: they refer to a
+      different package and stay at 2.3.1.
+    setup_files:
+      pyproject.toml: &fe_bump_pyproject |
+        [project]
+        name = "brindle-sync"
+        version = "2.3.1"
+        description = "Two-way sync for Brindle notebooks"
+        requires-python = ">=3.11"
+        dependencies = [
+            "brindle-core>=2.3.1",
+            "platformdirs>=4.0",
+        ]
+
+        [project.scripts]
+        brindle-sync = "brindle_sync.cli:main"
+      brindle_sync/__init__.py: |
+        """Two-way sync for Brindle notebooks."""
+
+        __version__ = "2.3.1"
+
+        # Oldest brindle-core release this package works with.
+        MIN_CORE_VERSION = "2.3.1"
+    acceptance: "{unittest} hidden_check_version_bump"
+    acceptance_files:
+      pristine_pyproject.toml: *fe_bump_pyproject
+      hidden_check_version_bump.py: |
+        import tomllib
+        import unittest
+        from pathlib import Path
+
+        import brindle_sync
+
+
+        class VersionBump(unittest.TestCase):
+            def test_pyproject(self):
+                got = tomllib.loads(Path("pyproject.toml").read_text())
+                want = tomllib.loads(Path("pristine_pyproject.toml").read_text())
+                want["project"]["version"] = "2.4.0"
+                self.assertEqual(got, want)
+
+            def test_package(self):
+                self.assertEqual(brindle_sync.__version__, "2.4.0")
+                self.assertEqual(brindle_sync.MIN_CORE_VERSION, "2.3.1")
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      files:
+        pyproject.toml: |
+          [project]
+          name = "brindle-sync"
+          version = "2.4.0"
+          description = "Two-way sync for Brindle notebooks"
+          requires-python = ">=3.11"
+          dependencies = [
+              "brindle-core>=2.3.1",
+              "platformdirs>=4.0",
+          ]
+
+          [project.scripts]
+          brindle-sync = "brindle_sync.cli:main"
+        brindle_sync/__init__.py: |
+          """Two-way sync for Brindle notebooks."""
+
+          __version__ = "2.4.0"
+
+          # Oldest brindle-core release this package works with.
+          MIN_CORE_VERSION = "2.3.1"
+      wrong_files:
+        # Blind replace-all: the brindle-core pin and MIN_CORE_VERSION moved too.
+        - pyproject.toml: |
+            [project]
+            name = "brindle-sync"
+            version = "2.4.0"
+            description = "Two-way sync for Brindle notebooks"
+            requires-python = ">=3.11"
+            dependencies = [
+                "brindle-core>=2.4.0",
+                "platformdirs>=4.0",
+            ]
+
+            [project.scripts]
+            brindle-sync = "brindle_sync.cli:main"
+          brindle_sync/__init__.py: |
+            """Two-way sync for Brindle notebooks."""
+
+            __version__ = "2.4.0"
+
+            # Oldest brindle-core release this package works with.
+            MIN_CORE_VERSION = "2.4.0"
+        # Only pyproject.toml bumped; the package still says 2.3.1.
+        - brindle_sync/__init__.py: |
+            """Two-way sync for Brindle notebooks."""
+
+            __version__ = "2.3.1"
+
+            # Oldest brindle-core release this package works with.
+            MIN_CORE_VERSION = "2.3.1"
+
+  - id: fe-slugify-max-length
+    difficulty: medium
+    notes: "medium — add an optional parameter with exact truncation rules; hidden tests."
+    prompt: |
+      Add an optional parameter max_length to slugify in {workspace}/slug.py.
+
+      - The default is None, meaning no limit (the current behaviour).
+      - When max_length is given and the full slug is longer than that, cut the
+        slug to its first max_length characters, then strip any hyphens left at
+        the end of the cut slug.
+      - max_length must be at least 1; for max_length < 1 raise ValueError.
+    setup_files:
+      slug.py: |
+        import re
+        import unicodedata
+
+
+        def slugify(text):
+            """Turn text into a URL slug.
+
+            ASCII-folds accented letters, lowercases, replaces every run of
+            characters other than a-z and 0-9 with one hyphen, and strips
+            leading and trailing hyphens.
+            """
+            text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+            text = re.sub(r"[^a-z0-9]+", "-", text.lower())
+            return text.strip("-")
+    acceptance: "{unittest} hidden_test_slug"
+    acceptance_files:
+      hidden_test_slug.py: |
+        import unittest
+
+        from slug import slugify
+
+
+        class MaxLength(unittest.TestCase):
+            def test_default_unchanged(self):
+                self.assertEqual(slugify("  Hello, World!  "), "hello-world")
+                self.assertEqual(slugify("Hello World", max_length=None), "hello-world")
+
+            def test_cut(self):
+                self.assertEqual(slugify("Hello World", max_length=5), "hello")
+                self.assertEqual(slugify("Hello World", max_length=8), "hello-wo")
+
+            def test_cuts_the_slug_not_the_input(self):
+                self.assertEqual(slugify("Hello,   World", max_length=8), "hello-wo")
+
+            def test_cut_on_hyphen_strips_it(self):
+                self.assertEqual(slugify("Hello World", max_length=6), "hello")
+                self.assertEqual(slugify("Crème brûlée -- recipe", max_length=13), "creme-brulee")
+
+            def test_long_enough_is_whole(self):
+                self.assertEqual(slugify("Hello World", max_length=11), "hello-world")
+                self.assertEqual(slugify("Hello World", max_length=50), "hello-world")
+
+            def test_invalid(self):
+                for bad in (0, -3):
+                    with self.assertRaises(ValueError):
+                        slugify("Hello World", max_length=bad)
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      files:
+        slug.py: |
+          import re
+          import unicodedata
+
+
+          def slugify(text, max_length=None):
+              """Turn text into a URL slug.
+
+              ASCII-folds accented letters, lowercases, replaces every run of
+              characters other than a-z and 0-9 with one hyphen, and strips
+              leading and trailing hyphens. With max_length, the slug is cut to
+              that many characters and any trailing hyphens are stripped.
+              """
+              if max_length is not None and max_length < 1:
+                  raise ValueError("max_length must be at least 1")
+              text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+              text = re.sub(r"[^a-z0-9]+", "-", text.lower())
+              slug = text.strip("-")
+              if max_length is not None and len(slug) > max_length:
+                  slug = slug[:max_length].rstrip("-")
+              return slug
+      wrong_files:
+        # Cuts but leaves a trailing hyphen ("hello-" for max_length=6).
+        - slug.py: |
+            import re
+            import unicodedata
+
+
+            def slugify(text, max_length=None):
+                if max_length is not None and max_length < 1:
+                    raise ValueError("max_length must be at least 1")
+                text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+                text = re.sub(r"[^a-z0-9]+", "-", text.lower())
+                slug = text.strip("-")
+                if max_length is not None:
+                    slug = slug[:max_length]
+                return slug
+        # Cuts the input text before slugifying, not the slug.
+        - slug.py: |
+            import re
+            import unicodedata
+
+
+            def slugify(text, max_length=None):
+                if max_length is not None:
+                    if max_length < 1:
+                        raise ValueError("max_length must be at least 1")
+                    text = text[:max_length]
+                text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+                text = re.sub(r"[^a-z0-9]+", "-", text.lower())
+                return text.strip("-")
+
+  - id: fe-rename-calc-total
+    difficulty: medium
+    notes: "medium — rename a function across three files, no alias; hidden tests exercise every call site."
+    prompt: >
+      Rename the function calc_total to order_total_cents everywhere. It is
+      defined in {workspace}/orders.py and used in {workspace}/invoice.py and
+      {workspace}/report.py. Update the definition, every call and every
+      import, and do not keep the old name as an alias.
+    setup_files:
+      orders.py: |
+        def calc_total(lines, tax_rate=0.0):
+            """Order total in cents: sum of qty * unit_cents, plus tax."""
+            subtotal = sum(line["qty"] * line["unit_cents"] for line in lines)
+            return subtotal + round(subtotal * tax_rate)
+      invoice.py: |
+        from orders import calc_total
+
+
+        def invoice_text(customer, lines, tax_rate):
+            total = calc_total(lines, tax_rate)
+            return f"Invoice for {customer}: {total / 100:.2f}"
+      report.py: |
+        import orders
+
+
+        def daily_revenue(todays_orders):
+            """Revenue in cents for a list of (lines, tax_rate) pairs."""
+            return sum(orders.calc_total(lines, rate) for lines, rate in todays_orders)
+    acceptance: "{unittest} hidden_test_rename_total"
+    acceptance_files:
+      hidden_test_rename_total.py: |
+        import unittest
+        from pathlib import Path
+
+        import invoice
+        import orders
+        import report
+
+        LINES = [{"qty": 3, "unit_cents": 250}, {"qty": 1, "unit_cents": 1999}]
+
+
+        class Renamed(unittest.TestCase):
+            def test_new_name(self):
+                self.assertEqual(orders.order_total_cents(LINES), 2749)
+                self.assertEqual(orders.order_total_cents(LINES, 0.1), 3024)
+
+            def test_old_name_is_gone(self):
+                self.assertFalse(hasattr(orders, "calc_total"))
+                for name in ("orders.py", "invoice.py", "report.py"):
+                    self.assertNotIn("calc_total", Path(name).read_text(), name)
+
+            def test_call_sites(self):
+                self.assertEqual(invoice.invoice_text("Pell & Daughters", LINES, 0.1),
+                                 "Invoice for Pell & Daughters: 30.24")
+                self.assertEqual(report.daily_revenue([(LINES, 0.0), (LINES, 0.1)]), 5773)
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      files:
+        orders.py: |
+          def order_total_cents(lines, tax_rate=0.0):
+              """Order total in cents: sum of qty * unit_cents, plus tax."""
+              subtotal = sum(line["qty"] * line["unit_cents"] for line in lines)
+              return subtotal + round(subtotal * tax_rate)
+        invoice.py: |
+          from orders import order_total_cents
+
+
+          def invoice_text(customer, lines, tax_rate):
+              total = order_total_cents(lines, tax_rate)
+              return f"Invoice for {customer}: {total / 100:.2f}"
+        report.py: |
+          import orders
+
+
+          def daily_revenue(todays_orders):
+              """Revenue in cents for a list of (lines, tax_rate) pairs."""
+              return sum(orders.order_total_cents(lines, rate) for lines, rate in todays_orders)
+      wrong_files:
+        # Kept the old name as an alias.
+        - orders.py: |
+            def order_total_cents(lines, tax_rate=0.0):
+                """Order total in cents: sum of qty * unit_cents, plus tax."""
+                subtotal = sum(line["qty"] * line["unit_cents"] for line in lines)
+                return subtotal + round(subtotal * tax_rate)
+
+
+            calc_total = order_total_cents
+        # Renamed the definition only; the call sites still use calc_total.
+        - invoice.py: |
+            from orders import calc_total
+
+
+            def invoice_text(customer, lines, tax_rate):
+                total = calc_total(lines, tax_rate)
+                return f"Invoice for {customer}: {total / 100:.2f}"
+          report.py: |
+            import orders
+
+
+            def daily_revenue(todays_orders):
+                """Revenue in cents for a list of (lines, tax_rate) pairs."""
+                return sum(orders.calc_total(lines, rate) for lines, rate in todays_orders)
+
+  - id: fe-elapsed-minutes-offsets
+    difficulty: medium
+    notes: >
+      medium — timezone bug: offsets are thrown away before subtracting; the
+      fix must also treat offset-less timestamps as UTC (naive/aware
+      subtraction raises). Visible tests. The tests pin the local zone to
+      UTC+05:30 (the acceptance env sets no TZ), so reading an offset-less
+      timestamp as local time fails on every host, a UTC one included.
+    prompt: >
+      elapsed_minutes in {workspace}/timelog.py gives wrong answers when the two
+      timestamps carry different UTC offsets. Fix it so it does what its
+      docstring says and the tests in test_timelog.py pass. You can run them
+      with `python3 -m unittest -q test_timelog`.
+    setup_files:
+      timelog.py: |
+        from datetime import datetime
+
+
+        def elapsed_minutes(start, end):
+            """Whole minutes from start to end.
+
+            Both are ISO-8601 timestamps such as "2026-03-08T01:30:00-05:00".
+            They may carry different UTC offsets (a shift can cross a DST
+            change, or be logged from another office). A timestamp without an
+            offset is in UTC.
+            """
+            a = datetime.fromisoformat(start).replace(tzinfo=None)
+            b = datetime.fromisoformat(end).replace(tzinfo=None)
+            return int((b - a).total_seconds() // 60)
+      test_timelog.py: &fe_timelog_tests |
+        import os
+        import time
+        import unittest
+        from datetime import datetime, timedelta
+
+        # Pin the local time zone to UTC+05:30 (POSIX writes the sign inverted)
+        # so these tests give the same result on every machine.
+        os.environ["TZ"] = "IST-5:30"
+        time.tzset()
+
+        from timelog import elapsed_minutes  # noqa: E402
+
+
+        class Elapsed(unittest.TestCase):
+            def test_local_zone_is_pinned(self):
+                # Not a timelog test: proves the pin above is still in effect.
+                self.assertEqual(datetime(2026, 5, 11, 12, 0).astimezone().utcoffset(),
+                                 timedelta(hours=5, minutes=30))
+
+            def test_same_offset(self):
+                self.assertEqual(
+                    elapsed_minutes("2026-04-02T09:00:00+02:00", "2026-04-02T17:30:00+02:00"), 510)
+
+            def test_across_a_dst_change(self):
+                # 01:30 EST to 03:30 EDT is one real hour.
+                self.assertEqual(
+                    elapsed_minutes("2026-03-08T01:30:00-05:00", "2026-03-08T03:30:00-04:00"), 60)
+
+            def test_different_offices(self):
+                self.assertEqual(
+                    elapsed_minutes("2026-05-11T08:00:00+01:00", "2026-05-11T09:15:00-04:00"), 375)
+
+            def test_no_offset_means_utc(self):
+                self.assertEqual(
+                    elapsed_minutes("2026-05-11T12:00:00", "2026-05-11T14:45:00+02:00"), 45)
+                self.assertEqual(
+                    elapsed_minutes("2026-05-11T12:00:00", "2026-05-11T12:30:00"), 30)
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    acceptance: "{unittest} test_timelog"
+    acceptance_files:
+      test_timelog.py: *fe_timelog_tests
+    reference:
+      files:
+        timelog.py: |
+          from datetime import datetime, timezone
+
+
+          def _parse(ts):
+              dt = datetime.fromisoformat(ts)
+              if dt.tzinfo is None:
+                  dt = dt.replace(tzinfo=timezone.utc)
+              return dt
+
+
+          def elapsed_minutes(start, end):
+              """Whole minutes from start to end.
+
+              Both are ISO-8601 timestamps such as "2026-03-08T01:30:00-05:00".
+              They may carry different UTC offsets (a shift can cross a DST
+              change, or be logged from another office). A timestamp without an
+              offset is in UTC.
+              """
+              a = _parse(start)
+              b = _parse(end)
+              return int((b - a).total_seconds() // 60)
+      wrong_files:
+        # Keeps the offsets, but an offset-less timestamp stays naive (TypeError on a mix).
+        - timelog.py: |
+            from datetime import datetime
+
+
+            def elapsed_minutes(start, end):
+                a = datetime.fromisoformat(start)
+                b = datetime.fromisoformat(end)
+                return int((b - a).total_seconds() // 60)
+        # Stamps UTC on every timestamp, overwriting the real offsets.
+        - timelog.py: |
+            from datetime import datetime, timezone
+
+
+            def elapsed_minutes(start, end):
+                a = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
+                b = datetime.fromisoformat(end).replace(tzinfo=timezone.utc)
+                return int((b - a).total_seconds() // 60)
+        # astimezone() reads an offset-less timestamp as LOCAL time, not UTC.
+        # Passed on a UTC-local host before the tests pinned the zone.
+        - timelog.py: |
+            from datetime import datetime, timezone
+
+
+            def elapsed_minutes(start, end):
+                a = datetime.fromisoformat(start).astimezone(timezone.utc)
+                b = datetime.fromisoformat(end).astimezone(timezone.utc)
+                return int((b - a).total_seconds() // 60)
+        # .timestamp() also reads an offset-less timestamp as local time.
+        - timelog.py: |
+            from datetime import datetime
+
+
+            def elapsed_minutes(start, end):
+                a = datetime.fromisoformat(start).timestamp()
+                b = datetime.fromisoformat(end).timestamp()
+                return int((b - a) // 60)
+        # Forces the process zone to UTC at import, undoing the tests' pin, so
+        # the local-time reading goes unnoticed.
+        - timelog.py: |
+            import os
+            import time
+            from datetime import datetime, timezone
+
+            os.environ["TZ"] = "UTC"
+            time.tzset()
+
+
+            def elapsed_minutes(start, end):
+                a = datetime.fromisoformat(start).astimezone(timezone.utc)
+                b = datetime.fromisoformat(end).astimezone(timezone.utc)
+                return int((b - a).total_seconds() // 60)
+
+  - id: fe-register-tsv-exporter
+    difficulty: medium
+    notes: >
+      medium — multi-file: the registry key and class name live only in the
+      new module, so the model must read it before editing the registry.
+    prompt: >
+      A new exporter lives in {workspace}/exporters/tsv_export.py, but
+      get_exporter cannot find it. Register it in
+      {workspace}/exporters/registry.py the same way the existing exporters
+      are registered, so it can be looked up by its format name.
+    setup_files:
+      exporters/__init__.py: |
+        """Output formats for `lumen export --format NAME`."""
+      exporters/registry.py: |
+        """Format name -> exporter class. `lumen export --format NAME` looks names up here."""
+
+        from exporters.json_export import JsonExporter
+        from exporters.markdown_export import MarkdownExporter
+
+        REGISTRY = {
+            JsonExporter.NAME: JsonExporter,
+            MarkdownExporter.NAME: MarkdownExporter,
+        }
+
+
+        def get_exporter(name):
+            try:
+                return REGISTRY[name]()
+            except KeyError:
+                raise ValueError(f"unknown export format {name!r}") from None
+      exporters/json_export.py: |
+        import json
+
+
+        class JsonExporter:
+            NAME = "json"
+
+            def render(self, rows):
+                return json.dumps(rows, sort_keys=True)
+      exporters/markdown_export.py: |
+        class MarkdownExporter:
+            NAME = "md-table"
+
+            def render(self, rows):
+                if not rows:
+                    return ""
+                cols = list(rows[0])
+                out = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
+                for row in rows:
+                    out.append("| " + " | ".join(str(row[c]) for c in cols) + " |")
+                return "\n".join(out)
+      exporters/tsv_export.py: |
+        class TabSeparatedExporter:
+            NAME = "tsv-strict-v3"
+
+            def render(self, rows):
+                if not rows:
+                    return ""
+                cols = list(rows[0])
+                lines = ["\t".join(cols)]
+                for row in rows:
+                    lines.append("\t".join(str(row[c]).replace("\t", " ") for c in cols))
+                return "\n".join(lines)
+    acceptance: "{unittest} hidden_test_registry"
+    acceptance_files:
+      hidden_test_registry.py: |
+        import unittest
+
+        from exporters.json_export import JsonExporter
+        from exporters.markdown_export import MarkdownExporter
+        from exporters.registry import REGISTRY, get_exporter
+        from exporters.tsv_export import TabSeparatedExporter
+
+
+        class Registry(unittest.TestCase):
+            def test_tsv_is_registered_under_its_name(self):
+                self.assertIs(REGISTRY.get("tsv-strict-v3"), TabSeparatedExporter)
+                self.assertIsInstance(get_exporter("tsv-strict-v3"), TabSeparatedExporter)
+
+            def test_existing_exporters_kept(self):
+                self.assertEqual(REGISTRY, {"json": JsonExporter, "md-table": MarkdownExporter,
+                                            "tsv-strict-v3": TabSeparatedExporter})
+
+            def test_render_through_registry(self):
+                out = get_exporter("tsv-strict-v3").render([{"sku": "K-88", "qty": 4}])
+                self.assertEqual(out, "sku\tqty\nK-88\t4")
+
+            def test_unknown_format(self):
+                with self.assertRaises(ValueError):
+                    get_exporter("tsv")
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      files:
+        exporters/registry.py: |
+          """Format name -> exporter class. `lumen export --format NAME` looks names up here."""
+
+          from exporters.json_export import JsonExporter
+          from exporters.markdown_export import MarkdownExporter
+          from exporters.tsv_export import TabSeparatedExporter
+
+          REGISTRY = {
+              JsonExporter.NAME: JsonExporter,
+              MarkdownExporter.NAME: MarkdownExporter,
+              TabSeparatedExporter.NAME: TabSeparatedExporter,
+          }
+
+
+          def get_exporter(name):
+              try:
+                  return REGISTRY[name]()
+              except KeyError:
+                  raise ValueError(f"unknown export format {name!r}") from None
+      wrong_files:
+        # Registered under a guessed key instead of the exporter's NAME.
+        - exporters/registry.py: |
+            from exporters.json_export import JsonExporter
+            from exporters.markdown_export import MarkdownExporter
+            from exporters.tsv_export import TabSeparatedExporter
+
+            REGISTRY = {
+                JsonExporter.NAME: JsonExporter,
+                MarkdownExporter.NAME: MarkdownExporter,
+                "tsv": TabSeparatedExporter,
+            }
+
+
+            def get_exporter(name):
+                try:
+                    return REGISTRY[name]()
+                except KeyError:
+                    raise ValueError(f"unknown export format {name!r}") from None
+        # Replaced the markdown entry instead of adding one.
+        - exporters/registry.py: |
+            from exporters.json_export import JsonExporter
+            from exporters.tsv_export import TabSeparatedExporter
+
+            REGISTRY = {
+                JsonExporter.NAME: JsonExporter,
+                TabSeparatedExporter.NAME: TabSeparatedExporter,
+            }
+
+
+            def get_exporter(name):
+                try:
+                    return REGISTRY[name]()
+                except KeyError:
+                    raise ValueError(f"unknown export format {name!r}") from None
+
+  - id: fe-services-yaml-ingest
+    difficulty: medium
+    notes: >
+      medium — edit one service in a YAML file where the same key and value
+      appear under other services and the defaults; hidden check parses the
+      file with its own small parser (stdlib only) and compares the whole tree.
+    prompt: >
+      In {workspace}/deploy/services.yaml, scale the ingest service to 5
+      replicas and move it to image tag 4.12.2. Change nothing else — in
+      particular not the other services or the defaults.
+    setup_files:
+      deploy/services.yaml: |
+        # Service fleet for the ferrous-queue stack.
+        defaults:
+          replicas: 2
+          memory_mb: 512
+
+        services:
+          api:
+            image: ferrous/api:4.12.0
+            replicas: 2
+            memory_mb: 1024
+          ingest:
+            image: ferrous/ingest:4.12.0
+            replicas: 2
+            memory_mb: 768
+          scheduler:
+            image: ferrous/scheduler:4.11.3
+            replicas: 1
+    acceptance: "{unittest} hidden_check_services_yaml"
+    acceptance_files:
+      hidden_check_services_yaml.py: |
+        import re
+        import unittest
+        from pathlib import Path
+
+
+        def parse(text):
+            """The block-mapping subset of YAML this file uses: `key: value`, nesting by indent."""
+            root = {}
+            stack = [(-1, root)]
+            for raw in text.splitlines():
+                if not raw.strip() or raw.lstrip().startswith("#"):
+                    continue
+                line = re.sub(r"\s+#.*$", "", raw).rstrip()
+                indent = len(line) - len(line.lstrip(" "))
+                key, _, value = line.strip().partition(":")
+                value = value.strip().strip("\"'")
+                while stack[-1][0] >= indent:
+                    stack.pop()
+                parent = stack[-1][1]
+                if value:
+                    parent[key.strip()] = value
+                else:
+                    child = {}
+                    parent[key.strip()] = child
+                    stack.append((indent, child))
+            return root
+
+
+        EXPECTED = {
+            "defaults": {"replicas": "2", "memory_mb": "512"},
+            "services": {
+                "api": {"image": "ferrous/api:4.12.0", "replicas": "2", "memory_mb": "1024"},
+                "ingest": {"image": "ferrous/ingest:4.12.2", "replicas": "5", "memory_mb": "768"},
+                "scheduler": {"image": "ferrous/scheduler:4.11.3", "replicas": "1"},
+            },
+        }
+
+
+        class Services(unittest.TestCase):
+            def test_tree(self):
+                self.assertEqual(parse(Path("deploy/services.yaml").read_text()), EXPECTED)
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      files:
+        deploy/services.yaml: |
+          # Service fleet for the ferrous-queue stack.
+          defaults:
+            replicas: 2
+            memory_mb: 512
+
+          services:
+            api:
+              image: ferrous/api:4.12.0
+              replicas: 2
+              memory_mb: 1024
+            ingest:
+              image: ferrous/ingest:4.12.2
+              replicas: 5
+              memory_mb: 768
+            scheduler:
+              image: ferrous/scheduler:4.11.3
+              replicas: 1
+      wrong_files:
+        # Blind replace-all of "replicas: 2": the defaults and api moved too.
+        - deploy/services.yaml: |
+            # Service fleet for the ferrous-queue stack.
+            defaults:
+              replicas: 5
+              memory_mb: 512
+
+            services:
+              api:
+                image: ferrous/api:4.12.0
+                replicas: 5
+                memory_mb: 1024
+              ingest:
+                image: ferrous/ingest:4.12.2
+                replicas: 5
+                memory_mb: 768
+              scheduler:
+                image: ferrous/scheduler:4.11.3
+                replicas: 1
+        # Scaled, but the image tag not moved.
+        - deploy/services.yaml: |
+            # Service fleet for the ferrous-queue stack.
+            defaults:
+              replicas: 2
+              memory_mb: 512
+
+            services:
+              api:
+                image: ferrous/api:4.12.0
+                replicas: 2
+                memory_mb: 1024
+              ingest:
+                image: ferrous/ingest:4.12.0
+                replicas: 5
+                memory_mb: 768
+              scheduler:
+                image: ferrous/scheduler:4.11.3
+                replicas: 1
+
+  # ---------------------------------------------------------------- hard
+  - id: fe-lru-cache-recency
+    difficulty: hard
+    smoke: true
+    notes: >
+      hard — three separate bugs in one class (get does not refresh recency,
+      put on an existing key does not either, eviction pops the newest key);
+      visible tests. One test updates a present, not-least-recent key in a
+      full cache, so a put() that evicts before checking presence fails.
+    prompt: >
+      The LRUCache in {workspace}/lru.py does not behave as its docstrings say.
+      Fix it so the tests in test_lru.py pass, keeping the public API unchanged.
+      You can run them with `python3 -m unittest -q test_lru`.
+    setup_files:
+      lru.py: |
+        from collections import OrderedDict
+
+
+        class LRUCache:
+            """A fixed-capacity cache that evicts the least recently used key.
+
+            Both get() of a present key and put() count as a use of that key.
+            """
+
+            def __init__(self, capacity):
+                if capacity < 1:
+                    raise ValueError("capacity must be >= 1")
+                self.capacity = capacity
+                self._data = OrderedDict()
+
+            def get(self, key, default=None):
+                if key not in self._data:
+                    return default
+                return self._data[key]
+
+            def put(self, key, value):
+                self._data[key] = value
+                if len(self._data) > self.capacity:
+                    self._data.popitem(last=True)
+
+            def keys(self):
+                """Keys from least to most recently used."""
+                return list(self._data)
+      test_lru.py: &fe_lru_tests |
+        import unittest
+
+        from lru import LRUCache
+
+
+        class LRU(unittest.TestCase):
+            def test_evicts_the_least_recent(self):
+                c = LRUCache(2)
+                c.put("a", 1)
+                c.put("b", 2)
+                c.put("c", 3)
+                self.assertIsNone(c.get("a"))
+                self.assertEqual(c.get("b"), 2)
+                self.assertEqual(c.get("c"), 3)
+
+            def test_get_refreshes(self):
+                c = LRUCache(2)
+                c.put("a", 1)
+                c.put("b", 2)
+                c.get("a")
+                c.put("c", 3)
+                self.assertEqual(c.keys(), ["a", "c"])
+
+            def test_put_existing_refreshes(self):
+                c = LRUCache(2)
+                c.put("a", 1)
+                c.put("b", 2)
+                c.put("a", 10)
+                c.put("c", 3)
+                self.assertEqual(c.keys(), ["a", "c"])
+                self.assertEqual(c.get("a"), 10)
+
+            def test_update_in_full_cache_keeps_others(self):
+                # Updating a present key never evicts: nothing grew.
+                c = LRUCache(2)
+                c.put("a", 1)
+                c.put("b", 2)
+                c.put("b", 20)
+                self.assertEqual(c.keys(), ["a", "b"])
+                self.assertEqual(c.get("a"), 1)
+                self.assertEqual(c.get("b"), 20)
+
+            def test_keys_order(self):
+                c = LRUCache(3)
+                for k in "xyz":
+                    c.put(k, k.upper())
+                c.get("x")
+                self.assertEqual(c.keys(), ["y", "z", "x"])
+
+            def test_missing_key(self):
+                c = LRUCache(1)
+                self.assertEqual(c.get("nope", 42), 42)
+                self.assertEqual(c.keys(), [])
+
+            def test_capacity_must_be_positive(self):
+                with self.assertRaises(ValueError):
+                    LRUCache(0)
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    acceptance: "{unittest} test_lru"
+    acceptance_files:
+      test_lru.py: *fe_lru_tests
+    reference:
+      files:
+        lru.py: |
+          from collections import OrderedDict
+
+
+          class LRUCache:
+              """A fixed-capacity cache that evicts the least recently used key.
+
+              Both get() of a present key and put() count as a use of that key.
+              """
+
+              def __init__(self, capacity):
+                  if capacity < 1:
+                      raise ValueError("capacity must be >= 1")
+                  self.capacity = capacity
+                  self._data = OrderedDict()
+
+              def get(self, key, default=None):
+                  if key not in self._data:
+                      return default
+                  self._data.move_to_end(key)
+                  return self._data[key]
+
+              def put(self, key, value):
+                  self._data[key] = value
+                  self._data.move_to_end(key)
+                  if len(self._data) > self.capacity:
+                      self._data.popitem(last=False)
+
+              def keys(self):
+                  """Keys from least to most recently used."""
+                  return list(self._data)
+      wrong_files:
+        # Only the eviction end fixed; get() and put() still do not refresh.
+        - lru.py: |
+            from collections import OrderedDict
+
+
+            class LRUCache:
+                def __init__(self, capacity):
+                    if capacity < 1:
+                        raise ValueError("capacity must be >= 1")
+                    self.capacity = capacity
+                    self._data = OrderedDict()
+
+                def get(self, key, default=None):
+                    if key not in self._data:
+                        return default
+                    return self._data[key]
+
+                def put(self, key, value):
+                    self._data[key] = value
+                    if len(self._data) > self.capacity:
+                        self._data.popitem(last=False)
+
+                def keys(self):
+                    return list(self._data)
+        # Eviction and get() fixed; put() on an existing key still does not refresh.
+        - lru.py: |
+            from collections import OrderedDict
+
+
+            class LRUCache:
+                def __init__(self, capacity):
+                    if capacity < 1:
+                        raise ValueError("capacity must be >= 1")
+                    self.capacity = capacity
+                    self._data = OrderedDict()
+
+                def get(self, key, default=None):
+                    if key not in self._data:
+                        return default
+                    self._data.move_to_end(key)
+                    return self._data[key]
+
+                def put(self, key, value):
+                    self._data[key] = value
+                    if len(self._data) > self.capacity:
+                        self._data.popitem(last=False)
+
+                def keys(self):
+                    return list(self._data)
+        # get() and eviction fixed, but put() evicts BEFORE checking whether the
+        # key is already present: updating "b" in a full cache drops live "a".
+        - lru.py: |
+            from collections import OrderedDict
+
+
+            class LRUCache:
+                def __init__(self, capacity):
+                    if capacity < 1:
+                        raise ValueError("capacity must be >= 1")
+                    self.capacity = capacity
+                    self._data = OrderedDict()
+
+                def get(self, key, default=None):
+                    if key not in self._data:
+                        return default
+                    self._data.move_to_end(key)
+                    return self._data[key]
+
+                def put(self, key, value):
+                    if len(self._data) >= self.capacity:
+                        self._data.popitem(last=False)
+                    self._data[key] = value
+                    self._data.move_to_end(key)
+
+                def keys(self):
+                    return list(self._data)
+
+  - id: fe-proration-billing
+    difficulty: hard
+    notes: >
+      hard — three bugs in one function (fixed 30-day month, exclusive day
+      count, floor instead of round-half-up); tests include a leap February
+      and an exact half cent. Visible tests.
+    prompt: >
+      prorated_cents in {workspace}/billing.py charges most customers the wrong
+      amount. Fix billing.py so it does what its docstring says and the tests
+      in test_billing.py pass. Keep the arithmetic in integer cents. You can
+      run the tests with `python3 -m unittest -q test_billing`.
+    setup_files:
+      billing.py: |
+        from datetime import date
+
+
+        def days_in_month(year, month):
+            return 30
+
+
+        def prorated_cents(monthly_cents, start, end):
+            """Charge for the days start..end (BOTH inclusive) of one calendar month.
+
+            The charge is monthly_cents * days_used / days_in_that_month,
+            rounded to the nearest cent, with exact halves rounded up.
+            start and end must be dates in the same month.
+            """
+            if (start.year, start.month) != (end.year, end.month):
+                raise ValueError("start and end must be in the same month")
+            days_used = (end - start).days
+            total = days_in_month(start.year, start.month)
+            return (monthly_cents * days_used) // total
+      test_billing.py: &fe_billing_tests |
+        import unittest
+        from datetime import date
+
+        from billing import prorated_cents
+
+
+        class Proration(unittest.TestCase):
+            def test_full_leap_february(self):
+                self.assertEqual(prorated_cents(2900, date(2028, 2, 1), date(2028, 2, 29)), 2900)
+
+            def test_full_31_day_month(self):
+                self.assertEqual(prorated_cents(3100, date(2027, 1, 1), date(2027, 1, 31)), 3100)
+
+            def test_one_day_of_april(self):
+                self.assertEqual(prorated_cents(1000, date(2027, 4, 10), date(2027, 4, 10)), 33)
+
+            def test_ten_days_of_february(self):
+                # 1999 * 10 / 28 = 713.93
+                self.assertEqual(prorated_cents(1999, date(2027, 2, 11), date(2027, 2, 20)), 714)
+
+            def test_exact_half_rounds_up(self):
+                # 75 * 1 / 30 = 2.5
+                self.assertEqual(prorated_cents(75, date(2027, 6, 5), date(2027, 6, 5)), 3)
+
+            def test_different_months_rejected(self):
+                with self.assertRaises(ValueError):
+                    prorated_cents(1000, date(2027, 1, 30), date(2027, 2, 2))
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    acceptance: "{unittest} test_billing"
+    acceptance_files:
+      test_billing.py: *fe_billing_tests
+    reference:
+      files:
+        billing.py: |
+          import calendar
+          from datetime import date
+
+
+          def days_in_month(year, month):
+              return calendar.monthrange(year, month)[1]
+
+
+          def prorated_cents(monthly_cents, start, end):
+              """Charge for the days start..end (BOTH inclusive) of one calendar month.
+
+              The charge is monthly_cents * days_used / days_in_that_month,
+              rounded to the nearest cent, with exact halves rounded up.
+              start and end must be dates in the same month.
+              """
+              if (start.year, start.month) != (end.year, end.month):
+                  raise ValueError("start and end must be in the same month")
+              days_used = (end - start).days + 1
+              total = days_in_month(start.year, start.month)
+              return (2 * monthly_cents * days_used + total) // (2 * total)
+      wrong_files:
+        # Month length and inclusive count fixed, still floor division.
+        - billing.py: |
+            import calendar
+            from datetime import date
+
+
+            def days_in_month(year, month):
+                return calendar.monthrange(year, month)[1]
+
+
+            def prorated_cents(monthly_cents, start, end):
+                if (start.year, start.month) != (end.year, end.month):
+                    raise ValueError("start and end must be in the same month")
+                days_used = (end - start).days + 1
+                total = days_in_month(start.year, start.month)
+                return (monthly_cents * days_used) // total
+        # Python's round(): an exact half goes to the even cent (2), not up (3).
+        - billing.py: |
+            import calendar
+            from datetime import date
+
+
+            def days_in_month(year, month):
+                return calendar.monthrange(year, month)[1]
+
+
+            def prorated_cents(monthly_cents, start, end):
+                if (start.year, start.month) != (end.year, end.month):
+                    raise ValueError("start and end must be in the same month")
+                days_used = (end - start).days + 1
+                total = days_in_month(start.year, start.month)
+                return round(monthly_cents * days_used / total)
+
+  - id: fe-rename-ledgerkit
+    difficulty: hard
+    notes: >
+      hard — rename across a package (definition, imports, calls, __all__)
+      with a longer, similarly named function that must keep its name, so a
+      blind substring replace fails. Hidden tests.
+    prompt: |
+      Rename the function fetch_rows_for_account (defined in
+      {workspace}/ledgerkit/balances.py) to entries_for_account throughout the
+      ledgerkit package: its definition, every call, every import and the
+      package's __all__. The package files are:
+
+      - {workspace}/ledgerkit/__init__.py
+      - {workspace}/ledgerkit/balances.py
+      - {workspace}/ledgerkit/statements.py
+      - {workspace}/ledgerkit/cli.py
+      - {workspace}/ledgerkit/store.py
+
+      No occurrence of the old name may remain in the package, and do not keep
+      an alias under the old name. store.fetch_rows_for_accounts (plural) is a
+      different function and keeps its name.
+    setup_files:
+      ledgerkit/__init__.py: |
+        """ledgerkit: tiny journal helpers."""
+
+        from ledgerkit.balances import fetch_rows_for_account, running_balance
+
+        __all__ = ["fetch_rows_for_account", "running_balance"]
+      ledgerkit/store.py: |
+        """An in-memory journal of (account, amount_cents, memo) rows."""
+
+        JOURNAL = []
+
+
+        def post(account, amount_cents, memo=""):
+            JOURNAL.append((account, amount_cents, memo))
+
+
+        def clear():
+            JOURNAL.clear()
+
+
+        def fetch_rows_for_accounts(accounts):
+            """All journal rows whose account is in accounts, oldest first."""
+            wanted = set(accounts)
+            return [row for row in JOURNAL if row[0] in wanted]
+      ledgerkit/balances.py: |
+        from ledgerkit import store
+
+
+        def fetch_rows_for_account(account):
+            """All journal rows for one account, oldest first."""
+            return [row for row in store.JOURNAL if row[0] == account]
+
+
+        def running_balance(account):
+            """The balance after each posting to account, in cents."""
+            total = 0
+            out = []
+            for _, amount, _ in fetch_rows_for_account(account):
+                total += amount
+                out.append(total)
+            return out
+      ledgerkit/statements.py: |
+        from ledgerkit.balances import fetch_rows_for_account
+
+
+        def statement_lines(account):
+            return [f"{memo or '-'}: {amount / 100:+.2f}"
+                    for _, amount, memo in fetch_rows_for_account(account)]
+      ledgerkit/cli.py: |
+        import sys
+
+        from ledgerkit import balances, statements, store
+
+
+        def main(argv):
+            cmd, arg = argv
+            if cmd == "rows":
+                for row in balances.fetch_rows_for_account(arg):
+                    print(row)
+            elif cmd == "rows-any":
+                for row in store.fetch_rows_for_accounts(arg.split(",")):
+                    print(row)
+            elif cmd == "statement":
+                print("\n".join(statements.statement_lines(arg)))
+            else:
+                print(f"unknown command {cmd}", file=sys.stderr)
+                return 2
+            return 0
+    acceptance: "{unittest} hidden_test_ledgerkit_rename"
+    acceptance_files:
+      hidden_test_ledgerkit_rename.py: |
+        import contextlib
+        import io
+        import re
+        import unittest
+        from pathlib import Path
+
+        import ledgerkit
+        from ledgerkit import balances, cli, statements, store
+
+        OLD = re.compile(r"\bfetch_rows_for_account\b")
+
+
+        def run_cli(*argv):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = cli.main(list(argv))
+            return code, buf.getvalue()
+
+
+        class Rename(unittest.TestCase):
+            def setUp(self):
+                store.clear()
+                store.post("ops-7731", 12500, "seed")
+                store.post("rnd-2204", -300, "coffee")
+                store.post("ops-7731", -4250, "")
+
+            def test_new_name(self):
+                self.assertEqual(balances.entries_for_account("ops-7731"),
+                                 [("ops-7731", 12500, "seed"), ("ops-7731", -4250, "")])
+                self.assertIs(ledgerkit.entries_for_account, balances.entries_for_account)
+                self.assertEqual(sorted(ledgerkit.__all__), ["entries_for_account", "running_balance"])
+
+            def test_old_name_is_gone(self):
+                for mod in (ledgerkit, balances, statements, cli):
+                    self.assertFalse(hasattr(mod, "fetch_rows_for_account"), mod.__name__)
+                for path in sorted(Path("ledgerkit").glob("*.py")):
+                    self.assertIsNone(OLD.search(path.read_text()), str(path))
+
+            def test_plural_function_keeps_its_name(self):
+                self.assertEqual(len(store.fetch_rows_for_accounts(["ops-7731", "rnd-2204"])), 3)
+                code, out = run_cli("rows-any", "rnd-2204")
+                self.assertEqual((code, out), (0, "('rnd-2204', -300, 'coffee')\n"))
+
+            def test_callers(self):
+                self.assertEqual(balances.running_balance("ops-7731"), [12500, 8250])
+                self.assertEqual(statements.statement_lines("ops-7731"),
+                                 ["seed: +125.00", "-: -42.50"])
+                code, out = run_cli("rows", "ops-7731")
+                self.assertEqual(code, 0)
+                self.assertEqual(out.splitlines(), ["('ops-7731', 12500, 'seed')",
+                                                    "('ops-7731', -4250, '')"])
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      files:
+        ledgerkit/__init__.py: |
+          """ledgerkit: tiny journal helpers."""
+
+          from ledgerkit.balances import entries_for_account, running_balance
+
+          __all__ = ["entries_for_account", "running_balance"]
+        ledgerkit/balances.py: |
+          from ledgerkit import store
+
+
+          def entries_for_account(account):
+              """All journal rows for one account, oldest first."""
+              return [row for row in store.JOURNAL if row[0] == account]
+
+
+          def running_balance(account):
+              """The balance after each posting to account, in cents."""
+              total = 0
+              out = []
+              for _, amount, _ in entries_for_account(account):
+                  total += amount
+                  out.append(total)
+              return out
+        ledgerkit/statements.py: |
+          from ledgerkit.balances import entries_for_account
+
+
+          def statement_lines(account):
+              return [f"{memo or '-'}: {amount / 100:+.2f}"
+                      for _, amount, memo in entries_for_account(account)]
+        ledgerkit/cli.py: |
+          import sys
+
+          from ledgerkit import balances, statements, store
+
+
+          def main(argv):
+              cmd, arg = argv
+              if cmd == "rows":
+                  for row in balances.entries_for_account(arg):
+                      print(row)
+              elif cmd == "rows-any":
+                  for row in store.fetch_rows_for_accounts(arg.split(",")):
+                      print(row)
+              elif cmd == "statement":
+                  print("\n".join(statements.statement_lines(arg)))
+              else:
+                  print(f"unknown command {cmd}", file=sys.stderr)
+                  return 2
+              return 0
+      wrong_files:
+        # Blind substring replace: the plural store.fetch_rows_for_accounts was renamed too.
+        - ledgerkit/store.py: |
+            """An in-memory journal of (account, amount_cents, memo) rows."""
+
+            JOURNAL = []
+
+
+            def post(account, amount_cents, memo=""):
+                JOURNAL.append((account, amount_cents, memo))
+
+
+            def clear():
+                JOURNAL.clear()
+
+
+            def entries_for_accounts(accounts):
+                """All journal rows whose account is in accounts, oldest first."""
+                wanted = set(accounts)
+                return [row for row in JOURNAL if row[0] in wanted]
+          ledgerkit/cli.py: |
+            import sys
+
+            from ledgerkit import balances, statements, store
+
+
+            def main(argv):
+                cmd, arg = argv
+                if cmd == "rows":
+                    for row in balances.entries_for_account(arg):
+                        print(row)
+                elif cmd == "rows-any":
+                    for row in store.entries_for_accounts(arg.split(",")):
+                        print(row)
+                elif cmd == "statement":
+                    print("\n".join(statements.statement_lines(arg)))
+                else:
+                    print(f"unknown command {cmd}", file=sys.stderr)
+                    return 2
+                return 0
+        # Kept the old name as an alias.
+        - ledgerkit/balances.py: |
+            from ledgerkit import store
+
+
+            def entries_for_account(account):
+                """All journal rows for one account, oldest first."""
+                return [row for row in store.JOURNAL if row[0] == account]
+
+
+            fetch_rows_for_account = entries_for_account
+
+
+            def running_balance(account):
+                """The balance after each posting to account, in cents."""
+                total = 0
+                out = []
+                for _, amount, _ in entries_for_account(account):
+                    total += amount
+                    out.append(total)
+                return out
+
+  - id: fe-compound-durations
+    difficulty: hard
+    notes: >
+      hard — extend a parser to a small grammar with ordering and error rules;
+      hidden tests. They reject a space inside a part ("1 h", "1 0m"), so
+      stripping every space before one fullmatch fails.
+    prompt: |
+      Extend parse_duration in {workspace}/durations.py so it also accepts
+      compound durations such as "1h30m", "2d 4h" or "1h 0m 5s".
+
+      - A duration is one or more parts. Each part is a non-negative integer
+        immediately followed by one unit letter: d, h, m or s (lowercase only;
+        1d = 86400 s, 1h = 3600 s, 1m = 60 s).
+      - Parts may be separated by spaces. Leading and trailing whitespace is
+        ignored.
+      - Units must appear in the order d, h, m, s, and each unit at most once.
+      - The result is the total number of seconds, as an int.
+
+      Anything else raises ValueError — including an empty or all-blank
+      string, a number without a unit, a unit without a number, an unknown or
+      uppercase unit, a repeated unit, and units out of order such as "30m1h".
+      Single-part inputs like "90s" and "15m" must keep working.
+    setup_files:
+      durations.py: |
+        import re
+
+        _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+        def parse_duration(text):
+            """Parse a duration like "90s", "15m", "2h" or "3d" into seconds (int).
+
+            Raises ValueError for anything else.
+            """
+            m = re.fullmatch(r"\s*(\d+)([smhd])\s*", text)
+            if not m:
+                raise ValueError(f"bad duration: {text!r}")
+            return int(m.group(1)) * _UNITS[m.group(2)]
+    acceptance: "{unittest} hidden_test_durations"
+    acceptance_files:
+      hidden_test_durations.py: |
+        import unittest
+
+        from durations import parse_duration
+
+
+        class Durations(unittest.TestCase):
+            def test_single_parts_still_work(self):
+                for text, want in (("90s", 90), ("15m", 900), ("2h", 7200), ("3d", 259200),
+                                   ("0s", 0), (" 45m ", 2700)):
+                    self.assertEqual(parse_duration(text), want, text)
+
+            def test_compound(self):
+                for text, want in (("1h30m", 5400), ("2d 4h", 187200), ("1h 0m 5s", 3605),
+                                   ("  1d2h3m4s  ", 93784), ("7m 13s", 433),
+                                   ("1d   1s", 86401)):
+                    self.assertEqual(parse_duration(text), want, text)
+
+            def test_result_is_int(self):
+                self.assertIsInstance(parse_duration("1h30m"), int)
+
+            def test_rejected(self):
+                for text in ("", "   ", "h", "1h30", "30m1h", "1h1h", "1h 2h", "5w",
+                             "1H", "-5m", "1.5h", "1h,30m", "s1", "1d 2x",
+                             # a space INSIDE a part: the unit must follow the number
+                             "1 h", "2 d", "1 0m", "1h 3 0m", "1 h30m"):
+                    with self.assertRaises(ValueError, msg=repr(text)):
+                        parse_duration(text)
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      files:
+        durations.py: |
+          import re
+
+          _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+          _ORDER = "dhms"
+          _PART = re.compile(r"([0-9]+)([dhms])")
+
+
+          def parse_duration(text):
+              """Parse "90s", "15m", "1h30m", "2d 4h", "1h 0m 5s" ... into seconds (int).
+
+              Parts are a number and a unit (d, h, m, s), in that order, each
+              unit at most once, optionally separated by spaces. Raises
+              ValueError for anything else.
+              """
+              s = text.strip()
+              if not s:
+                  raise ValueError(f"bad duration: {text!r}")
+              total = 0
+              last = -1
+              pos = 0
+              while pos < len(s):
+                  m = _PART.match(s, pos)
+                  if not m:
+                      raise ValueError(f"bad duration: {text!r}")
+                  rank = _ORDER.index(m.group(2))
+                  if rank <= last:
+                      raise ValueError(f"bad duration: {text!r}")
+                  last = rank
+                  total += int(m.group(1)) * _UNITS[m.group(2)]
+                  pos = m.end()
+                  while pos < len(s) and s[pos] == " ":
+                      pos += 1
+              return total
+      wrong_files:
+        # Parses the parts but never checks order or repeats ("30m1h" accepted).
+        - durations.py: |
+            import re
+
+            _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+            _PART = re.compile(r"([0-9]+)([dhms])")
+
+
+            def parse_duration(text):
+                s = text.strip()
+                if not s:
+                    raise ValueError(f"bad duration: {text!r}")
+                total = 0
+                pos = 0
+                while pos < len(s):
+                    m = _PART.match(s, pos)
+                    if not m:
+                        raise ValueError(f"bad duration: {text!r}")
+                    total += int(m.group(1)) * _UNITS[m.group(2)]
+                    pos = m.end()
+                    while pos < len(s) and s[pos] == " ":
+                        pos += 1
+                return total
+        # Sums every number+unit it can find, ignoring anything in between ("1h30" accepted).
+        - durations.py: |
+            import re
+
+            _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+            def parse_duration(text):
+                parts = re.findall(r"(\d+)([dhms])", text)
+                if not parts:
+                    raise ValueError(f"bad duration: {text!r}")
+                return sum(int(n) * _UNITS[u] for n, u in parts)
+        # Strips every space before parsing: "1 h" accepted, "1 0m" read as 10m.
+        - durations.py: |
+            import re
+
+            _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+            def parse_duration(text):
+                s = text.replace(" ", "")
+                if not s:
+                    raise ValueError(f"bad duration: {text!r}")
+                m = re.fullmatch(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", s)
+                if not m:
+                    raise ValueError(f"bad duration: {text!r}")
+                return sum(int(v) * _UNITS[u] for v, u in zip(m.groups(), "dhms") if v)
+        # Allows whitespace between a number and its unit ("1 h", "2 d" accepted).
+        - durations.py: |
+            import re
+
+            _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+            _RE = re.compile(r"(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?")
+
+
+            def parse_duration(text):
+                s = text.strip()
+                m = _RE.fullmatch(s)
+                if not s or not m:
+                    raise ValueError(f"bad duration: {text!r}")
+                return sum(int(v) * _UNITS[u] for v, u in zip(m.groups(), "dhms") if v)
+
+  - id: fe-rate-limits-from-doc
+    difficulty: hard
+    notes: >
+      hard — multi-file: the new values, a new plan and a retired plan are
+      only in the document; the model must transcribe the table into code
+      exactly (add, change and remove entries). Hidden tests.
+    prompt: >
+      The rate limits changed. Update LIMITS in {workspace}/ratelimit/config.py
+      so that it matches the table in {workspace}/docs/RATE_LIMITS.md exactly:
+      the same plans (add the new ones, remove any plan the document retires)
+      with the same per_minute and burst values, as ints. Leave DEFAULT_PLAN
+      and the other files as they are.
+    setup_files:
+      docs/RATE_LIMITS.md: |
+        # Rate limits (effective 2026-10-01)
+
+        Limits are enforced per API key. `per_minute` is the sustained rate;
+        `burst` is how many extra requests a key may make above it within a
+        single second.
+
+        | Plan       | per_minute | burst |
+        |------------|-----------:|------:|
+        | free       | 30         | 5     |
+        | starter    | 120        | 20    |
+        | team       | 480        | 60    |
+        | enterprise | 2400       | 300   |
+
+        The `legacy-pro` plan is retired on 2026-10-01; its keys move to `team`.
+      ratelimit/__init__.py: |
+        """Per-plan API rate limits."""
+      ratelimit/config.py: |
+        """Per-plan rate limits. Keep in sync with docs/RATE_LIMITS.md."""
+
+        LIMITS = {
+            "free": {"per_minute": 20, "burst": 5},
+            "starter": {"per_minute": 120, "burst": 10},
+            "legacy-pro": {"per_minute": 300, "burst": 40},
+            "enterprise": {"per_minute": 2000, "burst": 250},
+        }
+
+        DEFAULT_PLAN = "free"
+      ratelimit/limiter.py: |
+        from ratelimit.config import DEFAULT_PLAN, LIMITS
+
+
+        def limit_for(plan):
+            """(per_minute, burst) for a plan; unknown plans get the default plan's."""
+            spec = LIMITS.get(plan, LIMITS[DEFAULT_PLAN])
+            return spec["per_minute"], spec["burst"]
+    acceptance: "{unittest} hidden_test_rate_limits"
+    acceptance_files:
+      hidden_test_rate_limits.py: |
+        import unittest
+
+        from ratelimit.config import DEFAULT_PLAN, LIMITS
+        from ratelimit.limiter import limit_for
+
+        EXPECTED = {
+            "free": {"per_minute": 30, "burst": 5},
+            "starter": {"per_minute": 120, "burst": 20},
+            "team": {"per_minute": 480, "burst": 60},
+            "enterprise": {"per_minute": 2400, "burst": 300},
+        }
+
+
+        class Limits(unittest.TestCase):
+            def test_limits_match_the_document(self):
+                self.assertEqual(LIMITS, EXPECTED)
+                for spec in LIMITS.values():
+                    for value in spec.values():
+                        self.assertIs(type(value), int)
+
+            def test_default_plan_unchanged(self):
+                self.assertEqual(DEFAULT_PLAN, "free")
+
+            def test_lookup(self):
+                self.assertEqual(limit_for("team"), (480, 60))
+                self.assertEqual(limit_for("enterprise"), (2400, 300))
+                self.assertEqual(limit_for("legacy-pro"), (30, 5))
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      files:
+        ratelimit/config.py: |
+          """Per-plan rate limits. Keep in sync with docs/RATE_LIMITS.md."""
+
+          LIMITS = {
+              "free": {"per_minute": 30, "burst": 5},
+              "starter": {"per_minute": 120, "burst": 20},
+              "team": {"per_minute": 480, "burst": 60},
+              "enterprise": {"per_minute": 2400, "burst": 300},
+          }
+
+          DEFAULT_PLAN = "free"
+      wrong_files:
+        # Values updated, but the retired legacy-pro plan kept.
+        - ratelimit/config.py: |
+            LIMITS = {
+                "free": {"per_minute": 30, "burst": 5},
+                "starter": {"per_minute": 120, "burst": 20},
+                "legacy-pro": {"per_minute": 300, "burst": 40},
+                "team": {"per_minute": 480, "burst": 60},
+                "enterprise": {"per_minute": 2400, "burst": 300},
+            }
+
+            DEFAULT_PLAN = "free"
+        # Existing plans updated and legacy-pro removed, but the new team plan missing.
+        - ratelimit/config.py: |
+            LIMITS = {
+                "free": {"per_minute": 30, "burst": 5},
+                "starter": {"per_minute": 120, "burst": 20},
+                "enterprise": {"per_minute": 2400, "burst": 300},
+            }
+
+            DEFAULT_PLAN = "free"
+
+  - id: fe-interval-set-merge
+    difficulty: hard
+    notes: "hard — change a class invariant (always merged, sorted) and add a method; hidden tests."
+    prompt: |
+      Change IntervalSet in {workspace}/intervals.py:
+
+      1. spans() must always return the smallest list of (start, end) tuples
+         that covers exactly the integers added so far, sorted by start. After
+         any sequence of add() calls, intervals that overlap or touch (one ends
+         at n and the next starts at n + 1) are merged into one.
+      2. Add a method total() that returns how many distinct integers the set
+         contains (0 for an empty set).
+
+      add(), __contains__ and the ValueError for start > end keep their current
+      behaviour; a rejected add() leaves the set unchanged.
+    setup_files:
+      intervals.py: |
+        class IntervalSet:
+            """A set of integers stored as closed intervals [start, end]."""
+
+            def __init__(self):
+                self._spans = []
+
+            def add(self, start, end):
+                """Add every integer from start to end, inclusive."""
+                if start > end:
+                    raise ValueError(f"start {start} > end {end}")
+                self._spans.append((start, end))
+
+            def spans(self):
+                """The stored intervals as a list of (start, end) tuples."""
+                return list(self._spans)
+
+            def __contains__(self, n):
+                return any(s <= n <= e for s, e in self._spans)
+    acceptance: "{unittest} hidden_test_intervals"
+    acceptance_files:
+      hidden_test_intervals.py: |
+        import unittest
+
+        from intervals import IntervalSet
+
+
+        def build(*pairs):
+            s = IntervalSet()
+            for a, b in pairs:
+                s.add(a, b)
+            return s
+
+
+        class Merge(unittest.TestCase):
+            def test_sorted_disjoint(self):
+                self.assertEqual(build((5, 8), (1, 3)).spans(), [(1, 3), (5, 8)])
+
+            def test_touching_merge(self):
+                self.assertEqual(build((1, 3), (4, 6)).spans(), [(1, 6)])
+
+            def test_contained(self):
+                self.assertEqual(build((1, 5), (2, 3)).spans(), [(1, 5)])
+
+            def test_bridge(self):
+                self.assertEqual(build((10, 12), (1, 2), (3, 11)).spans(), [(1, 12)])
+                self.assertEqual(build((1, 1), (3, 3), (2, 2)).spans(), [(1, 3)])
+
+            def test_negative(self):
+                s = build((-5, -1), (0, 2))
+                self.assertEqual(s.spans(), [(-5, 2)])
+                self.assertEqual(s.total(), 8)
+
+            def test_total(self):
+                self.assertEqual(IntervalSet().total(), 0)
+                self.assertEqual(build((1, 3), (2, 6), (10, 10)).total(), 7)
+                self.assertEqual(build((4, 4), (4, 4)).total(), 1)
+
+            def test_contains(self):
+                s = build((1, 3), (7, 9))
+                self.assertIn(2, s)
+                self.assertIn(9, s)
+                self.assertNotIn(5, s)
+
+            def test_rejected_add(self):
+                s = build((1, 3))
+                with self.assertRaises(ValueError):
+                    s.add(8, 4)
+                self.assertEqual(s.spans(), [(1, 3)])
+                self.assertEqual(s.total(), 3)
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      files:
+        intervals.py: |
+          class IntervalSet:
+              """A set of integers stored as closed intervals [start, end]."""
+
+              def __init__(self):
+                  self._spans = []
+
+              def add(self, start, end):
+                  """Add every integer from start to end, inclusive."""
+                  if start > end:
+                      raise ValueError(f"start {start} > end {end}")
+                  merged = []
+                  for s, e in sorted(self._spans + [(start, end)]):
+                      if merged and s <= merged[-1][1] + 1:
+                          merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+                      else:
+                          merged.append((s, e))
+                  self._spans = merged
+
+              def spans(self):
+                  """The stored intervals as a sorted, merged list of (start, end) tuples."""
+                  return list(self._spans)
+
+              def total(self):
+                  """How many distinct integers the set contains."""
+                  return sum(e - s + 1 for s, e in self._spans)
+
+              def __contains__(self, n):
+                  return any(s <= n <= e for s, e in self._spans)
+      wrong_files:
+        # Merges overlapping intervals but not touching ones ((1, 3) + (4, 6) stay apart).
+        - intervals.py: |
+            class IntervalSet:
+                def __init__(self):
+                    self._spans = []
+
+                def add(self, start, end):
+                    if start > end:
+                        raise ValueError(f"start {start} > end {end}")
+                    merged = []
+                    for s, e in sorted(self._spans + [(start, end)]):
+                        if merged and s <= merged[-1][1]:
+                            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+                        else:
+                            merged.append((s, e))
+                    self._spans = merged
+
+                def spans(self):
+                    return list(self._spans)
+
+                def total(self):
+                    return sum(e - s + 1 for s, e in self._spans)
+
+                def __contains__(self, n):
+                    return any(s <= n <= e for s, e in self._spans)
+        # total() forgets that both ends are inclusive.
+        - intervals.py: |
+            class IntervalSet:
+                def __init__(self):
+                    self._spans = []
+
+                def add(self, start, end):
+                    if start > end:
+                        raise ValueError(f"start {start} > end {end}")
+                    merged = []
+                    for s, e in sorted(self._spans + [(start, end)]):
+                        if merged and s <= merged[-1][1] + 1:
+                            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+                        else:
+                            merged.append((s, e))
+                    self._spans = merged
+
+                def spans(self):
+                    return list(self._spans)
+
+                def total(self):
+                    return sum(e - s for s, e in self._spans)
+
+                def __contains__(self, n):
+                    return any(s <= n <= e for s, e in self._spans)
+
+  - id: fe-worklog-since-flag
+    difficulty: hard
+    notes: >
+      hard — a feature spanning two files (argparse option + filter
+      parameter) with exact inclusive-date and error-exit rules; hidden tests
+      drive the CLI in-process.
+    prompt: |
+      Add a --since option to the worklog CLI. The CLI is {workspace}/cli.py and
+      the filtering lives in {workspace}/query.py.
+
+      - `--since YYYY-MM-DD` keeps only entries whose day is on or after that
+        date (inclusive). It combines with --tag: when both are given, both
+        filters apply.
+      - In query.py, filter_entries gains a keyword argument since, default
+        None. It takes a datetime.date (or None for no date filter).
+      - An invalid --since value (anything that is not a real YYYY-MM-DD date,
+        such as 2026-02-30 or yesterday) must make the CLI exit with status 2
+        and an error message on stderr, the way argparse rejects bad
+        arguments.
+      - Without --since, the output must not change.
+    setup_files:
+      query.py: |
+        from datetime import date
+
+
+        def load_entries(lines):
+            """Parse "YYYY-MM-DD<TAB>minutes<TAB>note" lines into dicts."""
+            out = []
+            for line in lines:
+                line = line.rstrip("\n")
+                if not line.strip():
+                    continue
+                day, minutes, note = line.split("\t", 2)
+                out.append({"day": date.fromisoformat(day), "minutes": int(minutes), "note": note})
+            return out
+
+
+        def filter_entries(entries, tag=None):
+            """Entries whose note has the word #tag (all entries if tag is None)."""
+            if tag is None:
+                return list(entries)
+            return [e for e in entries if f"#{tag}" in e["note"].split()]
+
+
+        def total_minutes(entries):
+            return sum(e["minutes"] for e in entries)
+      cli.py: |
+        import argparse
+        import sys
+
+        from query import filter_entries, load_entries, total_minutes
+
+
+        def build_parser():
+            p = argparse.ArgumentParser(prog="worklog")
+            p.add_argument("logfile")
+            p.add_argument("--tag", help="only entries whose note has #TAG")
+            return p
+
+
+        def main(argv=None):
+            args = build_parser().parse_args(argv)
+            with open(args.logfile) as fh:
+                entries = load_entries(fh)
+            picked = filter_entries(entries, tag=args.tag)
+            print(f"{len(picked)} entries, {total_minutes(picked)} minutes")
+            return 0
+
+
+        if __name__ == "__main__":
+            sys.exit(main())
+    acceptance: "{unittest} hidden_test_worklog_since"
+    acceptance_files:
+      hidden_test_worklog_since.py: |
+        import contextlib
+        import io
+        import os
+        import tempfile
+        import unittest
+        from datetime import date
+
+        import cli
+        from query import filter_entries, load_entries
+
+        LOG = ("2026-08-30\t45\tstandup #ops\n"
+               "2026-08-31\t120\tmigration #db #ops\n"
+               "2026-09-01\t30\treview #db\n"
+               "2026-09-02\t90\tincident #ops\n")
+
+
+        class Since(unittest.TestCase):
+            def setUp(self):
+                fd, self.path = tempfile.mkstemp(suffix=".log", dir=".")
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(LOG)
+
+            def tearDown(self):
+                os.unlink(self.path)
+
+            def run_cli(self, *args):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    try:
+                        code = cli.main([self.path, *args])
+                    except SystemExit as exc:
+                        code = exc.code
+                return code, out.getvalue(), err.getvalue()
+
+            def test_without_since_unchanged(self):
+                self.assertEqual(self.run_cli()[:2], (0, "4 entries, 285 minutes\n"))
+                self.assertEqual(self.run_cli("--tag", "db")[:2], (0, "2 entries, 150 minutes\n"))
+
+            def test_since_is_inclusive(self):
+                self.assertEqual(self.run_cli("--since", "2026-08-31")[:2],
+                                 (0, "3 entries, 240 minutes\n"))
+
+            def test_since_with_tag(self):
+                self.assertEqual(self.run_cli("--since", "2026-08-31", "--tag", "ops")[:2],
+                                 (0, "2 entries, 210 minutes\n"))
+
+            def test_since_after_everything(self):
+                self.assertEqual(self.run_cli("--since", "2026-09-03")[:2],
+                                 (0, "0 entries, 0 minutes\n"))
+
+            def test_invalid_since(self):
+                for bad in ("2026-02-30", "yesterday"):
+                    code, out, err = self.run_cli("--since", bad)
+                    self.assertEqual(code, 2, bad)
+                    self.assertEqual(out, "", bad)
+                    self.assertTrue(err.strip(), bad)
+
+            def test_filter_entries_api(self):
+                entries = load_entries(LOG.splitlines(True))
+                self.assertEqual(len(filter_entries(entries)), 4)
+                self.assertEqual(len(filter_entries(entries, since=date(2026, 9, 1))), 2)
+                self.assertEqual(len(filter_entries(entries, tag="db", since=date(2026, 9, 1))), 1)
+                self.assertEqual(len(filter_entries(entries, tag="db", since=None)), 2)
+
+
+        if __name__ == "__main__":
+            unittest.main()
+    reference:
+      files:
+        query.py: |
+          from datetime import date
+
+
+          def load_entries(lines):
+              """Parse "YYYY-MM-DD<TAB>minutes<TAB>note" lines into dicts."""
+              out = []
+              for line in lines:
+                  line = line.rstrip("\n")
+                  if not line.strip():
+                      continue
+                  day, minutes, note = line.split("\t", 2)
+                  out.append({"day": date.fromisoformat(day), "minutes": int(minutes), "note": note})
+              return out
+
+
+          def filter_entries(entries, tag=None, since=None):
+              """Entries whose note has the word #tag and whose day is on or after since.
+
+              tag=None and since=None disable the respective filter.
+              """
+              out = list(entries)
+              if tag is not None:
+                  out = [e for e in out if f"#{tag}" in e["note"].split()]
+              if since is not None:
+                  out = [e for e in out if e["day"] >= since]
+              return out
+
+
+          def total_minutes(entries):
+              return sum(e["minutes"] for e in entries)
+        cli.py: |
+          import argparse
+          import sys
+          from datetime import date
+
+          from query import filter_entries, load_entries, total_minutes
+
+
+          def _day(text):
+              try:
+                  return date.fromisoformat(text)
+              except ValueError:
+                  raise argparse.ArgumentTypeError(f"not a YYYY-MM-DD date: {text!r}") from None
+
+
+          def build_parser():
+              p = argparse.ArgumentParser(prog="worklog")
+              p.add_argument("logfile")
+              p.add_argument("--tag", help="only entries whose note has #TAG")
+              p.add_argument("--since", type=_day, help="only entries on or after YYYY-MM-DD")
+              return p
+
+
+          def main(argv=None):
+              args = build_parser().parse_args(argv)
+              with open(args.logfile) as fh:
+                  entries = load_entries(fh)
+              picked = filter_entries(entries, tag=args.tag, since=args.since)
+              print(f"{len(picked)} entries, {total_minutes(picked)} minutes")
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+      wrong_files:
+        # --since treated as exclusive (after, not on or after).
+        - query.py: |
+            from datetime import date
+
+
+            def load_entries(lines):
+                out = []
+                for line in lines:
+                    line = line.rstrip("\n")
+                    if not line.strip():
+                        continue
+                    day, minutes, note = line.split("\t", 2)
+                    out.append({"day": date.fromisoformat(day), "minutes": int(minutes), "note": note})
+                return out
+
+
+            def filter_entries(entries, tag=None, since=None):
+                out = list(entries)
+                if tag is not None:
+                    out = [e for e in out if f"#{tag}" in e["note"].split()]
+                if since is not None:
+                    out = [e for e in out if e["day"] > since]
+                return out
+
+
+            def total_minutes(entries):
+                return sum(e["minutes"] for e in entries)
+        # Parses the date after argparse: a bad date crashes with ValueError, not exit 2.
+        - cli.py: |
+            import argparse
+            import sys
+            from datetime import date
+
+            from query import filter_entries, load_entries, total_minutes
+
+
+            def build_parser():
+                p = argparse.ArgumentParser(prog="worklog")
+                p.add_argument("logfile")
+                p.add_argument("--tag", help="only entries whose note has #TAG")
+                p.add_argument("--since", help="only entries on or after YYYY-MM-DD")
+                return p
+
+
+            def main(argv=None):
+                args = build_parser().parse_args(argv)
+                since = date.fromisoformat(args.since) if args.since else None
+                with open(args.logfile) as fh:
+                    entries = load_entries(fh)
+                picked = filter_entries(entries, tag=args.tag, since=since)
+                print(f"{len(picked)} entries, {total_minutes(picked)} minutes")
+                return 0
+
+
+            if __name__ == "__main__":
+                sys.exit(main())
