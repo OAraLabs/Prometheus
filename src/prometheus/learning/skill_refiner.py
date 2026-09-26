@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from prometheus.config.paths import get_config_dir
+from prometheus.learning.trace_format import format_trace
 
 if TYPE_CHECKING:
     from prometheus.providers.base import ModelProvider
@@ -51,7 +52,8 @@ Current skill content:
 {skill_content}
 ```
 
-Actual tool trace (what happened):
+Actual tool trace (what happened), one call per line as tool(input) → result,
+both cut short:
 {trace}
 
 Outcome: {outcome}
@@ -71,7 +73,7 @@ class SkillRefiner:
     Args:
         provider: ModelProvider for refinement analysis.
         model: Model name for the refinement call.
-        auto_dir: Override the auto-skills directory (used by ``maybe_refine_recent``).
+        auto_dir: Override the auto-skills directory (used by ``maybe_refine_loaded``).
         min_tool_calls: Minimum tool calls in the trace before considering refinement.
     """
 
@@ -348,10 +350,5 @@ class SkillRefiner:
 
     @staticmethod
     def _format_trace(trace: list[dict[str, Any]]) -> str:
-        lines: list[str] = []
-        for i, call in enumerate(trace, 1):
-            tool = call.get("tool_name", "unknown")
-            args = call.get("arguments", {})
-            result = str(call.get("result", ""))[:200]
-            lines.append(f"{i}. {tool}({args}) → {result}")
-        return "\n".join(lines)
+        """One line per call, showing what it was given (``learning/trace_format``)."""
+        return format_trace(trace)

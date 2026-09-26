@@ -26,6 +26,7 @@ from typing import Any
 from uuid import uuid4
 
 from prometheus.security.log_redaction import redact_capture as _redact
+from prometheus.security.log_redaction import redact_json_text, redact_secrets
 
 from prometheus.telemetry.db import connect_telemetry_db
 from prometheus.telemetry.latency import LatencyAggregate
@@ -914,7 +915,9 @@ class ToolCallTelemetry:
         from prometheus.security.log_redaction import redact_capture
         error_detail = redact_capture(error_detail)
         raw_model_output = redact_capture(raw_model_output)
-        parsed_tool_call = redact_capture(parsed_tool_call)
+        # A JSON string: redacted value by value, or a token right after an
+        # escaped newline is missed (X.37, redact_json_text).
+        parsed_tool_call = redact_json_text(parsed_tool_call)
         self._conn.execute(
             """
             INSERT INTO tool_calls
@@ -974,7 +977,8 @@ class ToolCallTelemetry:
         tool (or None if no golden trace exists). Stored for later analysis
         of "what would a cloud teacher have done differently".
         """
-        sample = (raw_sample or "")[:500]
+        # Redact before truncating: a cut can leave a token too short to match.
+        sample = redact_secrets(raw_sample or "")[:500]
         self._conn.execute(
             """
             INSERT INTO circuit_breaker_diagnostics
@@ -994,7 +998,7 @@ class ToolCallTelemetry:
                 sample,
                 1 if recovered else 0,
                 recovery_method,
-                golden_reference,
+                redact_json_text(golden_reference),
             ),
         )
         self._conn.commit()
@@ -1116,7 +1120,11 @@ class ToolCallTelemetry:
         if outcome not in {"success", "partial", "failed", "skipped"}:
             outcome = "failed"
         try:
-            summary_json = json.dumps(summary, default=str) if summary else None
+            # Redacted after serialising, so a value default=str turned into
+            # text is covered too (X.37).
+            summary_json = (
+                redact_json_text(json.dumps(summary, default=str)) if summary else None
+            )
         except Exception:
             summary_json = None
         try:
@@ -1213,7 +1221,10 @@ class ToolCallTelemetry:
 
         ts = timestamp_iso or datetime.now(timezone.utc).isoformat()
         try:
-            payload_json = json.dumps(payload or {}, default=str)
+            # A payload can carry conversation text (skill_created's
+            # trigger_task; a teacher escalation's user request and tool
+            # results), so it is redacted (X.37).
+            payload_json = redact_json_text(json.dumps(payload or {}, default=str)) or "{}"
         except Exception:
             payload_json = "{}"
 

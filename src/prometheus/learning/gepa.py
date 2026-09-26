@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from prometheus.config.paths import get_config_dir
+from prometheus.security.log_redaction import redact_secrets
 
 if TYPE_CHECKING:
     from prometheus.providers.base import ModelProvider
@@ -568,7 +569,11 @@ class GEPAOptimizer:
         return self._judge
 
     async def _call_provider(self, prompt: str) -> str:
-        """Stream a single completion and return concatenated text."""
+        """Stream a single completion and return concatenated text.
+
+        The prompt is built from skills and the traces they were used in, so
+        token shapes are redacted before it is sent (X.37).
+        """
         from prometheus.engine.messages import ConversationMessage
         from prometheus.providers.base import (
             ApiMessageRequest,
@@ -577,7 +582,7 @@ class GEPAOptimizer:
 
         request = ApiMessageRequest(
             model=self._model,
-            messages=[ConversationMessage.from_user_text(prompt)],
+            messages=[ConversationMessage.from_user_text(redact_secrets(prompt))],
             max_tokens=2048,
         )
         text_parts: list[str] = []

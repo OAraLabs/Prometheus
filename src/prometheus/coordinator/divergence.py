@@ -73,6 +73,7 @@ from typing import Optional, TYPE_CHECKING
 from uuid import uuid4
 
 from prometheus.config.paths import get_lcm_db_path
+from prometheus.security.log_redaction import redact_json_text, redact_secrets
 
 if TYPE_CHECKING:
     pass
@@ -347,13 +348,22 @@ class CheckpointStore:
         self._conn.commit()
 
     def save(self, checkpoint: Checkpoint) -> None:
-        """Save checkpoint to database."""
+        """Save checkpoint to database.
+
+        The row holds the user's goal and a snapshot of the conversation, so
+        token shapes are redacted before it is written (X.37), as they are for
+        the LCM message rows beside it.
+        """
+        (task_id, step, goal_hash, goal, messages_json, tool_calls_json,
+         score, created) = checkpoint.to_db_row()
         self._conn.execute(
             """INSERT OR REPLACE INTO checkpoints
                (task_id, step_number, goal_hash, goal_description,
                 messages_json, tool_calls_json, divergence_score, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            checkpoint.to_db_row(),
+            (task_id, step, goal_hash, redact_secrets(goal),
+             redact_json_text(messages_json), redact_json_text(tool_calls_json),
+             score, created),
         )
         self._conn.commit()
 
