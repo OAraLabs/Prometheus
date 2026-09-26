@@ -564,6 +564,19 @@ def create_app(
             )
             return None, "unknown"
 
+    def _skill_loads_block() -> dict[str, Any]:
+        """Loads per skill, most-loaded first: the status view of the skill-load counter."""
+        tel = getattr(app.state, "telemetry", None)
+        if tel is None or not hasattr(tel, "skill_load_stats"):
+            return {"available": False}
+        stats = tel.skill_load_stats()
+        skills = sorted(
+            ({"name": name, "source": s.get("source"), "loads": s["loads"],
+              "last_loaded_at": s["last_loaded_at"]} for name, s in stats.items()),
+            key=lambda s: (-s["loads"], s["name"]),
+        )
+        return {"total": sum(s["loads"] for s in skills), "skills": skills}
+
     def _context_block() -> dict[str, Any]:
         """The budget in force, plus the inputs that produced it.
 
@@ -956,6 +969,11 @@ def create_app(
             # no budget at all, which is why a wrong one could sit on the
             # Beacon panel unchallenged.
             "context": _context_block(),
+            # Skill use, from the load counter (tools/builtin/skill.py). Before
+            # it nothing counted a load, and "last used" everywhere was file
+            # mtime. {"available": False} when there is no telemetry to ask —
+            # not zeros, which would claim nothing was loaded.
+            "skill_loads": _skill_loads_block(),
             # Every local backend this install knows about and what each was
             # last seen serving — from the registry's CACHE (no I/O on a status
             # call; `stale` says the TTL lapsed, `probed: false` says nothing

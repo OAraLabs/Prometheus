@@ -3,13 +3,20 @@
 After a task uses a skill, compare what actually happened to what the
 skill prescribed. If the deviation led to a better outcome, update the skill.
 
+"Uses" means the task LOADED it: the post-task hook reads the task's own
+trace for a successful ``skill`` call and refines only that auto skill, and
+only when the task completed. The hook it replaces (``maybe_refine_recent``)
+took the most recently modified auto skill after ANY task with 3+ tool calls
+— 208 refinement calls on the mini, none after a real load
+(docs/audits/SKILL-USAGE.md §6).
+
 Usage (direct):
     refiner = SkillRefiner(provider)
     updated = await refiner.maybe_refine(skill_path, tool_trace, outcome)
 
 Usage (post-task hook on AgentLoop):
     refiner = SkillRefiner.from_config(provider)
-    agent_loop.add_post_task_hook(refiner.maybe_refine_recent)
+    agent_loop.add_post_task_hook(refiner.maybe_refine_loaded)
 """
 
 from __future__ import annotations
@@ -144,42 +151,77 @@ class SkillRefiner:
         model = learning.get("skill_refiner_model", "default")
         return cls(provider, model=model, telemetry=telemetry)
 
-    async def maybe_refine_recent(
+    async def maybe_refine_loaded(
         self,
         task_description: str,
         tool_trace: list[dict[str, Any]],
         final_text: str = "",
     ) -> bool:
-        """Post-task-hook entry point.
+        """Post-task-hook entry point: refine each auto skill this task loaded.
 
-        Find the most recently modified auto-skill and refine it against
-        the trace. Skips if no auto-skills exist or the trace is too short.
+        A skill is refined only when all of these hold:
 
-        ``final_text`` is part of the post-task-hook contract (the turn's
-        final reply); unused here today — the refinement prompt's
-        ``outcome`` field keeps its historical ``task_description`` value.
+        - the trace has a successful ``skill`` call that loaded it, and the
+          skill resolves to a file in the auto dir (user and builtin skills
+          are curated, never rewritten here);
+        - the task completed: no tool call failed after that load, and the
+          turn ended with a reply;
+        - the trace has at least ``min_tool_calls`` calls (the old floor).
+
+        ``tool_trace`` entries carry ``tool_input`` (AgentLoop.run_async).
+        Each loaded skill is refined at most once per task. Returns True when
+        any skill was updated.
         """
-        del final_text
         if len(tool_trace) < self._min_tool_calls:
             return False
-        if not self._auto_dir.exists():
+        if not (final_text or "").strip():
             return False
+        loaded: list[tuple[int, str]] = []
+        for i, call in enumerate(tool_trace):
+            if call.get("tool_name") != "skill" or call.get("is_error"):
+                continue
+            name = (call.get("tool_input") or {}).get("name")
+            if isinstance(name, str) and name.strip():
+                loaded.append((i, name.strip()))
+        refined = False
+        seen: set[Path] = set()
+        for i, name in loaded:
+            if any(later.get("is_error") for later in tool_trace[i + 1:]):
+                log.debug("SkillRefiner: %s was loaded but the task failed after it", name)
+                continue
+            path = self._auto_skill_path(name)
+            if path is None or path in seen:
+                continue
+            seen.add(path)
+            try:
+                refined = await self.maybe_refine(path, tool_trace, outcome=task_description) or refined
+            except Exception:
+                log.exception("SkillRefiner: maybe_refine failed for %s", path)
+        return refined
 
-        skills = sorted(
-            self._auto_dir.glob("*.md"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if not skills:
-            log.debug("SkillRefiner: no auto-skills to refine")
-            return False
+    def _auto_skill_path(self, name: str) -> Path | None:
+        """The auto-dir file serving *name*, matched the way the registry matches.
 
-        target = skills[0]
-        try:
-            return await self.maybe_refine(target, tool_trace, outcome=task_description)
-        except Exception:
-            log.exception("SkillRefiner: maybe_refine_recent failed for %s", target)
-            return False
+        The registry keys on the frontmatter ``name`` (falling back to the file
+        stem) and ``get()`` also tries lower-case and title-case, so a load of
+        "Release-Check" is the file named ``release-check``. Only the auto dir is
+        searched: that is the only place this refiner may write.
+        """
+        if not self._auto_dir.is_dir():
+            return None
+        from prometheus.skills.loader import _parse_skill_markdown
+
+        wanted = name.lower()
+        for path in sorted(self._auto_dir.glob("*.md")):
+            if ".bak-" in path.name:
+                continue
+            try:
+                parsed, _ = _parse_skill_markdown(path.stem, path.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            if parsed.lower() == wanted or path.stem.lower() == wanted:
+                return path
+        return None
 
     async def maybe_refine(
         self,

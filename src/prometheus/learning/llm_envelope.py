@@ -44,7 +44,7 @@ helpers maps cleanly:
 - ``"raise"`` (default) — for future code. Lets the caller decide how to
   recover, instead of silently degrading.
 - ``"return_none"`` — preserves the legacy ``maybe_create`` /
-  ``maybe_refine_recent`` contract that returns ``None`` / ``False`` on
+  ``maybe_refine_loaded`` contract that returns ``None`` / ``False`` on
   failure. The telemetry row still lands; the caller just doesn't see
   the exception.
 - ``"log_only"`` — for emit-on-success paths where the caller intends to

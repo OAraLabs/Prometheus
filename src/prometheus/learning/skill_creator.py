@@ -16,6 +16,15 @@ the only condition):
   that catches turns whose calls all succeeded mechanically but whose
   ANSWER was negative (the failed-lookup class).
 
+The write path then gates what gets saved (skill-usage audit, option C1):
+
+- a description that is literally ``name: …`` — a frontmatter line the
+  loader's tolerant scan keeps verbatim — is rejected, for every writer;
+- on the auto path (``on_collision="skip"``), a skill whose
+  ``name + description`` is within cosine ``dedupe_threshold`` (default
+  ``similarity.DEFAULT_THRESHOLD`` = 0.80) of an existing served skill is
+  rejected as a near-duplicate. Deliberate writers keep their content.
+
 Usage:
     creator = SkillCreator(provider)
     skill_path = await creator.maybe_create(task_record, tool_trace, final_text)
@@ -30,6 +39,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from prometheus.config.paths import get_config_dir
+from prometheus.skills.loader import _parse_skill_markdown, load_skill_registry
+from prometheus.skills.similarity import DEFAULT_THRESHOLD, skill_text
 
 if TYPE_CHECKING:
     from prometheus.providers.base import ModelProvider
@@ -94,6 +105,17 @@ Output ONLY the SKILL.md content or the SKIP line. No commentary.
 """
 
 
+# A description that is literally the frontmatter's ``name:`` line: two of the
+# 57 auto skills the mini wrote (docs/audits/SKILL-USAGE.md §5).
+_MALFORMED_DESCRIPTION = re.compile(r"^\s*name\s*:", re.IGNORECASE)
+
+
+def served_skill_catalog() -> list[tuple[str, str]]:
+    """``[(name, skill_text), …]`` for every skill the registry serves now."""
+    return [(s.name, skill_text(s.name, s.description))
+            for s in load_skill_registry().list_skills()]
+
+
 def _get_auto_skills_dir() -> Path:
     path = get_config_dir() / _AUTO_SKILLS_DIR_NAME
     path.mkdir(parents=True, exist_ok=True)
@@ -145,9 +167,22 @@ class SkillCreator:
         auto_dir: Path | None = None,
         signal_bus: object | None = None,
         telemetry: object | None = None,
+        similarity: object | None = None,
+        dedupe_threshold: float | None = None,
+        catalog: Any = None,
     ) -> None:
         from prometheus.learning.llm_envelope import LLMCallEnvelope
 
+        # The near-duplicate gate: a checker with ``available``,
+        # ``unavailable_reason`` and ``nearest(text, catalog)`` (default: the
+        # process-wide encoder, built on first use), the cosine at or above
+        # which a skill is rejected, and what it is compared against.
+        self._similarity = similarity
+        self._dedupe_threshold = (
+            DEFAULT_THRESHOLD if dedupe_threshold is None else float(dedupe_threshold)
+        )
+        self._catalog = catalog or served_skill_catalog
+        self._warned_unavailable = False
         self._provider = provider
         self._model = model
         self._min_tool_calls = min_tool_calls
@@ -201,6 +236,7 @@ class SkillCreator:
                 data = yaml.safe_load(fh) or {}
             learning = data.get("learning", {}) or {}
             min_calls = learning.get("skill_min_tool_calls", _MIN_TOOL_CALLS)
+            threshold = learning.get("skill_dedupe_threshold", DEFAULT_THRESHOLD)
         except (OSError, yaml.YAMLError) as exc:
             log.warning(
                 "SkillCreator.from_config: failed to load %s (%s: %s); "
@@ -208,8 +244,10 @@ class SkillCreator:
                 config_path, type(exc).__name__, exc, _MIN_TOOL_CALLS,
             )
             min_calls = _MIN_TOOL_CALLS
+            threshold = DEFAULT_THRESHOLD
 
-        return cls(provider, min_tool_calls=min_calls, telemetry=telemetry)
+        return cls(provider, min_tool_calls=min_calls, telemetry=telemetry,
+                   dedupe_threshold=threshold)
 
     async def maybe_create(
         self,
@@ -366,6 +404,14 @@ class SkillCreator:
                 return None
             path = self._auto_dir / f"{slug}-{int(time.time())}.md"
 
+        # The quality gate reads the skill the way the registry will serve it.
+        _, description = _parse_skill_markdown(slug, content.strip())
+        if _MALFORMED_DESCRIPTION.match(description):
+            self._record_gate({"reason": "malformed_description"})
+            return None
+        if on_collision == "skip" and self._near_duplicate(name, description):
+            return None
+
         path.write_text(content.strip() + "\n", encoding="utf-8")
         log.info("SkillCreator: created skill at %s", path)
 
@@ -377,6 +423,46 @@ class SkillCreator:
             content=content,
         )
         return path
+
+    def _near_duplicate(self, name: str, description: str) -> bool:
+        """True (and recorded) when an existing served skill is this close."""
+        checker = self._similarity
+        if checker is None:
+            from prometheus.skills.similarity import default_checker
+
+            checker = self._similarity = default_checker()
+        try:
+            if not checker.available:  # type: ignore[attr-defined]
+                if not self._warned_unavailable:
+                    self._warned_unavailable = True
+                    log.warning(
+                        "SkillCreator: near-duplicate check skipped — %s",
+                        checker.unavailable_reason,  # type: ignore[attr-defined]
+                    )
+                return False
+            hit = checker.nearest(  # type: ignore[attr-defined]
+                skill_text(name, description), self._catalog())
+        except Exception:
+            log.warning("SkillCreator: near-duplicate check failed — skill kept",
+                        exc_info=True)
+            return False
+        if hit is None or hit[0] < self._dedupe_threshold:
+            return False
+        score, nearest = hit
+        self._record_gate({"reason": "near_duplicate", "nearest": nearest,
+                           "score": round(float(score), 4),
+                           "threshold": self._dedupe_threshold})
+        return True
+
+    def _record_gate(self, summary: dict[str, Any]) -> None:
+        log.info("SkillCreator: skill rejected by the quality gate — %s", summary)
+        if self._telemetry is None:
+            return
+        try:
+            self._telemetry.record_run(  # type: ignore[attr-defined]
+                "skill_creator", "quality_gate", "skipped", summary=summary)
+        except Exception:
+            log.debug("SkillCreator: quality-gate telemetry failed", exc_info=True)
 
     async def _emit_created_signal(
         self,

@@ -125,6 +125,12 @@ voice = [
     "sounddevice>=0.5.5",
     "scipy>=1.17.1",
 ]
+# SkillCreator's near-duplicate gate (prometheus.skills.similarity): the
+# encoder runtime. The voice extra already brings all three (piper-tts →
+# onnxruntime, faster-whisper → tokenizers). Optional like voice: without it
+# the gate skips the check and logs why; skill creation never depends on it.
+# onnxruntime has no Intel-Mac wheel after 1.23.2 (see voice, above).
+skills = ["numpy>=1.26", "onnxruntime>=1.18", "tokenizers>=0.15"]
 # UPPER BOUND IS LOAD-BEARING — see tests/test_mcp_dependency_pin.py.
 # mcp 2.x moved ClientSession.list_tools to a keyword-only `params=`;
 # mcp/runtime.py calls it with `cursor=`, so 2.x is a TypeError on the

@@ -1938,7 +1938,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
         if skill_refiner is not None:
             # Override model to match the running model_name (from_config can't know it)
             skill_refiner._model = model_name
-            agent_loop.add_post_task_hook(skill_refiner.maybe_refine_recent)
+            agent_loop.add_post_task_hook(skill_refiner.maybe_refine_loaded)
             logger.info("SkillRefiner wired to agent loop post-task hook")
         else:
             logger.info("SkillRefiner: disabled by config (learning.skill_refinement_enabled)")

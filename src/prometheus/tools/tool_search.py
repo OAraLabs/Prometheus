@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -28,6 +29,57 @@ def _levenshtein(a: str, b: str) -> int:
             curr.append(min(curr[j] + 1, prev[j + 1] + 1, prev[j] + cost))
         prev = curr
     return prev[-1]
+
+
+# ---------------------------------------------------------------------------
+# Skill relevance
+# ---------------------------------------------------------------------------
+
+#: A skill is listed only at or above this match score (see skill_match_score).
+#: Tools and skills share one top-5, and when a query matched no text anywhere
+#: the ranking fell back to edit distance against the NAME — with ~134 skill
+#: names against ~55 tool names that filled results with arbitrary skills (20
+#: of the 25 user searches that listed one, docs/audits/SKILL-USAGE.md §1).
+#: Tools keep their old ranking; only a skill must now actually match.
+SKILL_MIN_MATCH = 0.5
+
+_WORD = re.compile(r"[a-z0-9]+")
+_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "from", "this", "that", "into", "what", "how",
+    "can", "you", "your", "are", "was", "were", "has", "have", "had", "not",
+    "but", "all", "any", "its", "our", "out", "via", "per", "who", "why",
+    "when", "where", "which", "will", "would", "should", "could", "about",
+    "there", "their", "them", "then", "than", "these", "those", "just", "also",
+    "some", "more", "most", "very", "only", "over", "such", "each", "both",
+    "other",
+})
+
+
+def skill_match_score(query: str, name: str, description: str) -> float:
+    """How well *query* matches a skill's name and description, 0.0–1.0.
+
+    1.0 when the whole query appears in the name or description as a phrase
+    (starting and ending on word boundaries). Otherwise the share of the
+    query's words of 3+ letters, stopwords excluded, that equal a word of the
+    name/description or begin one when the query word has 4+ letters
+    ("deploy" matches "deploy" and "deployment"; "log" does not match
+    "catalog"). Edit distance plays no part.
+    """
+    q = query.lower().strip()
+    if not q:
+        return 0.0
+    text = f"{name} {description}".lower()
+    if re.search(r"(?<![a-z0-9])" + re.escape(q) + r"(?![a-z0-9])", text):
+        return 1.0
+    words = [w for w in _WORD.findall(q) if len(w) >= 3 and w not in _STOPWORDS]
+    if not words:
+        return 0.0
+    tokens = set(_WORD.findall(text))
+    hits = sum(
+        1 for w in words
+        if w in tokens or (len(w) >= 4 and any(t.startswith(w) for t in tokens))
+    )
+    return hits / len(words)
 
 
 # ---------------------------------------------------------------------------
@@ -165,9 +217,12 @@ class ToolSearchTool(BaseTool):
             entry["match_score"] = round(score, 3)
             scored.append((score, "tool", entry))
 
-        # Score skills
+        # Score skills — only those that actually match the query (SKILL_MIN_MATCH);
+        # edit distance alone never lists one.
         if self._skill_registry is not None:
             for skill in self._skill_registry.list_skills():
+                if skill_match_score(query, skill.name, skill.description) < SKILL_MIN_MATCH:
+                    continue
                 score = self._score_skill(skill, query_lower)
                 entry = {
                     "type": "skill",
