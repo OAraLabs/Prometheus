@@ -1308,8 +1308,11 @@ def create_app(
           never typed. Filter or badge on ``provenance != "user"``. ``is_trusted``
           distinguishes machinery-authored injections (true) from third-party data
           the model must treat as untrusted (false).
-        * ``ordinal`` is ``turn_index`` (the in-memory list position) — an explicitly
-          NON-UNIQUE display position that repeats across restart/trim. Do not key on it.
+        * ``ordinal`` is ``turn_index``: the message's prompt position, unique within its
+          session (docs/audits/LCM-TURN-INDEX-DUPLICATES.md). It orders a session the way
+          the model saw it, which can differ from ``message_id`` order when a message
+          sent mid-turn was persisted before its turn's tail. It is a display order, not
+          an identity: key and page on ``message_id``.
         * ``timestamp`` is display-only — a whole turn can share one timestamp; order by
           ``message_id`` instead.
         * top-level ``watermark`` is the session's current max ``message_id`` (so a client

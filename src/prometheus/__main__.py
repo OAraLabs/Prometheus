@@ -671,7 +671,6 @@ async def run_interactive(
     ``:voice off`` leaves voice mode.
     """
     messages: list[ConversationMessage] = []
-    turn_index = 0
     voice_config = voice_config or {}
 
     print(f"Prometheus {__version__} — interactive mode")
@@ -748,9 +747,13 @@ async def run_interactive(
             print("Goodbye.")
             break
 
-        # Ingest to LCM
+        # Ingest to LCM. No turn_index: the store appends each row after every
+        # row the session already has. A per-turn counter here gave the user and
+        # the assistant row the SAME index (a duplicate under the UNIQUE
+        # (session_id, turn_index) index), restarted at 0 for every run, and
+        # re-used an index when a failed turn's user row was retried.
         if lcm_engine:
-            await lcm_engine.ingest(session_id, "user", user_input, turn_index=turn_index)
+            await lcm_engine.ingest(session_id, "user", user_input)
 
         messages.append(ConversationMessage.from_user_text(user_input))
 
@@ -784,9 +787,7 @@ async def run_interactive(
 
         # Ingest assistant response to LCM
         if lcm_engine and response_text:
-            await lcm_engine.ingest(
-                session_id, "assistant", response_text, turn_index=turn_index
-            )
+            await lcm_engine.ingest(session_id, "assistant", response_text)
             await lcm_engine.maybe_compact(session_id)
 
         # Voice output — speak the reply if this turn was voice-flagged
@@ -798,8 +799,6 @@ async def run_interactive(
                 await cli_voice_speak(response_text, voice_config)
             except Exception as exc:
                 log.debug("Voice playback failed: %s", exc)
-
-        turn_index += 1
 
 
 # ---------------------------------------------------------------------------
