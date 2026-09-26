@@ -63,6 +63,48 @@ class OllamaProvider(ModelProvider):
         """Set GBNF grammar for constrained decoding (llama.cpp extension)."""
         self._grammar = grammar
 
+    async def detect_tool_template(self, model_name: str | None = None) -> Any:
+        """What the served model's template does with tools, from ``/api/show``.
+
+        Ollama lists ``tools`` under ``capabilities`` and returns the Go
+        ``template`` for the model asked about; the verdict — an
+        ``adapter.tier.ToolTemplate`` — decides the adapter tier for a model
+        ``config/model_registry.yaml`` does not list (WP-X.28), and is cached
+        on the instance as ``tool_template``. The request body is the one the
+        backend registry's probe already sends (``{"model": name}``).
+
+        Ollama serves many models, so the question needs a name; without one
+        the answer is "unknown", never a guess. A server that cannot be asked
+        is a recorded fact, never a boot failure.
+        """
+        from prometheus.adapter.tier import ToolTemplate, classify_template
+
+        if not model_name:
+            self.tool_template = ToolTemplate(
+                native=None, call_format=None,
+                evidence="no model name to ask ollama /api/show about",
+            )
+            return self.tool_template
+        url = f"{self._base_url}/api/show"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, json={"model": model_name})
+                resp.raise_for_status()
+                show = resp.json()
+        except Exception as exc:  # noqa: BLE001 — unreachable or unparseable: recorded, not fatal
+            log.warning("Chat template detection failed (%s, %s): %s", url, model_name, exc)
+            self.tool_template = ToolTemplate(
+                native=None, call_format=None,
+                evidence=f"/api/show could not be read ({type(exc).__name__})",
+            )
+            return self.tool_template
+        show = show if isinstance(show, dict) else {}
+        self.tool_template = classify_template(
+            ollama_capabilities=show.get("capabilities"), ollama_template=show.get("template"),
+        )
+        log.info("Chat template: %s (%s at %s)", self.tool_template.evidence, model_name, self._base_url)
+        return self.tool_template
+
     async def stream_message(
         self, request: ApiMessageRequest
     ) -> AsyncIterator[ApiStreamEvent]:
