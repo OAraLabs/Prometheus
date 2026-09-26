@@ -75,6 +75,13 @@ class ModelAdapter:
     TIER_LIGHT = "light"
     TIER_FULL = "full"
 
+    # Why ``tier`` is what it is: the ``adapter.tier.TierDecision`` that
+    # ``__main__.create_adapter`` records (source: override, provider class,
+    # registry, chat template, fallback, or forced), read by the boot line,
+    # the CLI header and, later, /doctor and /api/status. None on an adapter
+    # built directly, which decides nothing and has nothing to explain.
+    tier_decision: Any = None
+
     def __init__(
         self,
         formatter: ModelPromptFormatter | None = None,
