@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
 from collections import defaultdict
 from typing import Any
@@ -374,7 +375,10 @@ def render_report(rows: list[dict[str, Any]], *, title: str, class_order: list[s
         "",
         f"- suite: `{first['suite']}` (sha `{first['suite_sha'][:12]}`), run label `{first['run_label']}`",
         f"- model: `{first['model']}` via `{first['provider']}`"
-        + (f", served as `{', '.join(first['served_models'])}`" if first.get("served_models") else ""),
+        # File names only: some servers report the model as the path they were
+        # started with, and a host's directory layout does not belong in a report.
+        + (f", served as `{', '.join(sorted({os.path.basename(m) for m in first['served_models']}))}`"
+           if first.get("served_models") else ""),
         f"- quantization: `{first.get('quantization')}` ({first.get('quantization_source')})",
         f"- adapter: tier `{first.get('adapter_tier')}`, base strictness `{first.get('adapter_strictness')}`"
         + (f" — **FORCED** for a tier sweep of rung `{first['tier_sweep']['of']}` (the daemon picks "
