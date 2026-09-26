@@ -22,7 +22,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from prometheus.engine.agent_loop import LoopContext, run_loop
@@ -45,6 +45,7 @@ from prometheus.gym.ladder.tiers import (
     counts_for_row,
     forced_adapter_factory,
     instrument_adapter,
+    tier_end,
 )
 from prometheus.gym.ladder.verdict import ERROR, FAIL, FORMAT_MISS, PASS, UNSCORED, Verdict, decide
 from prometheus.gym.runner import (
@@ -465,7 +466,8 @@ async def run_task(
 
     error, halted, stopped_by = "", "", "done"
     prev = get_telemetry_handle()
-    set_telemetry_handle(tel)
+    run_tel = _RunTelemetry(tel)
+    set_telemetry_handle(cast(ToolCallTelemetry, run_tel))
     wall_start = time.time()
     t0 = time.monotonic()
     retry_counter = ProviderRetryCounter()
@@ -523,7 +525,7 @@ async def run_task(
             stopped_by = halt_kinds[-1]
             halted = f"the loop stopped the turn ({halt_kinds[-1]})"
     if stopped_by == "done" and final_round_used_reasoning_fallback(
-        tel._conn, session_id, window
+        tel._conn, session_id, window, run_tel.fallbacks
     ):
         # The provider returned the unfinished reasoning as the reply; a
         # right value mentioned along the way is not an answer.
@@ -564,7 +566,7 @@ async def run_task(
         "answer_format_ok": verdict.answer_format_ok,
         "fail_reasons": [redact(r) for r in verdict.fail_reasons],
         "acceptance": _redact_acceptance(verdict.acceptance),
-        "judge": verdict.judge,
+        "judge": _redact_tree(verdict.judge),
         "error": redact(error) or None,
         "stopped_by": stopped_by,
         "loop_halts": halt_kinds,
@@ -578,8 +580,10 @@ async def run_task(
         "trace": trace_of(transcript),
         "adapter_tier_start": tier_start,
         # The circuit breaker can bump the tier mid-run (off → light → full) on
-        # a COPY of the adapter; that run then belongs to neither tier.
-        "adapter_tier_end": getattr(context.adapter, "tier", None),
+        # a COPY of the adapter, inside the loop's own copy of the context —
+        # `context.adapter` here never sees it; the counting adapter does.
+        # Such a run belongs to neither tier.
+        "adapter_tier_end": tier_end(adapter_counts, context.adapter),
         "adapter_counts": counts_for_row(adapter_counts),
         "provider_http_retries": retry_counter.count,
         "final_text_head": final[:300],
@@ -598,6 +602,42 @@ def _redact_acceptance(acc: dict[str, Any] | None) -> dict[str, Any] | None:
     if not acc:
         return acc
     return {k: (redact(v) if isinstance(v, str) else v) for k, v in acc.items()}
+
+
+def _redact_tree(value: Any) -> Any:
+    """Every string in a nested dict/list redacted — a judge's HTTP error
+    quotes the judge endpoint's full URL."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {k: _redact_tree(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_tree(v) for v in value]
+    return value
+
+
+class _RunTelemetry:
+    """The telemetry handle for ONE run: every call goes to the ladder's own
+    handle unchanged, and the reasoning-fallback reports the provider files
+    during this run are also kept here, timestamped. The fallback check reads
+    them from here, not from ``silent_failures`` by time, so a row another
+    writer put in a shared database (the live telemetry.db) is never taken
+    for this run's."""
+
+    def __init__(self, tel: ToolCallTelemetry) -> None:
+        self._tel = tel
+        self.fallbacks: list[float] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._tel, name)
+
+    def record_silent_failure(
+        self, subsystem: str, operation: str, exc: BaseException,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        if isinstance(context, dict) and context.get("used_reasoning_fallback") is True:
+            self.fallbacks.append(time.time())
+        self._tel.record_silent_failure(subsystem, operation, exc, context=context)
 
 
 # ---------------------------------------------------------------------------

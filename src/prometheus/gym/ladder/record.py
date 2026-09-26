@@ -156,16 +156,19 @@ def harvest_run_metrics(
 
 
 def final_round_used_reasoning_fallback(
-    conn: sqlite3.Connection, session_id: str, window: tuple[float, float]
+    conn: sqlite3.Connection, session_id: str, window: tuple[float, float],
+    fallbacks: list[float],
 ) -> bool:
     """Did the run's LAST model round answer with its reasoning channel?
 
     When a thinking model spends its whole output budget reasoning, the
     llama.cpp provider returns the unfinished reasoning as the reply and files
-    a ``silent_failures`` row (``used_reasoning_fallback: true``) through the
-    telemetry handle the ladder installs. That row has no session id, so it is
-    placed by time: the final round is the interval between the run's last two
-    ``loop_round`` rows (or the run's start).
+    a ``silent_failures`` report (``used_reasoning_fallback: true``) through
+    the telemetry handle the ladder installs for the run. ``fallbacks`` are the
+    times of the reports THIS run's handle received — never read back from
+    the database, where another writer's row could sit in the same interval.
+    The final round is the interval between the run's last two ``loop_round``
+    rows (or the run's start).
     """
     rounds = [r[0] for r in conn.execute(
         "SELECT timestamp FROM subsystem_runs WHERE subsystem = 'agent_loop' "
@@ -176,16 +179,7 @@ def final_round_used_reasoning_fallback(
         return False
     lo = rounds[-2] if len(rounds) > 1 else window[0]
     hi = rounds[-1]
-    for (ctx,) in conn.execute(
-        "SELECT context FROM silent_failures WHERE timestamp > ? AND timestamp <= ?",
-        (lo, hi),
-    ):
-        try:
-            if json.loads(ctx or "{}").get("used_reasoning_fallback") is True:
-                return True
-        except (TypeError, ValueError):
-            continue
-    return False
+    return any(lo < ts <= hi for ts in fallbacks)
 
 
 def outcome_for(verdict: str) -> str:
@@ -223,17 +217,41 @@ def record_summary(tel: Any, summary: dict[str, Any]) -> None:
 
 
 def load_rows(conn: sqlite3.Connection, run_label: str) -> list[dict[str, Any]]:
-    """Every summary row of one run label, flattened: columns + summary_json."""
+    """Every summary row of one run label, flattened: columns + summary_json.
+
+    Each row also gets ``breaker_tier_bumps``: the tier bumps the circuit
+    breaker itself recorded (``circuit_breaker_diagnostics``) during that run —
+    a second source beside the row's own tier fields, which before the tier
+    was observed where it is assigned could miss a bump. Those rows carry no
+    session id; in a ladder-only database (``sessionless_attribution`` =
+    time-window) the runs are sequential (one writer, a lock), so a breaker
+    row belongs to the first run whose summary was written after it. In the
+    live database other writers interleave and nothing is attributed (None).
+    """
+    try:
+        bumps: list[tuple[float, str]] = [
+            (ts, method) for ts, method in conn.execute(
+                "SELECT timestamp, recovery_method FROM circuit_breaker_diagnostics")
+            if (method or "").startswith("tier_bump")]
+    except sqlite3.OperationalError:  # a database with no breaker table
+        bumps = []
     out = []
+    prev_ts = float("-inf")
     for r in conn.execute(
         "SELECT timestamp, operation, outcome, duration_ms, input_tokens, "
         "output_tokens, session_id, model, node_id, summary_json FROM subsystem_runs "
         "WHERE subsystem = ? ORDER BY timestamp",
         (SUBSYSTEM,),
     ):
+        lo, prev_ts = prev_ts, r[0]
         summary = json.loads(r[9] or "{}")
         if summary.get("run_label") != run_label:
             continue
+        if summary.get("sessionless_attribution") == "time-window":
+            summary["breaker_tier_bumps"] = sorted(
+                m for ts, m in bumps if lo < ts <= r[0])
+        else:
+            summary["breaker_tier_bumps"] = None
         summary.setdefault("node_id", r[8])
         summary["_columns"] = {
             "operation": r[1], "outcome": r[2], "duration_ms": r[3],
@@ -355,12 +373,19 @@ def render_ladder_table(
             cm, ca = format_misses(cr)
             cells.append(f"{_ratio(cp, cd)} / {_ratio(cm, ca)}")
         out.append(
-            f"| {first.get('model')} (`{label}`) | {first.get('quantization')} "
+            f"| {_model_name(first.get('model'))} (`{label}`) | {first.get('quantization')} "
             f"| {first.get('adapter_tier')} | "
             + (f"{p}/{d} ({lo:.2f}–{hi:.2f})" if d else "—")
             + f" | {_ratio(m, a)} | " + " | ".join(cells) + " |"
         )
     return "\n".join(out) + "\n"
+
+
+def _model_name(model: Any) -> str:
+    """A model as reports print it: the file name only. Some servers report the
+    model as the path they were started with, and a host's directory layout
+    does not belong in a committed report."""
+    return os.path.basename(str(model).rstrip("/")) if model else str(model)
 
 
 def render_report(rows: list[dict[str, Any]], *, title: str, class_order: list[str]) -> str:
@@ -374,10 +399,8 @@ def render_report(rows: list[dict[str, Any]], *, title: str, class_order: list[s
         f"# {title}",
         "",
         f"- suite: `{first['suite']}` (sha `{first['suite_sha'][:12]}`), run label `{first['run_label']}`",
-        f"- model: `{first['model']}` via `{first['provider']}`"
-        # File names only: some servers report the model as the path they were
-        # started with, and a host's directory layout does not belong in a report.
-        + (f", served as `{', '.join(sorted({os.path.basename(m) for m in first['served_models']}))}`"
+        f"- model: `{_model_name(first['model'])}` via `{first['provider']}`"
+        + (f", served as `{', '.join(sorted({_model_name(m) for m in first['served_models']}))}`"
            if first.get("served_models") else ""),
         f"- quantization: `{first.get('quantization')}` ({first.get('quantization_source')})",
         f"- adapter: tier `{first.get('adapter_tier')}`, base strictness `{first.get('adapter_strictness')}`"
@@ -479,7 +502,8 @@ def tier_bumped(row: dict[str, Any]) -> bool:
     belongs to neither tier."""
     seen = (row.get("adapter_counts") or {}).get("tiers_seen") or []
     start, end = row.get("adapter_tier_start"), row.get("adapter_tier_end")
-    return len(seen) > 1 or (start is not None and end is not None and start != end)
+    return (len(seen) > 1 or bool(row.get("breaker_tier_bumps"))
+            or (start is not None and end is not None and start != end))
 
 
 def _per_run(rs: list[dict[str, Any]], key: str) -> str:
@@ -553,18 +577,23 @@ def render_tier_sweep(rows: list[dict[str, Any]], *, class_order: list[str]) -> 
     """One model at each forced adapter tier: what the adapter layer adds.
 
     Main figures leave out runs the circuit breaker bumped to another tier
-    (they are hybrids); those are counted on their own. Task success is
-    pass ÷ ALL runs — a tier's effect often shows up as format misses or
-    halts, which accuracy (pass ÷ pass + fail) would hide."""
+    (they are hybrids) and runs with no verdict (``error``: the harness or the
+    endpoint failed, not the model; ``unscored``); both are counted on their
+    own. Task success is pass ÷ all runs with a verdict — a tier's effect often
+    shows up as format misses or halts, which accuracy (pass ÷ pass + fail)
+    would hide."""
     swept = [r for r in rows if forced_tier(r)]
     if not swept:
         return "# Tier sweep\n\nNo forced-tier rows.\n"
     first = swept[0]
     by_tier: dict[str, list[dict[str, Any]]] = defaultdict(list)
     bumped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    undecided: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in swept:
-        (bumped if tier_bumped(r) else by_tier)[forced_tier(r) or "?"].append(r)
-    tiers = [t for t in TIER_ORDER if t in by_tier or t in bumped]
+        bucket = (bumped if tier_bumped(r)
+                  else undecided if r["verdict"] in ("error", "unscored") else by_tier)
+        bucket[forced_tier(r) or "?"].append(r)
+    tiers = [t for t in TIER_ORDER if t in by_tier or t in bumped or t in undecided]
     labels = sorted({r["run_label"] for r in swept})
     head = ("| tier | runs | task success (95% CI) | accuracy | wrong | format miss "
             "| parse-disagreement halts | other halts | tool-call success "
@@ -575,7 +604,7 @@ def render_tier_sweep(rows: list[dict[str, Any]], *, class_order: list[str]) -> 
     lines = [
         f"# Tier sweep — `{first['tier_sweep']['of']}`",
         "",
-        f"- model: `{first['model']}` via `{first['provider']}`, quantization `{first.get('quantization')}`;"
+        f"- model: `{_model_name(first['model'])}` via `{first['provider']}`, quantization `{first.get('quantization')}`;"
         f" the daemon picks tier `{first['tier_sweep']['daemon_tier']}` for it",
         f"- suite `{first['suite']}` (sha `{first['suite_sha'][:12]}`), harness `{first.get('harness_commit')}`",
         f"- run labels: {', '.join(f'`{x}`' for x in labels)}",
@@ -584,7 +613,8 @@ def render_tier_sweep(rows: list[dict[str, Any]], *, class_order: list[str]) -> 
         "Each tier is the daemon's own adapter for that tier (only the tier decision is forced).",
         "Tier `off` is never what the daemon uses for a local model — it measures what the server's",
         "own parser does with no adapter behind it. Runs the circuit breaker bumped to another",
-        "tier are hybrids and are left out of the main figures (counted below).",
+        "tier are hybrids, and runs with no verdict (a harness or endpoint error, unscored) are",
+        "not the adapter's; both are left out of the main figures (counted below).",
         "",
         "## By tier",
         "",
@@ -598,7 +628,7 @@ def render_tier_sweep(rows: list[dict[str, Any]], *, class_order: list[str]) -> 
             lines.append(_tier_row(t, [r for r in by_tier.get(t, []) if r["task_class"] == cid]))
     lines += [
         "",
-        "## Paired by task (task success; bumped runs left out)",
+        "## Paired by task (task success; bumped and no-verdict runs left out)",
         "",
         "Every tier ran the same tasks, so each task is compared with itself: the mean per-task",
         "difference in pass rate, a 95% bootstrap interval over tasks, and how many tasks flip.",
@@ -615,8 +645,9 @@ def render_tier_sweep(rows: list[dict[str, Any]], *, class_order: list[str]) -> 
         "",
         "## Left out and infrastructure",
         "",
-        "| tier | bumped runs (left out) | stopped by (main runs) | provider HTTP retries |",
-        "|---|---:|---|---:|",
+        "| tier | bumped runs (left out) | no verdict (left out) | stopped by (main runs) "
+        "| provider HTTP retries |",
+        "|---|---:|---:|---|---:|",
     ]
     for t in tiers:
         main = by_tier.get(t, [])
@@ -624,16 +655,19 @@ def render_tier_sweep(rows: list[dict[str, Any]], *, class_order: list[str]) -> 
         for r in main:
             stops[r.get("stopped_by") or "?"] += 1
         lines.append(
-            f"| {t} | {len(bumped.get(t, []))} | "
+            f"| {t} | {len(bumped.get(t, []))} | {len(undecided.get(t, []))} | "
             + ", ".join(f"{k} {v}" for k, v in sorted(stops.items()))
-            + f" | {sum(r.get('provider_http_retries') or 0 for r in main + bumped.get(t, []))} |"
+            + " | " + str(sum(r.get("provider_http_retries") or 0
+                              for r in main + bumped.get(t, []) + undecided.get(t, []))) + " |"
         )
     lines += [
         "",
         "Counters: *adapter retries / aborts* are the adapter's own decisions after a rejected call;",
         "*calls from text* are tool calls the adapter recovered from the reply's text; *text calls",
         "missed* are calls tier off left in the text that light/full would have recovered;",
-        "*XML-markup turns* are replies carrying `<tool_call>` / `<function=` markup. Provider HTTP",
-        "retries are the transport's, not the adapter's.",
+        "*XML-markup turns* are replies with no structured tool call that carry `<tool_call>` /",
+        "`<function=` markup — the replies the adapter is asked to read; a reply that carries",
+        "markup beside a structured call is not counted. Provider HTTP retries are the",
+        "transport's, not the adapter's.",
     ]
     return "\n".join(lines) + "\n"

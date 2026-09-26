@@ -16,7 +16,11 @@ recover, turns carrying ``<tool_call>`` / ``<function=`` markup, and each
 retry-or-abort decision. The instance keeps its class's behaviour — the
 subclass only observes — and a circuit-breaker tier bump (the loop
 ``copy.copy``s the adapter) carries the same counter dict, so a run's counts
-cover the bumped adapter too.
+cover the bumped adapter too. The bump happens on the loop's own copy of the
+run context, out of the caller's sight, so the tier is observed where it is
+assigned: every tier the adapter is given is recorded (``tiers_seen``), and
+the last one is the run's end tier — whether or not the adapter is asked
+anything after the bump.
 """
 
 from __future__ import annotations
@@ -57,6 +61,21 @@ class _CountingAdapter(ModelAdapter):
     """ModelAdapter that counts; every method returns exactly what the parent returns."""
 
     _ladder_counts: dict[str, Any]
+
+    # A data descriptor wins over the instance's own ``tier`` entry, for reads
+    # and writes alike; the value is kept in that entry, so reads return
+    # exactly what was assigned.
+    @property  # type: ignore[override]
+    def tier(self) -> str:
+        return cast(str, self.__dict__["tier"])
+
+    @tier.setter
+    def tier(self, value: str) -> None:
+        self.__dict__["tier"] = value
+        counts = self.__dict__.get("_ladder_counts")
+        if counts is not None:
+            counts["tiers_seen"].add(value)
+            counts["tier_end"] = value
 
     def _saw(self) -> dict[str, Any]:
         counts = self._ladder_counts
@@ -100,8 +119,17 @@ def instrument_adapter(adapter: Any) -> dict[str, Any] | None:
     counted = cast(_CountingAdapter, adapter)
     counts: dict[str, Any] = {name: 0 for name in COUNTERS}
     counts["tiers_seen"] = {counted.tier}
+    counts["tier_end"] = counted.tier
     counted._ladder_counts = counts
     return counts
+
+
+def tier_end(counts: dict[str, Any] | None, adapter: Any) -> str | None:
+    """The tier the run ENDED at: the last one its adapter was given (a
+    circuit-breaker bump included), else — uninstrumented — the adapter's own."""
+    if counts is not None:
+        return cast(str, counts["tier_end"])
+    return getattr(adapter, "tier", None)
 
 
 def counts_for_row(counts: dict[str, Any] | None) -> dict[str, Any] | None:

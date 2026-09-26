@@ -27,6 +27,8 @@ from prometheus.gym.ladder import runner as lr
 from prometheus.gym.ladder.selfcheck import selfcheck_task, synthetic_transcript
 from prometheus.gym.ladder.suite import LadderTask, load_suite, select_tasks
 from prometheus.gym.ladder.verdict import (
+    UNSCORED,
+    Verdict,
     check_predicates,
     decide,
     run_acceptance,
@@ -1619,3 +1621,196 @@ def test_the_tier_report_leaves_bumped_runs_out_and_pairs_tasks():
     left_out = next(ln for ln in lines if ln.startswith("| light | 1 |"))  # counted apart
     assert "done 2" in left_out
     assert rec.paired_difference({"a": 0.0, "b": 1.0}, {"a": 1.0, "b": 1.0})[:2] == (2, 0.5)
+
+
+# ---------------------------------------------------------------------------
+# What the pre-PR review found: a bump the row missed, rows with no verdict,
+# another writer's rows, a judge's URL, a model path, a symlinked sandbox, and
+# an abort's exit code
+# ---------------------------------------------------------------------------
+
+
+class _TripThenEmpty(ModelProvider):
+    """Round 1: five failing reads — the circuit breaker bumps the tier. Then
+    only empty replies, so the adapter is never asked anything at the new tier."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def set_grammar(self, grammar):  # noqa: ANN001
+        pass
+
+    async def stream_message(self, request):  # noqa: ANN001
+        self.calls += 1
+        ws = os.environ["PROMETHEUS_WORKSPACE_DIR"].rsplit("/home/", 1)[0] + "/ws"
+        content = ([ToolUseBlock(id=f"t{i}", name="read_file", input={"path": f"{ws}/missing{i}.txt"})
+                    for i in range(5)] if self.calls == 1 else [TextBlock(text="")])
+        yield ApiMessageCompleteEvent(
+            message=ConversationMessage(role="assistant", content=content),
+            usage=UsageSnapshot(input_tokens=30, output_tokens=12), stop_reason="stop")
+
+
+def test_a_breaker_bump_is_seen_even_when_the_adapter_is_never_asked_again(tmp_path):
+    # The breaker bumps a COPY of the adapter inside the loop's own copy of the
+    # context. The row read the caller's context (light → light), and with no
+    # adapter call after the bump the run was filed in tier light's figures.
+    from prometheus.__main__ import create_security_gate
+    from prometheus.gym.ladder.tiers import forced_adapter_factory
+
+    suite, task = _one_task(tmp_path, TEXT_CALL_TASK, "max_rounds: 6, max_tool_calls: 8")
+    sandbox = fx.Sandbox(tmp_path / "sb")
+    prev = sandbox.activate()
+    try:
+        sandbox.reset()
+        model_cfg = {"provider": "llama_cpp", "model": BONSAI, "grammar_enforcement": True}
+        pipeline = {"provider": _TripThenEmpty(),
+                    "adapter_factory": forced_adapter_factory("light", model_cfg, {}),
+                    "security_gate": create_security_gate({"workspace_root": str(sandbox.workspace)}),
+                    "model_name": BONSAI, "model_cfg": model_cfg, "tier_forced": True}
+        tel = ToolCallTelemetry(db_path=tmp_path / "telemetry.db")
+        row = asyncio.run(lr.run_task(task, suite, pipeline, sandbox=sandbox, tel=tel, judge=None,
+                                      run_label="t", run_idx=0, static={"model": BONSAI, "run_label": "t"}))
+    finally:
+        fx.Sandbox.restore(prev)
+    assert (row["adapter_tier_start"], row["adapter_tier_end"]) == ("light", "full"), row["stopped_by"]
+    assert row["adapter_counts"]["tiers_seen"] == ["full", "light"]
+    assert rec.tier_bumped(row)
+
+
+def _summary(tel, label, sid, attribution="time-window"):
+    rec.record_summary(tel, {"session_id": sid, "task_class": "single_tool", "verdict": "fail",
+                             "duration_ms": 1.0, "model": "m", "run_label": label,
+                             "sessionless_attribution": attribution})
+    time.sleep(0.01)
+
+
+def test_the_breakers_own_record_marks_a_bumped_run_in_a_ladder_only_db(tmp_path):
+    # A second source for rows recorded before the tier was observed where it
+    # is assigned: the breaker's diagnostics row, placed by time — only where
+    # the ladder is the database's one writer.
+    tel = _tel(tmp_path)
+    _summary(tel, "L", "s1")
+    tel.record_diagnosis("m", "off", "read_file", "wrong_path", False, None, True, "tier_bump:off->light")
+    time.sleep(0.01)
+    _summary(tel, "L", "s2")
+    tel.record_diagnosis("m", "off", "read_file", "wrong_path", False, None, False, "already_attempted")
+    _summary(tel, "L", "s3")
+    rows = rec.load_rows(tel._conn, "L")
+    assert [r["breaker_tier_bumps"] for r in rows] == [[], ["tier_bump:off->light"], []]
+    assert [rec.tier_bumped(r) for r in rows] == [False, True, False]
+    # The live telemetry.db has other writers: nothing is placed by time there.
+    _summary(tel, "live", "s4", attribution="off (live telemetry.db)")
+    tel.record_diagnosis("m", "off", "read_file", "wrong_path", False, None, True, "tier_bump:off->light")
+    time.sleep(0.01)
+    _summary(tel, "live", "s5", attribution="off (live telemetry.db)")
+    assert [r["breaker_tier_bumps"] for r in rec.load_rows(tel._conn, "live")] == [None, None]
+
+
+def test_runs_with_no_verdict_are_left_out_of_a_tiers_figures():
+    # An endpoint error is not the adapter's: it must not lower the tier's task
+    # success or flip a paired task, and it is counted apart.
+    rows = [_sweep_row("a", "off", "pass"), _sweep_row("b", "off", "pass"),
+            _sweep_row("a", "light", "pass"), {**_sweep_row("b", "light", "error"), "stopped_by": "error"}]
+    report = rec.render_tier_sweep(rows, class_order=["single_tool"])
+    lines = report.splitlines()
+    assert next(ln for ln in lines if ln.startswith("| light |")).startswith("| light | 1 | 1/1 ")
+    assert "| light − off | 1 | +0.000 |" in report
+    assert "| light | 0 | 1 | done 1 |" in report
+
+
+class _AnswersWhileAnotherWriterFallsBack(ModelProvider):
+    """Answers right; meanwhile ANOTHER writer to the same database (the live
+    daemon, on the live telemetry.db) files a reasoning-fallback row."""
+
+    def __init__(self, db_path) -> None:
+        self.other = ToolCallTelemetry(db_path=db_path)
+
+    async def stream_message(self, request):  # noqa: ANN001
+        self.other.record_silent_failure(
+            "llama_cpp_provider", "stream_message", RuntimeError("empty content"),
+            context={"used_reasoning_fallback": True})
+        yield ApiMessageCompleteEvent(
+            message=ConversationMessage(role="assistant", content=[TextBlock(text="7 times 3 is 21.")]),
+            usage=UsageSnapshot(input_tokens=50, output_tokens=8), stop_reason="stop")
+
+
+def test_another_writers_reasoning_fallback_is_not_this_runs(tmp_path):
+    body = """  - id: think
+    prompt: "What is 7 times 3?"
+    score: {expect_text_regex: '\\b21\\b'}
+    reference: {answer: "21"}
+"""
+    row = _run(tmp_path, _AnswersWhileAnotherWriterFallsBack(tmp_path / "telemetry.db"), body)
+    assert (row["verdict"], row["stopped_by"]) == ("pass", "done"), row
+
+
+def test_a_judges_error_is_stored_without_its_endpoint(tmp_path, monkeypatch):
+    async def judged(*a, **kw):
+        return Verdict(UNSCORED, None, None, "judge", ["judge unavailable"], judge={
+            "error": "HTTPStatusError: Server error '503' for url "
+                     "'http://192.0.2.10:11434/v1/chat/completions'",
+            "provenance": {"model": "qwen2.5:14b-instruct", "pinned": True}})
+
+    monkeypatch.setattr(lr, "decide", judged)
+    row = _run(tmp_path, _LongAnswer(), ANSWER_TASK)
+    stored = sqlite3.connect(str(tmp_path / "telemetry.db")).execute(
+        "SELECT summary_json FROM subsystem_runs WHERE subsystem = 'model_ladder'").fetchone()[0]
+    assert "192.0.2.10" not in stored and "11434" not in stored
+    assert row["judge"]["provenance"] == {"model": "qwen2.5:14b-instruct", "pinned": True}
+
+
+def test_reports_print_a_model_path_as_its_file_name():
+    rows = [{**_sweep_row("a", "light", "pass"), "model": "/home/alice/models/Qwen3.5-9B"}]
+    for report in (rec.render_tier_sweep(rows, class_order=["single_tool"]),
+                   rec.render_ladder_table({"L": [{**rows[0], "tier_sweep": None}]},
+                                           class_order=["single_tool"])):
+        assert "/home/alice" not in report and "Qwen3.5-9B" in report
+
+
+def test_reset_refuses_a_symlinked_home(tmp_path):
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "notes.txt").write_text("keep me")
+    root = tmp_path / "sb"
+    root.mkdir()
+    (root / "home").symlink_to(victim)
+    with pytest.raises(fx.SandboxError, match="symlink"):
+        fx.Sandbox(root).reset()
+    assert (victim / "notes.txt").read_text() == "keep me"
+
+
+def test_an_aborted_run_exits_3_even_when_its_rows_are_cut_short(tmp_path, monkeypatch, capsys):
+    # The endpoint dies on the first task: one error row with no verdict, then
+    # the abort. That is exit 3 (aborted), not 1 (a recording gap).
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(
+        "ladder_run_cli", Path(__file__).resolve().parents[1] / "scripts" / "ladder_run.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    db = tmp_path / "t.db"
+
+    async def dead(pipeline, timeout_s=45.0):
+        return False, "ReadTimeout"
+
+    # The real dead-endpoint row, recorded by run_task, then filed under the CLI's label.
+    monkeypatch.setattr(lr, "endpoint_alive", dead)
+    (tmp_path / "first").mkdir()
+    with pytest.raises(lr.LadderAbort):
+        _run(tmp_path / "first", _Hang(), CAP_TASK)
+    (dead_row,) = rec.load_rows(sqlite3.connect(str(tmp_path / "first" / "telemetry.db")), "t")
+
+    async def dies(suite, tasks, contestant, *, run_label, telemetry_db, **kw):
+        row = {k: v for k, v in dead_row.items() if k not in ("_columns", "breaker_tier_bumps")}
+        static = {"suite": "ladder-v1", "suite_sha": "0" * 64, "provider": "llama_cpp",
+                  "run_label": run_label}
+        rec.record_summary(ToolCallTelemetry(db_path=telemetry_db), {**row, **static})
+        raise lr.LadderAbort("endpoint unresponsive after the time budget (ReadTimeout)")
+
+    monkeypatch.setattr(cli, "run_ladder", dies)
+    monkeypatch.setattr(sys, "argv", [
+        "ladder_run.py", "--base-url", "http://127.0.0.1:9", "--no-judge", "--tasks",
+        "qa-arith-mult", "--run-label", "dead", "--telemetry-db", str(db),
+        "--report", str(tmp_path / "r.md")])
+    assert cli.main() == 3, capsys.readouterr().out

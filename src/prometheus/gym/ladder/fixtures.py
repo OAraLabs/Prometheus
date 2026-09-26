@@ -112,7 +112,16 @@ class Sandbox:
         database there when the pipeline was built (once per ladder run), and
         wiping it mid-run leaves the logger writing to a file with no table.
         Nothing a task can do writes there; it is the gate's own record.
+
+        The root and the home must be real directories: the wipe goes INTO
+        the home, and through a symlink it would empty whatever the link names
+        (the default root sits in a world-writable /tmp).
         """
+        for d in (self.root, self.home):
+            if d.is_symlink():
+                raise SandboxError(
+                    f"{d} is a symlink — the sandbox wipes what it holds, so it must be a "
+                    "real directory; remove it or pass a different --workdir")
         keep = self.data / "security"
         _remove(self.workspace)
         if self.home.exists():

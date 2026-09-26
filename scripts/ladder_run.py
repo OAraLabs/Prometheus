@@ -24,7 +24,8 @@ gym/results/ladder/<run-label>.md; it names no hosts.
 Exit codes: 0 = ran and every required field is populated somewhere;
 1 = the empty-field check failed (or nothing was recorded); 2 = refused
 before any task ran; 3 = aborted mid-run (dead endpoint, unclean sandbox) —
-the rows recorded before the abort stand and are reported.
+the rows recorded before the abort stand and are reported. An abort wins over
+the empty-field check: the rows an aborted run leaves are not a recording gap.
 """
 
 from __future__ import annotations
@@ -256,7 +257,7 @@ def main() -> int:
         # Never overwrite a report with nothing — a wrong --telemetry-db
         # would otherwise replace a committed report with "No rows recorded".
         print(f"❌ no rows for run label {args.run_label!r} in {db}; no report written")
-        return 1
+        return 3 if aborted else 1
     report = render_report(rows, title=f"Model ladder — {args.run_label}",
                            class_order=list(CLASS_IDS))
     out = Path(args.report) if args.report else REPO / "gym" / "results" / "ladder" / f"{args.run_label}.md"
@@ -266,9 +267,11 @@ def main() -> int:
     empty = check_empty_fields(rows)
     if empty:
         print(f"❌ empty-field check FAILED — empty in every row: {', '.join(empty)}")
-        return 1
-    print(f"✅ empty-field check passed over {len(rows)} row(s)")
-    return 3 if not args.report_only and aborted else 0
+    else:
+        print(f"✅ empty-field check passed over {len(rows)} row(s)")
+    # An abort's rows are cut short — often a single dead-endpoint row with no
+    # verdict — so an empty field there is the abort, not a recording gap.
+    return 3 if aborted else 1 if empty else 0
 
 
 if __name__ == "__main__":
