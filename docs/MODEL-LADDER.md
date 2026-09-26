@@ -51,13 +51,15 @@ criterion in `suite.yaml`. The first cut **populates four** of them and **defers
 class has its definition and nothing else, and the loader refuses a task file for it until a later
 work package makes it active.
 
-### Populated (suite v1, sha `20974af2f6e0`)
+### Populated (suite v1, sha `4017dba21ea2`)
 
-The first run ran at two earlier shas: `45df225d3b36` (the 27B, Bonsai and 9B smokes and all
-three sweeps) and `b71c4bc2c390` (Ornith's smoke), which adds two wrong-answer proofs to
-`qa-py-mutable-default` and widens its answer shape. `20974af2f6e0` changes only the wording of
-the `qa` and `single_tool` success criteria, which said a reply without its answer line is a
-fail; no code reads that text, and the reader never did that (*Verdicts*).
+The first run ran at two earlier shas: `45df225d3b36` (every smoke and sweep except Ornith's
+second smoke, the one in the tables) and `b71c4bc2c390` (that smoke), which adds two wrong-answer
+proofs to `qa-py-mutable-default` and widens its answer shape. `4017dba21ea2` changes only the
+wording of five success criteria, to say what the verdicts already did: `qa`, `single_tool` and
+`multi_step` said a reply without its answer line is a fail (it is read on its last line, and
+otherwise a format miss), and `file_edit` and `long_haul` said an exit status of 0 passes (the
+runner's own result must show tests ran and none failed). No code reads that text.
 
 **92 tasks.** Every task names its difficulty within its class; the report breaks pass rates out
 by it. Three per class are tagged `smoke: true`.
@@ -254,13 +256,17 @@ as wrong.
 | LaTeX `\frac` is not normalised | fraction answers must carry it in `answer_shape` (qa-algebra-linear does) | — |
 | a LOOSE list under a bare `ANSWER:` label (blank lines between items) is read as its first item | right item first passes, wrong item first fails; the tight list is a format miss | both |
 | a one-word heading under a bare label is read as a clean wrong token | `ANSWER:` then `Calculation:` then the working fails instead of falling back to the last line | down |
-| a comma list wrapped one item per line is read by its first line | `ANSWER: V2_003_add_index.sql,` then the other two names fails | down |
-| negation words are ASCII only (`isn't`, not `isn’t`) and a closed list (`couldn't find` is not one) | `The port isn’t 48217.` passes; `There isn't a 503` fails while `I couldn't find a 503` is a format miss | both |
+| an answer wrapped over several lines is read by its first line | `ANSWER: V2_003_add_index.sql,` then the other two names on their own lines fails | down |
+| negation words are ASCII only (`isn't`, not `isn’t`) and a closed list (`couldn't find` is not one) | `The port isn’t 48217.` passes; `ANSWER: There isn't a 503` fails while `ANSWER: I couldn't find a 503` is a format miss | both |
 
-The last four rows came from the pre-PR review, on invented replies. None of the first run's
-2,160 stored replies (900 of them on answer-line tasks) has a bare `ANSWER:` label, a wrapped
-answer line or a curly-apostrophe negation near its answer, so none of its verdicts rests on
-them; they stay limits under the freeze until a real reply hits one.
+The last four rows came from the pre-PR review, on invented replies. Of the first run's 2,160
+stored replies (900 on answer-line tasks), none has a bare `ANSWER:` label or a curly-apostrophe
+negation near its answer, and **one** has a wrapped answer: Ornith's second smoke,
+`qa-py-mutable-default` run 2 — "they appear on separate lines", then `ANSWER: 1` with `2`, `1`,
+`3` on the lines below. The reader read `1` and failed it; both blind graders failed it too,
+because `print` writes `1 2 1 3` on one line, so the verdict stands although the reader's reason
+is not theirs. (Read whole, the wrapped value would have passed the task's pattern.) The four
+limits stay under the freeze.
 
 Task spellings the checks found the reader fails although the value is right (**down**) — each is
 kept as written until a real reply uses it: a reversal spelled letter by letter (qa-reverse-word);
@@ -538,7 +544,7 @@ per rung in `gym/results/ladder/`.
 | `r09b-ornith` (at full) | 38 | 10 | 3 | 3 | 38/48 (0.66–0.88) | 3/33 | 82/85 |
 
 Empty-field check: passed for every rung. The 27B, Bonsai and 9B smokes ran at suite sha
-`45df225d3b36`, Ornith's at `b71c4bc2c390`; the two differ only in `qa-py-mutable-default` (its
+`45df225d3b36`, Ornith's second smoke (the one in the table) at `b71c4bc2c390`; the two differ only in `qa-py-mutable-default` (its
 shape and two wrong-answer proofs), and re-reading the other rungs' replies to that task under the
 new shape changes none of their verdicts. The smokes are 54 runs each: they show the pipeline and the reader on real output, not
 a ranking — the intervals overlap, and Bonsai and Ornith ran at tier full (see below).

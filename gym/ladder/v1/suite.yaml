@@ -41,7 +41,7 @@ classes:
     description: >
       Plain Q&A — answerable without tools.
     success_criterion: >
-      Exact-answer tasks: PASS iff the reply's final "ANSWER: <value>" line
+      Exact-answer tasks: PASS when the reply's final "ANSWER: <value>" line
       states the correct value, in any spelling of that value; the reply may
       discuss anything above the line. A reply with no answer line is read
       on its last line — PASS if that states the right value as its only
@@ -62,10 +62,10 @@ classes:
       One tool call is enough: read a value, run a command, find a file,
       write one exact file.
     success_criterion: >
-      PASS iff the reply's final "ANSWER: <value>" line states the value
+      PASS when the reply's final "ANSWER: <value>" line states the value
       planted in the workspace — unguessable, so a correct value implies the
-      lookup happened — or, for a write task, the named file holds exactly the
-      requested content. More calls are allowed within the budget; which tool
+      lookup happened — or, for a write task, iff the named file holds exactly
+      the requested content. More calls are allowed within the budget; which tool
       is used is not checked. A reply task's reply with no answer line is
       read on its last line as for qa, and is otherwise a format miss, never
       a fail.
@@ -82,7 +82,8 @@ classes:
     success_criterion: >
       PASS iff the end state is exactly right: the output file named in the
       prompt has the expected content, or the reply's final "ANSWER: <value>"
-      line states the expected value — a result that needs two to five
+      line states the expected value (a reply without the line is read as
+      for qa) — a result that needs two to five
       dependent tool calls to reach. Checked by predicates or a hidden
       acceptance test. No partial credit.
   file_edit:
@@ -95,10 +96,12 @@ classes:
     description: >
       Change existing files so an acceptance command passes.
     success_criterion: >
-      PASS iff the acceptance command the harness runs in the workspace after
-      the agent stops exits 0. Tests the agent could see are first restored
-      from pristine copies, so editing them buys nothing; the command runs
-      under the harness's own Python, not the box's python3.
+      PASS iff the acceptance tests the harness runs in the workspace after
+      the agent stops ran — at least one — and none failed, as its runner's
+      own result file reports; an exit status alone decides nothing. Tests
+      the agent could see are first restored from pristine copies, so editing
+      them buys nothing; the tests run under the harness's own isolated
+      Python, not the box's python3.
   web_research:
     status: deferred
     max_rounds: 12
@@ -155,6 +158,7 @@ classes:
       Build a small multi-part program from a written spec over many rounds.
     success_criterion: >
       PASS iff a hidden acceptance test suite — written into the workspace
-      only after the agent stops, stdlib unittest run with the harness's
-      Python — exits 0, and the run finished within its budget (40 rounds, 60
+      only after the agent stops, stdlib unittest run by the harness's runner
+      — runs at least one test with none failing, and the run finished
+      within its budget (40 rounds, 60
       tool calls, 25 minutes).
