@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
-import shutil
 import sqlite3
 import string
 import threading
@@ -310,15 +310,21 @@ class MemoryStore:
             log.info("MemoryStore: FTS indexes rebuilt (one-time integrity migration)")
 
     def _snapshot_db(self, *, reason: str = "manual migration") -> None:
-        """Copy the DB file out-of-tree, timestamped, before a migration.
+        """Back the database up out-of-tree, timestamped, before a migration.
+
+        The copy is made with SQLite's backup API, never by copying the file:
+        the store runs in WAL mode, and a committed write lives in
+        ``memory.db-wal`` until a checkpoint folds it into ``memory.db``, so a
+        copy of the file alone can miss committed rows. The copy is checked
+        before it counts as a snapshot.
 
         A snapshot never overwrites a snapshot. The stamp is one-second
-        granular, and one open can snapshot twice: a pre-manual DB with rows
-        runs the manual-column migration and then the FTS rebuild, each
-        snapshotting first — on a fast machine inside the same second. The
-        second copy then landed on the first one's name and silently replaced
-        it: the log named two snapshots, the disk held one. When the stamped
-        name is taken, the next free ``-N`` suffix is used instead.
+        granular and one open can snapshot twice (a pre-manual DB with rows
+        runs the manual-column migration, then the FTS rebuild), so the file
+        is created exclusively, and a taken name moves to the next free
+        ``-N`` suffix. Fail loud: a failed or corrupt copy is removed and the
+        error propagates, so no migration runs unprotected and nothing
+        half-written is left looking like a backup.
         """
         src = self._db_path
         if not src.exists():
@@ -326,10 +332,36 @@ class MemoryStore:
         ts = time.strftime("%Y%m%dT%H%M%S", time.localtime())
         dst = src.with_name(f"{src.name}.backup-{ts}")
         n = 0
-        while dst.exists():
-            n += 1
-            dst = src.with_name(f"{src.name}.backup-{ts}-{n}")
-        shutil.copy2(src, dst)
+        while True:
+            try:
+                # Owner-only from its first byte; an existing file is never reused.
+                os.close(os.open(dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+                break
+            except FileExistsError:
+                n += 1
+                dst = src.with_name(f"{src.name}.backup-{ts}-{n}")
+
+        def _refuse_to_spin(status: int, remaining: int, total: int) -> None:
+            # Python's backup retries BUSY/LOCKED forever; a migration must not
+            # hang the daemon's start.
+            if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise sqlite3.OperationalError(f"{src} was locked during the snapshot")
+
+        try:
+            copy = sqlite3.connect(str(dst))
+            try:
+                self._read(lambda conn: conn.backup(copy, progress=_refuse_to_spin))
+                integrity = copy.execute("PRAGMA integrity_check").fetchone()[0]
+            finally:
+                copy.close()
+            if integrity != "ok":
+                raise sqlite3.DatabaseError(
+                    f"snapshot {dst} failed integrity_check: {integrity}"
+                )
+        except BaseException:
+            # A partial or corrupt copy is not a backup: never leave one looking like one.
+            dst.unlink(missing_ok=True)
+            raise
         log.info("MemoryStore: snapshotted %s -> %s before %s", src, dst, reason)
 
     # ------------------------------------------------------------------
