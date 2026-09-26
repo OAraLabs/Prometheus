@@ -378,3 +378,97 @@ def test_a_tier_full_xml_reply_executes_the_tool(caplog):
     assert not provider.saw_feedback, "the loop retried a parse disagreement instead of running the call"
     assert not [r for r in caplog.records if "PARSE DISAGREEMENT" in r.getMessage()]
     assert final == RECOVERED
+
+
+# ---------------------------------------------------------------------------
+# Both formats in one reply: document order, the JSON reader kept off the XML
+# ---------------------------------------------------------------------------
+
+# coding_run's exchange 12 as recorded on 2026-09-25 (the production 27B, told
+# to write JSON and trained to write XML, wrote two DIFFERENT calls in one
+# reply): the first reader kept only the XML one and dropped the JSON one.
+EXCHANGE_12 = (
+    '```json\n{"name": "code_view", "arguments": {"path": '
+    '"/tmp/prometheus-parity/home/.prometheus/coding/cparity01-1790383216/calc.py"}}\n```\n'
+    "<tool_call>\n<function=code_view>\n<parameter=path>\n"
+    "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-1790383216/test_calc.py\n"
+    "</parameter>\n</function>\n</tool_call>"
+)
+CALC = "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-1790383216/calc.py"
+TEST_CALC = "/tmp/prometheus-parity/home/.prometheus/coding/cparity01-1790383216/test_calc.py"
+
+
+class TestDocumentOrder:
+    def test_exchange_12_yields_both_calls_in_the_order_written(self):
+        assert _blocks(StructuredOutputEnforcer().extract_tool_calls(EXCHANGE_12)) == [
+            ("code_view", {"path": CALC}),
+            ("code_view", {"path": TEST_CALC}),
+        ]
+
+    def test_xml_before_json_keeps_that_order(self):
+        text = _call("read_file", path="first.txt") + '\n{"name": "read_file", "arguments": {"path": "second.txt"}}'
+        assert _blocks(StructuredOutputEnforcer().extract_tool_calls(text)) == [
+            ("read_file", {"path": "first.txt"}),
+            ("read_file", {"path": "second.txt"}),
+        ]
+
+    def test_the_same_call_in_both_formats_is_one_call(self):
+        # The old recording's shape: the JSON call, then the XML rendering of it.
+        text = ('{"name": "code_run", "arguments": {"command": "python test_calc.py"}}\n\n'
+                + _call("code_run", command="python test_calc.py"))
+        assert _blocks(StructuredOutputEnforcer().extract_tool_calls(text)) == [
+            ("code_run", {"command": "python test_calc.py"}),
+        ]
+
+    def test_a_json_object_inside_a_parameter_value_is_the_value_not_a_call(self):
+        payload = '{"name": "bash", "arguments": {"command": "rm -rf /"}}'
+        text = _call("write_file", path="notes.json", content=payload)
+        calls = StructuredOutputEnforcer().extract_tool_calls(text)
+        assert _blocks(calls) == [("write_file", {"path": "notes.json", "content": payload})]
+
+    def test_a_fenced_json_object_inside_a_parameter_value_is_the_value(self):
+        payload = '```json\n{"name": "bash", "arguments": {"command": "ls"}}\n```'
+        text = "Saving the snippet.\n" + _call("write_file", path="snippet.md", content=payload)
+        assert _blocks(StructuredOutputEnforcer().extract_tool_calls(text)) == [
+            ("write_file", {"path": "snippet.md", "content": payload}),
+        ]
+
+    def test_a_truncated_xml_call_still_blanks_its_text(self):
+        # No closers at all: the JSON inside the cut value is still the value.
+        text = '<function=write_file>\n<parameter=content>\n{"name": "bash", "arguments": {"command": "ls"'
+        calls = StructuredOutputEnforcer().extract_tool_calls(text)
+        assert [c.name for c in calls] == ["write_file"]
+
+
+# A reply with no "<function=" takes exactly the path it always took: the
+# same strategies, in the same order, with the same precedence between them.
+NO_XML_SHAPES = {
+    "two fenced calls, in order": (
+        '```json\n{"name": "read_file", "arguments": {"path": "a"}}\n```\nthen\n'
+        '```json\n{"name": "read_file", "arguments": {"path": "b"}}\n```',
+        [("read_file", {"path": "a"}), ("read_file", {"path": "b"})]),
+    "a fenced call wins over a bare line elsewhere (strategy precedence)": (
+        '{"name": "read_file", "arguments": {"path": "line"}}\n'
+        '```json\n{"name": "read_file", "arguments": {"path": "fenced"}}\n```',
+        [("read_file", {"path": "fenced"})]),
+    "two calls on their own lines": (
+        'Sure.\n{"name": "read_file", "arguments": {"path": "a"}}\n'
+        '{"name": "read_file", "arguments": {"path": "b"}}\nDone.',
+        [("read_file", {"path": "a"}), ("read_file", {"path": "b"})]),
+    "objects in prose (the greedy last resort)": (
+        'Call {"name": "read_file", "arguments": {"path": "a"}} and then '
+        '{"name": "read_file", "arguments": {"path": "b"}} please',
+        [("read_file", {"path": "a"}), ("read_file", {"path": "b"})]),
+    "the same call twice is one": (
+        '{"name": "read_file", "arguments": {"path": "a"}}\n{"name": "read_file", "arguments": {"path": "a"}}',
+        [("read_file", {"path": "a"})]),
+    "a truncated bare object is no call (main finds no closing brace either)": (
+        '{"name": "read_file", "arguments": {"path": "a"', []),
+    "no call at all": ("Just prose, with a {brace} and <tool_call> mentioned.", []),
+}
+
+
+@pytest.mark.parametrize("label", list(NO_XML_SHAPES))
+def test_no_xml_replies_read_exactly_as_before(label):
+    text, expected = NO_XML_SHAPES[label]
+    assert _blocks(StructuredOutputEnforcer().extract_tool_calls(text)) == expected

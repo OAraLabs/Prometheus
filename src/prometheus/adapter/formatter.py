@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 from uuid import uuid4
 
-from prometheus.adapter.enforcer import parse_xml_tool_calls
+from prometheus.adapter.enforcer import StructuredOutputEnforcer
 from prometheus.engine.messages import ToolUseBlock
 
 
@@ -141,44 +141,14 @@ class QwenFormatter(ModelPromptFormatter):
     def parse_tool_calls(self, raw_response: str) -> list[ToolUseBlock]:
         """Extract tool calls from Qwen's text output.
 
-        Handles:
+        Handles, in document order, through the enforcer's own reader — one
+        reader, so the formatter and the enforcer cannot disagree:
         - Qwen's XML: <tool_call><function=NAME><parameter=K>V</parameter>...
-          (read by the enforcer's own reader, so the two cannot disagree)
         - Clean JSON: {"name": "...", "arguments": {...}}
         - JSON in markdown: ```json {...} ```
         - Multiple calls separated by newlines
         """
-        xml_calls = parse_xml_tool_calls(raw_response)
-        if xml_calls:
-            return xml_calls
-
-        results: list[ToolUseBlock] = []
-
-        # Find all ```json ... ``` blocks
-        for m in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", raw_response, re.DOTALL):
-            block = _parse_tool_call_json(m.group(1))
-            if block:
-                results.append(block)
-
-        if results:
-            return results
-
-        # Whole response is a JSON object
-        stripped = raw_response.strip()
-        if stripped.startswith("{"):
-            block = _parse_tool_call_json(stripped)
-            if block:
-                return [block]
-
-        # Any line that is itself a JSON object
-        for line in raw_response.splitlines():
-            line = line.strip()
-            if line.startswith("{"):
-                block = _parse_tool_call_json(line)
-                if block:
-                    results.append(block)
-
-        return results
+        return StructuredOutputEnforcer().extract_tool_calls(raw_response)
 
 
 # ---------------------------------------------------------------------------
