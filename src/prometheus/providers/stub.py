@@ -290,6 +290,8 @@ class StubProvider(ModelProvider):
             ...
     """
 
+    provider_name = "stub"
+
     def __init__(
         self,
         base_url: str = "http://localhost:8080",

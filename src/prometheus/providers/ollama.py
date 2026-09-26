@@ -142,6 +142,8 @@ class OllamaProvider(ModelProvider):
         provider = OllamaProvider(force_json=True)   # adds format="json"
     """
 
+    provider_name = "ollama"
+
     def __init__(
         self,
         base_url: str = "http://localhost:11434",

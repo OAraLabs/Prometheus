@@ -39,7 +39,7 @@ from prometheus.config.paths import (
     get_logs_dir,
     get_workspace_dir,
 )
-from prometheus.infra.doctor import DiagnosticCheck
+from prometheus.infra.doctor import DiagnosticCheck, check_router
 
 import logging
 
@@ -977,8 +977,10 @@ def run_extended_checks(
 ) -> list[DiagnosticCheck]:
     """The Phase 0 onboarding checks (config check computed by the caller)."""
     reach, model = check_inference(config, timeout=timeout)
+    router = check_router(config)
     return [
         config_check,
+        *([router] if router is not None else []),
         check_dirs_writable(),
         reach,
         model,
@@ -1026,9 +1028,10 @@ def run_anatomy_checks(config: dict[str, Any]) -> list[DiagnosticCheck]:
             # documented search order / live probe — don't double-report
             # (the class's Config check is also repo-root-relative, which
             # is wrong for pip installs). "Telegram" is superseded by the
-            # per-gateway checks (SPRINT G3).
+            # per-gateway checks (SPRINT G3). "Router" is the same
+            # check_router row the extended checks already carry.
             if check.name in ("Config", "Inference", "Model", "Whisper STT",
-                              "Telegram"):
+                              "Telegram", "Router"):
                 continue
             # Missing SOUL.md/AGENTS.md doesn't break the loop — the fast
             # setup path deliberately skips identity. Warn, don't fail.

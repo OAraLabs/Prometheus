@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **405** of
+Every key in `config/prometheus.yaml.default` — **401** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -167,10 +167,6 @@ none either — the key is documented so its absence is visible.
 | `router.overrides.enabled` | `True` |
 | `router.overrides.sticky` | `True` |
 | `router.fallback` | `[]` |
-| `router.auxiliary` | *(section)* |
-| `router.auxiliary.compression` | *(empty — no code default)* |
-| `router.auxiliary.summarization` | *(empty — no code default)* |
-| `router.auxiliary.vision` | *(empty — no code default)* |
 | `router.escalation` | *(section)* |
 | `router.escalation.as_subagent` | `True` |
 | `router.escalation.budget_usd` | `1.0` |

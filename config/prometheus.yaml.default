@@ -693,10 +693,6 @@ router:
   #    template. Values are the CODE'S OWN FALLBACK, so writing them
   #    changes nothing — they only make the existing behaviour visible.
   #    Pinned equal to the readers by tests/test_config_defaults_equality.
-  auxiliary:
-    compression:            # required — no code default
-    summarization:            # required — no code default
-    vision:            # required — no code default
   escalation:
     as_subagent: true
     budget_usd: 1.0

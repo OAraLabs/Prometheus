@@ -80,6 +80,11 @@ class ModelProvider(ABC):
 
     supports_vision: bool = False
     api_enforced_structure: bool = False
+    # The registry key that builds this provider ("anthropic", "ollama", ...).
+    # The loop reads it to tell the router which provider just failed, so every
+    # concrete class sets it; the OpenAI-compatible class, which serves many
+    # keys, sets it per instance.
+    provider_name: str = ""
 
     async def detect_vision(self) -> bool:
         """Probe whether the provider supports vision. Override in subclasses."""

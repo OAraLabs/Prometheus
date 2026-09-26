@@ -815,3 +815,90 @@ class TestHelpIncludesDoctor:
         text = cmd_help()
         assert "/doctor" in text
         assert "health check" in text.lower() or "diagnostic" in text.lower()
+
+
+# ===========================================================================
+# Router entries skipped at boot (WP-X.17)
+# ===========================================================================
+
+BAD_ROUTER_CONFIG = {"router": {
+    "fallback": [
+        {"provider": "ollama", "base_url": "http://ollama-box:11434", "model": "qwen3.5:9b"},
+        {"base_url": "http://other-box:8080", "model": "qwen3.8-27b"},
+    ],
+    "rules": [
+        {"task_type": "reasoning", "provider": "openai", "model": "gpt-5.6-luna",
+         "api_key_evn": "MY_KEY"},
+    ],
+}}
+
+
+class TestRouterRow:
+    """A refused router entry is skipped and the daemon boots on, so the
+    place it has to show is /doctor."""
+
+    def test_skipped_entries_are_a_warning_naming_each_entry_and_key(self) -> None:
+        from prometheus.infra.doctor import check_router
+
+        row = check_router(BAD_ROUTER_CONFIG)
+
+        assert row is not None and row.status == "warning"
+        assert "2 skipped at boot" in row.message
+        assert "router.fallback[1] ?/qwen3.8-27b refused: missing provider" in row.message
+        assert "router.rules[0] openai/gpt-5.6-luna refused: api_key_evn is not read" in row.message
+        assert row.fix
+
+    def test_a_deprecated_auxiliary_block_shows_too(self) -> None:
+        from prometheus.infra.doctor import check_router
+
+        row = check_router({"router": {"auxiliary": {"vision": None}}})
+
+        assert row is not None and row.status == "warning"
+        assert "router.auxiliary: config key is deprecated" in row.message
+
+    def test_a_clean_router_is_ok_and_no_router_is_no_row(self) -> None:
+        from prometheus.infra.doctor import check_router
+
+        clean = check_router({"router": {"fallback": BAD_ROUTER_CONFIG["router"]["fallback"][:1]}})
+
+        assert clean is not None and clean.status == "ok"
+        assert clean.message == "0 rule(s), 1 fallback entry"
+        assert check_router({}) is None
+        assert check_router({"router": {"fallback": [], "rules": []}}) is None
+
+    @pytest.mark.asyncio
+    async def test_slash_doctor_shows_the_skipped_entries(self, tmp_path: Path) -> None:
+        import prometheus.tools.builtin.anatomy as mod
+        from prometheus.gateway.commands import cmd_doctor
+
+        old_s, old_w, old_p = mod._scanner, mod._writer, mod._project_store
+        mock_scanner = MagicMock()
+        mock_scanner.scan = AsyncMock(return_value=_sample_state())
+        mod._scanner, mod._writer, mod._project_store = mock_scanner, MagicMock(), None
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=MagicMock())
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        try:
+            with patch("prometheus.infra.doctor.httpx.AsyncClient", return_value=mock_client), \
+                 patch("prometheus.infra.doctor.get_config_dir", return_value=tmp_path):
+                text = await cmd_doctor(BAD_ROUTER_CONFIG)
+        finally:
+            mod._scanner, mod._writer, mod._project_store = old_s, old_w, old_p
+
+        [line] = [ln for ln in text.splitlines() if "Router:" in ln]
+        assert line.startswith("⚠️ Router: 2 skipped at boot")
+        assert "api_key_evn" in line and "missing provider" in line
+
+    def test_oara_doctor_shows_them_without_a_scan(self) -> None:
+        from prometheus.cli.doctor import run_extended_checks
+
+        with patch("prometheus.cli.doctor.check_inference",
+                   return_value=(DiagnosticCheck("Inference", "connectivity", "ok", "up"),
+                                 DiagnosticCheck("Model", "model", "ok", "m"))):
+            checks = run_extended_checks(
+                BAD_ROUTER_CONFIG,
+                config_check=DiagnosticCheck("Config", "platform", "ok", "found"))
+
+        [row] = [c for c in checks if c.name == "Router"]
+        assert row.status == "warning" and "2 skipped at boot" in row.message

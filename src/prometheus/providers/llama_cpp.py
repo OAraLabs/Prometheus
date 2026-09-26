@@ -157,6 +157,8 @@ class LlamaCppProvider(ModelProvider):
         )
     """
 
+    provider_name = "llama_cpp"
+
     def __init__(
         self,
         base_url: str = "http://localhost:8080",
