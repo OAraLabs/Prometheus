@@ -513,7 +513,10 @@ class TestGuard:
         assert len(readers) == 4
         for statement in readers:
             assert "rowid" in statement.split("ORDER BY", 1)[1]
-            plan = " ".join(r[3] for r in store._conn.execute("EXPLAIN QUERY PLAN " + statement))
+            # Some Pythons trace the SQL with its values bound, some with "?".
+            params = [SID] * statement.count("?")
+            plan = " ".join(
+                r[3] for r in store._conn.execute("EXPLAIN QUERY PLAN " + statement, params))
             assert "TEMP B-TREE" not in plan, plan
 
 
