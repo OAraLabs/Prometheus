@@ -195,6 +195,40 @@ def _req_compaction(ev: Evidence) -> list[str]:
 _PYDANTIC_PER_RUN_VALUE = re.compile(r"input_value=\{[^}]*\b1[0-9]{9}\b")
 
 
+def _executed_from_xml(row: dict) -> bool:
+    """Did this executed call come from a Qwen XML block in the model's reply?
+
+    Not "does the reply carry XML somewhere": a reply can hold a JSON call
+    that ran beside an XML call that failed validation, and the executed
+    row's raw text then carries ``<function=`` without the reader having
+    executed anything from it (seen live, 2026-09-25). The executed call's
+    validated name and arguments must be a call the XML reader yields from
+    that reply.
+    """
+    if row.get("success") != 1 or "<function=" not in (row.get("raw_model_output") or ""):
+        return False
+    parsed = row.get("parsed_tool_call")
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except json.JSONDecodeError:
+            return False
+    if isinstance(parsed, dict) and set(parsed) == {"$json"}:
+        parsed = parsed["$json"]          # the store dump marks a decoded JSON column
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("input"), dict):
+        return False
+    from prometheus.adapter.enforcer import parse_xml_tool_calls
+
+    # The validated input may carry defaults the model never wrote; every
+    # argument the XML block does carry must be there, as written.
+    validated = {k: str(v) for k, v in parsed["input"].items()}
+    return any(
+        b.name == parsed.get("name")
+        and all(validated.get(k) == str(v) for k, v in b.input.items())
+        for b in parse_xml_tool_calls(row["raw_model_output"])
+    )
+
+
 def _req_coding(ev: Evidence) -> list[str]:
     code = next((s for s in ev.steps if s["op"] == "code"), {})
     report = (code.get("result") or {}).get("report") or {}
@@ -207,17 +241,16 @@ def _req_coding(ev: Evidence) -> list[str]:
     # disagreement, retried with feedback. This golden must show the reader at
     # work — an executed call read from a reply carrying the XML — and carry no
     # such disagreement, or it records the bug instead of the fix.
-    xml_executed = [r for r in ev.tool_rows()
-                    if r.get("success") == 1 and "<function=" in (r.get("raw_model_output") or "")]
+    xml_executed = [r for r in ev.tool_rows() if _executed_from_xml(r)]
     fed_back = [r for r in ev.requests
                 if "tool-call markup that could not be parsed" in json.dumps(r, ensure_ascii=False)]
     return (_need(report.get("status") == "success", f"coding run status {report.get('status')!r}")
             + _need(report.get("acceptance_exit") == 0, "acceptance command did not pass")
             + _need(not leaking, "a tool result carries a pydantic error repr with a per-run "
                                  f"value the normalizer cannot see — not replayable: {leaking[:1]}")
-            + _need(bool(xml_executed), "no executed tool call was read from a reply carrying a "
-                                        "Qwen XML call (<function=) — the sample does not show "
-                                        "the XML reader at work")
+            + _need(bool(xml_executed), "no executed tool call is one the XML reader yields from its "
+                                        "own reply (<function=) — the sample does not show the XML "
+                                        "reader at work")
             + _need(not fed_back, "a request carries the parse-disagreement feedback — an "
                                   "envelope the reader could not read; the sample records the bug"))
 

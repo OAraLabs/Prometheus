@@ -455,10 +455,18 @@ CODE_OK = [{"op": "code", "result": {"report": {"status": "success", "acceptance
 # same call read from JSON only — the golden must show the former.
 _XML_REPLY = ("<tool_call>\n<function=code_run>\n<parameter=command>\npython test_calc.py\n"
               "</parameter>\n</function>\n</tool_call>")
-XML_READ = _tel(tool_calls=(["tool_name", "success", "raw_model_output"],
-                            [["code_run", 1, _XML_REPLY]]))
-JSON_ONLY = _tel(tool_calls=(["tool_name", "success", "raw_model_output"],
-                             [["code_run", 1, '{"name": "code_run", "arguments": {}}']]))
+_RUN = {"name": "code_run", "input": {"command": "python test_calc.py"}}
+_TC = ["tool_name", "success", "raw_model_output", "parsed_tool_call"]
+XML_READ = _tel(tool_calls=(_TC, [["code_run", 1, _XML_REPLY, _RUN]]))
+JSON_ONLY = _tel(tool_calls=(_TC, [["code_run", 1, '{"name": "code_run", "arguments": {"command": "python test_calc.py"}}', _RUN]]))
+# Seen live: a JSON call that ran, in a reply whose XML call (wrong parameter
+# name) failed validation — the executed row's text carries <function=, but
+# nothing the XML reader yields is what ran.
+_MIXED = ('{"name": "code_str_replace", "arguments": {"path": "calc.py"}}\n\n'
+          "<tool_call>\n<function=code_run>\n<parameter=cmd>\npython test_calc.py\n</parameter>\n</function>\n</tool_call>")
+JSON_RAN_XML_FAILED = _tel(tool_calls=(_TC + ["error_type"], [
+    ["code_str_replace", 1, _MIXED, {"name": "code_str_replace", "input": {"path": "calc.py"}}, None],
+    ["code_run", 0, "", None, "validation_failed"]]))
 CODE_REQ = [{"messages": [{"role": "tool", "content": "1\tdef add"}]}]
 FED_BACK = [{"messages": [{"role": "user", "content":
              "Your previous response contained tool-call markup that could not be parsed, "
@@ -495,6 +503,7 @@ RECORDING_RULES = [
      [(_ev(stores=XML_READ, steps=CODE_OK,
            requests=[{"messages": [{"role": "tool", "content": PYDANTIC}]}]), "not replayable"),
       (_ev(stores=JSON_ONLY, steps=CODE_OK, requests=CODE_REQ), "XML reader"),
+      (_ev(stores=JSON_RAN_XML_FAILED, steps=CODE_OK, requests=CODE_REQ), "XML reader"),
       (_ev(stores=XML_READ, steps=CODE_OK, requests=FED_BACK), "parse-disagreement")]),
     ("linked_workspace", _ev(stores=TOOL_OK, requests=ATLAS_REQ,
                              steps=[_chat("Codename: ATLAS-7. Tally for blue: 9")]),
