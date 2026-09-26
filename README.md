@@ -10,7 +10,7 @@ Prometheus is an AI agent daemon: always on, on hardware you own. It remembers, 
 Prometheus is two pieces that pair with a 6-digit code:
 
 - **The daemon** — an always-on Python agent runtime: agent loop + Model Adapter Layer, a registry of every local inference box you own, three chat gateways (Telegram / Slack / Discord), lossless memory, sandboxed coding runs, cron, a security gate, and a bearer-token REST + WebSocket control plane — plus an OpenAI-compatible `/v1` surface so anything that already speaks OpenAI can talk to it.
-- **[Beacon](https://oara.ai/beacon)** — its native desktop cockpit (macOS / Linux): chat with live tool timelines, `@`-references and hands-free voice, Mission Control, a Loop Manager for coding runs, per-turn file checkpoints you can restore, a documents editor with AI redlines, Kanban, telemetry feeds, and per-provider key management. An [iOS client](https://oara.ai/beacon-ios) rides the same control plane (per-device tokens, push, pagination).
+- **[Beacon](https://oara.ai/beacon)** — its native desktop cockpit (macOS / Linux): chat with live tool timelines and `@`-references, Mission Control, a Loop Manager for coding runs, per-turn file checkpoints you can restore, a documents editor with AI redlines, Kanban, telemetry feeds, and per-provider key management. An [iOS client](https://oara.ai/beacon-ios) rides the same control plane (per-device tokens, push, pagination).
 
 ```bash
 git clone https://github.com/OAraLabs/Prometheus.git && cd Prometheus
@@ -45,7 +45,7 @@ That is the environment the CI test job runs in, so a local run exercises the sa
 - **Sees what you show it** — images reach a vision-capable model as images, not paraphrases; stored by reference so the bytes never bloat the transcript. `@file`, `@diff` and `@url` in the composer resolve on the daemon, scoped to the conversation's workspace.
 - **Every GPU box you own, one table** — name your inference boxes under `backends:` and each becomes a slash command and a row in the model picker: `/4090`, `/mini`, `/mini qwen2.5:7b-instruct`. The daemon probes each box (served model, reported context window, detected vision, latency), refuses to switch a chat to a box that is down and says why, budgets the conversation at *that* box's window, and remembers the choice across restarts. `/backends` shows the table; `/local` brings a chat home.
 - **Telemetry that stays home** — every tool call, repair, and token count logged to SQLite on your own disk and sent nowhere. It's the raw material for tuning the adapter and fine-tuning your own model: the data big labs keep for themselves, kept by you instead.
-- **A desktop cockpit** — Beacon pairs to the daemon over your LAN or tailnet and gives every subsystem a native surface; the model picker groups your own boxes above the cloud presets with each box's health, and on OAra Voice it also talks back — phrase-by-phrase streaming TTS and a hands-free mode with barge-in.
+- **A desktop cockpit** — Beacon pairs to the daemon over your LAN or tailnet and gives every subsystem a native surface; the model picker groups your own boxes above the cloud presets with each box's health. Streaming spoken replies and a hands-free mode with barge-in need OAra Voice, which isn't publicly available yet.
 
 > **Status:** Active development. Expect rough edges. Fixes land weekly. Feedback welcome.
 
@@ -226,7 +226,7 @@ Why this only works here: a screen recording of you doing your job is among the 
 
 ### Always-On
 
-- Telegram gateway with photo (real vision when the served model can see; captioning when it can't), voice (Whisper STT), document (20+ formats), and sticker handling — and control-plane commands (`/steer`, `/approve`, `/status`) answer **mid-turn**, because the data plane no longer holds the fetcher
+- Telegram gateway with photo (real vision when the served model can see; captioning when it can't), voice (Whisper STT, which needs the `[voice]` extra), document (20+ formats), and sticker handling — and control-plane commands (`/steer`, `/approve`, `/status`) answer **mid-turn**, because the data plane no longer holds the fetcher
 - Slack gateway (Socket Mode) at Telegram parity: 45 slash commands, thread-based long replies, channel whitelists
 - Discord gateway at the same parity: `/prometheus` app commands, DM + guild/channel whitelists
 - Cron scheduler (natural-language scheduling supported), heartbeat monitoring, systemd service
@@ -327,6 +327,8 @@ brew install oaralabs/tap/oara
 ```
 
 Use the full name: a bare `brew install oara` fails because the tap isn't trusted. The install takes a few minutes, since every Homebrew dependency comes prebuilt, and like a plain pip install it runs `oara daemon` and pairs with Beacon.
+
+**Voice** — Telegram voice notes and `oara --voice` use the built-in voice: Whisper speech-to-text and Piper text-to-speech. Neither is in the base package or the Homebrew install. `[voice]` adds both; `[full]` includes Piper but not Whisper, so voice input needs `[voice]` — for example `pip install 'oara-prometheus[full,voice]'`. Beacon's spoken replies are separate: they need OAra Voice, which isn't publicly available yet.
 
 Then run the setup wizard:
 
@@ -667,7 +669,7 @@ prometheus/
 - [x] Loud provider fallback + self-halting loop + honest context accounting
 - [x] Per-conversation workspace, per-turn file checkpoints, `@`-references, project-instruction discovery
 - [x] OpenAI-compatible `/v1` surface; `oara` console script
-- [x] Streaming TTS + hands-free voice (OAra Voice bridge + Beacon)
+- [ ] Streaming TTS + hands-free voice (OAra Voice bridge + Beacon) — *needs OAra Voice, which isn't publicly available yet*
 - [x] Multi-backend — a registry of every local inference box, `/4090`-style per-chat switching with probe-before-switch, per-backend context windows, Beacon desktop + iOS pickers
 - [ ] Beacon: attach to running coding runs, pause/inject/resume from the UI — *the daemon endpoints exist; the UI does not call them*
 - [x] Secrets redacted at every log handler and at capture time; logs rotate
