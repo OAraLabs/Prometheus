@@ -121,14 +121,15 @@ def _estimated_tokens(message: ConversationMessage) -> int:
     return max(1, estimate_message_tokens(message))
 
 
-def _row_tokens(part: object) -> int:
-    """A stored LCM row's cost against the restore window: the message it
-    restores to, by the same estimate. A legacy row with no ``content_json``
-    holds only its flat text — no thinking to leave out — and costs that text,
-    as before."""
+def _row_tokens(part: object, message: ConversationMessage) -> int:
+    """A stored LCM row's cost against the restore window: ``message``, the
+    message it restores to, by the same estimate — so a row the store keeps
+    in a degraded form (an evicted image, an unreadable body) costs what is
+    actually restored. A legacy row with no ``content_json`` holds only its
+    flat text — no thinking to leave out — and costs that text, as before."""
     if not getattr(part, "content_json", None):
         return max(1, len(getattr(part, "content", None) or "") // 4)
-    return _estimated_tokens(_message_from_part(part))
+    return _estimated_tokens(message)
 
 
 def _shortened(text: str, limit: int) -> str:
@@ -1049,18 +1050,21 @@ class SessionManager:
         if not parts:
             return 0
 
-        # Token budget, newest-first: keep the most recent rows that fit.
-        kept: list = []
+        # Token budget, newest-first: keep the most recent rows that fit. Each
+        # row is rebuilt once — costed as the message it restores to, and that
+        # message is the one restored.
+        kept: list[ConversationMessage] = []
         budget = _REHYDRATE_TOKEN_BUDGET
         for part in reversed(parts):
-            cost = _row_tokens(part)
+            message = _message_from_part(part)
+            cost = _row_tokens(part, message)
             if kept and budget - cost < 0:
                 break
             budget -= cost
-            kept.append(part)
+            kept.append(message)
         kept.reverse()
 
-        converted = [_message_from_part(p) for p in kept]
+        converted = kept
         start = next(
             (i for i, m in enumerate(converted) if _is_clean_human_turn(m)), None
         )

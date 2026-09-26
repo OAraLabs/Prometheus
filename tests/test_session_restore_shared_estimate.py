@@ -21,12 +21,19 @@ from unittest.mock import MagicMock
 from prometheus.context.token_estimation import estimate_message_tokens
 from prometheus.engine.messages import (
     ConversationMessage,
+    ImageBlock,
     TextBlock,
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
 )
-from prometheus.engine.session import _REHYDRATE_TOKEN_BUDGET, SessionManager, _estimated_tokens
+from prometheus.engine.session import (
+    _REHYDRATE_TOKEN_BUDGET,
+    _REHYDRATE_WINDOW,
+    SessionManager,
+    _estimated_tokens,
+    _message_from_part,
+)
 from prometheus.memory.lcm_engine import LCMEngine
 
 SID = "desktop:restore-shared-estimate"
@@ -60,14 +67,34 @@ def _restore(tmp_path: Path, messages: list[ConversationMessage]) -> list[Conver
     return mgr.get_or_create(SID).messages
 
 
-def _turns(n: int, *, thought: str = "") -> list[ConversationMessage]:
+def _turns(n: int, *, thought: str = "", filler: int = 600) -> list[ConversationMessage]:
     out: list[ConversationMessage] = []
     for i in range(n):
-        out.append(ConversationMessage.from_user_text(f"q{i}: " + "x" * 600))
+        out.append(ConversationMessage.from_user_text(f"q{i}: " + "x" * filler))
         blocks = [ThinkingBlock(thinking=thought)] if thought else []
         out.append(ConversationMessage(
-            role="assistant", content=[*blocks, TextBlock(text=f"a{i}: " + "y" * 600)]))
+            role="assistant", content=[*blocks, TextBlock(text=f"a{i}: " + "y" * filler)]))
     return out
+
+
+def _stored_rows(tmp_path: Path, messages: list[ConversationMessage]):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    engine = _engine(tmp_path)
+    _seed(engine, messages)
+    rows, _ = engine.conversation_store.messages_page(limit=10_000, session_id=SID)
+    return engine, rows
+
+
+def _old_window(costs: list[int]) -> int:
+    """How many of the newest rows the ORIGINAL budget loop kept, given each
+    row's cost under the original formula (oldest first)."""
+    budget, kept = _REHYDRATE_TOKEN_BUDGET, 0
+    for cost in reversed(costs[-_REHYDRATE_WINDOW:]):
+        if kept and budget - cost < 0:
+            break
+        budget -= cost
+        kept += 1
+    return kept
 
 
 # -- the shared estimate -----------------------------------------------------
@@ -127,15 +154,89 @@ def test_a_long_thinking_turn_is_not_cut_for_thinking_the_model_never_sees(tmp_p
 
 
 def test_control_a_session_without_thinking_restores_exactly_as_before(tmp_path: Path):
-    # 14 turns of ~330 tokens: the window keeps the newest ~12, as it always did.
-    restored = _restore(tmp_path, _turns(14))
-    budget, kept = _REHYDRATE_TOKEN_BUDGET, 0
-    for m in reversed(_turns(14)):
-        cost = max(1, len(m.content_json) // 4)
-        if kept and budget - cost < 0:
-            break
-        budget -= cost
-        kept += 1
-    expected = _turns(14)[-kept:]
-    start = next(i for i, m in enumerate(expected) if m.role == "user")
-    assert [m.text for m in restored] == [m.text for m in expected[start:]]
+    # Rows of ~270 tokens: the 40-row window holds ~10,800, so the 8,000-token
+    # budget cuts it — the restored set is decided by every row's cost, and must
+    # be exactly what the original formula decided.
+    messages = _turns(20, filler=1_050)
+    _, rows = _stored_rows(tmp_path / "rows", messages)
+    kept = _old_window([max(1, len(r.content_json) // 4) for r in rows])
+    assert kept < _REHYDRATE_WINDOW                              # the budget really cut it
+    expected = [_message_from_part(r) for r in rows[-kept:]]
+    expected = expected[next(i for i, m in enumerate(expected) if m.role == "user"):]
+    restored = _restore(tmp_path / "restore", messages)
+    assert [m.text for m in restored] == [m.text for m in expected]
+
+
+def test_control_a_legacy_row_costs_its_text_as_before(tmp_path: Path):
+    # A row stored before content_json existed holds only flat text: no thought
+    # to leave out, so it keeps the original cost (costing it as the rebuilt
+    # message would add the JSON framing and restore fewer rows).
+    import sqlite3
+
+    messages = _turns(20, filler=1_050)                           # 40 rows of ~260 tokens
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    engine = _engine(tmp_path)
+    _seed(engine, messages)
+    con = sqlite3.connect(tmp_path / "lcm.db")
+    con.execute("UPDATE lcm_messages SET content_json = NULL")
+    con.commit()
+    con.close()
+    rows, _ = engine.conversation_store.messages_page(limit=10_000, session_id=SID)
+    assert all(not r.content_json for r in rows)
+    kept = _old_window([max(1, len(r.content or "") // 4) for r in rows])
+    assert kept < _REHYDRATE_WINDOW                              # the budget really cut it
+    mgr = _manager(engine)
+    mgr.rehydrate_if_cold(SID)
+    restored = mgr.get_or_create(SID).messages
+    expected = rows[-kept:]
+    expected = expected[next(i for i, r in enumerate(expected) if r.role == "user"):]
+    assert [m.text for m in restored] == [r.content for r in expected]
+
+
+def test_a_legacy_row_is_costed_as_its_flat_text(tmp_path: Path):
+    import sqlite3
+
+    from prometheus.engine.session import _row_tokens
+
+    engine, _ = _stored_rows(tmp_path, _turns(2, filler=333))
+    con = sqlite3.connect(tmp_path / "lcm.db")
+    con.execute("UPDATE lcm_messages SET content_json = NULL")
+    con.commit()
+    con.close()
+    rows, _ = engine.conversation_store.messages_page(limit=10, session_id=SID)
+    assert [_row_tokens(r, _message_from_part(r)) for r in rows] == [
+        max(1, len(r.content) // 4) for r in rows]
+    # An empty legacy row still costs 1: every restored message costs something.
+    from types import SimpleNamespace
+
+    empty = SimpleNamespace(role="assistant", content="", content_json=None)
+    assert _row_tokens(empty, _message_from_part(empty)) == 1
+
+
+def test_a_thinking_row_costs_exactly_what_the_same_row_costs_without_it(tmp_path: Path):
+    from prometheus.engine.session import _row_tokens
+
+    _, plain = _stored_rows(tmp_path / "plain", _turns(3))
+    _, thinking = _stored_rows(tmp_path / "thinking", _turns(3, thought=THOUGHT))
+    assert [_row_tokens(r, _message_from_part(r)) for r in thinking] == [
+        _row_tokens(r, _message_from_part(r)) for r in plain]
+
+
+def test_a_degraded_row_costs_what_it_restores_to(tmp_path: Path):
+    # An upload whose cached file was evicted restores as a placeholder; it is
+    # costed as that placeholder — what the model is actually sent — not as the
+    # stored reference.
+    picture = tmp_path / "x.png"
+    picture.write_bytes(b"\x89PNG" + b"0" * 2_000)
+    upload = ConversationMessage(role="user", content=[
+        TextBlock(text="what is this?"),
+        ImageBlock(media_type="image/png", data="iVBORw0KGgo=", source_path=str(picture))])
+    _, rows = _stored_rows(tmp_path / "db", [upload, ConversationMessage(
+        role="assistant", content=[TextBlock(text="a chart")])])
+    picture.unlink()
+    from prometheus.engine.session import _row_tokens
+
+    row = next(r for r in rows if r.role == "user")
+    restored = _message_from_part(row)
+    assert "[Image: unavailable]" in restored.content_json
+    assert _row_tokens(row, restored) == _estimated_tokens(restored)
