@@ -18,6 +18,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from prometheus.config.paths import get_config_dir
+from prometheus.security.log_redaction import redact_capture, redact_json_text, redact_secrets
 
 log = logging.getLogger(__name__)
 
@@ -429,8 +430,14 @@ class MemoryStore:
                 "provenance is mandatory (no silent 'unknown' writes)"
             )
 
+        # Token shapes are redacted before a fact is kept (X.37): recall reads
+        # facts back into the system prompt, and the wiki compiles them into
+        # pages. Dedup then compares redacted text with redacted text.
+        entity_name = redact_secrets(entity_name)
+        fact = redact_secrets(fact)
+        tags = redact_capture(tags) if tags else tags
         now = time.time()
-        rel = relationship or "fact"
+        rel = redact_secrets(relationship) if relationship else "fact"
         norm_fact = _normalize_for_dedup(fact)
 
         def _op(conn):
@@ -743,6 +750,14 @@ class MemoryStore:
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return
+
+        # Redacted as persist_memory does: an update is a write of a fact too.
+        for key in ("entity_type", "entity_name", "relationship", "fact"):
+            if isinstance(updates.get(key), str):
+                updates[key] = redact_secrets(updates[key])
+        if "tags" in updates:
+            tags = updates["tags"]
+            updates["tags"] = redact_json_text(tags) if isinstance(tags, str) else redact_capture(tags)
 
         # Serialize JSON fields
         for key in ("source_event_ids", "tags"):
