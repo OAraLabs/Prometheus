@@ -209,9 +209,10 @@ def test_scrub_apply_rewrites_backs_up_and_is_idempotent(tmp_path):
 def test_scrub_missing_stores_are_said_not_skipped_silently(tmp_path):
     r = _run(["--telemetry", str(tmp_path / "no.db"), "--training", str(tmp_path / "no2.db"), "--trajectories", str(tmp_path / "none")], tmp_path)
     assert r.returncode == 0
-    # three named stores, plus both LCM files the scrub covers by default: the
-    # data-dir lcm.db and the legacy config-root one
-    assert r.stdout.count("not found (skipped") == 5
+    # three named stores, plus what the scrub covers by default: both LCM files
+    # (the data-dir lcm.db and the legacy config-root one) and memory.db
+    assert r.stdout.count("not found (skipped") == 6
     home = tmp_path / "home" / ".prometheus"
     assert f"{home / 'data' / 'lcm.db'}: not found" in r.stdout
     assert f"{home / 'lcm.db'}: not found" in r.stdout
+    assert f"{home / 'memory.db'}: not found" in r.stdout

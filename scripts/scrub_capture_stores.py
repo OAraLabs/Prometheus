@@ -5,8 +5,9 @@ Capture-time redaction (security/log_redaction, wired into telemetry,
 PairStore.add_pair, the golden-trace export and, since X.37, the LCM stores)
 keeps NEW rows clean. This is the one-off for the rows and files written
 before it existed: the 2026-08-31 finding (a Telegram bot token in
-telemetry.db, training.db and a trajectories/ export) and the X.37 finding
-(GitHub tokens in lcm.db, in messages and in the summaries built from them).
+telemetry.db, training.db and a trajectories/ export), the X.37 finding
+(GitHub tokens in lcm.db, in messages and in the summaries built from them)
+and a GitHub-shaped token in a memory.db fact.
 
     python3 scripts/scrub_capture_stores.py            # DRY RUN: counts only, touches nothing
     python3 scripts/scrub_capture_stores.py --apply    # rewrite in place, after a backup
@@ -17,12 +18,14 @@ race its writes.
 Dry run is the default. It opens every database read-only and prints, per
 store and column, how many rows/lines carry a redactable shape. --apply first
 copies each SQLite database with the sqlite backup API (WAL-safe: a plain `cp`
-of a WAL database copies only checkpointed pages) to <db>.pre-scrub-<stamp>,
+of a WAL database copies only checkpointed pages) to <db>.pre-scrub-<stamp>
+(never over an earlier backup),
 then UPDATEs the redacted columns row by row with secure_delete on, so the
 old values are zeroed rather than left in free pages. JSON columns are parsed
-and their strings redacted, so they stay valid JSON. In lcm.db the full-text
-indexes over the rewritten columns are rebuilt: they are external-content
-FTS5 tables and would otherwise still hold, and still match, the old terms.
+and their strings redacted, so they stay valid JSON. In lcm.db and memory.db
+the full-text indexes over the rewritten columns are rebuilt: lcm.db's would
+otherwise still hold, and still match, the old terms, and memory.db's
+triggers only mark the old terms deleted until FTS5 merges its segments.
 Each rewritten database's WAL is then checkpointed and truncated. JSONL files
 are rewritten line by line via a temp file + replace. Nothing is deleted.
 
@@ -59,6 +62,7 @@ DEFAULT_TRAJECTORIES = HOME / ".prometheus" / "trajectories"
 # 2026-08-12 may still hold (config/paths.get_legacy_lcm_db_path): nothing
 # writes it any more, but its checkpoints table holds conversation messages.
 DEFAULT_LCM = (HOME / ".prometheus" / "data" / "lcm.db", HOME / ".prometheus" / "lcm.db")
+DEFAULT_MEMORY = HOME / ".prometheus" / "memory.db"
 
 # (table, key column, text columns that may carry a secret)
 TELEMETRY_TARGETS = (
@@ -79,10 +83,22 @@ LCM_TARGETS = (
 )
 # table -> the external-content FTS5 index over it, rebuilt when the table was rewritten
 LCM_FTS = {"lcm_messages": "lcm_messages_fts", "lcm_summaries": "lcm_summaries_fts"}
+MEMORY_TARGETS = (
+    ("memories", "id", ("entity_name", "relationship", "fact", "tags")),
+    # Deprecated (superseded by LCM) and written by nothing in production any
+    # more; scanned so rows from before that are not missed.
+    ("messages", "id", ("content",)),
+    ("summaries", "id", ("summary_text",)),
+)
+MEMORY_FTS = {"memories": "memories_fts", "messages": "messages_fts"}
 
 
 def _backup(db: Path, stamp: str) -> Path:
     dest = db.with_name(f"{db.name}.pre-scrub-{stamp}")
+    n = 1
+    while dest.exists():  # a second run in the same second must not overwrite the first backup
+        dest = db.with_name(f"{db.name}.pre-scrub-{stamp}-{n}")
+        n += 1
     src = sqlite3.connect(str(db))
     dst = sqlite3.connect(str(dest))
     with dst:
@@ -193,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lcm", type=Path, action="append",
                     help="an LCM database; repeat for more (default: the data-dir lcm.db "
                          "and the legacy config-root one)")
+    ap.add_argument("--memory", type=Path, default=DEFAULT_MEMORY, help="the memory store (facts)")
     args = ap.parse_args(argv)
     lcm_dbs = args.lcm or list(DEFAULT_LCM)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -208,6 +225,8 @@ def main(argv: list[str] | None = None) -> int:
     for db in lcm_dbs:
         stores.append((f"lcm ({db})", lambda db=db: scrub_sqlite(
             db, LCM_TARGETS, apply=args.apply, stamp=stamp, fts=LCM_FTS)))
+    stores.append(("memory.db", lambda: scrub_sqlite(
+        args.memory, MEMORY_TARGETS, apply=args.apply, stamp=stamp, fts=MEMORY_FTS)))
     for label, fn in stores:
         print(f"{label}:")
         try:
