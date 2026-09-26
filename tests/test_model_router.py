@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from prometheus.providers.registry import ProviderRegistry
 from prometheus.router.model_router import (
     ModelRouter,
     RouteDecision,
@@ -204,6 +205,137 @@ class TestFallback:
         assert r.get_fallback() is None
 
 
+# The live daemon's chain, by shape: a llama.cpp primary, then an Ollama box,
+# then Anthropic. The hosts are placeholders.
+LIVE_SHAPED_CHAIN = [
+    {"provider": "ollama", "base_url": "http://ollama-box:11434", "model": "qwen3.5:9b"},
+    {"provider": "anthropic", "model": "claude-sonnet-4-5"},
+]
+
+
+def _live_shaped_loop(monkeypatch, chain=LIVE_SHAPED_CHAIN):
+    """A real primary, a real router and the loop's own context, so the name
+    the router is told is the name the loop reads off a real provider."""
+    from prometheus.engine.agent_loop import LoopContext
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    primary = ProviderRegistry.create({"provider": "llama_cpp", "base_url": "http://primary:8080"})
+    router = ModelRouter(
+        config=load_router_config({"router": {"fallback": chain}}),
+        primary_provider=primary,
+        primary_adapter=MagicMock(),
+        primary_model="qwen3.8-27b",
+    )
+    ctx = LoopContext(
+        provider=primary, model="qwen3.8-27b", system_prompt="test",
+        max_tokens=256, model_router=router, adapter=MagicMock(),
+    )
+    return router, ctx
+
+
+class TestFallbackNeverReturnsTheFailedProvider:
+    """The circuit breaker's model switch walks router.fallback, and so does the
+    hook contract's recovery from a failed pick. Each hop must leave the
+    provider that just failed."""
+
+    def test_second_hop_leaves_the_provider_that_just_failed(self, monkeypatch):
+        # What the loop does on each formatting-error trip: ask, then swap in
+        # whatever came back. On origin/main the second ask handed back the
+        # Ollama box that had just failed, because the router ignored the name
+        # and the loop called that box "llama_cpp" anyway.
+        from prometheus.engine.agent_loop import _try_model_fallback
+        from prometheus.providers.anthropic import AnthropicProvider
+        from prometheus.providers.ollama import OllamaProvider
+
+        _, ctx = _live_shaped_loop(monkeypatch)
+
+        first = _try_model_fallback(ctx)
+        assert isinstance(first.provider, OllamaProvider)
+        ctx.provider = first.provider
+
+        second = _try_model_fallback(ctx)
+        assert second is not None
+        assert second.provider is not first.provider
+        assert isinstance(second.provider, AnthropicProvider)
+        assert second.provider_name == "anthropic"
+
+    def test_an_entry_of_the_failed_provider_is_skipped(self):
+        r = _make_router(fallback_chain=[
+            {"provider": "ollama", "base_url": "http://ollama-box:11434", "model": "qwen3.5:9b"},
+            {"provider": "llama_cpp", "base_url": "http://other-box:8080"},
+        ])
+
+        d = r.get_fallback("ollama")
+
+        assert d is not None and d.provider_name == "llama_cpp"
+
+    def test_a_chain_that_runs_out_says_so_in_a_warning(self, monkeypatch, caplog):
+        from prometheus.engine.agent_loop import _try_model_fallback
+
+        _, ctx = _live_shaped_loop(monkeypatch, chain=LIVE_SHAPED_CHAIN[:1])
+        ctx.provider = _try_model_fallback(ctx).provider
+
+        with caplog.at_level(logging.WARNING, logger="prometheus.router.model_router"):
+            assert _try_model_fallback(ctx) is None
+
+        [warning] = [r for r in caplog.records if r.name == "prometheus.router.model_router"]
+        assert warning.levelno == logging.WARNING
+        message = warning.getMessage()
+        assert "no fallback left" in message
+        # Names the provider that failed, and why the one entry was passed over.
+        assert "after ollama failed" in message
+        assert "[0] ollama/qwen3.5:9b: skipped, ollama is what failed" in message
+
+    def test_an_entry_that_cannot_be_built_is_named_in_the_warning(self, monkeypatch, caplog):
+        monkeypatch.delenv("ROUTER_TEST_UNSET_KEY", raising=False)
+        r = _make_router(fallback_chain=[
+            {"provider": "anthropic", "model": "claude-sonnet-4-5",
+             "api_key_env": "ROUTER_TEST_UNSET_KEY"},
+        ])
+
+        with caplog.at_level(logging.WARNING, logger="prometheus.router.model_router"):
+            assert r.get_fallback("llama_cpp") is None
+
+        text = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "anthropic/claude-sonnet-4-5: could not be built" in text
+        assert "ROUTER_TEST_UNSET_KEY is not set" in text
+
+    def test_a_failed_build_never_logs_the_entrys_key(self, monkeypatch, caplog):
+        # The entry is logged by provider and model. It used to be logged
+        # whole, api_key included, at DEBUG.
+        def refuse(cfg):
+            raise ValueError("endpoint refused")
+
+        monkeypatch.setattr(ProviderRegistry, "create", staticmethod(refuse))
+        r = _make_router(fallback_chain=[
+            {"provider": "openai", "api_key": "sk-router-test-secret", "model": "gpt-5.6-luna"},
+        ])
+
+        with caplog.at_level(logging.DEBUG, logger="prometheus.router.model_router"):
+            assert r.get_fallback("llama_cpp") is None
+
+        assert caplog.records
+        assert not any("sk-router-test-secret" in rec.getMessage() for rec in caplog.records)
+
+    @pytest.mark.parametrize("name", ProviderRegistry.list_providers())
+    def test_every_provider_names_itself_by_the_key_it_was_built_from(self, name, monkeypatch):
+        # The loop tells the router which provider failed by reading this
+        # attribute (agent_loop._try_model_fallback), defaulting to "llama_cpp"
+        # when it is missing. Only the OpenAI-compatible class carried it, so an
+        # Anthropic or Ollama failure was reported as a llama.cpp one.
+        from prometheus.providers import xai_oauth
+        from prometheus.providers.registry import CLOUD_DEFAULTS
+
+        monkeypatch.setattr(xai_oauth, "is_logged_in", lambda: False)
+        env = CLOUD_DEFAULTS.get(name, {}).get("default_env")
+        if env:
+            monkeypatch.setenv(env, "test-key")
+
+        provider = ProviderRegistry.create({"provider": name})
+
+        assert provider.provider_name == name
+
+
 # -- Task-type rule provider cache -------------------------------------------
 
 CODE_MSG = "write a python function to parse json"
@@ -220,9 +352,8 @@ class TestTaskRuleProviderCache:
     @pytest.fixture(autouse=True)
     def _huge_int_stays_unprintable(self, caplog):
         # HUGE_INT tests nothing once PYTHONINTMAXSTRDIGITS=0 lifts the limit,
-        # so pin the default. And keep the router's DEBUG line off: it formats
-        # the rule's config, which pytest's capture handler re-raises on where
-        # production handlers swallow it.
+        # so pin the default. And keep the router's DEBUG traceback out of the
+        # capture: the router's own lines name a rule by index, never by value.
         old = sys.get_int_max_str_digits()
         sys.set_int_max_str_digits(4300)
         caplog.set_level(logging.INFO, logger="prometheus.router.model_router")
@@ -334,27 +465,246 @@ class TestTaskRuleProviderCache:
         assert decision.provider is r.primary_provider
 
 
-# -- Auxiliary ---------------------------------------------------------------
+# -- Rule and fallback fields ------------------------------------------------
 
-class TestAuxiliary:
-    def test_auxiliary_with_config_uses_configured(self):
-        r = _make_router(
-            auxiliary_vision={"provider": "llama_cpp", "base_url": "http://localhost:8080"},
-        )
-        d = r.route_auxiliary("vision")
-        assert d.reason == RouteReason.AUXILIARY
-        assert d.provider is not r.primary_provider
+class _RecordingConfig(dict):
+    """A provider config that remembers every key read from it."""
 
-    def test_auxiliary_without_config_uses_primary(self):
-        r = _make_router()
-        d = r.route_auxiliary("vision")
-        assert d.reason == RouteReason.AUXILIARY
-        assert d.provider is r.primary_provider
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.read: set[str] = set()
 
-    def test_auxiliary_unknown_task_uses_primary(self):
-        r = _make_router()
-        d = r.route_auxiliary("nonexistent")
-        assert d.provider is r.primary_provider
+    def get(self, key, default=None):
+        self.read.add(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        self.read.add(key)
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        self.read.add(key)
+        return super().__contains__(key)
+
+
+def _router_from_yaml(router_section: dict) -> ModelRouter:
+    return ModelRouter(
+        config=load_router_config({"router": router_section}),
+        primary_provider=MagicMock(),
+        primary_adapter=MagicMock(),
+        primary_model="gemma4-26b",
+    )
+
+
+def _router_warnings(caplog) -> str:
+    return "\n".join(
+        rec.getMessage() for rec in caplog.records
+        if rec.name == "prometheus.router.model_router" and rec.levelno >= logging.WARNING
+    )
+
+
+class TestRuleAndFallbackFields:
+    """Every field a rule or fallback entry carries is either honoured or
+    refused at load, loudly. None is dropped."""
+
+    @pytest.mark.parametrize("name", ProviderRegistry.list_providers())
+    def test_the_declared_keys_are_exactly_the_keys_create_reads(self, name, monkeypatch):
+        # Load-time refusal trusts this table, so it is pinned to the factory
+        # itself: a key create() starts reading must be declared, or a config
+        # using it is refused; a declared key create() stops reading would be
+        # accepted and dropped.
+        from prometheus.providers import xai_oauth
+        from prometheus.providers.registry import CLOUD_DEFAULTS, PROVIDER_CONFIG_KEYS
+
+        assert set(PROVIDER_CONFIG_KEYS) == set(ProviderRegistry.list_providers())
+        monkeypatch.setattr(xai_oauth, "is_logged_in", lambda: False)
+        env = CLOUD_DEFAULTS.get(name, {}).get("default_env")
+        if env:
+            monkeypatch.setenv(env, "test-key")
+        cfg = _RecordingConfig(provider=name)
+
+        ProviderRegistry.create(cfg)
+
+        assert cfg.read == PROVIDER_CONFIG_KEYS[name]
+
+    def test_a_rules_api_key_env_reaches_its_provider(self, monkeypatch):
+        # origin/main built the rule's provider from provider, model and
+        # base_url only, so it quietly used OPENAI_API_KEY.
+        monkeypatch.setenv("OPENAI_API_KEY", "the-default-key")
+        monkeypatch.setenv("ROUTER_TEST_RULE_KEY", "the-rules-key")
+        r = _router_from_yaml({"rules": [{
+            "task_type": "code_generation", "provider": "openai",
+            "model": "gpt-5.6-luna", "api_key_env": "ROUTER_TEST_RULE_KEY",
+        }]})
+
+        decision = r.route(CODE_MSG)
+
+        assert decision.reason == RouteReason.TASK_RULE
+        assert decision.provider._api_key == "the-rules-key"
+
+    def test_every_other_rule_field_reaches_its_provider(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("ROUTER_TEST_BASE_URL", "http://rule-host:9000/v1")
+        r = _router_from_yaml({"rules": [{
+            "task_type": "code_generation", "provider": "openai", "model": "gpt-5.6-luna",
+            "base_url_env": "ROUTER_TEST_BASE_URL", "timeout": 7.5,
+            "max_tokens": 1234, "vision": True,
+        }]})
+
+        provider = r.route(CODE_MSG).provider
+
+        assert provider._base_url == "http://rule-host:9000/v1"
+        assert provider._timeout == 7.5
+        assert provider._default_max_tokens == 1234
+        assert provider.supports_vision is True
+
+    def test_rules_differing_only_in_key_get_their_own_providers(self, monkeypatch):
+        # The cache key is the whole provider config (#569), so a newly
+        # honoured field separates providers without anyone remembering to.
+        monkeypatch.setenv("ROUTER_TEST_KEY_A", "key-a")
+        monkeypatch.setenv("ROUTER_TEST_KEY_B", "key-b")
+        r = _router_from_yaml({"rules": [
+            {"task_type": "code_generation", "provider": "openai",
+             "model": "gpt-5.6-luna", "api_key_env": "ROUTER_TEST_KEY_A"},
+            {"task_type": "reasoning", "provider": "openai",
+             "model": "gpt-5.6-luna", "api_key_env": "ROUTER_TEST_KEY_B"},
+        ]})
+
+        assert r.route(CODE_MSG).provider._api_key == "key-a"
+        assert r.route(REASONING_MSG).provider._api_key == "key-b"
+
+    def test_a_llama_cpp_rules_suppress_thinking_reaches_its_provider(self):
+        r = _router_from_yaml({"rules": [{
+            "task_type": "code_generation", "provider": "llama_cpp",
+            "model": "qwen3.8-27b", "suppress_thinking": False,
+        }]})
+
+        assert r.route(CODE_MSG).provider._suppress_thinking is False
+
+    @pytest.mark.parametrize("section", ["rules", "fallback"])
+    def test_a_misspelt_key_is_refused_at_load(self, section, caplog):
+        entry = {"provider": "openai", "model": "gpt-5.6-luna", "api_key_evn": "MY_KEY"}
+        if section == "rules":
+            entry["task_type"] = "code_generation"
+
+        with caplog.at_level(logging.WARNING, logger="prometheus.router.model_router"):
+            cfg = load_router_config({"router": {section: [entry]}})
+
+        assert (cfg.task_rules if section == "rules" else cfg.fallback_chain) == []
+        warnings = _router_warnings(caplog)
+        assert f"router.{section}[0]" in warnings
+        assert "api_key_evn" in warnings
+
+    @pytest.mark.parametrize("section", ["rules", "fallback"])
+    def test_a_key_its_provider_never_reads_is_refused_at_load(self, section, caplog):
+        # api_key_env is real, but llama.cpp sends no key, so a llama.cpp
+        # entry carrying one would run unauthenticated without a word.
+        entry = {"provider": "llama_cpp", "model": "qwen3.8-27b", "api_key_env": "MY_KEY"}
+        if section == "rules":
+            entry["task_type"] = "code_generation"
+
+        with caplog.at_level(logging.WARNING, logger="prometheus.router.model_router"):
+            cfg = load_router_config({"router": {section: [entry]}})
+
+        assert (cfg.task_rules if section == "rules" else cfg.fallback_chain) == []
+        warnings = _router_warnings(caplog)
+        assert "api_key_env" in warnings
+        assert "llama_cpp" in warnings
+
+    @pytest.mark.parametrize("section", ["rules", "fallback"])
+    def test_an_unknown_provider_is_refused_at_load(self, section, caplog):
+        entry = {"provider": "openia", "model": "gpt-5.6-luna"}
+        if section == "rules":
+            entry["task_type"] = "code_generation"
+
+        with caplog.at_level(logging.WARNING, logger="prometheus.router.model_router"):
+            cfg = load_router_config({"router": {section: [entry]}})
+
+        assert (cfg.task_rules if section == "rules" else cfg.fallback_chain) == []
+        assert "openia" in _router_warnings(caplog)
+
+    def test_a_rule_without_a_provider_is_refused_for_that(self, caplog):
+        # Not for its api_key_env, which is what the llama.cpp default would
+        # have said.
+        with caplog.at_level(logging.WARNING, logger="prometheus.router.model_router"):
+            cfg = load_router_config({"router": {"rules": [
+                {"task_type": "code_generation", "model": "m", "api_key_env": "MY_KEY"},
+            ]}})
+
+        assert cfg.task_rules == []
+        assert "router.rules[0] refused: missing provider" in _router_warnings(caplog)
+
+    def test_a_rule_whose_key_is_not_set_says_so_once(self, monkeypatch, caplog):
+        # Honouring api_key_env means an unset variable now fails the build
+        # instead of borrowing the default key. That must not be quiet either.
+        monkeypatch.delenv("ROUTER_TEST_UNSET_KEY", raising=False)
+        r = _router_from_yaml({"rules": [{
+            "task_type": "code_generation", "provider": "openai",
+            "model": "gpt-5.6-luna", "api_key_env": "ROUTER_TEST_UNSET_KEY",
+        }]})
+
+        with caplog.at_level(logging.WARNING, logger="prometheus.router.model_router"):
+            first, second = r.route(CODE_MSG), r.route(CODE_MSG)
+
+        assert first.reason == second.reason == RouteReason.PRIMARY
+        warnings = _router_warnings(caplog).splitlines()
+        assert len(warnings) == 1
+        assert "router.rules[0] (code_generation) cannot be built" in warnings[0]
+        assert "ROUTER_TEST_UNSET_KEY is not set" in warnings[0]
+
+    def test_a_fallback_entry_that_is_not_a_mapping_is_refused_at_load(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="prometheus.router.model_router"):
+            cfg = load_router_config({"router": {"fallback": ["anthropic"]}})
+
+        assert cfg.fallback_chain == []
+        assert "router.fallback[0]" in _router_warnings(caplog)
+
+    def test_a_refusal_never_logs_a_value(self, caplog):
+        with caplog.at_level(logging.DEBUG, logger="prometheus.router.model_router"):
+            load_router_config({"router": {
+                "rules": [{"task_type": "code_generation", "provider": "openai",
+                           "model": "m", "api_key": "sk-router-test-secret", "bogus": 1}],
+                "fallback": [{"provider": "openai", "model": "m",
+                              "api_key": "sk-router-test-secret", "bogus": 1}],
+            }})
+
+        assert caplog.records
+        assert not any("sk-router-test-secret" in rec.getMessage() for rec in caplog.records)
+
+    def test_the_live_shaped_chain_loads_unchanged_and_quietly(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="prometheus.router.model_router"):
+            cfg = load_router_config({"router": {"fallback": LIVE_SHAPED_CHAIN}})
+
+        assert cfg.fallback_chain == LIVE_SHAPED_CHAIN
+        assert _router_warnings(caplog) == ""
+
+    @pytest.mark.parametrize("section", ["rules", "fallback"])
+    def test_an_empty_section_loads_as_empty(self, section):
+        # `fallback:` with no value is YAML null; iterating it crashed the
+        # router's constructor.
+        cfg = load_router_config({"router": {section: None}})
+        _router_from_yaml({section: None})
+
+        assert (cfg.task_rules if section == "rules" else cfg.fallback_chain) == []
+
+
+# -- router.auxiliary (removed) ----------------------------------------------
+
+class TestAuxiliaryRemoved:
+    """route_auxiliary had no caller from the first commit on, so a provider
+    configured under router.auxiliary was never used."""
+
+    def test_a_configured_auxiliary_block_is_refused_loudly(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="prometheus.router.model_router"):
+            load_router_config({"router": {"auxiliary": {
+                "vision": {"provider": "openai", "model": "gpt-4o"},
+            }}})
+
+        assert "router.auxiliary: config key is deprecated" in _router_warnings(caplog)
+
+    def test_the_router_has_no_auxiliary_route(self):
+        assert not hasattr(ModelRouter, "route_auxiliary")
+        assert "AUXILIARY" not in RouteReason.__members__
 
 
 # -- Adapter auto-adjustment ------------------------------------------------
@@ -408,9 +758,6 @@ class TestConfigLoading:
                     "provider": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
                     "as_subagent": False,
                 },
-                "auxiliary": {
-                    "vision": {"provider": "openai", "model": "gpt-4o"},
-                },
             }
         })
         assert len(cfg.fallback_chain) == 1
@@ -418,7 +765,6 @@ class TestConfigLoading:
         assert cfg.max_simple_chars == 200
         assert cfg.escalation_enabled is True
         assert cfg.escalation_as_subagent is False
-        assert cfg.auxiliary_vision is not None
 
 
 # -- Status ------------------------------------------------------------------

@@ -290,6 +290,8 @@ def test_every_registered_key_carries_a_disposition():
 # dotted key path -> where its deprecation is enforced.
 DEPRECATED_KEYS: dict[str, str] = {
     "model_router": "renamed to `router:` — warned by __main__.create_model_router",
+    "router.auxiliary": "never routed anything (route_auxiliary had no caller) — "
+                        "warned by router.model_router.load_router_config",
 }
 
 

@@ -309,6 +309,10 @@ router:
 
 **Defaults, honestly:** the router object is built on every boot — that is what makes the override commands above work out of the box — but its autonomous halves ship **inert**: `rules` and `fallback` are empty, `smart_routing` and `escalation` are off. The per-chat overrides (`router.overrides`) are a separate, lightweight mechanism and ship **on**.
 
+**Rules and fallback entries take a provider config** — `provider`, `model`, plus whatever that provider reads (`api_key_env`, `base_url`, `timeout`, …), and a rule adds `task_type` and `min_confidence`. A key the provider never reads is refused at load with a WARNING that lists the keys it does read, and the entry is skipped. This catches a misspelt `api_key_env`, or one on a `llama_cpp` entry, which sends no key.
+
+**How the fallback chain is walked:** when the circuit breaker trips on tool-call formatting errors, the turn moves to the first `fallback` entry that is not the provider that just failed, and each later trip moves on again. The failed provider is known only by its provider name, so a failed `ollama` skips *every* `ollama` entry, including one on another box. List a chain whose neighbours are different providers. When no entry is left, a WARNING names the provider that failed and why each entry was skipped.
+
 > **Renamed key.** This section was `model_router:` before GRAFT-ROUTER-WIRE v3. Nothing reads the old name: a config that still carries it gets a boot warning saying its rules are not being applied, and runs primary-only routing. Rename the block to `router:`.
 
 ## Force-search / `tool_choice`

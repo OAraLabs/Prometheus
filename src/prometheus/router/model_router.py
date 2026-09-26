@@ -180,7 +180,6 @@ class RouteReason(str, Enum):
     ESCALATION = "escalation"
     FALLBACK = "fallback"
     QUEUE = "queue"
-    AUXILIARY = "auxiliary"
 
 
 @dataclass
@@ -212,6 +211,10 @@ class RoutingRule:
     model: str
     base_url: Optional[str] = None
     min_confidence: float = 0.0
+    # The rest of the rule's provider config (api_key_env, timeout, ...),
+    # passed to ProviderRegistry.create with provider, model and base_url.
+    # load_router_config admits only keys the provider reads.
+    provider_options: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -234,11 +237,6 @@ class RouterConfig:
     escalation_provider: dict | None = None
     escalation_as_subagent: bool = True
     escalation_budget_usd: float = 1.00
-
-    # Auxiliary
-    auxiliary_vision: dict | None = None
-    auxiliary_compression: dict | None = None
-    auxiliary_summarization: dict | None = None
 
     # Per-session user overrides (Phase 4: /claude, /gpt, /gemini, /xai, /grok, /local, /route)
     # overrides_enabled=False → direct-mode commands are no-ops (reply with warning, don't crash)
@@ -727,11 +725,13 @@ class ModelRouter:
         ]
         self._escalation_provider: Any | None = None
         self._simple_provider: Any | None = None
-        self._auxiliary_cache: dict[str, Any] = {}
 
         # Task-type rule provider cache (Phase 1.5); keyed by the provider
         # config each rule builds — see _route_by_task_type.
         self._task_rule_providers: dict[tuple[tuple[str, str], ...], Any] = {}
+        # Rules whose provider could not be built, by index, so each one is
+        # reported once rather than on every turn it matches.
+        self._unbuildable_rules: set[int] = set()
 
         # Task classifier (Phase 1.5); used by _route_by_task_type
         self.classifier = TaskClassifier()
@@ -791,32 +791,6 @@ class ModelRouter:
 
         # 5. Primary (with fallback if needed)
         return self._route_primary()
-
-    def route_auxiliary(self, task: str) -> RouteDecision:
-        """Route an auxiliary task (vision, compression, summarization)."""
-        aux_map = {
-            "vision": self.config.auxiliary_vision,
-            "compression": self.config.auxiliary_compression,
-            "summarization": self.config.auxiliary_summarization,
-        }
-        aux_cfg = aux_map.get(task)
-        if not aux_cfg:
-            return RouteDecision(
-                provider=self.primary_provider,
-                adapter=self.primary_adapter,
-                reason=RouteReason.AUXILIARY,
-                model_name=self.primary_model,
-            )
-
-        provider = self._get_or_create_auxiliary(task, aux_cfg)
-        adapter = _build_adapter_for(aux_cfg.get("provider", ""))
-        return RouteDecision(
-            provider=provider,
-            adapter=adapter,
-            reason=RouteReason.AUXILIARY,
-            model_name=aux_cfg.get("model", "unknown"),
-            provider_name=aux_cfg.get("provider", "unknown"),
-        )
 
     # ── Per-session user override (Phase 3.5) ─────────────────────
 
@@ -1046,7 +1020,7 @@ class ModelRouter:
             return None
 
         classification = self.classifier.classify(message)
-        for rule in self.config.task_rules:
+        for index, rule in enumerate(self.config.task_rules):
             if rule.task_type != classification.task_type:
                 continue
             if classification.confidence < rule.min_confidence:
@@ -1058,6 +1032,7 @@ class ModelRouter:
             }
             if rule.base_url:
                 provider_cfg["base_url"] = rule.base_url
+            provider_cfg.update(rule.provider_options)
             # Keyed on the WHOLE config the provider is built from. The key was
             # "provider:model", so two rules naming one model on two hosts (two
             # llama.cpp boxes, say) shared whichever provider was built first,
@@ -1077,12 +1052,18 @@ class ModelRouter:
                     self._task_rule_providers[cache_key] = ProviderRegistry.create(
                         provider_cfg
                     )
-            except Exception:
-                log.debug(
-                    "Failed to create task-rule provider %s",
-                    provider_cfg,
-                    exc_info=True,
-                )
+            except Exception as exc:
+                # Named by index and task type, never by its config: the
+                # config can hold an api_key, and printing its values is
+                # what raised on HUGE_INT above. Once per rule, not per turn.
+                if index not in self._unbuildable_rules:
+                    self._unbuildable_rules.add(index)
+                    log.warning(
+                        "router.rules[%d] (%s) cannot be built (%s: %s) — turns it "
+                        "matches go to the next routing branch instead",
+                        index, rule.task_type.value, type(exc).__name__, exc,
+                    )
+                log.debug("task-rule provider build failed", exc_info=True)
                 return None
 
             return RouteDecision(
@@ -1126,17 +1107,33 @@ class ModelRouter:
         )
 
     def get_fallback(self, failed_provider_name: str = "") -> RouteDecision | None:
-        """Get next available fallback after a provider failure."""
+        """The first entry in router.fallback that is not the provider that failed.
+
+        The caller names the failed provider by its registry key: the loop
+        reads ``provider_name`` off the instance that just failed. A key is
+        all the router is told, and it cannot tell one Ollama box from
+        another by it, so every entry with that key is passed over. An empty
+        name passes nothing over. When no entry is left, one WARNING names
+        the failed provider and why each entry was passed over.
+        """
         from prometheus.providers.registry import ProviderRegistry
 
+        passed_over: list[str] = []
         for i, (cfg, cached) in enumerate(self._fallback_cache):
+            label = f"[{i}] {_entry_provider(cfg)}/{cfg.get('model') or '?'}"
+            if failed_provider_name and _entry_provider(cfg) == failed_provider_name:
+                passed_over.append(f"{label}: skipped, {failed_provider_name} is what failed")
+                continue
             if cached is None:
                 try:
                     cached = ProviderRegistry.create(cfg)
-                    self._fallback_cache[i] = (cfg, cached)
-                except Exception:
-                    log.debug("Failed to create fallback provider %s", cfg, exc_info=True)
+                except Exception as exc:
+                    # By label, never the entry itself: it can hold an api_key.
+                    reason = f"{label}: could not be built ({type(exc).__name__}: {exc})"
+                    log.warning("router.fallback%s", reason)
+                    passed_over.append(reason)
                     continue
+                self._fallback_cache[i] = (cfg, cached)
             pname = cfg.get("provider", "unknown")
             return RouteDecision(
                 provider=cached,
@@ -1146,15 +1143,13 @@ class ModelRouter:
                 provider_name=pname,
                 cost_warning=f"Primary unavailable — using fallback: {cfg.get('model', 'unknown')}",
             )
+        if passed_over:
+            log.warning(
+                "ModelRouter: no fallback left after %s failed — router.fallback %s",
+                failed_provider_name or "the current provider",
+                "; ".join(passed_over),
+            )
         return None
-
-    # ── Auxiliary ──────────────────────────────────────────────────
-
-    def _get_or_create_auxiliary(self, task: str, cfg: dict) -> Any:
-        if task not in self._auxiliary_cache:
-            from prometheus.providers.registry import ProviderRegistry
-            self._auxiliary_cache[task] = ProviderRegistry.create(cfg)
-        return self._auxiliary_cache[task]
 
     # ── Status ────────────────────────────────────────────────────
 
@@ -1235,39 +1230,116 @@ def _build_adapter_for(provider_name: str) -> Any:
     return ModelAdapter(formatter=QwenFormatter(), strictness="MEDIUM")
 
 
-def _parse_task_rules(rules_config: list) -> list[RoutingRule]:
+# Keys a router entry may carry besides its provider's own
+# (PROVIDER_CONFIG_KEYS): the model the turn asks for, which the router reads
+# even where the provider does not (llama.cpp serves whatever it loaded), and,
+# for a rule, what it matches.
+_FALLBACK_ENTRY_KEYS = frozenset({"model"})
+_RULE_KEYS = _FALLBACK_ENTRY_KEYS | {"task_type", "min_confidence"}
+_RULE_REQUIRED = ("task_type", "provider", "model")
+
+
+def _entry_provider(entry: Mapping[str, Any]) -> Any:
+    """The provider an entry builds — ProviderRegistry.create's own default."""
+    return entry.get("provider", "llama_cpp")
+
+
+def _entry_refusal(entry: Any, own_keys: frozenset[str]) -> str | None:
+    """Why a rule or fallback entry cannot be loaded as written, or None.
+
+    Names keys and the provider, never a value: an entry can hold an api_key.
+    """
+    from prometheus.providers.registry import PROVIDER_CONFIG_KEYS
+
+    if not isinstance(entry, Mapping):
+        return f"expected a mapping, got {type(entry).__name__}"
+    provider = _entry_provider(entry)
+    if not isinstance(provider, str):
+        return f"provider must be a name, got {type(provider).__name__}"
+    if provider not in PROVIDER_CONFIG_KEYS:
+        return f"unknown provider {provider!r}"
+    accepted = PROVIDER_CONFIG_KEYS[provider] | own_keys
+    unread = sorted(str(k) for k in entry if k not in accepted)
+    if unread:
+        return (
+            f"{', '.join(unread)} {'is' if len(unread) == 1 else 'are'} not read "
+            f"for provider {provider} (it reads {', '.join(sorted(accepted))})"
+        )
+    return None
+
+
+def _parse_task_rules(rules_config: list | None) -> list[RoutingRule]:
     """Parse task-type routing rules from config (Phase 1.5).
 
-    Invalid rule entries are logged and skipped rather than raising, so a
-    typo in one rule doesn't break the whole daemon.
+    A rule that cannot be loaded as written is refused with a WARNING and
+    skipped rather than raising, so a typo in one rule doesn't break the
+    whole daemon — and never loaded with a key dropped, which would build its
+    provider from defaults (a rule's api_key_env quietly became the
+    provider's default key).
     """
     rules: list[RoutingRule] = []
-    for r in rules_config:
-        try:
-            rules.append(
-                RoutingRule(
-                    task_type=TaskType(r["task_type"]),
-                    provider=r["provider"],
-                    model=r["model"],
-                    base_url=r.get("base_url"),
-                    min_confidence=r.get("min_confidence", 0.0),
-                )
+    for i, r in enumerate(rules_config or []):
+        missing = [k for k in _RULE_REQUIRED if isinstance(r, Mapping) and k not in r]
+        refusal = f"missing {', '.join(missing)}" if missing else _entry_refusal(r, _RULE_KEYS)
+        if refusal is None:
+            try:
+                task_type = TaskType(r["task_type"])
+            except ValueError as e:
+                refusal = str(e)
+        if refusal is not None:
+            log.warning("router.rules[%d] refused: %s", i, refusal)
+            continue
+        rules.append(
+            RoutingRule(
+                task_type=task_type,
+                provider=r["provider"],
+                model=r["model"],
+                base_url=r.get("base_url"),
+                min_confidence=r.get("min_confidence", 0.0),
+                provider_options={
+                    k: v for k, v in r.items()
+                    if k not in _RULE_KEYS | {"provider", "base_url"}
+                },
             )
-        except (KeyError, ValueError) as e:
-            log.warning("Invalid routing rule %r: %s", r, e)
+        )
     return rules
+
+
+def _parse_fallback_chain(chain_config: list | None) -> list[dict]:
+    """The router.fallback entries that can be loaded as written.
+
+    An entry carrying a key its provider never reads is refused with a
+    WARNING, the same as a rule: kept, it would build a provider that
+    silently ignores that key.
+    """
+    chain: list[dict] = []
+    for i, entry in enumerate(chain_config or []):
+        refusal = _entry_refusal(entry, _FALLBACK_ENTRY_KEYS)
+        if refusal is None:
+            chain.append(entry)
+        else:
+            log.warning("router.fallback[%d] refused: %s", i, refusal)
+    return chain
 
 
 def load_router_config(config: dict) -> RouterConfig:
     """Parse the router: section from prometheus.yaml."""
-    rc = config.get("router", {})
+    rc = config.get("router", {}) or {}
     smart = rc.get("smart_routing", {})
     esc = rc.get("escalation", {})
-    aux = rc.get("auxiliary", {})
     overrides = rc.get("overrides", {})
 
+    # A membership test, not a read: nothing reads this block, so the config
+    # reference must not list it (tests/test_config_drift.py DEPRECATED_KEYS).
+    if "auxiliary" in rc:
+        log.warning(
+            "router.auxiliary: config key is deprecated — nothing ever routed a "
+            "task through it, so no provider configured there has been used. "
+            "Delete the block."
+        )
+
     return RouterConfig(
-        fallback_chain=rc.get("fallback", []),
+        fallback_chain=_parse_fallback_chain(rc.get("fallback", [])),
         task_rules=_parse_task_rules(rc.get("rules", [])),
         smart_routing_enabled=smart.get("enabled", False),
         max_simple_chars=smart.get("max_simple_chars", 160),
@@ -1277,9 +1349,6 @@ def load_router_config(config: dict) -> RouterConfig:
         escalation_provider=esc.get("provider"),
         escalation_as_subagent=esc.get("as_subagent", True),
         escalation_budget_usd=esc.get("budget_usd", 1.00),
-        auxiliary_vision=aux.get("vision"),
-        auxiliary_compression=aux.get("compression"),
-        auxiliary_summarization=aux.get("summarization"),
         # Phase 4: direct-mode provider overrides
         overrides_enabled=overrides.get("enabled", True),
         overrides_sticky=overrides.get("sticky", True),
