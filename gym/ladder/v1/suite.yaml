@@ -1,0 +1,164 @@
+# Model ladder suite v1 — FROZEN. Editing any file in this directory is a new
+# suite version (the sha256 every recorded run carries changes with it).
+#
+# Definition, verdict rules, judge pinning and the telemetry field mapping:
+# docs/MODEL-LADDER.md. Every task is synthetic: no real user data, no real
+# hosts (offline web pages live on the reserved .example domain).
+
+name: ladder-v1
+version: 1
+workspace: /tmp/prometheus-ladder
+
+# Deliberately NOT the daemon's personalised prompt (SOUL.md, AGENTS.md, ...):
+# that differs per machine, and the ladder must run the same bytes on the
+# 4090 and on Apple Silicon. The runner appends the working directory and,
+# for memory tasks, MEMORY.md/USER.md rendered exactly as the daemon renders
+# them.
+system_prompt: |
+  You are Prometheus, a capable assistant with tools. Use a tool whenever the
+  task needs information you do not already have or an action in the world;
+  answer directly when it does not. When you are asked to create or change
+  files, use the exact paths given, and always give write_file and edit_file
+  an absolute path. When you finish, reply with a short final answer that
+  states the result.
+
+# Budgets per class. max_rounds = model calls (loop turns); max_tool_calls =
+# the loop's tool-iteration cap; timeout_s = wall-clock budget for the whole
+# run (running out of time or rounds is a FAIL — the model could not finish
+# within what it was given).
+#
+# Every class states its success criterion. The first cut populates four
+# classes; the other four are DEFINED (budgets + criterion) but deferred:
+# they carry no tasks until a later work package adds them.
+classes:
+  qa:
+    status: active
+    file: qa.yaml
+    max_rounds: 4
+    max_tool_calls: 4
+    max_tokens: 1024
+    timeout_s: 150
+    description: >
+      Plain Q&A — answerable without tools.
+    success_criterion: >
+      Exact-answer tasks: PASS when the reply's final "ANSWER: <value>" line
+      states the correct value, in any spelling of that value; the reply may
+      discuss anything above the line. A reply with no answer line is read
+      on its last line — PASS if that states the right value as its only
+      value of the answer's kind, FAIL if it is exactly a wrong one — and is
+      otherwise a format miss, never a fail (answer_format_ok = false either
+      way). Explanation tasks: PASS iff
+      the pinned judge scores the reply at or above the task's threshold
+      (0.7) against a stated rubric and reference answer. Tools are allowed
+      but not needed.
+  single_tool:
+    status: active
+    file: single_tool.yaml
+    max_rounds: 6
+    max_tool_calls: 6
+    max_tokens: 1024
+    timeout_s: 180
+    description: >
+      One tool call is enough: read a value, run a command, find a file,
+      write one exact file.
+    success_criterion: >
+      PASS when the reply's final "ANSWER: <value>" line states the value
+      planted in the workspace — unguessable, so a correct value implies the
+      lookup happened — or, for a write task, iff the named file holds exactly
+      the requested content. More calls are allowed within the budget; which tool
+      is used is not checked. A reply task's reply with no answer line is
+      read on its last line as for qa, and is otherwise a format miss, never
+      a fail.
+  multi_step:
+    status: active
+    file: multi_step.yaml
+    max_rounds: 14
+    max_tool_calls: 16
+    max_tokens: 2048
+    timeout_s: 360
+    description: >
+      Two to five dependent tool calls, where each step needs the previous
+      step's result.
+    success_criterion: >
+      PASS iff the end state is exactly right: the output file named in the
+      prompt has the expected content, or the reply's final "ANSWER: <value>"
+      line states the expected value (a reply without the line is read as
+      for qa) — a result that needs two to five
+      dependent tool calls to reach. Checked by predicates or a hidden
+      acceptance test. No partial credit.
+  file_edit:
+    status: active
+    file: file_edit.yaml
+    max_rounds: 16
+    max_tool_calls: 20
+    max_tokens: 4096
+    timeout_s: 480
+    description: >
+      Change existing files so an acceptance command passes.
+    success_criterion: >
+      PASS iff the acceptance tests the harness runs in the workspace after
+      the agent stops ran — at least one — and none failed, as its runner's
+      own result file reports; an exit status alone decides nothing. Tests
+      the agent could see are first restored from pristine copies, so editing
+      them buys nothing; the tests run under the harness's own isolated
+      Python, not the box's python3.
+  web_research:
+    status: deferred
+    max_rounds: 12
+    max_tool_calls: 14
+    max_tokens: 2048
+    timeout_s: 360
+    description: >
+      Find and combine facts from web pages.
+    success_criterion: >
+      PASS iff the final reply states the facts asked for, as given on the
+      authoritative page(s), and none of the distractor values (older
+      versions, superseded or contradicting pages). Offline tasks answer from
+      fixture pages on reserved .example hosts served through the real
+      web_fetch / web_search schemas; live tasks are opt-in and declare
+      whether their answer changes over time. Syntheses are graded by the
+      pinned judge, only after the fact predicates pass.
+  memory_recall:
+    status: deferred
+    max_rounds: 8
+    max_tool_calls: 8
+    max_tokens: 1024
+    timeout_s: 180
+    description: >
+      Recall planted facts from Prometheus's memory layers.
+    success_criterion: >
+      PASS iff the final reply states the planted fact — the latest value
+      where a later session superseded an earlier one — and not the
+      superseded or distractor values. Facts are planted in MEMORY.md /
+      USER.md, earlier sessions (lcm_grep), the wiki (wiki_query), or early in
+      a seeded conversation; the verdict reads only what the model produced
+      in the run, never the seed.
+  scheduling:
+    status: deferred
+    max_rounds: 8
+    max_tool_calls: 8
+    max_tokens: 1024
+    timeout_s: 180
+    description: >
+      Create, change, inspect and delete scheduled jobs with the cron tools.
+    success_criterion: >
+      PASS iff, after the run, the sandbox's cron registry holds exactly the
+      requested change: the named job with a schedule that fires at the
+      requested times (any equivalent spelling), the requested command and
+      enabled state, and every other job as it was — checked on the registry,
+      not the reply. Inspection tasks ("which job runs on Sundays?") are
+      checked on the reply.
+  long_haul:
+    status: deferred
+    max_rounds: 40
+    max_tool_calls: 60
+    max_tokens: 4096
+    timeout_s: 1500
+    description: >
+      Build a small multi-part program from a written spec over many rounds.
+    success_criterion: >
+      PASS iff a hidden acceptance test suite — written into the workspace
+      only after the agent stops, stdlib unittest run by the harness's runner
+      — runs at least one test with none failing, and the run finished
+      within its budget (40 rounds, 60
+      tool calls, 25 minutes).
