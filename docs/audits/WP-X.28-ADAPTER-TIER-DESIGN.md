@@ -516,10 +516,20 @@ Not applicable; the reader is format-driven, not tier-driven.
 
 ### Goldens
 
-None change. No recorded completion in any of the 11 traces contains `<function=`
-(checked); the four `<tool_call` replies in `coding_run` are JSON-in-tag and keep their
-path. The seam rule applies: replay plus `bench --baseline` on the mini, with an
-`origin/main` control in the same session.
+**One changes: `coding_run` recorded the defect.** The report first said none would,
+from a grep of the raw completion bodies for `<function=` — which found nothing because
+the tokenizer splits the marker across SSE deltas (`<function` / `=code_run>`). The
+mini's replay of PR 1 found it: reconstructed from their deltas, four `coding_run` replies
+carry Qwen XML. The coding path sends no tools and no grammar and injects the JSON
+instruction, so the production 27B wrote its JSON call and its XML call in the same reply
+(completions 4 and 7: both read as the same call, either way), a JSON call with a stray
+`</function>` (completion 5), and, at completion 6, the XML alone — which main dropped as a
+parse disagreement and retried with feedback. PR 1 executes that call, so the recorded
+run's sixth round disappears and the request stream after it differs. The other ten
+goldens replay at PARITY. `coding_run` must be re-recorded with the primary live on the
+4090 (the new turn has no recorded answer; a stand-in cannot supply one), which makes PR 1
+a trace-changing PR — decision pending (see Decisions). The seam rule applies: replay plus
+`bench --baseline` on the mini, with an `origin/main` control in the same session.
 
 ### Speed
 
@@ -620,7 +630,7 @@ touch is named.
 
 | # | PR | touches | traces | seam rule | engine/agent_loop.py |
 |---|---|---|---|---|---|
-| 1 | XML reader in the enforcer and formatter (item 4) | `adapter/enforcer.py`, `adapter/formatter.py`, tests | none change; replay must pass | bench on the mini (adapter/) | no |
+| 1 | XML reader in the enforcer and formatter (item 4) | `adapter/enforcer.py`, `adapter/formatter.py`, tests | **`coding_run` recorded the defect and must be re-recorded (live 4090)**; the other ten replay at PARITY | bench on the mini (adapter/) | no |
 | 2 | Tier resolver, template probes, boot line (items 1 and the log half of 3) | new `adapter/tier.py`; `__main__.py` (`create_adapter`, `_get_adapter_tier` wrapper, CLI helper); `daemon.py` (one probe call); `providers/llama_cpp.py`, `providers/ollama.py` (`detect_tool_template`); `providers/backends.py` (`extra["tool_template"]`); tests | none change; replay must pass | bench (adapter/) | no |
 | 3 | Config override `adapter.model_tiers` (item 2) | `__main__.py`, `config/prometheus.yaml.default`, `docs/reference/config-keys.md` (regenerated), tests | none | no | no |
 | 4 | Surfaces: `/doctor`, `oara doctor`, `/api/status.adapter`, `/api/models` tier fields, `/api/backends.tool_template` (item 3) | `infra/doctor.py`, `infra/anatomy.py`, `gateway/commands.py`, `cli/doctor.py`, `web/server.py`, `docs/guide/providers.md` (the "Adapter strictness" section), tests | none; replay runs on `web/**` | no | no |
@@ -693,6 +703,10 @@ questions:
 9. Not now; `/doctor` showing the mismatch is enough.
 10. Ornith's file is `Ornith-1.5-9B-Q4_K_M.gguf`; Bonsai's is the ladder's exact
     `Ternary-Bonsai-2-27B-PQ2_0.gguf`.
+
+Pending (raised 2026-09-26, after the mini's replay of PR 1): `coding_run` recorded the
+defect PR 1 fixes, so PR 1 cannot land trace-neutral; it needs one live re-record of
+`coding_run` on the 4090, in Will's window, making it the first trace-changing PR.
 
 Build order: PR 1 (the XML reader in the enforcer, taught to `QwenFormatter` through the
 same helper), then PR 2 (resolver, template probes, boot line, and the `type(provider)`
