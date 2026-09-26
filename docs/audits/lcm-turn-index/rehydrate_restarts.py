@@ -161,6 +161,17 @@ for era in ("rehydrate on", "before rehydrate existed"):
         "blind_now_tokens": stats([e["now"]["tokens"] for e in blind if e["now"]["restored"]]),
         "blind_now_payloads_shortened": stats([e["now"]["shortened"] for e in blind if e["now"]["restored"]]),
         "blind_now_messages_left_out": stats([e["now"]["left_out"] for e in blind if e["now"]["restored"]]),
+        "blind_now_by_path": {
+            path: {
+                "restored": sum(1 for e in grp if e["now"]["restored"]),
+                "messages": stats([e["now"]["restored"] for e in grp if e["now"]["restored"]]),
+                "tokens": stats([e["now"]["tokens"] for e in grp if e["now"]["restored"]]),
+                "payloads_shortened": stats([e["now"]["shortened"] for e in grp if e["now"]["restored"]]),
+                "messages_left_out": stats([e["now"]["left_out"] for e in grp if e["now"]["restored"]]),
+            }
+            for path, grp in sorted(
+                {p: [e for e in blind if e["path"] == p] for p in {e["path"] for e in blind}}.items())
+        },
     }
 out["all_resumes_this_code(how)"] = dict(collections.Counter(e["now"]["how"] for e in events))
 print(json.dumps(out, indent=1))
