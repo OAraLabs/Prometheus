@@ -37,8 +37,10 @@ found off during the next incident.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from typing import Any
 
 REDACTED = "<redacted>"
 
@@ -58,7 +60,10 @@ REDACTED = "<redacted>"
 #    of "bot" and the leading digit. Between them the two patterns cover
 #    the token whether it is prefixed, embedded in a URL, or bare.
 # 2. A bare Telegram token. The {30,} secret length keeps timestamps
-#    ("23:42:01") and "host:port" out of the blast radius.
+#    ("23:42:01") and "host:port" out of the blast radius, and a secret of
+#    nothing but lowercase hex is an id, not a token: over kept conversation
+#    text (X.37) "<epoch>:<md5>" ids matched, and a bot token's secret is
+#    mixed-case base64url.
 # 3. Slack bot/app/user tokens (xoxb-/xoxp-/… and the app-level
 #    xapp-), which travel in headers and exception strings rather
 #    than URLs.
@@ -70,29 +75,110 @@ REDACTED = "<redacted>"
 #                             API token, cloud keys in a header dump)
 #      ?token= / &token=      the voice middleware's WebSocket query-string convention
 #      sk-… / sk-ant-…        OpenAI / Anthropic / DeepSeek / Moonshot / Alibaba
-#      xai-…, AIza…           xAI, Google
+#      xai-…, AIza…           xAI, Google (an xAI key is one flat run: kebab-case
+#                             names such as model ids are not keys)
 #      gh?_… / github_pat_…   GitHub
 #      Discord bot tokens     <base64 id>.<6 chars>.<27+ chars>
 #      Slack                  adds xoxc/xoxd (browser) and xoxe (refresh)
+# 5. X.37: the shapes a person pastes into a chat. The skill-usage audit found
+#    GitHub tokens verbatim in lcm.db, in messages and in the summaries built
+#    from them, so these now run over what is KEPT (LCM, telemetry) and over
+#    what the learning loop sends to a model, not only over log lines. Kept
+#    text is read back, so a false positive costs real content: every pattern
+#    is anchored on a vendor-issued prefix or a fixed label, none on "looks
+#    random" (tests/test_secret_redaction_x37.py pins both directions).
+#      PEM private-key blocks the whole block, BEGIN line to END line; a block
+#                             cut off before its END line loses its BEGIN line
+#                             and the base64 lines after it
+#      AWS                    key ids by prefix; the secret key and session
+#                             token only beside their label (no prefix of their own)
+#      URL passwords          scheme://user:password@host (or scheme://:pw@host),
+#                             unless the host is loopback or the password is a
+#                             $VAR / {var} reference: over kept text nearly every
+#                             hit was a local dev database, whose password guards
+#                             nothing and whose URL fine-tune data needs whole
+#      webhooks               the secret path of a Slack or Discord webhook
+#      query strings          access_token / api_key / client_secret values,
+#                             beside item 4's token=
+#      vendor prefixes        _VENDOR_TOKENS, one line per issuer
+
+# One alternation behind one leading \b: a single pass over the text rather
+# than one per vendor, and a prefix at the end of a longer word is not the
+# start of a token. The trailing guard stops a fixed-length shape from matching
+# the head of a longer run.
+_VENDOR_TOKENS: tuple[tuple[str, str], ...] = (
+    ("AWS access key id", r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
+    ("GitLab", r"gl(?:pat|dt|rt|ptt|oas|cbt|ft|agent)-[A-Za-z0-9_-]{20,}"),
+    ("Hugging Face", r"hf_[A-Za-z0-9]{30,}"),
+    ("Stripe", r"[rs]k_(?:live|test)_[A-Za-z0-9]{20,}|whsec_[A-Za-z0-9+/=]{24,}"),
+    ("npm", r"npm_[A-Za-z0-9]{36,}"),
+    ("PyPI", r"pypi-AgE(?:IcHlwaS5vcmc|NdGVzdC5weXBpLm9yZw)[A-Za-z0-9_-]{50,}"),
+    ("Google OAuth", r"ya29\.[A-Za-z0-9_-]{30,}|GOCSPX-[A-Za-z0-9_-]{24,}"),
+    ("SendGrid", r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"),
+    ("JWT", r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    ("Groq", r"gsk_[A-Za-z0-9]{40,}"),
+    ("Replicate", r"r8_[A-Za-z0-9]{30,}"),
+    ("Tavily", r"tvly-[A-Za-z0-9_-]{20,}"),
+    ("Perplexity", r"pplx-[A-Za-z0-9]{40,}"),
+    ("Linear", r"lin_(?:api|oauth)_[A-Za-z0-9]{32,}"),
+    ("DigitalOcean", r"do[opr]_v1_[a-f0-9]{64}"),
+    ("Tailscale", r"tskey-[A-Za-z0-9-]{20,}"),
+    ("Shopify", r"shp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}"),
+    ("Notion", r"ntn_[A-Za-z0-9]{40,}|secret_[A-Za-z0-9]{43}"),
+    ("Supabase", r"sbp_[a-f0-9]{40}|sb_secret_[A-Za-z0-9_-]{20,}"),
+    ("Sentry", r"sntry[su]_[A-Za-z0-9+/=_-]{40,}"),
+    ("Doppler", r"dp\.(?:pt|st|ct|sa|scim|audit)\.[A-Za-z0-9_-]{40,}"),
+    ("Databricks", r"dapi[a-f0-9]{32}"),
+    ("Postman", r"PMAK-[A-Za-z0-9]{24}-[A-Za-z0-9]{34}"),
+    ("Pinecone", r"pcsk_[A-Za-z0-9_]{40,}"),
+    ("LangSmith", r"lsv2_(?:pt|sk)_[A-Za-z0-9_]{30,}"),
+    ("Figma", r"figd_[A-Za-z0-9_-]{40,}"),
+    ("Netlify", r"nfp_[A-Za-z0-9]{36,}"),
+    ("Heroku", r"HRKU-[A-Za-z0-9_-]{30,}"),
+    ("ElevenLabs", r"sk_[a-f0-9]{48}"),
+    ("Mailchimp", r"[0-9a-f]{32}-us[0-9]{1,2}"),
+)
+_VENDOR_TOKEN_RE = re.compile(
+    r"\b(?:" + "|".join(source for _, source in _VENDOR_TOKENS) + r")(?![A-Za-z0-9_-])"
+)
+# Literal first where the shape allows it: the regex engine skips ahead to a
+# literal prefix in C, where a leading \b or class costs a probe per character.
+_PEM_HEAD = r"-----BEGIN[A-Z0-9 ]* PRIVATE KEY(?: BLOCK)?-{5}"
+_PEM_TAIL = r"-{5}END[A-Z0-9 ]* PRIVATE KEY(?: BLOCK)?-{5}"
+
 _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(bot)(\d{5,}:[^/\s\"'\\]+)"), r"\1" + REDACTED),
-    (re.compile(r"\b\d{5,}:[A-Za-z0-9_-]{30,}\b"), REDACTED),
+    (re.compile(r"\b\d{5,}:(?![0-9a-f]{30,}\b)[A-Za-z0-9_-]{30,}\b"), REDACTED),
     (re.compile(r"\b(?:xox[abcdeprs]|xapp)-[A-Za-z0-9-]{10,}"), REDACTED),
     (re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{16,})"), r"\1" + REDACTED),
-    (re.compile(r"([?&]token=)([^&\s\"'<>]+)"), r"\1" + REDACTED),
+    (re.compile(r"([?&](?:token|access_token|api_key|apikey|client_secret)=)([^&\s\"'<>]+)"),
+     r"\1" + REDACTED),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), REDACTED),
-    (re.compile(r"\bxai-[A-Za-z0-9_-]{12,}"), REDACTED),
+    (re.compile(r"\bxai-[A-Za-z0-9]{12,}(?![A-Za-z0-9_-])"), REDACTED),
     (re.compile(r"\bAIza[A-Za-z0-9_-]{20,}"), REDACTED),
     (re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"), REDACTED),
     (re.compile(r"\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{5,7}\.[A-Za-z0-9_-]{20,}\b"), REDACTED),
+    # 5. X.37
+    (re.compile(_PEM_HEAD + r"[\s\S]*?" + _PEM_TAIL), REDACTED),
+    (re.compile(_PEM_HEAD + r"(?:\s+(?:[A-Za-z0-9+/=]{16,}|[A-Za-z-]+:[^\n]*))*"), REDACTED),
+    (re.compile(r"((?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY|SecretAccessKey"
+                r"|aws_session_token|AWS_SESSION_TOKEN|SessionToken|sessionToken)"
+                r"[\"']?\s*[:=]\s*[\"']?)[A-Za-z0-9/+=]{40,}"), r"\1" + REDACTED),
+    (re.compile(r"(://[^\s/:@\"'<>]*:)(?![$%{])[^\s/@\"'<>]+(@)"
+                r"(?!(?:localhost|127(?:\.[0-9]{1,3}){3}|0\.0\.0\.0|\[::1\])(?![A-Za-z0-9.-]))"),
+     r"\1" + REDACTED + r"\2"),
+    (re.compile(r"(hooks\.slack\.com/(?:services|workflows|triggers)/)[A-Za-z0-9/_-]+"),
+     r"\1" + REDACTED),
+    (re.compile(r"(discord(?:app)?\.com/api/webhooks/[0-9]+/)[A-Za-z0-9_-]+"), r"\1" + REDACTED),
+    (_VENDOR_TOKEN_RE, REDACTED),
 )
 
 
 def redact_secrets(text: str) -> str:
-    """Return ``text`` with any known gateway-token shape replaced.
+    """Return ``text`` with every known token shape replaced.
 
-    Cheap enough to run on every emitted log line: the common case is
-    three failed regex scans over a short string.
+    Cheap enough to run on every emitted log line: the common case is a
+    handful of failed regex scans over a short string.
     """
     if not text:
         return text
@@ -126,6 +212,56 @@ def redact_capture(value):
     if isinstance(value, tuple):
         return tuple(redact_capture(v) for v in value)
     return value
+
+
+def _redact_tree(value: Any) -> tuple[Any, bool]:
+    """``redact_capture`` over parsed JSON, also saying whether anything changed."""
+    if isinstance(value, str):
+        redacted = redact_secrets(value)
+        return redacted, redacted != value
+    if isinstance(value, dict):
+        changed = False
+        out: dict[Any, Any] = {}
+        for key, item in value.items():
+            out[key], item_changed = _redact_tree(item)
+            changed = changed or item_changed
+        return out, changed
+    if isinstance(value, list):
+        pairs = [_redact_tree(item) for item in value]
+        return [item for item, _ in pairs], any(changed for _, changed in pairs)
+    return value, False
+
+
+def redact_json_text(text: str | None) -> str | None:
+    """Redact the string values inside a JSON document that is held as text.
+
+    For columns that store JSON (``lcm_messages.content_json``, telemetry
+    ``summary_json`` / ``payload``, the divergence checkpoints). Running
+    :func:`redact_secrets` over the raw text is not enough: after an escaped
+    newline the character in front of a token is the ``n`` of ``\\n``, so a
+    ``\\b``-anchored shape never matches there. This parses the document,
+    redacts every string in it, and serialises it again.
+
+    A document with nothing to redact comes back byte-identical, so a clean
+    row is stored exactly as its writer produced it. Text that does not parse
+    as JSON is redacted as plain text.
+
+    Without a backslash, every string in the document sits in the raw text
+    verbatim between quotes, which a pattern treats as it does the start and
+    end of a string; one scan of the raw text then decides for all of them.
+    """
+    if not text:
+        return text
+    if "\\" not in text and redact_secrets(text) == text:
+        return text
+    try:
+        value = json.loads(text)
+        redacted, changed = _redact_tree(value)
+    except (ValueError, RecursionError):
+        return redact_secrets(text)
+    if not changed:
+        return text
+    return json.dumps(redacted, ensure_ascii=text.isascii())
 
 
 class RedactingFilter(logging.Filter):

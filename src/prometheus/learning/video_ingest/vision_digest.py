@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from prometheus.providers.registry import ProviderRegistry
+from prometheus.security.log_redaction import redact_secrets
 
 log = logging.getLogger(__name__)
 
@@ -352,9 +353,18 @@ async def _call_vision(
     content: list[dict[str, Any]],
     max_tokens: int,
 ) -> str:
-    """One multimodal call: raw OpenAI-style content blocks, text out."""
+    """One multimodal call: raw OpenAI-style content blocks, text out.
+
+    Text parts are redacted before they are sent (X.37). Image parts are left
+    as they are: redacting inside base64 data would corrupt the image.
+    """
     from prometheus.providers.base import ApiMessageRequest, ApiTextDeltaEvent
 
+    content = [
+        {**part, "text": redact_secrets(part["text"])}
+        if part.get("type") == "text" and isinstance(part.get("text"), str) else part
+        for part in content
+    ]
     request = ApiMessageRequest(
         model=model,
         messages=[{"role": "user", "content": content}],  # raw payload, see module docstring

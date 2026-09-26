@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from prometheus.memory.lcm_types import MessagePart, SummaryNode
 from prometheus.providers.base import ApiMessageRequest, ModelProvider
+from prometheus.security.log_redaction import redact_secrets
 
 if TYPE_CHECKING:
     pass
@@ -141,10 +142,15 @@ class LCMSummarizer:
     async def _call_model(self, prompt: str) -> str:
         """Call the model with retries and circuit breaker logic.
 
+        The prompt is redacted before it is sent (X.37): rows written before
+        the stores redacted on insert still hold tokens, and the summary made
+        from them would carry them forward.
+
         Raises:
             LCMCircuitBreakerOpen: If the breaker is already open.
             RuntimeError: If all retries are exhausted (also trips the breaker).
         """
+        prompt = redact_secrets(prompt)
         if self.circuit_open:
             raise LCMCircuitBreakerOpen(
                 f"Circuit breaker open after {self._consecutive_failures} "
