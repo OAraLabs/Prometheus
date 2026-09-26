@@ -116,13 +116,14 @@ class ChatSession:
         self._lcm_persisted_len: int = 0
         self._lcm_persisted_ahead: set[int] = set()
         # Added to each row's list position to stamp its durable turn_index
-        # at persist time. turn_index is the prompt position, UNIQUE per
-        # session in the store; every place the numbering (re)starts must
-        # therefore continue above every durable row, or the ORDER BY
-        # turn_index readers (LCM compactor/assembler) zip two conversations
-        # together. restore() sets it from the store (rehydrate); trim()
-        # shifts it with the list; _anchor_turn_index() lifts it above the
-        # store's maximum at the first write after a (re)start.
+        # at persist time. turn_index is the prompt position, unique per
+        # session (a migrated store's guard refuses a repeat), so every place
+        # the numbering (re)starts must continue above every durable row, or
+        # the ORDER BY turn_index readers (LCM compactor/assembler) zip two
+        # conversations together. restore() sets it from the store
+        # (rehydrate); trim() shifts it with the list; _anchor_turn_index()
+        # lifts it above the store's maximum at the first write after a
+        # (re)start.
         self._turn_index_offset: int = 0
         # False until the numbering has been checked against the store. A new
         # session starts unanchored (it may be a daemon restart, a path that

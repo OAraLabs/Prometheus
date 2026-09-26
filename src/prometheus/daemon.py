@@ -1230,13 +1230,14 @@ async def run_daemon(args: argparse.Namespace) -> None:
     except Exception as exc:
         logger.warning("LCM engine not available: %s", exc)
 
-    # One-time LCM migration: make (session_id, turn_index) UNIQUE, renumbering
-    # the duplicate indices older builds wrote (backup first; gated by
-    # user_version, so every later start is one PRAGMA read). It runs HERE:
-    # after the engine has created the tables, and before anything that writes
-    # lcm.db is wired to it — the session manager and agent loop just below,
-    # then the gateways, the jobs and the compactor. It never raises; a failed
-    # migration rolls back and the daemon runs on without the unique index.
+    # One-time LCM migration: renumber the duplicate turn_index values older
+    # builds wrote (backup first) and install the trigger that refuses a
+    # repeated (session_id, turn_index) from then on. Gated by user_version, so
+    # every later start is one PRAGMA read. It runs HERE: after the engine has
+    # created the tables, and before anything that writes lcm.db is wired to
+    # it — the session manager and agent loop just below, then the gateways,
+    # the jobs and the compactor. It never raises; a failed migration rolls
+    # back and the daemon runs on without the guard.
     # tests/test_lcm_turn_index_unique.py pins this ordering.
     # docs/audits/LCM-TURN-INDEX-DUPLICATES.md §5.3.
     if lcm_engine is not None:

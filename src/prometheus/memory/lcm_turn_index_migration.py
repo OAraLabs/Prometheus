@@ -1,4 +1,4 @@
-"""One-time migration: make ``(session_id, turn_index)`` UNIQUE in ``lcm.db``.
+"""One-time migration: guard ``(session_id, turn_index)`` against repeats in ``lcm.db``.
 
 ``turn_index`` is a message's durable prompt position, and the LCM readers order
 by it. For most of this store's life nothing kept it unique: every restart of a
@@ -7,22 +7,28 @@ numbered from its window instead of the session, ``/reset``, a rollback of a
 durable row) re-used indices that older rows already held, and
 ``ORDER BY turn_index`` then zipped two conversations together. The numbering
 fix is in :class:`~prometheus.engine.session.ChatSession`. This module repairs
-the rows already written and installs the UNIQUE index that guards the fix.
-Evidence and design: docs/audits/LCM-TURN-INDEX-DUPLICATES.md §5.3.
+the rows already written and installs the guard behind the fix: a BEFORE INSERT
+trigger that refuses a row whose index another message of the session already
+holds. Evidence and design: docs/audits/LCM-TURN-INDEX-DUPLICATES.md §5.3.
+
+**A trigger, not a UNIQUE index.** Builds from before this migration insert with
+``INSERT OR REPLACE``. Under a UNIQUE index, REPLACE resolves a collision by
+DELETING the older row, so a rollback or a pip downgrade would delete history.
+The trigger's ``RAISE(ABORT)`` fails the statement whatever its conflict clause:
+an old build's colliding insert fails, and the older row stays.
 
 The daemon calls :func:`migrate_turn_index` once at start, after the LCM engine
 exists and BEFORE any writer (gateways, jobs, the compactor) is wired to it. It
 never raises: on any failure it rolls back, says so loudly, and the daemon runs
-on without the unique index, exactly as before this migration existed.
+on without the guard, exactly as before this migration existed.
 
 **Gated** by ``PRAGMA user_version`` 0 → 1 on ``lcm.db``. Neither the version nor
-an index is a table, so a migrated DB keeps exactly the tables and columns it
+a trigger is a table, so a migrated DB keeps exactly the tables and columns it
 had. That is also why the renumbering map lives in a TEMP table: a new table or
 column in ``lcm.db`` would change every parity golden's store dump.
 
-**No duplicates** (every fresh install, every parity run): the legacy non-unique
-index is swapped for the UNIQUE one and ``user_version`` is set. Nothing else is
-written, and no backup file is made.
+**No duplicates** (every fresh install, every parity run): the guard is created
+and ``user_version`` is set. Nothing else is written, and no backup file is made.
 
 **Duplicates**: first a backup with SQLite's backup API to
 ``<lcm.db>.pre-turn-index-<UTC time>.bak``, checked (``integrity_check`` and row
@@ -36,17 +42,19 @@ count) before anything is touched. Then ONE ``BEGIN IMMEDIATE`` transaction:
 2. run 0 keeps its values; each later run is shifted up to start above every
    value before it, keeping its internal gaps; within a run the order is
    ``(turn_index, rowid)``;
-3. the new values go in through a TEMP map, the legacy index is dropped, the
-   UNIQUE index is created and ``user_version`` is set;
+3. the new values go in through a TEMP map; only then is the guard created (it
+   is BEFORE INSERT only and would not see the UPDATE anyway) and
+   ``user_version`` set;
 4. before COMMIT: the row count is unchanged, a digest of every other column (by
    rowid) is unchanged, no ``(session_id, turn_index)`` repeats, and every
    affected session reads back in exactly the planned order. Any mismatch rolls
    the whole transaction back.
 
-⚠ Pre-fix code must not write a migrated DB. It inserts with
-``INSERT OR REPLACE``, which under the UNIQUE index resolves a collision by
-DELETING the older row. Roll back to such a version only after undoing the
-index (see the migration PR's deploy note), or restore the ``.bak``.
+Pre-fix code on a migrated DB can no longer delete history, but it cannot
+append to a session it collides in either: the guard refuses the row, and the
+old code swallows the error, so those rows are lost for as long as it runs. To
+run an old build fully, drop the trigger first (the migration PR's deploy note
+has the SQL).
 """
 
 from __future__ import annotations
@@ -61,14 +69,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from prometheus.memory.lcm_conversation_store import (
-    LEGACY_TURN_INDEX_INDEX,
-    TURN_INDEX_UNIQUE_INDEX,
+    TURN_INDEX_GUARD_SQL,
+    TURN_INDEX_GUARD_TRIGGER,
+    TURN_INDEX_INDEX,
 )
 
 log = logging.getLogger(__name__)
 
-#: ``PRAGMA user_version`` of an ``lcm.db`` whose ``(session_id, turn_index)`` is UNIQUE.
-TURN_INDEX_UNIQUE_VERSION = 1
+#: ``PRAGMA user_version`` of an ``lcm.db`` whose ``(session_id, turn_index)`` is guarded.
+TURN_INDEX_GUARD_VERSION = 1
 
 _SQLITE_BUSY = 5
 _SQLITE_LOCKED = 6
@@ -214,7 +223,7 @@ def run_turn_index_migration(
             raise TurnIndexMigrationError(
                 "the migration needs an autocommit connection outside any transaction"
             )
-        if _user_version(conn) >= TURN_INDEX_UNIQUE_VERSION:
+        if _user_version(conn) >= TURN_INDEX_GUARD_VERSION:
             return TurnIndexMigrationResult("done_before", seconds=_since(started))
         if not _has_messages_table(conn):
             return TurnIndexMigrationResult("no_table", seconds=_since(started))
@@ -231,11 +240,18 @@ def run_turn_index_migration(
 
         conn.execute("BEGIN IMMEDIATE")
         try:
-            if _user_version(conn) >= TURN_INDEX_UNIQUE_VERSION:
+            if _user_version(conn) >= TURN_INDEX_GUARD_VERSION:
                 conn.execute("ROLLBACK")
                 return TurnIndexMigrationResult("done_before", seconds=_since(started))
             plan = RenumberPlan()
             count, digest = 0, ""
+            if not renumber and _has_duplicates(conn):
+                # Written between the precheck and the lock: there is no backup
+                # of it, so this start does not touch it.
+                raise TurnIndexMigrationError(
+                    "a repeated turn_index appeared after the precheck; nothing "
+                    "was changed, the next start will retry"
+                )
             if renumber:
                 if _data_version(conn) != seen_version:
                     raise TurnIndexMigrationError(
@@ -254,15 +270,18 @@ def run_turn_index_migration(
                     ).fetchall()
                 )
                 _apply(conn, plan)
-            conn.execute(f"DROP INDEX IF EXISTS {LEGACY_TURN_INDEX_INDEX}")
-            # Creating the UNIQUE index is itself the proof that no pair repeats.
+            # The readers' plain index (the store creates it; a DB from before it
+            # existed gets it here), then the guard, after the renumbering.
             conn.execute(
-                f"CREATE UNIQUE INDEX IF NOT EXISTS {TURN_INDEX_UNIQUE_INDEX}"
+                f"CREATE INDEX IF NOT EXISTS {TURN_INDEX_INDEX}"
                 " ON lcm_messages (session_id, turn_index)"
             )
-            conn.execute(f"PRAGMA user_version = {TURN_INDEX_UNIQUE_VERSION}")
+            conn.execute(TURN_INDEX_GUARD_SQL)
+            conn.execute(f"PRAGMA user_version = {TURN_INDEX_GUARD_VERSION}")
             if renumber:
                 _verify(conn, plan, count, digest)
+            if not _has_guard(conn):
+                raise TurnIndexMigrationError("the turn-index guard was not created")
             conn.execute("COMMIT")
         except BaseException:
             if conn.in_transaction:
@@ -285,15 +304,15 @@ def run_turn_index_migration(
     if renumber:
         log.warning(
             "LCM turn_index migration: renumbered %d rows in %d sessions (%d runs, "
-            "largest shift %d); (session_id, turn_index) is now UNIQUE. Backup of the "
-            "previous state: %s (%d bytes). %.2fs",
+            "largest shift %d); a trigger now refuses a repeated (session_id, "
+            "turn_index). Backup of the previous state: %s (%d bytes). %.2fs",
             result.rows_renumbered, result.sessions, result.runs, result.max_shift,
             result.backup_path, result.backup_bytes, result.seconds,
         )
     else:
         log.info(
-            "LCM turn_index migration: no duplicates; (session_id, turn_index) is now "
-            "UNIQUE (%.2fs)", result.seconds,
+            "LCM turn_index migration: no duplicates; a trigger now refuses a "
+            "repeated (session_id, turn_index) (%.2fs)", result.seconds,
         )
     return result
 
@@ -395,7 +414,7 @@ def _failed(
 ) -> TurnIndexMigrationResult:
     log.error(
         "LCM TURN_INDEX MIGRATION FAILED — nothing was committed; the daemon runs on "
-        "WITHOUT the unique index, as before. %s%s",
+        "WITHOUT the turn-index guard, as before. %s%s",
         exc,
         f" (backup kept at {backup[0]})" if backup and backup[0] != ":memory:" else "",
         exc_info=True,
@@ -438,6 +457,13 @@ def _data_version(conn: sqlite3.Connection) -> int:
 def _has_messages_table(conn: sqlite3.Connection) -> bool:
     return conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lcm_messages'"
+    ).fetchone() is not None
+
+
+def _has_guard(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+        (TURN_INDEX_GUARD_TRIGGER,),
     ).fetchone() is not None
 
 

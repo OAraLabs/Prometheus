@@ -20,14 +20,36 @@ from prometheus.memory.lcm_types import MessagePart
 log = logging.getLogger(__name__)
 
 # ``turn_index`` is a message's durable prompt position: unique within its
-# session. The UNIQUE index below enforces that; it is created by the one-time
-# migration in :mod:`prometheus.memory.lcm_turn_index_migration`, which the
-# daemon runs at start (before any writer), and which also retires the legacy
-# NON-unique index on the same key. Until a DB has been migrated, the store
-# keeps the legacy index so its readers stay indexed.
-# See docs/audits/LCM-TURN-INDEX-DUPLICATES.md.
-TURN_INDEX_UNIQUE_INDEX = "idx_lcm_messages_session_turn"
-LEGACY_TURN_INDEX_INDEX = "idx_lcm_messages_session"
+# session. Two schema objects serve it:
+#
+# * the plain index on ``(session_id, turn_index)``, which the readers and the
+#   guard below use (created with the table);
+# * the GUARD, a BEFORE INSERT trigger that refuses a row when another message
+#   of the same session already holds its turn_index, with RAISE(ABORT). Only
+#   the one-time migration in :mod:`prometheus.memory.lcm_turn_index_migration`
+#   creates it; the daemon runs that at start, before any writer.
+#
+# Deliberately NOT a UNIQUE index. Builds from before the guard insert with
+# ``INSERT OR REPLACE``, and REPLACE resolves a UNIQUE conflict by DELETING the
+# row that holds the key: a rollback (or a pip downgrade) would then delete
+# history on every collision. RAISE(ABORT) fails the statement whatever its
+# conflict clause, so an old build's colliding insert fails and the older row
+# stays. See docs/audits/LCM-TURN-INDEX-DUPLICATES.md.
+TURN_INDEX_INDEX = "idx_lcm_messages_session"
+TURN_INDEX_GUARD_TRIGGER = "lcm_messages_turn_index_guard"
+TURN_INDEX_GUARD_MESSAGE = (
+    "lcm_messages turn_index guard: this session already has a message at this turn_index"
+)
+# A re-insert of the SAME id is left to the statement's own conflict handling
+# (``id <> NEW.id``): an old build's same-id REPLACE still works.
+TURN_INDEX_GUARD_SQL = (
+    f"CREATE TRIGGER IF NOT EXISTS {TURN_INDEX_GUARD_TRIGGER}"
+    " BEFORE INSERT ON lcm_messages"
+    " WHEN EXISTS (SELECT 1 FROM lcm_messages"
+    "   WHERE session_id = NEW.session_id AND turn_index = NEW.turn_index"
+    "   AND id <> NEW.id)"
+    f" BEGIN SELECT RAISE(ABORT, '{TURN_INDEX_GUARD_MESSAGE}'); END"
+)
 
 _INSERT_COLUMNS = (
     "(id, session_id, turn_index, role, content, content_json, token_count, timestamp,"
@@ -35,11 +57,9 @@ _INSERT_COLUMNS = (
 )
 
 # ON CONFLICT(id) DO NOTHING: re-inserting an id that is already stored is a
-# no-op. It is deliberately NOT ``INSERT OR REPLACE``: REPLACE resolves EVERY
-# uniqueness conflict by deleting the row that holds the key, so under the
-# UNIQUE (session_id, turn_index) index a colliding insert would silently delete
-# the older message. A turn-key conflict still raises (an upsert only handles
-# the conflict target it names) and is resolved in :meth:`insert_message`.
+# no-op. It is deliberately NOT ``INSERT OR REPLACE``, which resolves a
+# conflict by deleting the row that holds the key. A turn-key conflict (the
+# guard trigger) still raises and is resolved in :meth:`insert_message`.
 _INSERT_SQL = (
     f"INSERT INTO lcm_messages {_INSERT_COLUMNS}"
     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)"
@@ -59,8 +79,8 @@ _INSERT_APPENDING_SQL = (
 
 
 def _is_turn_key_conflict(exc: sqlite3.IntegrityError) -> bool:
-    """True when *exc* is the UNIQUE (session_id, turn_index) index refusing a row."""
-    return "lcm_messages.session_id, lcm_messages.turn_index" in str(exc)
+    """True when *exc* is the turn-index guard refusing a row."""
+    return TURN_INDEX_GUARD_MESSAGE in str(exc)
 
 
 class LCMConversationStore:
@@ -101,6 +121,9 @@ class LCMConversationStore:
                 provenance  TEXT NOT NULL DEFAULT 'user',
                 is_trusted  INTEGER NOT NULL DEFAULT 1
             );
+
+            CREATE INDEX IF NOT EXISTS idx_lcm_messages_session
+                ON lcm_messages (session_id, turn_index);
 
             CREATE INDEX IF NOT EXISTS idx_lcm_messages_compacted
                 ON lcm_messages (session_id, compacted);
@@ -233,27 +256,6 @@ class LCMConversationStore:
         self._conn.commit()
         self._migrate_add_content_json()
         self._migrate_add_trust_fields()
-        self._ensure_turn_index_index()
-
-    def _ensure_turn_index_index(self) -> None:
-        """Keep ``(session_id, turn_index)`` indexed on a DB that is not migrated yet.
-
-        Once the turn-index migration has created the UNIQUE index, the legacy
-        non-unique one on the same key is gone for good: re-creating it here on
-        every open would leave two indexes to maintain on each insert. This store
-        never creates the UNIQUE index itself. Only the migration does, so the
-        daemon controls when the uniqueness guard starts to apply.
-        """
-        row = self._conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
-            (TURN_INDEX_UNIQUE_INDEX,),
-        ).fetchone()
-        if row is None:
-            self._conn.execute(
-                f"CREATE INDEX IF NOT EXISTS {LEGACY_TURN_INDEX_INDEX}"
-                " ON lcm_messages (session_id, turn_index)"
-            )
-            self._conn.commit()
 
     @property
     def db_path(self) -> Path:
@@ -365,11 +367,12 @@ class LCMConversationStore:
 
         * an ``id`` that is already stored is left exactly as it is: the insert
           is a no-op and the FTS index is not touched;
-        * a ``turn_index`` the session already uses (refused by the UNIQUE index
-          on a migrated DB) is reassigned to the next free index and retried
-          once. The collision is recorded as a silent failure (subsystem
-          ``lcm``, operation ``turn_index_collision``), so a new producer of
-          duplicate indices shows up loudly instead of costing a message.
+        * a ``turn_index`` another message of the session already holds
+          (refused by the guard trigger on a migrated DB) is reassigned to the
+          next free index and retried once. The collision is recorded as a
+          silent failure (subsystem ``lcm``, operation ``turn_index_collision``),
+          so a new producer of duplicate indices shows up loudly instead of
+          costing a message.
         """
         mid = msg.message_id or uuid4().hex
         ts = msg.timestamp or time.time()
@@ -383,23 +386,33 @@ class LCMConversationStore:
             msg.provenance, 1 if msg.is_trusted else 0,
         )
         collision: sqlite3.IntegrityError | None = None
+        inserted = False
         if append:
             cur = self._conn.execute(
                 _INSERT_APPENDING_SQL, (mid, msg.session_id, *values, msg.session_id)
             )
+            inserted = cur.rowcount == 1
         else:
             try:
                 cur = self._conn.execute(
                     _INSERT_SQL, (mid, msg.session_id, msg.turn_index, *values)
                 )
+                inserted = cur.rowcount == 1
             except sqlite3.IntegrityError as exc:
                 if not _is_turn_key_conflict(exc):
                     raise
-                collision = exc
-                cur = self._conn.execute(
-                    _INSERT_APPENDING_SQL, (mid, msg.session_id, *values, msg.session_id)
-                )
-        inserted = cur.rowcount == 1
+                # The guard fires BEFORE the id conflict is looked at, so a re-insert
+                # of a stored id can trip it too. That re-insert is the no-op
+                # ON CONFLICT(id) would have made it, not a collision.
+                if self._conn.execute(
+                    "SELECT 1 FROM lcm_messages WHERE id = ?", (mid,)
+                ).fetchone() is None:
+                    collision = exc
+                    cur = self._conn.execute(
+                        _INSERT_APPENDING_SQL,
+                        (mid, msg.session_id, *values, msg.session_id),
+                    )
+                    inserted = cur.rowcount == 1
 
         stored = self._conn.execute(
             "SELECT rowid, turn_index FROM lcm_messages WHERE id = ?", (mid,)

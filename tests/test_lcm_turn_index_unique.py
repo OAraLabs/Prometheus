@@ -45,8 +45,9 @@ from prometheus.memory import lcm_turn_index_migration as migration
 from prometheus.memory.lcm_assembler import LCMAssembler
 from prometheus.memory.lcm_compaction import LCMCompactor
 from prometheus.memory.lcm_conversation_store import (
-    LEGACY_TURN_INDEX_INDEX,
-    TURN_INDEX_UNIQUE_INDEX,
+    TURN_INDEX_GUARD_MESSAGE,
+    TURN_INDEX_GUARD_TRIGGER,
+    TURN_INDEX_INDEX,
     LCMConversationStore,
 )
 from prometheus.memory.lcm_engine import LCMEngine
@@ -138,6 +139,16 @@ def _prompt_order(db: Path, sid: str = SID) -> list[tuple[int, str]]:
         con.close()
 
 
+def _ids(db: Path, sid: str = SID) -> list[str]:
+    con = sqlite3.connect(db)
+    try:
+        return [r[0] for r in con.execute(
+            "SELECT id FROM lcm_messages WHERE session_id = ? ORDER BY turn_index, rowid",
+            (sid,))]
+    finally:
+        con.close()
+
+
 def _turn_index_of(db: Path, content: str) -> int:
     con = sqlite3.connect(db)
     try:
@@ -159,14 +170,29 @@ def _schema(db: Path) -> dict[str, list[str]]:
         con.close()
 
 
-def _indexes(db: Path) -> dict[str, bool]:
-    """Index name -> unique, for the (session_id, turn_index) key."""
+def _turn_indexes(db: Path) -> dict[str, bool]:
+    """Every index on lcm_messages whose first column is session_id and second
+    turn_index -> whether it is UNIQUE. The guard is a trigger: this stays
+    ``{TURN_INDEX_INDEX: False}`` before and after the migration."""
     con = sqlite3.connect(db)
     try:
-        return {
-            r[1]: bool(r[2]) for r in con.execute("PRAGMA index_list(lcm_messages)")
-            if r[1] in (TURN_INDEX_UNIQUE_INDEX, LEGACY_TURN_INDEX_INDEX)
-        }
+        out = {}
+        for _seq, name, unique, *_ in con.execute("PRAGMA index_list(lcm_messages)"):
+            cols = [r[2] for r in con.execute(f'PRAGMA index_info("{name}")')]
+            if cols[:2] == ["session_id", "turn_index"]:
+                out[name] = bool(unique)
+        return out
+    finally:
+        con.close()
+
+
+def _has_guard(db: Path) -> bool:
+    con = sqlite3.connect(db)
+    try:
+        return con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            (TURN_INDEX_GUARD_TRIGGER,),
+        ).fetchone() is not None
     finally:
         con.close()
 
@@ -484,14 +510,60 @@ class TestGuard:
         assert len(telemetry.records) == 1
         assert [ti for ti, _ in _prompt_order(tmp_path / "lcm.db")] == list(range(8))
 
-    def test_the_unique_index_replaces_the_legacy_one_for_good(self, tmp_path: Path) -> None:
+    def test_the_guard_is_a_trigger_beside_a_plain_index(self, tmp_path: Path) -> None:
+        """Only the migration creates the guard, and never as a UNIQUE index."""
         db = tmp_path / "lcm.db"
         LCMConversationStore(db).close()
-        assert _indexes(db) == {LEGACY_TURN_INDEX_INDEX: False}
+        assert _turn_indexes(db) == {TURN_INDEX_INDEX: False} and not _has_guard(db)
         migrate_turn_index(db)
-        assert _indexes(db) == {TURN_INDEX_UNIQUE_INDEX: True}
+        assert _turn_indexes(db) == {TURN_INDEX_INDEX: False} and _has_guard(db)
         LCMConversationStore(db).close()                # every later open
-        assert _indexes(db) == {TURN_INDEX_UNIQUE_INDEX: True}
+        assert _turn_indexes(db) == {TURN_INDEX_INDEX: False} and _has_guard(db)
+
+    def test_an_old_build_cannot_delete_history(self, tmp_path: Path) -> None:
+        """The reason the guard is a trigger. Builds from before it insert with
+        INSERT OR REPLACE. A UNIQUE index would let that DELETE the older row on a
+        collision; the trigger's RAISE(ABORT) fails the statement instead, whatever
+        its conflict clause. The old build loses the new row, never history."""
+        db = tmp_path / "lcm.db"
+        _legacy(db, [(0, "older A"), (1, "older B")])
+        assert migrate_turn_index(db).status == "indexed"
+        pre_fix_insert = (
+            "INSERT OR REPLACE INTO lcm_messages (id, session_id, turn_index, role,"
+            " content, content_json, token_count, timestamp, compacted, provenance,"
+            " is_trusted) VALUES (?, ?, ?, 'user', ?, NULL, 0, 9.0, 0, 'user', 1)"
+        )
+        con = sqlite3.connect(db)
+        with pytest.raises(sqlite3.IntegrityError, match=TURN_INDEX_GUARD_MESSAGE):
+            con.execute(pre_fix_insert, ("old-build-row", SID, 0, "from an old build"))
+        con.rollback()
+        # A same-id re-insert, which the guard leaves to the statement, still works.
+        con.execute(pre_fix_insert, (_ids(db)[1], SID, 1, "B, rewritten by id"))
+        con.commit()
+        con.close()
+
+        assert _prompt_order(db) == [(0, "older A"), (1, "B, rewritten by id")]
+
+    def test_a_stored_id_on_a_taken_index_is_a_quiet_no_op(
+        self, tmp_path: Path, telemetry: _Telemetry
+    ) -> None:
+        """The guard fires before the id conflict is looked at, so re-inserting a
+        stored id onto another row's index trips it. That is the no-op ON
+        CONFLICT(id) would have made it, not a collision to record."""
+        db = tmp_path / "lcm.db"
+        store = LCMConversationStore(db)
+        assert migrate_turn_index(db).status == "indexed"
+        for i in range(2):
+            store.insert_message(MessagePart(role="user", content=f"m{i}",
+                                             session_id=SID, turn_index=i,
+                                             message_id=f"id-{i}"))
+        again = MessagePart(role="user", content="rewrite?", session_id=SID,
+                            turn_index=1, message_id="id-0")
+        assert store.insert_message(again) == "id-0"
+
+        assert _prompt_order(db) == [(0, "m0"), (1, "m1")]
+        assert again.turn_index == 0
+        assert telemetry.records == []
 
     @pytest.mark.parametrize("migrated", [False, True])
     def test_readers_order_by_turn_index_then_rowid_without_sorting(
@@ -540,7 +612,7 @@ def _legacy_history(db: Path) -> None:
 
 
 class TestMigration:
-    def test_no_duplicates_writes_only_the_index_and_the_version(self, tmp_path: Path) -> None:
+    def test_no_duplicates_writes_only_the_guard_and_the_version(self, tmp_path: Path) -> None:
         db = tmp_path / "lcm.db"
         _legacy(db, [(i, f"m{i}") for i in range(5)])
         schema, rows = _schema(db), _all_rows(db)
@@ -552,7 +624,7 @@ class TestMigration:
         assert sorted(p.name for p in tmp_path.iterdir() if "bak" in p.name) == []
         assert _schema(db) == schema and _all_rows(db) == rows
         assert _user_version(db) == 1
-        assert _indexes(db) == {TURN_INDEX_UNIQUE_INDEX: True}
+        assert _has_guard(db) and _turn_indexes(db) == {TURN_INDEX_INDEX: False}
 
     def test_duplicates_are_renumbered_in_prompt_order_after_a_backup(
         self, tmp_path: Path
@@ -579,7 +651,7 @@ class TestMigration:
         assert [r[:ti] + r[ti + 1:] for r in after] == [r[:ti] + r[ti + 1:] for r in rows_before]
         assert _schema(db) == schema
         assert _user_version(db) == 1
-        assert _indexes(db) == {TURN_INDEX_UNIQUE_INDEX: True}
+        assert _has_guard(db) and _turn_indexes(db) == {TURN_INDEX_INDEX: False}
         # The backup is the untouched pre-migration state, private to the owner.
         assert result.backup_path == str(backup) and result.backup_bytes > 0
         assert _all_rows(backup) == rows_before
@@ -612,7 +684,7 @@ class TestMigration:
         assert result.status == "failed" and "simulated" in (result.error or "")
         assert _all_rows(db) == rows and _schema(db) == schema
         assert _user_version(db) == 0
-        assert _indexes(db) == {LEGACY_TURN_INDEX_INDEX: False}
+        assert not _has_guard(db)
         assert (tmp_path / "x.bak").exists()           # kept for inspection
         assert "MIGRATION FAILED" in caplog.text
         assert [r["operation"] for r in telemetry.records] == ["turn_index_migration"]
@@ -636,6 +708,22 @@ class TestMigration:
         assert "between the backup and the write lock" in (result.error or "")
         assert _dups(db) != [] and _user_version(db) == 0
         assert _prompt_order(db, "web:other") == [(99, "late writer")]
+
+    def test_a_repeat_written_after_the_precheck_aborts_the_quick_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No duplicates at the precheck means no backup. If one appears before
+        the lock, this start must not guard a table it has no backup of."""
+        db = tmp_path / "lcm.db"
+        _legacy(db, [(i, f"m{i}") for i in range(3)])
+        answers = iter([False, True])
+        monkeypatch.setattr(migration, "_has_duplicates", lambda _conn: next(answers))
+
+        result = migrate_turn_index(db, backup_path=tmp_path / "x.bak")
+
+        assert result.status == "failed" and "after the precheck" in (result.error or "")
+        assert not _has_guard(db) and _user_version(db) == 0
+        assert not (tmp_path / "x.bak").exists()
 
     def test_not_enough_disk_refuses_before_writing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
