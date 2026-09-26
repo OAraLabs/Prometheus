@@ -109,7 +109,26 @@ def _message_from_part(part: object) -> ConversationMessage:
 
 
 def _estimated_tokens(message: ConversationMessage) -> int:
-    return max(1, len(message.content_json) // 4)
+    """A message's cost against the restore window: the shared estimate the
+    compactor and the context pre-flight use (context/token_estimation), so a
+    restore budgets what those will count — thinking no request builder sends
+    back is not charged. At least 1, so every restored message costs something."""
+    # Imported here: prometheus.context imports prometheus.engine (through
+    # token_estimation -> engine.messages), whose package init imports this
+    # module — a module-level import would be circular.
+    from prometheus.context.token_estimation import estimate_message_tokens
+
+    return max(1, estimate_message_tokens(message))
+
+
+def _row_tokens(part: object) -> int:
+    """A stored LCM row's cost against the restore window: the message it
+    restores to, by the same estimate. A legacy row with no ``content_json``
+    holds only its flat text — no thinking to leave out — and costs that text,
+    as before."""
+    if not getattr(part, "content_json", None):
+        return max(1, len(getattr(part, "content", None) or "") // 4)
+    return _estimated_tokens(_message_from_part(part))
 
 
 def _shortened(text: str, limit: int) -> str:
@@ -1034,7 +1053,7 @@ class SessionManager:
         kept: list = []
         budget = _REHYDRATE_TOKEN_BUDGET
         for part in reversed(parts):
-            cost = max(1, len(part.content_json or part.content or "") // 4)
+            cost = _row_tokens(part)
             if kept and budget - cost < 0:
                 break
             budget -= cost
