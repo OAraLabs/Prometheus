@@ -1,0 +1,157 @@
+# The model ladder's rungs. Endpoints never live here: pass --base-url /
+# --judge-base-url (or LADDER_BASE_URL / LADDER_JUDGE_BASE_URL).
+#
+# A --rung run is REFUSED unless the endpoint serves a model matching `match`
+# (regex, case-insensitive), the adapter picks `adapter_tier` for it (the tier
+# the daemon itself would use — config/model_registry.yaml), and the probed
+# quantization equals `quantization`. Rows are never filed under a rung the
+# endpoint is not actually serving.
+#
+# `hf` pins the exact upstream file (repo, revision, file, sha256): a model
+# name is not an identity — the production 27B's own filename now resolves to
+# a DIFFERENT file on Hugging Face main. `serve` is where and how the rung is
+# served; every rung runs on llama.cpp (never Ollama) with production's flags
+# mirrored, sampling set explicitly, and thinking suppressed.
+
+version: 1
+
+# The FIRST run (decided 2026-09-25): the production 27B, the same checkpoint
+# compressed to ternary (what compression costs), a 9B of the same
+# architecture (what size costs), and Ornith-1.5-9B (added 2026-09-25: the same
+# size and base as the 9B, agentic training). Qwen3.5-4B comes later.
+first_run: [r27b, r27b-pq2, r08b, r09b-ornith]
+
+# ONE judge for every rung, so pass rates on judged tasks are comparable
+# across rungs. It must not be any rung's model (enforced by
+# tests/test_ladder_suite.py and again at run time). UNDECIDED for the mini
+# rungs: at Ollama's default 32k context this judge needs ~14.8 GiB and does
+# not fit beside any rung served on the mini's 3090 Ti (~11.7 GiB free), so
+# rung runs use --no-judge (the 6 judged qa tasks are recorded UNSCORED) until
+# the judge is decided — see docs/MODEL-LADDER.md, "Judge".
+judge:
+  model: qwen2.5:14b-instruct
+  served_by: ollama
+  on_disk: mini
+
+rungs:
+  - id: r27b
+    size_class: 27B
+    model: Qwen3.8-27B
+    match: 'qwen3\.8[-_]27b'
+    quantization: UD-Q4_K_XL
+    adapter_tier: light
+    hf:
+      repo: unsloth/Qwen3.8-27B-GGUF
+      revision: fe1e2a23d973adb629709749dc4f6756df66ef10
+      file: Qwen3.8-27B-UD-Q4_K_XL.gguf
+      size: 17923394624
+      sha256: bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372
+    serve: >
+      The 4090's PRODUCTION llama-server, untouched (no restart, no model
+      swap): llama.cpp 9d57ce456, -c 32768 --parallel 1 --flash-attn on --jinja
+      -b/-ub 2048 --reasoning-budget 2048, mmproj loaded, no sampling flags (the
+      GGUF's temp 1.0 / top_k 20 / top_p 0.95 apply, min_p 0.05 by default).
+      Runs only inside 06:30-10:00, announced; the daemon queues behind it.
+    notes: >
+      Unsloth's ORIGINAL 2026-08-14 upload. Unsloth replaced it on 08-19 with a
+      different 17,559,178,144 B file under the same name, so the revision and
+      hash above — not the name — identify this rung.
+
+  - id: r27b-pq2
+    size_class: 27B (ternary, 2.13 bpw)
+    model: Ternary-Bonsai-2-27B (PrismML, from Qwen3.8-27B)
+    match: 'ternary-bonsai-2-27b'
+    quantization: PQ2_0
+    adapter_tier: full
+    hf:
+      repo: prism-ml/Ternary-Bonsai-2-27B-gguf
+      revision: 65f27a86966957c534ea6ad12149286e01ca7cc0
+      file: Ternary-Bonsai-2-27B-PQ2_0.gguf
+      size: 7206168928
+      sha256: 3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1
+    serve: >
+      The mini's 3090 Ti, PrismML's llama.cpp fork (release prism-b10735-842b188,
+      linux-cuda-12.8 prebuilt; b10735 or later is REQUIRED — earlier builds
+      segfault loading PQ2_0 on the mini's AVX-512 CPU), bound to localhost,
+      production's flags except -ub 512 (memory) and no mmproj (text-only),
+      with --temp 1.0 --top-k 20 --top-p 0.95 --min-p 0.05.
+    notes: >
+      The same checkpoint as r27b (Qwen3.8-27B), so r27b vs r27b-pq2 measures
+      what PrismML's ternary pipeline costs against Unsloth UD-Q4_K_XL — not
+      against full precision. Tier `full` is what the daemon picks today (no
+      registry entry matches the name); r27b runs at `light`, so the Bonsai
+      tier sweep (off / light / full) is reported beside it. Confounds: server
+      (the fork tracks upstream 5ea87dd, 178 commits after 9d57ce456; its own
+      commits touch no server or chat code), and PrismML's published scores
+      are thinking-mode only while the ladder runs thinking suppressed.
+
+  - id: r08b
+    size_class: 9B
+    model: Qwen3.5-9B
+    match: 'qwen3\.5[-_:]9b'
+    quantization: UD-Q4_K_XL
+    adapter_tier: light
+    hf:
+      repo: unsloth/Qwen3.5-9B-MTP-GGUF
+      revision: 9716a636ee4bddc3fed678220b7a33dd2a4160ae
+      file: Qwen3.5-9B-UD-Q4_K_XL.gguf
+      size: 6135034208
+      sha256: 362f85a2d7dbc0259e926d5ac33ca0d0f17fd3753496d65bfd2106384c929d3f
+    serve: >
+      The mini's 3090 Ti, llama.cpp built on the mini at production's commit
+      9d57ce456 for sm_86, bound to localhost, production's flags (no mmproj),
+      with --temp 1.0 --top-k 20 --top-p 0.95 --min-p 0.05.
+    notes: >
+      The same architecture, tokenizer and tool-call format as r27b, one
+      generation older (Qwen3.5 vs 3.8) — Qwen3.8 has no mid size. The -MTP
+      build matches production's file layout and Unsloth template. You run
+      this model today as qwen3.5:9b, the router's fallback.
+
+  - id: r09b-ornith
+    size_class: 9B (agentic RL)
+    model: Ornith-1.5-9B (ornith-ai; Qwen3.5-9B base, agentic-coding RL)
+    match: 'ornith-1\.5-9b'
+    quantization: Q4_K_M
+    adapter_tier: full
+    hf:
+      repo: ornith-ai/Ornith-1.5-9B-GGUF
+      revision: abdd624b12ebf020b767fff532ff44fe552b28c3
+      file: Ornith-1.5-9B-Q4_K_M.gguf
+      size: 5780090816
+      sha256: 70c112196e0b7023803c9762752e46d29e612a92c83f995bc3ba1ceb07e8fab6
+    serve: >
+      The mini's 3090 Ti, the same llama.cpp 9d57ce456 build and flags as r08b (no mmproj),
+      with --temp 1.0 --top-k 20 --top-p 0.95 --min-p 0.05; thinking suppressed like every rung.
+    notes: >
+      Side by side with r08b: same size and architecture (qwen35; the same parameter count as
+      Qwen3.5-9B's MTP build), so the difference is mostly the agentic training. Two confounds,
+      labelled, not fixed here: the quantizer (the official llama.cpp Q4_K_M here vs Unsloth
+      UD-Q4_K_XL for r08b), and the adapter tier — the daemon gives it `full` by default because
+      its file name matches no config/model_registry.yaml entry (evidence for WP-X.28). The
+      card does not declare base_model; "Qwen3.5-9B base" is the vendor's description.
+
+  - id: r04b
+    size_class: 4B
+    model: Qwen3.5-4B
+    match: 'qwen3\.5[-_:]4b'
+    quantization: UD-Q4_K_XL
+    adapter_tier: light
+    on_disk: none
+    notes: Later run (unsloth/Qwen3.5-4B-MTP-GGUF), for the Mac / low tier.
+
+  - id: r02b
+    size_class: 2B
+    model: Qwen3.5-2B
+    match: 'qwen3\.5[-_:]2b'
+    quantization: Q8_0
+    adapter_tier: light
+    on_disk: none
+    notes: Proposed for a later run. Small models lose the most to quantization; Q8_0 keeps it out.
+
+  - id: r26b-moe
+    size_class: 26B-A4B MoE
+    model: gemma-4-26B-A4B-it
+    match: 'gemma-4-26b-a4b'
+    quantization: Q4_K_M
+    adapter_tier: light
+    on_disk: 4090 (GGUF, an April revision with a pre-July template); WP-2.3's Apple Silicon run
