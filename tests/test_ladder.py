@@ -235,7 +235,7 @@ class TestPredicates:
     PLANET = r"(?:the planet )?(?:mercury|venus|earth|mars|jupiter|saturn|uranus|neptune)"
     NUM = r"-?\d+(?:[,\s]\d{3})*(?:\.\d+)?"
     REGION = r"(?:region\s*=\s*)?[a-z]+-[a-z]+-\d+"
-    MUT, MUT_SHAPE = r"1[\s,]+2[\s,]+1[\s,]+3", r"-?\d+(?:[\s,]+-?\d+)*"
+    MUT, MUT_SHAPE = r"1[\s,]+2[\s,]+1[\s,]+3", r"\(?-?\d+(?:[\s,]+-?\d+)*\)?"
     SETTLE, PY_PATH = r"(?:(?:\./|/\S*/)?src/)?billing/settle\.py(?::\d+)?", r"[\w./-]+\.py(?::\d+)?"
 
     @pytest.mark.parametrize("text, expect, shape, want", [
@@ -280,7 +280,12 @@ class TestPredicates:
         # REAL replies (qwen2.5:7b dry run, 2026-09-25) the reader misread — verbatim
         # but for the sandbox path. A tuple's own brackets are not a qualifier:
         ("So the final answer:\n\nANSWER: (1, 2, 1, 4)", MUT, MUT_SHAPE, ("fail", True)),
-        ("ANSWER: (1, 2, 1, 3)", MUT, MUT_SHAPE, ("pass", True)),
+        # ...but where the task's shape says a bracketed sequence is a value of its kind (an
+        # exact-output question), a printed tuple is a different, wrong output (a real
+        # Ornith-1.5-9B reply, 2026-09-26)
+        ("`print` displays the tuple: `(1, 2, 1, 3)`.\n\nANSWER: (1, 2, 1, 3)", MUT, MUT_SHAPE,
+         ("fail", True)),
+        ("ANSWER: (1, 2, 1, 3)", MUT, r"-?\d+(?:[\s,]+-?\d+)*", ("pass", True)),
         # a committed line that denies there is an answer, naming no value of its kind:
         ("It appears that the function `reconcile_ledger_v3` is not defined in any Python file "
          "within this project. \n\nANSWER: /tmp/sb/ws does not contain a definition for "
