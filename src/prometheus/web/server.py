@@ -4484,6 +4484,10 @@ def create_app(
         if not session_mgr:
             return JSONResponse(status_code=503, content={"error": "session manager not available"})
 
+        # Restore a cold session's recent conversation first, as every send
+        # path does, or the model answers blind after a restart.
+        if hasattr(session_mgr, "rehydrate_if_cold"):
+            session_mgr.rehydrate_if_cold(f"web:{session_id}")
         session = session_mgr.get_or_create(f"web:{session_id}")
         session.add_user_message(content)
         # pre_len AFTER the user append — the index in result.messages where

@@ -45,7 +45,12 @@ import time
 from typing import TypeGuard
 
 from prometheus.config.ephemeral import is_session_ephemeral
-from prometheus.engine.messages import ConversationMessage
+from prometheus.engine.messages import (
+    ConversationMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 
 log = logging.getLogger(__name__)
 
@@ -58,11 +63,137 @@ MAX_SESSION_MESSAGES = 50
 # being rescued.
 _REHYDRATE_WINDOW = 40
 _REHYDRATE_TOKEN_BUDGET = 8_000
+# When that window holds no clean human turn (a turn longer than the window, or
+# one big tool result that eats the budget), a restart used to restore nothing.
+# It now reads further back for the newest turn, at most this many rows...
+_REHYDRATE_MAX_DEPTH = 2_000
+_REHYDRATE_PAGE = 200
+# ...and makes that turn fit: tool results and string tool arguments longer
+# than this are shortened in the RESTORED copy only (the store keeps them whole).
+_REHYDRATE_SHORTEN_CHARS = 1_000
+# Estimated tokens reserved for the note that says what a restore left out.
+_REHYDRATE_NOTE_TOKENS = 60
 
 
 def _is_int(value: object) -> TypeGuard[int]:
     """A real int from the engine, not a bool and not a test double's stand-in."""
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_clean_human_turn(message: ConversationMessage) -> bool:
+    """A human's own message, text only: the one safe place for a restore to
+    start (anything else can open on a tool result whose call is not restored)."""
+    return (
+        message.role == "user"
+        and message.provenance == "user"
+        and all(type(b).__name__ == "TextBlock" for b in message.content)
+    )
+
+
+def _is_user_message(message: ConversationMessage) -> bool:
+    """A message someone sent (text, images), not a tool result."""
+    return message.role == "user" and not any(
+        isinstance(b, ToolResultBlock) for b in message.content
+    )
+
+
+def _message_from_part(part: object) -> ConversationMessage:
+    """A stored LCM row, back as a live message (feat/session-rehydrate)."""
+    return ConversationMessage.from_stored(
+        role=part.role,  # type: ignore[attr-defined]
+        content=part.content,  # type: ignore[attr-defined]
+        content_json=part.content_json,  # type: ignore[attr-defined]
+        provenance=getattr(part, "provenance", "user"),
+        is_trusted=getattr(part, "is_trusted", True),
+    )
+
+
+def _estimated_tokens(message: ConversationMessage) -> int:
+    return max(1, len(message.content_json) // 4)
+
+
+def _shortened(text: str, limit: int) -> str:
+    """Head and tail of ``text`` around a note saying how much was cut."""
+    if len(text) <= limit:
+        return text
+    head = limit * 2 // 3
+    return (
+        f"{text[:head]}\n[… {len(text) - limit} characters shortened at restart; "
+        f"the conversation store has the full text …]\n{text[-(limit - head):]}"
+    )
+
+
+def _shorten_tool_payloads(
+    message: ConversationMessage, limit: int
+) -> tuple[ConversationMessage, int]:
+    """A copy of ``message`` with every tool result, and every string tool
+    argument, longer than ``limit`` shortened. Returns it and how many."""
+    count = 0
+    blocks = []
+    for block in message.content:
+        if isinstance(block, ToolResultBlock) and len(block.content) > limit:
+            block = block.model_copy(update={"content": _shortened(block.content, limit)})
+            count += 1
+        elif isinstance(block, ToolUseBlock):
+            arguments = dict(block.input)
+            for key, value in block.input.items():
+                if isinstance(value, str) and len(value) > limit:
+                    arguments[key] = _shortened(value, limit)
+                    count += 1
+            if arguments != block.input:
+                block = block.model_copy(update={"input": arguments})
+        blocks.append(block)
+    if not count:
+        return message, 0
+    return message.model_copy(update={"content": blocks}), count
+
+
+def _restore_newest_turn(
+    messages: list[ConversationMessage],
+) -> tuple[list[ConversationMessage], dict[str, int]] | None:
+    """The newest human turn of ``messages`` (storage order), made to fit the
+    restore budget; None when there is no clean human turn to start from.
+
+    Tried in order, each only if the one before still does not fit:
+
+    1. the turn as it is;
+    2. with its oversized tool payloads shortened (the restored copy only);
+    3. its opening request, plus the newest part of the turn that fits,
+       starting at an assistant message so every tool result keeps its call.
+       A note on the request says how many messages were left out.
+    """
+    cut = next(
+        (i for i in range(len(messages) - 1, -1, -1) if _is_clean_human_turn(messages[i])),
+        None,
+    )
+    if cut is None:
+        return None
+    turn = messages[cut:]
+    info = {"rows_back": len(messages) - cut, "shortened": 0, "left_out": 0}
+    if sum(map(_estimated_tokens, turn)) > _REHYDRATE_TOKEN_BUDGET:
+        pairs = [_shorten_tool_payloads(m, _REHYDRATE_SHORTEN_CHARS) for m in turn]
+        turn = [m for m, _ in pairs]
+        info["shortened"] = sum(n for _, n in pairs)
+    costs = [_estimated_tokens(m) for m in turn]
+    if sum(costs) <= _REHYDRATE_TOKEN_BUDGET:
+        return turn, info
+    room = _REHYDRATE_TOKEN_BUDGET - costs[0] - _REHYDRATE_NOTE_TOKENS
+    start, used = len(turn), 0
+    for j in range(len(turn) - 1, 0, -1):
+        used += costs[j]
+        if used > room:
+            break
+        if turn[j].role == "assistant":
+            start = j
+    left_out = start - 1
+    note = TextBlock(text=(
+        f"[Restored after a restart: {left_out} message(s) of this turn, between this "
+        "request and what follows, are left out here to fit the context. The "
+        "conversation store has them in full.]"
+    ))
+    request = turn[0].model_copy(update={"content": [*turn[0].content, note]})
+    info["left_out"] = left_out
+    return [request, *turn[start:]], info
 
 
 class ChatSession:
@@ -622,7 +753,7 @@ class ChatSession:
                 self._lcm_persisted_len = idx
 
     def rollback_to(self, length: int) -> int:
-        """Discard every message appended past ``length``. Returns the count.
+        """Discard the failed turn's own messages past ``length``. Returns how many.
 
         The span twin of :meth:`rollback_last`, for the in-place ``run_loop``
         contract :meth:`persist_loop_result` describes: a turn that dies
@@ -638,28 +769,45 @@ class ChatSession:
         truncated the offending result away, but it cannot fire before round
         ``microcompact_after_turns`` — and the turn dies on round 0.
 
-        Durable rows stay in LCM (append-only, unchanged) but the watermark
-        retreats for each freed position, so the NEXT message written there
-        persists instead of being skipped as already-written, and the
-        numbering re-anchors so that message does not take a discarded
-        durable row's turn_index.
+        One kind of row past ``length`` is NOT the failed turn's: a message the
+        user sent while the turn was running. It was saved the moment it
+        arrived (above the turn's still-unsaved tail), so it is kept, in its
+        order, right behind ``length``. Dropping it used to leave it in the
+        store while the model never saw it again.
+
+        Discarded durable rows stay in LCM (append-only, unchanged) but the
+        watermark retreats for each freed position, so the NEXT message
+        written there persists instead of being skipped as already-written,
+        and the numbering re-anchors so new rows land above every saved one.
         """
         length = max(0, length)
-        discarded = len(self.messages) - length
-        if discarded <= 0:
+        if len(self.messages) <= length:
             return 0
-        del self.messages[length:]
-        if self._lcm_persisted_len > length or any(
-            idx >= length for idx in self._lcm_persisted_ahead
-        ):
-            # A discarded row was durable (the turn's user row, or a message
-            # sent mid-turn): the next rows must be numbered above it.
+        tail = list(enumerate(self.messages[length:], start=length))
+        kept = [
+            message for position, message in tail
+            if self._is_saved(position) and _is_user_message(message)
+        ]
+        if any(self._is_saved(position) for position, _ in tail):
+            # A row past ``length`` is durable (kept or not): the next rows
+            # must be numbered above it.
             self._turn_index_anchored = False
-        for idx in range(length, length + discarded):
-            self._lcm_persisted_ahead.discard(idx)
-        if self._lcm_persisted_len > length:
-            self._lcm_persisted_len = length
-        return discarded
+        del self.messages[length:]
+        self.messages.extend(kept)
+        # The kept rows now sit at length, length + 1, ...; all of them saved.
+        ahead = {i for i in self._lcm_persisted_ahead if i < length}
+        ahead.update(range(length, length + len(kept)))
+        watermark = min(self._lcm_persisted_len, length)
+        while watermark in ahead:
+            ahead.discard(watermark)
+            watermark += 1
+        self._lcm_persisted_len = watermark
+        self._lcm_persisted_ahead = ahead
+        return len(tail) - len(kept)
+
+    def _is_saved(self, position: int) -> bool:
+        """``self.messages[position]`` is already written to LCM (or settled)."""
+        return position < self._lcm_persisted_len or position in self._lcm_persisted_ahead
 
     def get_messages(self) -> list[ConversationMessage]:
         """Return the conversation history."""
@@ -842,11 +990,17 @@ class SessionManager:
         - the restored tail STARTS at a clean human turn (role user,
           provenance user, text-only). Cutting at a count or rowid can
           orphan a ToolResultBlock from its tool_use — a hard 400 from
-          every provider. No clean turn in the window → restore nothing
-          (fail closed: exactly today's behaviour).
+          every provider.
         - the window is capped by rows AND estimated tokens, so the loop
           is never handed an initial set the compactor structurally cannot
           rescue (single-pass, and off by default).
+        - when that window holds no clean human turn (one big tool result,
+          or a turn longer than the window), the restore does NOT give up:
+          it restores the newest human turn, read from further back if
+          needed, and makes it fit the same budget by shortening oversized
+          tool payloads and, for a very long turn, keeping its request plus
+          its newest rounds (``_restore_newest_turn``). Only a session with
+          no clean human turn at all restores nothing.
         """
         if not self.rehydrate_enabled:
             return 0
@@ -887,28 +1041,35 @@ class SessionManager:
             kept.append(part)
         kept.reverse()
 
-        converted = [
-            ConversationMessage.from_stored(
-                role=p.role,
-                content=p.content,
-                content_json=p.content_json,
-                provenance=getattr(p, "provenance", "user"),
-                is_trusted=getattr(p, "is_trusted", True),
-            )
-            for p in kept
-        ]
+        converted = [_message_from_part(p) for p in kept]
         start = next(
-            (
-                i for i, m in enumerate(converted)
-                if m.role == "user"
-                and m.provenance == "user"
-                and all(type(b).__name__ == "TextBlock" for b in m.content)
-            ),
-            None,
+            (i for i, m in enumerate(converted) if _is_clean_human_turn(m)), None
         )
-        if start is None:
-            return 0
-        converted = converted[start:]
+        if start is not None:
+            converted = converted[start:]
+            detail = f"window {len(parts)} rows, boundary trimmed {start}"
+        else:
+            # No clean human turn in the budgeted window: a turn longer than
+            # the window, or one big tool result that ate the budget. This
+            # used to restore NOTHING and the model started blind. Restore the
+            # newest turn instead, made to fit (see _restore_newest_turn).
+            try:
+                deeper = self._rows_back_to_a_human_turn(store, session_id, parts)
+            except Exception:
+                log.warning(
+                    "rehydrate_if_cold: reading further back failed for %s — "
+                    "starting cold", session_id, exc_info=True,
+                )
+                return 0
+            restored = _restore_newest_turn(deeper)
+            if restored is None:
+                return 0  # no human turn to start from: nothing safe to restore
+            converted, info = restored
+            detail = (
+                f"newest turn from {info['rows_back']} rows back, "
+                f"{info['shortened']} tool payload(s) shortened, "
+                f"{info['left_out']} message(s) left out"
+            )
 
         try:
             # The SESSION's next free index, not one past the restored window:
@@ -932,11 +1093,31 @@ class SessionManager:
             # the cold check and here — its live set wins.
             return 0
         log.info(
-            "rehydrate: %s restored %d message(s) (window %d rows, "
-            "boundary trimmed %d)",
-            session_id, len(converted), len(parts), start,
+            "rehydrate: %s restored %d message(s) (%s)",
+            session_id, len(converted), detail,
         )
         return len(converted)
+
+    def _rows_back_to_a_human_turn(
+        self, store: object, session_id: str, parts: list
+    ) -> list[ConversationMessage]:
+        """The session's newest rows (storage order), read back page by page
+        until they include a clean human turn or reach _REHYDRATE_MAX_DEPTH."""
+        messages = [_message_from_part(p) for p in parts]
+        oldest = getattr(parts[0], "row_id", 0) if parts else 0
+        depth = len(parts)
+        while oldest and depth < _REHYDRATE_MAX_DEPTH and not any(
+            _is_clean_human_turn(m) for m in messages
+        ):
+            page, _more = store.messages_page(  # type: ignore[attr-defined]
+                limit=_REHYDRATE_PAGE, before=oldest, session_id=session_id
+            )
+            if not page:
+                break
+            messages = [_message_from_part(p) for p in page] + messages
+            oldest = page[0].row_id
+            depth += len(page)
+        return messages
 
     def get(self, session_id: str) -> "ChatSession | None":
         """Return the existing session for ``session_id``, or None.
