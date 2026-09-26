@@ -597,6 +597,10 @@ class DiscordAdapter(BasePlatformAdapter):
         await self._add_reaction(message, REACTION_PROCESSING)
 
         session_id = event.session_key()  # "discord:<channel_id>"
+        # Restore a cold session's recent conversation first, as the other
+        # gateways do, or the model answers blind after a restart.
+        if hasattr(self.session_manager, "rehydrate_if_cold"):
+            self.session_manager.rehydrate_if_cold(session_id)
         session = self.session_manager.get_or_create(session_id)
         session.add_user_message(event.text)
         pre_len = len(session.get_messages())

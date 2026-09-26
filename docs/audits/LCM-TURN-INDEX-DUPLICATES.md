@@ -421,21 +421,25 @@ re-creates the guard.
   - 0.52 s.
 - **Beacon clients** (desktop and iOS) key and page on `message_id`. Both cache `ordinal`, and one
   display sort in the desktop client orders by it; unique values make that sort correct. No client
-  change is needed. Some of their comments still call `ordinal` non-unique; the PR lists them as a
-  Beacon follow-up.
+  change is needed. A few of their comments still describe `ordinal` as non-unique; that is tracked
+  privately.
 
 ## 6. Found in passing (not part of this defect)
 
 1. **Golden-trace exporter `LIMIT 500`** (`golden_trace_exporter.py:102`). `get_messages(limit=500)`
    is ascending, so for any call after a session's 500th message the resolver sees context from around
    row 500. 2,473 golden calls differ for this reason alone, and 642 more in combination with the
-   ordering problem. It needs a "rows before `ts`, newest first, then reversed" read.
+   ordering problem. It needs a "rows before `ts`, newest first, then reversed" read. Fixed by #586.
 2. **A failed WS turn drops a durable mid-turn user message from the conversation** (P6). The row
-   stays in LCM, but the model never sees it again.
+   stays in LCM, but the model never sees it again. Fixed in the rehydrate follow-up to #587: the
+   rollback now keeps it.
 3. **Rehydrate declines entirely** whenever the newest 8,000 tokens hold no clean human turn, for
    example after one large tool result. That is a context-loss problem ("the model starts blind") in
    its own right, separate from the numbering: 9 of the restarts since 08-31 in affected sessions.
+   Fixed in the same follow-up: a restart restores the newest human turn instead of nothing, and
+   the send paths that never asked (`inject_turn`, `POST /api/chat`, Slack, Discord) now do.
 4. `add_user_message`'s return value is not the durable ordinal after rehydrate or trim (see §5.1).
+   Fixed by #587.
 
 ## Appendix: reproduction
 

@@ -2209,6 +2209,11 @@ class TelegramAdapter(BasePlatformAdapter):
         non-Telegram session the turn still runs and persists, but this adapter
         cannot deliver the reply.
         """
+        # A task result after a restart must not run blind: restore the
+        # conversation first, as the human send paths do. Without this the
+        # injected row also warmed the session, so nothing restored it later.
+        if hasattr(self.session_manager, "rehydrate_if_cold"):
+            self.session_manager.rehydrate_if_cold(session_id)
         session = self.session_manager.get_or_create(session_id)
         response_text = await self._run_agent_turn(
             session,
