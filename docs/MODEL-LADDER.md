@@ -367,13 +367,16 @@ change.
 - The loop writes a repaired call's repair count only when the call executes (or times out); a
   repaired call that then fails is recorded with 0. The ladder counts repairs from the per-call
   observer instead.
-- **Tier `full` cannot read XML tool calls.** At `full` the tools are withheld from the request, so
-  llama-server's own parser has nothing to parse against, and Prometheus's extractor reads JSON
-  only. A model trained on Qwen3-Coder XML calls (Qwen3.5 / 3.8, Bonsai 2) keeps writing them:
-  a reply that is only the XML is stripped and retried (`stripped_to_empty`), and XML after prose
-  is deleted silently — the prose becomes the answer. Seen in real Bonsai 2 output (the smoke's
-  `parse_disagreement` halts and "Let me use Python…" format misses). The ladder counts
-  XML-markup turns per run so the tier sweep shows it; it cannot recover the deleted calls.
+- **Tier `full` could not read XML tool calls — until #582, after the first run.** At `full` the
+  tools are withheld from the request, so llama-server's own parser has nothing to parse against,
+  and until WP-X.28 PR 1 (#582) Prometheus's extractor read JSON only. A model trained on
+  Qwen3-Coder XML calls (Qwen3.5 / 3.8, Bonsai 2) keeps writing them: a reply that was only the XML
+  was stripped and retried (`stripped_to_empty`), and XML after prose was deleted silently — the
+  prose became the answer. Seen in real Bonsai 2 output (the smoke's `parse_disagreement` halts and
+  "Let me use Python…" format misses). #582 reads the XML at `full`; the first run's smokes and
+  sweeps were measured before it, and the ladder has not re-measured `full` since. The ladder
+  counts XML-markup turns per run either way, so a re-sweep shows whether the calls are now read
+  (`calls from text` rises, parse-disagreement halts fall).
 - At `full` the model never sees parameter schemas (the tool list is name: description; the schema
   exists only inside the grammar and a retry prompt), and at `light` it gets two call formats at
   once (the template's XML block and the formatter's JSON instruction).
@@ -476,6 +479,14 @@ WP-2.1's end-to-end proof, on the rungs decided on 2026-09-25 plus Ornith-1.5-9B
 pinned by revision and SHA-256 (`rungs.yaml`); every run was thinking-suppressed, `--no-judge`
 (the one judged smoke task is `unscored`), 3 runs per task, from one harness host (this Mac).
 
+**The daemon code measured is main at `27399d4` (#572)**, the base this branch had when the runs
+were made; the `harness` commit ids in the reports are this branch's commits from before it was
+rebased. Of what main has merged since, one change sits on the ladder's path and changes behaviour:
+**#582 (WP-X.28 PR 1), which makes tier `full` read Qwen's XML tool calls**. Everything below about
+tier `full` describes the code before it (#570 moved the routing step without changing it; #580's
+identity line is written by the model router, which ladder runs do not use). Nothing here was
+re-measured after the rebase.
+
 | rung | model (quant) | served on | server | tier |
 |---|---|---|---|---|
 | `r27b` | Qwen3.8-27B (Unsloth UD-Q4_K_XL, the 08-14 upload) | the 4090, **production, untouched** — run 06:31–06:36, llama-server PID, uptime and VRAM identical before and after | llama.cpp `9d57ce456` (production's own) | light |
@@ -542,22 +553,26 @@ Paired by task (mean per-task difference in task success, 95% bootstrap interval
 
 - **Off ≈ light for all three.** With native tools in the request, llama-server's own parser
   reads the Qwen3-Coder XML calls; at light the adapter recovered almost nothing from text (at most
-  0.04 calls per run) and repaired nothing. **Full costs 16–30 points** for every model: full withholds the native tools, so the
-  model's trained XML calls reach Prometheus as text, which the JSON-only extractor cannot read —
-  a reply that is only XML is stripped and retried (parse disagreements), and XML after prose is
-  deleted silently, leaving the prose as the answer (the "Let me search the codebase." format
-  misses, and many of the wrong answers). Full does not help the weaker model either: the 9B
-  loses less than the others but still 16 points.
+  0.04 calls per run) and repaired nothing. **Full cost 16–30 points** for every model, before
+  #582: full withholds the native tools, so the model's trained XML calls reach Prometheus as
+  text, which the extractor then read as JSON only — a reply that was only XML was stripped and
+  retried (parse disagreements), and XML after prose was deleted silently, leaving the prose as the
+  answer (the "Let me search the codebase." format misses, and many of the wrong answers). Full
+  did not help the weaker model either: the 9B lost less than the others but still 16 points. How
+  much of the gap #582 closes is not measured here.
 - **Ornith vs Qwen3.5-9B** (same size and base, so mostly the agentic training): at light they are
   level within the intervals (191/203 vs 187/204). At full Ornith loses the most of any model
   (−0.30): it writes the most XML-markup turns (2.51 per run vs 1.34) and the most format misses
-  (15 vs 2). Its agentic training leans harder on the trained call format, which tier full breaks.
+  (15 vs 2). Its agentic training leans harder on the trained call format, which tier full broke
+  before #582.
   Confounds, labelled: the quantizer (official Q4_K_M vs Unsloth UD-Q4_K_XL), and the tier — the
   daemon gives Ornith `full` by default because its file name matches no registry entry.
 - **Evidence for WP-X.28, not changed here.** Qwen3.8 derivatives (Bonsai 2 27B included) and
   Qwen3.5 derivatives (Ornith) behave like tier-light models — native XML tool calls, off ≈ light,
   full much worse — but the daemon puts both at `full` because their file names do not contain
   `qwen3`. `config/model_registry.yaml` and the adapter are untouched in this work package.
+  #582 (WP-X.28 PR 1) has since made `full` read the XML; it does not change which tier these
+  models get. A re-sweep on main would measure what #582 recovers — not run here.
 - **The 4-rung comparison therefore reads at light**: the 27B and the 9B ran their rung smokes at
   light; Bonsai's and Ornith's rung smokes ran at the daemon's pick (full), and their sweeps give
   the light numbers for the three tool-using classes.
