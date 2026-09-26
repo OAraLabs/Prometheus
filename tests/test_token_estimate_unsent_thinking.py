@@ -42,12 +42,16 @@ def assistant(*blocks) -> ConversationMessage:
     return ConversationMessage(role="assistant", content=list(blocks))
 
 
+@pytest.mark.parametrize("reply", ["Done.", "Voilà — “naïve” café, 30°C. 日本語の答え。" * 20],
+                         ids=["ascii", "non-ascii"])
 @pytest.mark.parametrize("signature", [None, ""], ids=["no-signature", "empty-signature"])
-def test_an_unsigned_thought_adds_nothing(signature):
+def test_an_unsigned_thought_adds_nothing(signature, reply):
+    # Exactly nothing: what remains is measured by content_json itself, so a
+    # non-ASCII reply costs what it costs without the thought.
     with_thought = assistant(ThinkingBlock(thinking=THOUGHT, signature=signature),
-                             TextBlock(text="Done."))
+                             TextBlock(text=reply))
     assert estimate_message_tokens(with_thought) == estimate_message_tokens(
-        assistant(TextBlock(text="Done.")))
+        assistant(TextBlock(text=reply)))
 
 
 def test_a_thinking_only_turn_costs_what_an_empty_turn_costs():
@@ -71,13 +75,26 @@ def test_thinking_anthropic_sends_back_still_counts(block):
               ToolUseBlock(id="toolu_1", name="read_file", input={"path": "a.txt"})),
     ConversationMessage(role="user", content=[
         ToolResultBlock(tool_use_id="toolu_1", content="line one\nline two\n" * 40)]),
+    # As the gateway builds an upload: the bytes live on disk (source_path),
+    # and content_json stores the reference, not the ~400k-char payload.
     ConversationMessage(role="user", content=[
-        TextBlock(text="look"), ImageBlock(media_type="image/png", data="iVBORw0KGgo=")]),
+        TextBlock(text="look"),
+        ImageBlock(media_type="image/png", data="iVBORw0KGgo=" * 33_000,
+                   source_path="/cache/uploads/x.png")]),
 ], ids=["user-text", "tool-use", "tool-result", "image"])
 def test_a_message_without_unsent_thinking_is_estimated_exactly_as_before(msg):
     # The compaction golden records exact token figures: nothing but the
     # thinking may move them.
     assert estimate_message_tokens(msg) == estimate_tokens(msg.content_json)
+
+
+def test_an_upload_beside_an_unsent_thought_still_costs_its_reference_not_its_bytes():
+    image = ImageBlock(media_type="image/png", data="iVBORw0KGgo=" * 33_000,
+                       source_path="/cache/uploads/x.png")
+    with_thought = ConversationMessage(role="user", content=[
+        ThinkingBlock(thinking=THOUGHT), TextBlock(text="look"), image])
+    without = ConversationMessage(role="user", content=[TextBlock(text="look"), image])
+    assert estimate_message_tokens(with_thought) == estimate_message_tokens(without) < 200
 
 
 def test_the_message_itself_keeps_its_thought():
