@@ -26,6 +26,7 @@ from prometheus.router.model_router import (
     TaskType,
     _build_adapter_for,
     load_router_config,
+    read_router_config,
 )
 
 
@@ -278,13 +279,11 @@ class TestFallbackNeverReturnsTheFailedProvider:
         with caplog.at_level(logging.WARNING, logger="prometheus.router.model_router"):
             assert _try_model_fallback(ctx) is None
 
-        [warning] = [r for r in caplog.records if r.name == "prometheus.router.model_router"]
-        assert warning.levelno == logging.WARNING
-        message = warning.getMessage()
+        [message] = _router_warnings(caplog).splitlines()
         assert "no fallback left" in message
         # Names the provider that failed, and why the one entry was passed over.
         assert "after ollama failed" in message
-        assert "[0] ollama/qwen3.5:9b: skipped, ollama is what failed" in message
+        assert "ollama/qwen3.5:9b: skipped, ollama is what failed" in message
 
     def test_an_entry_that_cannot_be_built_is_named_in_the_warning(self, monkeypatch, caplog):
         monkeypatch.delenv("ROUTER_TEST_UNSET_KEY", raising=False)
@@ -632,7 +631,7 @@ class TestRuleAndFallbackFields:
             ]}})
 
         assert cfg.task_rules == []
-        assert "router.rules[0] refused: missing provider" in _router_warnings(caplog)
+        assert _router_warnings(caplog) == "router.rules[0] ?/m refused: missing provider"
 
     def test_a_rule_whose_key_is_not_set_says_so_once(self, monkeypatch, caplog):
         # Honouring api_key_env means an unset variable now fails the build
@@ -658,6 +657,62 @@ class TestRuleAndFallbackFields:
 
         assert cfg.fallback_chain == []
         assert "router.fallback[0]" in _router_warnings(caplog)
+
+    def test_a_fallback_entry_without_a_provider_is_refused_at_load(self, caplog):
+        # It used to build a llama.cpp provider on localhost:8080 by default.
+        with caplog.at_level(logging.WARNING, logger="prometheus.router.model_router"):
+            cfg = load_router_config({"router": {"fallback": [
+                {"base_url": "http://ollama-box:11434", "model": "qwen3.5:9b"},
+            ]}})
+
+        assert cfg.fallback_chain == []
+        assert _router_warnings(caplog) == (
+            "router.fallback[0] ?/qwen3.5:9b refused: missing provider")
+
+    def test_each_refused_entry_is_one_warning_naming_it_and_its_key(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="prometheus.router.model_router"):
+            cfg = load_router_config({"router": {
+                "fallback": [
+                    LIVE_SHAPED_CHAIN[0],
+                    {"provider": "llama_cpp", "model": "q", "api_key_env": "K"},
+                ],
+                "rules": [
+                    {"task_type": "reasoning", "provider": "openai", "model": "g",
+                     "api_key_evn": "K", "timout": 5},
+                ],
+            }})
+
+        assert cfg.fallback_chain == [LIVE_SHAPED_CHAIN[0]]
+        fallback_line, rule_line = _router_warnings(caplog).splitlines()
+        assert fallback_line.startswith("router.fallback[1] llama_cpp/q refused: api_key_env is not read")
+        assert rule_line.startswith("router.rules[0] openai/g refused: api_key_evn, timout are not read")
+        assert cfg.problems == [fallback_line, rule_line]
+
+    def test_read_router_config_logs_nothing(self, caplog):
+        # /doctor reads the same parse; it must not re-log the boot WARNINGs.
+        with caplog.at_level(logging.DEBUG, logger="prometheus.router.model_router"):
+            cfg = read_router_config({"router": {"fallback": [{"provider": "x"}]}})
+
+        assert cfg.problems == ["router.fallback[0] x/? refused: unknown provider 'x'"]
+        assert not caplog.records
+
+    @pytest.mark.parametrize("section", ["smart_routing", "escalation", "overrides"])
+    def test_an_empty_router_subsection_does_not_break_boot(self, section):
+        # `smart_routing:` with nothing under it is YAML null, and .get on it
+        # raised out of load_router_config — which the daemon calls at boot.
+        cfg = load_router_config({"router": {section: None}})
+
+        assert cfg.problems == []
+
+    def test_a_malformed_name_cannot_take_the_load_down(self, caplog):
+        # A label that formats a 4300-digit int raises; the load must not.
+        with caplog.at_level(logging.INFO, logger="prometheus.router.model_router"):
+            cfg = load_router_config({"router": {"rules": [
+                {"task_type": "code_generation", "provider": "llama_cpp", "model": HUGE_INT},
+            ], "fallback": [{"provider": "llama_cpp", "model": HUGE_INT, "bogus": 1}]}})
+
+        assert len(cfg.task_rules) == 1
+        assert "router.fallback[0] llama_cpp/<int> refused" in _router_warnings(caplog)
 
     def test_a_refusal_never_logs_a_value(self, caplog):
         with caplog.at_level(logging.DEBUG, logger="prometheus.router.model_router"):

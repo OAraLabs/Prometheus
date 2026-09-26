@@ -86,6 +86,41 @@ def match_model(model_name: str, registry: dict) -> dict | None:
     return None
 
 
+def check_router(config: dict) -> DiagnosticCheck | None:
+    """The router: entries boot skipped, and why — or None when there is no
+    router to speak of (no rules, no fallback, nothing refused).
+
+    Reads the same parse the daemon boots with, so this row and the boot
+    WARNINGs cannot disagree. A refused entry does not stop the daemon; it
+    is skipped, which is exactly why it has to be visible somewhere other
+    than a journal line.
+    """
+    from prometheus.router.model_router import read_router_config
+
+    try:
+        rc = read_router_config(config)
+    except Exception as exc:  # noqa: BLE001 — a doctor row, never a crash
+        return DiagnosticCheck(
+            name="Router", category="platform", status="warning",
+            message=f"could not read the router: section ({type(exc).__name__}: {exc})",
+        )
+    if rc.problems:
+        return DiagnosticCheck(
+            name="Router", category="platform", status="warning",
+            message=f"{len(rc.problems)} skipped at boot: " + "; ".join(rc.problems),
+            fix="Correct or remove each entry named above in the router: section "
+                "of prometheus.yaml. Until then it is skipped and everything "
+                "else runs.",
+        )
+    if not (rc.task_rules or rc.fallback_chain):
+        return None
+    return DiagnosticCheck(
+        name="Router", category="platform", status="ok",
+        message=f"{len(rc.task_rules)} rule(s), {len(rc.fallback_chain)} fallback entr"
+                f"{'y' if len(rc.fallback_chain) == 1 else 'ies'}",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Doctor
 # ---------------------------------------------------------------------------
@@ -138,6 +173,7 @@ class Doctor:
         checks.append(self._check_python_version())
         checks.append(self._check_uv())
         checks.append(self._check_config_valid())
+        checks.append(check_router(self.config))
         checks.append(self._check_data_dir())
         checks.append(self._check_bootstrap_files())
         checks.append(self._check_dependencies())

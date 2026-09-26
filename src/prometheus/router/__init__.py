@@ -14,6 +14,7 @@ from prometheus.router.model_router import (
     TaskClassifier,
     TaskType,
     load_router_config,
+    read_router_config,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "TaskClassifier",
     "TaskType",
     "load_router_config",
+    "read_router_config",
 ]

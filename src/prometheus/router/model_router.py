@@ -245,6 +245,11 @@ class RouterConfig:
     overrides_enabled: bool = True
     overrides_sticky: bool = True
 
+    # What read_router_config refused, one line per entry, naming the entry
+    # and the key. load_router_config logs each as a WARNING at boot, and
+    # /doctor shows them. A refused entry is skipped; the daemon still starts.
+    problems: list[str] = field(default_factory=list)
+
 
 # ── Per-session override (Phase 3.5) ──────────────────────────────
 
@@ -1120,7 +1125,7 @@ class ModelRouter:
 
         passed_over: list[str] = []
         for i, (cfg, cached) in enumerate(self._fallback_cache):
-            label = f"[{i}] {_entry_provider(cfg)}/{cfg.get('model') or '?'}"
+            label = _entry_label(cfg)
             if failed_provider_name and _entry_provider(cfg) == failed_provider_name:
                 passed_over.append(f"{label}: skipped, {failed_provider_name} is what failed")
                 continue
@@ -1130,7 +1135,7 @@ class ModelRouter:
                 except Exception as exc:
                     # By label, never the entry itself: it can hold an api_key.
                     reason = f"{label}: could not be built ({type(exc).__name__}: {exc})"
-                    log.warning("router.fallback%s", reason)
+                    log.warning("router.fallback %s", reason)
                     passed_over.append(reason)
                     continue
                 self._fallback_cache[i] = (cfg, cached)
@@ -1244,6 +1249,22 @@ def _entry_provider(entry: Mapping[str, Any]) -> Any:
     return entry.get("provider", "llama_cpp")
 
 
+def _printable(value: Any) -> str:
+    """A config value for a log line, or its type. YAML can put a list, a map
+    or an int str() refuses (a 4300-digit hex literal) where a name belongs,
+    and a label that raises would take boot down with it."""
+    if value is None:
+        return "?"
+    return value if isinstance(value, str) else f"<{type(value).__name__}>"
+
+
+def _entry_label(entry: Any) -> str:
+    """provider/model — never the whole entry, which can hold an api_key."""
+    if not isinstance(entry, Mapping):
+        return f"<{type(entry).__name__}>"
+    return f"{_printable(entry.get('provider'))}/{_printable(entry.get('model') or None)}"
+
+
 def _entry_refusal(entry: Any, own_keys: frozenset[str]) -> str | None:
     """Why a rule or fallback entry cannot be loaded as written, or None.
 
@@ -1253,7 +1274,9 @@ def _entry_refusal(entry: Any, own_keys: frozenset[str]) -> str | None:
 
     if not isinstance(entry, Mapping):
         return f"expected a mapping, got {type(entry).__name__}"
-    provider = _entry_provider(entry)
+    if "provider" not in entry:
+        return "missing provider"
+    provider = entry["provider"]
     if not isinstance(provider, str):
         return f"provider must be a name, got {type(provider).__name__}"
     if provider not in PROVIDER_CONFIG_KEYS:
@@ -1268,10 +1291,10 @@ def _entry_refusal(entry: Any, own_keys: frozenset[str]) -> str | None:
     return None
 
 
-def _parse_task_rules(rules_config: list | None) -> list[RoutingRule]:
+def _parse_task_rules(rules_config: list | None, problems: list[str]) -> list[RoutingRule]:
     """Parse task-type routing rules from config (Phase 1.5).
 
-    A rule that cannot be loaded as written is refused with a WARNING and
+    A rule that cannot be loaded as written is refused into ``problems`` and
     skipped rather than raising, so a typo in one rule doesn't break the
     whole daemon — and never loaded with a key dropped, which would build its
     provider from defaults (a rule's api_key_env quietly became the
@@ -1287,7 +1310,7 @@ def _parse_task_rules(rules_config: list | None) -> list[RoutingRule]:
             except ValueError as e:
                 refusal = str(e)
         if refusal is not None:
-            log.warning("router.rules[%d] refused: %s", i, refusal)
+            problems.append(f"router.rules[{i}] {_entry_label(r)} refused: {refusal}")
             continue
         rules.append(
             RoutingRule(
@@ -1305,11 +1328,11 @@ def _parse_task_rules(rules_config: list | None) -> list[RoutingRule]:
     return rules
 
 
-def _parse_fallback_chain(chain_config: list | None) -> list[dict]:
+def _parse_fallback_chain(chain_config: list | None, problems: list[str]) -> list[dict]:
     """The router.fallback entries that can be loaded as written.
 
-    An entry carrying a key its provider never reads is refused with a
-    WARNING, the same as a rule: kept, it would build a provider that
+    An entry carrying a key its provider never reads is refused into
+    ``problems``, the same as a rule: kept, it would build a provider that
     silently ignores that key.
     """
     chain: list[dict] = []
@@ -1318,29 +1341,37 @@ def _parse_fallback_chain(chain_config: list | None) -> list[dict]:
         if refusal is None:
             chain.append(entry)
         else:
-            log.warning("router.fallback[%d] refused: %s", i, refusal)
+            problems.append(f"router.fallback[{i}] {_entry_label(entry)} refused: {refusal}")
     return chain
 
 
-def load_router_config(config: dict) -> RouterConfig:
-    """Parse the router: section from prometheus.yaml."""
-    rc = config.get("router", {}) or {}
-    smart = rc.get("smart_routing", {})
-    esc = rc.get("escalation", {})
-    overrides = rc.get("overrides", {})
+def read_router_config(config: dict) -> RouterConfig:
+    """Parse the router: section from prometheus.yaml, logging nothing.
 
+    Never raises on a bad entry: what cannot be loaded as written is skipped
+    and named in ``.problems``, so an upgrade that starts refusing an entry
+    still boots with everything else. /doctor reads ``.problems`` from here;
+    the daemon goes through :func:`load_router_config`, which logs them.
+    """
+    # `or {}`: a section left empty in YAML is null, and .get on it crashed boot.
+    rc = config.get("router", {}) or {}
+    smart = rc.get("smart_routing", {}) or {}
+    esc = rc.get("escalation", {}) or {}
+    overrides = rc.get("overrides", {}) or {}
+
+    problems: list[str] = []
     # A membership test, not a read: nothing reads this block, so the config
     # reference must not list it (tests/test_config_drift.py DEPRECATED_KEYS).
     if "auxiliary" in rc:
-        log.warning(
+        problems.append(
             "router.auxiliary: config key is deprecated — nothing ever routed a "
             "task through it, so no provider configured there has been used. "
             "Delete the block."
         )
 
     return RouterConfig(
-        fallback_chain=_parse_fallback_chain(rc.get("fallback", [])),
-        task_rules=_parse_task_rules(rc.get("rules", [])),
+        fallback_chain=_parse_fallback_chain(rc.get("fallback", []), problems),
+        task_rules=_parse_task_rules(rc.get("rules", []), problems),
         smart_routing_enabled=smart.get("enabled", False),
         max_simple_chars=smart.get("max_simple_chars", 160),
         max_simple_words=smart.get("max_simple_words", 28),
@@ -1352,4 +1383,25 @@ def load_router_config(config: dict) -> RouterConfig:
         # Phase 4: direct-mode provider overrides
         overrides_enabled=overrides.get("enabled", True),
         overrides_sticky=overrides.get("sticky", True),
+        problems=problems,
     )
+
+
+def load_router_config(config: dict) -> RouterConfig:
+    """Parse the router: section for the daemon: one WARNING per refused
+    entry, then one INFO line naming what did load."""
+    cfg = read_router_config(config)
+    for problem in cfg.problems:
+        log.warning("%s", problem)
+    if cfg.task_rules or cfg.fallback_chain or cfg.problems:
+        log.info(
+            "router: loaded rules [%s], fallback [%s]%s",
+            ", ".join(
+                f"{r.task_type.value} → {_printable(r.provider)}/{_printable(r.model)}"
+                for r in cfg.task_rules
+            ),
+            ", ".join(_entry_label(e) for e in cfg.fallback_chain),
+            f"; {len(cfg.problems)} refused (see the WARNINGs above, or oara doctor)"
+            if cfg.problems else "",
+        )
+    return cfg
