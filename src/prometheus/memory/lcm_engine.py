@@ -176,6 +176,10 @@ class LCMEngine:
         # real await, this must become a value threaded through the call chain
         # (tests/test_chat_done_row_id.py pins the no-coroutine property).
         self._last_ingested_row_id: int | None = None
+        # The turn_index the most recent ingest really stored: the requested one,
+        # or, when the store had to move the row (it appended it, or the index was
+        # taken), the one it chose. Same shared-slot invariant as the rowid above.
+        self._last_ingested_turn_index: int | None = None
 
         # Stats tracking.
         self._total_compactions: int = 0
@@ -230,7 +234,7 @@ class LCMEngine:
         role: str,
         content: str,
         *,
-        turn_index: int = 0,
+        turn_index: int | None = None,
         content_json: str | None = None,
         provenance: str = "user",
         is_trusted: bool = True,
@@ -241,7 +245,9 @@ class LCMEngine:
             session_id: Conversation session identifier.
             role: Message role (``"user"``, ``"assistant"``, ``"system"``).
             content: The message text.
-            turn_index: Turn counter within the session.
+            turn_index: The message's prompt position in the session, unique
+                within it. ``None`` (the default) appends: the store numbers
+                the row after every row the session already has.
             content_json: Optional lossless JSON of the structured content blocks
                 (additive — defaults to ``None``, i.e. legacy flat-text behaviour).
             provenance: Turn origin (``"user"`` / ``"task_supervisor"`` / ...).
@@ -256,14 +262,15 @@ class LCMEngine:
             role=role,
             content=content,
             session_id=session_id,
-            turn_index=turn_index,
+            turn_index=turn_index if turn_index is not None else 0,
             token_count=estimate_tokens(content),
             content_json=content_json,
             provenance=provenance,
             is_trusted=is_trusted,
         )
-        self._conv_store.add_message(session_id, msg)
+        self._conv_store.add_message(session_id, msg, append=turn_index is None)
         self._last_ingested_row_id = msg.row_id or None
+        self._last_ingested_turn_index = msg.turn_index
         return msg.message_id
 
     def ingest_sync(
@@ -272,7 +279,7 @@ class LCMEngine:
         role: str,
         content: str,
         *,
-        turn_index: int = 0,
+        turn_index: int | None = None,
         content_json: str | None = None,
         provenance: str = "user",
         is_trusted: bool = True,
@@ -299,14 +306,15 @@ class LCMEngine:
             role=role,
             content=content,
             session_id=session_id,
-            turn_index=turn_index,
+            turn_index=turn_index if turn_index is not None else 0,
             token_count=estimate_tokens(content),
             content_json=content_json,
             provenance=provenance,
             is_trusted=is_trusted,
         )
-        self._conv_store.add_message(session_id, msg)
+        self._conv_store.add_message(session_id, msg, append=turn_index is None)
         self._last_ingested_row_id = msg.row_id or None
+        self._last_ingested_turn_index = msg.turn_index
         return msg.message_id
 
     @property
@@ -318,6 +326,15 @@ class LCMEngine:
         nothing — it always reflects the last write this engine performed.
         """
         return self._last_ingested_row_id
+
+    @property
+    def last_ingested_turn_index(self) -> int | None:
+        """The ``turn_index`` the most recent ingest stored, or None before any.
+
+        ``ChatSession`` compares it with the index it asked for: when the store had
+        to move a row, the session moves its numbering with it.
+        """
+        return self._last_ingested_turn_index
 
     def is_ingested(self, message_id: str) -> bool:
         """Return ``True`` iff this message_id is durably persisted.

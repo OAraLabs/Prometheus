@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import TypeGuard
 
 from prometheus.config.ephemeral import is_session_ephemeral
 from prometheus.engine.messages import ConversationMessage
@@ -57,6 +58,11 @@ MAX_SESSION_MESSAGES = 50
 # being rescued.
 _REHYDRATE_WINDOW = 40
 _REHYDRATE_TOKEN_BUDGET = 8_000
+
+
+def _is_int(value: object) -> TypeGuard[int]:
+    """A real int from the engine, not a bool and not a test double's stand-in."""
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 class ChatSession:
@@ -78,7 +84,7 @@ class ChatSession:
         "queued_steers", "queued_prompts",
         "_lcm_engine", "_compaction_tasks",
         "_lcm_persisted_len", "_lcm_persisted_ahead",
-        "_turn_index_offset",
+        "_turn_index_offset", "_turn_index_anchored",
     )
 
     def __init__(
@@ -109,14 +115,21 @@ class ChatSession:
         # appending its unpersisted tail below it.
         self._lcm_persisted_len: int = 0
         self._lcm_persisted_ahead: set[int] = set()
-        # feat/session-rehydrate: added to each row's list index when
-        # stamping turn_index at persist time. Zero for a cold session
-        # (unchanged contract); set by restore() so rows written AFTER a
-        # rehydrate continue the durable numbering instead of colliding
-        # with the historical rows the restored tail came from — the
-        # ORDER BY turn_index readers (LCM compactor/assembler) would
-        # otherwise interleave new rows into old history.
+        # Added to each row's list position to stamp its durable turn_index
+        # at persist time. turn_index is the prompt position, unique per
+        # session (a migrated store's guard refuses a repeat), so every place
+        # the numbering (re)starts must continue above every durable row, or
+        # the ORDER BY turn_index readers (LCM compactor/assembler) zip two
+        # conversations together. restore() sets it from the store
+        # (rehydrate); trim() shifts it with the list; _anchor_turn_index()
+        # lifts it above the store's maximum at the first write after a
+        # (re)start.
         self._turn_index_offset: int = 0
+        # False until the numbering has been checked against the store. A new
+        # session starts unanchored (it may be a daemon restart, a path that
+        # never rehydrates, or a declined rehydrate), and so do clear() and a
+        # rollback that discards a durable row. See _anchor_turn_index().
+        self._turn_index_anchored: bool = False
 
     # ------------------------------------------------------------------
     # SPRINT-2 WS1 — /steer and /queue plumbing
@@ -184,8 +197,9 @@ class ChatSession:
         """Append a user-role message to the conversation. Returns its ``turn_index``.
 
         The returned turn_index is the durable per-session ordinal the message
-        is persisted under — callers use it as the ``msg-{turn_index}`` wire id
-        (e.g. the WS user-echo correlates a client_msg_id to it).
+        is persisted under (list position + the numbering offset, read after the
+        persist, which may have anchored the numbering). Callers put it on the
+        wire as ``ordinal`` (e.g. the WS user-echo).
 
         Managed-tasks sprint: ``provenance`` + ``is_trusted`` let the shared
         ``inject_turn`` primitive record a non-user, untrusted turn (e.g. a task
@@ -198,10 +212,10 @@ class ChatSession:
         LCM/MemoryExtractor — only the loop-appended tail would land
         in the durable store.
         """
-        # turn_index = position the message will occupy in self.messages
-        # AFTER the append (matches what add_result_messages will use
-        # for downstream turns).
-        new_turn_index = len(self.messages)
+        # The position the message will occupy in self.messages AFTER the
+        # append (matches what add_result_messages will use for downstream
+        # turns); its durable turn_index is position + offset.
+        position = len(self.messages)
         if blocks and provenance == "user" and is_trusted:
             # #339 (image history, Phase 3b): media blocks ride the SAME
             # message and are persisted WITH it — content_json stores the
@@ -226,8 +240,8 @@ class ChatSession:
         # turn's still-unpersisted tail (Beacon sends mid-turn; the echo
         # needs the rowid immediately). Sealing here would mark that tail
         # settled and the turn's own persist would then skip it — loss.
-        self._persist_to_lcm(new_turn_index, seal=False)
-        return new_turn_index
+        self._persist_to_lcm(position, seal=False)
+        return position + self._turn_index_offset
 
     def add_result_messages(
         self,
@@ -384,7 +398,9 @@ class ChatSession:
         next turn's persists write only genuinely new rows — and the
         turn-index offset makes those new rows continue the durable
         numbering from ``next_turn_index`` instead of colliding with the
-        history the tail was loaded from.
+        history the tail was loaded from. ``next_turn_index`` must be the
+        SESSION's next free index (``store.next_turn_index``), not one past
+        the restored window: the window can miss an older, higher-numbered run.
 
         Deliberately does NOT persist (the rows are already durable) and
         does NOT schedule compaction (nothing new was written).
@@ -399,6 +415,9 @@ class ChatSession:
         self._lcm_persisted_len = len(self.messages)
         self._lcm_persisted_ahead = set()
         self._turn_index_offset = next_turn_index - len(self.messages)
+        # The caller took next_turn_index from the store (rehydrate_if_cold):
+        # the numbering is already above every durable row.
+        self._turn_index_anchored = True
 
     def _note_persisted(self, idx: int) -> None:
         """Record that ``self.messages[idx]`` is durably written.
@@ -416,6 +435,36 @@ class ChatSession:
         elif idx > self._lcm_persisted_len:
             self._lcm_persisted_ahead.add(idx)
 
+    def _anchor_turn_index(self, first_position: int) -> None:
+        """Continue the numbering above every durable row, once per (re)start.
+
+        Called just before the first write after the numbering (re)starts: a
+        new ChatSession (a daemon restart, a path that never rehydrates, a
+        declined rehydrate), clear(), or a rollback that discarded a durable
+        row. The offset is raised just enough that ``first_position`` (the
+        lowest position not yet durable) lands on the session's next free
+        index. It is never lowered, so an anchor where nothing collides
+        changes nothing.
+
+        Deliberately NOT done on every write: a message sent mid-turn is
+        persisted at once, ABOVE the turn's still-unpersisted tail. Anchoring
+        the tail to the store's maximum then would number the tail after
+        that message and break prompt order.
+
+        A no-op when the engine has no conversation store (test fakes, an
+        engine without one): there is nothing to anchor to.
+        """
+        if self._turn_index_anchored:
+            return
+        store = getattr(self._lcm_engine, "conversation_store", None)
+        next_free = getattr(store, "next_turn_index", None)
+        floor = next_free(self.session_id) if callable(next_free) else None
+        if _is_int(floor):
+            self._turn_index_offset = max(
+                self._turn_index_offset, floor - first_position
+            )
+        self._turn_index_anchored = True
+
     def _persist_to_lcm(self, start: int, *, seal: bool) -> int | None:
         """Persist the not-yet-persisted rows of ``self.messages[start:]``
         to LCM. Best-effort — never raises. No-op when no engine is wired.
@@ -427,10 +476,13 @@ class ChatSession:
         the assistant turn's durable id without a REST re-read
         (GRAFT-MOBILE-BRIDGE 3b). It never affects persistence itself.
 
-        ``turn_index`` for each row is its index in ``self.messages`` —
-        unchanged from the original contract, but now computed per row so a
-        span with skips (an already-durable user row in the middle of a
-        turn's tail) still stamps every row with its true position.
+        ``turn_index`` for each row is its index in ``self.messages`` plus
+        the numbering offset, computed per row so a span with skips (an
+        already-durable user row in the middle of a turn's tail) still stamps
+        every row with its true position. Before the first write after the
+        numbering (re)starts, :meth:`_anchor_turn_index` lifts the offset
+        above every durable row of the session, so a new position can never
+        re-use an index the store already holds.
 
         Exact-once: rows below the watermark, and rows in the ahead-set,
         are skipped — persisting an overlapping span is a safe no-op. This
@@ -459,20 +511,35 @@ class ChatSession:
                 for i in range(max(start, self._lcm_persisted_len), end)
                 if i not in self._lcm_persisted_ahead
             ]
+            if pending:
+                # Anchor at the lowest position that is not yet durable: rows
+                # below the watermark are settled, and rows between it and
+                # pending[0] (a turn's tail under a mid-turn message) will be
+                # written later at position + offset, so they must clear the
+                # store's maximum too.
+                self._anchor_turn_index(min(pending[0], self._lcm_persisted_len))
             for i in pending:
                 msg = self.messages[i]
+                requested = i + self._turn_index_offset
                 self._lcm_engine.ingest_sync(
                     session_id=self.session_id,
                     role=msg.role,
                     content=msg.text,
                     content_json=msg.content_json,
-                    turn_index=i + self._turn_index_offset,
+                    turn_index=requested,
                     # Persist the turn's trust tag so an injected (untrusted)
                     # task result survives the LCM round-trip rather than being
                     # silently dropped to the trusted default.
                     provenance=msg.provenance,
                     is_trusted=msg.is_trusted,
                 )
+                stored = getattr(self._lcm_engine, "last_ingested_turn_index", None)
+                if _is_int(stored) and stored != requested:
+                    # The store found the index taken and moved the row (it
+                    # records that loudly). Move the numbering with it, so the
+                    # rest of this span, and later ones, do not collide row
+                    # by row: this row now sits at position + offset again.
+                    self._turn_index_offset = max(self._turn_index_offset, stored - i)
                 wrote_any = True
                 if msg.role == "assistant":
                     # The row the client's streamed bubble reconciles to. Take
@@ -540,11 +607,16 @@ class ChatSession:
         If the popped row was already durable it stays in LCM (append-only
         store; unchanged behavior) — but the watermark must retreat so the
         NEXT message at this position persists instead of being skipped as
-        already-written.
+        already-written, and the numbering re-anchors so that message gets a
+        new turn_index instead of the popped row's.
         """
         if self.messages:
             self.messages.pop()
             idx = len(self.messages)
+            if idx < self._lcm_persisted_len or idx in self._lcm_persisted_ahead:
+                # The popped row stays durable at its index; the next message
+                # at this position must be numbered above it, not on top of it.
+                self._turn_index_anchored = False
             self._lcm_persisted_ahead.discard(idx)
             if self._lcm_persisted_len > idx:
                 self._lcm_persisted_len = idx
@@ -568,13 +640,21 @@ class ChatSession:
 
         Durable rows stay in LCM (append-only, unchanged) but the watermark
         retreats for each freed position, so the NEXT message written there
-        persists instead of being skipped as already-written.
+        persists instead of being skipped as already-written, and the
+        numbering re-anchors so that message does not take a discarded
+        durable row's turn_index.
         """
         length = max(0, length)
         discarded = len(self.messages) - length
         if discarded <= 0:
             return 0
         del self.messages[length:]
+        if self._lcm_persisted_len > length or any(
+            idx >= length for idx in self._lcm_persisted_ahead
+        ):
+            # A discarded row was durable (the turn's user row, or a message
+            # sent mid-turn): the next rows must be numbered above it.
+            self._turn_index_anchored = False
         for idx in range(length, length + discarded):
             self._lcm_persisted_ahead.discard(idx)
         if self._lcm_persisted_len > length:
@@ -617,6 +697,9 @@ class ChatSession:
         # post-reset message would look already-persisted and be dropped.
         self._lcm_persisted_len = 0
         self._lcm_persisted_ahead.clear()
+        # ...but the durable numbering must NOT restart: the cleared rows keep
+        # their turn_index in the store. Re-anchor at the next write.
+        self._turn_index_anchored = False
 
     def set_lcm_engine(self, engine: object | None) -> None:
         """Point this session at an LCM engine, or at ``None`` for no durable
@@ -826,17 +909,24 @@ class SessionManager:
         if start is None:
             return 0
         converted = converted[start:]
-        kept = kept[start:]
+
+        try:
+            # The SESSION's next free index, not one past the restored window:
+            # the window can miss an older run numbered higher, and continuing
+            # from the window re-used that run's indices (the largest producer
+            # of duplicates, docs/audits/LCM-TURN-INDEX-DUPLICATES.md P3).
+            next_turn_index = store.next_turn_index(session_id)
+        except Exception:
+            log.warning(
+                "rehydrate_if_cold: could not read the next turn_index for %s — "
+                "starting cold, exactly as before the feature", session_id,
+                exc_info=True,
+            )
+            return 0
 
         session = self.get_or_create(session_id)
         try:
-            session.restore(
-                converted,
-                # +1 past the LARGEST historical turn_index in the tail, not
-                # the last row's: turn_index restarts per daemon lifetime,
-                # so the last row's value is not necessarily the max.
-                next_turn_index=max(p.turn_index for p in kept) + 1,
-            )
+            session.restore(converted, next_turn_index=next_turn_index)
         except RuntimeError:
             # Raced by a concurrent turn that warmed the session between
             # the cold check and here — its live set wins.

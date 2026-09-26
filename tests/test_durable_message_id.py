@@ -1,8 +1,9 @@
 """Durable message identity (branch fix/durable-message-id).
 
 The wire ``message_id`` is now the LCM rowid: durable, unique, monotonic, restart-stable —
-unlike the old ``msg-{turn_index}`` (the in-memory list position, which resets on restart/
-trim and repeats). These tests prove the exact properties Step 3's live smoke showed broken.
+unlike the old ``msg-{turn_index}`` (then the in-memory list position, which reset on
+restart/trim and repeated; unique per session only since the turn-index migration). These
+tests prove the exact properties Step 3's live smoke showed broken.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from prometheus.memory.lcm_conversation_store import LCMConversationStore  # noqa: E402
+from prometheus.memory.lcm_turn_index_migration import migrate_turn_index  # noqa: E402
 from prometheus.memory.lcm_types import MessagePart  # noqa: E402
 from prometheus.web.server import create_app  # noqa: E402
 
@@ -25,21 +27,27 @@ def _client(store):
 
 
 def test_duplicate_turn_index_get_distinct_message_ids(tmp_path):
-    """The Step-3 bug exactly: two rows with the SAME turn_index (e.g. a second msg-0 after a
-    restart). They must now present DISTINCT, independently-retrievable canonical ids."""
-    store = LCMConversationStore(tmp_path / "lcm.db")
+    """The Step-3 bug exactly: two rows claiming the SAME turn_index (e.g. a second msg-0 after
+    a restart). They must present DISTINCT, independently-retrievable canonical ids.
+
+    Since the turn-index migration (docs/audits/LCM-TURN-INDEX-DUPLICATES.md) the ordinal no
+    longer repeats either: on a migrated store the second row is stored at the next free index,
+    and the first is never touched."""
+    db = tmp_path / "lcm.db"
+    store = LCMConversationStore(db)
+    assert migrate_turn_index(db).status == "indexed"
     a = MessagePart(role="user", content="before restart", session_id="s", turn_index=0, timestamp=100.0)
     b = MessagePart(role="user", content="after restart", session_id="s", turn_index=0, timestamp=200.0)
     store.insert_message(a)
     store.insert_message(b)
-    assert a.turn_index == b.turn_index == 0  # same ordinal (the old collision)
+    assert (a.turn_index, b.turn_index) == (0, 1)  # moved to the next free index, not overwritten
     assert a.row_id != b.row_id  # distinct durable ids
 
     body = _client(store).get("/api/sessions/s/messages").json()
     ids = [m["message_id"] for m in body["messages"]]
     ordinals = [m["ordinal"] for m in body["messages"]]
-    assert ordinals == [0, 0]  # ordinal still duplicates (display only — that's fine)
-    assert len(set(ids)) == 2  # but message_ids are distinct
+    assert ordinals == [0, 1]  # the prompt position is unique per session
+    assert len(set(ids)) == 2  # and message_ids are distinct
     assert ids == [a.row_id, b.row_id]
     # both rows independently retrievable via the cursor
     after_a = _client(store).get(f"/api/sessions/s/messages?since={a.row_id}").json()
