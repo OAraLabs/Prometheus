@@ -51,7 +51,7 @@ criterion in `suite.yaml`. The first cut **populates four** of them and **defers
 class has its definition and nothing else, and the loader refuses a task file for it until a later
 work package makes it active.
 
-### Populated (suite v1, sha `45df225d3b36`)
+### Populated (suite v1, sha `b71c4bc2c390`)
 
 **92 tasks.** Every task names its difficulty within its class; the report breaks pass rates out
 by it. Three per class are tagged `smoke: true`.
@@ -211,16 +211,21 @@ rule itself — a list of candidates decided by whichever item came last — was
 everything else they found is listed here instead of fixed. From here on the reader changes only
 where it misreads a **real** reply (the smoke's hand-check), never for an invented one.
 
-Real replies have changed it once so far. A dry run of the smoke on `qwen2.5:7b-instruct` gave
-five answer-line replies; four were misread, and each is now pinned verbatim in
-`tests/test_ladder.py`. `ANSWER: (1, 2, 1, 4)` and two committed "there is none" answers
-(`ANSWER: No request ID found for HTTP status 503.`) had been format misses, but all three are
-wrong answers and now fail. `…is 48217. ANSWER: 48217` had passed but was recorded as missing
-its answer line. The Bonsai 2 27B smoke's 33 answer-line replies, graded blind by two graders
-who agreed on all 33, disagreed with the reader once: "…is defined in `src/billing/settle.py`.
-Let me confirm there's no other definition elsewhere." — the "no" in the second sentence had
-made a stated answer a format miss. A negation now disqualifies a value only in the sentence
-that states it (`It is not 48217` is still a format miss).
+Real replies are the only thing that changed it after the freeze. Over the first run, two blind
+graders read **333 real replies** (every answer-line reply of every rung's smoke, plus 15 per tier
+from each tier sweep) and disagreed with the reader on **two**, both fixed and pinned verbatim:
+
+- a qwen2.5:7b dry run, before the first run, found four misreads: `ANSWER: (1, 2, 1, 4)` and two
+  committed "there is none" answers (`ANSWER: No request ID found for HTTP status 503.`) had been
+  format misses — all wrong answers, now failed; `…is 48217. ANSWER: 48217` passed but was
+  recorded as missing its answer line;
+- Bonsai 2 27B: "…is defined in `src/billing/settle.py`. Let me confirm there's no other
+  definition elsewhere." — the "no" in the second sentence had made a stated answer a format miss.
+  A negation now disqualifies a value only in the sentence that states it;
+- Ornith-1.5-9B: "`print` displays the tuple: `(1, 2, 1, 3)`. ANSWER: (1, 2, 1, 3)" — credited,
+  though the program prints `1 2 1 3`. Fixed in the TASK, not the reader: for this exact-output
+  question a bracketed sequence is a value of the answer's kind (suite sha `45df225d3b36` →
+  `b71c4bc2c390`; re-reading every stored reply to that task changes only that one row).
 
 Each limit says which way it moves a score. *Down* is the costly direction: a right answer counted
 as wrong.
@@ -386,8 +391,9 @@ uv run python scripts/ladder_run.py --provider llama_cpp --base-url "$LADDER_BAS
 - **First run** (`first_run` in `rungs.yaml`, decided 2026-09-25): `r27b` (Qwen3.8-27B
   UD-Q4_K_XL — the 4090's production model, run against the production server untouched and only
   inside 06:30–10:00), `r27b-pq2` (PrismML's ternary Bonsai 2 27B — the same checkpoint, what
-  compression costs) and `r08b` (Qwen3.5-9B UD-Q4_K_XL — what size costs). Each pins its file by
-  revision and SHA-256. `r04b` (Qwen3.5-4B) comes later.
+  compression costs), `r08b` (Qwen3.5-9B UD-Q4_K_XL — what size costs) and `r09b-ornith`
+  (Ornith-1.5-9B Q4_K_M — the same size and base as `r08b`, agentic training). Each pins its file
+  by revision and SHA-256. `r04b` (Qwen3.5-4B) comes later.
 - **Serving.** Every rung runs on llama.cpp — never Ollama, which turns thinking on, drops the
   grammar-constrained tool decoding, swaps the prompt renderer and sampler, and reports the file
   type as the quant. The mini rungs mirror production's flags (`-c 32768 --parallel 1
@@ -436,9 +442,12 @@ uv run python scripts/ladder_run.py --provider llama_cpp --base-url "$LADDER_BAS
 
 ## What the ladder does not control
 
-- **Sampling.** Temperature and friends are the serving backend's defaults; the pipeline has no
-  per-run override (the gym reserves `sampling` for the same reason). WP-2.2 should launch every
-  rung's server with the same sampling flags.
+- **Sampling.** Prometheus sends no sampler settings, so each server's defaults decide — and
+  llama-server takes them from each GGUF's `general.sampling.*`, which differ by file. The pipeline
+  has no per-run override (the gym reserves `sampling` for the same reason), so the servers are
+  pinned instead: the first run started every mini server with production's effective values
+  (`--temp 1.0 --top-k 20 --top-p 0.95 --min-p 0.05`) and checked each server's `/props`;
+  production itself gets the same values from its GGUF. Every later rung must do the same.
 - **Thinking.** `suppress_thinking` stays at the daemon default (on). The effective flag per round
   is recorded.
 - **Bash confinement.** Bash's write floor is enforced where bubblewrap works (Linux) and absent on
@@ -461,41 +470,103 @@ uv run python scripts/ladder_run.py --provider llama_cpp --base-url "$LADDER_BAS
   the page name and summary, so `length,` does not match `length`. Wiki fixtures keep index
   summaries plain; again, this is the real tool.
 
-## Smoke run
+## First run (2026-09-25 / 26)
 
-WP-2.1's end-to-end proof, 2026-09-24: the 24 smoke tasks (three per class, suite sha
-`0b18eb23f710`), one run each, on one model. Reports:
-[`smoke-qwen2.5-7b-ollama.md`](../gym/results/ladder/smoke-qwen2.5-7b-ollama.md) and
-[`smoke-qwen2.5-7b-openai-compat.md`](../gym/results/ladder/smoke-qwen2.5-7b-openai-compat.md).
+WP-2.1's end-to-end proof, on the rungs decided on 2026-09-25 plus Ornith-1.5-9B. Every rung is
+pinned by revision and SHA-256 (`rungs.yaml`); every run was thinking-suppressed, `--no-judge`
+(the one judged smoke task is `unscored`), 3 runs per task, from one harness host (this Mac).
 
-- **Model:** `qwen2.5:7b-instruct`, Q4_K_M (8B class), adapter tier `light` / strictness `NONE` —
-  the daemon's pick. It is not a proposed rung: it was the one model already resident on a GPU
-  that could be used without loading or unloading anything on a shared box.
-- **Judge:** `Qwen3.8-27B-UD-Q4_K_XL`, pinned by flag, on a different machine from the contestant.
-  The suite's rung pin (`qwen2.5:14b-instruct`) would have meant loading a second model beside the
-  resident one on the same shared card. One smoke task is judged; it was graded 1.0.
-- **Two transports, same tasks:** Prometheus's `OllamaProvider` (the daemon's path to ollama), and
-  the local OpenAI-compatible provider against the same endpoint, which asks for streamed usage.
+| rung | model (quant) | served on | server | tier |
+|---|---|---|---|---|
+| `r27b` | Qwen3.8-27B (Unsloth UD-Q4_K_XL, the 08-14 upload) | the 4090, **production, untouched** — run 06:31–06:36, llama-server PID, uptime and VRAM identical before and after | llama.cpp `9d57ce456` (production's own) | light |
+| `r27b-pq2` | Ternary Bonsai 2 27B (PrismML PQ2_0), the same Qwen3.8-27B checkpoint | the mini's 3090 Ti | PrismML fork `prism-b10735` (the Zen 4 load fix) | full (daemon's pick) |
+| `r08b` | Qwen3.5-9B (Unsloth UD-Q4_K_XL, -MTP build) | the mini's 3090 Ti | llama.cpp `9d57ce456`, built on the mini for sm_86 | light |
+| `r09b-ornith` | Ornith-1.5-9B (official Q4_K_M), Qwen3.5-9B base, agentic RL | the mini's 3090 Ti | llama.cpp `9d57ce456`, built on the mini | full (daemon's pick) |
 
-| class | pass (ollama) | pass (OpenAI-compat) | tool calls ok / counted | rounds (mean) | tokens in / out (mean, compat) | time s (mean) |
-|---|---:|---:|---:|---:|---|---:|
-| qa | 2/3 | 2/3 | 0/2 | 1.5 | 2646 / 45 | 1.2 |
-| single_tool | 1/3 | 1/3 | 10/10 | 2.7 | 9143 / 236 | 1.5 |
-| multi_step | 0/3 | 0/3 | 20/29 | 4.5 | 18022 / 593 | 3.8 |
-| file_edit | 0/3 | 0/3 | 14/16 | 3.3 | 10012 / 380 | 9.4 |
-| web_research | 2/3 | 3/3 | 14/14 | 3.3 | 11471 / 184 | 1.9 |
-| memory_recall | 2/3 | 2/3 | 9/12 | 3.0 | 6446 / 92 | 1.5 |
-| scheduling | 1/3 | 1/3 | 4/7 | 2.3 | 6346 / 97 | 1.1 |
-| long_haul | 0/3 | 0/3 | 5/5 | 2.3 | 7733 / 874 | 7.3 |
-| **all** | **8/24** | **9/24** | | | | |
+Each mini server ran with production's flags, `--temp 1.0 --top-k 20 --top-p 0.95 --min-p 0.05`
+(production's effective sampler, confirmed from every server's `/props`), no vision projector,
+bound to localhost, started and stopped by its recorded PID; the card was back to its baseline
+(12,159 MiB used by its four residents) after each.
 
-Three runs per class says nothing about what a 7B model can do; the Wilson intervals in the reports
-span most of [0, 1]. What the smoke shows is the pipeline: 48 runs, every one decided (no `error`,
-no `unscored`), zero permission denials, the judged run graded with provenance, 12
-session-less `tool_calls` rows attributed by time window.
+### Smokes (18 tasks × 3: the 12 smoke tasks and 6 more answer-line tasks)
 
-**Empty-field check:** the OpenAI-compatible run **passes** — all twelve required fields are
-populated. The ollama run **fails on `input_tokens` and `output_tokens`**, empty in all 24 rows:
-66 model rounds, every one recording 0 input tokens (the OpenAI-compatible run: 72 rounds, none zero), because `OllamaProvider` does not request
-streamed usage (see *Known gaps*). Everything else is populated in both runs;
-`tool_call_success` is empty only where a run made no tool calls.
+Reports: [`ladder-first-run-smokes.md`](../gym/results/ladder/ladder-first-run-smokes.md) and one
+per rung in `gym/results/ladder/`.
+
+| rung | pass | fail | format miss | unscored | accuracy (95% CI) | answer line missing | tool-call success |
+|---|---:|---:|---:|---:|---|---:|---:|
+| `r27b` | 49 | 2 | 0 | 3 | 49/51 (0.87–0.99) | 0/31 | 115/115 |
+| `r27b-pq2` (at full) | 40 | 8 | 3 | 3 | 40/48 (0.70–0.91) | 3/32 | 90/92 |
+| `r08b` | 49 | 2 | 0 | 3 | 49/51 (0.87–0.99) | 0/32 | 117/120 |
+| `r09b-ornith` (at full) | 38 | 10 | 3 | 3 | 38/48 (0.66–0.88) | 3/33 | 82/85 |
+
+Empty-field check: passed for every rung. The 27B, Bonsai and 9B smokes ran at suite sha
+`45df225d3b36`, Ornith's at `b71c4bc2c390`; the two differ only in `qa-py-mutable-default`'s shape,
+and re-reading the other rungs' replies to that task under the new shape changes none of their
+verdicts. The smokes are 54 runs each: they show the pipeline and the reader on real output, not
+a ranking — the intervals overlap, and Bonsai and Ornith ran at tier full (see below).
+
+**Hand-check.** Two graders, blind to the reader, graded 333 real replies (all 198 answer-line
+replies of the smokes, both Bonsai runs and both Ornith runs included, plus 15 per tier from
+each of the three sweeps): the graders agreed with each other on every reply, and with the reader on all but two —
+both fixed (*The answer reader is frozen*).
+
+### Adapter-tier sweeps: what the adapter layer adds
+
+The same model, server, sampler and 68 tool-using tasks (single_tool, multi_step, file_edit) at
+tier off, light and full, 3 repetitions each with the tier order rotated
+(`--force-adapter-tier`; reports `tier-sweep-*.md`). *Task success* is pass ÷ all runs; non-passes
+split into wrong answers, format misses, parse-disagreement halts (the loop stopped on a tool call
+the adapter could not read) and other halts (round/tool caps, repeat, breaker, empty replies).
+Runs the circuit breaker bumped to another tier are left out (0 to 2 per sweep).
+
+| model | tier | task success (95% CI) | wrong | format miss | parse-disagreement halts | other halts | XML-markup turns / run |
+|---|---|---|---:|---:|---:|---:|---:|
+| Bonsai 2 27B | off | 188/203 (0.88–0.95) | 3 | 0 | 0 | 12 | 0.00 |
+| | light | 186/204 (0.86–0.94) | 7 | 0 | 0 | 11 | 0.00 |
+| | full | 135/204 (0.59–0.72) | 31 | 5 | 21 | 12 | 1.90 |
+| Qwen3.5-9B | off | 189/204 (0.88–0.95) | 9 | 0 | 0 | 6 | 0.00 |
+| | light | 187/204 (0.87–0.95) | 11 | 0 | 0 | 6 | 0.00 |
+| | full | 155/204 (0.70–0.81) | 31 | 2 | 6 | 10 | 1.34 |
+| Ornith-1.5-9B | off | 194/203 (0.92–0.98) | 2 | 0 | 0 | 7 | 0.00 |
+| | light | 191/203 (0.90–0.97) | 4 | 0 | 0 | 8 | 0.00 |
+| | full | 130/204 (0.57–0.70) | 46 | 15 | 2 | 11 | 2.51 |
+
+Paired by task (mean per-task difference in task success, 95% bootstrap interval over tasks):
+
+| model | light − off | full − light |
+|---|---|---|
+| Bonsai 2 27B | −0.015 (−0.064 – +0.034) | **−0.250 (−0.338 – −0.172)**, 19 tasks flip |
+| Qwen3.5-9B | −0.010 (−0.039 – +0.020) | **−0.157 (−0.221 – −0.098)**, 10 tasks flip |
+| Ornith-1.5-9B | −0.020 (−0.059 – +0.020) | **−0.299 (−0.377 – −0.221)**, 23 tasks flip |
+
+- **Off ≈ light for all three.** With native tools in the request, llama-server's own parser
+  reads the Qwen3-Coder XML calls; at light the adapter recovered almost nothing from text (at most
+  0.04 calls per run) and repaired nothing. **Full costs 16–30 points** for every model: full withholds the native tools, so the
+  model's trained XML calls reach Prometheus as text, which the JSON-only extractor cannot read —
+  a reply that is only XML is stripped and retried (parse disagreements), and XML after prose is
+  deleted silently, leaving the prose as the answer (the "Let me search the codebase." format
+  misses, and many of the wrong answers). Full does not help the weaker model either: the 9B
+  loses less than the others but still 16 points.
+- **Ornith vs Qwen3.5-9B** (same size and base, so mostly the agentic training): at light they are
+  level within the intervals (191/203 vs 187/204). At full Ornith loses the most of any model
+  (−0.30): it writes the most XML-markup turns (2.51 per run vs 1.34) and the most format misses
+  (15 vs 2). Its agentic training leans harder on the trained call format, which tier full breaks.
+  Confounds, labelled: the quantizer (official Q4_K_M vs Unsloth UD-Q4_K_XL), and the tier — the
+  daemon gives Ornith `full` by default because its file name matches no registry entry.
+- **Evidence for WP-X.28, not changed here.** Qwen3.8 derivatives (Bonsai 2 27B included) and
+  Qwen3.5 derivatives (Ornith) behave like tier-light models — native XML tool calls, off ≈ light,
+  full much worse — but the daemon puts both at `full` because their file names do not contain
+  `qwen3`. `config/model_registry.yaml` and the adapter are untouched in this work package.
+- **The 4-rung comparison therefore reads at light**: the 27B and the 9B ran their rung smokes at
+  light; Bonsai's and Ornith's rung smokes ran at the daemon's pick (full), and their sweeps give
+  the light numbers for the three tool-using classes.
+
+### Not controlled, and not measured
+
+- Time: the 27B ran on the 4090 sharing production's one slot with the daemon; the others on the
+  3090 Ti beside four resident services. Wall times do not compare across boxes.
+- Judge: undecided; the six judged `qa` tasks are `unscored` in every rung.
+- Thinking-on: every rung ran thinking-suppressed. Ornith's fairness check (a thinking-on smoke if
+  it landed more than ~10 points below the 9B at light) did not trigger.
+- The first run is a smoke per rung plus the sweeps, not the full 92-task × 3 rung runs (WP-2.2).

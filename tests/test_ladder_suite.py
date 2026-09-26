@@ -132,8 +132,9 @@ def test_rungs_are_well_formed_and_the_judge_is_not_a_rung():
     ids = [r["id"] for r in data["rungs"]]
     assert len(ids) == len(set(ids))
     # First run (2026-09-25): the production 27B, the same checkpoint in
-    # ternary, and a 9B of the same architecture.
-    assert data["first_run"] == ["r27b", "r27b-pq2", "r08b"]
+    # ternary, a 9B of the same architecture, and Ornith-1.5-9B (the 9B's
+    # size and base, agentic training).
+    assert data["first_run"] == ["r27b", "r27b-pq2", "r08b", "r09b-ornith"]
     assert set(data["first_run"]) <= set(ids)
     for r in data["rungs"]:
         for key in ("id", "size_class", "model", "match", "quantization", "adapter_tier"):

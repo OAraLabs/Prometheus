@@ -16,9 +16,10 @@
 version: 1
 
 # The FIRST run (decided 2026-09-25): the production 27B, the same checkpoint
-# compressed to ternary (what compression costs), and a 9B of the same
-# architecture (what size costs). Qwen3.5-4B comes later.
-first_run: [r27b, r27b-pq2, r08b]
+# compressed to ternary (what compression costs), a 9B of the same
+# architecture (what size costs), and Ornith-1.5-9B (added 2026-09-25: the same
+# size and base as the 9B, agentic training). Qwen3.5-4B comes later.
+first_run: [r27b, r27b-pq2, r08b, r09b-ornith]
 
 # ONE judge for every rung, so pass rates on judged tasks are comparable
 # across rungs. It must not be any rung's model (enforced by

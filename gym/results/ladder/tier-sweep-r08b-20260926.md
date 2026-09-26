@@ -1,8 +1,8 @@
-# Tier sweep — `r27b-pq2`
+# Tier sweep — `r08b`
 
-- model: `Ternary-Bonsai-2-27B-PQ2_0.gguf` via `llama_cpp`, quantization `PQ2_0`; the daemon picks tier `full` for it
-- suite `ladder-v1` (sha `45df225d3b36`), harness `4b5c294b263604e8e26b4c26999bf84e3db0326b`
-- run labels: `r27b-pq2-sweep-r1-full-20260925`, `r27b-pq2-sweep-r1-light-20260925`, `r27b-pq2-sweep-r1-off-20260925`, `r27b-pq2-sweep-r2-full-20260925`, `r27b-pq2-sweep-r2-light-20260925`, `r27b-pq2-sweep-r2-off-20260925`, `r27b-pq2-sweep-r3-full-20260925`, `r27b-pq2-sweep-r3-light-20260925`, `r27b-pq2-sweep-r3-off-20260925`
+- model: `Qwen3.5-9B-UD-Q4_K_XL.gguf` via `llama_cpp`, quantization `UD-Q4_K_XL`; the daemon picks tier `light` for it
+- suite `ladder-v1` (sha `45df225d3b36`), harness `3bb6703ffbfbf7a5681d01e7ccdcd8740a82a91c`
+- run labels: `r08b-sweep-r1-full-20260926`, `r08b-sweep-r1-light-20260926`, `r08b-sweep-r1-off-20260926`, `r08b-sweep-r2-full-20260926`, `r08b-sweep-r2-light-20260926`, `r08b-sweep-r2-off-20260926`, `r08b-sweep-r3-full-20260926`, `r08b-sweep-r3-light-20260926`, `r08b-sweep-r3-off-20260926`
 - thinking suppression: `supported`
 
 Each tier is the daemon's own adapter for that tier (only the tier decision is forced).
@@ -14,33 +14,33 @@ tier are hybrids and are left out of the main figures (counted below).
 
 | tier | runs | task success (95% CI) | accuracy | wrong | format miss | parse-disagreement halts | other halts | tool-call success | calls / run | repairs / run | adapter retries / aborts per run | calls from text / run | text calls missed / run | XML-markup turns / run | breaker halts | denied / blocked | rounds | tokens in / out | time s |
 |---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---|---:|---|---:|
-| off | 203 | 188/203 (0.88–0.95) | 188/203 | 3 | 0 | 0 | 12 | 846/863 | 4.57 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 / 5 | 5.0 | 21547 / 505 | 9.2 |
-| light | 204 | 186/204 (0.86–0.94) | 186/204 | 7 | 0 | 0 | 11 | 847/854 | 4.50 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 2 / 0 | 4.9 | 24656 / 552 | 10.4 |
-| full | 204 | 135/204 (0.59–0.72) | 135/199 | 31 | 5 | 21 | 12 | 496/521 | 2.66 | 0.00 | 0.11 / 0.01 | 2.66 | 0.00 | 1.90 | 2 | 7 / 0 | 4.5 | 6195 / 340 | 6.8 |
+| off | 204 | 189/204 (0.88–0.95) | 189/204 | 9 | 0 | 0 | 6 | 764/799 | 4.12 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 1 / 4 | 4.6 | 20650 / 556 | 6.0 |
+| light | 204 | 187/204 (0.87–0.95) | 187/204 | 11 | 0 | 0 | 6 | 759/794 | 4.12 | 0.00 | 0.00 / 0.00 | 0.04 | 0.00 | 0.00 | 0 | 4 / 4 | 4.7 | 24007 / 527 | 5.9 |
+| full | 204 | 155/204 (0.70–0.81) | 155/202 | 31 | 2 | 6 | 10 | 593/672 | 3.47 | 0.00 | 0.35 / 0.00 | 3.68 | 0.00 | 1.34 | 2 | 8 / 1 | 4.6 | 8206 / 555 | 5.6 |
 
 ### single_tool
 
 | tier | runs | task success (95% CI) | accuracy | wrong | format miss | parse-disagreement halts | other halts | tool-call success | calls / run | repairs / run | adapter retries / aborts per run | calls from text / run | text calls missed / run | XML-markup turns / run | breaker halts | denied / blocked | rounds | tokens in / out | time s |
 |---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---|---:|---|---:|
-| off | 72 | 69/72 (0.88–0.99) | 69/72 | 0 | 0 | 0 | 3 | 133/137 | 1.92 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 / 0 | 2.9 | 11533 / 121 | 3.2 |
-| light | 72 | 68/72 (0.87–0.98) | 68/72 | 1 | 0 | 0 | 3 | 125/129 | 1.82 | 0.00 | 0.00 / 0.00 | 0.01 | 0.00 | 0.00 | 0 | 1 / 0 | 2.8 | 12359 / 136 | 3.5 |
-| full | 72 | 64/72 (0.80–0.94) | 64/69 | 1 | 3 | 2 | 2 | 105/111 | 1.56 | 0.00 | 0.08 / 0.00 | 1.56 | 0.00 | 0.94 | 0 | 0 / 0 | 3.0 | 3331 / 109 | 2.9 |
+| off | 72 | 68/72 (0.87–0.98) | 68/72 | 4 | 0 | 0 | 0 | 96/100 | 1.40 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 / 0 | 2.4 | 9960 / 105 | 1.8 |
+| light | 72 | 67/72 (0.85–0.97) | 67/72 | 4 | 0 | 0 | 1 | 96/99 | 1.40 | 0.00 | 0.00 / 0.00 | 0.04 | 0.00 | 0.00 | 0 | 0 / 0 | 2.4 | 11282 / 109 | 1.9 |
+| full | 72 | 61/72 (0.75–0.91) | 61/71 | 9 | 1 | 0 | 1 | 86/98 | 1.39 | 0.00 | 0.17 / 0.00 | 1.39 | 0.00 | 0.14 | 0 | 0 / 0 | 2.4 | 4168 / 113 | 1.5 |
 
 ### multi_step
 
 | tier | runs | task success (95% CI) | accuracy | wrong | format miss | parse-disagreement halts | other halts | tool-call success | calls / run | repairs / run | adapter retries / aborts per run | calls from text / run | text calls missed / run | XML-markup turns / run | breaker halts | denied / blocked | rounds | tokens in / out | time s |
 |---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---|---:|---|---:|
-| off | 66 | 58/66 (0.78–0.94) | 58/66 | 3 | 0 | 0 | 5 | 319/321 | 5.08 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 / 0 | 5.8 | 23545 / 413 | 8.0 |
-| light | 66 | 60/66 (0.82–0.96) | 60/66 | 5 | 0 | 0 | 1 | 311/313 | 4.95 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 1 / 0 | 5.6 | 26099 / 416 | 8.3 |
-| full | 66 | 46/66 (0.58–0.79) | 46/64 | 8 | 2 | 7 | 3 | 211/214 | 3.32 | 0.00 | 0.03 / 0.00 | 3.32 | 0.00 | 2.09 | 0 | 2 / 0 | 5.3 | 7116 / 346 | 7.0 |
+| off | 66 | 62/66 (0.85–0.98) | 62/66 | 4 | 0 | 0 | 0 | 281/293 | 4.52 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 / 0 | 5.0 | 19738 / 464 | 5.0 |
+| light | 66 | 60/66 (0.82–0.96) | 60/66 | 6 | 0 | 0 | 0 | 268/280 | 4.33 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 1 / 0 | 5.0 | 22844 / 420 | 4.8 |
+| full | 66 | 50/66 (0.64–0.84) | 50/65 | 11 | 1 | 2 | 2 | 252/285 | 4.45 | 0.00 | 0.41 / 0.00 | 4.45 | 0.00 | 1.70 | 0 | 1 / 0 | 5.6 | 7718 / 429 | 4.4 |
 
 ### file_edit
 
 | tier | runs | task success (95% CI) | accuracy | wrong | format miss | parse-disagreement halts | other halts | tool-call success | calls / run | repairs / run | adapter retries / aborts per run | calls from text / run | text calls missed / run | XML-markup turns / run | breaker halts | denied / blocked | rounds | tokens in / out | time s |
 |---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---|---:|---|---:|
-| off | 65 | 61/65 (0.85–0.98) | 61/65 | 0 | 0 | 0 | 4 | 394/405 | 7.00 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 / 5 | 6.4 | 30612 / 1024 | 17.2 |
-| light | 66 | 58/66 (0.78–0.94) | 58/66 | 1 | 0 | 0 | 7 | 411/412 | 6.97 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 / 0 | 6.5 | 36627 / 1143 | 20.1 |
-| full | 66 | 25/66 (0.27–0.50) | 25/66 | 22 | 0 | 12 | 7 | 180/196 | 3.21 | 0.00 | 0.21 / 0.03 | 3.21 | 0.00 | 2.76 | 2 | 5 / 0 | 5.4 | 8398 / 586 | 10.9 |
+| off | 66 | 59/66 (0.80–0.95) | 59/66 | 1 | 0 | 0 | 6 | 387/406 | 6.70 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 1 / 4 | 6.6 | 33225 / 1141 | 11.5 |
+| light | 66 | 60/66 (0.82–0.96) | 60/66 | 1 | 0 | 0 | 5 | 395/415 | 6.86 | 0.00 | 0.00 / 0.00 | 0.08 | 0.00 | 0.00 | 0 | 3 / 4 | 7.0 | 39051 / 1088 | 11.3 |
+| full | 66 | 44/66 (0.55–0.77) | 44/66 | 11 | 0 | 4 | 7 | 255/289 | 4.76 | 0.00 | 0.50 / 0.00 | 5.41 | 0.00 | 2.29 | 2 | 7 / 1 | 6.1 | 13100 / 1164 | 11.1 |
 
 ## Paired by task (task success; bumped runs left out)
 
@@ -49,17 +49,17 @@ difference in pass rate, a 95% bootstrap interval over tasks, and how many tasks
 
 | comparison | tasks | mean difference | 95% interval | tasks flipped |
 |---|---:|---:|---|---:|
-| light − off | 68 | -0.015 | -0.064 – +0.034 | 6 |
-| full − light | 68 | -0.250 | -0.338 – -0.172 | 19 |
-| full − off | 68 | -0.265 | -0.353 – -0.176 | 21 |
+| light − off | 68 | -0.010 | -0.039 – +0.020 | 3 |
+| full − light | 68 | -0.157 | -0.221 – -0.098 | 10 |
+| full − off | 68 | -0.167 | -0.235 – -0.103 | 11 |
 
 ## Left out and infrastructure
 
 | tier | bumped runs (left out) | stopped by (main runs) | provider HTTP retries |
 |---|---:|---|---:|
-| off | 1 | done 191, repeat_halt 1, round_cap 11 | 0 |
-| light | 0 | done 193, round_cap 10, tool_call_cap 1 | 0 |
-| full | 0 | circuit_breaker 2, done 171, empty_response 7, parse_disagreement 21, round_cap 3 | 0 |
+| off | 0 | done 198, round_cap 6 | 0 |
+| light | 0 | done 198, round_cap 6 | 0 |
+| full | 0 | circuit_breaker 2, done 188, parse_disagreement 6, round_cap 7, tool_call_cap 1 | 0 |
 
 Counters: *adapter retries / aborts* are the adapter's own decisions after a rejected call;
 *calls from text* are tool calls the adapter recovered from the reply's text; *text calls
