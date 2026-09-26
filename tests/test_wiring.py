@@ -6450,7 +6450,7 @@ class TestSunriseAgentLoopHooksList:
 
 
 class TestSunriseSkillRefiner:
-    """SkillRefiner.from_config gating + maybe_refine_recent hook integration."""
+    """SkillRefiner.from_config gating + maybe_refine_loaded hook integration."""
 
     def test_from_config_returns_none_when_disabled(self, tmp_path):
         """from_config returns None when skill_refinement_enabled is False."""
@@ -6478,8 +6478,14 @@ class TestSunriseSkillRefiner:
         assert result is not None
         assert result._model == "test-model"
 
-    def test_maybe_refine_recent_picks_newest_skill(self, tmp_path, monkeypatch):
-        """maybe_refine_recent finds the most recently modified auto-skill."""
+    def test_maybe_refine_loaded_refines_the_loaded_skill_not_the_newest(
+        self, tmp_path, monkeypatch
+    ):
+        """The hook refines the auto skill the task LOADED — never "the newest file".
+
+        maybe_refine_recent used to pick the most recently modified auto skill
+        after any 3+ call task; see tests/test_skill_refiner_loaded_only.py.
+        """
         import time
         from prometheus.learning.skill_refiner import SkillRefiner
 
@@ -6488,7 +6494,7 @@ class TestSunriseSkillRefiner:
         old = auto_dir / "old-skill.md"
         new = auto_dir / "new-skill.md"
         old.write_text("---\nname: old\n---\nold")
-        time.sleep(0.05)  # ensure mtime ordering
+        time.sleep(0.05)  # new is the newest file; the old heuristic picked it
         new.write_text("---\nname: new\n---\nnew")
 
         captured: dict[str, Any] = {}
@@ -6502,15 +6508,19 @@ class TestSunriseSkillRefiner:
         monkeypatch.setattr(SkillRefiner, "maybe_refine", fake_maybe_refine)
 
         refiner = SkillRefiner(MagicMock(), auto_dir=auto_dir, min_tool_calls=2)
-        trace = [{"tool_name": "Bash"}, {"tool_name": "Read"}, {"tool_name": "Edit"}]
-        ok = asyncio.run(refiner.maybe_refine_recent("did the thing", trace))
+        trace = [
+            {"tool_name": "skill", "tool_input": {"name": "old"}, "is_error": False},
+            {"tool_name": "Read", "tool_input": {}, "is_error": False},
+            {"tool_name": "Edit", "tool_input": {}, "is_error": False},
+        ]
+        ok = asyncio.run(refiner.maybe_refine_loaded("did the thing", trace, "done"))
         assert ok is True
-        assert captured["path"] == new
+        assert captured["path"] == old
         assert captured["trace_len"] == 3
         assert captured["outcome"] == "did the thing"
 
-    def test_maybe_refine_recent_skips_short_traces(self, tmp_path):
-        """maybe_refine_recent returns False if trace is below threshold."""
+    def test_maybe_refine_loaded_skips_short_traces(self, tmp_path):
+        """maybe_refine_loaded returns False if trace is below threshold."""
         from prometheus.learning.skill_refiner import SkillRefiner
 
         auto_dir = tmp_path / "auto"
@@ -6518,18 +6528,20 @@ class TestSunriseSkillRefiner:
         (auto_dir / "skill.md").write_text("---\nname: x\n---\nbody")
 
         refiner = SkillRefiner(MagicMock(), auto_dir=auto_dir, min_tool_calls=5)
-        ok = asyncio.run(refiner.maybe_refine_recent("task", [{"tool_name": "Bash"}]))
+        trace = [{"tool_name": "skill", "tool_input": {"name": "x"}, "is_error": False}]
+        ok = asyncio.run(refiner.maybe_refine_loaded("task", trace, "done"))
         assert ok is False
 
-    def test_maybe_refine_recent_skips_empty_dir(self, tmp_path):
-        """maybe_refine_recent returns False when auto_dir is empty."""
+    def test_maybe_refine_loaded_skips_empty_dir(self, tmp_path):
+        """maybe_refine_loaded returns False when auto_dir is empty."""
         from prometheus.learning.skill_refiner import SkillRefiner
 
         auto_dir = tmp_path / "auto"
         auto_dir.mkdir()
         refiner = SkillRefiner(MagicMock(), auto_dir=auto_dir, min_tool_calls=1)
-        trace = [{"tool_name": "Bash"}, {"tool_name": "Read"}]
-        ok = asyncio.run(refiner.maybe_refine_recent("task", trace))
+        trace = [{"tool_name": "skill", "tool_input": {"name": "x"}, "is_error": False},
+                 {"tool_name": "Read", "tool_input": {}, "is_error": False}]
+        ok = asyncio.run(refiner.maybe_refine_loaded("task", trace, "done"))
         assert ok is False
 
 
@@ -7661,18 +7673,27 @@ class TestVisibleMemorySkillsWiring:
         """test_curator_writes_report + test_curator_archives_dont_delete"""
         import asyncio
         import time as _t
-        import os
         from prometheus.learning.skill_state import SkillStateStore
         from prometheus.learning.curator import Curator
         from prometheus.providers.base import ApiTextDeltaEvent
+
+        from prometheus.telemetry.tracker import (
+            SKILL_LOAD_OPERATION,
+            SKILL_LOAD_SUBSYSTEM,
+            ToolCallTelemetry,
+        )
 
         auto = tmp_path / "skills" / "auto"
         auto.mkdir(parents=True)
         (auto / "a.md").write_text("---\nname: a\n---\n# A\n")
         (auto / "b.md").write_text("---\nname: b\n---\n# B\n")
-        # Make 'a' old enough to be archived by mtime.
-        old_t = _t.time() - 200 * 86400
-        os.utime(auto / "a.md", (old_t, old_t))
+        # Make 'a' old enough to be archived: its last LOAD was 200 days ago
+        # (the Curator ages on loads now, not on file mtime).
+        tel = ToolCallTelemetry(tmp_path / "t.db")
+        tel.record_run(SKILL_LOAD_SUBSYSTEM, SKILL_LOAD_OPERATION, "success",
+                       summary={"skill": "a", "source": "auto", "file": "a"})
+        tel._conn.execute("UPDATE subsystem_runs SET timestamp = ?",
+                          (_t.time() - 200 * 86400,))
 
         class P:
             async def stream_message(self, req):
@@ -7687,6 +7708,7 @@ class TestVisibleMemorySkillsWiring:
             reports_dir=tmp_path / "curator",
             state_store=SkillStateStore(tmp_path / "_state.json"),
             interval_seconds=60,
+            telemetry=tel,
         )
         run = asyncio.run(c.run_once())
 

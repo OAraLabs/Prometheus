@@ -77,7 +77,7 @@ RUN_ASYNC_ONLY = {
     # THE REMAINING GAP, deliberately left open — see the PR that added this
     # file. daemon.py registers TWO post-task hooks on the AgentLoop:
     # SkillCreator.maybe_create (learning.auto_skill_creation: true) and
-    # SkillRefiner.maybe_refine_recent (learning.skill_refinement_enabled:
+    # SkillRefiner.maybe_refine_loaded (learning.skill_refinement_enabled:
     # true). Both are live-on in config and NEITHER fires on a web/Beacon
     # turn. Unlike the nudge this is not a one-line share: each hook is an
     # extra LLM call per turn, so wiring it to the surface that does the most
