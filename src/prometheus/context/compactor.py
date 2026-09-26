@@ -235,11 +235,14 @@ class ContextCompactor:
         # the cache invalidates only when the span actually has to change.
         self._session_spans: dict[str, int] = {}
         # return_none: failures are already loud (silent_failures + failed
-        # subsystem_runs); apply() then falls back explicitly.
+        # subsystem_runs); apply() then falls back explicitly. Not redacted:
+        # the summary replaces turns of the live conversation, and a token
+        # the user gave the agent must survive into it (llm_envelope, item 4).
         self._envelope = LLMCallEnvelope(
             subsystem="context_compactor",
             telemetry=telemetry,
             on_failure="return_none",
+            redact_prompts=False,
         )
 
     # -- construction -----------------------------------------------------
