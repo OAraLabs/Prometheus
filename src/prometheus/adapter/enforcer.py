@@ -2,6 +2,8 @@
 
 Handles the messy reality of open models that don't always return clean
 structured tool calls. Supports:
+  - Qwen's XML tool calls: <function=NAME><parameter=K>V</parameter></function>
+    (see :func:`parse_xml_tool_calls`)
   - Clean JSON tool call objects
   - JSON wrapped in markdown code blocks
   - JSON mixed with prose text
@@ -42,6 +44,9 @@ class StructuredOutputEnforcer:
         """Extract all tool calls from raw model text output.
 
         Tries in order:
+        0. Qwen's XML calls, ``<function=NAME><parameter=K>V</parameter>``;
+           when the text carries any, they are the answer and the JSON
+           strategies do not run
         1. JSON in ```json ... ``` fenced blocks
         2. JSON in ``` ... ``` generic fenced blocks
         3. JSON objects on their own line / at start of response
@@ -60,6 +65,28 @@ class StructuredOutputEnforcer:
             if key not in seen_ids:
                 seen_ids.add(key)
                 results.append(block)
+
+        def _known(blocks: list[ToolUseBlock]) -> list[ToolUseBlock]:
+            # Filter against registry if provided — always apply filter when registry given
+            if tool_registry is not None:
+                return [b for b in blocks if tool_registry.get(b.name) is not None]
+            return blocks
+
+        # --- Strategy 0: Qwen's XML format ---
+        # The format the Qwen3.5 / Qwen3.8 chat template teaches (and Bonsai 2,
+        # the same checkpoint). At tier full the tools are withheld from the
+        # request, so the server parses nothing and the model's XML reached this
+        # extractor as prose — which read JSON only, found nothing, and the
+        # markup stripper then deleted the call: a PARSE DISAGREEMENT retry when
+        # the call was the whole reply, a silently lost call when prose preceded
+        # it. Measured on the Bonsai tier sweep: 21 of 204 tier-full runs ended
+        # in that disagreement, and full scored 25 points under light. A reply
+        # without any ``<function=`` takes exactly the path it always took.
+        if "<function=" in raw_response:
+            for block in parse_xml_tool_calls(raw_response, tool_registry):
+                _add(block)
+            if results:
+                return _known(results)
 
         # --- Strategy 1: ```json ... ``` blocks ---
         for m in re.finditer(r"```json\s*(.*?)\s*```", raw_response, re.DOTALL | re.IGNORECASE):
@@ -82,11 +109,7 @@ class StructuredOutputEnforcer:
             for candidate in candidates:
                 _add(_try_parse_tool_call(candidate))
 
-        # Filter against registry if provided — always apply filter when registry given
-        if tool_registry is not None:
-            return [b for b in results if tool_registry.get(b.name) is not None]
-
-        return results
+        return _known(results)
 
     def generate_grammar(
         self,
@@ -340,3 +363,113 @@ def _repair_truncated_json(text: str) -> dict[str, Any] | None:
         return result if isinstance(result, dict) else None
     except json.JSONDecodeError:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Qwen's XML tool calls
+# ---------------------------------------------------------------------------
+
+# The call format the Qwen3.5 / Qwen3.8 chat template teaches — recorded from
+# the production server's /props in tests/fixtures/parity/tool_calls.trace.json,
+# and pinned against it by tests/test_enforcer_xml.py:
+#
+#     <tool_call>
+#     <function=example_function_name>
+#     <parameter=example_parameter_1>
+#     value_1
+#     </parameter>
+#     </function>
+#     </tool_call>
+#
+# The template renders a string argument as its text and any other argument as
+# JSON (``args_value | tojson``), with one newline on each side. So a value is
+# text unless the tool's schema says the parameter is not a string, in which
+# case the reader tries JSON and keeps the text when that fails (the validator
+# then reports it). Without a registry every value is text.
+_XML_FUNCTION_RE = re.compile(r"<function=([A-Za-z0-9_.\-]+)>")
+_XML_PARAMETER_RE = re.compile(r"<parameter=([A-Za-z0-9_.\-]+)>")
+_XML_FUNCTION_CLOSE = "</function>"
+_XML_PARAMETER_CLOSE = "</parameter>"
+_XML_ENVELOPE_CLOSE = "</tool_call>"
+
+
+def parse_xml_tool_calls(raw_response: str, tool_registry: Any = None) -> list[ToolUseBlock]:
+    """Read every ``<function=NAME>`` call in ``raw_response``, in order.
+
+    Tolerant the way the JSON reader is tolerant of truncation: a block that
+    lacks its closing tag runs to the next ``<function=``, to the envelope's
+    ``</tool_call>``, or to the end of the text — the grammar's prose branch
+    never constrains the XML and ``max_tokens`` can cut it. The ``<tool_call>``
+    envelope is not required; the stripper removes it either way. The caller
+    dedups and filters against its registry; this reads.
+    """
+    if not raw_response or "<function=" not in raw_response:
+        return []
+    results: list[ToolUseBlock] = []
+    functions = list(_XML_FUNCTION_RE.finditer(raw_response))
+    for index, fn in enumerate(functions):
+        body_start = fn.end()
+        body_end = (
+            functions[index + 1].start() if index + 1 < len(functions) else len(raw_response)
+        )
+        for marker in (_XML_FUNCTION_CLOSE, _XML_ENVELOPE_CLOSE):
+            close = raw_response.find(marker, body_start, body_end)
+            if close != -1:
+                body_end = close
+        body = raw_response[body_start:body_end]
+        args: dict[str, Any] = {}
+        params = list(_XML_PARAMETER_RE.finditer(body))
+        for p_index, param in enumerate(params):
+            value_start = param.end()
+            value_end = params[p_index + 1].start() if p_index + 1 < len(params) else len(body)
+            close = body.find(_XML_PARAMETER_CLOSE, value_start, value_end)
+            if close != -1:
+                value_end = close
+            value = _strip_one_newline_each_side(body[value_start:value_end])
+            args[param.group(1)] = _xml_value(value, fn.group(1), param.group(1), tool_registry)
+        results.append(ToolUseBlock(id=f"toolu_{uuid4().hex[:12]}", name=fn.group(1), input=args))
+    return results
+
+
+def _strip_one_newline_each_side(value: str) -> str:
+    """The template puts exactly one newline after ``<parameter=K>`` and one
+    before ``</parameter>``; a value that itself ends in a newline keeps it."""
+    if value.startswith("\n"):
+        value = value[1:]
+    if value.endswith("\n"):
+        value = value[:-1]
+    return value
+
+
+def _xml_value(text: str, tool_name: str, key: str, tool_registry: Any) -> Any:
+    """The text as the schema types it: JSON for a non-string parameter, else text."""
+    kind = _parameter_type(tool_registry, tool_name, key)
+    if kind is None or kind == "string":
+        return text
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def _parameter_type(tool_registry: Any, tool_name: str, key: str) -> str | None:
+    """The JSON-schema type of ``key`` on ``tool_name``, or None when unknown."""
+    if tool_registry is None:
+        return None
+    try:
+        tool = tool_registry.get(tool_name)
+        schema = tool.input_model.model_json_schema()
+        prop = (schema.get("properties") or {}).get(key) or {}
+    except Exception:  # noqa: BLE001 — a duck-typed registry without schemas: keep the text
+        return None
+    kind = prop.get("type")
+    if kind is None:
+        # ``int | None`` renders as anyOf; the first non-null branch types it.
+        for alternative in prop.get("anyOf") or prop.get("oneOf") or []:
+            alt_kind = alternative.get("type") if isinstance(alternative, dict) else None
+            if alt_kind and alt_kind != "null":
+                kind = alt_kind
+                break
+    if isinstance(kind, list):
+        kind = next((k for k in kind if k != "null"), None)
+    return kind if isinstance(kind, str) else None

@@ -17,6 +17,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 from uuid import uuid4
 
+from prometheus.adapter.enforcer import parse_xml_tool_calls
 from prometheus.engine.messages import ToolUseBlock
 
 
@@ -141,10 +142,16 @@ class QwenFormatter(ModelPromptFormatter):
         """Extract tool calls from Qwen's text output.
 
         Handles:
+        - Qwen's XML: <tool_call><function=NAME><parameter=K>V</parameter>...
+          (read by the enforcer's own reader, so the two cannot disagree)
         - Clean JSON: {"name": "...", "arguments": {...}}
         - JSON in markdown: ```json {...} ```
         - Multiple calls separated by newlines
         """
+        xml_calls = parse_xml_tool_calls(raw_response)
+        if xml_calls:
+            return xml_calls
+
         results: list[ToolUseBlock] = []
 
         # Find all ```json ... ``` blocks
@@ -331,14 +338,24 @@ class ToolCallMarkupFilter:
         return out
 
 
+# A Qwen XML call the model emitted WITHOUT its <tool_call> envelope. The
+# envelope filter above cannot see it; the reader (enforcer.parse_xml_tool_calls)
+# still executes it, so the residual text a gateway shows must not carry it.
+_BARE_FUNCTION_BLOCK_RE = re.compile(
+    r"<function=[A-Za-z0-9_.\-]+>.*?(?:</function>|$)", re.DOTALL
+)
+
+
 def strip_tool_call_markup(text: str) -> str:
     """One-shot strip of ``<tool_call>…</tool_call>`` spans from a complete string.
 
     Same semantics as feeding the whole string through :class:`ToolCallMarkupFilter`
-    then :meth:`~ToolCallMarkupFilter.flush`. Used on final assistant text before
-    gateways read ``result.text`` / ``AssistantTurnComplete.message.text`` — the
-    stream filter never touches that path (Telegram/Slack/Discord deliver the
-    completed message, not deltas).
+    then :meth:`~ToolCallMarkupFilter.flush`, plus the removal of a bare
+    ``<function=…>…</function>`` block (a Qwen XML call that arrived without its
+    envelope — the stream filter leaves that one visible while it streams).
+    Used on final assistant text before gateways read ``result.text`` /
+    ``AssistantTurnComplete.message.text`` — the stream filter never touches
+    that path (Telegram/Slack/Discord deliver the completed message, not deltas).
     """
     if not text:
         return text
@@ -346,4 +363,7 @@ def strip_tool_call_markup(text: str) -> str:
     if "<" not in text:
         return text
     f = ToolCallMarkupFilter()
-    return f.feed(text) + f.flush()
+    out = f.feed(text) + f.flush()
+    if "<function=" in out:
+        out = _BARE_FUNCTION_BLOCK_RE.sub("", out)
+    return out
