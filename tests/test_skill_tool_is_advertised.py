@@ -57,4 +57,50 @@ def test_the_prompt_and_the_tool_agree_on_the_name():
         memory_content="(none)",
         skills=[{"name": "x", "description": "d", "core": False}],
     )
-    assert f"use the {SkillTool.name} tool" in prompt
+    assert f"with the {SkillTool.name} tool" in prompt
+
+
+# ---------------------------------------------------------------------------
+# The prompt says to load a skill when one fits (folded into C2 so the goldens
+# change once). Before: "Use tool_search to find skills for any task you're
+# unsure how to approach" — a trigger a capable model rarely meets, and it sat
+# only on the tail line, so a prompt listing just the core skills carried no
+# loading instruction at all (every parity golden is that case).
+# ---------------------------------------------------------------------------
+
+LOAD_WHEN_IT_FITS = "load it with the skill tool before you start"
+
+
+def _section(skills) -> str:
+    from prometheus.context.prompt_assembler import build_runtime_system_prompt
+
+    prompt = build_runtime_system_prompt(
+        cwd=".", config={"bootstrap": {"load_soul": False, "load_agents": False},
+                         "anatomy": {"include_in_system_prompt": False}},
+        memory_content="(none)", skills=skills,
+    )
+    start = prompt.index("# Available Skills")
+    end = prompt.find("\n\n# ", start + 1)
+    return prompt[start:end if end > 0 else None]
+
+
+def test_the_core_only_prompt_says_to_load_a_skill_when_one_fits():
+    section = _section([{"name": "commit", "description": "d", "core": True}])
+    assert LOAD_WHEN_IT_FITS in section
+    assert "## Core skills\n- **commit**: d" in section
+
+
+def test_the_tail_line_finds_then_loads():
+    section = _section([{"name": "commit", "description": "d", "core": True},
+                        {"name": "x", "description": "d", "core": False}])
+    assert LOAD_WHEN_IT_FITS in section
+    assert "1 additional skill available on demand" in section
+    assert "tool_search" in section
+
+
+def test_the_old_trigger_is_gone():
+    for skills in ([{"name": "x", "description": "d", "core": False}],
+                   [{"name": "x", "description": "d"}]):
+        section = _section(skills)
+        assert "unsure how to approach" not in section
+        assert LOAD_WHEN_IT_FITS in section
