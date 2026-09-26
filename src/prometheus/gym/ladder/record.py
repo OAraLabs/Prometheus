@@ -224,32 +224,38 @@ def load_rows(conn: sqlite3.Connection, run_label: str) -> list[dict[str, Any]]:
     a second source beside the row's own tier fields, which before the tier
     was observed where it is assigned could miss a bump. Those rows carry no
     session id; in a ladder-only database (``sessionless_attribution`` =
-    time-window) the runs are sequential (one writer, a lock), so a breaker
-    row belongs to the first run whose summary was written after it. In the
-    live database other writers interleave and nothing is attributed (None).
+    time-window) the runs are sequential (one writer, a lock), and the breaker
+    trips only after a model round, so a breaker row belongs to the run whose
+    first ``loop_round`` row came before it and whose summary came after it.
+    A bump left by a run that never wrote its summary (interrupted) belongs to
+    no run. In the live database other writers interleave and nothing is
+    attributed (None). Only a bump that happened counts (``tier_bump:a->b``,
+    not ``tier_bump_failed``).
     """
     try:
         bumps: list[tuple[float, str]] = [
             (ts, method) for ts, method in conn.execute(
                 "SELECT timestamp, recovery_method FROM circuit_breaker_diagnostics")
-            if (method or "").startswith("tier_bump")]
+            if (method or "").startswith("tier_bump:")]
     except sqlite3.OperationalError:  # a database with no breaker table
         bumps = []
+    first_round: dict[str, float] = dict(conn.execute(
+        "SELECT session_id, MIN(timestamp) FROM subsystem_runs WHERE subsystem = 'agent_loop' "
+        "AND operation = 'loop_round' AND session_id IS NOT NULL GROUP BY session_id"))
     out = []
-    prev_ts = float("-inf")
     for r in conn.execute(
         "SELECT timestamp, operation, outcome, duration_ms, input_tokens, "
         "output_tokens, session_id, model, node_id, summary_json FROM subsystem_runs "
         "WHERE subsystem = ? ORDER BY timestamp",
         (SUBSYSTEM,),
     ):
-        lo, prev_ts = prev_ts, r[0]
         summary = json.loads(r[9] or "{}")
         if summary.get("run_label") != run_label:
             continue
         if summary.get("sessionless_attribution") == "time-window":
-            summary["breaker_tier_bumps"] = sorted(
-                m for ts, m in bumps if lo < ts <= r[0])
+            start = first_round.get(r[6])
+            summary["breaker_tier_bumps"] = [] if start is None else sorted(
+                m for ts, m in bumps if start <= ts <= r[0])
         else:
             summary["breaker_tier_bumps"] = None
         summary.setdefault("node_id", r[8])

@@ -1684,25 +1684,35 @@ def _summary(tel, label, sid, attribution="time-window"):
     time.sleep(0.01)
 
 
+def _round(tel, sid):
+    tel.record_run("agent_loop", "loop_round", "success", session_id=sid)
+    time.sleep(0.01)
+
+
+def _bump(tel, method="tier_bump:off->light"):
+    tel.record_diagnosis("m", "off", "read_file", "wrong_path", False, None, True, method)
+    time.sleep(0.01)
+
+
 def test_the_breakers_own_record_marks_a_bumped_run_in_a_ladder_only_db(tmp_path):
     # A second source for rows recorded before the tier was observed where it
     # is assigned: the breaker's diagnostics row, placed by time — only where
-    # the ladder is the database's one writer.
+    # the ladder is the database's one writer, and only inside a run's own
+    # model rounds (the breaker trips after a round).
     tel = _tel(tmp_path)
-    _summary(tel, "L", "s1")
-    tel.record_diagnosis("m", "off", "read_file", "wrong_path", False, None, True, "tier_bump:off->light")
-    time.sleep(0.01)
-    _summary(tel, "L", "s2")
-    tel.record_diagnosis("m", "off", "read_file", "wrong_path", False, None, False, "already_attempted")
-    _summary(tel, "L", "s3")
+    _bump(tel)                                   # before any run: nobody's
+    _round(tel, "s1"); _summary(tel, "L", "s1")
+    _round(tel, "s2"); _bump(tel); _summary(tel, "L", "s2")
+    _round(tel, "s3"); _bump(tel, "already_attempted"); _summary(tel, "L", "s3")
+    _round(tel, "gone"); _bump(tel)              # an interrupted run: no summary
+    _round(tel, "s4"); _summary(tel, "L", "s4")
+    _round(tel, "s5"); _bump(tel, "tier_bump_failed"); _summary(tel, "L", "s5")
     rows = rec.load_rows(tel._conn, "L")
-    assert [r["breaker_tier_bumps"] for r in rows] == [[], ["tier_bump:off->light"], []]
-    assert [rec.tier_bumped(r) for r in rows] == [False, True, False]
+    assert [r["breaker_tier_bumps"] for r in rows] == [[], ["tier_bump:off->light"], [], [], []]
+    assert [rec.tier_bumped(r) for r in rows] == [False, True, False, False, False]
     # The live telemetry.db has other writers: nothing is placed by time there.
-    _summary(tel, "live", "s4", attribution="off (live telemetry.db)")
-    tel.record_diagnosis("m", "off", "read_file", "wrong_path", False, None, True, "tier_bump:off->light")
-    time.sleep(0.01)
-    _summary(tel, "live", "s5", attribution="off (live telemetry.db)")
+    _round(tel, "s6"); _summary(tel, "live", "s6", attribution="off (live telemetry.db)")
+    _round(tel, "s7"); _bump(tel); _summary(tel, "live", "s7", attribution="off (live telemetry.db)")
     assert [r["breaker_tier_bumps"] for r in rec.load_rows(tel._conn, "live")] == [None, None]
 
 
