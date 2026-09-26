@@ -1684,14 +1684,20 @@ def _summary(tel, label, sid, attribution="time-window"):
     time.sleep(0.01)
 
 
-def _round(tel, sid):
-    tel.record_run("agent_loop", "loop_round", "success", session_id=sid)
-    time.sleep(0.01)
-
-
 def _bump(tel, method="tier_bump:off->light"):
     tel.record_diagnosis("m", "off", "read_file", "wrong_path", False, None, True, method)
     time.sleep(0.01)
+
+
+def _ladder_run(tel, label, sid, bump=None, *, summary=True, attribution="time-window"):
+    """One run as it lands in the database: its first model round, a breaker
+    row if the breaker tripped, then (unless interrupted) its summary."""
+    tel.record_run("agent_loop", "loop_round", "success", session_id=sid)
+    time.sleep(0.01)
+    if bump:
+        _bump(tel, bump)
+    if summary:
+        _summary(tel, label, sid, attribution)
 
 
 def test_the_breakers_own_record_marks_a_bumped_run_in_a_ladder_only_db(tmp_path):
@@ -1700,19 +1706,20 @@ def test_the_breakers_own_record_marks_a_bumped_run_in_a_ladder_only_db(tmp_path
     # the ladder is the database's one writer, and only inside a run's own
     # model rounds (the breaker trips after a round).
     tel = _tel(tmp_path)
-    _bump(tel)                                   # before any run: nobody's
-    _round(tel, "s1"); _summary(tel, "L", "s1")
-    _round(tel, "s2"); _bump(tel); _summary(tel, "L", "s2")
-    _round(tel, "s3"); _bump(tel, "already_attempted"); _summary(tel, "L", "s3")
-    _round(tel, "gone"); _bump(tel)              # an interrupted run: no summary
-    _round(tel, "s4"); _summary(tel, "L", "s4")
-    _round(tel, "s5"); _bump(tel, "tier_bump_failed"); _summary(tel, "L", "s5")
+    _bump(tel)                                                    # before any run: nobody's
+    _ladder_run(tel, "L", "s1")
+    _ladder_run(tel, "L", "s2", "tier_bump:off->light")
+    _ladder_run(tel, "L", "s3", "already_attempted")
+    _ladder_run(tel, "L", "gone", "tier_bump:off->light", summary=False)  # interrupted
+    _ladder_run(tel, "L", "s4")
+    _ladder_run(tel, "L", "s5", "tier_bump_failed")
     rows = rec.load_rows(tel._conn, "L")
     assert [r["breaker_tier_bumps"] for r in rows] == [[], ["tier_bump:off->light"], [], [], []]
     assert [rec.tier_bumped(r) for r in rows] == [False, True, False, False, False]
     # The live telemetry.db has other writers: nothing is placed by time there.
-    _round(tel, "s6"); _summary(tel, "live", "s6", attribution="off (live telemetry.db)")
-    _round(tel, "s7"); _bump(tel); _summary(tel, "live", "s7", attribution="off (live telemetry.db)")
+    live = "off (live telemetry.db)"
+    _ladder_run(tel, "live", "s6", attribution=live)
+    _ladder_run(tel, "live", "s7", "tier_bump:off->light", attribution=live)
     assert [r["breaker_tier_bumps"] for r in rec.load_rows(tel._conn, "live")] == [None, None]
 
 
