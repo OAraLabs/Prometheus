@@ -2,6 +2,8 @@
 
 Handles the messy reality of open models that don't always return clean
 structured tool calls. Supports:
+  - Qwen's XML tool calls: <function=NAME><parameter=K>V</parameter></function>
+    (see :func:`parse_xml_tool_calls`)
   - Clean JSON tool call objects
   - JSON wrapped in markdown code blocks
   - JSON mixed with prose text
@@ -39,48 +41,80 @@ class StructuredOutputEnforcer:
         raw_response: str,
         tool_registry: Any = None,
     ) -> list[ToolUseBlock]:
-        """Extract all tool calls from raw model text output.
+        """Extract all tool calls from raw model text output, in document order.
 
-        Tries in order:
-        1. JSON in ```json ... ``` fenced blocks
-        2. JSON in ``` ... ``` generic fenced blocks
-        3. JSON objects on their own line / at start of response
-        4. Any JSON object in the text (greedy last resort)
+        Two families, read together:
+
+        * Qwen's XML calls, ``<function=NAME><parameter=K>V</parameter>``
+          (:func:`parse_xml_tool_calls`) — the format the Qwen3.5 / Qwen3.8
+          chat template teaches, and Bonsai 2, the same checkpoint. At tier
+          full the tools are withheld from the request, so the server parses
+          nothing and the model's XML reaches this extractor as prose. It used
+          to read JSON only: the markup stripper then deleted the call — a
+          PARSE DISAGREEMENT retry when the call was the whole reply, a
+          silently lost call when prose preceded it. Measured on the Bonsai
+          tier sweep: 21 of 204 tier-full runs ended in that disagreement, and
+          full scored 25 points under light.
+        * JSON calls, tried in order on the text OUTSIDE the XML function
+          spans — so a JSON object inside a ``<parameter>`` value is the
+          value, never a second call:
+
+          1. JSON in ```json ... ``` fenced blocks
+          2. JSON in ``` ... ``` generic fenced blocks
+          3. JSON objects on their own line / at start of response
+          4. Any JSON object in the text (greedy last resort)
+
+        A reply carrying both formats keeps every call, in the order the model
+        wrote them (the production 27B, told to write JSON and trained to write
+        XML, writes two different calls in one reply); a call written twice —
+        the same name and arguments in JSON and in XML — is one call. A reply
+        with no ``<function=`` takes exactly the path it always took.
         """
         if not raw_response or not raw_response.strip():
             return []
 
+        found: list[tuple[int, ToolUseBlock]] = []   # (offset in the reply, block)
+        text = raw_response
+        if "<function=" in raw_response:
+            spans = _xml_tool_call_spans(raw_response, tool_registry)
+            found.extend((start, block) for start, _end, block in spans)
+            text = _blank_spans(raw_response, [(start, end) for start, end, _block in spans])
+
+        from_json: list[tuple[int, ToolUseBlock]] = []
+
+        def _add(offset: int, block: ToolUseBlock | None) -> None:
+            if block is not None:
+                from_json.append((offset, block))
+
+        # --- Strategy 1: ```json ... ``` blocks ---
+        for m in re.finditer(r"```json\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE):
+            _add(m.start(), _try_parse_tool_call(m.group(1)))
+
+        # --- Strategy 2: ``` ... ``` blocks (any language tag) ---
+        if not from_json:
+            for m in re.finditer(r"```\w*\s*(\{.*?\})\s*```", text, re.DOTALL):
+                _add(m.start(), _try_parse_tool_call(m.group(1)))
+
+        # --- Strategy 3: JSON on its own line ---
+        if not from_json:
+            for m in re.finditer(r"^\s*(\{[^\n]+\})\s*$", text, re.MULTILINE):
+                _add(m.start(), _try_parse_tool_call(m.group(1)))
+
+        # --- Strategy 4: Any JSON object (greedy, last resort) ---
+        if not from_json:
+            # Find all {...} blocks, try longest first
+            for m in re.finditer(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}", text, re.DOTALL):
+                _add(m.start(), _try_parse_tool_call(m.group(0)))
+
+        found.extend(from_json)
+        found.sort(key=lambda item: item[0])
         results: list[ToolUseBlock] = []
         seen_ids: set[str] = set()
-
-        def _add(block: ToolUseBlock | None) -> None:
-            if block is None:
-                return
+        for _offset, block in found:
             key = f"{block.name}:{json.dumps(block.input, sort_keys=True)}"
             if key not in seen_ids:
                 seen_ids.add(key)
                 results.append(block)
-
-        # --- Strategy 1: ```json ... ``` blocks ---
-        for m in re.finditer(r"```json\s*(.*?)\s*```", raw_response, re.DOTALL | re.IGNORECASE):
-            _add(_try_parse_tool_call(m.group(1)))
-
-        # --- Strategy 2: ``` ... ``` blocks (any language tag) ---
-        if not results:
-            for m in re.finditer(r"```\w*\s*(\{.*?\})\s*```", raw_response, re.DOTALL):
-                _add(_try_parse_tool_call(m.group(1)))
-
-        # --- Strategy 3: JSON on its own line ---
-        if not results:
-            for m in re.finditer(r"^\s*(\{[^\n]+\})\s*$", raw_response, re.MULTILINE):
-                _add(_try_parse_tool_call(m.group(1)))
-
-        # --- Strategy 4: Any JSON object (greedy, last resort) ---
-        if not results:
-            # Find all {...} blocks, try longest first
-            candidates = re.findall(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}", raw_response, re.DOTALL)
-            for candidate in candidates:
-                _add(_try_parse_tool_call(candidate))
 
         # Filter against registry if provided — always apply filter when registry given
         if tool_registry is not None:
@@ -340,3 +374,135 @@ def _repair_truncated_json(text: str) -> dict[str, Any] | None:
         return result if isinstance(result, dict) else None
     except json.JSONDecodeError:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Qwen's XML tool calls
+# ---------------------------------------------------------------------------
+
+# The call format the Qwen3.5 / Qwen3.8 chat template teaches — recorded from
+# the production server's /props in tests/fixtures/parity/tool_calls.trace.json,
+# and pinned against it by tests/test_enforcer_xml.py:
+#
+#     <tool_call>
+#     <function=example_function_name>
+#     <parameter=example_parameter_1>
+#     value_1
+#     </parameter>
+#     </function>
+#     </tool_call>
+#
+# The template renders a string argument as its text and any other argument as
+# JSON (``args_value | tojson``), with one newline on each side. So a value is
+# text unless the tool's schema says the parameter is not a string, in which
+# case the reader tries JSON and keeps the text when that fails (the validator
+# then reports it). Without a registry every value is text.
+_XML_FUNCTION_RE = re.compile(r"<function=([A-Za-z0-9_.\-]+)>")
+_XML_PARAMETER_RE = re.compile(r"<parameter=([A-Za-z0-9_.\-]+)>")
+_XML_FUNCTION_CLOSE = "</function>"
+_XML_PARAMETER_CLOSE = "</parameter>"
+_XML_ENVELOPE_CLOSE = "</tool_call>"
+
+
+def parse_xml_tool_calls(raw_response: str, tool_registry: Any = None) -> list[ToolUseBlock]:
+    """Read every ``<function=NAME>`` call in ``raw_response``, in order.
+
+    Tolerant the way the JSON reader is tolerant of truncation: a block that
+    lacks its closing tag runs to the next ``<function=``, to the envelope's
+    ``</tool_call>``, or to the end of the text — the grammar's prose branch
+    never constrains the XML and ``max_tokens`` can cut it. The ``<tool_call>``
+    envelope is not required; the stripper removes it either way. The caller
+    dedups and filters against its registry; this reads.
+    """
+    return [block for _start, _end, block in _xml_tool_call_spans(raw_response, tool_registry)]
+
+
+def _xml_tool_call_spans(
+    raw_response: str, tool_registry: Any = None,
+) -> list[tuple[int, int, ToolUseBlock]]:
+    """Every XML call with the span ``[start, end)`` of the text it occupies —
+    from ``<function=`` through ``</function>`` when that closer is there —
+    so the JSON reader can be kept off the text inside a call."""
+    if not raw_response or "<function=" not in raw_response:
+        return []
+    results: list[tuple[int, int, ToolUseBlock]] = []
+    functions = list(_XML_FUNCTION_RE.finditer(raw_response))
+    for index, fn in enumerate(functions):
+        body_start = fn.end()
+        body_end = (
+            functions[index + 1].start() if index + 1 < len(functions) else len(raw_response)
+        )
+        for marker in (_XML_FUNCTION_CLOSE, _XML_ENVELOPE_CLOSE):
+            close = raw_response.find(marker, body_start, body_end)
+            if close != -1:
+                body_end = close
+        body = raw_response[body_start:body_end]
+        args: dict[str, Any] = {}
+        params = list(_XML_PARAMETER_RE.finditer(body))
+        for p_index, param in enumerate(params):
+            value_start = param.end()
+            value_end = params[p_index + 1].start() if p_index + 1 < len(params) else len(body)
+            close = body.find(_XML_PARAMETER_CLOSE, value_start, value_end)
+            if close != -1:
+                value_end = close
+            value = _strip_one_newline_each_side(body[value_start:value_end])
+            args[param.group(1)] = _xml_value(value, fn.group(1), param.group(1), tool_registry)
+        span_end = body_end
+        if raw_response.startswith(_XML_FUNCTION_CLOSE, body_end):
+            span_end = body_end + len(_XML_FUNCTION_CLOSE)
+        results.append((fn.start(), span_end,
+                        ToolUseBlock(id=f"toolu_{uuid4().hex[:12]}", name=fn.group(1), input=args)))
+    return results
+
+
+def _blank_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    """``text`` with each span replaced by spaces of the same length, so
+    offsets in the result are offsets in the original."""
+    out = list(text)
+    for start, end in spans:
+        out[start:end] = " " * (end - start)
+    return "".join(out)
+
+
+def _strip_one_newline_each_side(value: str) -> str:
+    """The template puts exactly one newline after ``<parameter=K>`` and one
+    before ``</parameter>``; a value that itself ends in a newline keeps it."""
+    if value.startswith("\n"):
+        value = value[1:]
+    if value.endswith("\n"):
+        value = value[:-1]
+    return value
+
+
+def _xml_value(text: str, tool_name: str, key: str, tool_registry: Any) -> Any:
+    """The text as the schema types it: JSON for a non-string parameter, else text."""
+    kind = _parameter_type(tool_registry, tool_name, key)
+    if kind is None or kind == "string":
+        return text
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def _parameter_type(tool_registry: Any, tool_name: str, key: str) -> str | None:
+    """The JSON-schema type of ``key`` on ``tool_name``, or None when unknown."""
+    if tool_registry is None:
+        return None
+    try:
+        tool = tool_registry.get(tool_name)
+        schema = tool.input_model.model_json_schema()
+        prop = (schema.get("properties") or {}).get(key) or {}
+    except Exception:  # noqa: BLE001 — a duck-typed registry without schemas: keep the text
+        return None
+    kind = prop.get("type")
+    if kind is None:
+        # ``int | None`` renders as anyOf; the first non-null branch types it.
+        for alternative in prop.get("anyOf") or prop.get("oneOf") or []:
+            alt_kind = alternative.get("type") if isinstance(alternative, dict) else None
+            if alt_kind and alt_kind != "null":
+                kind = alt_kind
+                break
+    if isinstance(kind, list):
+        kind = next((k for k in kind if k != "null"), None)
+    return kind if isinstance(kind, str) else None

@@ -451,6 +451,26 @@ UNDO = [{"op": "tree", "label": "after-turn", "tree": {"a": 1}}, None,
         {"op": "tree", "label": "after-undo", "tree": {"b": 2}}]
 ATLAS_REQ = [{"messages": [{"role": "system", "content": "# Project Atlas\n- codename ATLAS-7."}]}]
 CODE_OK = [{"op": "code", "result": {"report": {"status": "success", "acceptance_exit": 0}}}]
+# WP-X.28 PR 1: an executed call the reader took from a Qwen XML reply, and the
+# same call read from JSON only — the golden must show the former.
+_XML_REPLY = ("<tool_call>\n<function=code_run>\n<parameter=command>\npython test_calc.py\n"
+              "</parameter>\n</function>\n</tool_call>")
+_RUN = {"name": "code_run", "input": {"command": "python test_calc.py"}}
+_TC = ["tool_name", "success", "raw_model_output", "parsed_tool_call"]
+XML_READ = _tel(tool_calls=(_TC, [["code_run", 1, _XML_REPLY, _RUN]]))
+JSON_ONLY = _tel(tool_calls=(_TC, [["code_run", 1, '{"name": "code_run", "arguments": {"command": "python test_calc.py"}}', _RUN]]))
+# Seen live: a JSON call that ran, in a reply whose XML call (wrong parameter
+# name) failed validation — the executed row's text carries <function=, but
+# nothing the XML reader yields is what ran.
+_MIXED = ('{"name": "code_str_replace", "arguments": {"path": "calc.py"}}\n\n'
+          "<tool_call>\n<function=code_run>\n<parameter=cmd>\npython test_calc.py\n</parameter>\n</function>\n</tool_call>")
+JSON_RAN_XML_FAILED = _tel(tool_calls=(_TC + ["error_type"], [
+    ["code_str_replace", 1, _MIXED, {"name": "code_str_replace", "input": {"path": "calc.py"}}, None],
+    ["code_run", 0, "", None, "validation_failed"]]))
+CODE_REQ = [{"messages": [{"role": "tool", "content": "1\tdef add"}]}]
+FED_BACK = [{"messages": [{"role": "user", "content":
+             "Your previous response contained tool-call markup that could not be parsed, "
+             "so it was discarded and nothing ran."}]}]
 # What pydantic puts in a tool result: the offending input, truncated, epoch and all.
 PYDANTIC = ("1 validation error for CodeViewInput\npath\n  Field required [type=missing, "
             "input_value={'file_path': '/tmp/prome...g/cparity01-1790371638'}, input_type=dict]")
@@ -479,9 +499,12 @@ RECORDING_RULES = [
            + [_chat("I can't be certain, but: amber, birch, cobalt")]), "hedges"),
       (_ev(stores=COMPACTED, steps=[_chat("noted")] * 3
            + [_chat("amber\nbirch\ncobalt\n\nThose were the words.\nAnything else?")]), "one line")]),
-    ("coding_run", _ev(steps=CODE_OK, requests=[{"messages": [{"role": "tool", "content": "1\tdef add"}]}]),
-     [(_ev(steps=CODE_OK, requests=[{"messages": [{"role": "tool", "content": PYDANTIC}]}]),
-       "not replayable")]),
+    ("coding_run", _ev(stores=XML_READ, steps=CODE_OK, requests=CODE_REQ),
+     [(_ev(stores=XML_READ, steps=CODE_OK,
+           requests=[{"messages": [{"role": "tool", "content": PYDANTIC}]}]), "not replayable"),
+      (_ev(stores=JSON_ONLY, steps=CODE_OK, requests=CODE_REQ), "XML reader"),
+      (_ev(stores=JSON_RAN_XML_FAILED, steps=CODE_OK, requests=CODE_REQ), "XML reader"),
+      (_ev(stores=XML_READ, steps=CODE_OK, requests=FED_BACK), "parse-disagreement")]),
     ("linked_workspace", _ev(stores=TOOL_OK, requests=ATLAS_REQ,
                              steps=[_chat("Codename: ATLAS-7. Tally for blue: 9")]),
      [(_ev(stores=TOOL_OK, requests=ATLAS_REQ, steps=[_chat("The codename is ATLAS-7.")]),
