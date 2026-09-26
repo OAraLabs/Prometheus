@@ -55,10 +55,13 @@ where it differs from the plan, and the gates it passed.
     summaries reach the model through the `lcm_*` tools (103 calls).
   - **Golden-trace training exports.** Their contexts are resolved in `turn_index` order.
 - **Fix.** Keep `turn_index` as the durable *prompt position*. Anchor its base to the store's
-  `MAX(turn_index)+1` whenever numbering restarts, add a UNIQUE index with a non-destructive insert, and
-  run a one-time renumbering migration after taking a backup. The dry run on the snapshot kept every
-  row and left 0 duplicates in 0.15 s. The added cost is 3.4 µs, once per numbering restart. **No
-  parity golden changes**, provided the fix adds no table and no column.
+  `MAX(turn_index)+1` whenever numbering restarts, and run a one-time renumbering migration after taking
+  a backup. The migration then installs a guard: a BEFORE INSERT trigger that refuses a repeated index.
+  It is deliberately not a UNIQUE index, because an older build's `INSERT OR REPLACE` would turn a
+  UNIQUE conflict into a delete. The dry run of the final code on the snapshot kept every row and left
+  0 duplicates, in about half a second. The costs are 3.4 µs once per numbering restart and about 1 µs
+  per insert for the guard. **No parity golden changes**, provided the fix adds no table and no
+  column.
 
 ---
 
@@ -212,27 +215,33 @@ lifetimes. Readers order by `(turn_index, rowid)`.
     order and misplaces the 660 mid-turn rows. Use it only as the conflict fallback below.
   - `ORDER BY rowid` in the readers fails for the same reason.
 
-### 5.2 Guard: a UNIQUE index, but only with a non-destructive insert
+### 5.2 Guard: a trigger, not a UNIQUE index
 
-- Replace `idx_lcm_messages_session` (a non-unique index on `(session_id, turn_index)`) with a UNIQUE
-  index on the same key. That adds no index-maintenance cost, and the planner still uses it: I checked
-  `EXPLAIN` for both `ORDER BY turn_index` and `ORDER BY turn_index, rowid`; neither needs a temp
-  B-tree.
-- ⚠ **`insert_message` uses `INSERT OR REPLACE` (`lcm_conversation_store.py:294`).** With a UNIQUE
-  index, a colliding insert would **silently delete the older message** and leave its FTS row
-  orphaned. Switch to plain `INSERT` (`ON CONFLICT(id) DO NOTHING` if id idempotence is wanted). On an
-  IntegrityError on the turn key, reassign to `next_turn_index` and retry once, then call
-  `record_silent_failure(subsystem="lcm", operation="turn_index_collision")`. That way a new producer
-  shows up loudly and never costs a row. A bare IntegrityError is not an option: `_persist_to_lcm`
-  swallows exceptions, so the row would simply vanish from LCM.
+- Keep the plain index `idx_lcm_messages_session` on `(session_id, turn_index)` for the readers. The
+  planner uses it for `ORDER BY turn_index, rowid` without a temp B-tree (checked with `EXPLAIN`).
+- Add a BEFORE INSERT trigger that does `RAISE(ABORT, '<fixed message>')` when another message of the
+  same session (a different `id`) already holds `NEW.turn_index`. Its cost is one indexed `EXISTS` per
+  insert.
+- ⚠ **Why not a UNIQUE index.** The first version of this design proposed one. Builds from before the
+  fix insert with `INSERT OR REPLACE`, and REPLACE resolves a UNIQUE conflict by **deleting the older
+  row** (and orphaning its FTS entry). A rollback (R3) or a pip downgrade would then delete history on
+  every collision, and only a runbook step would stand in the way. `RAISE(ABORT)` fails the statement
+  whatever its conflict clause, so an old build's colliding insert fails and the older row stays. A
+  re-insert of the same `id` is left to the statement, so a REPLACE by id still works.
+- New code never uses REPLACE; it uses plain `INSERT … ON CONFLICT(id) DO NOTHING`. When the guard
+  refuses a row, the store appends it at the next free index (an atomic `INSERT … SELECT MAX + 1`),
+  retries once, and calls `record_silent_failure(subsystem="lcm", operation="turn_index_collision")`. A
+  new producer then shows up loudly and never costs a row. Letting the error escape is not an option:
+  `_persist_to_lcm` swallows exceptions, so the row would simply vanish from LCM.
 
 ### 5.3 Migration of existing rows
 
 It runs once, at daemon start, before gateways write. It is gated by `PRAGMA user_version` 0 → 1 on
 `lcm.db`: the value is 0 today, and `memory/store.py` already uses this pattern.
 
-1. **Precheck.** If there are no duplicates, create the unique index, set `user_version = 1`, and
-   stop. No backup and no file is written.
+1. **Precheck.** If there are no duplicates, create the guard, set `user_version = 1`, and stop. No
+   backup and no file is written. A repeat written between this precheck and the write lock aborts
+   this start, which has no backup of it; the next start migrates it properly.
 2. **Backup first.** Use the sqlite3 backup API to write `<lcm.db>.pre-turn-index-<ts>.bak` next to
    the DB, then check `PRAGMA integrity_check` and the row count on the backup before touching
    anything.
@@ -243,15 +252,16 @@ It runs once, at daemon start, before gateways write. It is gated by `PRAGMA use
    - Keep run 0's values. Shift each later run up to start above every value so far, keeping its
      internal gaps. Within a run, order by `(turn_index, rowid)`.
    - Apply through a TEMP map table (a portable correlated `UPDATE`, not `UPDATE … FROM`, which needs
-     SQLite 3.33), then drop the old index and create the UNIQUE one.
+     SQLite 3.33). Only then create the guard: it is BEFORE INSERT only, so it would not see the
+     `UPDATE` anyway, and it must never guard a half-renumbered table.
 4. **Verify before COMMIT:**
    - row count unchanged;
    - a digest of every other column, by rowid, unchanged;
    - zero duplicate pairs;
    - `ORDER BY turn_index` equals the computed order for every session.
 
-   If any check fails, ROLLBACK, log loudly and keep running without the unique index. The migration
-   must never brick the daemon.
+   If any check fails, ROLLBACK, log loudly and keep running without the guard. The migration must
+   never brick the daemon.
 5. **Nothing else keys on `turn_index`.** ids, rowids, FTS rowids, summaries (which reference ids) and
    `message_client_ids` (which reference rowids) are untouched. The wire `ordinal` changes value for
    renumbered rows. It was documented as non-unique and display-only ("Do not key on it"); it is now
@@ -286,7 +296,7 @@ It runs once, at daemon start, before gateways write. It is gated by `PRAGMA use
 - Every scenario writes one session numbered 0…n in rowid order, so the precheck is a no-op and the
   values are identical.
 - The store dump lists **tables and rows only** (`scripts/parity/observe.py` reads
-  `sqlite_master WHERE type='table'`). Indexes and `user_version` are not in it.
+  `sqlite_master WHERE type='table'`). Indexes, triggers and `user_version` are not in it.
 
 **Traps that would change all 11 `expected.json`:**
 
@@ -299,16 +309,18 @@ The fix touches `engine/session.py`, so the seam rule applies: parity `replay` a
 
 ### 5.5 Speed
 
-Synthetic benchmark on the Mac (a DB shaped like production: 18,879 rows, one session of 8,345;
-400 inserts × 2 rounds):
+Synthetic benchmark on the Mac (`bench_insert.py`: a DB shaped like production, 18,879 rows with one
+session of 8,345; 400 inserts × 3 rounds per variant, plus a batched run):
 
-- Insert p50/p95 is **70–82 / 109–136 µs** today and **70–73 / 111–117 µs** with the UNIQUE index.
-  That is the same within noise; the per-commit fsync dominates.
+- With a commit per insert, as the store does, p50 is **70–77 µs** for all three variants: the pre-fix
+  insert, the fixed insert without the guard, and the fixed insert with it. The per-commit fsync
+  dominates and hides the difference.
+- With the fsync out of the way (5,000 inserts in one transaction), the guard costs **about 1 µs per
+  insert** (0.93–1.09 µs): its one indexed `EXISTS`.
 - The anchor query costs **3.4 µs p50**, once per numbering restart, not per row.
-- `ORDER BY turn_index, rowid` uses the same plan.
-- The migration runs once, in about 0.15 s, plus the backup copy (0.12–0.2 s from file into memory on
-  the mini; I did not measure a copy to disk).
-- I expect no measurable change per agent round. The parity bench on the fix PR confirms it (§5.7).
+- `ORDER BY turn_index, rowid` uses the same plan as before.
+- The migration runs once, in about half a second of work, plus writing the backup.
+- There is no measurable change per agent round; the parity bench confirms it (§5.7).
 
 ### 5.6 Tests and docs that pin the old contract and must change with the fix
 
@@ -331,12 +343,23 @@ passed.
   aborts without changing anything, and the next start retries. The copy is created owner-only (0600),
   never over an existing file, and a partial or failed copy is deleted rather than left looking like a
   backup.
-- **Only the daemon installs the UNIQUE index.** `migrate_turn_index` runs in `run_daemon` right after
+- **The guard is a trigger, not a UNIQUE index** (changed in review; §5.2 has the reason). A synthetic
+  probe on SQLite 3.45.1 (the daemon's interpreter) and 3.50.4 (uv's Python) showed:
+  - UNIQUE plus an old build's `INSERT OR REPLACE` on a taken key deletes the older row;
+  - the trigger fails that statement with `SQLITE_CONSTRAINT_TRIGGER`, and the older row survives;
+  - a same-id REPLACE still works;
+  - the new `ON CONFLICT(id) DO NOTHING` path inserts a free key and is refused on a taken one;
+  - the `INSERT … SELECT` append path passes;
+  - an `UPDATE` is not guarded (BEFORE INSERT only), which is why the migration renumbers first and
+    then verifies.
+
+  `TestGuard::test_an_old_build_cannot_delete_history` pins it. The guard fires before the id conflict
+  is looked at, so a stored id re-inserted onto another row's index trips it too. The store treats that
+  as the no-op `ON CONFLICT(id)` would have made it, and records nothing.
+- **Only the daemon installs the guard.** `migrate_turn_index` runs in `run_daemon` right after
   `LCMEngine` is built, before the session manager, the agent loop, any gateway, the cron scheduler, the
   extractor, the golden-trace exporter or the web server is wired. `TestDaemonOrdering` pins that order.
-  The store keeps the legacy index until then and never re-creates it afterwards. This is deliberate:
-  another process on new code must not install a guard that a pre-fix writer would then trip over by
-  deleting rows (below).
+  The store itself never creates the trigger.
 - **The anchor sits at the lowest position not yet durable,** not at the first row being written, so a
   turn's tail waiting under a mid-turn message also clears the store's maximum. If the store ever has to
   move a row, the session moves its numbering with it: one loud collision, not one per row.
@@ -350,46 +373,56 @@ passed.
   The `ingest()` default is now `None` (append); the old default of 0 guaranteed a collision for any
   caller that omitted it.
 
-**⚠ Pre-fix code must not write a migrated `lcm.db`.** It inserts with `INSERT OR REPLACE`, which under
-the UNIQUE index resolves a collision by deleting the older row. A pre-fix daemon collides on the first
-write of every restarted session. The pre-fix CLI REPL collides on every turn, because its user and
-assistant rows share an index. Before running a pre-fix build, stop the daemon and undo the index:
+**Pre-fix code on a migrated `lcm.db` can no longer delete history.** Its `INSERT OR REPLACE` on a
+taken index fails instead. It cannot append to a session it collides in either, though. The guard
+refuses the row, the old code swallows the error, and the rows are lost for as long as it runs:
+- a pre-fix daemon records a silent failure, and every later row of that session waits behind the
+  refused one; that happens wherever the old numbering restarts (a restart where rehydrate declines or
+  is not called, `/reset`, a rollback);
+- the pre-fix CLI REPL stops with an `IntegrityError` on its first reply, because its user and
+  assistant rows share an index.
+
+To run an old build fully, stop the daemon and drop the trigger first:
 
 ```sql
-DROP INDEX idx_lcm_messages_session_turn;
-CREATE INDEX idx_lcm_messages_session ON lcm_messages (session_id, turn_index);
+DROP TRIGGER lcm_messages_turn_index_guard;
 PRAGMA user_version = 0;
 ```
 
-Alternatively, restore the `.bak`, which loses what was written since.
+The next start of a fixed build then migrates again: it repairs whatever the old build duplicated and
+re-creates the guard.
 
-**Gates**
+**Gates** (on `8cea1ca`, the guard as a trigger)
 
-- **Tests.** `tests/test_lcm_turn_index_unique.py` has 41 tests. The ten reproductions failed on
-  `caa24db` (10 failed, the control passed) and pass now. Full suite on the Mac (Python 3.14.3): 8,694
+- **Tests.** `tests/test_lcm_turn_index_unique.py` has 44 tests. The ten reproductions failed on
+  `caa24db` (10 failed, the control passed) and pass now. Full suite on the Mac (Python 3.14.3): 8,697
   passed, 513 skipped, 0 failed. ruff and the mypy gate are clean (250 modules clean, 122 on the debt
   list).
 - **Parity on the mini** (Python 3.11.15): replay 11/11 PARITY (0 diffs, all model requests matched);
-  stability IDENTICAL across 2 runs. No golden changed: the PR touches no `expected.json`.
+  stability IDENTICAL across 2 runs. No golden changed: the PR touches no `expected.json`, and the
+  trigger is not in the store dump.
 - **Speed gate on the mini:** branch median p50 17.1 ms (Δ +0.7 ms against the baseline's 16.4; mean
-  Δ +1.3 ms; peak RSS Δ +1.7 MB), within the noise band. The main control, run right after, also came
-  in at 17.1 ms (Δ +0.6 ms; mean Δ +1.3 ms; peak RSS Δ +1.5 MB).
-- **Insert path** (`bench_insert.py`, synthetic, on the Mac, 400 inserts × 3 rounds): p50 75–80 µs
-  against 71–79 µs before the fix. The extra 1–4 µs is the read-back of the stored index. The anchor
-  query costs 3.4–3.5 µs, once per numbering restart.
-- **Final dry run of this code on the 2026-09-26 nightly snapshot** (`lcm_migration_dryrun.py`, in
-  memory, nothing written). It gave the same result under the daemon's own interpreter, Python 3.12.3
-  with SQLite 3.45.1:
+  Δ +1.7 ms; peak RSS Δ +1.7 MB), within the noise band. The main control, run right after, came in at
+  17.5 ms (Δ +1.1 ms; mean Δ +1.7 ms; peak RSS Δ +1.6 MB).
+- **Insert path** (`bench_insert.py`, synthetic, on the Mac):
+  - committed inserts: p50 70–77 µs in all three variants;
+  - batched: the guard costs 0.93–1.09 µs per insert;
+  - the anchor: 3.3–3.4 µs, once per numbering restart.
+- **Final dry run of this code on the 2026-09-26 nightly snapshot** (`lcm_migration_dryrun.py`, run
+  under the deploy venv's interpreter, Python 3.12.3 with SQLite 3.45.1; in memory, nothing written):
   - before: 7,468 colliding rows in 16 sessions;
   - `migrated`: 13,791 rows renumbered in 302 runs (largest shift +7,855), with 660 rows placed in
     prompt order ahead of rowid order;
-  - after: 0 duplicates, 18,879 rows before and after, tables and columns unchanged, no TEMP table
-    left;
-  - `integrity_check` and FTS integrity ok; a second run is a no-op;
-  - 0.54 s.
+  - after: 0 duplicates, 18,879 rows before and after, tables and columns unchanged, the plain index
+    kept, the guard present, no TEMP table left;
+  - `integrity_check` and FTS integrity ok;
+  - an old build's `INSERT OR REPLACE` at a real row's key was refused, with no row lost;
+  - a second run is a no-op;
+  - 0.52 s.
 - **Beacon clients** (desktop and iOS) key and page on `message_id`. Both cache `ordinal`, and one
   display sort in the desktop client orders by it; unique values make that sort correct. No client
-  change is needed.
+  change is needed. Some of their comments still call `ordinal` non-unique; the PR lists them as a
+  Beacon follow-up.
 
 ## 6. Found in passing (not part of this defect)
 

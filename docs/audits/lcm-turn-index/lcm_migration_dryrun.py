@@ -14,8 +14,8 @@ import sys
 import time
 
 from prometheus.memory.lcm_conversation_store import (
-    LEGACY_TURN_INDEX_INDEX,
-    TURN_INDEX_UNIQUE_INDEX,
+    TURN_INDEX_GUARD_TRIGGER,
+    TURN_INDEX_INDEX,
 )
 from prometheus.memory.lcm_turn_index_migration import run_turn_index_migration
 
@@ -59,10 +59,14 @@ out["result"] = {k: v for k, v in vars(result).items() if k != "backup_path"}
 out["after"] = duplicate_stats(mem)
 out["rows_after"] = mem.execute("SELECT COUNT(*) FROM lcm_messages").fetchone()[0]
 out["user_version_after"] = mem.execute("PRAGMA user_version").fetchone()[0]
-out["indexes_after"] = {
+out["turn_index_indexes_after(name: unique)"] = {
     r[1]: bool(r[2]) for r in mem.execute("PRAGMA index_list(lcm_messages)")
-    if r[1] in (TURN_INDEX_UNIQUE_INDEX, LEGACY_TURN_INDEX_INDEX)
+    if r[1] == TURN_INDEX_INDEX or "turn" in r[1]
 }
+out["guard_trigger_after"] = mem.execute(
+    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+    (TURN_INDEX_GUARD_TRIGGER,),
+).fetchone()[0] == 1
 out["tables_and_columns_unchanged"] = tables(mem) == schema_before
 out["temp_tables_left"] = mem.execute("SELECT COUNT(*) FROM sqlite_temp_master").fetchone()[0]
 try:
@@ -73,6 +77,23 @@ except sqlite3.Error as exc:
 t0 = time.perf_counter()
 out["integrity_check"] = mem.execute("PRAGMA integrity_check").fetchone()[0]
 out["integrity_check_s"] = round(time.perf_counter() - t0, 2)
+
+# An old build's insert at a key a real row holds: refused, and nothing deleted.
+sid, ti = mem.execute("SELECT session_id, turn_index FROM lcm_messages LIMIT 1").fetchone()
+before = mem.execute("SELECT COUNT(*) FROM lcm_messages").fetchone()[0]
+try:
+    mem.execute(
+        "INSERT OR REPLACE INTO lcm_messages (id, session_id, turn_index, role, content,"
+        " content_json, token_count, timestamp, compacted, provenance, is_trusted)"
+        " VALUES ('dry-run-old-build', ?, ?, 'user', '', NULL, 0, 0, 0, 'user', 1)",
+        (sid, ti),
+    )
+    out["old_build_insert_or_replace"] = "ACCEPTED (unexpected)"
+except sqlite3.IntegrityError as exc:
+    out["old_build_insert_or_replace"] = f"refused: {type(exc).__name__}"
+out["old_build_rows_unchanged"] = (
+    mem.execute("SELECT COUNT(*) FROM lcm_messages").fetchone()[0] == before
+)
 
 rerun = run_turn_index_migration(mem, backup_path=":memory:")
 out["second_run_status"] = rerun.status

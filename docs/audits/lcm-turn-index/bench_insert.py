@@ -3,12 +3,17 @@
 No user data: a DB shaped like production (112 sessions, 18,879 rows, one session
 holding 8,345) filled with filler text.
 
-* pre-fix: ``INSERT OR REPLACE`` under the legacy non-unique index (the old
-  ``insert_message`` statement, reproduced inline);
-* fixed: ``LCMConversationStore.insert_message`` on a migrated DB (UNIQUE
-  index, ``INSERT ... ON CONFLICT(id) DO NOTHING``, read-back of the stored index);
+* pre-fix: ``INSERT OR REPLACE`` (the old ``insert_message`` statements,
+  reproduced inline) on an un-migrated DB;
+* fixed, no guard: ``LCMConversationStore.insert_message`` on an un-migrated DB
+  (``INSERT ... ON CONFLICT(id) DO NOTHING``, read-back of the stored index);
+* fixed + guard: the same on a migrated DB, where the guard trigger runs one
+  indexed EXISTS per insert. Its cost is the difference from the line above;
 * anchor: ``LCMConversationStore.next_turn_index``, paid once per numbering
-  (re)start, not per row.
+  (re)start, not per row;
+* batched: the store's own insert statement, 5,000 rows in one transaction, with
+  and without the guard. With no per-insert fsync in the way, the difference is
+  the trigger's cost alone.
 
 Run from a checkout: PYTHONPATH=src python docs/audits/lcm-turn-index/bench_insert.py
 """
@@ -18,7 +23,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from prometheus.memory.lcm_conversation_store import LCMConversationStore
+from prometheus.memory.lcm_conversation_store import _INSERT_SQL, LCMConversationStore
 from prometheus.memory.lcm_turn_index_migration import migrate_turn_index
 from prometheus.memory.lcm_types import MessagePart
 
@@ -70,9 +75,10 @@ def quantiles(values: list[float]) -> tuple[float, float]:
             round(ordered[int(len(ordered) * 0.95)] * 1e6, 1))
 
 
-def run(*, fixed: bool) -> tuple[tuple[float, float], tuple[float, float] | None]:
+def run(variant: str) -> tuple[tuple[float, float], tuple[float, float] | None]:
+    fixed = variant != "pre-fix"
     with tempfile.TemporaryDirectory() as directory:
-        store = build(directory, migrated=fixed)
+        store = build(directory, migrated=variant == "fixed + guard")
         inserts: list[float] = []
         anchors: list[float] = []
         nxt = 8345
@@ -93,8 +99,30 @@ def run(*, fixed: bool) -> tuple[tuple[float, float], tuple[float, float] | None
         return quantiles(inserts), (quantiles(anchors) if anchors else None)
 
 
+def batched(*, guard: bool, n: int = 5000) -> float:
+    """Microseconds per insert, n inserts in one transaction."""
+    with tempfile.TemporaryDirectory() as directory:
+        store = build(directory, migrated=guard)
+        conn = store._conn
+        first = store.next_turn_index(BIG)
+        started = time.perf_counter()
+        conn.execute("BEGIN")
+        for k in range(n):
+            conn.execute(_INSERT_SQL, (f"b-{k}", BIG, first + k, "user", "y" * 400, None, 0,
+                                       1.0, "user", 1))
+        conn.execute("COMMIT")
+        per_insert = (time.perf_counter() - started) / n * 1e6
+        store.close()
+        return round(per_insert, 2)
+
+
 for round_no in range(3):
-    for fixed in (False, True):
-        insert, anchor = run(fixed=fixed)
-        label = "fixed  " if fixed else "pre-fix"
-        print(f"round {round_no} {label} insert p50/p95 us {insert}  anchor p50/p95 us {anchor}")
+    for variant in ("pre-fix", "fixed, no guard", "fixed + guard"):
+        insert, anchor = run(variant)
+        print(f"round {round_no} {variant:16} insert p50/p95 us {insert}"
+              f"  anchor p50/p95 us {anchor}")
+
+for round_no in range(3):
+    without, with_guard = batched(guard=False), batched(guard=True)
+    print(f"batched round {round_no}: {without} us/insert without the guard, {with_guard} with"
+          f" -> the guard costs {round(with_guard - without, 2)} us per insert")
