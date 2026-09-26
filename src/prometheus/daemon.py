@@ -818,6 +818,22 @@ async def run_daemon(args: argparse.Namespace) -> None:
                     model_name,
                 )
 
+    # Chat-template tool calling. DETECTED, never assumed (WP-X.28): what the
+    # served template renders decides the adapter tier for a model the
+    # registry does not list; the registry keeps precedence for the ones it
+    # does, and a template that cannot be read leaves the tier at 'full' —
+    # said so on the boot line create_adapter logs. Same posture as vision
+    # and the context size above: the backend is asked, and its answer is
+    # recorded as what it is (native / not native / unknown).
+    tool_template: Any = None
+    if hasattr(provider, "detect_tool_template"):
+        tool_template = await provider.detect_tool_template(model_name)
+        logger.info(
+            "Chat template tool calling: %s (%s)",
+            {True: "native", False: "not native", None: "unknown"}[tool_template.native],
+            tool_template.evidence,
+        )
+
     # Backend registry — every local inference box this install knows about
     # (the primary as `local` + `backends:` in config), probed once here in
     # parallel and bounded by its own timeout, so a dead box costs one timeout
@@ -923,7 +939,7 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # Sprint 15 wiring fix: daemon was missing adapter, security_gate,
     # model_router, and divergence_detector — all were built but not connected.
     # Phase 2: router now requires primary provider + adapter + model built first.
-    adapter = create_adapter(model_config, config.get("adapter"))
+    adapter = create_adapter(model_config, config.get("adapter"), template=tool_template)
     security_gate = create_security_gate(security_config, getattr(args, "config", None))
     model_router = create_model_router(config, provider, adapter, model_name)
     # Phase 3: wire the router back into the adapter's RetryEngine so it can

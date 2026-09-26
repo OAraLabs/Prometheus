@@ -452,6 +452,45 @@ class LlamaCppProvider(ModelProvider):
             self.supports_vision = False
             return False
 
+    async def detect_tool_template(self, model_name: str | None = None) -> Any:
+        """What the served chat template does with tools, from ``/props``.
+
+        llama-server publishes the template it renders (``chat_template``) and
+        its own analysis of it (``chat_template_caps``: ``supports_tools``,
+        ``supports_tool_calls``, ...). The verdict — an
+        ``adapter.tier.ToolTemplate`` — decides the adapter tier for a model
+        ``config/model_registry.yaml`` does not list (WP-X.28), and is cached
+        on the instance as ``tool_template``. Verified against the /props
+        payload recorded from the production server on 2026-09-25
+        (``tests/fixtures/parity/tool_calls.trace.json``).
+
+        A server that cannot be asked is a recorded fact (``native=None``),
+        never a boot failure. ``model_name`` is unused here — llama-server
+        serves one model — and exists so every local provider answers the
+        same call.
+        """
+        from prometheus.adapter.tier import ToolTemplate, classify_template
+
+        url = f"{self._base_url}/props"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                props = resp.json()
+        except Exception as exc:  # noqa: BLE001 — unreachable or unparseable: recorded, not fatal
+            log.warning("Chat template detection failed (%s): %s", url, exc)
+            self.tool_template = ToolTemplate(
+                native=None, call_format=None,
+                evidence=f"/props could not be read ({type(exc).__name__})",
+            )
+            return self.tool_template
+        props = props if isinstance(props, dict) else {}
+        self.tool_template = classify_template(
+            chat_template=props.get("chat_template"), caps=props.get("chat_template_caps"),
+        )
+        log.info("Chat template: %s (endpoint=%s)", self.tool_template.evidence, self._base_url)
+        return self.tool_template
+
     async def detect_loaded_model(self) -> str | None:
         """Query /v1/models to discover the model actually loaded on the server.
 
