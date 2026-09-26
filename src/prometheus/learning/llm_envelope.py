@@ -23,6 +23,15 @@ needs:
    ``subsystem_runs`` row with duration, output size, and a summary so
    ``/health`` can answer "is this subsystem actually running?"
 
+4. **Prompt redaction (X.37).** ``call()`` redacts token shapes in the prompt
+   before it leaves the process. Its callers are the learning loop and other
+   background subsystems, which build prompts from conversation text and
+   tool traces and never need a credential to do their job. A caller that
+   summarises the LIVE conversation — the context compactor, whose summary
+   replaces turns the model is still working from — passes
+   ``redact_prompts=False``. ``stream()`` is the agent's own turn and is never
+   redacted: a token the user pasted for the agent to use must reach it.
+
 Usage::
 
     envelope = LLMCallEnvelope(
@@ -160,6 +169,7 @@ class LLMCallEnvelope:
         telemetry: "ToolCallTelemetry | None" = None,
         *,
         on_failure: OnFailure = "raise",
+        redact_prompts: bool = True,
     ) -> None:
         if on_failure not in ("raise", "log_only", "return_none"):
             raise ValueError(
@@ -169,6 +179,7 @@ class LLMCallEnvelope:
         self._subsystem = subsystem
         self._telemetry = telemetry
         self._on_failure = on_failure
+        self._redact_prompts = redact_prompts
 
     # ------------------------------------------------------------------
     # Primary entry point
@@ -200,6 +211,11 @@ class LLMCallEnvelope:
             ApiMessageRequest,
             ApiTextDeltaEvent,
         )
+
+        if self._redact_prompts:
+            from prometheus.security.log_redaction import redact_secrets
+
+            prompt = redact_secrets(prompt)
 
         # Build the request with the canonically correct content shape.
         # This is the structural barrier against ed8f1a6 — there is no

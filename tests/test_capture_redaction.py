@@ -14,6 +14,7 @@ in test_log_redaction.py). Do not make them look more real.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -156,14 +157,18 @@ def _seed_old_stores(tmp_path: Path) -> tuple[Path, Path, Path]:
     return tel_db, tr_db, traj
 
 
-def _run(args: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, timeout=120)
+def _run(args: list[str], tmp_path: Path) -> subprocess.CompletedProcess:
+    # PROMETHEUS_HOME sends every default path (the LCM files, when a test names
+    # none) into tmp_path: a scrub test must never resolve to the real ~/.prometheus.
+    env = {**os.environ, "PROMETHEUS_HOME": str(tmp_path / "home")}
+    return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True,
+                          timeout=120, env=env)
 
 
 def test_scrub_dry_run_counts_and_touches_nothing(tmp_path):
     tel_db, tr_db, traj = _seed_old_stores(tmp_path)
     before = (tel_db.read_bytes(), tr_db.read_bytes(), (traj / "golden_traces_1.jsonl").read_text())
-    r = _run(["--telemetry", str(tel_db), "--training", str(tr_db), "--trajectories", str(traj)])
+    r = _run(["--telemetry", str(tel_db), "--training", str(tr_db), "--trajectories", str(traj)], tmp_path)
     assert r.returncode == 0, r.stderr
     assert "DRY RUN" in r.stdout
     assert "tool_calls.raw_model_output                     1 would change" in r.stdout
@@ -179,7 +184,7 @@ def test_scrub_dry_run_counts_and_touches_nothing(tmp_path):
 
 def test_scrub_apply_rewrites_backs_up_and_is_idempotent(tmp_path):
     tel_db, tr_db, traj = _seed_old_stores(tmp_path)
-    r = _run(["--apply", "--telemetry", str(tel_db), "--training", str(tr_db), "--trajectories", str(traj)])
+    r = _run(["--apply", "--telemetry", str(tel_db), "--training", str(tr_db), "--trajectories", str(traj)], tmp_path)
     assert r.returncode == 0, r.stderr
     assert "5 row(s)/line(s) rewritten" in r.stdout
     backups = sorted(tmp_path.glob("*.pre-scrub-*"))
@@ -197,11 +202,16 @@ def test_scrub_apply_rewrites_backs_up_and_is_idempotent(tmp_path):
     lines = (traj / "golden_traces_1.jsonl").read_text().splitlines()
     assert len(lines) == 2 and FAKE_TOKEN not in lines[0] and json.loads(lines[1])["messages"][0]["content"] == "clean"
     # second run: nothing left to do, no new backups
-    r2 = _run(["--apply", "--telemetry", str(tel_db), "--training", str(tr_db), "--trajectories", str(traj)])
+    r2 = _run(["--apply", "--telemetry", str(tel_db), "--training", str(tr_db), "--trajectories", str(traj)], tmp_path)
     assert r2.returncode == 0 and "0 row(s)/line(s) rewritten" in r2.stdout
 
 
 def test_scrub_missing_stores_are_said_not_skipped_silently(tmp_path):
-    r = _run(["--telemetry", str(tmp_path / "no.db"), "--training", str(tmp_path / "no2.db"), "--trajectories", str(tmp_path / "none")])
+    r = _run(["--telemetry", str(tmp_path / "no.db"), "--training", str(tmp_path / "no2.db"), "--trajectories", str(tmp_path / "none")], tmp_path)
     assert r.returncode == 0
-    assert r.stdout.count("not found (skipped") == 3
+    # three named stores, plus both LCM files the scrub covers by default: the
+    # data-dir lcm.db and the legacy config-root one
+    assert r.stdout.count("not found (skipped") == 5
+    home = tmp_path / "home" / ".prometheus"
+    assert f"{home / 'data' / 'lcm.db'}: not found" in r.stdout
+    assert f"{home / 'lcm.db'}: not found" in r.stdout
