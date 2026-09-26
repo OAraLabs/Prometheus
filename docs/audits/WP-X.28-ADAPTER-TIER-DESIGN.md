@@ -630,7 +630,7 @@ touch is named.
 
 | # | PR | touches | traces | seam rule | engine/agent_loop.py |
 |---|---|---|---|---|---|
-| 1 | XML reader in the enforcer and formatter (item 4) | `adapter/enforcer.py`, `adapter/formatter.py`, tests | **`coding_run` recorded the defect and must be re-recorded (live 4090)**; the other ten replay at PARITY | bench on the mini (adapter/) | no |
+| 1 | XML reader in the enforcer and formatter (item 4) | `adapter/enforcer.py`, `adapter/formatter.py`, `scripts/parity/scenarios.py` (the coding_run rule), tests | **one trace: `coding_run` recorded the defect and is re-recorded live**; the other ten replay at PARITY | bench on the mini (adapter/) | no |
 | 2 | Tier resolver, template probes, boot line (items 1 and the log half of 3) | new `adapter/tier.py`; `__main__.py` (`create_adapter`, `_get_adapter_tier` wrapper, CLI helper); `daemon.py` (one probe call); `providers/llama_cpp.py`, `providers/ollama.py` (`detect_tool_template`); `providers/backends.py` (`extra["tool_template"]`); tests | none change; replay must pass | bench (adapter/) | no |
 | 3 | Config override `adapter.model_tiers` (item 2) | `__main__.py`, `config/prometheus.yaml.default`, `docs/reference/config-keys.md` (regenerated), tests | none | no | no |
 | 4 | Surfaces: `/doctor`, `oara doctor`, `/api/status.adapter`, `/api/models` tier fields, `/api/backends.tool_template` (item 3) | `infra/doctor.py`, `infra/anatomy.py`, `gateway/commands.py`, `cli/doctor.py`, `web/server.py`, `docs/guide/providers.md` (the "Adapter strictness" section), tests | none; replay runs on `web/**` | no | no |
@@ -704,9 +704,18 @@ questions:
 10. Ornith's file is `Ornith-1.5-9B-Q4_K_M.gguf`; Bonsai's is the ladder's exact
     `Ternary-Bonsai-2-27B-PQ2_0.gguf`.
 
-Pending (raised 2026-09-26, after the mini's replay of PR 1): `coding_run` recorded the
-defect PR 1 fixes, so PR 1 cannot land trace-neutral; it needs one live re-record of
-`coding_run` on the 4090, in Will's window, making it the first trace-changing PR.
+Ruled 2026-09-25 (evening), after the mini's replay of PR 1 found that `coding_run`
+recorded the defect PR 1 fixes: PR 1 is the trace-changing PR (#580 has landed, none is in
+flight). `coding_run` is re-recorded on the mini the way #580 was — the primary live on the
+4090's running production server (approved for this PR only, outside 06:30–10:00, no
+restart, endpoint never printed), the alt from a strict stand-in over the committed
+exchanges. The new golden must show the XML call executing (a committed scenario rule now
+requires an executed call read from a reply carrying `<function=`, and no parse-disagreement
+feedback); the PR names the exchange and the tool call before and after. Why the coding run
+sat at tier `full`: the `code` subcommand builds its adapter from the config's model HINT
+(`model.model`, blank in the harness config and in the deployed one), and a blank name matches
+no registry family. PR 2 does not change that tier (a blank name with no template read is
+the fallback, `full`), so PR 2 stays trace-neutral.
 
 Build order: PR 1 (the XML reader in the enforcer, taught to `QwenFormatter` through the
 same helper), then PR 2 (resolver, template probes, boot line, and the `type(provider)`

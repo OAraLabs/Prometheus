@@ -200,10 +200,26 @@ def _req_coding(ev: Evidence) -> list[str]:
     report = (code.get("result") or {}).get("report") or {}
     leaking = [m.group(0)[:80] for r in ev.requests
                for m in _PYDANTIC_PER_RUN_VALUE.finditer(json.dumps(r, ensure_ascii=False))]
+    # WP-X.28 PR 1: the coding path runs the primary at tier full (its adapter is
+    # built from the config's model HINT, blank here), and the production 27B
+    # writes its template's Qwen XML calls there. The recording before PR 1
+    # held one such call that the reader could not read: dropped as a parse
+    # disagreement, retried with feedback. This golden must show the reader at
+    # work — an executed call read from a reply carrying the XML — and carry no
+    # such disagreement, or it records the bug instead of the fix.
+    xml_executed = [r for r in ev.tool_rows()
+                    if r.get("success") == 1 and "<function=" in (r.get("raw_model_output") or "")]
+    fed_back = [r for r in ev.requests
+                if "tool-call markup that could not be parsed" in json.dumps(r, ensure_ascii=False)]
     return (_need(report.get("status") == "success", f"coding run status {report.get('status')!r}")
             + _need(report.get("acceptance_exit") == 0, "acceptance command did not pass")
             + _need(not leaking, "a tool result carries a pydantic error repr with a per-run "
-                                 f"value the normalizer cannot see — not replayable: {leaking[:1]}"))
+                                 f"value the normalizer cannot see — not replayable: {leaking[:1]}")
+            + _need(bool(xml_executed), "no executed tool call was read from a reply carrying a "
+                                        "Qwen XML call (<function=) — the sample does not show "
+                                        "the XML reader at work")
+            + _need(not fed_back, "a request carries the parse-disagreement feedback — an "
+                                  "envelope the reader could not read; the sample records the bug"))
 
 
 def _req_workspace(ev: Evidence) -> list[str]:
