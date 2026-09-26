@@ -18,7 +18,12 @@ class SkillTool(BaseTool):
     """Return the content of a loaded skill by name."""
 
     name = "skill"
-    description = "Read a builtin or user-defined skill by name."
+    description = (
+        "Load a skill: saved step-by-step instructions for one kind of task (a "
+        "procedure, a house convention, a known fix). Call it with the skill's name "
+        "before starting a task that a skill covers, then follow what it returns. The "
+        "system prompt names the core skills; find others with tool_search."
+    )
     input_model = SkillToolInput
 
     def is_read_only(self, arguments: SkillToolInput) -> bool:

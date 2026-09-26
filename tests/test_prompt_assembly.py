@@ -285,7 +285,7 @@ class TestSkillsSection:
 
     def test_no_skills_hint_when_empty(self):
         prompt = build_runtime_system_prompt(cwd=".", config={}, skills=None)
-        assert "tool_search to find skills" not in prompt
+        assert "# Available Skills" not in prompt
 
     def test_daemon_call_sites_pass_skills(self):
         # Wiring guard (AST): every daemon prompt-build site must pass

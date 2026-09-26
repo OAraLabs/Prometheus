@@ -234,7 +234,10 @@ tools:
     # through 07-25 and ZERO from the day deferral activated. ~670 est
     # tokens buys the class out; the advertised set stays ~74% below the
     # full catalog.
-    always_loaded: [bash, task_create, read_file, write_file, edit_file, grep, glob, tool_search, web_search, web_fetch, memory]
+    # skill promoted 2026-09-26 (docs/audits/SKILL-USAGE.md, option C2): the
+    # system prompt tells every run to "use the skill tool", and on 822 of 973
+    # runs it was not in the list. ~150 tokens.
+    always_loaded: [bash, task_create, read_file, write_file, edit_file, grep, glob, tool_search, skill, web_search, web_fetch, memory]
     # MCP tools follow the servers you configured: a configured server IS
     # the advertise decision, so its tools sit in the catalog like any
     # always_loaded tool, and a server added or removed over REST changes

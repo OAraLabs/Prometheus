@@ -34,7 +34,7 @@ from __future__ import annotations
 # meant the model was handed nothing it could call.
 SHIPPED_ALWAYS_LOADED: tuple[str, ...] = (
     "bash", "task_create", "read_file", "write_file", "edit_file",
-    "grep", "glob", "tool_search", "web_search", "web_fetch", "memory",
+    "grep", "glob", "tool_search", "skill", "web_search", "web_fetch", "memory",
 )
 
 # security.workspace_root — where write_file/edit_file may write without
