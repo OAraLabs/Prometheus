@@ -632,6 +632,7 @@ touch is named.
 |---|---|---|---|---|---|
 | 1 | XML reader in the enforcer and formatter (item 4) | `adapter/enforcer.py`, `adapter/formatter.py`, `scripts/parity/scenarios.py` (the coding_run rule), tests | **one trace: `coding_run` recorded the defect and is re-recorded live**; the other ten replay at PARITY | bench on the mini (adapter/) | no |
 | 2 | Tier resolver, template probes, boot line (items 1 and the log half of 3) | new `adapter/tier.py`; `__main__.py` (`create_adapter`, `_get_adapter_tier` wrapper, CLI helper); `daemon.py` (one probe call); `providers/llama_cpp.py`, `providers/ollama.py` (`detect_tool_template`); `providers/backends.py` (`extra["tool_template"]`); tests | none change; replay must pass | bench (adapter/) | no |
+| 2c | Coding mode gets the same tier as a chat turn: the `code` subcommand passes the served model's real name (or the resolver's template probe) instead of the blank config HINT (queued 2026-09-25, after PR 1 lands) | `__main__.py` (the `code` subcommand) | **one trace: `coding_run`** (its requests change: tools native at `light`) | replay | no |
 | 3 | Config override `adapter.model_tiers` (item 2) | `__main__.py`, `config/prometheus.yaml.default`, `docs/reference/config-keys.md` (regenerated), tests | none | no | no |
 | 4 | Surfaces: `/doctor`, `oara doctor`, `/api/status.adapter`, `/api/models` tier fields, `/api/backends.tool_template` (item 3) | `infra/doctor.py`, `infra/anatomy.py`, `gateway/commands.py`, `cli/doctor.py`, `web/server.py`, `docs/guide/providers.md` (the "Adapter strictness" section), tests | none; replay runs on `web/**` | no | no |
 | 5 | `--tier-sweep` (item 5), a follow-up after the ladder branch merges (the branch itself is not touched) | `scripts/ladder_run.py`, `gym/ladder/runner.py`, `tiers.py`, `record.py`, `docs/MODEL-LADDER.md`, tests | none | no | no |
@@ -715,7 +716,10 @@ feedback); the PR names the exchange and the tool call before and after. Why the
 sat at tier `full`: the `code` subcommand builds its adapter from the config's model HINT
 (`model.model`, blank in the harness config and in the deployed one), and a blank name matches
 no registry family. PR 2 does not change that tier (a blank name with no template read is
-the fallback, `full`), so PR 2 stays trace-neutral.
+the fallback, `full`), so PR 2 stays trace-neutral — PR 2 alone leaves coding mode at `full`.
+Queued after PR 1 lands, as its own PR (2c in the table): coding mode passes the served
+model's real name, or the resolver's template probe, so a coding run gets the same tier as
+a chat turn; it changes `coding_run`'s requests, so it is trace-changing and waits its turn.
 
 Build order: PR 1 (the XML reader in the enforcer, taught to `QwenFormatter` through the
 same helper), then PR 2 (resolver, template probes, boot line, and the `type(provider)`
