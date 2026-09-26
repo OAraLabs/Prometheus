@@ -848,6 +848,21 @@ def run_coding_task(args) -> int:
 
     model_cfg = dict(config.get("model", {}))
     provider, model_name = create_provider(model_cfg)
+    # The served model's real name, asked for the way the daemon and the
+    # interactive CLI already ask for it. Until now this path built its
+    # adapter from the config's HINT alone — blank on the shipped template
+    # and on the deployed daemon — so every coding run matched no registry
+    # family and ran at adapter tier full, with its tools written into the
+    # prompt, while a chat turn on the same server ran at light with them
+    # native (WP-X.28; the coding_run golden recorded it, every request with
+    # model ""). The name reaches the adapter, the session and every
+    # telemetry row of the run. An unreachable server keeps the hint, as the
+    # CLI does; Ollama serves the name it is asked for, so nothing to detect.
+    if model_cfg.get("provider", "llama_cpp") == "llama_cpp":
+        model_name = _detect_model_or_fallback(
+            model_cfg.get("base_url", "http://localhost:8080"), model_name,
+        )
+        model_cfg["model"] = model_name
     adapter = create_adapter(model_cfg, config.get("adapter"))
 
     telemetry = None
