@@ -24,6 +24,7 @@ import pytest
 from prometheus import __main__ as m
 
 SERVED = "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"
+TEMPLATE = object()   # the served template's verdict, whatever the probe returns
 
 
 class _StubSandbox:
@@ -66,10 +67,16 @@ def _drive(monkeypatch, tmp_path, cfg_text: str, detected: str | None):
 
     def _create_adapter(model_cfg, adapter_cfg=None, **kwargs):
         seen["adapter_model"] = model_cfg.get("model", "")
+        seen["adapter_template"] = kwargs.get("template")
         return None
+
+    def _detect_template(model_cfg):
+        seen["template_asked_for"] = dict(model_cfg)
+        return TEMPLATE
 
     monkeypatch.setattr(m, "create_provider", _create_provider)
     monkeypatch.setattr(m, "_detect_model_or_fallback", _detect)
+    monkeypatch.setattr(m, "_detect_tool_template_or_none", _detect_template)
     monkeypatch.setattr(m, "create_adapter", _create_adapter)
     monkeypatch.setattr("prometheus.coding.sandbox.clone_repo_for_sandbox",
                         lambda *a, **k: _StubSandbox(tmp_path))
@@ -100,6 +107,10 @@ def test_llama_cpp_coding_run_is_built_for_the_served_model(monkeypatch, tmp_pat
     assert seen["asked_base_url"] == "http://box:8080"
     assert seen["adapter_model"] == SERVED, "the adapter was built for the hint, not the served model"
     assert seen["session_model"] == SERVED, "the session (and its requests) carry the hint, not the served model"
+    # The template probe is asked about the served model and its verdict
+    # reaches the adapter, as on the interactive CLI.
+    assert seen["template_asked_for"]["model"] == SERVED
+    assert seen["adapter_template"] is TEMPLATE
 
 
 def test_the_hint_stands_when_the_server_cannot_be_asked(monkeypatch, tmp_path):

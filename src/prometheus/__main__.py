@@ -1016,7 +1016,12 @@ def run_coding_task(args) -> int:
             model_cfg.get("base_url", "http://localhost:8080"), model_name,
         )
         model_cfg["model"] = model_name
-    adapter = create_adapter(model_cfg, config.get("adapter"))
+    # And the served template's verdict, read the way the interactive CLI reads
+    # it, so a model the registry does not list (Bonsai, Ornith) resolves its
+    # tier here exactly as it does for a chat turn.
+    adapter = create_adapter(
+        model_cfg, config.get("adapter"), template=_detect_tool_template_or_none(model_cfg),
+    )
 
     telemetry = None
     if config.get("infrastructure", {}).get("telemetry_enabled", True):
