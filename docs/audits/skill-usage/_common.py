@@ -57,12 +57,26 @@ USER_SURFACES = frozenset({
 TEST_SURFACES = frozenset({"smoke", "probe", "verify", "beacon-verify"})
 
 
-def surface(session_id: str | None) -> str:
-    """A coarse class for a session id: the surface, 'evals', 'coding', 'test' or 'none'."""
+def session_column_start(tel: sqlite3.Connection) -> float:
+    """When ``tool_calls.session_id`` started being written: its first non-null row.
+    Rows before this have no session by construction; see ``session_gaps.py``
+    for the ones after it."""
+    return float(tel.execute(
+        "SELECT MIN(timestamp) FROM tool_calls WHERE session_id IS NOT NULL").fetchone()[0])
+
+
+def surface(session_id: str | None, ts: float | None = None, column_start: float | None = None) -> str:
+    """A coarse class for a session id: the surface, 'evals', 'coding', 'test' or 'no session id'.
+
+    Pass the row's timestamp and ``session_column_start`` to split session-less
+    rows into "before the column existed" and "after" (a telemetry gap)."""
     if session_id is None:
-        return "none (pre-2026-08-15, no session column)"
+        if ts is None or column_start is None:
+            return "no session id"
+        return ("no session id: before the column existed" if ts < column_start
+                else "no session id: after (failure path or session-less run)")
     if session_id == "system":
-        return "evals (nightly, session 'system')"
+        return "evals/benchmarks (session 'system')"
     m = re.match(r"^([A-Za-z][A-Za-z_\-]*?)[:_]", session_id)
     prefix = m.group(1).lower() if m else session_id.lower()
     if prefix == "coding":

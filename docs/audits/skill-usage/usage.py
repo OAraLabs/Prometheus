@@ -59,9 +59,10 @@ def main() -> None:
     print("  -- by provider:", {p: v for p, v in sorted(prov.items(), key=lambda kv: -kv[1][0])})
 
     print("== by surface: calls, tool_search, skill")
+    start = C.session_column_start(tel)
     sur = collections.defaultdict(lambda: [0, 0, 0])
     for r in rows:
-        s = C.surface(r["session_id"])
+        s = C.surface(r["session_id"], r["timestamp"], start)
         sur[s][0] += 1
         sur[s][1] += r["tool_name"] == "tool_search"
         sur[s][2] += r["tool_name"] == "skill"
@@ -107,7 +108,7 @@ def main() -> None:
                  "user" if name in reg and reg[name]["source"] == "user" else
                  "auto" if name in reg else "archived auto" if name in archived else "not in catalog")
         nf = "Skill not found" in (r["error_detail"] or "")
-        print(f"  {C.day(r['timestamp'])} {label(r):32} {C.surface(r['session_id']):40} "
+        print(f"  {C.day(r['timestamp'])} {label(r):32} {C.surface(r['session_id'], r['timestamp'], start):44} "
               f"success={r['success']} not_found={nf} golden={r['is_golden']} resolves_to={where}")
     odd = collections.Counter(r["tool_name"] for r in rows
                               if "skill" in r["tool_name"].lower() and r["tool_name"] != "skill")

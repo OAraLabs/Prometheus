@@ -112,12 +112,13 @@ def main() -> None:
     # 2. Every telemetry query.
     res = collections.Counter()
     best = collections.Counter()
+    start = C.session_column_start(tel)
     for row in tel.execute("SELECT timestamp, session_id, parsed_tool_call FROM tool_calls"
                            " WHERE tool_name='tool_search'"):
         inp = C.parsed_input(row["parsed_tool_call"])
-        cls = C.surface(row["session_id"])
-        cls = "evals" if cls.startswith("evals") else "user surfaces" if cls.startswith("user:") else (
-            "pre-2026-08-15" if cls.startswith("none") else "test/coding")
+        cls = C.surface(row["session_id"], row["timestamp"], start)
+        cls = "evals/benchmarks" if cls.startswith("evals") else "user surfaces" if cls.startswith("user:") else (
+            "no session id" if cls.startswith("no session") else "test/coding")
         if inp is None:
             res[(cls, "no input recorded")] += 1
             continue

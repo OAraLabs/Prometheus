@@ -27,7 +27,7 @@ too. It has more than one cause. Ranked:
    went without it. Until #462 the advertisement was resolved before routing, so those runs were
    served with the local model's deferred set.
 3. **Search rarely leads to a load.** All three loads came two seconds after a `tool_search` in July.
-   Since the last one, 299 searches (80 outside the nightly evals) have produced no load. When a search
+   Since the last one, 299 searches (80 outside eval/benchmark runs) have produced no load. When a search
    does list skills, it is mostly by accident: 20 of the 25 user searches that listed one got there by
    edit distance alone. The listing then tells the model to call a tool that most runs weren't given.
 4. **Few requests match a skill, and the auto skills are thin.** A skill clearly matched about
@@ -39,6 +39,10 @@ too. It has more than one cause. Ranked:
    mtime, which it labels `last_used_days_ago`. GEPA filters on the wrong tool name, field and export
    shape. A skill body that *is* loaded on a local run gets microcompacted to about 500 chars three
    user messages later.
+
+**A telemetry gap, separate from the causes:** 637 of the 10,814 tool calls made since `tool_calls`
+got its `session_id` column (5.9%) still carry no session id. That includes every failure-path row,
+so per-session failure counts undercount (§1). None of the 637 is a `skill` call.
 
 **Fix options (§9).** The plumbing (C) comes first under any option: **+90 tokens** per deferred
 request, low risk. Relevance-picked skills (B) is the recommended next step, framed as an Instinct
@@ -66,7 +70,8 @@ costs **7,193 tokens** per request, 10% of the local 72k window.
   - Telemetry `tool_calls`: 2026-04-06 → 2026-09-24, 16,414 calls. The 15,019 `_loop_transition`
     pseudo-rows are excluded.
   - LCM: 2026-05-27 → 2026-09-24, with 865 human turns on user surfaces.
-  - Tool-advertisement rows start 2026-07-31. `tool_calls.session_id` starts 2026-08-15.
+  - Tool-advertisement rows start 2026-07-31. `tool_calls.session_id` starts 2026-08-15 17:41 UTC
+    (637 calls after that still have none; §1).
   - No tool call or LCM message is newer than 2026-09-24 20:02 UTC: the daemon had no conversations
     between then and the snapshot.
 - **Matcher.** The Instinct kNN baseline's encoder, reproduced exactly:
@@ -108,10 +113,11 @@ By provider: llama.cpp 9,018 / 327 / 1 · qwen 6,968 / 8 / 0 · xai 324 / 3 / 2 
 
 | surface (session prefix) | calls | `tool_search` | `skill` |
 |---|---:|---:|---:|
-| no session column yet (before 2026-08-15) | 6,237 | 52 | 3 |
+| no session id: before the column existed (to 2026-08-15 17:41 UTC) | 5,600 | 50 | 3 |
 | beacon | 5,218 | 11 | 0 |
 | telegram | 2,240 | 2 | 0 |
-| nightly evals (session `system`, a 7-tool registry without `skill`) | 1,520 | 219 | 0 |
+| evals/benchmarks (session `system`, a 7-tool registry without `skill`; none at the 03:00/06:00 cron times) | 1,520 | 219 | 0 |
+| no session id: after the column existed (the gap below) | 637 | 2 | 0 |
 | web (the pre-#458 namespace) | 516 | 0 | 0 |
 | desktop | 516 | 47 | 0 |
 | ios | 116 | 0 | 0 |
@@ -157,8 +163,8 @@ By provider: llama.cpp 9,018 / 327 / 1 · qwen 6,968 / 8 / 0 · xai 324 / 3 / 2 
   | calls | searches | … list ≥1 skill | … only by edit distance (no query word matched) | selects listing a skill |
   |---|---:|---:|---:|---:|
   | user surfaces | 28 | 25 | **20** | 0 of 32 |
-  | before 2026-08-15 | 24 | 21 | 1 | 0 of 19 |
-  | nightly evals | 219 | 187 | 82 | – |
+  | no session id | 24 | 21 | 1 | 0 of 19 |
+  | evals/benchmarks | 219 | 187 | 82 | – |
   | test/coding | 3 | 3 | 2 | 0 of 4 |
 
   So a search usually does return a skill. On user surfaces, only 5 of 28 searches returned one
@@ -183,6 +189,35 @@ By provider: llama.cpp 9,018 / 327 / 1 · qwen 6,968 / 8 / 0 · xai 324 / 3 / 2 
 - **Turns.** 1 of 865 human turns on user surfaces loaded a skill (0.12%).
 - **Runs.** 2 of 2,886 runs since 2026-06-12 contained a `skill` call (0.07%).
 - None since 2026-07-21.
+
+### Tool calls with no session id: a telemetry gap
+
+**6,237 of the 16,414 calls (38%) have no session id.**
+
+- **5,600 predate the column.** `tool_calls.session_id` was first written on 2026-08-15 at 17:41 UTC,
+  so earlier rows have no session by construction.
+  - That includes all 3 `skill` calls, and so the only 2 golden ones.
+  - The golden-trace exporter skips session-less rows as untrainable, so those two could never have
+    been exported.
+  - The first export file also starts at that same minute.
+- **637 of the 10,814 calls made since then (5.9%) still have none. That is the gap.**
+  `session_gaps.py` sorts them by the writer in `engine/agent_loop.py` that produced them:
+
+  | why | rows | from user sessions |
+  |---|---:|---:|
+  | main-path call in a run that had no session id at all (subagents in `coordinator/subagent.py` and some harness scripts call the loop without one) | 313 | 0 (309 ran amid eval/benchmark activity) |
+  | failure path: every tool-path writer except the main one omits `session_id` (validation_failed 138, permission_denied 115, input_validation 39, tool_timeout 3, tool_exception 1) | 296 | 93 |
+  | `lucky_guess` marker (a model called a tool it wasn't offered) | 28 | 26 |
+  | ephemeral session (nulled on purpose) | 0 | – |
+
+- **How rows were attributed to a surface.** Each row takes the surface of the nearest row with the
+  same model and a session id, within 5 minutes. Failing that, it takes the latest `loop_round` row
+  within 10 minutes. 8 rows stayed unattributed.
+- **The 9,898 `_loop_transition` pseudo-rows** written since the column exists have no session id
+  either.
+- **Effect on this audit.** None of the 637 is a `skill` call and 2 are `tool_search` calls, so the gap
+  hides no skill use. It does hide every failure's session, so a per-session failure or lucky-guess
+  count from telemetry undercounts.
 
 ## 2. The catalog
 
@@ -259,6 +294,9 @@ here):
   | **all 973** | **151 (15.5%)** | 948 |
 
   The 1,406 eval and coding runs used 6- and 7-tool registries with no `skill` tool.
+- A model *can* call a tool it wasn't offered: the validator accepts any registered name, and telemetry
+  marks the call `lucky_guess`. That happened 28 times (all after 2026-08-15) across 7 tools, mostly
+  the `lcm_*` tools, and never with `skill`.
 
 **Is `tool_search` advertised on every Qwen 3.8 Max turn? Yes. `skill` is not.**
 
@@ -399,8 +437,9 @@ Nothing in Prometheus counts skill use. Every consumer substitutes something els
     call:` marker. The tool is `skill`, the field is `name`, and the marker is in **0 of the 5,519**
     export lines.
   - Fixing all three would still find nothing. The only two golden `skill` calls (rowids 4,569–4,570,
-    2026-07-10) predate every export file, whose earliest row is 2026-08-15 17:41 UTC. So the exports
-    hold **0 `skill` lines** either way.
+    2026-07-10) predate the `session_id` column. The exporter skips session-less rows, and its first
+    file starts where the column does (2026-08-15 17:41 UTC). So the exports hold **0 `skill` lines**
+    either way.
   - GEPA is off on the mini (`learning.gepa_enabled: false`). Switched on, it would report "no
     auto-skill matches in traces" every cycle.
 - **UI.** The Telegram `/skills` list and Beacon's `/api/skills/list` show file mtime as "last used".
@@ -548,6 +587,7 @@ export PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=~/prometheus-deploy/src PROMETHEUS_C
 python3 catalog.py $S --tokenizer $M/qwen3/tokenizer.json   # §2
 python3 usage.py $S                                          # §1
 python3 advertised.py $S                                     # §3 (who had skill / tool_search)
+python3 session_gaps.py $S                                   # §1 (tool calls with no session id)
 python3 seen_by_model.py $S $M/qwen3/tokenizer.json          # §3 (rendered section, schemas, token costs)
 python3 tool_search_replay.py $S tools.json                  # §1 (did a result list a skill?)
 python3 missed.py $S $M/bge --threshold 0.75                 # §4 and option B's cost
