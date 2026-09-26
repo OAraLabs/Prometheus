@@ -492,9 +492,17 @@ def _tier_row(name: str, rs: list[dict[str, Any]]) -> str:
     ok = sum(r.get("tool_calls_ok") or 0 for r in rs)
     excl = sum(r.get("tool_calls_excluded") or 0 for r in rs)
     breaker = sum(1 for r in rs if r.get("stopped_by") == "circuit_breaker")
+    # Why a run did not pass: a finished wrong answer, a format miss, the loop
+    # stopping on a parse disagreement (a tool call the adapter could not read),
+    # or any other halt (round/tool caps, repeat, breaker, empty replies).
+    wrong = sum(1 for r in rs if r["verdict"] == "fail" and r.get("stopped_by") == "done")
+    parse = sum(1 for r in rs if r["verdict"] == "fail" and r.get("stopped_by") == "parse_disagreement")
+    halts = sum(1 for r in rs if r["verdict"] == "fail"
+                and r.get("stopped_by") not in ("done", "parse_disagreement"))
     return (
         f"| {name} | {n} | " + (f"{passed}/{n} ({lo:.2f}–{hi:.2f})" if n else "—")
-        + f" | {_ratio(p, d)} | {sum(1 for r in rs if r['verdict'] == 'format_miss')} "
+        + f" | {_ratio(p, d)} | {wrong} | {sum(1 for r in rs if r['verdict'] == 'format_miss')} "
+        f"| {parse} | {halts} "
         f"| {_ratio(ok, calls - excl)} | {_fmt(_mean([r.get('tool_calls') for r in rs]), '.2f')} "
         f"| {_fmt(_mean([r.get('repairs') for r in rs]), '.2f')} "
         f"| {_per_run(rs, 'adapter_retries')} / {_per_run(rs, 'adapter_aborts')} "
@@ -554,11 +562,12 @@ def render_tier_sweep(rows: list[dict[str, Any]], *, class_order: list[str]) -> 
         (bumped if tier_bumped(r) else by_tier)[forced_tier(r) or "?"].append(r)
     tiers = [t for t in TIER_ORDER if t in by_tier or t in bumped]
     labels = sorted({r["run_label"] for r in swept})
-    head = ("| tier | runs | task success (95% CI) | accuracy | format miss | tool-call success "
+    head = ("| tier | runs | task success (95% CI) | accuracy | wrong | format miss "
+            "| parse-disagreement halts | other halts | tool-call success "
             "| calls / run | repairs / run | adapter retries / aborts per run | calls from text / run "
             "| text calls missed / run | XML-markup turns / run | breaker halts | denied / blocked "
             "| rounds | tokens in / out | time s |")
-    sep = "|---|---:|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---|---:|---|---:|"
+    sep = "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---|---:|---|---:|"
     lines = [
         f"# Tier sweep — `{first['tier_sweep']['of']}`",
         "",
