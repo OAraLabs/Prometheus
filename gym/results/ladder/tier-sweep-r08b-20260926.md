@@ -8,7 +8,8 @@
 Each tier is the daemon's own adapter for that tier (only the tier decision is forced).
 Tier `off` is never what the daemon uses for a local model — it measures what the server's
 own parser does with no adapter behind it. Runs the circuit breaker bumped to another
-tier are hybrids and are left out of the main figures (counted below).
+tier are hybrids, and runs with no verdict (a harness or endpoint error, unscored) are
+not the adapter's; both are left out of the main figures (counted below).
 
 ## By tier
 
@@ -42,7 +43,7 @@ tier are hybrids and are left out of the main figures (counted below).
 | light | 66 | 60/66 (0.82–0.96) | 60/66 | 1 | 0 | 0 | 5 | 395/415 | 6.86 | 0.00 | 0.00 / 0.00 | 0.08 | 0.00 | 0.00 | 0 | 3 / 4 | 7.0 | 39051 / 1088 | 11.3 |
 | full | 66 | 44/66 (0.55–0.77) | 44/66 | 11 | 0 | 4 | 7 | 255/289 | 4.76 | 0.00 | 0.50 / 0.00 | 5.41 | 0.00 | 2.29 | 2 | 7 / 1 | 6.1 | 13100 / 1164 | 11.1 |
 
-## Paired by task (task success; bumped runs left out)
+## Paired by task (task success; bumped and no-verdict runs left out)
 
 Every tier ran the same tasks, so each task is compared with itself: the mean per-task
 difference in pass rate, a 95% bootstrap interval over tasks, and how many tasks flip.
@@ -55,14 +56,16 @@ difference in pass rate, a 95% bootstrap interval over tasks, and how many tasks
 
 ## Left out and infrastructure
 
-| tier | bumped runs (left out) | stopped by (main runs) | provider HTTP retries |
-|---|---:|---|---:|
-| off | 0 | done 198, round_cap 6 | 0 |
-| light | 0 | done 198, round_cap 6 | 0 |
-| full | 0 | circuit_breaker 2, done 188, parse_disagreement 6, round_cap 7, tool_call_cap 1 | 0 |
+| tier | bumped runs (left out) | no verdict (left out) | stopped by (main runs) | provider HTTP retries |
+|---|---:|---:|---|---:|
+| off | 0 | 0 | done 198, round_cap 6 | 0 |
+| light | 0 | 0 | done 198, round_cap 6 | 0 |
+| full | 0 | 0 | circuit_breaker 2, done 188, parse_disagreement 6, round_cap 7, tool_call_cap 1 | 0 |
 
 Counters: *adapter retries / aborts* are the adapter's own decisions after a rejected call;
 *calls from text* are tool calls the adapter recovered from the reply's text; *text calls
 missed* are calls tier off left in the text that light/full would have recovered;
-*XML-markup turns* are replies carrying `<tool_call>` / `<function=` markup. Provider HTTP
-retries are the transport's, not the adapter's.
+*XML-markup turns* are replies with no structured tool call that carry `<tool_call>` /
+`<function=` markup — the replies the adapter is asked to read; a reply that carries
+markup beside a structured call is not counted. Provider HTTP retries are the
+transport's, not the adapter's.

@@ -43,8 +43,11 @@ classes:
     success_criterion: >
       Exact-answer tasks: PASS iff the reply's final "ANSWER: <value>" line
       states the correct value, in any spelling of that value; the reply may
-      discuss anything above the line. No answer line is a FAIL, recorded as
-      a format miss (answer_format_ok = false). Explanation tasks: PASS iff
+      discuss anything above the line. A reply with no answer line is read
+      on its last line — PASS if that states the right value as its only
+      value of the answer's kind, FAIL if it is exactly a wrong one — and is
+      otherwise a format miss, never a fail (answer_format_ok = false either
+      way). Explanation tasks: PASS iff
       the pinned judge scores the reply at or above the task's threshold
       (0.7) against a stated rubric and reference answer. Tools are allowed
       but not needed.
@@ -63,8 +66,9 @@ classes:
       planted in the workspace — unguessable, so a correct value implies the
       lookup happened — or, for a write task, the named file holds exactly the
       requested content. More calls are allowed within the budget; which tool
-      is used is not checked. No answer line on a reply task is a FAIL,
-      recorded as a format miss.
+      is used is not checked. A reply task's reply with no answer line is
+      read on its last line as for qa, and is otherwise a format miss, never
+      a fail.
   multi_step:
     status: active
     file: multi_step.yaml

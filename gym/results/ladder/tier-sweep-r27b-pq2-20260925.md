@@ -8,13 +8,14 @@
 Each tier is the daemon's own adapter for that tier (only the tier decision is forced).
 Tier `off` is never what the daemon uses for a local model — it measures what the server's
 own parser does with no adapter behind it. Runs the circuit breaker bumped to another
-tier are hybrids and are left out of the main figures (counted below).
+tier are hybrids, and runs with no verdict (a harness or endpoint error, unscored) are
+not the adapter's; both are left out of the main figures (counted below).
 
 ## By tier
 
 | tier | runs | task success (95% CI) | accuracy | wrong | format miss | parse-disagreement halts | other halts | tool-call success | calls / run | repairs / run | adapter retries / aborts per run | calls from text / run | text calls missed / run | XML-markup turns / run | breaker halts | denied / blocked | rounds | tokens in / out | time s |
 |---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---|---:|---|---:|
-| off | 203 | 188/203 (0.88–0.95) | 188/203 | 3 | 0 | 0 | 12 | 846/863 | 4.57 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 / 5 | 5.0 | 21547 / 505 | 9.2 |
+| off | 202 | 188/202 (0.89–0.96) | 188/202 | 3 | 0 | 0 | 11 | 837/853 | 4.51 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 / 4 | 4.9 | 21193 / 489 | 9.0 |
 | light | 204 | 186/204 (0.86–0.94) | 186/204 | 7 | 0 | 0 | 11 | 847/854 | 4.50 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 2 / 0 | 4.9 | 24656 / 552 | 10.4 |
 | full | 204 | 135/204 (0.59–0.72) | 135/199 | 31 | 5 | 21 | 12 | 496/521 | 2.66 | 0.00 | 0.11 / 0.01 | 2.66 | 0.00 | 1.90 | 2 | 7 / 0 | 4.5 | 6195 / 340 | 6.8 |
 
@@ -38,31 +39,33 @@ tier are hybrids and are left out of the main figures (counted below).
 
 | tier | runs | task success (95% CI) | accuracy | wrong | format miss | parse-disagreement halts | other halts | tool-call success | calls / run | repairs / run | adapter retries / aborts per run | calls from text / run | text calls missed / run | XML-markup turns / run | breaker halts | denied / blocked | rounds | tokens in / out | time s |
 |---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---|---:|---|---:|
-| off | 65 | 61/65 (0.85–0.98) | 61/65 | 0 | 0 | 0 | 4 | 394/405 | 7.00 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 / 5 | 6.4 | 30612 / 1024 | 17.2 |
+| off | 64 | 61/64 (0.87–0.98) | 61/64 | 0 | 0 | 0 | 3 | 385/395 | 6.86 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 / 4 | 6.3 | 29634 / 981 | 16.5 |
 | light | 66 | 58/66 (0.78–0.94) | 58/66 | 1 | 0 | 0 | 7 | 411/412 | 6.97 | 0.00 | 0.00 / 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 / 0 | 6.5 | 36627 / 1143 | 20.1 |
 | full | 66 | 25/66 (0.27–0.50) | 25/66 | 22 | 0 | 12 | 7 | 180/196 | 3.21 | 0.00 | 0.21 / 0.03 | 3.21 | 0.00 | 2.76 | 2 | 5 / 0 | 5.4 | 8398 / 586 | 10.9 |
 
-## Paired by task (task success; bumped runs left out)
+## Paired by task (task success; bumped and no-verdict runs left out)
 
 Every tier ran the same tasks, so each task is compared with itself: the mean per-task
 difference in pass rate, a 95% bootstrap interval over tasks, and how many tasks flip.
 
 | comparison | tasks | mean difference | 95% interval | tasks flipped |
 |---|---:|---:|---|---:|
-| light − off | 68 | -0.015 | -0.064 – +0.034 | 6 |
+| light − off | 68 | -0.017 | -0.064 – +0.029 | 6 |
 | full − light | 68 | -0.250 | -0.338 – -0.172 | 19 |
-| full − off | 68 | -0.265 | -0.353 – -0.176 | 21 |
+| full − off | 68 | -0.267 | -0.355 – -0.181 | 21 |
 
 ## Left out and infrastructure
 
-| tier | bumped runs (left out) | stopped by (main runs) | provider HTTP retries |
-|---|---:|---|---:|
-| off | 1 | done 191, repeat_halt 1, round_cap 11 | 0 |
-| light | 0 | done 193, round_cap 10, tool_call_cap 1 | 0 |
-| full | 0 | circuit_breaker 2, done 171, empty_response 7, parse_disagreement 21, round_cap 3 | 0 |
+| tier | bumped runs (left out) | no verdict (left out) | stopped by (main runs) | provider HTTP retries |
+|---|---:|---:|---|---:|
+| off | 2 | 0 | done 191, repeat_halt 1, round_cap 10 | 0 |
+| light | 0 | 0 | done 193, round_cap 10, tool_call_cap 1 | 0 |
+| full | 0 | 0 | circuit_breaker 2, done 171, empty_response 7, parse_disagreement 21, round_cap 3 | 0 |
 
 Counters: *adapter retries / aborts* are the adapter's own decisions after a rejected call;
 *calls from text* are tool calls the adapter recovered from the reply's text; *text calls
 missed* are calls tier off left in the text that light/full would have recovered;
-*XML-markup turns* are replies carrying `<tool_call>` / `<function=` markup. Provider HTTP
-retries are the transport's, not the adapter's.
+*XML-markup turns* are replies with no structured tool call that carry `<tool_call>` /
+`<function=` markup — the replies the adapter is asked to read; a reply that carries
+markup beside a structured call is not counted. Provider HTTP retries are the
+transport's, not the adapter's.

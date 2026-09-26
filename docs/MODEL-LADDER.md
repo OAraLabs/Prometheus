@@ -7,8 +7,8 @@ served model at a time, with every run ending in a **verdict** and landing in
 `telemetry.db`.
 
 This page defines the suite (WP-2.1). The full runs are WP-2.2 (the 4090) and WP-2.3
-(Apple Silicon); the **first run targets about 4B, about 14B and the 27B** (`first_run` in
-`rungs.yaml`). The first cut populates four of the eight classes; the other four are defined —
+(Apple Silicon); the **first run** (`first_run` in `rungs.yaml`) is the production 27B, the same
+checkpoint in ternary (Bonsai 2), Qwen3.5-9B and Ornith-1.5-9B — see *First run* below. The first cut populates four of the eight classes; the other four are defined —
 budgets and success criterion — and deferred (see below).
 
 - Suite: [`gym/ladder/v1/`](../gym/ladder/v1/) — `suite.yaml` plus one file per class.
@@ -51,14 +51,20 @@ criterion in `suite.yaml`. The first cut **populates four** of them and **defers
 class has its definition and nothing else, and the loader refuses a task file for it until a later
 work package makes it active.
 
-### Populated (suite v1, sha `b71c4bc2c390`)
+### Populated (suite v1, sha `20974af2f6e0`)
+
+The first run ran at two earlier shas: `45df225d3b36` (the 27B, Bonsai and 9B smokes and all
+three sweeps) and `b71c4bc2c390` (Ornith's smoke), which adds two wrong-answer proofs to
+`qa-py-mutable-default` and widens its answer shape. `20974af2f6e0` changes only the wording of
+the `qa` and `single_tool` success criteria, which said a reply without its answer line is a
+fail; no code reads that text, and the reader never did that (*Verdicts*).
 
 **92 tasks.** Every task names its difficulty within its class; the report breaks pass rates out
 by it. Three per class are tagged `smoke: true`.
 
 | class | tasks | easy / medium / hard | decided by | proofs: wrong · format miss · right | success criterion (abridged) |
 |---|---:|---|---|---|---|
-| `qa` — plain Q&A | 24 | 7 / 9 / 8 | answer line 18, judge 6 | 110 · 38 · 130 | the reply's `ANSWER:` line states the right value; explanations scored ≥ 0.7 by the pinned judge against a rubric and reference |
+| `qa` — plain Q&A | 24 | 7 / 9 / 8 | answer line 18, judge 6 | 112 · 38 · 130 | the reply's `ANSWER:` line states the right value; explanations scored ≥ 0.7 by the pinned judge against a rubric and reference |
 | `single_tool` — one call is enough | 24 | 8 / 9 / 7 | answer line 21, file predicates 2, acceptance 1 | 140 · 31 · 160 | the `ANSWER:` line states the unguessable planted value, or the named file holds exactly the requested content |
 | `multi_step` — dependent calls | 22 | 7 / 8 / 7 | end-state predicates 16, answer line 5, acceptance 1 | 60 · 16 · 41 | the end state (output file, or the `ANSWER:` line) is exactly right; reaching it takes 2–5 dependent calls |
 | `file_edit` — edit until a command passes | 22 | 7 / 8 / 7 | acceptance 22 | 55 · – · – | the harness's acceptance tests run and pass after the agent stops, against pristine copies of any visible tests |
@@ -66,7 +72,7 @@ by it. Three per class are tagged `smoke: true`.
 The proofs are replies and end states each check is proven against (see *Verdicts*): **wrong**
 ones it must fail (wrong answers and wrong files), **format misses** it must neither credit nor
 fail, and **right** answers in other spellings it must credit. Every mechanically checked task has
-at least one wrong proof and fails untouched; every answer-line task has at least three right
+at least one wrong proof and does not pass untouched; every answer-line task has at least three right
 answers, two wrong ones and one format miss. The six judge-only explanations have none by nature.
 
 ### Defined, deferred
@@ -101,7 +107,8 @@ could not finish within what it was given.
 
 ## Verdicts
 
-Every task ends in one of four verdicts, decided in this order:
+Every task ends in one of five verdicts (`pass`, `format_miss`, `fail`, `unscored`, `error` — table
+below). The checks are applied in this order:
 
 1. **Predicates** — deterministic checks over the finished run: the gym's (`expect_tool`,
    `expect_file`, ...) and the ladder's (`expect_answer`, `expect_text_any/all/regex`,
@@ -139,12 +146,13 @@ Every task ends in one of four verdicts, decided in this order:
    because it may be commentary, a qualifier or a hedge, and no syntax tells them apart.
 
    Before any of that, the answer line is read generously: a value on the lines below a bare
-   `ANSWER:` label (a list, a fenced block, display math — each read whole, so a list of two
-   candidates is a format miss), LaTeX (`$…$`, `\boxed{}`, `\text{}`, `\%`, `1{,}081`), the
+   `ANSWER:` label (a tight list, a fenced block, display math — each read whole, so a list of two
+   candidates is a format miss; a loose list is a known limit below), LaTeX (`$…$`, `\boxed{}`, `\text{}`, `\%`, `1{,}081`), the
    prompt's own `<…>` placeholder brackets copied, a value wholly inside one pair of brackets (a
    tuple: `(1, 2, 1, 4)`), and Unicode hyphens are all read as the value they spell. None of those rules can turn a wrong value into a right one. A list is never
    decided by its last item, with a label or without: that would make the verdict depend on the
-   order the model listed its candidates in.
+   order the model listed its candidates in (a loose list under a bare label still is, by its
+   first — see the known limits).
 2. **Acceptance tests** — `{unittest} <modules>`, run by the *harness* in the workspace after
    the agent stops, through its own runner (`src/prometheus/gym/ladder/accept.py`). An exit
    code of 0 proves nothing on its own, so the runner does not rely on one:
@@ -184,6 +192,8 @@ A verdict reads only what the **model** produced in the run:
 - when a thinking model spends the final round's whole output budget reasoning, the llama.cpp
   provider returns the unfinished reasoning as the reply and files a `silent_failures` row. A
   right value mentioned along the way is not an answer: the run fails as `reasoning_fallback`.
+  The ladder takes that report from the run's own telemetry handle as it is filed, never from
+  the table by time, so another writer's row in a shared database is never this run's.
   The preflight also runs the provider's thinking-suppression probe (as the daemon does at boot),
   records the result, and refuses a rung run whose template ignores the suppression flag.
 
@@ -191,7 +201,8 @@ A verdict reads only what the **model** produced in the run:
 task through the real predicates and the real acceptance runner, without running a model
 (`prometheus.gym.ladder.selfcheck`):
 
-- the untouched setup, with no answer, must **fail**;
+- the untouched setup, with no answer, must **not pass** — an end-state task fails, and an
+  answer-line task is a format miss (no answer is not a wrong answer);
 - each `reference.wrong_answers` entry (an off-by-one number, a sign slip, a distractor value, a
   distractor stated as the answer) must **fail**;
 - each `reference.wrong_files` entry written over the reference (a partial fix, a blind
@@ -224,8 +235,9 @@ from each tier sweep) and disagreed with the reader on **two**, both fixed and p
   A negation now disqualifies a value only in the sentence that states it;
 - Ornith-1.5-9B: "`print` displays the tuple: `(1, 2, 1, 3)`. ANSWER: (1, 2, 1, 3)" — credited,
   though the program prints `1 2 1 3`. Fixed in the TASK, not the reader: for this exact-output
-  question a bracketed sequence is a value of the answer's kind (suite sha `45df225d3b36` →
-  `b71c4bc2c390`; re-reading every stored reply to that task changes only that one row).
+  question a bracketed sequence is a value of the answer's kind, and the tuple and its fixed
+  sibling are wrong-answer proofs (suite sha `45df225d3b36` → `b71c4bc2c390`; re-reading every
+  stored reply to that task changes only that one row).
 
 Each limit says which way it moves a score. *Down* is the costly direction: a right answer counted
 as wrong.
@@ -240,6 +252,15 @@ as wrong.
 | lineless credit reads the last line only | a closing note naming the right value after a wrong answer passes | up |
 | a numbered procedure is a list | `1. …` `2. …` `3. So it is 56` with no answer line is a format miss | toward format miss |
 | LaTeX `\frac` is not normalised | fraction answers must carry it in `answer_shape` (qa-algebra-linear does) | — |
+| a LOOSE list under a bare `ANSWER:` label (blank lines between items) is read as its first item | right item first passes, wrong item first fails; the tight list is a format miss | both |
+| a one-word heading under a bare label is read as a clean wrong token | `ANSWER:` then `Calculation:` then the working fails instead of falling back to the last line | down |
+| a comma list wrapped one item per line is read by its first line | `ANSWER: V2_003_add_index.sql,` then the other two names fails | down |
+| negation words are ASCII only (`isn't`, not `isn’t`) and a closed list (`couldn't find` is not one) | `The port isn’t 48217.` passes; `There isn't a 503` fails while `I couldn't find a 503` is a format miss | both |
+
+The last four rows came from the pre-PR review, on invented replies. None of the first run's
+2,160 stored replies (900 of them on answer-line tasks) has a bare `ANSWER:` label, a wrapped
+answer line or a curly-apostrophe negation near its answer, so none of its verdicts rests on
+them; they stay limits under the freeze until a real reply hits one.
 
 Task spellings the checks found the reader fails although the value is right (**down**) — each is
 kept as written until a real reply uses it: a reversal spelled letter by letter (qa-reverse-word);
@@ -267,7 +288,8 @@ The judge is `PrometheusJudge` (OpenAI-compatible, JSON-schema constrained decod
 - the runner refuses a pin the judge endpoint does not serve. llama-server ignores the
   request's `model` field and answers with whatever it loaded, so a pin naming one model while
   the endpoint serves another would record a judge that never graded anything;
-- the judge's provenance (`model`, `pinned`, `base_url`) is stored with every judged row.
+- the judge's provenance (`model`, `pinned`) is stored with every judged row; the endpoint is
+  not, and a judge error is stored with its URL replaced.
 
 For the rungs, the pin is in `rungs.yaml`: **`qwen2.5:14b-instruct` on the mini's ollama**, one
 judge for every rung so judged pass rates compare across rungs. It is not any rung's model
@@ -277,8 +299,8 @@ concrete pass/fail criteria and carries a reference answer, and why a report sho
 mechanical verdicts separately (the `decided by` column). A `--rung` run cannot override the pin.
 
 **Where the judge runs is undecided, and until it is, rung runs use `--no-judge`** (the six judged
-tasks are recorded `unscored`; `--no-judge` works with `--rung`). The first run serves two rungs
-on the mini's 3090 Ti, and at Ollama's default context there (32k, chosen from VRAM) this judge
+tasks are recorded `unscored`; `--no-judge` works with `--rung`). The first run serves three rungs
+on the mini's 3090 Ti (one at a time), and at Ollama's default context there (32k, chosen from VRAM) this judge
 needs about 14.8 GiB — it does not fit beside any rung in the ~11.7 GiB the card has free (an
 earlier version of this page said it did; it does not). Options for the full runs: re-pin to the
 already-resident `qwen2.5:7b-instruct` (no extra memory, weaker); serve the 14b's existing file
@@ -300,7 +322,7 @@ The schema is unchanged. Each run leaves three kinds of rows, all carrying the r
 |---|---|---|
 | task class | `subsystem_runs.operation` on the summary row | yes |
 | model | `subsystem_runs.model` (requested); `summary_json.served_model` (what the endpoint reports) | yes |
-| success | `subsystem_runs.outcome` (`success` / `failed` / `skipped` = undecided) and `summary_json.success`, `verdict` | yes |
+| success | `subsystem_runs.outcome` (`success` / `failed` / `partial` = a format miss / `skipped` = unscored or error) and `summary_json.success`, `verdict` | yes |
 | time | `subsystem_runs.duration_ms` on the summary row | yes |
 | tokens | per round: `input_tokens` / `output_tokens` on the run's `loop_round` rows; per run: `summary_json.input_tokens` / `output_tokens` | per round only |
 | quantization | `summary_json.quantization` (+ `quantization_source`) | **no column** |
@@ -318,7 +340,9 @@ differs from it), run label, rung, KV-cache provenance, the thinking-suppression
 the bash write-floor state, verdict source and reasons, the acceptance result (tests run /
 failed), the judge's score and provenance (model and `pinned`; the endpoint is not stored),
 `stopped_by` (done / round_cap / tool_call_cap / timeout / repeat_halt / circuit_breaker /
-empty_response / divergence_halt / reasoning_fallback / error), and a bounded trace of the calls.
+empty_response / divergence_halt / parse_disagreement / boundary_escape / context_overflow /
+reasoning_fallback / error — the loop's own halts are `runner.LOOP_HALTS`), and a bounded trace of
+the calls.
 Errors and reasons have URLs and IP addresses replaced (`<url>`, `<ip>`): provider errors quote
 the full request URL, and telemetry.db is backed up and copied between machines.
 
@@ -358,9 +382,10 @@ change.
   to `tool_calls` **without a session_id**; only the final execution path sets it. The ladder
   attributes session-less rows inside a run's time window to that run (one ladder writer per DB
   is enforced by a lock) and counts them in `tool_calls_unattributed`.
-- `OllamaProvider` never asks for streamed usage (`stream_options.include_usage`), so every
-  ollama round records 0 tokens; the llama.cpp and OpenAI-compatible providers do ask. A run
-  through ollama records tokens as unreported, and the empty-field check says so.
+- Until #577 `OllamaProvider` never asked for streamed usage (`stream_options.include_usage`),
+  so every ollama round recorded 0 tokens and a ladder run through ollama recorded tokens as
+  unreported. #577 (on main since the first run's code base) asks for it and sends `max_tokens`;
+  no first-run rung was served through Ollama.
 - The loop's own halt messages carry no marker (recognised by their wording, pinned by a test),
   and its repeat guard writes no `tool_calls` row for a blocked call (counted from the
   transcript).
@@ -481,11 +506,12 @@ pinned by revision and SHA-256 (`rungs.yaml`); every run was thinking-suppressed
 
 **The daemon code measured is main at `27399d4` (#572)**, the base this branch had when the runs
 were made; the `harness` commit ids in the reports are this branch's commits from before it was
-rebased. Of what main has merged since, one change sits on the ladder's path and changes behaviour:
-**#582 (WP-X.28 PR 1), which makes tier `full` read Qwen's XML tool calls**. Everything below about
-tier `full` describes the code before it (#570 moved the routing step without changing it; #580's
-identity line is written by the model router, which ladder runs do not use). Nothing here was
-re-measured after the rebase.
+rebased. Of what main has merged since, one change sits on the path these runs took and changes
+behaviour: **#582 (WP-X.28 PR 1), which makes tier `full` read Qwen's XML tool calls**. Everything
+below about tier `full` describes the code before it. (#570 moved the routing step without
+changing it; #580's identity line is written by the model router, which ladder runs do not use;
+#577 changed the Ollama provider, which no rung used.) Nothing here was re-measured after the
+rebase.
 
 | rung | model (quant) | served on | server | tier |
 |---|---|---|---|---|
@@ -512,9 +538,9 @@ per rung in `gym/results/ladder/`.
 | `r09b-ornith` (at full) | 38 | 10 | 3 | 3 | 38/48 (0.66–0.88) | 3/33 | 82/85 |
 
 Empty-field check: passed for every rung. The 27B, Bonsai and 9B smokes ran at suite sha
-`45df225d3b36`, Ornith's at `b71c4bc2c390`; the two differ only in `qa-py-mutable-default`'s shape,
-and re-reading the other rungs' replies to that task under the new shape changes none of their
-verdicts. The smokes are 54 runs each: they show the pipeline and the reader on real output, not
+`45df225d3b36`, Ornith's at `b71c4bc2c390`; the two differ only in `qa-py-mutable-default` (its
+shape and two wrong-answer proofs), and re-reading the other rungs' replies to that task under the
+new shape changes none of their verdicts. The smokes are 54 runs each: they show the pipeline and the reader on real output, not
 a ranking — the intervals overlap, and Bonsai and Ornith ran at tier full (see below).
 
 **Hand-check.** Two graders, blind to the reader, graded 333 real replies (all 198 answer-line
@@ -526,20 +552,32 @@ both fixed (*The answer reader is frozen*).
 
 The same model, server, sampler and 68 tool-using tasks (single_tool, multi_step, file_edit) at
 tier off, light and full, 3 repetitions each with the tier order rotated
-(`--force-adapter-tier`; reports `tier-sweep-*.md`). *Task success* is pass ÷ all runs; non-passes
+(`--force-adapter-tier`; reports `tier-sweep-*.md`). *XML-markup turns* are replies with no
+structured tool call that carry `<tool_call>` / `<function=` markup — the replies the adapter is
+asked to read; a reply carrying markup beside a structured call is not counted, so 0.00 at off and
+light means no markup-only reply, not no markup. *Task success* is pass ÷ all runs; non-passes
 split into wrong answers, format misses, parse-disagreement halts (the loop stopped on a tool call
 the adapter could not read) and other halts (round/tool caps, repeat, breaker, empty replies).
-Runs the circuit breaker bumped to another tier are left out (0 to 2 per sweep).
+Runs the circuit breaker bumped to another tier are left out (0 to 3 per sweep), as are runs with
+no verdict (none in these sweeps).
+
+**Corrected before merge.** The pre-PR review found that a run's end tier was read from the
+caller's copy of the loop context, which never sees the breaker's bump, so a bumped run was
+caught only if its adapter was asked something after the bump. Two were not: Bonsai
+`fe-interval-set-merge` and Ornith `st-read-csv-sku-price`, one run each at tier off, both
+round-cap fails. Both came to light when the breaker's own `circuit_breaker_diagnostics` rows
+were cross-checked against the run rows (the report now does that), and both are now left out.
+Each model's tier off loses one other halt; full − light is unchanged.
 
 | model | tier | task success (95% CI) | wrong | format miss | parse-disagreement halts | other halts | XML-markup turns / run |
 |---|---|---|---:|---:|---:|---:|---:|
-| Bonsai 2 27B | off | 188/203 (0.88–0.95) | 3 | 0 | 0 | 12 | 0.00 |
+| Bonsai 2 27B | off | 188/202 (0.89–0.96) | 3 | 0 | 0 | 11 | 0.00 |
 | | light | 186/204 (0.86–0.94) | 7 | 0 | 0 | 11 | 0.00 |
 | | full | 135/204 (0.59–0.72) | 31 | 5 | 21 | 12 | 1.90 |
 | Qwen3.5-9B | off | 189/204 (0.88–0.95) | 9 | 0 | 0 | 6 | 0.00 |
 | | light | 187/204 (0.87–0.95) | 11 | 0 | 0 | 6 | 0.00 |
 | | full | 155/204 (0.70–0.81) | 31 | 2 | 6 | 10 | 1.34 |
-| Ornith-1.5-9B | off | 194/203 (0.92–0.98) | 2 | 0 | 0 | 7 | 0.00 |
+| Ornith-1.5-9B | off | 194/202 (0.92–0.98) | 2 | 0 | 0 | 6 | 0.00 |
 | | light | 191/203 (0.90–0.97) | 4 | 0 | 0 | 8 | 0.00 |
 | | full | 130/204 (0.57–0.70) | 46 | 15 | 2 | 11 | 2.51 |
 
@@ -547,9 +585,9 @@ Paired by task (mean per-task difference in task success, 95% bootstrap interval
 
 | model | light − off | full − light |
 |---|---|---|
-| Bonsai 2 27B | −0.015 (−0.064 – +0.034) | **−0.250 (−0.338 – −0.172)**, 19 tasks flip |
+| Bonsai 2 27B | −0.017 (−0.064 – +0.029) | **−0.250 (−0.338 – −0.172)**, 19 tasks flip |
 | Qwen3.5-9B | −0.010 (−0.039 – +0.020) | **−0.157 (−0.221 – −0.098)**, 10 tasks flip |
-| Ornith-1.5-9B | −0.020 (−0.059 – +0.020) | **−0.299 (−0.377 – −0.221)**, 23 tasks flip |
+| Ornith-1.5-9B | −0.025 (−0.064 – +0.015) | **−0.299 (−0.377 – −0.221)**, 23 tasks flip |
 
 - **Off ≈ light for all three.** With native tools in the request, llama-server's own parser
   reads the Qwen3-Coder XML calls; at light the adapter recovered almost nothing from text (at most
@@ -581,7 +619,8 @@ Paired by task (mean per-task difference in task success, 95% bootstrap interval
 
 - Time: the 27B ran on the 4090 sharing production's one slot with the daemon; the others on the
   3090 Ti beside four resident services. Wall times do not compare across boxes.
-- Judge: undecided; the six judged `qa` tasks are `unscored` in every rung.
+- Judge: undecided; the one judged task in the smokes (`qa-explain-sky-blue`) is `unscored` in
+  every rung, and the other five judged tasks were not run.
 - Thinking-on: every rung ran thinking-suppressed. Ornith's fairness check (a thinking-on smoke if
   it landed more than ~10 points below the 9B at light) did not trigger.
 - The first run is a smoke per rung plus the sweeps, not the full 92-task × 3 rung runs (WP-2.2).
