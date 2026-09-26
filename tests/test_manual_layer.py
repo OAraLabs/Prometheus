@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import sqlite3
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -123,14 +125,65 @@ def test_migration_adds_manual_column_and_snapshots(tmp_path):
 
 
 def test_migration_is_idempotent_no_snapshot_on_reopen(tmp_path):
+    """A reopen migrates nothing, so it snapshots nothing: measured as a delta.
+
+    The first open runs BOTH migrations on a pre-manual DB with rows (manual
+    column, then FTS rebuild), and each snapshots first. How many files that
+    leaves is pinned by test_snapshots_never_overwrite_each_other below; this
+    test only asks that the count does not move on reopen.
+    """
     db = tmp_path / "memory.db"
     _make_pre_manual_db(db)
-    MemoryStore(db_path=db).close()                  # migrates + snapshots once
+    MemoryStore(db_path=db).close()                  # migrates + snapshots
     first = len(list(tmp_path.glob("memory.db.backup-*")))
-    assert first == 1
-    MemoryStore(db_path=db).close()                  # column present → no-op
+    assert first, "the first open migrates, and a migration snapshots first"
+    MemoryStore(db_path=db).close()                  # column present, user_version 1 → no-op
     assert len(list(tmp_path.glob("memory.db.backup-*"))) == first, \
-        "no new snapshot when the column already exists"
+        "no new snapshot on reopen: nothing is left to migrate"
+
+
+@pytest.mark.parametrize(
+    ("offsets", "expected"),
+    [
+        # Both snapshots inside one second: the second name takes a sequence number.
+        ((0, 0), ["backup-{0}", "backup-{0}-1"]),
+        # Straddling a second boundary (the slow-runner case CI hit): two stamps.
+        ((0, 1), ["backup-{0}", "backup-{1}"]),
+    ],
+    ids=["same-second", "next-second"],
+)
+def test_snapshots_never_overwrite_each_other(tmp_path, monkeypatch, offsets, expected):
+    """One open of a pre-manual DB with rows runs two migrations, and each
+    snapshots first — with a name that is one-second granular.
+
+    On a fast machine both copies fell inside the same second, so the second
+    copy landed on the first one's name and silently replaced it: the log named
+    two snapshots, the disk held one. On a slow runner the two straddled a
+    second boundary and the disk held two — which is why a test that assumed
+    the collision (``== 1``) passed locally and failed on CI. Pin the clock to
+    both cases: the disk must hold one readable copy per migration either way.
+    """
+    db = tmp_path / "memory.db"
+    _make_pre_manual_db(db)
+    real_localtime = time.localtime
+    stamps = [real_localtime(1_700_000_000 + s) for s in offsets]
+    calls = itertools.count()
+    # The first call gets the first stamp; every later call gets the last one.
+    monkeypatch.setattr(
+        time, "localtime", lambda *_: stamps[min(next(calls), len(stamps) - 1)]
+    )
+
+    MemoryStore(db_path=db).close()
+
+    text = [time.strftime("%Y%m%dT%H%M%S", st) for st in stamps]
+    backups = sorted(tmp_path.glob("memory.db.backup-*"))
+    assert [b.name for b in backups] == [f"memory.db.{e.format(*text)}" for e in expected], \
+        "one snapshot per migration: the second must not overwrite the first"
+    for b in backups:
+        conn = sqlite3.connect(str(b))
+        assert conn.execute("SELECT fact FROM memories").fetchall() == [("an old fact",)], \
+            f"{b.name} must be a readable copy of the data"
+        conn.close()
 
 
 def test_migration_fails_loud_no_half_write(tmp_path, monkeypatch):

@@ -309,12 +309,25 @@ class MemoryStore:
             log.info("MemoryStore: FTS indexes rebuilt (one-time integrity migration)")
 
     def _snapshot_db(self, *, reason: str = "manual migration") -> None:
-        """Copy the DB file out-of-tree, timestamped, before a migration."""
+        """Copy the DB file out-of-tree, timestamped, before a migration.
+
+        A snapshot never overwrites a snapshot. The stamp is one-second
+        granular, and one open can snapshot twice: a pre-manual DB with rows
+        runs the manual-column migration and then the FTS rebuild, each
+        snapshotting first — on a fast machine inside the same second. The
+        second copy then landed on the first one's name and silently replaced
+        it: the log named two snapshots, the disk held one. When the stamped
+        name is taken, the next free ``-N`` suffix is used instead.
+        """
         src = self._db_path
         if not src.exists():
             return  # nothing to back up (in-memory / brand-new DB)
         ts = time.strftime("%Y%m%dT%H%M%S", time.localtime())
         dst = src.with_name(f"{src.name}.backup-{ts}")
+        n = 0
+        while dst.exists():
+            n += 1
+            dst = src.with_name(f"{src.name}.backup-{ts}-{n}")
         shutil.copy2(src, dst)
         log.info("MemoryStore: snapshotted %s -> %s before %s", src, dst, reason)
 
