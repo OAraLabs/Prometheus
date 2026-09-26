@@ -3167,6 +3167,19 @@ def _microcompact_old_results(
         return
 
     from prometheus.engine.messages import ToolResultBlock as TRB
+    from prometheus.engine.messages import ToolUseBlock as TUB
+
+    # A loaded skill's body is the instructions the model loaded it FOR, and
+    # it arrives as a tool result — so this pass used to cut it to its first
+    # ~500 chars three user-role messages later, mid-task. Matched to its call
+    # by tool_use id, never by what the result text looks like.
+    skill_result_ids = {
+        block.id
+        for msg in messages
+        if getattr(msg, "role", None) == "assistant" and isinstance(msg.content, list)
+        for block in msg.content
+        if isinstance(block, TUB) and block.name == "skill"
+    }
 
     # Count user messages from the end to identify the "fresh" window
     user_msg_count = 0
@@ -3190,6 +3203,8 @@ def _microcompact_old_results(
             if not isinstance(block, TRB):
                 continue
             if block.is_error:
+                continue
+            if block.tool_use_id in skill_result_ids:
                 continue
             content = block.content
             if "[content pruned" in content or "[microcompacted]" in content:
@@ -4353,6 +4368,18 @@ async def _execute_tool_call(
                         # can resolve session_id + notify_target from trusted
                         # context rather than from (injected) tool arguments.
                         "session_id": context.session_id,
+                        # The turn's own conversation, for DESCRIPTIVE readers
+                        # (the skill-load counter). On the web path
+                        # context.session_id is the shared routing namespace
+                        # (#458), so it names no conversation. Never an
+                        # origin/trust input — same rule as the telemetry rows.
+                        "effective_session_id": (
+                            effective_session_id if effective_session_id is not None
+                            else context.session_id
+                        ),
+                        # Tools that write telemetry null the session for an
+                        # ephemeral turn, as the tool_calls row does.
+                        "ephemeral": ephemeral,
                         **(context.tool_metadata or {}),
                     },
                 ),
@@ -4776,6 +4803,11 @@ class AgentLoop:
         last_usage = UsageSnapshot()
         turns = 0
         self._tool_trace = []
+        # Each call's input, by tool_use id, so a trace entry can say WHAT was
+        # called — SkillRefiner needs the name a `skill` call loaded. Held under
+        # its own key: the prompt formatters read "arguments", and changing
+        # what SkillCreator's generation prompt shows is a separate decision.
+        started_inputs: dict[str, dict] = {}
 
         async for event, usage in run_loop(
             context, messages, tool_choice=tool_choice
@@ -4784,9 +4816,12 @@ class AgentLoop:
                 last_text = event.message.text
                 last_usage = event.usage
                 turns += 1
+            elif isinstance(event, ToolExecutionStarted):
+                started_inputs[event.tool_use_id] = dict(event.tool_input or {})
             elif isinstance(event, ToolExecutionCompleted):
                 self._tool_trace.append({
                     "tool_name": event.tool_name,
+                    "tool_input": started_inputs.pop(event.tool_use_id, {}),
                     "result": (event.output or "")[:200],
                     "is_error": event.is_error,
                 })

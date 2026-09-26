@@ -16,6 +16,7 @@ from uuid import uuid4
 from prometheus.config.paths import get_lcm_db_path
 from prometheus.memory.lcm_fts5 import sanitize_fts5_query
 from prometheus.memory.lcm_types import SummaryNode
+from prometheus.security.log_redaction import redact_secrets
 
 
 class LCMSummaryStore:
@@ -121,9 +122,14 @@ class LCMSummaryStore:
         ``session_id`` partitions the DAG per conversation (the compactor inserts
         via :meth:`add_summary`); it is optional for back-compat with global
         callers/tests (stored as NULL).
+
+        Token shapes in ``summary_text`` are redacted before the row and its
+        full-text entry exist (X.37): a summary is built from messages, and a
+        token in a message was carried into the summaries made from it.
         """
         nid = node.id or uuid4().hex
         created = node.created_at or time.time()
+        summary_text = redact_secrets(node.summary_text)
 
         self._conn.execute(
             "INSERT OR REPLACE INTO lcm_summaries"
@@ -135,7 +141,7 @@ class LCMSummaryStore:
                 session_id,
                 json.dumps(node.parent_ids),
                 json.dumps(node.source_message_ids),
-                node.summary_text,
+                summary_text,
                 node.depth,
                 node.token_count,
                 created,
@@ -157,7 +163,7 @@ class LCMSummaryStore:
         ).fetchone()[0]
         self._conn.execute(
             "INSERT OR REPLACE INTO lcm_summaries_fts (rowid, summary_text) VALUES (?, ?)",
-            (rowid, node.summary_text),
+            (rowid, summary_text),
         )
         self._conn.commit()
         return nid

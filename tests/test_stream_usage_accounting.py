@@ -80,6 +80,10 @@ def _mock_ollama(monkeypatch, *, ask_honoured: bool) -> list[dict]:
     seen: list[dict] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/show":
+            # The capability question (WP-X.35): unknown here, so the chat
+            # request is exactly the one this test was written against.
+            return httpx.Response(404, json={"error": "not found"})
         body = json.loads(req.content)
         seen.append(body)
         return httpx.Response(200, content=_ollama_sse(ask_honoured, body),

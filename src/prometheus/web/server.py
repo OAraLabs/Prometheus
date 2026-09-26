@@ -564,6 +564,19 @@ def create_app(
             )
             return None, "unknown"
 
+    def _skill_loads_block() -> dict[str, Any]:
+        """Loads per skill, most-loaded first: the status view of the skill-load counter."""
+        tel = getattr(app.state, "telemetry", None)
+        if tel is None or not hasattr(tel, "skill_load_stats"):
+            return {"available": False}
+        stats = tel.skill_load_stats()
+        skills = sorted(
+            ({"name": name, "source": s.get("source"), "loads": s["loads"],
+              "last_loaded_at": s["last_loaded_at"]} for name, s in stats.items()),
+            key=lambda s: (-s["loads"], s["name"]),
+        )
+        return {"total": sum(s["loads"] for s in skills), "skills": skills}
+
     def _context_block() -> dict[str, Any]:
         """The budget in force, plus the inputs that produced it.
 
@@ -956,6 +969,11 @@ def create_app(
             # no budget at all, which is why a wrong one could sit on the
             # Beacon panel unchallenged.
             "context": _context_block(),
+            # Skill use, from the load counter (tools/builtin/skill.py). Before
+            # it nothing counted a load, and "last used" everywhere was file
+            # mtime. {"available": False} when there is no telemetry to ask —
+            # not zeros, which would claim nothing was loaded.
+            "skill_loads": _skill_loads_block(),
             # Every local backend this install knows about and what each was
             # last seen serving — from the registry's CACHE (no I/O on a status
             # call; `stale` says the TTL lapsed, `probed: false` says nothing
@@ -3292,10 +3310,13 @@ def create_app(
 
     @app.get("/api/skills/list")
     async def get_skills_list():
-        """Auto-skills with state, pinned flag, last-used mtime.
+        """Auto-skills with state, pinned flag, file mtime and recorded use.
 
         Mirrors the cmd_skills_auto_list shape so the Beacon panel and
         the Telegram /skills command can be reasoned about together.
+        ``loads`` and ``last_loaded_at`` come from the skill-load counter
+        (0 and null when no load is recorded, or no counter is wired);
+        ``last_modified`` is the file's mtime, which is not a use.
         """
         try:
             from prometheus.config.paths import get_config_dir
@@ -3306,6 +3327,14 @@ def create_app(
         auto_dir = get_config_dir() / "skills" / "auto"
         if not auto_dir.is_dir():
             return []
+
+        from prometheus.gateway.commands import skill_loads_for
+
+        tel = getattr(app.state, "telemetry", None)
+        try:
+            stats = tel.skill_load_stats() if hasattr(tel, "skill_load_stats") else {}
+        except Exception:  # a read failure must not break the list
+            stats = {}
 
         store = SkillStateStore()
         rows: list[dict[str, Any]] = []
@@ -3318,12 +3347,15 @@ def create_app(
                 mtime = path.stat().st_mtime
             except OSError:
                 mtime = 0.0
+            loads = skill_loads_for(path, stats) or {}
             rows.append({
                 "name": name,
                 "pinned": rec.pinned,
                 "state": rec.state,
                 "first_seen_at": rec.first_seen_at,
                 "last_modified": mtime,
+                "loads": loads.get("loads", 0),
+                "last_loaded_at": loads.get("last_loaded_at"),
                 "size_bytes": path.stat().st_size if path.exists() else 0,
                 "notes": rec.notes,
             })

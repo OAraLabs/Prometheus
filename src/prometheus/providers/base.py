@@ -80,6 +80,12 @@ class ModelProvider(ABC):
 
     supports_vision: bool = False
     api_enforced_structure: bool = False
+    # What the served chat template does with tools — DETECTED by
+    # ``detect_tool_template`` on the local providers (llama.cpp ``/props``,
+    # ollama ``/api/show``), an ``adapter.tier.ToolTemplate``; None until a
+    # probe ran. It decides the adapter tier for a model the registry does not
+    # list (WP-X.28). Same posture as ``supports_vision``: recorded, not assumed.
+    tool_template: Any = None
 
     async def detect_vision(self) -> bool:
         """Probe whether the provider supports vision. Override in subclasses."""

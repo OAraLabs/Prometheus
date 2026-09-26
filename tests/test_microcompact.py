@@ -249,3 +249,57 @@ class TestSharedEngineSafety:
         assert len(result_a) < 200
         assert 250 < len(result_b) < 450
         assert self._rows(engine) == before
+
+
+# ---------------------------------------------------------------------------
+# A loaded skill's body is never trimmed (skill-usage audit, option C1)
+# ---------------------------------------------------------------------------
+
+def _tool_use_msg(tool_use_id: str, name: str) -> ConversationMessage:
+    from prometheus.engine.messages import ToolUseBlock
+
+    return ConversationMessage(
+        role="assistant",
+        content=[ToolUseBlock(id=tool_use_id, name=name, input={"name": "x"})],
+    )
+
+
+class TestLoadedSkillsSurviveMicroCompaction:
+    """A skill arrives as a tool result, and three user-role messages later
+    microcompaction used to cut it to its first ~500 chars — the instructions
+    the model loaded it FOR (a user-directory skill's median is ~1.3k tokens).
+    The Agent Skills client guide says to exempt skill content from pruning."""
+
+    def _history(self, body: str) -> list[ConversationMessage]:
+        return [
+            _tool_use_msg("s1", "skill"),
+            _tool_result_msg(body, tool_use_id="s1"),
+            _tool_use_msg("b1", "bash"),
+            _tool_result_msg("first line\n" + "y" * 2000, tool_use_id="b1"),
+            _user_msg("turn 1"),
+            _assistant_msg(),
+            _user_msg("turn 2"),
+            _assistant_msg(),
+            _user_msg("turn 3"),
+        ]
+
+    def test_the_skill_body_is_kept_whole(self):
+        ctx = _make_context(microcompact_after_turns=2, microcompact_keep_chars_no_lcm=100)
+        body = "---\nname: x\n---\n" + "step\n" * 600
+        msgs = self._history(body)
+        _microcompact_old_results(ctx, msgs, current_turn=5)
+        assert msgs[1].content[0].content == body
+
+    def test_other_old_results_are_still_trimmed(self):
+        ctx = _make_context(microcompact_after_turns=2, microcompact_keep_chars_no_lcm=100)
+        msgs = self._history("---\nname: x\n---\n" + "step\n" * 600)
+        _microcompact_old_results(ctx, msgs, current_turn=5)
+        assert "[microcompacted]" in msgs[3].content[0].content
+
+    def test_a_result_is_matched_to_its_call_by_id_not_by_content(self):
+        ctx = _make_context(microcompact_after_turns=2, microcompact_keep_chars_no_lcm=100)
+        msgs = self._history("---\nname: x\n---\n" + "step\n" * 600)
+        # A bash result that happens to look like a skill file is still bash.
+        msgs[3] = _tool_result_msg("---\nname: y\n---\n" + "z" * 2000, tool_use_id="b1")
+        _microcompact_old_results(ctx, msgs, current_turn=5)
+        assert "[microcompacted]" in msgs[3].content[0].content

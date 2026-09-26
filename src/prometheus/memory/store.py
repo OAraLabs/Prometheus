@@ -18,6 +18,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from prometheus.config.paths import get_config_dir
+from prometheus.security.log_redaction import redact_capture, redact_json_text, redact_secrets
 
 log = logging.getLogger(__name__)
 
@@ -309,12 +310,25 @@ class MemoryStore:
             log.info("MemoryStore: FTS indexes rebuilt (one-time integrity migration)")
 
     def _snapshot_db(self, *, reason: str = "manual migration") -> None:
-        """Copy the DB file out-of-tree, timestamped, before a migration."""
+        """Copy the DB file out-of-tree, timestamped, before a migration.
+
+        A snapshot never overwrites a snapshot. The stamp is one-second
+        granular, and one open can snapshot twice: a pre-manual DB with rows
+        runs the manual-column migration and then the FTS rebuild, each
+        snapshotting first — on a fast machine inside the same second. The
+        second copy then landed on the first one's name and silently replaced
+        it: the log named two snapshots, the disk held one. When the stamped
+        name is taken, the next free ``-N`` suffix is used instead.
+        """
         src = self._db_path
         if not src.exists():
             return  # nothing to back up (in-memory / brand-new DB)
         ts = time.strftime("%Y%m%dT%H%M%S", time.localtime())
         dst = src.with_name(f"{src.name}.backup-{ts}")
+        n = 0
+        while dst.exists():
+            n += 1
+            dst = src.with_name(f"{src.name}.backup-{ts}-{n}")
         shutil.copy2(src, dst)
         log.info("MemoryStore: snapshotted %s -> %s before %s", src, dst, reason)
 
@@ -416,8 +430,14 @@ class MemoryStore:
                 "provenance is mandatory (no silent 'unknown' writes)"
             )
 
+        # Token shapes are redacted before a fact is kept (X.37): recall reads
+        # facts back into the system prompt, and the wiki compiles them into
+        # pages. Dedup then compares redacted text with redacted text.
+        entity_name = redact_secrets(entity_name)
+        fact = redact_secrets(fact)
+        tags = redact_capture(tags) if tags else tags
         now = time.time()
-        rel = relationship or "fact"
+        rel = redact_secrets(relationship) if relationship else "fact"
         norm_fact = _normalize_for_dedup(fact)
 
         def _op(conn):
@@ -730,6 +750,14 @@ class MemoryStore:
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return
+
+        # Redacted as persist_memory does: an update is a write of a fact too.
+        for key in ("entity_type", "entity_name", "relationship", "fact"):
+            if isinstance(updates.get(key), str):
+                updates[key] = redact_secrets(updates[key])
+        if "tags" in updates:
+            tags = updates["tags"]
+            updates["tags"] = redact_json_text(tags) if isinstance(tags, str) else redact_capture(tags)
 
         # Serialize JSON fields
         for key in ("source_event_ids", "tags"):
