@@ -31,6 +31,14 @@ WATERMARK_FILENAME = ".export_state.json"
 # corpus or blow up example length.
 CONTEXT_MESSAGE_LIMIT = 12
 
+# How many rows before the call to read. Far deeper than the cap on purpose:
+# the resolver drops rows before it counts them — tool calls and results
+# persist with no flat text, and a trailing assistant preamble is trimmed — so
+# a window the size of the cap could come back empty after one agentic turn.
+# 500 is the depth the old read had, so any call with at most 500 rows before
+# it resolves exactly as it did.
+CONTEXT_SCAN_ROWS = 500
+
 # Session ids that name a SURFACE, not a conversation. A shared LoopContext
 # pins one of these on every turn from that surface (daemon.py pins "web"), so
 # the id is a routing namespace and the rows behind it are an accumulation of
@@ -99,7 +107,11 @@ def lcm_context_resolver(store: object, *, limit: int = CONTEXT_MESSAGE_LIMIT):
             )
             return []
         try:
-            messages = store.get_messages(session_id, limit=500)
+            # The rows just BEFORE the call, in prompt order. This was
+            # get_messages(limit=500), which returns a session's 500 LOWEST
+            # turn_index rows: every call after the 500th row was paired with
+            # the conversation around row 500 instead of its own.
+            messages = store.messages_before(session_id, ts, limit=CONTEXT_SCAN_ROWS)
         except Exception:
             log.debug("LCM lookup failed for session %s", session_id, exc_info=True)
             return []
@@ -108,7 +120,9 @@ def lcm_context_resolver(store: object, *, limit: int = CONTEXT_MESSAGE_LIMIT):
         for msg in messages:
             # STRICTLY BEFORE the call: a message at or after it can include
             # the tool's own result, which would leak the answer back into
-            # the prompt — the exact defect this export shape replaced.
+            # the prompt — the exact defect this export shape replaced. The
+            # store already reads strictly before; checked again here because
+            # the cost of trusting it wrongly is a leaked answer in a corpus.
             if getattr(msg, "timestamp", 0) >= ts:
                 continue
             role = getattr(msg, "role", "")

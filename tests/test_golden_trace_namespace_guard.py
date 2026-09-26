@@ -31,7 +31,7 @@ class _Store:
     def __init__(self) -> None:
         self.asked: list[str] = []
 
-    def get_messages(self, session_id, limit=500):
+    def messages_before(self, session_id, timestamp, *, limit):
         self.asked.append(session_id)
         return [
             _Msg("user", "someone else's question", 100.0),
