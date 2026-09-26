@@ -254,27 +254,29 @@ class TestProducers:
     def test_restart_where_rehydrate_declines_continues_above_history(
         self, tmp_path: Path
     ) -> None:
-        """P1. rehydrate_if_cold restores nothing when its window (40 rows,
-        newest-first 8,000-token budget) holds no clean human turn: here the last
-        turn's tool output alone exceeds the budget. The session starts cold."""
+        """P1. A restart whose rehydrate restores nothing starts the session cold,
+        and its numbering must still continue above every saved row. Since the
+        rehydrate follow-up, a big tool result or a long turn no longer makes it
+        decline (tests/test_rehydrate_always_restores.py); a session with no
+        human turn to start from still does."""
         engine = _engine(tmp_path)
-        big = "x" * 40_000                    # ~10k tokens: fills the budget alone
         _seed(engine, [
-            *_turns(3, "old"),
-            _user("run the report"),
+            ConversationMessage.from_injected(
+                "task finished: report ready", provenance="task_supervisor",
+                is_trusted=False),
             ConversationMessage(role="assistant", content=[
                 ToolUseBlock(id="t1", name="bash", input={"command": "report"})]),
             ConversationMessage(role="user", content=[
-                ToolResultBlock(tool_use_id="t1", content=big)]),
+                ToolResultBlock(tool_use_id="t1", content="ok")]),
             _asst("done"),
-        ])                                              # 0..9
+        ])                                              # 0..3
 
         mgr = _manager(engine, rehydrate=True)          # daemon restart
-        assert mgr.rehydrate_if_cold(SID) == 0          # declined, as in production
-        assert mgr.get_or_create(SID).add_user_message("next day") == 10
+        assert mgr.rehydrate_if_cold(SID) == 0          # nothing safe to start from
+        assert mgr.get_or_create(SID).add_user_message("next day") == 4
 
         assert _dups(tmp_path / "lcm.db") == []
-        assert _turn_index_of(tmp_path / "lcm.db", "next day") == 10
+        assert _turn_index_of(tmp_path / "lcm.db", "next day") == 4
 
     def test_restart_through_a_path_that_never_rehydrates(self, tmp_path: Path) -> None:
         """P2. inject_turn (task completions), POST /api/chat, Slack and Discord

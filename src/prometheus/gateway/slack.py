@@ -704,6 +704,10 @@ class SlackAdapter(BasePlatformAdapter):
         self._save_channel(channel)
 
         session_id = f"slack:{channel}"
+        # Restore a cold session's recent conversation first, as the other
+        # gateways do, or the model answers blind after a restart.
+        if hasattr(self.session_manager, "rehydrate_if_cold"):
+            self.session_manager.rehydrate_if_cold(session_id)
         session = self.session_manager.get_or_create(session_id)
         session.add_user_message(text)
         pre_len = len(session.get_messages())
