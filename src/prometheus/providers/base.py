@@ -80,6 +80,11 @@ class ModelProvider(ABC):
 
     supports_vision: bool = False
     api_enforced_structure: bool = False
+    # The registry key that builds this provider ("anthropic", "ollama", ...).
+    # The loop reads it to tell the router which provider just failed, so every
+    # concrete class sets it; the OpenAI-compatible class, which serves many
+    # keys, sets it per instance.
+    provider_name: str = ""
     # What the served chat template does with tools — DETECTED by
     # ``detect_tool_template`` on the local providers (llama.cpp ``/props``,
     # ollama ``/api/show``), an ``adapter.tier.ToolTemplate``; None until a
