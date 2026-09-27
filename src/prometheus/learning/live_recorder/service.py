@@ -65,15 +65,24 @@ class LiveRecorderService:
         self._skill_registry = skill_registry
         self._recordings_dir = recordings_dir or (get_data_dir() / _RECORDINGS_DIR_NAME)
 
-    async def persist_content(self, content: str, *, trigger: str) -> Path | None:
+    async def persist_content(
+        self,
+        content: str,
+        *,
+        trigger: str,
+        on_collision: str = "suffix",
+        replaced: list[tuple[Path, Path]] | None = None,
+    ) -> Path | None:
         """Persist finished skill markdown through the standard auto-skill path.
 
         Wraps ``SkillCreator.persist_skill_content`` and reloads the live
         SkillRegistry on success. Used by the upload pipeline below and by
         the skill-drafts accept flow (vision-derived skills approved in
-        Beacon land through the exact same write path).
+        Beacon land through the exact same write path), which passes
+        ``on_collision="refuse"`` or ``"replace"`` — see the write path.
         """
-        skill_path = await self._skill_creator.persist_skill_content(content, trigger=trigger)
+        skill_path = await self._skill_creator.persist_skill_content(
+            content, trigger=trigger, on_collision=on_collision, replaced=replaced)
         if skill_path is not None:
             self._reload_registry()
         return skill_path

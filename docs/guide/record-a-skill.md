@@ -39,6 +39,13 @@ Config→Skills tab pick new skills up with no extra wiring, and the live
 Nothing leaves the machine: the trace goes browser → your daemon, and the
 DOM path needs no model at all.
 
+Everything a recording contributes to the skill — typed values, labels, page
+titles, URLs, selectors, parameter names — is written as JSON inside inline
+code (`` `"Ada Lovelace"` ``). A value can hold anything a page or a user put
+in it, including line breaks and backticks; rendered this way it stays on one
+line and can never open a code block, a heading or a list in the skill. The
+skill then passes the same code scanner every machine-written skill does.
+
 Every upload is archived under `~/.prometheus/data/recordings/<id>/`
 (events, screenshots, extracted actions, gate + verification results)
 for provenance and future training-data use.
@@ -73,7 +80,11 @@ vision-derived skills **never** auto-persist. They land in
 - `GET  /api/learning/skill-drafts` — list pending drafts
 - `GET  /api/learning/skill-drafts/{id}` — content + provenance
 - `POST /api/learning/skill-drafts/{id}/accept` — persist through the
-  standard auto-skill path (optionally with edited content)
+  standard auto-skill path (optionally with edited content). If a live
+  skill already has the draft's name, the answer is **409** naming it and
+  the draft stays pending; accept again with `{"replace": true}` to
+  archive the live skill to `skills/auto/archive/` and write the draft in
+  its place, or rename the draft
 - `POST /api/learning/skill-drafts/{id}/reject` — archived to
   `drafts/.rejected/`, never deleted
 

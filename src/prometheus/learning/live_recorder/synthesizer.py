@@ -10,10 +10,21 @@ machine-generated skill.
 Ported from skillforge-engine core/live_synthesizer.py; the output format
 was rewritten to match the skills/auto/ conventions that the loader,
 curator, and Beacon already understand.
+
+Every recorded value — a typed value, a label, a page title, a URL, a
+selector, a parameter's name and type, a step's description (the vision
+path's comes from a model) — is rendered by :func:`_code`: JSON-encoded
+inside inline code. A recording can put anything in those strings, and they
+used to be pasted into the markdown as they were, so a typed value holding a
+line break and ```` ```python ```` opened a real code block in a skill that
+auto-persists without review (WP-X.42). Rendered this way a value is one
+line, and nothing in it can open a fence, a heading, a list item or any
+other structure.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -35,16 +46,41 @@ class LiveSkillDraft:
     parameter_count: int
 
 
+# Line breaks json.dumps leaves literal with ensure_ascii=False; ``str.splitlines``
+# (and so the skill loader) splits on them all the same.
+_LITERAL_LINE_BREAKS = {"\x85": "\\u0085", "\u2028": "\\u2028", "\u2029": "\\u2029"}
+
+
+def _code(value: object) -> str:
+    """A recorded value as inline code that cannot open any markdown structure.
+
+    JSON-encoded, so a line break, a quote or a control character becomes an
+    escape and the value stays on one line; a backtick (which would close the
+    code span) and the line breaks JSON keeps literal are escaped as well.
+    Inside a code span nothing else is interpreted.
+    """
+    text = json.dumps("" if value is None else str(value), ensure_ascii=False)
+    text = text.replace("`", "\\u0060")
+    for char, escaped in _LITERAL_LINE_BREAKS.items():
+        text = text.replace(char, escaped)
+    return f"`{text}`"
+
+
 def _infer_app(start_url: str) -> str:
-    """Derive an app name from the recording's start URL."""
+    """Derive an app name from the recording's start URL.
+
+    Kept to the characters a domain label may hold: the name lands in the
+    title heading and the frontmatter ``description:``.
+    """
     try:
         domain = urlparse(start_url).netloc
     except ValueError:
         domain = ""
     domain = domain.replace("www.", "")
-    if not domain:
+    label = re.sub(r"[^A-Za-z0-9-]", "", domain.split(".")[0]) if domain else ""
+    if not label:
         return "Web"
-    return domain.split(".")[0].title()
+    return label.title()
 
 
 def infer_workflow_title(actions: list[dict[str, Any]], metadata: dict[str, Any]) -> str:
@@ -106,17 +142,17 @@ def action_to_markdown_step(action: dict[str, Any], step_num: int) -> str:
         if action.get("field_type") == "password":
             details.append("**Security**: use secure credential storage, never a literal value")
         elif action.get("is_parameter"):
-            details.append(f"**Parameter**: `{action.get('parameter_name', 'value')}`")
+            details.append(f"**Parameter**: {_code(action.get('parameter_name') or 'value')}")
     elif action_type == "NAVIGATE":
         url = action.get("to_url") or action.get("url", "")
         if url:
-            details.append(f"**URL**: `{url}`")
+            details.append(f"**URL**: {_code(url)}")
     elif action_type in ("CLICK_BUTTON", "CLICK"):
         css_selector = action.get("css_selector", "")
         if css_selector:
-            details.append(f"**Selector**: `{css_selector}`")
+            details.append(f"**Selector**: {_code(css_selector)}")
 
-    step_md = f"{step_num}. {description}"
+    step_md = f"{step_num}. {_code(description)}"
     if details:
         step_md += "\n   - " + "\n   - ".join(details)
     return step_md
@@ -153,7 +189,8 @@ def build_skill_content(
         f"# {title}",
         "",
         "## When to use",
-        f"Repeat the recorded browser workflow on {start_url or 'the target application'}.",
+        "Repeat the recorded browser workflow on "
+        + (_code(start_url) if start_url else "the target application") + ".",
         "",
     ]
 
@@ -164,11 +201,12 @@ def build_skill_content(
             param_name = param.get("name", "unknown")
             param_type = param.get("type", "text")
             default_value = param.get("default_value", "")
-            entry = f"- **{param_name}** (`{param_type}`)"
+            entry = f"- {_code(param_name)} ({_code(param_type)})"
             if default_value and param_type != "password":
-                entry += f" — example: `{default_value}`"
+                entry += f" — example: {_code(default_value)}"
             lines.append(entry)
-            lines.append(f"  {param.get('description', '')}")
+            if param.get("description"):
+                lines.append(f"  {_code(param['description'])}")
         lines.append("")
 
     lines.append("## Steps")
@@ -180,7 +218,7 @@ def build_skill_content(
     lines.append("## Notes")
     lines.append("- Captured with the live recorder browser extension (deterministic DOM trace, no vision model).")
     if start_url:
-        lines.append(f"- Recording started at {start_url}")
+        lines.append(f"- Recording started at {_code(start_url)}")
     if duration:
         lines.append(f"- Original run took ~{duration} seconds over {len(actions)} steps.")
     lines.append("- Selectors reflect the UI at recording time; re-verify them if the application changes.")
