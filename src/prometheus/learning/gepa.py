@@ -17,11 +17,12 @@ One cycle:
    same evidence for all. A variant is PROPOSED only if every verdict parsed,
    its mean beats the live skill's by at least ``gepa_min_margin``, the mean
    clears ``gepa_judge_threshold``, and it scores below the live skill on no
-   run. An unparseable verdict never wins. The default margin, 0.1, is the
+   run. An unparseable verdict never wins. The default margin, 0.15, is the
    smallest at which no formatting-only rewrite of a skill passed this rule
-   against the configured judge (``docs/audits/gepa-margin/judge_noise.py``:
-   0 of 30 at 0.1, 3 of 30 at 0.05), and every deliberate degradation fell
-   by at least that much.
+   against the configured judge in two runs of
+   ``docs/audits/gepa-margin/judge_noise.py`` (0 of 60; 1 of 60 at 0.1, 5 of
+   60 at 0.05), while the one real improvement that cleared 0.1 cleared it
+   too, and every deliberate degradation fell by at least 0.1.
 5. **A proposal is staged, never applied** (:mod:`prometheus.learning.gepa_proposals`).
    GEPA does not write ``skills/auto/``; a person promotes with
    ``oara gepa promote``.
@@ -343,7 +344,7 @@ class GEPAOptimizer:
             ``gepa_max_skills_per_cycle`` (int, default 3)
             ``gepa_variants_per_skill`` (int, default 3)
             ``gepa_min_loads`` (int, default 3)
-            ``gepa_min_margin`` (float, default 0.1)
+            ``gepa_min_margin`` (float, default 0.15)
             ``gepa_judge_threshold`` (float, default 0.7)
             ``gepa_allow_hosted`` (bool, default False)
             ``gepa_model`` (str, default ``default`` — the provider's model)
@@ -376,7 +377,7 @@ class GEPAOptimizer:
         self._max_skills = max(1, int(cfg.get("gepa_max_skills_per_cycle", 3)))
         self._variants = max(1, int(cfg.get("gepa_variants_per_skill", 3)))
         self._min_loads = max(1, int(cfg.get("gepa_min_loads", 3)))
-        self._margin = min(1.0, max(0.0, float(cfg.get("gepa_min_margin", 0.1))))
+        self._margin = min(1.0, max(0.0, float(cfg.get("gepa_min_margin", 0.15))))
         self._threshold = float(cfg.get("gepa_judge_threshold", 0.7))
         # Only a real YAML true opts in: the string "false" is truthy.
         self._allow_hosted = cfg.get("gepa_allow_hosted", False) is True

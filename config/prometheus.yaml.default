@@ -903,9 +903,10 @@ learning:
   # A variant is proposed only if its mean judge score beats the live
   # skill's by at least this much on the same runs, reaches
   # gepa_judge_threshold, and is lower on no run. A verdict with no
-  # parseable score never wins. 0.1: the smallest margin at which no
-  # formatting-only rewrite passed in docs/audits/gepa-margin/judge_noise.py.
-  gepa_min_margin: 0.1
+  # parseable score never wins. 0.15: the smallest margin at which no
+  # formatting-only rewrite passed, over two runs of
+  # docs/audits/gepa-margin/judge_noise.py.
+  gepa_min_margin: 0.15
   gepa_judge_threshold: 0.7
   gepa_min_idle_minutes: 10
   gepa_max_frequency_hours: 24

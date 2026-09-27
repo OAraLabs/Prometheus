@@ -1,6 +1,6 @@
 """WP-X.33 — how far does GEPA's judge move on a change that means nothing?
 
-This is the measurement behind ``learning.gepa_min_margin: 0.1``. It runs
+This is the measurement behind ``learning.gepa_min_margin: 0.15``. It runs
 GEPA's own scoring path (``GEPAOptimizer._score`` → ``PrometheusJudge.evaluate``
 → ``parsed_score``) against a judge, on PUBLIC or SYNTHETIC content only: the
 three package builtins, three short auto-style skills and every run, all
@@ -17,24 +17,37 @@ Run (from a checkout, against a local judge — nothing here is user data):
     PYTHONPATH=src python docs/audits/gepa-margin/judge_noise.py \
         qwen2.5:7b-instruct src/prometheus/skills/builtin
 
-Result on 2026-09-26, oara-mini, qwen2.5:7b-instruct on loopback Ollama
-(the configured ``evals.judge_model``), 198 judge calls, 0 unparseable:
+Results, 2026-09-26, the mini, qwen2.5:7b-instruct on loopback Ollama (the
+configured ``evals.judge_model``). Two runs of 198 judge calls each: run 1 from
+the branch before WP-X.22 merged (GEPA's interim strict re-read of the reply),
+run 2 from the final code (the judge's verdict status). 0 unparseable in both.
 
-  * same text scored twice: 1 of 18 (skill, run) pairs came back different.
-  * surface rewrites (30): per-run |delta| mean 0.031, p90 0.20, max 0.30;
-    on the 3-run mean, p95 0.133, max 0.167 — large deltas come with a run
-    that moved the other way.
-  * rewrites passing the whole rule (mean gain >= margin AND lower on no
-    run): 3 of 30 at a margin of 0.05, 0 of 30 at 0.10, 0 of 30 at 0.15.
-  * degradations (18): mean drop 0.37; every one dropped by >= 0.10.
-  * evidence-matching improvements (6): +0.20 (passes), +0.067, +0.033 x2
-    (not enough), 0.0 x2 — this judge rewards real fixes weakly, so GEPA
-    will propose rarely. The margin errs on the side of fewer proposals: a
-    false proposal costs a person's review, a missed one costs nothing.
+                                            run 1          run 2
+  same text scored twice, pairs differing   1 of 18        0 of 18
+  surface rewrites (30), per-run |delta|    mean .031      mean .031
+                                            p90 .20        p90 .10
+                                            max .30        max .50
+  ... on the 3-run mean                     p95 .133       p95 .133
+                                            max .167       max .167
+  rewrites passing the WHOLE rule
+  (mean gain >= margin, lower on no run)
+     at a margin of 0.05                    3 of 30        2 of 30
+     at 0.10                                0 of 30        1 of 30
+     at 0.15                                0 of 30        0 of 30
+  degradations (18): mean drop              .37            .356
+     dropping by >= 0.10                    18 of 18       18 of 18
+  evidence-matching improvements (6)        +.20 passes; the rest +.13 at
+                                            most, or lower on a run — in
+                                            both runs
 
-0.10 is the smallest margin at which no formatting-only rewrite passed; it is
-half the judge rubric's smallest anchor gap (0.2). Thirty rewrites bound the
-false-proposal rate only loosely (0/30: under ~10% at 95%).
+0.15 is the smallest margin at which no formatting-only rewrite passed in
+either run (0 of 60; 1 of 60 at 0.10, 5 of 60 at 0.05). With three variants
+per candidate, 0.10 would stage a noise-only proposal about one time in
+twenty. The one real improvement that cleared 0.10 (+0.20) clears 0.15 too.
+This judge rewards real fixes weakly, so GEPA will propose rarely; the margin
+errs that way on purpose — a false proposal costs a person's review, a missed
+one costs nothing. Sixty comparisons of thirty rewrites bound the rate only
+loosely.
 """
 
 from __future__ import annotations

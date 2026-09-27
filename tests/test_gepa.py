@@ -1038,6 +1038,29 @@ class TestReportAndWiring:
         assert report.notes == "no provider to generate variants"
 
 
+def test_gepa_code_defaults_equal_the_template():
+    """test_config_defaults_equality cannot see these reads (the section is passed in), so pin them."""
+    import yaml
+
+    from prometheus.sentinel.gepa_engine import GEPAEngine
+
+    template = yaml.safe_load(
+        (REPO / "config" / "prometheus.yaml.default").read_text(encoding="utf-8"))["learning"]
+    opt = GEPAOptimizer(None, config={})
+    assert opt._enabled is template["gepa_enabled"] is False
+    assert opt._max_skills == template["gepa_max_skills_per_cycle"]
+    assert opt._variants == template["gepa_variants_per_skill"]
+    assert opt._min_loads == template["gepa_min_loads"]
+    assert opt._margin == template["gepa_min_margin"]
+    assert opt._threshold == template["gepa_judge_threshold"]
+    assert opt._allow_hosted is template["gepa_allow_hosted"] is False
+    assert opt._model == template["gepa_model"]
+    assert "gepa_min_traces_required" not in template  # read by nothing since WP-X.33
+    engine = GEPAEngine(optimizer=opt, signal_bus=None, config={})  # type: ignore[arg-type]
+    assert engine._min_idle_s == template["gepa_min_idle_minutes"] * 60
+    assert engine._max_freq_s == template["gepa_max_frequency_hours"] * 3600
+
+
 def test_gepa_never_writes_skills_auto():
     """Structural: the optimizer module writes nothing itself — the store stages, a person promotes."""
     src = (REPO / "src" / "prometheus" / "learning" / "gepa.py").read_text(encoding="utf-8")

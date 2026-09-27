@@ -239,7 +239,7 @@ none either — the key is documented so its absence is visible.
 | `learning.gepa_max_skills_per_cycle` | `3` |
 | `learning.gepa_variants_per_skill` | `3` |
 | `learning.gepa_min_loads` | `3` |
-| `learning.gepa_min_margin` | `0.1` |
+| `learning.gepa_min_margin` | `0.15` |
 | `learning.gepa_judge_threshold` | `0.7` |
 | `learning.gepa_min_idle_minutes` | `10` |
 | `learning.gepa_max_frequency_hours` | `24` |
