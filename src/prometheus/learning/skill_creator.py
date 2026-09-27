@@ -172,8 +172,12 @@ class SkillNameTaken(Exception):
 
     def where(self) -> list[str]:
         """``auto:<file>`` for each auto file, ``<source>:<file>`` for the rest."""
-        return ([f"auto:{f.name}" for f in self.files]
-                + [f"{source}:{path.name}" for source, path in self.served])
+        return _served_by(self.files, self.served)
+
+
+def _served_by(files: list[Path], served: list[tuple[str, Path]]) -> list[str]:
+    return ([f"auto:{f.name}" for f in files]
+            + [f"{source}:{path.name}" for source, path in served])
 
 
 @dataclass(frozen=True)
@@ -417,10 +421,11 @@ class SkillCreator:
           ``-<unixtime>-2``, ``-3``… when that is taken too — right for
           deliberate writers (teacher escalation, record-a-skill) that must
           not lose content;
-        - ``"skip"`` treats the collision as near-duplicate evidence and
-          writes nothing — the auto path uses this; the timestamp-suffix
-          behaviour there is how three ``debug-cron-job-failure*`` copies
-          accumulated;
+        - ``"skip"`` treats a name that is already served — by an auto file,
+          a builtin or the user's ``skills/`` — as near-duplicate evidence and
+          writes nothing, recorded like the quality gate's other refusals —
+          the auto path uses this; the timestamp-suffix behaviour there is how
+          three ``debug-cron-job-failure*`` copies accumulated;
         - ``"refuse"`` raises :class:`SkillNameTaken` when a skill with this
           name is already served — an auto file (its own, or another serving
           the same name) or a skill served from elsewhere (a builtin, the
@@ -478,15 +483,15 @@ class SkillCreator:
 
         base = self._auto_dir / f"{slug}.md"
 
-        # Don't overwrite existing skills. The cheap early answer for the auto
-        # path; the exclusive write below is the one that decides.
-        if on_collision == "skip" and base.exists():
-            log.info(
-                "SkillCreator: %r already exists — skipping duplicate "
-                "(near-duplicate gate)",
-                base.name,
-            )
-            return None
+        # The auto path writes nothing under a name that is already served —
+        # by an auto file, a builtin or the user's own skills/ (an auto skill
+        # registered after those would take their place) — and records it like
+        # its other refusals. The exclusive write below still decides a race.
+        if on_collision == "skip":
+            served_by = _served_by(self._clashes(slug, base), self._served_elsewhere(slug))
+            if served_by:
+                self._record_gate({"reason": "name_already_served", "served_by": served_by})
+                return None
 
         # The quality gate reads the skill the way the registry will serve it.
         _, description = _parse_skill_markdown(slug, content.strip())

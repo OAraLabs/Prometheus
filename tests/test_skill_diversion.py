@@ -299,3 +299,47 @@ class TestTheAcceptFlowApplies:
         assert body["conflict"]["served_elsewhere"] == [{"source": "builtin", "file": "debug.md"}]
         assert "builtin skill debug.md" in body["error"]
         assert not (auto / "debug.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# SkillCreator's own auto path: a served name is skipped, and recorded
+# ---------------------------------------------------------------------------
+
+
+_TRACE = [{"tool_name": "bash", "tool_input": {"command": f"step {i}"}, "result": "ok",
+           "is_error": False} for i in range(3)]
+
+
+def _user_skill(name: str) -> None:
+    from prometheus.config.paths import config_dir_path
+
+    root = config_dir_path() / "skills"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / f"{name}.md").write_text(skill(name, "the user's own"))
+
+
+@pytest.mark.parametrize("name,setup,served_by", [
+    ("debug", None, ["builtin:debug.md"]),
+    ("my-notes", "user", ["user:my-notes.md"]),
+    ("release-check", "auto-other-file", ["auto:old-release.md"]),
+    ("release-check", "auto-same-file", ["auto:release-check.md"]),
+])
+def test_the_auto_path_skips_a_name_already_served(tmp_path, name, setup, served_by):
+    """An auto skill registered after a builtin or a user skill takes its place;
+    one under a name an auto skill holds is a duplicate. Either way: nothing is
+    written, and the refusal is a quality-gate row like the others."""
+    creator, auto = _creator(tmp_path, provider=_Model(skill(name, "machine-written")))
+    if setup == "user":
+        _user_skill(name)
+    elif setup == "auto-other-file":
+        (auto / "old-release.md").write_text(skill(name, "an older auto skill"))
+    elif setup == "auto-same-file":
+        (auto / f"{name}.md").write_text(skill(name, "the live auto skill"))
+    before = sorted(p.name for p in auto.iterdir())
+
+    assert asyncio.run(creator.maybe_create("do the thing", _TRACE, "Done.")) is None
+    assert sorted(p.name for p in auto.iterdir()) == before
+    [(outcome, summary)] = _rows(tmp_path, "quality_gate")
+    assert outcome == "skipped"
+    assert summary == {"reason": "name_already_served", "served_by": served_by}
+    assert _drafts() == []  # the auto path skips; only deliberate writers divert
