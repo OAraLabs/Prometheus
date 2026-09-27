@@ -488,7 +488,11 @@ class SkillCreator:
         # registered after those would take their place) — and records it like
         # its other refusals. The exclusive write below still decides a race.
         if on_collision == "skip":
-            served_by = _served_by(self._clashes(slug, base), self._served_elsewhere(slug))
+            # An auto file of that name is what the registry serves (auto skills
+            # register last), so builtins and user skills are looked up only
+            # when there is none — and the registry is not loaded for nothing.
+            clash = self._clashes(slug, base)
+            served_by = _served_by(clash, [] if clash else self._served_elsewhere(slug))
             if served_by:
                 self._record_gate({"reason": "name_already_served", "served_by": served_by})
                 return None
