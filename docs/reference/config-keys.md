@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **403** of
+Every key in `config/prometheus.yaml.default` — **405** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -239,10 +239,12 @@ none either — the key is documented so its absence is visible.
 | `learning.gepa_enabled` | `False` |
 | `learning.gepa_max_skills_per_cycle` | `3` |
 | `learning.gepa_variants_per_skill` | `3` |
-| `learning.gepa_min_traces_required` | `10` |
+| `learning.gepa_min_loads` | `3` |
+| `learning.gepa_min_margin` | `0.15` |
 | `learning.gepa_judge_threshold` | `0.7` |
 | `learning.gepa_min_idle_minutes` | `10` |
 | `learning.gepa_max_frequency_hours` | `24` |
+| `learning.gepa_allow_hosted` | `False` |
 | `learning.gepa_model` | `default` |
 | `learning.live_recorder` | *(section)* |
 | `learning.live_recorder.enabled` | `True` |
