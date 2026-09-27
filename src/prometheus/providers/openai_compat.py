@@ -283,6 +283,7 @@ class OpenAICompatProvider(ModelProvider):
         cache_write: int | None = None
         input_tokens = 0
         output_tokens = 0
+        served_model: str | None = None
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             async with client.stream(
@@ -343,6 +344,11 @@ class OpenAICompatProvider(ModelProvider):
                     except json.JSONDecodeError:
                         continue
 
+                    # What served this call, as the service names it on every
+                    # chunk (WP-X.21 T12a). A cloud alias can resolve to a
+                    # dated snapshot; the requested name stays in `model`.
+                    served_model = chunk.get("model") or served_model
+
                     if "usage" in chunk:
                         u = chunk["usage"] or {}
                         input_tokens = u.get("prompt_tokens", 0)
@@ -399,4 +405,5 @@ class OpenAICompatProvider(ModelProvider):
             ),
             stop_reason=finish_reason,
             dropped_malformed=dropped_malformed,
+            served_model=served_model,
         )

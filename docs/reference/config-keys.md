@@ -71,7 +71,7 @@ none either — the key is documented so its absence is visible.
 | `tools` | *(section)* |
 | `tools.deferred_loading` | *(section)* |
 | `tools.deferred_loading.enabled` | `auto` |
-| `tools.deferred_loading.always_loaded` | `['bash', 'task_create', 'read_file', 'write_file', 'edit_file', 'grep', 'glob', 'tool_search', 'web_search', 'web_fetch', 'memory']` |
+| `tools.deferred_loading.always_loaded` | `['bash', 'task_create', 'read_file', 'write_file', 'edit_file', 'grep', 'glob', 'tool_search', 'skill', 'web_search', 'web_fetch', 'memory']` |
 | `tools.deferred_loading.mcp_always_deferred` | `False` |
 | `tools.deferred_loading.search_mcp` | `True` |
 | `adapter` | *(section)* |

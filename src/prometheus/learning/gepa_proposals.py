@@ -45,6 +45,8 @@ from pathlib import Path
 from typing import Any
 
 from prometheus.config.paths import config_dir_path
+from prometheus.learning.skill_files import archive_copy
+from prometheus.learning.skill_files import atomic_write as _atomic_write
 from prometheus.security.log_redaction import redact_secrets
 
 log = logging.getLogger(__name__)
@@ -132,20 +134,6 @@ class PromotionResult:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _atomic_write(path: Path, text: str) -> None:
-    """Write via a temp file in the same directory, then rename over *path*.
-
-    The temp name does not end in ``.md``: the loader globs ``*.md``, and a
-    half-written skill must never be served.
-    """
-    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 class ProposalStore:
@@ -450,23 +438,15 @@ class ProposalStore:
         )
 
     def _archive(self, target: Path, live: str) -> Path:
-        """Copy the live version into ``auto/archive/`` under a name no copy holds yet."""
-        self.archive_dir.mkdir(parents=True, exist_ok=True)
-        stamp = int(time.time())
-        for n in range(1, 100):
-            suffix = "" if n == 1 else f"-{n}"
-            path = self.archive_dir / f"{target.stem}_{stamp}{suffix}.md"
-            try:
-                # Exclusive: an archive is never overwritten (two promotions in
-                # one second must not share a name — the #594 collision).
-                with path.open("x", encoding="utf-8") as fh:
-                    fh.write(live)
-                return path
-            except FileExistsError:
-                continue
-            except OSError as exc:
-                raise ProposalError("io", f"could not archive {target.name}: {exc}") from exc
-        raise ProposalError("io", f"could not find a free archive name for {target.name}")
+        """Copy the live version into ``auto/archive/`` under a name no copy holds yet.
+
+        The shared convention (``learning.skill_files.archive_copy``): an
+        accept that replaces a live skill archives it the same way.
+        """
+        try:
+            return archive_copy(target, self.archive_dir, text=live)
+        except OSError as exc:
+            raise ProposalError("io", f"could not archive {target.name}: {exc}") from exc
 
 
 # ── text for any surface ─────────────────────────────────────────────

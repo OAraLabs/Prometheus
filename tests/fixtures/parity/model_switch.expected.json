@@ -741,7 +741,7 @@
      "rows": [
       [
        "desktop:parity-switch",
-       "One",
+       "Explain The Number One",
        "<time>"
       ]
      ]
@@ -1686,7 +1686,7 @@
        "success",
        {
         "$json": {
-         "advertised": 11,
+         "advertised": 12,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
@@ -1717,7 +1717,7 @@
          "stop_reason": "stop"
         }
        },
-       5926,
+       6170,
        2,
        0,
        "desktop:parity-switch",
@@ -1738,7 +1738,7 @@
        "success",
        {
         "$json": {
-         "advertised": 11,
+         "advertised": 12,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
@@ -1769,7 +1769,7 @@
          "stop_reason": "stop"
         }
        },
-       2579,
+       2679,
        2,
        0,
        "desktop:parity-switch",
@@ -1790,7 +1790,7 @@
        "success",
        {
         "$json": {
-         "advertised": 11,
+         "advertised": 12,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
@@ -1821,7 +1821,7 @@
          "stop_reason": "stop"
         }
        },
-       5970,
+       6214,
        2,
        0,
        "desktop:parity-switch",

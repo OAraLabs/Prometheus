@@ -276,6 +276,7 @@ class AnthropicProvider(ModelProvider):
         input_tokens = 0
         output_tokens = 0
         stop_reason: str | None = None
+        served_model: str | None = None
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as response:
@@ -300,6 +301,10 @@ class AnthropicProvider(ModelProvider):
                     etype = event.get("type", "")
 
                     if etype == "message_start":
+                        # What served this call (WP-X.21 T12a): an alias such as
+                        # claude-haiku-4-5 is answered by a dated model id. The
+                        # requested name stays in `model`.
+                        served_model = event.get("message", {}).get("model") or served_model
                         usage = event.get("message", {}).get("usage", {})
                         input_tokens = usage.get("input_tokens", 0)
                         # Anthropic reports prompt caching as separate counters
@@ -435,6 +440,7 @@ class AnthropicProvider(ModelProvider):
                 cache_write_tokens=cache_write,
             ),
             stop_reason=stop_reason,
+            served_model=served_model,
         )
 
 
