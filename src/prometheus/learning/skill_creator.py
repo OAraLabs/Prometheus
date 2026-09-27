@@ -39,6 +39,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -148,18 +149,50 @@ _COLLISION_MODES = frozenset({"suffix", "skip", "refuse", "replace"})
 
 
 class SkillNameTaken(Exception):
-    """``on_collision="refuse"``: a live auto skill already has this name.
+    """``on_collision="refuse"``: a skill with this name is already served.
 
-    ``files`` are the auto skill files holding it, so a surface can name them
-    (a skill-draft ACCEPT answers 409 with them).
+    ``files`` are the auto skill files holding it; ``served`` the skills the
+    registry serves under it from elsewhere (``(source, path)`` — a package
+    builtin, the user's own ``skills/``), which an auto skill of that name
+    would silently take over from. A surface names them all (a skill-draft
+    ACCEPT answers 409 with them).
     """
 
-    def __init__(self, name: str, files: list[Path]) -> None:
-        super().__init__(
-            f"a live skill already has the name {name!r}: "
-            + ", ".join(f.name for f in files))
+    def __init__(
+        self,
+        name: str,
+        files: list[Path],
+        served: list[tuple[str, Path]] | None = None,
+    ) -> None:
         self.name = name
-        self.files = files
+        self.files = list(files)
+        self.served = list(served or [])
+        super().__init__(
+            f"a skill named {name!r} is already served: " + ", ".join(self.where()))
+
+    def where(self) -> list[str]:
+        """``auto:<file>`` for each auto file, ``<source>:<file>`` for the rest."""
+        return _served_by(self.files, self.served)
+
+
+def _served_by(files: list[Path], served: list[tuple[str, Path]]) -> list[str]:
+    return ([f"auto:{f.name}" for f in files]
+            + [f"{source}:{path.name}" for source, path in served])
+
+
+@dataclass(frozen=True)
+class DivertedToDraft:
+    """A machine-written skill whose name was already served, staged for a person.
+
+    What :meth:`SkillCreator.persist_or_divert` returns instead of a path: the
+    skill sits in ``skills/drafts/`` and the accept flow (409, replace or
+    rename) decides what happens to it. Nothing machine-written changes a
+    live skill without a person — the same rule as GEPA.
+    """
+
+    draft_id: str
+    skill_name: str
+    served_by: list[str]
 
 
 class SkillNameExtractionError(ValueError):
@@ -195,9 +228,13 @@ class SkillCreator:
         similarity: object | None = None,
         dedupe_threshold: float | None = None,
         catalog: Any = None,
+        drafts: object | None = None,
     ) -> None:
         from prometheus.learning.llm_envelope import LLMCallEnvelope
 
+        # Where persist_or_divert stages a skill whose name is already served
+        # (default: the configured skills/drafts/, built on first use).
+        self._drafts = drafts
         # The near-duplicate gate: a checker with ``available``,
         # ``unavailable_reason`` and ``nearest(text, catalog)`` (default: the
         # process-wide encoder, built on first use), the cosine at or above
@@ -384,14 +421,16 @@ class SkillCreator:
           ``-<unixtime>-2``, ``-3``… when that is taken too — right for
           deliberate writers (teacher escalation, record-a-skill) that must
           not lose content;
-        - ``"skip"`` treats the collision as near-duplicate evidence and
-          writes nothing — the auto path uses this; the timestamp-suffix
-          behaviour there is how three ``debug-cron-job-failure*`` copies
-          accumulated;
-        - ``"refuse"`` raises :class:`SkillNameTaken` when a live auto skill
-          already has this name (its file, or another file serving the same
-          name) — an accepted draft uses this, because a suffixed copy of a
-          skill whose name is taken is never served;
+        - ``"skip"`` treats a name that is already served — by an auto file,
+          a builtin or the user's ``skills/`` — as near-duplicate evidence and
+          writes nothing, recorded like the quality gate's other refusals —
+          the auto path uses this; the timestamp-suffix behaviour there is how
+          three ``debug-cron-job-failure*`` copies accumulated;
+        - ``"refuse"`` raises :class:`SkillNameTaken` when a skill with this
+          name is already served — an auto file (its own, or another serving
+          the same name) or a skill served from elsewhere (a builtin, the
+          user's ``skills/``) it would take over from. An accepted draft uses
+          this, and :meth:`persist_or_divert` turns it into a draft;
         - ``"replace"`` archives every such file into ``auto/archive/`` (the
           way a GEPA promotion does), then writes ``<slug>.md``. The
           ``(live file, archive copy)`` pairs are appended to *replaced*.
@@ -444,15 +483,19 @@ class SkillCreator:
 
         base = self._auto_dir / f"{slug}.md"
 
-        # Don't overwrite existing skills. The cheap early answer for the auto
-        # path; the exclusive write below is the one that decides.
-        if on_collision == "skip" and base.exists():
-            log.info(
-                "SkillCreator: %r already exists — skipping duplicate "
-                "(near-duplicate gate)",
-                base.name,
-            )
-            return None
+        # The auto path writes nothing under a name that is already served —
+        # by an auto file, a builtin or the user's own skills/ (an auto skill
+        # registered after those would take their place) — and records it like
+        # its other refusals. The exclusive write below still decides a race.
+        if on_collision == "skip":
+            # An auto file of that name is what the registry serves (auto skills
+            # register last), so builtins and user skills are looked up only
+            # when there is none — and the registry is not loaded for nothing.
+            clash = self._clashes(slug, base)
+            served_by = _served_by(clash, [] if clash else self._served_elsewhere(slug))
+            if served_by:
+                self._record_gate({"reason": "name_already_served", "served_by": served_by})
+                return None
 
         # The quality gate reads the skill the way the registry will serve it.
         _, description = _parse_skill_markdown(slug, content.strip())
@@ -468,8 +511,9 @@ class SkillCreator:
         else:
             if on_collision == "refuse":
                 clash = self._clashes(slug, base)
-                if clash:
-                    raise SkillNameTaken(name, clash)
+                served = self._served_elsewhere(slug)
+                if clash or served:
+                    raise SkillNameTaken(name, clash, served)
             path = self._write_new(slug, base, text, suffix=on_collision == "suffix")
             if path is None:
                 # Taken between the check and the write: another writer won.
@@ -561,6 +605,99 @@ class SkillCreator:
             if _slugify(served) == slug:
                 out.append(path)
         return out
+
+    def _served_elsewhere(self, slug: str) -> list[tuple[str, Path]]:
+        """Skills the registry serves from outside this auto dir under the same name.
+
+        A package builtin or one of the user's own ``skills/``: the registry
+        registers auto skills after them, so an auto skill of that name would
+        silently take its place.
+        """
+        try:
+            registry = load_skill_registry()
+        except Exception:
+            log.warning("SkillCreator: skill registry unreadable — served names unchecked",
+                        exc_info=True)
+            return []
+        auto = self._auto_dir.resolve()
+        out: list[tuple[str, Path]] = []
+        for served in registry.list_skills():
+            if not served.path or _slugify(served.name) != slug:
+                continue
+            path = Path(served.path)
+            if path.resolve().parent == auto:
+                continue  # this auto dir's own files are _clashes' business
+            out.append((served.source or "unknown", path))
+        return out
+
+    async def persist_or_divert(
+        self,
+        content: str,
+        *,
+        trigger: str,
+        source: str,
+    ) -> Path | DivertedToDraft | None:
+        """Write the skill, or stage it for a person when its name is already served.
+
+        For the deliberate writers that used to add a suffixed copy — teacher
+        escalation, record-a-skill. A copy under a taken name was hidden (the
+        registry serves one file per name), or took over from a builtin or a
+        user's skill; neither is a machine's call. It is never a replace: the
+        skill goes to ``skills/drafts/`` and the accept flow (409, replace or
+        rename) applies. Validation refusals (the scanner, a bad ``name:``)
+        still return None and stage nothing.
+        """
+        try:
+            return await self.persist_skill_content(content, trigger=trigger, on_collision="refuse")
+        except SkillNameTaken as taken:
+            return self._divert(content, trigger=trigger, source=source, taken=taken)
+
+    def _divert(
+        self,
+        content: str,
+        *,
+        trigger: str,
+        source: str,
+        taken: SkillNameTaken,
+    ) -> DivertedToDraft | None:
+        served_by = taken.where()
+        what = (trigger or "")[:200]
+        try:
+            store = self._drafts
+            if store is None:
+                from prometheus.learning.skill_drafts import SkillDraftStore
+
+                store = self._drafts = SkillDraftStore()
+            sidecar = store.create(  # type: ignore[attr-defined]
+                content, source=source,
+                provenance={"reason": "name_already_served", "served_by": served_by,
+                            "trigger": what},
+            )
+        except Exception as exc:
+            log.exception("SkillCreator: could not stage %r as a draft — nothing was written",
+                          taken.name)
+            self._record_diversion("failed", {
+                "skill": taken.name, "source": source, "served_by": served_by,
+                "trigger": what, "error": f"{type(exc).__name__}: {exc}"[:300],
+            })
+            return None
+        draft_id = str(sidecar["draft_id"])
+        log.info("SkillCreator: a skill named %r is already served (%s) — staged as draft %s "
+                 "for review instead of written", taken.name, ", ".join(served_by), draft_id)
+        self._record_diversion("success", {
+            "skill": taken.name, "draft_id": draft_id, "source": source,
+            "served_by": served_by, "trigger": what,
+        })
+        return DivertedToDraft(draft_id=draft_id, skill_name=taken.name, served_by=served_by)
+
+    def _record_diversion(self, outcome: str, summary: dict[str, Any]) -> None:
+        if self._telemetry is None:
+            return
+        try:
+            self._telemetry.record_run(  # type: ignore[attr-defined]
+                "skill_creator", "divert_to_draft", outcome, summary=summary)
+        except Exception:
+            log.debug("SkillCreator: diversion telemetry failed", exc_info=True)
 
     def _replace(
         self,

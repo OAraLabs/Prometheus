@@ -4310,14 +4310,21 @@ def create_app(
             )
         except SkillNameTaken as exc:
             files = [f.name for f in exc.files]
+            # Served from outside skills/auto/ (a builtin, the user's skills/):
+            # never modified; a replace serves this draft instead (WP-X.43).
+            elsewhere = [{"source": source, "file": path.name} for source, path in exc.served]
+            where = [f"skills/auto/{f}" for f in files] + [
+                f"{e['source']} skill {e['file']}" for e in elsewhere]
             return JSONResponse(
                 status_code=409,
                 content={
-                    "error": f"a live skill already has the name {exc.name!r} "
-                             f"(skills/auto/{', skills/auto/'.join(files)}). Accept with "
-                             "{\"replace\": true} to archive it and write this draft "
-                             "in its place, or rename the draft.",
-                    "conflict": {"skill_name": exc.name, "files": files},
+                    "error": f"a skill named {exc.name!r} is already served "
+                             f"({', '.join(where)}). Accept with {{\"replace\": true}} to "
+                             "serve this draft under that name instead (auto copies are "
+                             "archived first; builtin and user skills are left as they are), "
+                             "or rename the draft.",
+                    "conflict": {"skill_name": exc.name, "files": files,
+                                 "served_elsewhere": elsewhere},
                 },
             )
         if path is None:

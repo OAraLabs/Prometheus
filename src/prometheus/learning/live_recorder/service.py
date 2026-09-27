@@ -87,6 +87,19 @@ class LiveRecorderService:
             self._reload_registry()
         return skill_path
 
+    async def persist_or_divert(self, content: str, *, trigger: str) -> Any:
+        """Write a recorded skill, or stage it as a draft when its name is already served.
+
+        ``SkillCreator.persist_or_divert`` with this writer's source; reloads the
+        live SkillRegistry only when a skill was written. Returns the path, a
+        ``DivertedToDraft``, or None (validation refused it).
+        """
+        written = await self._skill_creator.persist_or_divert(
+            content, trigger=trigger, source="record_a_skill")
+        if isinstance(written, Path):
+            self._reload_registry()
+        return written
+
     async def handle_upload(
         self,
         events: list[dict[str, Any]],
@@ -96,8 +109,10 @@ class LiveRecorderService:
         """Run the full pipeline on one uploaded recording.
 
         Returns a JSON-serializable result dict. ``status`` is one of:
-        ``created`` (skill persisted), ``rejected`` (quality gate or
-        verifier refused it), or ``error`` (pipeline failure).
+        ``created`` (skill persisted), ``draft`` (a skill with that name is
+        already served, so it waits in ``skills/drafts/`` for a person),
+        ``rejected`` (quality gate or verifier refused it), or ``error``
+        (pipeline failure).
         """
         recording_id = f"rec-{int(time.time())}-{abs(hash(str(metadata))) % 10000:04d}"
         rec_dir = self._recordings_dir / recording_id
@@ -153,13 +168,36 @@ class LiveRecorderService:
         draft = build_skill_content(actions, parameters, norm_meta)
 
         trigger = f"browser recording of {norm_meta.get('start_url') or 'unknown site'} ({recording_id})"
-        skill_path = await self.persist_content(draft.content, trigger=trigger)
-        if skill_path is None:
+        # A recording whose skill name is already served becomes a draft for a
+        # person (WP-X.43): a second copy under a taken name was hidden, and
+        # nothing machine-written replaces a live skill on its own.
+        from prometheus.learning.skill_creator import DivertedToDraft
+
+        written = await self.persist_or_divert(draft.content, trigger=trigger)
+        if isinstance(written, DivertedToDraft):
+            log.info("Live recorder: %r is already served — recording %s staged as draft %s",
+                     written.skill_name, recording_id, written.draft_id)
+            return {
+                "status": "draft",
+                "reason": "name_already_served",
+                "draft_id": written.draft_id,
+                "skill_name": written.skill_name,
+                "served_by": written.served_by,
+                "title": draft.title,
+                "description": draft.description,
+                "step_count": draft.step_count,
+                "parameter_count": draft.parameter_count,
+                "quality_gate": gate.to_dict(),
+                "verification": verification,
+                "recording_id": recording_id,
+            }
+        if written is None:
             return {
                 "status": "error",
                 "error": "skill persistence rejected the generated content",
                 "recording_id": recording_id,
             }
+        skill_path = written
 
         log.info("Live recorder: created skill %s from recording %s", skill_path.name, recording_id)
         return {

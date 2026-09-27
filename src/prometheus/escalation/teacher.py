@@ -234,6 +234,9 @@ class EscalationOutcome:
     status: str  # "escalated" | "teacher_failed" | "refused_budget"
     corrective_reply: str | None = None
     skill_path: str | None = None
+    # Set instead of skill_path when a skill with that name was already served:
+    # the teacher's skill waits in skills/drafts/ for a person (WP-X.43).
+    skill_draft_id: str | None = None
     skill_rejected_reasons: list[str] = field(default_factory=list)
     detector_reasons: list[str] = field(default_factory=list)
     matched_patterns: list[str] = field(default_factory=list)
@@ -437,6 +440,7 @@ class TeacherEscalation:
         teacher_raw: str | None = None,
         corrective: str | None = None,
         skill_path: str | None = None,
+        skill_draft_id: str | None = None,
         skill_rejected_reasons: list[str] | None = None,
         failure: str | None = None,
     ) -> dict[str, Any]:
@@ -463,6 +467,7 @@ class TeacherEscalation:
             "corrective_reply": _cap(corrective, _CAP_REPLY) if corrective else None,
             "skill_persisted": bool(skill_path),
             "skill_path": skill_path,
+            "skill_draft_id": skill_draft_id,
             "skill_rejected_reasons": list(skill_rejected_reasons or []),
             "failure": failure,
             "budget": {
@@ -657,13 +662,23 @@ class TeacherEscalation:
             )
 
         # Persist the skill through the existing SkillCreator path (its
-        # validation + slug confinement + no-overwrite + signal apply).
+        # validation + slug confinement + no-overwrite + signal apply). A
+        # skill whose name is already served is staged in skills/drafts/ for
+        # a person instead (WP-X.43): a second copy under a taken name was
+        # hidden, and a machine never replaces a live skill on its own.
+        from prometheus.learning.skill_creator import DivertedToDraft
+
         skill_path: "Path | None" = None
+        diverted: DivertedToDraft | None = None
         creator = self._ensure_skill_creator()
         if creator is not None:
             try:
-                skill_path = await creator.persist_skill_content(
-                    skill_draft, trigger=user_request)
+                written = await creator.persist_or_divert(
+                    skill_draft, trigger=user_request, source="teacher_escalation")
+                if isinstance(written, DivertedToDraft):
+                    diverted = written
+                else:
+                    skill_path = written
             except Exception as exc:
                 self._record_failure(
                     "persist_skill", f"{type(exc).__name__}: {exc}",
@@ -672,28 +687,46 @@ class TeacherEscalation:
         if skill_path is not None:
             self._stats["skills_written"] += 1
 
+        if creator is None:
+            rejected = ["skill creator unavailable"]
+        elif skill_path is not None:
+            rejected = []
+        elif diverted is not None:
+            rejected = [
+                f"a skill named {diverted.skill_name!r} is already served "
+                f"({', '.join(diverted.served_by)}) — staged as draft "
+                f"{diverted.draft_id} for review"
+            ]
+        else:
+            rejected = ["skill content failed SkillCreator validation"]
         await self._record_trace(self._trace_payload(
             status="escalated", session_id=session_id,
             user_request=user_request, tool_results=tool_results,
             final_reply=final_reply, verdict=verdict,
             teacher_raw=str(raw), corrective=corrective,
             skill_path=str(skill_path) if skill_path else None,
-            skill_rejected_reasons=(
-                [] if skill_path else ["skill content failed SkillCreator validation"]
-            ) if creator is not None else ["skill creator unavailable"],
+            skill_draft_id=diverted.draft_id if diverted else None,
+            skill_rejected_reasons=rejected,
         ))
 
         short = "; ".join(verdict.matched_patterns) or "failed turn"
+        if skill_path:
+            saved = " A skill was saved for next time.)"
+        elif diverted is not None:
+            saved = (" A skill with that name already exists, so the new one was saved "
+                     "as a draft for review.)")
+        else:
+            saved = ")"
         return EscalationOutcome(
             status="escalated",
             corrective_reply=corrective,
             skill_path=str(skill_path) if skill_path else None,
+            skill_draft_id=diverted.draft_id if diverted else None,
             detector_reasons=verdict.reasons,
             matched_patterns=verdict.matched_patterns,
             note=(
                 f"(System note: the local model's turn failed [{short}] — "
                 f"this reply came from the teacher model "
-                f"{self._teacher_provider_name}/{self._teacher_model}."
-                + (" A skill was saved for next time.)" if skill_path else ")")
+                f"{self._teacher_provider_name}/{self._teacher_model}." + saved
             ),
         )
