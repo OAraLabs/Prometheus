@@ -139,7 +139,44 @@ class TestOffOnLocal:
     def test_off_on_a_cloud_provider_does_not_warn(self, caplog):
         with caplog.at_level(logging.WARNING):
             m.create_adapter({"provider": "openai", "model": "gpt-4o"}, _cfg(**{"gpt-4o": "off"}))
-        assert not [r for r in caplog.records if "LOCAL backend" in r.getMessage()]
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING and "adapter.model_tiers" in r.getMessage()]
+
+
+# ---------------------------------------------------------------------------
+# light or full on a cloud provider: allowed, and warned about (X.41)
+# ---------------------------------------------------------------------------
+
+class TestLiftOnCloud:
+    """The loop reads tier "off" as "cloud": the microcompaction of old tool
+    results and deferred tool advertising skip on off and run on every other
+    tier. An override that lifts a cloud model off "off" gives it that
+    local-only trimming, which mutates the prefix its prompt cache was built
+    on. Will's per-model control must be able to say it; the boot line must
+    say what it costs."""
+
+    @pytest.mark.parametrize("tier", ["light", "full"])
+    def test_lifting_a_cloud_provider_off_off_warns_and_names_the_key(self, caplog, tier):
+        with caplog.at_level(logging.WARNING):
+            adapter = m.create_adapter({"provider": "openai", "model": "gpt-4o"}, _cfg(**{"gpt-4o": tier}))
+        assert (adapter.tier, adapter.tier_decision.source) == (tier, "override")
+        warned = [r.getMessage() for r in caplog.records
+                  if r.levelno == logging.WARNING and "CLOUD provider" in r.getMessage()]
+        assert len(warned) == 1
+        assert "'gpt-4o'" in warned[0] and f"= {tier} " in warned[0]
+        assert "prompt cache" in warned[0] and "X.41" in warned[0]
+
+    def test_lifting_a_local_model_is_not_the_cloud_case(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            m.create_adapter({"provider": "llama_cpp", "model": BONSAI}, _cfg(bonsai="light"))
+        assert not [r for r in caplog.records if "CLOUD provider" in r.getMessage()]
+
+    def test_a_registry_or_template_decision_never_fires_it(self, caplog):
+        # Only the override can lift a cloud provider: provider class comes
+        # right after it, so nothing else ever puts a cloud model on light/full.
+        with caplog.at_level(logging.WARNING):
+            adapter = m.create_adapter({"provider": "openai", "model": "gpt-4o"}, {})
+        assert (adapter.tier, adapter.tier_decision.source) == ("off", "provider_class")
+        assert not [r for r in caplog.records if "CLOUD provider" in r.getMessage()]
 
 
 # ---------------------------------------------------------------------------

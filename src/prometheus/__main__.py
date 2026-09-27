@@ -654,12 +654,26 @@ def create_adapter(
     if decision.source == "override":
         from prometheus.providers.registry import ProviderRegistry
 
-        if tier == "off" and not ProviderRegistry.is_cloud(provider_name):
+        cloud = ProviderRegistry.is_cloud(provider_name)
+        if tier == "off" and not cloud:
             log.warning(
                 "adapter.model_tiers[%r] = off for %s on a LOCAL backend (%s): text "
                 "extraction and validation are off, so a tool call the server does not "
                 "parse itself is lost. Allowed; make sure this is what you want.",
                 override_key, model_name or "(no model name)", provider_name,
+            )
+        elif tier != "off" and cloud:
+            # The loop reads tier "off" as "cloud": the microcompaction of old
+            # tool results and deferred tool advertising skip on off and run on
+            # every other tier (engine/agent_loop.py, context/dynamic_tools.py).
+            # Lifted off "off", a cloud model gets that local-only trimming, and
+            # each trim mutates the prefix its prompt cache was built on.
+            log.warning(
+                "adapter.model_tiers[%r] = %s lifts %s on a CLOUD provider (%s) off tier "
+                "off: local-only context trimming then runs on a cloud model and throws "
+                "away its prompt cache (tracked as X.41). Allowed; make sure this is what "
+                "you want.",
+                override_key, tier, model_name or "(no model name)", provider_name,
             )
 
     if tier == "off":
