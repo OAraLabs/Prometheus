@@ -876,6 +876,29 @@ def _run_paths(context: "LoopContext") -> tuple[Path, tuple[Path, ...] | None]:
     return current
 
 
+# WP-X.21 T14: which (model, provider name) SERVED the round in progress, when
+# that is not the context's own — i.e. the provider fallback served it. None
+# otherwise. Telemetry reads it and nothing else does: the next round still
+# asks the primary, and no decision is taken on it. Without it, every row a
+# degraded round wrote named the model that FAILED, and a local fallback's
+# successful call was flagged golden under the cloud provider's name — student
+# output filed as a teacher example. A ContextVar for _RUN_PATHS's reason: the
+# read-only tool calls run under gather, in tasks that copy the context.
+_ROUND_SERVING: contextvars.ContextVar = contextvars.ContextVar("prometheus_round_serving", default=None)
+
+
+def _serving_model(context: "LoopContext") -> str:
+    """The model to RECORD for the round in progress: the fallback's, if it served."""
+    serving = _ROUND_SERVING.get()
+    return serving[0] if serving is not None else context.model
+
+
+def _serving_provider_name(context: "LoopContext") -> str:
+    """The provider name to RECORD (it decides ``is_golden``) for the round in progress."""
+    serving = _ROUND_SERVING.get()
+    return serving[1] if serving is not None else _provider_name_for_telemetry(context.provider)
+
+
 async def run_loop(
     context: LoopContext,
     messages: list[ConversationMessage],
@@ -975,6 +998,7 @@ async def run_loop(
     # task (a stale workspace applied to the next turn is the exact
     # cross-talk this must never allow).
     _paths_token = _RUN_PATHS.set(None)
+    _serving_token = _ROUND_SERVING.set(None)
     try:
         async for item in _run_loop(
             context,
@@ -990,6 +1014,7 @@ async def run_loop(
             yield item
     finally:
         _RUN_PATHS.reset(_paths_token)
+        _ROUND_SERVING.reset(_serving_token)
         if turn_key is not None:
             try:
                 fmv.discard_turn(turn_key=turn_key)
@@ -1734,6 +1759,15 @@ async def _run_loop(
         if final_message is None:
             raise RuntimeError("Model stream finished without a final message")
 
+        # Who served THIS round, for every row it writes from here on (T14):
+        # the fallback when the round degraded, else the context's own. Set
+        # every round, so a degraded round cannot leak into the next.
+        _ROUND_SERVING.set(
+            (degrade_notice_this_turn[0].model or context.model,
+             degrade_notice_this_turn[0].provider_name or "")
+            if degrade_notice_this_turn else None
+        )
+
         # Golden Trace Capture sprint: capture the model's raw output BEFORE
         # the adapter's extract_tool_calls path rewrites final_message. This
         # string is what we'd want to train a local model to emit for the
@@ -2399,7 +2433,7 @@ async def _run_loop(
                             "turn": turn,
                         },
                         session_id=effective_session_id or context.session_id,
-                        model=context.model,
+                        model=_serving_model(context),
                     )
                 except Exception:
                     # Telemetry must never be why a halt fails to happen.
@@ -2501,7 +2535,7 @@ async def _run_loop(
                                 "task_id": div_task_id,
                             },
                             session_id=effective_session_id or context.session_id,
-                            model=context.model,
+                            model=_serving_model(context),
                         )
                     except Exception:
                         log.debug("divergence halt: record_run failed", exc_info=True)
@@ -2899,7 +2933,7 @@ def _log_iteration(
     log.debug("loop turn=%d iter=%d reason=%s %s", turn, tool_iteration, reason, detail)
     if context.telemetry is not None:
         context.telemetry.record(
-            model=context.model,
+            model=_serving_model(context),
             tool_name="_loop_transition",
             success=(reason == _IterationReason.TOOL_SUCCESS),
             error_type=reason if reason != _IterationReason.TOOL_SUCCESS else None,
@@ -3308,7 +3342,7 @@ async def _safe_execute(
         if context.telemetry is not None:
             try:
                 context.telemetry.record(
-                    model=context.model,
+                    model=_serving_model(context),
                     tool_name=tc.name,
                     success=False,
                     error_type="tool_exception",
@@ -3816,7 +3850,7 @@ async def _execute_tool_call(
         if pre.blocked:
             if context.telemetry is not None:
                 context.telemetry.record(
-                    model=context.model,
+                    model=_serving_model(context),
                     tool_name=tool_name,
                     success=False,
                     error_type="hook_blocked",
@@ -3832,7 +3866,7 @@ async def _execute_tool_call(
     if context.tool_registry is None:
         if context.telemetry is not None:
             context.telemetry.record(
-                model=context.model,
+                model=_serving_model(context),
                 tool_name=tool_name,
                 success=False,
                 error_type="no_registry",
@@ -3919,7 +3953,7 @@ async def _execute_tool_call(
                 except Exception:
                     _failed_call = None
                 context.telemetry.record(
-                    model=context.model,
+                    model=_serving_model(context),
                     tool_name=tool_name,
                     success=False,
                     retries=retries_used,
@@ -3959,7 +3993,7 @@ async def _execute_tool_call(
     if tool is None:
         if context.telemetry is not None:
             context.telemetry.record(
-                model=context.model,
+                model=_serving_model(context),
                 tool_name=tool_name,
                 success=False,
                 error_type="unknown_tool",
@@ -4031,7 +4065,7 @@ async def _execute_tool_call(
             except Exception:
                 _markup_call = None
             context.telemetry.record(
-                model=context.model,
+                model=_serving_model(context),
                 tool_name=tool_name,
                 success=False,
                 error_type="template_markup",
@@ -4102,7 +4136,7 @@ async def _execute_tool_call(
                 except Exception:
                     _failed_call = None
                 context.telemetry.record(
-                    model=context.model,
+                    model=_serving_model(context),
                     tool_name=tool_name,
                     success=False,
                     error_type="input_validation",
@@ -4317,7 +4351,7 @@ async def _execute_tool_call(
                 if not confirmed:
                     if context.telemetry is not None:
                         context.telemetry.record(
-                            model=context.model,
+                            model=_serving_model(context),
                             tool_name=tool_name,
                             success=False,
                             error_type="permission_denied",
@@ -4332,7 +4366,7 @@ async def _execute_tool_call(
             else:
                 if context.telemetry is not None:
                     context.telemetry.record(
-                        model=context.model,
+                        model=_serving_model(context),
                         tool_name=tool_name,
                         success=False,
                         error_type="permission_denied",
@@ -4393,7 +4427,7 @@ async def _execute_tool_call(
         )
         if context.telemetry is not None:
             context.telemetry.record(
-                model=context.model,
+                model=_serving_model(context),
                 tool_name=tool_name,
                 success=False,
                 retries=retries_used,
@@ -4461,7 +4495,10 @@ async def _execute_tool_call(
     )
 
     # Sprint 3 / Golden Trace Capture: record telemetry with raw + parsed output.
-    provider_name = _provider_name_for_telemetry(context.provider)
+    # The round's SERVING provider, not the context's: a local fallback's call
+    # must not be flagged golden under the cloud provider that failed (T14).
+    # The same name decides cloud-golden pair capture below.
+    provider_name = _serving_provider_name(context)
     if context.telemetry is not None:
         import json as _json
         try:
@@ -4469,7 +4506,7 @@ async def _execute_tool_call(
         except Exception:
             parsed_tool_json = None
         context.telemetry.record(
-            model=context.model,
+            model=_serving_model(context),
             tool_name=tool_name,
             success=not result.is_error,
             retries=retries_used,
