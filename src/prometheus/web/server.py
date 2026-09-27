@@ -4285,12 +4285,14 @@ def create_app(
             content, trigger=f"skill draft {draft_id} accepted ({source})"
         )
         if path is None:
-            # Validation refused it (e.g. missing frontmatter name:) —
-            # leave the draft in place so the reviewer can fix and retry.
+            # Validation refused it (a missing frontmatter name:, the quality
+            # gate, or dangerous code, WP-X.40) — leave the draft in place so
+            # the reviewer can fix and retry.
             return JSONResponse(
                 status_code=422,
                 content={"error": "persistence rejected the content "
-                                  "(missing/invalid frontmatter name:)"},
+                                  "(missing/invalid frontmatter name:, a quality-gate "
+                                  "rejection, or dangerous code — the log says which)"},
             )
 
         store.remove_accepted(draft_id)

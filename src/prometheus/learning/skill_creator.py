@@ -25,6 +25,10 @@ The write path then gates what gets saved (skill-usage audit, option C1):
   ``similarity.DEFAULT_THRESHOLD`` = 0.80) of an existing served skill is
   rejected as a near-duplicate. Deliberate writers keep their content.
 
+Before any of that, every writer's content passes ``DangerousCodeScanner`` —
+the same ``scan_markdown_content`` call SkillRefiner and GEPA make before they
+write (WP-X.40). A DANGEROUS verdict writes nothing.
+
 Usage:
     creator = SkillCreator(provider)
     skill_path = await creator.maybe_create(task_record, tool_trace, final_text)
@@ -341,14 +345,15 @@ class SkillCreator:
         """Validate and write skill markdown through the standard auto-skill path.
 
         This is THE write path for machine-generated skills — used by
-        :meth:`maybe_create` and by teacher escalation
-        (``escalation/teacher.py``), so every writer gets the same
-        validation: frontmatter-``name:`` extraction with no fallback,
-        slug confinement to ``[a-z0-9-]`` inside the auto dir (a hostile
-        ``name:`` cannot traverse out), the no-overwrite policy, and the
-        ``skill_created`` signal. Returns the written path, or ``None``
-        when validation rejected the content (failure recorded in
-        ``telemetry.silent_failures``).
+        :meth:`maybe_create`, teacher escalation (``escalation/teacher.py``),
+        record-a-skill and an ACCEPTed skill draft (both through
+        ``LiveRecorderService.persist_content``), so every writer gets the
+        same validation: the DangerousCodeScanner gate, frontmatter-``name:``
+        extraction with no fallback, slug confinement to ``[a-z0-9-]``
+        inside the auto dir (a hostile ``name:`` cannot traverse out), the
+        no-overwrite policy, and the ``skill_created`` signal. Returns the
+        written path, or ``None`` when validation rejected the content (the
+        refusal recorded in telemetry).
 
         ``trigger`` is the originating task/request description — used for
         telemetry context and the emitted signal, never for the filename.
@@ -361,6 +366,12 @@ class SkillCreator:
         this; the timestamp-suffix behaviour there is how three
         ``debug-cron-job-failure*`` copies accumulated.
         """
+        # WP-X.40: the scanner gate, first, so nothing it refuses reaches any
+        # later step. SkillRefiner and GEPA scan what they write; until this
+        # the four writers that come through here did not.
+        if not self._passes_code_scan(content, trigger=trigger):
+            return None
+
         # PR #20: derive the slug from the LLM's frontmatter ``name:``, not
         # from the raw user message. The pre-PR-#20 path slugified
         # ``task_description``, which produced filenames like
@@ -455,6 +466,54 @@ class SkillCreator:
                            "score": round(float(score), 4),
                            "threshold": self._dedupe_threshold})
         return True
+
+    def _passes_code_scan(self, content: str, *, trigger: str) -> bool:
+        """True when ``DangerousCodeScanner`` lets *content* through.
+
+        The same call SkillRefiner and GEPA make: ``scan_markdown_content``,
+        which reads the Python code blocks. SUSPICIOUS findings pass, as they
+        do there. A DANGEROUS verdict is refused with a WARNING naming the
+        trigger and the scanner's reasons, and a ``subsystem_runs`` row
+        (``skill_creator``/``code_scan``). A scanner that fails refuses too
+        (fail safe, as in SkillRefiner and GEPA): unscanned content is never
+        written.
+        """
+        what = (trigger or "")[:200]
+        try:
+            from prometheus.security.code_scanner import DangerousCodeScanner
+
+            scan = DangerousCodeScanner().scan_markdown_content(content)
+        except Exception as exc:
+            log.exception(
+                "SkillCreator: DangerousCodeScanner failed — refusing to write "
+                "the skill for %r", what,
+            )
+            self._record_scan_refusal("failed", {
+                "reason": "scanner_failed", "trigger": what,
+                "error": f"{type(exc).__name__}: {exc}"[:300],
+            })
+            return False
+        if not scan.is_dangerous:
+            return True
+        findings = [f"{f.rule} (line {f.line}): {f.detail}"
+                    for f in scan.findings if f.severity == "dangerous"][:10]
+        log.warning(
+            "SkillCreator: refusing to write the skill for %r — it contains "
+            "dangerous code: %s", what, "; ".join(findings),
+        )
+        self._record_scan_refusal("skipped", {
+            "reason": "dangerous_code", "trigger": what, "findings": findings,
+        })
+        return False
+
+    def _record_scan_refusal(self, outcome: str, summary: dict[str, Any]) -> None:
+        if self._telemetry is None:
+            return
+        try:
+            self._telemetry.record_run(  # type: ignore[attr-defined]
+                "skill_creator", "code_scan", outcome, summary=summary)
+        except Exception:
+            log.debug("SkillCreator: code-scan telemetry failed", exc_info=True)
 
     def _record_gate(self, summary: dict[str, Any]) -> None:
         log.info("SkillCreator: skill rejected by the quality gate — %s", summary)
