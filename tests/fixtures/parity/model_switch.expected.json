@@ -1714,6 +1714,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "stop"
         }
        },
@@ -1723,7 +1724,7 @@
        "desktop:parity-switch",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       null,
+       4172,
        null,
        "<node>",
        "local",
@@ -1731,6 +1732,31 @@
       ],
       [
        "<uuid:32>",
+       "<time>",
+       "session_titles",
+       "generate",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       69,
+       6,
+       null,
+       "desktop:parity-switch",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       15,
+       null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:33>",
        "<time>",
        "agent_loop",
        "tool_advertisement",
@@ -1758,7 +1784,7 @@
        null
       ],
       [
-       "<uuid:33>",
+       "<uuid:34>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1766,6 +1792,7 @@
        "success",
        {
         "$json": {
+         "served_model": "qwen2.5:7b-instruct",
          "stop_reason": "stop"
         }
        },
@@ -1778,11 +1805,11 @@
        null,
        null,
        "<node>",
-       "unknown",
+       "local",
        null
       ],
       [
-       "<uuid:34>",
+       "<uuid:35>",
        "<time>",
        "agent_loop",
        "tool_advertisement",
@@ -1810,7 +1837,7 @@
        null
       ],
       [
-       "<uuid:35>",
+       "<uuid:36>",
        "<time>",
        "agent_loop",
        "loop_round",
@@ -1818,6 +1845,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "stop"
         }
        },
@@ -1827,7 +1855,7 @@
        "desktop:parity-switch",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       null,
+       6171,
        null,
        "<node>",
        "local",

@@ -1661,6 +1661,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "tool_calls"
         }
        },
@@ -1670,7 +1671,7 @@
        "desktop:parity-tools",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       null,
+       6151,
        null,
        "<node>",
        "local",
@@ -1685,6 +1686,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "tool_calls"
         }
        },
@@ -1694,7 +1696,7 @@
        "desktop:parity-tools",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       null,
+       6220,
        null,
        "<node>",
        "local",
@@ -1709,6 +1711,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "stop"
         }
        },
@@ -1718,7 +1721,32 @@
        "desktop:parity-tools",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
+       6265,
        null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:34>",
+       "<time>",
+       "session_titles",
+       "generate",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       135,
+       6,
+       null,
+       "desktop:parity-tools",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       15,
        null,
        "<node>",
        "local",
@@ -1748,7 +1776,7 @@
      ],
      "rows": [
       [
-       "<uuid:34>",
+       "<uuid:35>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "glob",
@@ -1817,7 +1845,7 @@
        "<node>"
       ],
       [
-       "<uuid:35>",
+       "<uuid:36>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "_loop_transition",
@@ -1831,12 +1859,12 @@
        0,
        0,
        null,
-       null,
+       "desktop:parity-tools",
        null,
        "<node>"
       ],
       [
-       "<uuid:36>",
+       "<uuid:37>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "read_file",
@@ -1899,7 +1927,7 @@
        "<node>"
       ],
       [
-       "<uuid:37>",
+       "<uuid:38>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "_loop_transition",
@@ -1913,7 +1941,7 @@
        0,
        0,
        null,
-       null,
+       "desktop:parity-tools",
        null,
        "<node>"
       ]

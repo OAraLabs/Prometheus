@@ -299,9 +299,16 @@ class HookExecutor:
             max_tokens=512,
         )
 
+        # Through the envelope (WP-X.21 T11): the request passes unchanged,
+        # and the call leaves a usage row, which it never did.
+        from prometheus.learning.llm_envelope import LLMCallEnvelope
+        from prometheus.telemetry.tracker import get_telemetry_handle
+
+        envelope = LLMCallEnvelope("prompt_hooks", telemetry=get_telemetry_handle())
         text_chunks: list[str] = []
         final_event: ApiMessageCompleteEvent | None = None
-        async for event_item in self._context.provider.stream_message(request):
+        async for event_item in envelope.stream(provider=self._context.provider, request=request,
+                                                operation="agent" if agent_mode else "prompt"):
             if isinstance(event_item, ApiMessageCompleteEvent):
                 final_event = event_item
             else:

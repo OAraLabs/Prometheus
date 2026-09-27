@@ -313,6 +313,11 @@ class AnthropicProvider(ModelProvider):
                         from prometheus.providers.openai_compat import _parse_cache_usage
 
                         cached_input, cache_write = _parse_cache_usage(usage)
+                        # The usage contract: input_tokens is the WHOLE prompt,
+                        # cached part included (ToolCallTelemetry.last_request_tokens).
+                        # Anthropic's excludes both counters, so add them back
+                        # (WP-X.21 T8): 348 of a 15,083-token prompt, as recorded.
+                        input_tokens += (cached_input or 0) + (cache_write or 0)
 
                     elif etype == "content_block_start":
                         current_block = event.get("content_block", {})

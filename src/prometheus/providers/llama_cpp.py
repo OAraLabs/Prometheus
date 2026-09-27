@@ -848,6 +848,8 @@ class LlamaCppProvider(ModelProvider):
         finish_reason: str | None = None
         input_tokens = 0
         output_tokens = 0
+        cached_input: int | None = None
+        cache_write: int | None = None
         served_model: str | None = None
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -886,6 +888,12 @@ class LlamaCppProvider(ModelProvider):
                         u = chunk["usage"] or {}
                         input_tokens = u.get("prompt_tokens", 0)
                         output_tokens = u.get("completion_tokens", 0)
+                        # The server reports its prompt cache on every
+                        # completion (prompt_tokens_details.cached_tokens);
+                        # it was never read (WP-X.21 T7).
+                        from prometheus.providers.openai_compat import _parse_cache_usage
+
+                        cached_input, cache_write = _parse_cache_usage(u)
 
                     for choice in chunk.get("choices", []):
                         finish_reason = choice.get("finish_reason") or finish_reason
@@ -969,6 +977,8 @@ class LlamaCppProvider(ModelProvider):
             usage=UsageSnapshot(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                cached_input_tokens=cached_input,
+                cache_write_tokens=cache_write,
             ),
             stop_reason=finish_reason,
             dropped_malformed=dropped_malformed,

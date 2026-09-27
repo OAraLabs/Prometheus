@@ -127,8 +127,15 @@ class VisionTool(BaseTool):
                 max_tokens=2000,
             )
 
+            # Through the envelope (WP-X.21 T11): the request passes unchanged,
+            # and the call leaves a usage row, which it never did.
+            from prometheus.learning.llm_envelope import LLMCallEnvelope
+            from prometheus.telemetry.tracker import get_telemetry_handle
+
+            envelope = LLMCallEnvelope("vision", telemetry=get_telemetry_handle())
             text_parts: list[str] = []
-            async for event in provider.stream_message(request):
+            async for event in envelope.stream(provider=provider, request=request,
+                                               operation="describe_image"):
                 if isinstance(event, ApiMessageCompleteEvent):
                     if event.message.text:
                         text_parts.append(event.message.text)

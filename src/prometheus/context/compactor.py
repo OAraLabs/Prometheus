@@ -53,6 +53,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
+from prometheus.config.ephemeral import recorded_session_id
 from prometheus.context.budget import (
     LEGACY_FALLBACK_LIMIT,
     resolve_effective_limit,
@@ -725,6 +726,10 @@ class ContextCompactor:
                 max_tokens=self._max_summary_tokens,
                 operation="summarize_span",
                 context={"session_id": session_id, "span_messages": len(span)},
+                # The row's own column (WP-X.21 T10), under the loop's rule:
+                # the conversation, and none at all on an ephemeral turn. The
+                # anchor and cache keep the full id either way.
+                session_id=recorded_session_id(session_id),
             )
             duration_ms = (time.time() - started) * 1000.0
 

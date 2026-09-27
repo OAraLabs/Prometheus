@@ -59,7 +59,6 @@ mcp/transport.py
 memory/extractor.py
 memory/hermes_memory_tool.py
 memory/lcm_engine.py
-memory/lcm_summarize.py
 memory/pointer.py
 memory/store.py
 permissions/checker.py

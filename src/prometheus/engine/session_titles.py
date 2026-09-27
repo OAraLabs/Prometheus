@@ -73,8 +73,12 @@ def first_exchange(messages: list) -> tuple[str, str] | None:
     return None
 
 
-async def generate_title(provider, model: str, user: str, assistant: str) -> str | None:
-    """One budget-capped call → a clipped title, or None on any failure."""
+async def generate_title(provider, model: str, user: str, assistant: str,
+                         *, session_id: str | None = None) -> str | None:
+    """One budget-capped call → a clipped title, or None on any failure.
+
+    ``session_id`` is the conversation being titled, for the call's usage row
+    (WP-X.21 T11), under the loop's rule: none on an ephemeral turn."""
     request = ApiMessageRequest(
         model=model,
         messages=[
@@ -90,8 +94,16 @@ async def generate_title(provider, model: str, user: str, assistant: str) -> str
         max_tokens=24,
     )
     try:
+        # Through the envelope (WP-X.21 T11): the request passes unchanged,
+        # and the call leaves a usage row, which it never did.
+        from prometheus.config.ephemeral import recorded_session_id
+        from prometheus.learning.llm_envelope import LLMCallEnvelope
+        from prometheus.telemetry.tracker import get_telemetry_handle
+
+        envelope = LLMCallEnvelope("session_titles", telemetry=get_telemetry_handle())
         full_text = ""
-        async for event in provider.stream_message(request):
+        async for event in envelope.stream(provider=provider, request=request, operation="generate",
+                                           session_id=recorded_session_id(session_id)):
             if isinstance(event, ApiTextDeltaEvent):
                 full_text += event.text
             elif isinstance(event, ApiMessageCompleteEvent):
@@ -176,7 +188,7 @@ async def backfill_titles(store, provider, model: str, *, dry_run: bool = False,
         if delay_seconds and attempts > 1:
             await asyncio.sleep(delay_seconds)
         if dry_run:
-            title = await generate_title(provider, model, *exchange)
+            title = await generate_title(provider, model, *exchange, session_id=sid)
             if title:
                 counts["would_title"] += 1
                 log(f"would title {sid}: {title!r}")
@@ -238,7 +250,7 @@ async def maybe_title_session(store, provider, model: str,
         exchange = first_exchange(messages)
         if exchange is None:
             return
-        title = await generate_title(provider, model, *exchange)
+        title = await generate_title(provider, model, *exchange, session_id=session_id)
         if title and not store.get_session_title(session_id):
             store.set_session_title(session_id, title)
             logger.info("titled session %s: %r", session_id, title)

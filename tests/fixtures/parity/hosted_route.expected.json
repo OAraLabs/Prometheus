@@ -1426,19 +1426,45 @@
        "success",
        {
         "$json": {
+         "served_model": "claude-haiku-4-5-20251001",
          "stop_reason": "end_turn"
         }
        },
-       348,
+       15083,
        25,
        0,
        "desktop:parity-hosted",
        "claude-haiku-4-5",
        null,
-       null,
-       null,
+       0,
+       14735,
        "<node>",
        "metered",
+       null
+      ],
+      [
+       "<uuid:28>",
+       "<time>",
+       "session_titles",
+       "generate",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       105,
+       5,
+       null,
+       "desktop:parity-hosted",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       0,
+       null,
+       "<node>",
+       "local",
        null
       ]
      ]

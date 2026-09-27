@@ -1681,6 +1681,7 @@
        "success",
        {
         "$json": {
+         "served_model": "qwen2.5:7b-instruct",
          "stop_reason": "stop"
         }
        },
@@ -1693,7 +1694,7 @@
        null,
        null,
        "<node>",
-       "unknown",
+       "local",
        null
       ],
       [
@@ -1705,6 +1706,7 @@
        "success",
        {
         "$json": {
+         "served_model": "qwen2.5:7b-instruct",
          "stop_reason": "stop"
         }
        },
@@ -1717,7 +1719,32 @@
        null,
        null,
        "<node>",
-       "unknown",
+       "local",
+       null
+      ],
+      [
+       "<uuid:31>",
+       "<time>",
+       "session_titles",
+       "generate",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       160,
+       8,
+       null,
+       "desktop:parity-repair",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       15,
+       null,
+       "<node>",
+       "local",
        null
       ]
      ]
@@ -1744,7 +1771,7 @@
      ],
      "rows": [
       [
-       "<uuid:31>",
+       "<uuid:32>",
        "<time>",
        "qwen2.5:7b-instruct",
        "read_file",
@@ -1771,7 +1798,7 @@
        },
        0,
        1,
-       null,
+       "qwen2.5:7b-instruct",
        "desktop:parity-repair",
        {
         "$json": {
@@ -1814,7 +1841,7 @@
        "<node>"
       ],
       [
-       "<uuid:32>",
+       "<uuid:33>",
        "<time>",
        "qwen2.5:7b-instruct",
        "_loop_transition",
@@ -1828,7 +1855,7 @@
        0,
        0,
        null,
-       null,
+       "desktop:parity-repair",
        null,
        "<node>"
       ]

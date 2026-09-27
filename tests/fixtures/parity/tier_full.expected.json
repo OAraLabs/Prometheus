@@ -1936,6 +1936,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "stop"
         }
        },
@@ -1945,7 +1946,7 @@
        "desktop:parity-tierfull",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       null,
+       0,
        null,
        "<node>",
        "local",
@@ -1960,6 +1961,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "stop"
         }
        },
@@ -1969,7 +1971,7 @@
        "desktop:parity-tierfull",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       null,
+       2836,
        null,
        "<node>",
        "local",
@@ -1984,6 +1986,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "stop"
         }
        },
@@ -1993,7 +1996,7 @@
        "desktop:parity-tierfull",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       null,
+       2940,
        null,
        "<node>",
        "local",
@@ -2008,6 +2011,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "stop"
         }
        },
@@ -2017,7 +2021,32 @@
        "desktop:parity-tierfull",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
+       3034,
        null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:38>",
+       "<time>",
+       "session_titles",
+       "generate",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       158,
+       6,
+       null,
+       "desktop:parity-tierfull",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       15,
        null,
        "<node>",
        "local",
@@ -2047,7 +2076,7 @@
      ],
      "rows": [
       [
-       "<uuid:38>",
+       "<uuid:39>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "read_file",
@@ -2110,7 +2139,7 @@
        "<node>"
       ],
       [
-       "<uuid:39>",
+       "<uuid:40>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "_loop_transition",
@@ -2124,12 +2153,12 @@
        0,
        0,
        null,
-       null,
+       "desktop:parity-tierfull",
        null,
        "<node>"
       ],
       [
-       "<uuid:40>",
+       "<uuid:41>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "read_file",
@@ -2192,7 +2221,7 @@
        "<node>"
       ],
       [
-       "<uuid:41>",
+       "<uuid:42>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "_loop_transition",
@@ -2206,12 +2235,12 @@
        0,
        0,
        null,
-       null,
+       "desktop:parity-tierfull",
        null,
        "<node>"
       ],
       [
-       "<uuid:42>",
+       "<uuid:43>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "write_file",
@@ -2272,7 +2301,7 @@
        "<node>"
       ],
       [
-       "<uuid:43>",
+       "<uuid:44>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "_loop_transition",
@@ -2286,7 +2315,7 @@
        0,
        0,
        null,
-       null,
+       "desktop:parity-tierfull",
        null,
        "<node>"
       ]

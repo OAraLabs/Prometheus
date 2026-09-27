@@ -90,7 +90,8 @@ class LCMSummarizer:
     # Public API
     # ------------------------------------------------------------------
 
-    async def summarize_messages(self, messages: list[MessagePart]) -> str:
+    async def summarize_messages(self, messages: list[MessagePart], *,
+                                 session_id: str | None = None) -> str:
         """Produce a concise summary of raw conversation messages.
 
         Args:
@@ -106,9 +107,10 @@ class LCMSummarizer:
             f"[{m.role}] {m.content}" for m in messages
         )
         prompt = _MESSAGE_SUMMARY_PROMPT.format(messages=formatted)
-        return await self._call_model(prompt)
+        return await self._call_model(prompt, session_id=session_id)
 
-    async def summarize_summaries(self, summaries: list[SummaryNode]) -> str:
+    async def summarize_summaries(self, summaries: list[SummaryNode], *,
+                                  session_id: str | None = None) -> str:
         """Merge multiple summary nodes into a higher-depth summary.
 
         Args:
@@ -124,7 +126,7 @@ class LCMSummarizer:
             f"[depth={s.depth}] {s.summary_text}" for s in summaries
         )
         prompt = _NODE_SUMMARY_PROMPT.format(summaries=formatted)
-        return await self._call_model(prompt)
+        return await self._call_model(prompt, session_id=session_id)
 
     def reset(self) -> None:
         """Reset the circuit breaker after a recovery period."""
@@ -139,7 +141,7 @@ class LCMSummarizer:
     # Internal
     # ------------------------------------------------------------------
 
-    async def _call_model(self, prompt: str) -> str:
+    async def _call_model(self, prompt: str, *, session_id: str | None = None) -> str:
         """Call the model with retries and circuit breaker logic.
 
         The prompt is redacted before it is sent (X.37): rows written before
@@ -177,9 +179,20 @@ class LCMSummarizer:
                     max_tokens=1024,
                 )
 
-                # Consume the stream and extract the complete text.
+                # Consume the stream and extract the complete text. Through the
+                # envelope (WP-X.21 T11): the request passes unchanged, and the
+                # call leaves a usage row, which it never did.
+                from prometheus.learning.llm_envelope import LLMCallEnvelope
+                from prometheus.telemetry.tracker import get_telemetry_handle
+
+                from prometheus.config.ephemeral import recorded_session_id
+
+                envelope = LLMCallEnvelope("lcm_summarizer", telemetry=get_telemetry_handle())
                 full_text = ""
-                async for event in self._provider.stream_message(request):
+                # The conversation being compacted, under the loop's rule.
+                async for event in envelope.stream(provider=self._provider, request=request,
+                                                   operation="summarize",
+                                                   session_id=recorded_session_id(session_id)):
                     from prometheus.providers.base import (
                         ApiMessageCompleteEvent,
                         ApiTextDeltaEvent,

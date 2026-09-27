@@ -1605,6 +1605,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "tool_calls"
         }
        },
@@ -1614,7 +1615,7 @@
        "desktop:parity-atlas",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       null,
+       4172,
        null,
        "<node>",
        "local",
@@ -1629,6 +1630,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "stop"
         }
        },
@@ -1638,7 +1640,32 @@
        "desktop:parity-atlas",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
+       6316,
        null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:31>",
+       "<time>",
+       "session_titles",
+       "generate",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       113,
+       9,
+       null,
+       "desktop:parity-atlas",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       15,
        null,
        "<node>",
        "local",
@@ -1668,7 +1695,7 @@
      ],
      "rows": [
       [
-       "<uuid:31>",
+       "<uuid:32>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "read_file",
@@ -1731,7 +1758,7 @@
        "<node>"
       ],
       [
-       "<uuid:32>",
+       "<uuid:33>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "_loop_transition",
@@ -1745,7 +1772,7 @@
        0,
        0,
        null,
-       null,
+       "desktop:parity-atlas",
        null,
        "<node>"
       ]
