@@ -186,35 +186,69 @@ def test_snapshots_never_overwrite_each_other(tmp_path, monkeypatch, offsets, ex
         conn.close()
 
 
+def test_snapshot_holds_rows_still_in_the_wal(tmp_path):
+    """A snapshot holds every committed row, including those still in the WAL.
+
+    The store runs in ``journal_mode=WAL``: a committed write lives in
+    ``memory.db-wal`` until a checkpoint folds it into ``memory.db``, so a plain
+    file copy of ``memory.db`` misses it. Park a committed row in the WAL —
+    switch the pre-manual DB to WAL, insert, and keep a second connection open
+    so that closing the writer cannot checkpoint — then let the store open,
+    migrate and snapshot. Every snapshot must hold both rows.
+    """
+    db = tmp_path / "memory.db"
+    _make_pre_manual_db(db)                       # 'an old fact' sits in memory.db itself
+    writer = sqlite3.connect(str(db))
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute(
+        "INSERT INTO memories (id, entity_type, entity_name, relationship, fact,"
+        " confidence, source_event_ids, last_mentioned, mention_count, tags, timestamp)"
+        " VALUES ('wal1','person','Old','fact','a fact still in the wal',0.5,'[]',0,1,'[]',0)"
+    )
+    writer.commit()
+    keeper = sqlite3.connect(str(db))
+    keeper.execute("SELECT COUNT(*) FROM memories").fetchone()  # opens the WAL and keeps it
+    writer.close()                                # not the last connection: no checkpoint
+    wal = tmp_path / "memory.db-wal"
+    assert wal.exists() and wal.stat().st_size > 0, \
+        "precondition: the new row must still sit in the WAL"
+    try:
+        MemoryStore(db_path=db).close()           # migrates twice, snapshots twice
+    finally:
+        keeper.close()
+
+    backups = sorted(tmp_path.glob("memory.db.backup-*"))
+    assert len(backups) == 2, "one snapshot per migration"
+    for b in backups:
+        conn = sqlite3.connect(str(b))
+        facts = {r[0] for r in conn.execute("SELECT fact FROM memories")}
+        conn.close()
+        assert facts == {"an old fact", "a fact still in the wal"}, \
+            f"{b.name} misses committed rows"
+
+
 def test_migration_fails_loud_no_half_write(tmp_path, monkeypatch):
     """A broken ALTER halts (raises) and does NOT half-write the column.
 
-    sqlite3.Connection is an immutable C type, so we make the ALTER fail by
-    wrapping the connection the store opens — the snapshot still runs first.
+    The ALTER fails through a Connection subclass installed as the factory of
+    every connection the store opens — a real connection, so the backup API
+    accepts it as a snapshot target — and the snapshot still runs first.
     """
     db = tmp_path / "memory.db"
     _make_pre_manual_db(db)
     real_connect = sqlite3.connect
 
-    class _AlterFailsConn:
+    class _AlterFailsConn(sqlite3.Connection):
         """A real connection, except the manual ALTER raises."""
-
-        def __init__(self, real):
-            object.__setattr__(self, "_real", real)
 
         def execute(self, sql, *args, **kwargs):
             if "ADD COLUMN manual" in sql:
                 raise sqlite3.OperationalError("simulated ALTER failure")
-            return object.__getattribute__(self, "_real").execute(sql, *args, **kwargs)
-
-        def __getattr__(self, name):
-            return getattr(object.__getattribute__(self, "_real"), name)
-
-        def __setattr__(self, name, value):
-            setattr(object.__getattribute__(self, "_real"), name, value)
+            return super().execute(sql, *args, **kwargs)
 
     monkeypatch.setattr(
-        sqlite3, "connect", lambda *a, **k: _AlterFailsConn(real_connect(*a, **k))
+        sqlite3, "connect",
+        lambda *a, **k: real_connect(*a, factory=_AlterFailsConn, **k),
     )
 
     with pytest.raises(sqlite3.OperationalError):

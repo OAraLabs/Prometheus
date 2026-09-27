@@ -451,24 +451,24 @@ UNDO = [{"op": "tree", "label": "after-turn", "tree": {"a": 1}}, None,
         {"op": "tree", "label": "after-undo", "tree": {"b": 2}}]
 ATLAS_REQ = [{"messages": [{"role": "system", "content": "# Project Atlas\n- codename ATLAS-7."}]}]
 CODE_OK = [{"op": "code", "result": {"report": {"status": "success", "acceptance_exit": 0}}}]
-# WP-X.28 PR 1: an executed call the reader took from a Qwen XML reply, and the
-# same call read from JSON only — the golden must show the former.
+# WP-X.28 PR 2c: the coding run at the chat turn's tier. An executed call the
+# server parsed natively (its text carries no call), against the tier-full
+# shape (#582's golden): the call read out of the reply's text.
 _XML_REPLY = ("<tool_call>\n<function=code_run>\n<parameter=command>\npython test_calc.py\n"
               "</parameter>\n</function>\n</tool_call>")
 _RUN = {"name": "code_run", "input": {"command": "python test_calc.py"}}
 _TC = ["tool_name", "success", "raw_model_output", "parsed_tool_call"]
-XML_READ = _tel(tool_calls=(_TC, [["code_run", 1, _XML_REPLY, _RUN]]))
-JSON_ONLY = _tel(tool_calls=(_TC, [["code_run", 1, '{"name": "code_run", "arguments": {"command": "python test_calc.py"}}', _RUN]]))
-# Seen live: a JSON call that ran, in a reply whose XML call (wrong parameter
-# name) failed validation — the executed row's text carries <function=, but
-# nothing the XML reader yields is what ran.
-_MIXED = ('{"name": "code_str_replace", "arguments": {"path": "calc.py"}}\n\n'
-          "<tool_call>\n<function=code_run>\n<parameter=cmd>\npython test_calc.py\n</parameter>\n</function>\n</tool_call>")
-JSON_RAN_XML_FAILED = _tel(tool_calls=(_TC + ["error_type"], [
-    ["code_str_replace", 1, _MIXED, {"name": "code_str_replace", "input": {"path": "calc.py"}}, None],
-    ["code_run", 0, "", None, "validation_failed"]]))
-CODE_REQ = [{"messages": [{"role": "tool", "content": "1\tdef add"}]}]
-FED_BACK = [{"messages": [{"role": "user", "content":
+NATIVE = _tel(tool_calls=(_TC, [["code_run", 1, "", _RUN]]))
+FROM_TEXT_XML = _tel(tool_calls=(_TC, [["code_run", 1, _XML_REPLY, _RUN]]))
+FROM_TEXT_JSON = _tel(tool_calls=(_TC, [["code_run", 1, '{"name": "code_run", "arguments": {"command": "python test_calc.py"}}', _RUN]]))
+SERVED = "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"
+_TOOLS = [{"type": "function", "function": {"name": "code_run", "parameters": {}}}]
+_TASK = {"role": "user", "content": "Begin the coding task. Repository root: /x. Start by exploring the relevant files."}
+CODE_REQ = [{"model": SERVED, "tools": _TOOLS, "tool_choice": "auto",
+             "messages": [_TASK, {"role": "tool", "content": "1\tdef add"}]}]
+BLANK_MODEL_REQ = [{"model": "", "tools": _TOOLS, "messages": [_TASK]}]
+NO_TOOLS_REQ = [{"model": SERVED, "messages": [_TASK]}]
+FED_BACK = [{"model": SERVED, "tools": _TOOLS, "messages": [_TASK, {"role": "user", "content":
              "Your previous response contained tool-call markup that could not be parsed, "
              "so it was discarded and nothing ran."}]}]
 # What pydantic puts in a tool result: the offending input, truncated, epoch and all.
@@ -499,12 +499,15 @@ RECORDING_RULES = [
            + [_chat("I can't be certain, but: amber, birch, cobalt")]), "hedges"),
       (_ev(stores=COMPACTED, steps=[_chat("noted")] * 3
            + [_chat("amber\nbirch\ncobalt\n\nThose were the words.\nAnything else?")]), "one line")]),
-    ("coding_run", _ev(stores=XML_READ, steps=CODE_OK, requests=CODE_REQ),
-     [(_ev(stores=XML_READ, steps=CODE_OK,
-           requests=[{"messages": [{"role": "tool", "content": PYDANTIC}]}]), "not replayable"),
-      (_ev(stores=JSON_ONLY, steps=CODE_OK, requests=CODE_REQ), "XML reader"),
-      (_ev(stores=JSON_RAN_XML_FAILED, steps=CODE_OK, requests=CODE_REQ), "XML reader"),
-      (_ev(stores=XML_READ, steps=CODE_OK, requests=FED_BACK), "parse-disagreement")]),
+    ("coding_run", _ev(stores=NATIVE, steps=CODE_OK, requests=CODE_REQ),
+     [(_ev(stores=NATIVE, steps=CODE_OK,
+           requests=[{"model": SERVED, "tools": _TOOLS,
+                      "messages": [_TASK, {"role": "tool", "content": PYDANTIC}]}]), "not replayable"),
+      (_ev(stores=NATIVE, steps=CODE_OK, requests=BLANK_MODEL_REQ), "served model"),
+      (_ev(stores=NATIVE, steps=CODE_OK, requests=NO_TOOLS_REQ), "native tools"),
+      (_ev(stores=FROM_TEXT_XML, steps=CODE_OK, requests=CODE_REQ), "reply's text"),
+      (_ev(stores=FROM_TEXT_JSON, steps=CODE_OK, requests=CODE_REQ), "reply's text"),
+      (_ev(stores=NATIVE, steps=CODE_OK, requests=FED_BACK), "parse-disagreement")]),
     ("linked_workspace", _ev(stores=TOOL_OK, requests=ATLAS_REQ,
                              steps=[_chat("Codename: ATLAS-7. Tally for blue: 9")]),
      [(_ev(stores=TOOL_OK, requests=ATLAS_REQ, steps=[_chat("The codename is ATLAS-7.")]),
