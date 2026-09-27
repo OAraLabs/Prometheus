@@ -413,6 +413,10 @@ class LLMCallEnvelope:
             summary=summary or None,
             input_tokens=usage_in,
             output_tokens=usage_out,
+            # The success row never passed these (#119 added them to the
+            # failure row only), so no row ever held a cache count (WP-X.21 T6).
+            cached_input_tokens=usage_cached,
+            cache_write_tokens=usage_cache_write,
             round_index=round_index,
             session_id=session_id,
             model=request.model,
