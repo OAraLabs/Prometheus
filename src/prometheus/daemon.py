@@ -673,6 +673,11 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # iteration ceiling below the shipped default with /health green, the
     # tree clean and the deploy guard passing. Warns; never refuses.
     warn_on_divergence(config)
+    # WP-X.33: a GEPA key that was renamed is otherwise silently ignored, and
+    # the reference deployment's config still sets it. Warned whether GEPA is
+    # enabled or not.
+    from prometheus.learning.gepa import warn_renamed_keys
+    warn_renamed_keys(config)
 
     # Sprint 15 GRAFT: scoped daemon lock — prevent duplicate instances
     from prometheus.gateway.status import acquire_daemon_lock, release_daemon_lock

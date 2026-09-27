@@ -82,7 +82,7 @@ def _store(args: argparse.Namespace) -> ProposalStore:
 
 def _dry_run(args: argparse.Namespace) -> int:
     from prometheus.config.defaults import resolve_config_path
-    from prometheus.learning.gepa import GEPAOptimizer
+    from prometheus.learning.gepa import GEPAOptimizer, warn_renamed_keys
 
     import yaml
 
@@ -93,6 +93,8 @@ def _dry_run(args: argparse.Namespace) -> int:
         print(f"gepa dry-run: cannot read the config ({type(exc).__name__}); "
               "reporting with an empty one")
         data = {}
+    warn_renamed_keys(data)
+
     def _path(value: str | None) -> Path | None:
         return Path(value).expanduser() if value else None
 

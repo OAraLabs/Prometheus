@@ -1061,6 +1061,56 @@ def test_gepa_code_defaults_equal_the_template():
     assert engine._max_freq_s == template["gepa_max_frequency_hours"] * 3600
 
 
+def test_a_config_still_setting_the_renamed_minimum_gets_one_warning_at_load(tmp_path, caplog):
+    """gepa_min_traces_required was renamed to gepa_min_loads; a config that still
+    sets it (the reference deployment's does) is warned once at load, never silently
+    ignored — at every daemon boot, GEPA on or off, and in the dry run."""
+    import logging
+
+    from prometheus.cli.gepa import run_gepa_command
+    from prometheus.learning.gepa import warn_renamed_keys
+
+    stale = {"learning": {"gepa_enabled": False, "gepa_min_traces_required": 10}}
+    with caplog.at_level(logging.WARNING, logger="prometheus.learning.gepa"):
+        assert warn_renamed_keys(stale) is True
+    [record] = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    message = record.getMessage()
+    assert "learning.gepa_min_traces_required" in message
+    assert "renamed to learning.gepa_min_loads" in message and "IGNORED" in message
+    # Ignored means ignored: the old value sets nothing.
+    assert GEPAOptimizer(None, config=stale["learning"])._min_loads == 3
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="prometheus.learning.gepa"):
+        for config in ({"learning": {"gepa_min_loads": 4}}, {"learning": None}, {}, None):
+            assert warn_renamed_keys(config) is False
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    # The daemon calls it at load, next to its other boot-time config checks and
+    # unconditionally (a top-level statement of run_daemon, not inside GEPA's
+    # enabled branch), so a daemon with GEPA off still says it.
+    tree = ast.parse((REPO / "src" / "prometheus" / "daemon.py").read_text(encoding="utf-8"))
+    run_daemon = next(n for n in ast.walk(tree)
+                      if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_daemon")
+    called = [getattr(s.value.func, "id", None) for s in run_daemon.body
+              if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)]
+    assert "warn_renamed_keys" in called
+    assert called.index("warn_renamed_keys") == called.index("warn_on_divergence") + 1
+
+    # The dry run loads the config itself, and says it once too.
+    cfg = tmp_path / "prometheus.yaml"
+    cfg.write_text(json.dumps(stale), encoding="utf-8")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="prometheus.learning.gepa"):
+        assert run_gepa_command(_cli([
+            "--config", str(cfg), "gepa", "dry-run", "--json",
+            "--telemetry-db", str(tmp_path / "absent.db"),
+            "--lcm-db", str(tmp_path / "absent-lcm.db"),
+        ])) == 0
+    assert len([r for r in caplog.records
+                if "gepa_min_traces_required" in r.getMessage()]) == 1
+
+
 def test_gepa_never_writes_skills_auto():
     """Structural: the optimizer module writes nothing itself — the store stages, a person promotes."""
     src = (REPO / "src" / "prometheus" / "learning" / "gepa.py").read_text(encoding="utf-8")

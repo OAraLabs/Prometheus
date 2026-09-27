@@ -152,6 +152,29 @@ def _is_local_provider(name: str | None) -> bool:
     return name in ProviderRegistry.list_providers() and not ProviderRegistry.is_cloud(name)
 
 
+def warn_renamed_keys(config: dict[str, Any] | None) -> bool:
+    """One WARNING at config load if a config still sets GEPA's renamed minimum.
+
+    ``gepa_min_traces_required`` counted exported traces; WP-X.33 replaced it
+    with ``gepa_min_loads``, and nothing reads the old key. Configs written
+    before then still set it — the reference deployment's does — and a key
+    nothing reads is silently ignored. So the daemon calls this at every boot,
+    GEPA on or off, and the dry run calls it too. Returns whether it warned.
+    """
+    learning = (config or {}).get("learning") or {}
+    # A membership test, not a read: nothing reads the old key any more.
+    if isinstance(learning, dict) and "gepa_min_traces_required" in learning:
+        log.warning(
+            "learning.gepa_min_traces_required: config key is deprecated — it was "
+            "renamed to learning.gepa_min_loads (WP-X.33) and is IGNORED. GEPA's "
+            "candidates are now auto skills loaded at least gepa_min_loads times "
+            "(default 3), not exported traces. Delete the key; set gepa_min_loads "
+            "to change the minimum."
+        )
+        return True
+    return False
+
+
 def _normalized(text: str) -> str:
     return " ".join(text.split())
 
