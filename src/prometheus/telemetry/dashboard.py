@@ -12,12 +12,20 @@ from pathlib import Path
 from typing import Any
 
 from prometheus.telemetry.db import connect_telemetry_db
-from prometheus.telemetry.tracker import POLICY_ERROR_TYPES
+from prometheus.telemetry.tracker import (
+    LUCKY_GUESS_ERROR_TYPE,
+    LUCKY_GUESS_OPERATION,
+    POLICY_ERROR_TYPES,
+)
 
 # SQL fragment placeholders for the policy error types (D3 denominator
 # honesty — see tracker.POLICY_ERROR_TYPES).
 _POLICY_PH = ",".join("?" * len(POLICY_ERROR_TYPES))
 _POLICY_PARAMS = tuple(POLICY_ERROR_TYPES)
+
+# The old lucky-guess markers are tool_calls rows but not calls (see
+# tracker.LUCKY_GUESS_ERROR_TYPE): every per-call query here skips them.
+_NOT_A_MARKER = "(error_type IS NULL OR error_type != ?)"
 
 
 class ToolDashboard:
@@ -55,8 +63,9 @@ class ToolDashboard:
         * ``avg_latency_by_tool``   – ``{tool_name: float}``
         * ``circuit_breaker_trips`` – count of ``_loop_transition`` records
           with ``error_type='circuit_breaker_trip'``
-        * ``lucky_guesses``         – count of records with
-          ``error_type='lucky_guess'``
+        * ``lucky_guesses``         – deferred tools called by name: the
+          ``agent_loop``/``lucky_guess`` runs, plus the marker rows written to
+          ``tool_calls`` before those existed
         * ``adapter_repairs``       – count of records where ``retries > 0``
         * ``total_calls``           – real tool calls in window (synthetic
           ``_loop_transition`` loop echoes excluded)
@@ -111,25 +120,27 @@ class ToolDashboard:
              WHERE timestamp >= ?
                AND tool_name != '_loop_transition'
                AND (error_type IS NULL OR error_type NOT IN ({_POLICY_PH}))
+               AND {_NOT_A_MARKER}
              GROUP BY tool_name
             """,
-            (cutoff, *_POLICY_PARAMS),
+            (cutoff, *_POLICY_PARAMS, LUCKY_GUESS_ERROR_TYPE),
         ).fetchall()
         return {r["tool_name"]: r["rate"] for r in rows}
 
     def _most_called(self, cutoff: float) -> list[dict[str, Any]]:
         # Denied calls still count as calls (volume metric); loop echoes don't.
         rows = self._conn.execute(
-            """
+            f"""
             SELECT tool_name, COUNT(*) AS calls
               FROM tool_calls
              WHERE timestamp >= ?
                AND tool_name != '_loop_transition'
+               AND {_NOT_A_MARKER}
              GROUP BY tool_name
              ORDER BY calls DESC
              LIMIT 10
             """,
-            (cutoff,),
+            (cutoff, LUCKY_GUESS_ERROR_TYPE),
         ).fetchall()
         return [{"tool_name": r["tool_name"], "calls": r["calls"]} for r in rows]
 
@@ -175,9 +186,10 @@ class ToolDashboard:
              WHERE timestamp >= ?
                AND tool_name != '_loop_transition'
                AND (error_type IS NULL OR error_type NOT IN ({_POLICY_PH}))
+               AND {_NOT_A_MARKER}
              GROUP BY tool_name
             """,
-            (cutoff, *_POLICY_PARAMS),
+            (cutoff, *_POLICY_PARAMS, LUCKY_GUESS_ERROR_TYPE),
         ).fetchall()
         # AVG over an all-NULL group is NULL. Dropping the key keeps the declared dict[str, float]
         # honest instead of smuggling a None through it.
@@ -197,16 +209,34 @@ class ToolDashboard:
         return row["cnt"]
 
     def _count_lucky_guesses(self, cutoff: float) -> int:
-        row = self._conn.execute(
+        # Both shapes: the marker rows the loop wrote to tool_calls before, and
+        # the agent_loop/lucky_guess runs it writes now. One lucky guess is
+        # one of either, never both.
+        old = self._conn.execute(
             """
             SELECT COUNT(*) AS cnt
               FROM tool_calls
              WHERE timestamp >= ?
-               AND error_type = 'lucky_guess'
+               AND error_type = ?
             """,
-            (cutoff,),
-        ).fetchone()
-        return row["cnt"]
+            (cutoff, LUCKY_GUESS_ERROR_TYPE),
+        ).fetchone()["cnt"]
+        try:
+            new = self._conn.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                  FROM subsystem_runs
+                 WHERE timestamp >= ?
+                   AND subsystem = 'agent_loop'
+                   AND operation = ?
+                """,
+                (cutoff, LUCKY_GUESS_OPERATION),
+            ).fetchone()["cnt"]
+        except sqlite3.OperationalError:
+            # A database the tracker never opened has no subsystem_runs table:
+            # nothing in the new shape was written to it.
+            new = 0
+        return old + new
 
     def _count_adapter_repairs(self, cutoff: float) -> int:
         row = self._conn.execute(
@@ -235,7 +265,8 @@ class ToolDashboard:
               FROM tool_calls
              WHERE timestamp >= ?
                AND tool_name != '_loop_transition'
+               AND {_NOT_A_MARKER}
             """,
-            (*_POLICY_PARAMS, *_POLICY_PARAMS, cutoff),
+            (*_POLICY_PARAMS, *_POLICY_PARAMS, cutoff, LUCKY_GUESS_ERROR_TYPE),
         ).fetchone()
         return row["total"], row["denials"], row["rate"]
