@@ -41,7 +41,6 @@ nothing, and would have written straight into ``skills/auto/`` if it had.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import re
@@ -115,49 +114,29 @@ _JUDGE_EXPECTED = (
 )
 
 
-def _json_candidates(raw: str) -> list[str]:
-    text = raw.strip()
-    fenced = re.sub(r"```(?:json)?\s*\n?", "", text).strip()
-    out = [text]
-    if fenced != text:
-        out.append(fenced)
-    start, end = text.find("{"), text.rfind("}")
-    if 0 <= start < end:
-        out.append(text[start:end + 1])
-    return out
-
-
 def parsed_score(verdict: object) -> float | None:
-    """The score the judge actually gave, or None when its answer held none.
+    """The judge's score when it gave a verdict, else None — and None never wins.
 
-    ``PrometheusJudge`` turns an empty answer into 0.0 and an unparseable one
-    into the first number in its text, and returns both as ordinary verdicts.
-    So the raw answer is read again here, strictly: a JSON object (bare, fenced
-    or embedded) whose ``score`` is a number from 0 to 1. Anything else — no
-    object, no ``score``, a string, a boolean, out of range — is None, and None
-    never wins a comparison.
+    Since WP-X.22 the judge says which it was. Every reply is read by one
+    strict parser (``evals.judge.parse_judge_reply``), and a ``JudgeVerdict``
+    is either ``parsed`` — ``score`` is the judge's own number, finite, in
+    [0, 1] — or ``unparseable``, with ``score`` None. Before that, an empty
+    reply became 0.0 and an unparseable one the first number in its text, and
+    GEPA's ``float(verdict.score)`` would now raise on the None.
 
-    WP-X.22 is making the judge report whether it parsed a score; once it
-    lands, its verdict status replaces this re-read.
+    Anything that does not say it parsed, including a judge stand-in with no
+    status, is no verdict. The range is checked again because a stand-in need
+    not be a ``JudgeVerdict``, whose constructor enforces it.
     """
-    raw = getattr(verdict, "raw_response", None)
-    if not isinstance(raw, str) or not raw.strip():
+    from prometheus.evals.judge import VERDICT_PARSED
+
+    if getattr(verdict, "status", None) != VERDICT_PARSED:
         return None
-    for candidate in _json_candidates(raw):
-        try:
-            parsed = json.loads(candidate)
-        except ValueError:
-            continue
-        if not isinstance(parsed, dict):
-            return None
-        score = parsed.get("score")
-        if isinstance(score, bool) or not isinstance(score, (int, float)):
-            return None
-        value = float(score)
-        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
-            return None
-        return value
-    return None
+    score = getattr(verdict, "score", None)
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return None
+    value = float(score)
+    return value if math.isfinite(value) and 0.0 <= value <= 1.0 else None
 
 
 def _is_local_provider(name: str | None) -> bool:

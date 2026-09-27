@@ -22,6 +22,12 @@ from types import SimpleNamespace
 import pytest
 
 from prometheus.config.paths import config_dir_path
+from prometheus.evals.judge import (
+    VERDICT_PARSED,
+    VERDICT_UNPARSEABLE,
+    JudgeVerdict,
+    parse_judge_reply,
+)
 from prometheus.learning import gepa_evidence as ev
 from prometheus.learning.gepa import (
     GEPA_CYCLE_OPERATION,
@@ -239,16 +245,20 @@ class StubProvider:
         return "\n".join(m.text for r in self.requests for m in r.messages)
 
 
-@dataclass
-class StubVerdict:
-    score: float
-    reasoning: str
-    raw_response: str
+def _reply(value: float | str) -> JudgeVerdict:
+    """A judge reply read by the judge's own strict parser, as PrometheusJudge reads it."""
+    raw = value if isinstance(value, str) else json.dumps({"score": value, "reasoning": "stub"})
+    return parse_judge_reply(raw)
 
 
 @dataclass
 class StubJudge:
-    """Scores by marker; a marker may map to a raw answer instead of a score."""
+    """Scores by marker; a marker may map to a raw reply instead of a score.
+
+    Replies go through ``parse_judge_reply`` (WP-X.22), so a reply with no
+    verdict comes back ``unparseable`` with ``score`` None, exactly as from
+    the real judge.
+    """
 
     scores: dict[str, float | str] = field(default_factory=lambda: {
         "Run the tests.": 0.6, "full test suite": 0.8, "read failures first": 0.85})
@@ -259,10 +269,7 @@ class StubJudge:
         self.calls.append({"task_input": task_input, "agent_output": agent_output,
                            "expected_behavior": expected_behavior})
         value = next((v for k, v in self.scores.items() if k in agent_output), self.default)
-        if isinstance(value, str):
-            return StubVerdict(score=0.0, reasoning="raw", raw_response=value)
-        return StubVerdict(score=value, reasoning="stub",
-                           raw_response=json.dumps({"score": value, "reasoning": "stub"}))
+        return _reply(value)
 
     def provenance(self) -> dict:
         return {"base_url": "http://judge.invalid", "model": "stub-judge", "pinned": True}
@@ -458,23 +465,23 @@ class TestEvidence:
 # ---------------------------------------------------------------------------
 
 
-def _v(raw: str | None):
-    return SimpleNamespace(score=0.9, reasoning="", raw_response=raw)
-
-
 class TestParsedScore:
+    """GEPA takes the judge's verdict status (WP-X.22) — it does not re-read replies."""
+
     @pytest.mark.parametrize("raw,expected", [
         ('{"score": 0.8, "reasoning": "fine"}', 0.8),
         ('{"score": 1, "reasoning": "x"}', 1.0),
         ('```json\n{"score": 0.4, "reasoning": "x"}\n```', 0.4),
         ('Here you go: {"score": 0.7, "reasoning": "x"} done', 0.7),
     ])
-    def test_a_real_score_is_read(self, raw, expected):
-        assert parsed_score(_v(raw)) == expected
+    def test_a_parsed_verdict_gives_its_score(self, raw, expected):
+        verdict = parse_judge_reply(raw)
+        assert verdict.status == VERDICT_PARSED
+        assert parsed_score(verdict) == expected
 
     @pytest.mark.parametrize("raw", [
-        None, "", "   ",
-        "I would rate this 0.9 out of 1",          # the judge's fallback would say 0.9
+        "", "   ",
+        "I would rate this 0.9 out of 1",          # the old fallback said 0.9
         "Step 1: the skill is fine.",              # …or 1.0 from "1"
         '{"reasoning": "no score"}',
         '{"score": "0.9", "reasoning": "x"}',
@@ -484,8 +491,18 @@ class TestParsedScore:
         '{"score": NaN, "reasoning": "x"}',
         "[0.9]",
     ])
-    def test_anything_else_is_no_score(self, raw):
-        assert parsed_score(_v(raw)) is None
+    def test_an_unparseable_verdict_is_no_score_and_does_not_raise(self, raw):
+        """score None: the old ``float(verdict.score)`` raised TypeError here."""
+        verdict = parse_judge_reply(raw)
+        assert verdict.status == VERDICT_UNPARSEABLE and verdict.score is None
+        assert parsed_score(verdict) is None
+
+    def test_something_that_does_not_say_it_parsed_is_no_verdict(self):
+        """A stand-in with a score but no status is not trusted to have parsed."""
+        assert parsed_score(SimpleNamespace(score=0.9, reasoning="", raw_response="0.9")) is None
+        assert parsed_score(SimpleNamespace(status="parsed", score=True)) is None
+        assert parsed_score(SimpleNamespace(status="parsed", score=float("nan"))) is None
+        assert parsed_score(SimpleNamespace(status="parsed", score=None)) is None
 
 
 class TestTheRule:
@@ -524,7 +541,7 @@ class TestTheRule:
 
         async def evaluate(task_input, agent_output, expected_behavior, tool_trace=None):
             if "read failures first" in agent_output:
-                return StubVerdict(score=1.0, reasoning="", raw_response=next(answers))
+                return parse_judge_reply(next(answers))
             return await StubJudge.evaluate(judge, task_input, agent_output, expected_behavior)
 
         judge.evaluate = evaluate  # type: ignore[method-assign]
@@ -540,6 +557,22 @@ class TestTheRule:
         report = asyncio.run(ready_world.optimizer(judge=judge).run_optimization_cycle())
         assert report.live_unparseable == 1
         assert report.variants == 0 and report.proposed == 0
+
+    def test_an_unparseable_verdict_is_a_loss_counted_in_the_row(self, ready_world):
+        """WP-X.22's unparseable verdict (score None) never raises and never wins.
+
+        Every verdict for the variants holds no score: nothing is proposed, and
+        the cycle's subsystem_runs row counts each one as unparseable.
+        """
+        judge = StubJudge(scores={"Run the tests.": 0.6, "full test suite": "no verdict here",
+                                  "read failures first": ""})
+        report = asyncio.run(ready_world.optimizer(judge=judge).run_optimization_cycle())
+        assert report.proposed == 0 and report.errors == 0
+        # The live skill's 3 verdicts parsed; each variant stopped at its first no-verdict.
+        assert report.judged == 3 + 2 and report.unparseable == 2
+        [(outcome, summary)] = ready_world.gepa_rows()
+        assert outcome == "success"
+        assert summary["judged"] == 5 and summary["unparseable"] == 2 and summary["proposed"] == 0
 
     def test_a_judge_that_raises_counts_as_unparseable(self, ready_world):
         class Broken(StubJudge):
