@@ -1426,7 +1426,9 @@ async def _run_loop(
                 # The row names THIS turn's conversation — the per-call id,
                 # not the shared web context's "web" namespace — and none at
                 # all on an ephemeral turn, like every other row it writes.
-                session_id=None if ephemeral else effective_session_id,
+                # A run with no session of its own (a subagent, POST
+                # /api/chat) files it under its record id, as its calls are.
+                session_id=None if ephemeral else rec_sid,
             )
 
         final_message: ConversationMessage | None = None

@@ -286,3 +286,80 @@ def _no_global_handle(monkeypatch):
     import prometheus.telemetry.tracker as tracker
 
     monkeypatch.setattr(tracker, "_telemetry_singleton", None)
+
+
+# ---------------------------------------------------------------------------
+# Compaction rows (#607) belong to the run too
+# ---------------------------------------------------------------------------
+
+
+class _NInput(BaseModel):
+    n: int
+
+
+class _BigRead(BaseTool):
+    """A large result that differs per call, so the repeat detector never trips."""
+
+    name = "big_read"
+    description = "returns a large result"
+    input_model = _NInput
+
+    def is_read_only(self, arguments) -> bool:  # noqa: ANN001
+        return True
+
+    async def execute(self, arguments, context):  # noqa: ANN001
+        return ToolResult(output=f"result {arguments.n}\n" + "x" * 2000, is_error=False)
+
+
+class _ThreeReadsProvider(ModelProvider):
+    """Rounds 0-2 each call big_read; round 3 answers. Microcompaction runs at
+    the top of round 3 and trims round 0's result."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream_message(self, request):  # noqa: ANN001
+        n = self.calls
+        self.calls += 1
+        content = ([ToolUseBlock(id=f"t{n}", name="big_read", input={"n": n})]
+                   if n < 3 else [TextBlock(text="done")])
+        yield ApiMessageCompleteEvent(
+            message=ConversationMessage(role="assistant", content=content),
+            usage=UsageSnapshot(input_tokens=1, output_tokens=1),
+            stop_reason="stop",
+        )
+
+
+def test_a_record_only_runs_compaction_rows_carry_its_record_id(tmp_path):
+    """A run with no session of its own (a subagent, POST /api/chat) files its
+    microcompaction rows under its record id, like every other row it writes."""
+    from prometheus.adapter import ModelAdapter
+    from prometheus.engine.agent_loop import LoopContext, run_loop
+
+    registry = ToolRegistry()
+    registry.register(_BigRead())
+    db = tmp_path / "telemetry.db"
+    tel = ToolCallTelemetry(db)
+    ctx = LoopContext(provider=_ThreeReadsProvider(), model="stub-model", system_prompt="",
+                      max_tokens=128, tool_registry=registry,
+                      adapter=ModelAdapter(tier="light"),  # a local tier: microcompaction runs
+                      telemetry=tel, microcompact_after_turns=2)
+    own = "subagent:telegram:42:agent-7"
+
+    async def drain() -> None:
+        async for _ in run_loop(ctx, [ConversationMessage.from_user_text("go")],
+                                record_session_id=own):
+            pass
+
+    asyncio.run(drain())
+    tel.close()
+    con = sqlite3.connect(db)
+    compactions = [r[0] for r in con.execute(
+        "SELECT session_id FROM subsystem_runs WHERE subsystem='agent_loop'"
+        " AND operation='microcompact' ORDER BY rowid")]
+    calls = {r[0] for r in con.execute(
+        "SELECT session_id FROM tool_calls WHERE tool_name != '_loop_transition'")}
+    con.close()
+    assert compactions, "microcompaction must fire, or this test measures nothing"
+    assert set(compactions) == {own}, "the run's compaction rows were session-less"
+    assert calls == {own}, "premise: the run's calls carry the record id"
