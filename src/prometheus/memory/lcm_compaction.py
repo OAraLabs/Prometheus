@@ -159,7 +159,7 @@ class LCMCompactor:
         self, messages: list[MessagePart], session_id: str
     ) -> SummaryNode:
         """Create a depth-0 summary node from raw messages."""
-        summary_text = await self._summarizer.summarize_messages(messages)
+        summary_text = await self._summarizer.summarize_messages(messages, session_id=session_id)
 
         node = SummaryNode(
             source_message_ids=[m.message_id for m in messages],
@@ -204,7 +204,7 @@ class LCMCompactor:
         self, nodes: list[SummaryNode], new_depth: int, session_id: str
     ) -> SummaryNode:
         """Create a higher-depth summary node from child nodes."""
-        summary_text = await self._summarizer.summarize_summaries(nodes)
+        summary_text = await self._summarizer.summarize_summaries(nodes, session_id=session_id)
 
         node = SummaryNode(
             parent_ids=[n.id for n in nodes],

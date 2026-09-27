@@ -116,6 +116,16 @@ def is_session_ephemeral(session_id: str | None) -> bool:
     return bool(load_ephemeral_sessions().get(str(session_id)))
 
 
+def recorded_session_id(session_id: str | None) -> str | None:
+    """The session a telemetry row records for a call that serves *session_id*:
+    the id itself, or None when there is none or it is flagged ephemeral — the
+    agent loop's rule for every row it writes (WP-X.21). Descriptive only;
+    never an origin input."""
+    if not session_id or is_session_ephemeral(session_id):
+        return None
+    return session_id
+
+
 def set_session_ephemeral(session_id: str, on: bool) -> None:
     """Turn ephemeral mode on or off for *session_id*, durably.
 

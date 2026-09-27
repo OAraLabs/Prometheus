@@ -53,10 +53,10 @@ class MockSummarizer:
         self._text = summary_text
         self._consecutive_failures = 0
 
-    async def summarize_messages(self, messages):
+    async def summarize_messages(self, messages, *, session_id=None):
         return self._text
 
-    async def summarize_summaries(self, summaries):
+    async def summarize_summaries(self, summaries, *, session_id=None):
         return self._text
 
     def reset(self) -> None:
@@ -674,10 +674,10 @@ class TestAssembler:
         from prometheus.memory.lcm_compaction import LCMCompactor
 
         class _FakeSummarizer:
-            async def summarize_messages(self, messages):
+            async def summarize_messages(self, messages, *, session_id=None):
                 return f"summary of {len(messages)} messages"
 
-            async def summarize_summaries(self, nodes):
+            async def summarize_summaries(self, nodes, *, session_id=None):
                 return f"meta-summary of {len(nodes)} nodes"
 
         config = CompactionConfig(fresh_tail_count=2, compaction_batch_size=3)

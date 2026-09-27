@@ -53,6 +53,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
+from prometheus.config.ephemeral import recorded_session_id
 from prometheus.context.budget import (
     LEGACY_FALLBACK_LIMIT,
     resolve_effective_limit,
@@ -170,17 +171,6 @@ _SUMMARY_PROMPT = (
 )
 
 SUMMARY_MARKER_PREFIX = "[Compacted summary of turns"
-
-
-def _recorded_session(session_id: str) -> str | None:
-    """The telemetry column's session for a summary call: the conversation, or
-    None for no conversation or an ephemeral one (the loop's own rule).
-    Descriptive only; the anchor and cache keep the full id either way."""
-    from prometheus.config.ephemeral import is_session_ephemeral
-
-    if not session_id or is_session_ephemeral(session_id):
-        return None
-    return session_id
 
 
 class ContextCompactor:
@@ -737,8 +727,9 @@ class ContextCompactor:
                 operation="summarize_span",
                 context={"session_id": session_id, "span_messages": len(span)},
                 # The row's own column (WP-X.21 T10), under the loop's rule:
-                # the conversation, and none at all on an ephemeral turn.
-                session_id=_recorded_session(session_id),
+                # the conversation, and none at all on an ephemeral turn. The
+                # anchor and cache keep the full id either way.
+                session_id=recorded_session_id(session_id),
             )
             duration_ms = (time.time() - started) * 1000.0
 
