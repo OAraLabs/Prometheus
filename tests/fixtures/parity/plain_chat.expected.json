@@ -19,11 +19,11 @@
      "role": "user"
     },
     {
-     "content": "All systems are green and humming like a steady lighthouse!",
+     "content": "All systems are glowing with lighthouse-level clarity!",
      "content_json": {
       "$json": [
        {
-        "text": "All systems are green and humming like a steady lighthouse!",
+        "text": "All systems are glowing with lighthouse-level clarity!",
         "type": "text"
        }
       ]
@@ -34,7 +34,7 @@
     }
    ],
    "op": "chat",
-   "reply": "All systems are green and humming like a steady lighthouse!",
+   "reply": "All systems are glowing with lighthouse-level clarity!",
    "session": "desktop:parity-plain"
   }
  ],
@@ -191,16 +191,16 @@
        "desktop:parity-plain",
        1,
        "assistant",
-       "All systems are green and humming like a steady lighthouse!",
+       "All systems are glowing with lighthouse-level clarity!",
        {
         "$json": [
          {
-          "text": "All systems are green and humming like a steady lighthouse!",
+          "text": "All systems are glowing with lighthouse-level clarity!",
           "type": "text"
          }
         ]
        },
-       14,
+       13,
        "<time>",
        0,
        "user",
@@ -217,7 +217,7 @@
        "Parity check. Reply with one short friendly sentence that contains the word 'lighthouse'. Do not use any tools."
       ],
       [
-       "All systems are green and humming like a steady lighthouse!"
+       "All systems are glowing with lighthouse-level clarity!"
       ]
      ]
     },
@@ -242,7 +242,7 @@
       [
        1,
        {
-        "$bytes_sha256": "cb2828956cb51650",
+        "$bytes_sha256": "41ad54fc6a0ffdda",
         "len": 2
        }
       ],
@@ -263,8 +263,8 @@
       [
        274877906945,
        {
-        "$bytes_sha256": "0c6f7dc920a36406",
-        "len": 107
+        "$bytes_sha256": "0d02ff295c2ba314",
+        "len": 96
        }
       ]
      ]
@@ -285,7 +285,7 @@
       [
        2,
        {
-        "$bytes_sha256": "01ba4719c80b6fe9",
+        "$bytes_sha256": "beead77994cf5733",
         "len": 1
        }
       ]
@@ -436,7 +436,7 @@
      "rows": [
       [
        "desktop:parity-plain",
-       "Lighthouse Parity Check",
+       "One sentence with lighthouse",
        "<time>"
       ]
      ]
@@ -1381,7 +1381,7 @@
        "success",
        {
         "$json": {
-         "advertised": 11,
+         "advertised": 12,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
@@ -1412,8 +1412,8 @@
          "stop_reason": "stop"
         }
        },
-       5943,
-       13,
+       6187,
+       11,
        0,
        "desktop:parity-plain",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
