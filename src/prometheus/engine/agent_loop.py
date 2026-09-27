@@ -4057,7 +4057,9 @@ async def _execute_tool_call(
                             effective_session_id if effective_session_id is not None
                             else context.session_id
                         ),
-                        model=context.model,
+                        # The round's serving model, like the call's own row:
+                        # the fallback's, when it served (T14).
+                        model=_serving_model(context),
                         summary={"tool": tool_name},
                     )
 

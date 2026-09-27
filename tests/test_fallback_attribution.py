@@ -187,3 +187,47 @@ def _no_global_handle(monkeypatch):
     import prometheus.telemetry.tracker as tracker
 
     monkeypatch.setattr(tracker, "_telemetry_singleton", None)
+
+
+def test_a_degraded_rounds_lucky_guess_names_the_fallback(tmp_path):
+    """The lucky-guess marker (#605) belongs to the round that made the call, so it
+    names the model that served that round: the fallback's, when it did."""
+    from prometheus.adapter import ModelAdapter
+    from prometheus.context.dynamic_tools import DynamicToolLoader
+
+    registry = ToolRegistry()
+    for name in ("bash", "read_file", "image_generate"):
+        registry.register(_tool(name))
+    # Deferred loading on, advertising bash + read_file only: image_generate is
+    # registered but not advertised, so the fallback's call to it is a lucky guess.
+    loader = DynamicToolLoader(registry, {"enabled": True, "always_loaded": ["bash", "read_file"]})
+    db = tmp_path / "telemetry.db"
+    tel = ToolCallTelemetry(db)
+    ctx = LoopContext(
+        provider=_ExpiredCloud(),
+        model=CLOUD,
+        system_prompt="- Model: qwen3.8-max (provider: qwen)",
+        max_tokens=512,
+        tool_registry=registry,
+        tool_loader=loader,
+        adapter=ModelAdapter(tier="light"),
+        telemetry=tel,
+        fallback=FallbackTarget(model=LOCAL, provider_name="llama_cpp",
+                                provider=_Scripted("image_generate"), is_local_backend=True),
+    )
+
+    async def drain() -> None:
+        async for _ in run_loop(ctx, [ConversationMessage.from_user_text("go")], session_id="desktop:fb"):
+            pass
+
+    asyncio.run(drain())
+    tel.close()
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    [marker] = con.execute("SELECT model, session_id FROM subsystem_runs WHERE subsystem='agent_loop'"
+                           " AND operation='lucky_guess'").fetchall()
+    assert (marker["model"], marker["session_id"]) == (LOCAL, "desktop:fb"), (
+        "the fallback served the round that guessed; the marker named the model that failed"
+    )
+    [row] = _tool_rows(con)
+    assert (row["tool_name"], row["model"]) == ("image_generate", LOCAL), "and so does the call's own row"
