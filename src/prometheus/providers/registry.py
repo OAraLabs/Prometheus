@@ -166,6 +166,25 @@ LOCAL_PLACEHOLDER_BEARER = "local"
 # shared OpenAI-shape builder, so both can carry an `image_url` part.
 _LOCAL_PROVIDERS = {"llama_cpp", "ollama"} | _LOCAL_OPENAI_COMPAT_PROVIDERS
 
+# Every key ProviderRegistry.create reads, per provider. A router rule or
+# fallback entry carrying any other key is refused at load: a key create()
+# never reads is a setting that silently does nothing (an `api_key_env` on a
+# llama.cpp entry sends no key at all). Pinned to create() itself by
+# tests/test_model_router.py, which records the keys it actually reads.
+_KEYED_ENDPOINT_KEYS = frozenset({
+    "provider", "api_key", "api_key_env", "base_url", "base_url_env", "model", "timeout",
+})
+PROVIDER_CONFIG_KEYS: dict[str, frozenset[str]] = {
+    **{
+        name: _KEYED_ENDPOINT_KEYS | {"vision", "max_tokens"}
+        for name in _OPENAI_COMPAT_PROVIDERS | _LOCAL_OPENAI_COMPAT_PROVIDERS
+    },
+    "anthropic": _KEYED_ENDPOINT_KEYS | {"prompt_caching"},
+    "llama_cpp": frozenset({"provider", "base_url", "timeout", "suppress_thinking"}),
+    "ollama": frozenset({"provider", "base_url", "timeout"}),
+    "stub": frozenset({"provider", "base_url", "timeout"}),
+}
+
 
 def _provider_defaults(provider_name: str) -> dict[str, Any]:
     """Built-in endpoint/key defaults for a provider, cloud or local.

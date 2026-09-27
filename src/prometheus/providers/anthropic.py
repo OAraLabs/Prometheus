@@ -180,6 +180,8 @@ class AnthropicProvider(ModelProvider):
 
     api_enforced_structure: bool = True
 
+    provider_name = "anthropic"
+
     def __init__(
         self,
         api_key: str | None = None,
