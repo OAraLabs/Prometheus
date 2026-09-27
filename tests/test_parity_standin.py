@@ -192,3 +192,42 @@ def test_the_closed_window():
     assert _in_closed_window("06:15-10:00", datetime(2026, 9, 27, 9, 59))
     assert not _in_closed_window("06:15-10:00", datetime(2026, 9, 27, 6, 14))
     assert not _in_closed_window("06:15-10:00", datetime(2026, 9, 27, 23, 0))
+
+
+# -- a new scenario: nothing committed of its own --------------------------------------------
+
+def test_a_new_scenario_s_stand_in_answers_the_seed_s_probes_and_no_completion():
+    """A scenario recorded for the first time has no committed exchanges. Its stand-in
+    answers the alt's boot probes from a recorded golden, and nothing else: a completion
+    on a stand-in side was never committed for it, so none may be answered."""
+    from parity.model_server import COMPLETIONS_PATHS
+    from parity.rerecord import _committed, standin_exchanges
+
+    assert _committed("not_yet_recorded") is None
+    own = standin_exchanges("tool_calls")
+    assert len(own) == len(_committed("tool_calls")["exchanges"])
+    seeded = standin_exchanges("not_yet_recorded", "model_switch")   # its alt DID complete
+    assert not [e for e in seeded if e.method == "POST" and e.path in COMPLETIONS_PATHS]
+    assert {(e.upstream, e.method, e.path) for e in seeded} >= {
+        ("alt", "GET", "/api/tags"), ("alt", "GET", "/api/ps"), ("alt", "POST", "/api/show")}
+    with pytest.raises(ValueError, match="standin-from"):
+        standin_exchanges("not_yet_recorded")
+
+
+def test_the_recorder_settles_seeds_before_reading_anything(monkeypatch, capsys):
+    """A new scenario without a seed, or a seed for a recorded one, is refused
+    before the deploy config is read or a stand-in started."""
+    from parity import rerecord
+
+    def unreadable():
+        raise AssertionError("the deploy config was read")
+    monkeypatch.setattr(rerecord, "DEPLOY_CONFIG", type("P", (), {"read_text": staticmethod(unreadable)}))
+    assert rerecord.main(["plain_chat", "--standin-from", "plain_chat=tool_calls"]) == 2
+    assert "only for a new scenario" in capsys.readouterr().out
+    assert rerecord.main(["no_such_scenario"]) == 2
+    real = rerecord._committed
+    monkeypatch.setattr(rerecord, "_committed", lambda n: None if n == "plain_chat" else real(n))
+    assert rerecord.main(["plain_chat"]) == 2
+    assert "--standin-from plain_chat=" in capsys.readouterr().out
+    assert rerecord.main(["plain_chat", "--standin-from", "plain_chat=nothing_recorded"]) == 2
+    assert "no committed trace to seed" in capsys.readouterr().out
