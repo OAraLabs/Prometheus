@@ -4278,12 +4278,39 @@ def create_app(
                     content={"error": "content must be a non-empty string when provided"},
                 )
             content = edited
+        # WP-X.42: a draft whose name a live skill already has is refused
+        # (409) unless the reviewer asks to replace it. It used to be written
+        # beside the live skill under a suffixed name, which the registry
+        # never serves: "accepted", and nothing changed for the agent.
+        replace = (body or {}).get("replace", False)
+        if not isinstance(replace, bool):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "replace must be true or false when provided"},
+            )
+
+        from prometheus.learning.skill_creator import SkillNameTaken
 
         source = sidecar.get("source", "unknown")
         service = _live_recorder_service()
-        path = await service.persist_content(
-            content, trigger=f"skill draft {draft_id} accepted ({source})"
-        )
+        replaced: list[tuple[Path, Path]] = []
+        try:
+            path = await service.persist_content(
+                content, trigger=f"skill draft {draft_id} accepted ({source})",
+                on_collision="replace" if replace else "refuse", replaced=replaced,
+            )
+        except SkillNameTaken as exc:
+            files = [f.name for f in exc.files]
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": f"a live skill already has the name {exc.name!r} "
+                             f"(skills/auto/{', skills/auto/'.join(files)}). Accept with "
+                             "{\"replace\": true} to archive it and write this draft "
+                             "in its place, or rename the draft.",
+                    "conflict": {"skill_name": exc.name, "files": files},
+                },
+            )
         if path is None:
             # Validation refused it (a missing frontmatter name:, the quality
             # gate, or dangerous code, WP-X.40) — leave the draft in place so
@@ -4296,12 +4323,16 @@ def create_app(
             )
 
         store.remove_accepted(draft_id)
+        replaced_out = [{"file": live.name, "archived_as": f"archive/{copy.name}"}
+                        for live, copy in replaced]
         await _emit_draft_signal("skill_draft_accepted", {
             "draft_id": draft_id,
             "skill_name": path.stem,
             "skill_path": str(path),
+            "replaced": replaced_out,
         })
-        return {"status": "accepted", "skill_name": path.stem, "skill_path": str(path)}
+        return {"status": "accepted", "skill_name": path.stem, "skill_path": str(path),
+                "replaced": replaced_out}
 
     @app.post("/api/learning/skill-drafts/{draft_id}/reject")
     async def reject_skill_draft(draft_id: str):

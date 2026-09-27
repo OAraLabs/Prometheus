@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from prometheus.config.paths import get_config_dir
+from prometheus.learning.skill_files import archive_copy, atomic_write, create_exclusive
 from prometheus.learning.trace_format import format_trace
 from prometheus.skills.loader import _parse_skill_markdown, load_skill_registry
 from prometheus.skills.similarity import DEFAULT_THRESHOLD, skill_text
@@ -141,6 +142,24 @@ def _slugify(text: str) -> str:
     """
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower().strip())
     return slug.strip("-")[:64].rstrip("-")
+
+
+_COLLISION_MODES = frozenset({"suffix", "skip", "refuse", "replace"})
+
+
+class SkillNameTaken(Exception):
+    """``on_collision="refuse"``: a live auto skill already has this name.
+
+    ``files`` are the auto skill files holding it, so a surface can name them
+    (a skill-draft ACCEPT answers 409 with them).
+    """
+
+    def __init__(self, name: str, files: list[Path]) -> None:
+        super().__init__(
+            f"a live skill already has the name {name!r}: "
+            + ", ".join(f.name for f in files))
+        self.name = name
+        self.files = files
 
 
 class SkillNameExtractionError(ValueError):
@@ -341,6 +360,7 @@ class SkillCreator:
         *,
         trigger: str,
         on_collision: str = "suffix",
+        replaced: list[tuple[Path, Path]] | None = None,
     ) -> Path | None:
         """Validate and write skill markdown through the standard auto-skill path.
 
@@ -359,13 +379,31 @@ class SkillCreator:
         telemetry context and the emitted signal, never for the filename.
 
         ``on_collision`` decides what an existing ``<slug>.md`` means:
-        ``"suffix"`` (default) writes ``<slug>-<unixtime>.md`` — right for
-        deliberate writers (teacher escalation, record-a-skill, an ACCEPTed
-        draft) that must not lose content. ``"skip"`` treats the collision
-        as near-duplicate evidence and writes nothing — the auto path uses
-        this; the timestamp-suffix behaviour there is how three
-        ``debug-cron-job-failure*`` copies accumulated.
+
+        - ``"suffix"`` (default) writes ``<slug>-<unixtime>.md``, and
+          ``-<unixtime>-2``, ``-3``… when that is taken too — right for
+          deliberate writers (teacher escalation, record-a-skill) that must
+          not lose content;
+        - ``"skip"`` treats the collision as near-duplicate evidence and
+          writes nothing — the auto path uses this; the timestamp-suffix
+          behaviour there is how three ``debug-cron-job-failure*`` copies
+          accumulated;
+        - ``"refuse"`` raises :class:`SkillNameTaken` when a live auto skill
+          already has this name (its file, or another file serving the same
+          name) — an accepted draft uses this, because a suffixed copy of a
+          skill whose name is taken is never served;
+        - ``"replace"`` archives every such file into ``auto/archive/`` (the
+          way a GEPA promotion does), then writes ``<slug>.md``. The
+          ``(live file, archive copy)`` pairs are appended to *replaced*.
+
+        Every write is exclusive (``O_CREAT | O_EXCL``) or, for a replace, an
+        atomic rename: no write ever lands over a file it did not mean to
+        replace — two suffixed writes in one second used to share a name, and
+        the second erased the first.
         """
+        if on_collision not in _COLLISION_MODES:
+            raise ValueError(f"on_collision must be one of {sorted(_COLLISION_MODES)}, "
+                             f"not {on_collision!r}")
         # WP-X.40: the scanner gate, first, so nothing it refuses reaches any
         # later step. SkillRefiner and GEPA scan what they write; until this
         # the four writers that come through here did not.
@@ -404,18 +442,17 @@ class SkillCreator:
             )
             return None
 
-        path = self._auto_dir / f"{slug}.md"
+        base = self._auto_dir / f"{slug}.md"
 
-        # Don't overwrite existing skills
-        if path.exists():
-            if on_collision == "skip":
-                log.info(
-                    "SkillCreator: %r already exists — skipping duplicate "
-                    "(near-duplicate gate)",
-                    path.name,
-                )
-                return None
-            path = self._auto_dir / f"{slug}-{int(time.time())}.md"
+        # Don't overwrite existing skills. The cheap early answer for the auto
+        # path; the exclusive write below is the one that decides.
+        if on_collision == "skip" and base.exists():
+            log.info(
+                "SkillCreator: %r already exists — skipping duplicate "
+                "(near-duplicate gate)",
+                base.name,
+            )
+            return None
 
         # The quality gate reads the skill the way the registry will serve it.
         _, description = _parse_skill_markdown(slug, content.strip())
@@ -425,7 +462,22 @@ class SkillCreator:
         if on_collision == "skip" and self._near_duplicate(name, description):
             return None
 
-        path.write_text(content.strip() + "\n", encoding="utf-8")
+        text = content.strip() + "\n"
+        if on_collision == "replace":
+            path = self._replace(slug, base, text, replaced)
+        else:
+            if on_collision == "refuse":
+                clash = self._clashes(slug, base)
+                if clash:
+                    raise SkillNameTaken(name, clash)
+            path = self._write_new(slug, base, text, suffix=on_collision == "suffix")
+            if path is None:
+                # Taken between the check and the write: another writer won.
+                if on_collision == "refuse":
+                    raise SkillNameTaken(name, [base])
+                log.info("SkillCreator: %r appeared before it was written — skipping",
+                         base.name)
+                return None
         log.info("SkillCreator: created skill at %s", path)
 
         # Sprint S1 Stream 2: emit skill_created so the Telegram gateway,
@@ -466,6 +518,76 @@ class SkillCreator:
                            "score": round(float(score), 4),
                            "threshold": self._dedupe_threshold})
         return True
+
+    def _write_new(self, slug: str, base: Path, text: str, *, suffix: bool) -> Path | None:
+        """Create *base*, or (``suffix``) the first free ``<slug>-<unixtime>[-N].md``.
+
+        Exclusive at every name: returns None only when *base* is taken and no
+        suffix was asked for.
+        """
+        try:
+            create_exclusive(base, text)
+            return base
+        except FileExistsError:
+            if not suffix:
+                return None
+        stamp = int(time.time())
+        for n in range(1, 1000):
+            path = self._auto_dir / f"{slug}-{stamp}{'' if n == 1 else f'-{n}'}.md"
+            try:
+                create_exclusive(path, text)
+                return path
+            except FileExistsError:
+                continue
+        raise FileExistsError(f"no free name for {slug} in {self._auto_dir}")
+
+    def _clashes(self, slug: str, base: Path) -> list[Path]:
+        """The live auto skill files a skill with this slug would sit beside.
+
+        The file at its own path, and any other auto skill whose served name
+        slugifies the same: the registry serves one of them and hides the
+        rest, so a second file under the same name is either dead on arrival
+        or shadows the first. SkillRefiner's ``.bak-`` backups are history,
+        not live skills.
+        """
+        out = [base] if base.exists() else []
+        for path in sorted(self._auto_dir.glob("*.md")):
+            if path == base or ".bak-" in path.name:
+                continue
+            try:
+                served, _ = _parse_skill_markdown(path.stem, path.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            if _slugify(served) == slug:
+                out.append(path)
+        return out
+
+    def _replace(
+        self,
+        slug: str,
+        base: Path,
+        text: str,
+        replaced: list[tuple[Path, Path]] | None,
+    ) -> Path:
+        """Archive every clashing live file, then write *base* — a promotion's order.
+
+        Each file is copied into ``auto/archive/`` first (exclusive names), so
+        nothing is lost if a later step fails; *base* is then replaced in one
+        rename, and the other clashing files leave ``auto/`` (their copies
+        stay in the archive), so exactly one file serves the name.
+        """
+        archive_dir = self._auto_dir / "archive"
+        pairs = [(live, archive_copy(live, archive_dir)) for live in self._clashes(slug, base)]
+        atomic_write(base, text)
+        for live, _ in pairs:
+            if live != base:
+                live.unlink(missing_ok=True)
+        for live, copy in pairs:
+            log.info("SkillCreator: replaced %s (the previous version is archive/%s)",
+                     live.name, copy.name)
+        if replaced is not None:
+            replaced.extend(pairs)
+        return base
 
     def _passes_code_scan(self, content: str, *, trigger: str) -> bool:
         """True when ``DangerousCodeScanner`` lets *content* through.

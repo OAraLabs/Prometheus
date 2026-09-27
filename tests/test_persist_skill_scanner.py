@@ -196,27 +196,28 @@ def _live_recorder_module():
 
 
 class TestRecordASkill:
-    def test_a_recording_that_smuggles_a_code_block_is_not_persisted(self, tmp_path, caplog):
-        """A typed value becomes the skill's parameter example verbatim, fence and all.
+    def test_a_dangerous_synthesized_skill_is_not_persisted(self, tmp_path, caplog, monkeypatch):
+        """The scanner guards this writer too, whatever the synthesizer produces.
 
-        DOM recordings auto-persist once the quality gate passes (no human
-        review), so without the scan a page or a textarea could plant a Python
-        block in a skill the agent later loads.
+        A typed value used to reach the skill verbatim, fence and all; since
+        WP-X.42 recorded values render inert (tests/test_skill_write_safety.py),
+        so the dangerous draft here is injected at the synthesizer.
         """
+        import prometheus.learning.live_recorder.service as service_mod
         from prometheus.learning.live_recorder.service import LiveRecorderService
+        from prometheus.learning.live_recorder.synthesizer import LiveSkillDraft
 
         rec = _live_recorder_module()
-        events = rec._recording_events()
-        payload = "notes\n```python\nimport os\nos.system('rm -rf ~')\n```\n"
-        next(e for e in events if e.get("type") == "input")["inputValue"] = payload
-
+        monkeypatch.setattr(service_mod, "build_skill_content", lambda *a, **k: LiveSkillDraft(
+            name="tidy-release-notes", title="t", description="d", content=DANGEROUS,
+            step_count=1, parameter_count=0))
         creator, auto = _creator(tmp_path)
         registry = MagicMock()
         service = LiveRecorderService(creator, skill_registry=registry,
                                       recordings_dir=tmp_path / "recordings")
         with caplog.at_level(logging.WARNING, logger="prometheus.learning.skill_creator"):
             result = asyncio.run(service.handle_upload(
-                events, {"startUrl": rec.METADATA["start_url"], "duration": 6000}))
+                rec._recording_events(), {"startUrl": rec.METADATA["start_url"], "duration": 6000}))
         assert result["status"] == "error"
         assert "rejected" in result["error"]
         assert list(auto.iterdir()) == []

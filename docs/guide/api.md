@@ -139,7 +139,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8005/v1/chat/completi
 | POST | `/api/learning/video-ingest` | Start background video/YouTube ingestion toward a skill **draft** (never auto-persisted). 503 when `learning.video_ingest.enabled: false` — which is the shipped default |
 | GET | `/api/learning/skill-drafts` | List pending skill drafts |
 | GET | `/api/learning/skill-drafts/{draft_id}` | Draft content + provenance sidecar |
-| POST | `/api/learning/skill-drafts/{draft_id}/accept` | Persist a reviewed draft to `skills/auto/` (optionally with edited `content`); goes through the same validated write path DOM recordings use |
+| POST | `/api/learning/skill-drafts/{draft_id}/accept` | Persist a reviewed draft to `skills/auto/` (optionally with edited `content`); goes through the same validated write path DOM recordings use. **409** with `conflict: {skill_name, files}` when a live skill already has the name (the draft stays); `replace: true` archives those files to `skills/auto/archive/` and writes the draft in their place, and the 200 lists them under `replaced` |
 | POST | `/api/learning/skill-drafts/{draft_id}/reject` | Archive a draft to `drafts/.rejected/` (never deleted) |
 
 Draft lifecycle events (`skill_draft_created` / `skill_draft_accepted` / `skill_draft_rejected` / `video_ingest_failed`) ride the WebSocket's `sentinel_signal` fan-out. See the [Record a Skill guide](record-a-skill.md).
