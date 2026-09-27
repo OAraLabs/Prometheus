@@ -630,7 +630,7 @@
      "rows": [
       [
        "desktop:parity-repair",
-       "Sandboxed Tool Call Repair",
+       "Sandboxed Tool Call Repair Test",
        "<time>"
       ]
      ]
@@ -1653,7 +1653,7 @@
        "success",
        {
         "$json": {
-         "advertised": 11,
+         "advertised": 12,
          "deferred_active": true,
          "profile": "full",
          "registered_total": 51,
