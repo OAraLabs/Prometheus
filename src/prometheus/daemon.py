@@ -673,6 +673,11 @@ async def run_daemon(args: argparse.Namespace) -> None:
     # iteration ceiling below the shipped default with /health green, the
     # tree clean and the deploy guard passing. Warns; never refuses.
     warn_on_divergence(config)
+    # WP-X.33: a GEPA key that was renamed is otherwise silently ignored, and
+    # the reference deployment's config still sets it. Warned whether GEPA is
+    # enabled or not.
+    from prometheus.learning.gepa import warn_renamed_keys
+    warn_renamed_keys(config)
 
     # Sprint 15 GRAFT: scoped daemon lock — prevent duplicate instances
     from prometheus.gateway.status import acquire_daemon_lock, release_daemon_lock
@@ -2340,7 +2345,13 @@ async def run_daemon(args: argparse.Namespace) -> None:
             evals_cfg = config.get("evals", {}) or {}
             gepa_optimizer = GEPAOptimizer(
                 provider=provider,
+                # Decides whether variants may be generated at all: a hosted
+                # provider only with learning.gepa_allow_hosted: true.
+                provider_name=model_config.get("provider", "llama_cpp"),
                 judge_base_url=evals_cfg.get("judge_base_url"),
+                # The pin from_config() already reads. Without it the in-daemon
+                # judge graded with whatever its endpoint listed first.
+                judge_model=evals_cfg.get("judge_model"),
                 telemetry=telemetry,
                 config=learning_cfg,
             )

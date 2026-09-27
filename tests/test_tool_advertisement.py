@@ -90,7 +90,6 @@ DEFERRED_BY_DESIGN: dict[str, tuple[str, str]] = {
     "notebook_edit": ("Jupyter-specific; edit_file covers the general case.", "edit a jupyter notebook cell"),
     "github_search": ("Overlaps symbiote_scout; explicit.", "search github repositories"),
     "message": ("Outbound send to Discord/Slack/Telegram — explicit by nature.", "send a message to slack or discord"),
-    "skill": ("Skill bodies are injected by the skill system, not usually fetched.", "read a skill by name"),
     "todo_write": ("Project checklist append; niche.", "append a todo item"),
     "sentinel_status": ("Subsystem introspection; diagnostic.", "sentinel subsystem status"),
     "wiki_lint": ("Maintenance operation, run deliberately.", "lint the wiki for broken links"),
@@ -241,6 +240,18 @@ def test_tool_search_itself_is_advertised():
 # ---------------------------------------------------------------------------
 # The operator's live config, when present
 # ---------------------------------------------------------------------------
+
+def test_the_skill_tool_is_advertised():
+    """Promoted 2026-09-26 (option C2 of docs/audits/SKILL-USAGE.md).
+
+    Its DEFERRED_BY_DESIGN entry read "Skill bodies are injected by the skill
+    system, not usually fetched". Nothing injects them: the prompt assembler
+    documents that a body reaches the model only as this tool's result. The
+    prompt meanwhile told every run to "use the skill tool" — and on 822 of 973
+    main-registry runs that tool was not in the list.
+    """
+    assert "skill" in advertised_names()
+
 
 def test_live_always_loaded_names_are_real_tools():
     """A typo in the operator's always_loaded silently advertises nothing.

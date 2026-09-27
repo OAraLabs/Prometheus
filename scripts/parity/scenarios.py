@@ -35,6 +35,13 @@ CALC_PY = '''def add(a, b):
     return a - b
 '''
 
+# tier_full's workspace. The count sits behind an index, so reaching it takes
+# one read to learn the file's name and a second to read it — the turn needs
+# several rounds of calls, each read out of the reply's text at tier full.
+DEPOT_INDEX = "Stock counts for this depot are kept in bin-7.txt.\n"
+
+DEPOT_BIN = "bolts: 5\ngears: 14\nwashers: 8\n"
+
 TEST_CALC_PY = '''from calc import add
 
 assert add(2, 3) == 5, add(2, 3)
@@ -138,10 +145,16 @@ def _req_checkpoint(ev: Evidence) -> list[str]:
     restore = next((s for s in ev.steps if s["op"] == "restore_latest"), {})
     result = restore.get("result") or {}
     touched = len(result.get("restored") or []) + len(result.get("deleted") or [])
+    start = next((s for s in ev.steps if s["op"] == "tree" and s.get("label") == "before-turn"), {})
     before = next((s for s in ev.steps if s["op"] == "tree" and s.get("label") == "after-turn"), {})
     after = next((s for s in ev.steps if s["op"] == "tree" and s.get("label") == "after-undo"), {})
+    # An undo that changed SOMETHING is not an undo: the tree after it must be the
+    # tree before the turn, file for file and hash for hash. A sample whose restore
+    # left a written file behind, or brought back only one of two, is refused.
     return (_need(touched > 0, "restore touched no file")
             + _need(before.get("tree") != after.get("tree"), "undo did not change the workspace")
+            + _need("tree" in start and after.get("tree") == start.get("tree"),
+                    "the undo did not return the workspace to its state before the turn")
             + _need(bool(_final_reply(ev).strip()), "no final reply"))
 
 
@@ -195,13 +208,15 @@ def _req_compaction(ev: Evidence) -> list[str]:
 _PYDANTIC_PER_RUN_VALUE = re.compile(r"input_value=\{[^}]*\b1[0-9]{9}\b")
 
 
-def _call_in_text(row: dict) -> bool:
+def _call_in_text(row: dict, *, xml_only: bool = False) -> bool:
     """Did the model's reply TEXT carry this executed call (the tier-full shape)?
 
     At tier full the tools are withheld from the request and the call is read
     out of the reply's text — as JSON, or as the Qwen XML the reader learned in
     #582. At light the server parses the call natively and the text carries
-    nothing the reader would yield. The reader itself is the oracle.
+    nothing the reader would yield. The reader itself is the oracle. With
+    ``xml_only`` only the XML reader counts (``parse_xml_tool_calls``): a call
+    the JSON strategies read out of the same text does not.
     """
     raw = row.get("raw_model_output") or ""
     parsed = row.get("parsed_tool_call")
@@ -214,14 +229,24 @@ def _call_in_text(row: dict) -> bool:
         parsed = parsed["$json"]          # the store dump marks a decoded JSON column
     if not raw or not isinstance(parsed, dict) or not isinstance(parsed.get("input"), dict):
         return False
-    from prometheus.adapter.enforcer import StructuredOutputEnforcer
+    from prometheus.adapter.enforcer import StructuredOutputEnforcer, parse_xml_tool_calls
 
+    read = parse_xml_tool_calls(raw) if xml_only else StructuredOutputEnforcer().extract_tool_calls(raw)
+    # The validated input may carry defaults the model never wrote; every
+    # argument the reply does carry must be there, as written.
     validated = {k: str(v) for k, v in parsed["input"].items()}
     return any(
         b.name == parsed.get("name")
         and all(validated.get(k) == str(v) for k, v in b.input.items())
-        for b in StructuredOutputEnforcer().extract_tool_calls(raw)
+        for b in read
     )
+
+
+def _fed_back(ev: Evidence) -> list:
+    """Requests carrying the parse-disagreement feedback: the reader saw tool-call
+    markup it could not read, dropped it, and told the model so."""
+    return [r for r in ev.requests
+            if "tool-call markup that could not be parsed" in json.dumps(r, ensure_ascii=False)]
 
 
 def _coding_requests(ev: Evidence) -> list:
@@ -250,8 +275,7 @@ def _req_coding(ev: Evidence) -> list[str]:
     toolless = [r for r in coding if not r.get("tools")]
     executed = [r for r in ev.tool_rows() if r.get("success") == 1 and r.get("parsed_tool_call")]
     native = [r for r in executed if not _call_in_text(r)]
-    fed_back = [r for r in ev.requests
-                if "tool-call markup that could not be parsed" in json.dumps(r, ensure_ascii=False)]
+    fed_back = _fed_back(ev)
     return (_need(report.get("status") == "success", f"coding run status {report.get('status')!r}")
             + _need(report.get("acceptance_exit") == 0, "acceptance command did not pass")
             + _need(not leaking, "a tool result carries a pydantic error repr with a per-run "
@@ -265,6 +289,48 @@ def _req_coding(ev: Evidence) -> list[str]:
                                   "one was read out of the reply's text, the tier-full shape")
             + _need(not fed_back, "a request carries the parse-disagreement feedback — an "
                                   "envelope the reader could not read; the sample records the bug"))
+
+
+def _req_tier_full(ev: Evidence) -> list[str]:
+    # WP-X.28 item 6a. Since #585 no golden runs a local model at tier full:
+    # coding_run resolves to light like a chat turn, and the one tier-full
+    # adapter left in the set is repaired_tool_call's alt, whose 7B writes
+    # JSON. This scenario pins the served 27B to full through
+    # adapter.model_tiers (#602), so its golden must show tier full's text path
+    # end to end: the tools withheld from every request; the 27B's Qwen XML
+    # calls read out of its reply by #582's reader and executed, more than
+    # once; the task done (acceptance: gears.txt holds the count, the files it
+    # read unchanged); a final reply that reports what happened; and no
+    # markup the reader could not read.
+    tooled = [r for r in ev.requests if isinstance(r, dict) and r.get("tools")]
+    executed = [r for r in ev.tool_rows() if r.get("success") == 1 and r.get("parsed_tool_call")]
+    from_xml = [r for r in executed if _call_in_text(r, xml_only=True)]
+    depot = {path.rsplit("/", 1)[-1]: (dump or {}).get("text")
+             for path, dump in ev.stores.items() if path.startswith("ws/depot/")}
+    answer = (depot.get("gears.txt") or "").strip()
+    reply = _final_reply(ev)
+    # A reply that says the work failed, when the files show it done, does not
+    # report what happened.
+    hedges = [w for w in ("couldn", "could not", "can't", "cannot", "unable", "failed")
+              if w in reply]
+    fed_back = _fed_back(ev)
+    return (_need(not tooled, f"{len(tooled)} request(s) carry native tools — the run is not "
+                              "at tier full")
+            + _need(len(executed) >= 2, f"expected >=2 executed tool calls, got {len(executed)} — "
+                                        "the task needs a read to find the file, another to read "
+                                        "it, and a write")
+            + _need(bool(from_xml), "no executed call is one the XML reader (#582) yields from its "
+                                    "own reply — the sample does not show tier full's text path")
+            + _need(answer == "14", f"acceptance: gears.txt holds {answer!r}, not the gears "
+                                    "count (14)")
+            + _need(depot.get("index.txt") == DEPOT_INDEX and depot.get("bin-7.txt") == DEPOT_BIN,
+                    "acceptance: index.txt or bin-7.txt changed — the task only reads them")
+            + _need(bool(re.search(r"\b14\b", reply)) and "bin-7" in reply,
+                    "the final reply does not give the gears count (14) and the file it came "
+                    "from (bin-7.txt)")
+            + _need(not hedges, f"the final reply reports a failure the files do not show: {hedges}")
+            + _need(not fed_back, "a request carries the parse-disagreement feedback — markup "
+                                  "the reader could not read; the sample records the bug"))
 
 
 def _req_workspace(ev: Evidence) -> list[str]:
@@ -478,6 +544,30 @@ SCENARIOS: list[Scenario] = [
                 "message": "Please save this to your long-term memory with the memory "
                            "tool: the parity canary colour is teal. Confirm when done."}],
         require=_req_memory,
+    ),
+    Scenario(
+        name="tier_full",
+        # WHY THE OVERRIDE. The served 27B resolves to light (a registry entry),
+        # where the server parses calls natively and nothing is read out of the
+        # reply's text. adapter.model_tiers (#602) pins it to full, the tier a
+        # local model the registry and its template cannot place runs at: tools
+        # withheld from the request and described in the prompt, the reply's
+        # text read for calls (#582's XML reader), MEDIUM validation.
+        covers="a local model pinned to adapter tier full by adapter.model_tiers: tools "
+               "withheld from every request, the 27B's Qwen XML calls read out of its reply "
+               "text and executed across rounds, the task's file written",
+        files={ws("depot"): {"index.txt": DEPOT_INDEX, "bin-7.txt": DEPOT_BIN}},
+        config={"adapter": {"model_tiers": {"qwen3.8-27b": "full"}}},
+        steps=[
+            {"op": "workspace", "session": "desktop:parity-tierfull", "ws": "depot"},
+            {"op": "chat", "session": "desktop:parity-tierfull",
+             "message": "Use your tools for this. In the workspace, index.txt says which file "
+                        "holds the stock counts. Read it, then read that file and find the "
+                        "number of gears. Write just that number to a new file gears.txt in "
+                        "the workspace. Then tell me the number of gears and the name of the "
+                        "file you read it from."},
+        ],
+        require=_req_tier_full,
     ),
 ]
 

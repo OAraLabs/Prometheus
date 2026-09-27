@@ -314,12 +314,23 @@ def build_runtime_system_prompt(
     # the standing prompt cost at ~core-count entries instead of the full
     # catalog (~8.5k tokens at 146 skills). Everything remains loadable via
     # the skill tool; nothing is lost by being un-rendered.
+    #
+    # The instruction leads the section so it holds whatever is listed: it used
+    # to ride only the tail line, as "use tool_search to find skills for any
+    # task you're unsure how to approach" — a trigger a capable model rarely
+    # meets — so a prompt listing just the core skills said nothing about
+    # loading one (docs/audits/SKILL-USAGE.md: 0 loads on 151 runs that had the
+    # skill tool).
     if skills:
         core = [s for s in skills if isinstance(s, dict) and s.get("core")]
         tail_count = len(skills) - len(core)
-        lines = []
+        lines = [
+            "A skill is saved step-by-step instructions for one kind of task. When "
+            "one fits the task in front of you, load it with the skill tool before "
+            "you start, and follow it."
+        ]
         if core:
-            lines.append("## Core skills (always available)")
+            lines.append("## Core skills")
             for s in core:
                 name = str(s.get("name", ""))
                 desc = str(s.get("description", ""))
@@ -328,18 +339,15 @@ def build_runtime_system_prompt(
             lines.append(
                 f"## {tail_count} additional skill{'s' if tail_count != 1 else ''} "
                 "available on demand. "
-                "Use tool_search to find skills for any task you're unsure how "
-                "to approach, then use the skill tool to load the skill's instructions."
+                "Find one that fits with tool_search, then load it with the skill tool."
             )
         elif not core:
-            # skills list present but empty-ish / no dicts — keep old hint
+            # skills list present but empty-ish / no dicts
             lines.append(
-                "You have additional skills available beyond your loaded tools. "
-                "Use tool_search to find skills for any task you're unsure how "
-                "to approach, then use the skill tool to load the skill's instructions."
+                "More skills are available than are listed here. "
+                "Find one that fits with tool_search, then load it with the skill tool."
             )
-        if lines:
-            dynamic_sections.append("# Available Skills\n\n" + "\n".join(lines))
+        dynamic_sections.append("# Available Skills\n\n" + "\n".join(lines))
 
     # Project instruction files (PROMETHEUS.md, HERMES.md, CLAUDE.md, etc.)
     # Stacked loading: collects files from all directory levels walking upward.

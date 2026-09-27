@@ -876,6 +876,29 @@ def _run_paths(context: "LoopContext") -> tuple[Path, tuple[Path, ...] | None]:
     return current
 
 
+# WP-X.21 T14: which (model, provider name) SERVED the round in progress, when
+# that is not the context's own — i.e. the provider fallback served it. None
+# otherwise. Telemetry reads it and nothing else does: the next round still
+# asks the primary, and no decision is taken on it. Without it, every row a
+# degraded round wrote named the model that FAILED, and a local fallback's
+# successful call was flagged golden under the cloud provider's name — student
+# output filed as a teacher example. A ContextVar for _RUN_PATHS's reason: the
+# read-only tool calls run under gather, in tasks that copy the context.
+_ROUND_SERVING: contextvars.ContextVar = contextvars.ContextVar("prometheus_round_serving", default=None)
+
+
+def _serving_model(context: "LoopContext") -> str:
+    """The model to RECORD for the round in progress: the fallback's, if it served."""
+    serving = _ROUND_SERVING.get()
+    return serving[0] if serving is not None else context.model
+
+
+def _serving_provider_name(context: "LoopContext") -> str:
+    """The provider name to RECORD (it decides ``is_golden``) for the round in progress."""
+    serving = _ROUND_SERVING.get()
+    return serving[1] if serving is not None else _provider_name_for_telemetry(context.provider)
+
+
 async def run_loop(
     context: LoopContext,
     messages: list[ConversationMessage],
@@ -990,6 +1013,7 @@ async def run_loop(
     # task (a stale workspace applied to the next turn is the exact
     # cross-talk this must never allow).
     _paths_token = _RUN_PATHS.set(None)
+    _serving_token = _ROUND_SERVING.set(None)
     try:
         async for item in _run_loop(
             context,
@@ -1007,6 +1031,7 @@ async def run_loop(
             yield item
     finally:
         _RUN_PATHS.reset(_paths_token)
+        _ROUND_SERVING.reset(_serving_token)
         if turn_key is not None:
             try:
                 fmv.discard_turn(turn_key=turn_key)
@@ -1396,7 +1421,13 @@ async def _run_loop(
     for turn in range(context.max_turns):
         # MicroCompaction: compact old tool results (free, no LLM calls)
         if turn > 0 and context.microcompact_after_turns > 0:
-            _microcompact_old_results(context, messages, turn)
+            _microcompact_old_results(
+                context, messages, turn,
+                # The row names THIS turn's conversation — the per-call id,
+                # not the shared web context's "web" namespace — and none at
+                # all on an ephemeral turn, like every other row it writes.
+                session_id=None if ephemeral else effective_session_id,
+            )
 
         final_message: ConversationMessage | None = None
         usage = UsageSnapshot()
@@ -1761,6 +1792,15 @@ async def _run_loop(
 
         if final_message is None:
             raise RuntimeError("Model stream finished without a final message")
+
+        # Who served THIS round, for every row it writes from here on (T14):
+        # the fallback when the round degraded, else the context's own. Set
+        # every round, so a degraded round cannot leak into the next.
+        _ROUND_SERVING.set(
+            (degrade_notice_this_turn[0].model or context.model,
+             degrade_notice_this_turn[0].provider_name or "")
+            if degrade_notice_this_turn else None
+        )
 
         # Golden Trace Capture sprint: capture the model's raw output BEFORE
         # the adapter's extract_tool_calls path rewrites final_message. This
@@ -2429,7 +2469,7 @@ async def _run_loop(
                             "turn": turn,
                         },
                         session_id=rec_sid,
-                        model=context.model,
+                        model=_serving_model(context),
                     )
                 except Exception:
                     # Telemetry must never be why a halt fails to happen.
@@ -2531,7 +2571,7 @@ async def _run_loop(
                                 "task_id": div_task_id,
                             },
                             session_id=rec_sid,
-                            model=context.model,
+                            model=_serving_model(context),
                         )
                     except Exception:
                         log.debug("divergence halt: record_run failed", exc_info=True)
@@ -2929,7 +2969,7 @@ def _log_iteration(
     log.debug("loop turn=%d iter=%d reason=%s %s", turn, tool_iteration, reason, detail)
     if context.telemetry is not None:
         context.telemetry.record(
-            model=context.model,
+            model=_serving_model(context),
             tool_name="_loop_transition",
             success=(reason == _IterationReason.TOOL_SUCCESS),
             error_type=reason if reason != _IterationReason.TOOL_SUCCESS else None,
@@ -3172,11 +3212,16 @@ def _microcompact_old_results(
     context: LoopContext,
     messages: list[ConversationMessage],
     current_turn: int,
+    *,
+    session_id: str | None = None,
 ) -> None:
     """Compact old tool result messages in-place to save context tokens.
 
     Runs BEFORE LCM compaction and compression — it's free (no LLM calls).
     Only touches ToolResultBlock content in messages older than N turns.
+
+    ``session_id`` is the conversation the telemetry row is filed under: the
+    turn's, resolved by the caller. DESCRIPTIVE only — never an origin input.
     """
     if current_turn < context.microcompact_after_turns:
         return
@@ -3290,7 +3335,12 @@ def _microcompact_old_results(
                     subsystem="agent_loop",
                     operation="microcompact",
                     outcome="success",
-                    session_id=getattr(context, "session_id", None),
+                    # Not context.session_id: on the web path that is the
+                    # "web" routing namespace the shared context carries, so
+                    # every web conversation's rewrites were filed under one
+                    # key and none could be joined back (WP-X.21 T5). #258 and
+                    # #458 fixed the same substitution in the other writers.
+                    session_id=session_id,
                     model=getattr(context, "model", None),
                     round_index=current_turn,
                     summary={
@@ -3342,7 +3392,7 @@ async def _safe_execute(
         if context.telemetry is not None:
             try:
                 context.telemetry.record(
-                    model=context.model,
+                    model=_serving_model(context),
                     tool_name=tc.name,
                     success=False,
                     error_type="tool_exception",
@@ -3850,7 +3900,7 @@ async def _execute_tool_call(
         if pre.blocked:
             if context.telemetry is not None:
                 context.telemetry.record(
-                    model=context.model,
+                    model=_serving_model(context),
                     tool_name=tool_name,
                     success=False,
                     error_type="hook_blocked",
@@ -3866,7 +3916,7 @@ async def _execute_tool_call(
     if context.tool_registry is None:
         if context.telemetry is not None:
             context.telemetry.record(
-                model=context.model,
+                model=_serving_model(context),
                 tool_name=tool_name,
                 success=False,
                 error_type="no_registry",
@@ -3953,7 +4003,7 @@ async def _execute_tool_call(
                 except Exception:
                     _failed_call = None
                 context.telemetry.record(
-                    model=context.model,
+                    model=_serving_model(context),
                     tool_name=tool_name,
                     success=False,
                     retries=retries_used,
@@ -3997,7 +4047,7 @@ async def _execute_tool_call(
     if tool is None:
         if context.telemetry is not None:
             context.telemetry.record(
-                model=context.model,
+                model=_serving_model(context),
                 tool_name=tool_name,
                 success=False,
                 error_type="unknown_tool",
@@ -4025,14 +4075,30 @@ async def _execute_tool_call(
             }
             if tool_name not in loaded_names:
                 log.info("Lucky guess: model called deferred tool %s", tool_name)
-                if context.telemetry is not None:
-                    context.telemetry.record(
-                        model=context.model,
-                        tool_name=tool_name,
-                        success=True,
-                        error_type="lucky_guess",
-                        error_detail=f"Tool {tool_name} called without being in prompt schema",
-                        served_model=served_model,
+                # A MARKER, NOT A CALL, so not a tool_calls row. It used to be
+                # one — success=1, no session — written just before the call's
+                # own row, so every per-call reader counted one call twice and
+                # a failed call half-succeeded (tracker.LUCKY_GUESS_ERROR_TYPE).
+                # The call's own row is written below as usual; this records
+                # only that its tool was not advertised.
+                if context.telemetry is not None and hasattr(context.telemetry, "record_run"):
+                    from prometheus.telemetry.tracker import LUCKY_GUESS_OPERATION
+
+                    context.telemetry.record_run(
+                        subsystem="agent_loop",
+                        operation=LUCKY_GUESS_OPERATION,
+                        outcome="success",
+                        # The call row's own rule: the turn's conversation,
+                        # and none at all on an ephemeral turn. DESCRIPTIVE
+                        # only — never an origin input.
+                        session_id=None if ephemeral else (
+                            effective_session_id if effective_session_id is not None
+                            else context.session_id
+                        ),
+                        # The round's serving model, like the call's own row:
+                        # the fallback's, when it served (T14).
+                        model=_serving_model(context),
+                        summary={"tool": tool_name},
                     )
 
     # Content gate. GBNF validated structure, json.loads validated syntax and
@@ -4069,7 +4135,7 @@ async def _execute_tool_call(
             except Exception:
                 _markup_call = None
             context.telemetry.record(
-                model=context.model,
+                model=_serving_model(context),
                 tool_name=tool_name,
                 success=False,
                 error_type="template_markup",
@@ -4140,7 +4206,7 @@ async def _execute_tool_call(
                 except Exception:
                     _failed_call = None
                 context.telemetry.record(
-                    model=context.model,
+                    model=_serving_model(context),
                     tool_name=tool_name,
                     success=False,
                     error_type="input_validation",
@@ -4355,7 +4421,7 @@ async def _execute_tool_call(
                 if not confirmed:
                     if context.telemetry is not None:
                         context.telemetry.record(
-                            model=context.model,
+                            model=_serving_model(context),
                             tool_name=tool_name,
                             success=False,
                             error_type="permission_denied",
@@ -4370,7 +4436,7 @@ async def _execute_tool_call(
             else:
                 if context.telemetry is not None:
                     context.telemetry.record(
-                        model=context.model,
+                        model=_serving_model(context),
                         tool_name=tool_name,
                         success=False,
                         error_type="permission_denied",
@@ -4431,7 +4497,7 @@ async def _execute_tool_call(
         )
         if context.telemetry is not None:
             context.telemetry.record(
-                model=context.model,
+                model=_serving_model(context),
                 tool_name=tool_name,
                 success=False,
                 retries=retries_used,
@@ -4499,7 +4565,10 @@ async def _execute_tool_call(
     )
 
     # Sprint 3 / Golden Trace Capture: record telemetry with raw + parsed output.
-    provider_name = _provider_name_for_telemetry(context.provider)
+    # The round's SERVING provider, not the context's: a local fallback's call
+    # must not be flagged golden under the cloud provider that failed (T14).
+    # The same name decides cloud-golden pair capture below.
+    provider_name = _serving_provider_name(context)
     if context.telemetry is not None:
         import json as _json
         try:
@@ -4507,7 +4576,7 @@ async def _execute_tool_call(
         except Exception:
             parsed_tool_json = None
         context.telemetry.record(
-            model=context.model,
+            model=_serving_model(context),
             tool_name=tool_name,
             success=not result.is_error,
             retries=retries_used,

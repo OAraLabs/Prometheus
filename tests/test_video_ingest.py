@@ -531,7 +531,7 @@ async def test_pipeline_produces_skill_draft(tmp_path: Path, monkeypatch):
     assert skill["step_count"] == 5
     assert skill["parameter_count"] == 2
     # Parameterized TYPE steps surfaced in the draft
-    assert "**input_0**" in skill["content"]
+    assert '`"input_0"`' in skill["content"]  # recorded names render as JSON in inline code
 
     # Gate integration: real gate_actions ran on the funnel-mapped actions
     gate = result["quality_gate"]

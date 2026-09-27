@@ -30,7 +30,7 @@ from parity import normalize as norm  # noqa: E402
 from parity import traces  # noqa: E402
 from parity.model_server import COMPLETIONS_PATHS, Exchange, ModelServer, ServerState  # noqa: E402
 from parity.runner import RunOutput  # noqa: E402
-from parity.scenarios import BY_NAME, SCENARIOS, Evidence  # noqa: E402
+from parity.scenarios import BY_NAME, DEPOT_BIN, DEPOT_INDEX, SCENARIOS, Evidence  # noqa: E402
 
 FIXTURES = traces.trace_dir(REPO)
 
@@ -353,7 +353,7 @@ def test_a_harness_error_is_never_reported_as_parity():
 
 REQUIRED = {"plain_chat", "tool_calls", "repaired_tool_call", "gate_blocked",
             "checkpoint_undo", "compaction", "coding_run", "linked_workspace", "model_switch",
-            "hosted_route"}
+            "hosted_route", "tier_full"}
 
 
 def test_every_required_scenario_is_recorded():
@@ -446,9 +446,14 @@ GATE = {**_tel(tool_calls=(["tool_name", "error_type"], [["read_file", "permissi
         "home/.prometheus/data/security/audit.db": {"sqlite": {"permission_audit": {
             "columns": ["decision"], "rows": [["DENY"]]}}}}
 COMPACTED = _tel(subsystem_runs=(["subsystem"], [["context_compactor"]]))
-UNDO = [{"op": "tree", "label": "after-turn", "tree": {"a": 1}}, None,
-        {"op": "restore_latest", "result": {"restored": ["x"]}},
-        {"op": "tree", "label": "after-undo", "tree": {"b": 2}}]
+# checkpoint_undo's shape: the turn adds greeting.txt and rewrites inventory.txt;
+# the undo deletes the one and restores the other.
+_START = {"inventory.txt": "19d70ba9"}
+_TURNED = {"greeting.txt": "876ccc84", "inventory.txt": "f408144b"}
+UNDO = [{"op": "tree", "label": "before-turn", "tree": _START}, None,
+        {"op": "tree", "label": "after-turn", "tree": _TURNED},
+        {"op": "restore_latest", "result": {"restored": ["inventory.txt"], "deleted": ["greeting.txt"]}},
+        {"op": "tree", "label": "after-undo", "tree": _START}]
 ATLAS_REQ = [{"messages": [{"role": "system", "content": "# Project Atlas\n- codename ATLAS-7."}]}]
 CODE_OK = [{"op": "code", "result": {"report": {"status": "success", "acceptance_exit": 0}}}]
 # WP-X.28 PR 2c: the coding run at the chat turn's tier. An executed call the
@@ -474,14 +479,67 @@ FED_BACK = [{"model": SERVED, "tools": _TOOLS, "messages": [_TASK, {"role": "use
 # What pydantic puts in a tool result: the offending input, truncated, epoch and all.
 PYDANTIC = ("1 validation error for CodeViewInput\npath\n  Field required [type=missing, "
             "input_value={'file_path': '/tmp/prome...g/cparity01-1790371638'}, input_type=dict]")
+# WP-X.28 item 6a: tier full on the chat path. Every call is read out of the
+# reply's text by #582's XML reader, and no request carries native tools.
+def _xml(name: str, **params: str) -> str:
+    body = "".join(f"<parameter={k}>\n{v}\n</parameter>\n" for k, v in params.items())
+    return f"<tool_call>\n<function={name}>\n{body}</function>\n</tool_call>"
+
+
+_DEPOT_CALLS = [("read_file", {"path": "index.txt"}), ("read_file", {"path": "bin-7.txt"}),
+                ("write_file", {"path": "gears.txt", "content": "14"})]
+FULL_XML_ROWS = [[n, 1, _xml(n, **a), {"name": n, "input": a}] for n, a in _DEPOT_CALLS]
+FULL_JSON_ROWS = [[n, 1, json.dumps({"name": n, "arguments": a}), {"name": n, "input": a}]
+                  for n, a in _DEPOT_CALLS]
+FULL_NATIVE_ROWS = [[n, 1, "", {"name": n, "input": a}] for n, a in _DEPOT_CALLS]
+DEPOT = {"ws/depot/index.txt": {"text": DEPOT_INDEX}, "ws/depot/bin-7.txt": {"text": DEPOT_BIN},
+         "ws/depot/gears.txt": {"text": "14\n"}}
+
+
+def _depot(rows=FULL_XML_ROWS, files: dict[str, str | None] | None = None) -> dict:
+    """tier_full's stores: telemetry rows, and the workspace with ``files``
+    changed (text) or gone (None)."""
+    depot = {**DEPOT}
+    for name, text in (files or {}).items():
+        if text is None:
+            depot.pop(f"ws/depot/{name}", None)
+        else:
+            depot[f"ws/depot/{name}"] = {"text": text}
+    return {**_tel(tool_calls=(_TC, rows)), **depot}
+
+
+_ASK = {"role": "user", "content": "Use your tools for this. In the workspace, index.txt says ..."}
+FULL_REQ = [{"model": SERVED, "messages": [_ASK]},
+            {"model": SERVED, "messages": [_ASK, {"role": "user", "content": "1\tStock counts"}]}]
+FULL_TOOLED_REQ = FULL_REQ[:1] + [{**FULL_REQ[1], "tools": _TOOLS}]
+FULL_FED_BACK = FULL_REQ + [{"model": SERVED, "messages": [_ASK, {"role": "user", "content":
+                 "Your previous response contained tool-call markup that could not be parsed, "
+                 "so it was discarded and nothing ran."}]}]
+FULL_REPLY = ("There are **14** gears. The count came from `bin-7.txt` (index.txt pointed there), "
+              "and I wrote 14 to gears.txt.")
+
+
+def _full(reply: str = FULL_REPLY) -> list[dict]:
+    return [{"op": "workspace"}, _chat(reply)]
+
+
 HOSTED_REQ = [{"system": "- Model: claude-haiku-4-5 (provider: anthropic) — the ACTIVE model"}]
 SWITCH_REQS = [{"messages": [{"content": "one"}]}, {"messages": [{"content": "title"}]},
                {"messages": [{"content": "two"}]}]
 MEMORY = {"home/.prometheus/MEMORY.md": "- the parity canary colour is teal"}
 
 
-def _undo(reply: str) -> list[dict]:
-    return [s if s is not None else _chat(reply) for s in UNDO]
+def _undo(reply: str, *, after_undo: dict | None = None) -> list[dict]:
+    steps = [s if s is not None else _chat(reply) for s in UNDO]
+    if after_undo is not None:
+        steps[-1] = {"op": "tree", "label": "after-undo", "tree": after_undo}
+    return steps
+
+
+# An undo that left a changed file: greeting.txt deleted, inventory.txt NOT restored.
+UNDO_LEFT_A_CHANGE = {"inventory.txt": "f408144b"}
+# An undo that left the written file: inventory.txt restored, greeting.txt still there.
+UNDO_LEFT_A_FILE = {"greeting.txt": "876ccc84", "inventory.txt": "19d70ba9"}
 
 
 # (scenario, a sample that passes, [(a sample that must be refused, a fragment of the reason)])
@@ -493,7 +551,9 @@ RECORDING_RULES = [
     ("gate_blocked", _ev(stores=GATE, steps=[_chat("Both were refused by the security gate.")]),
      [(_ev(stores=GATE, steps=[_chat("Done, here are the results.")]), "refusals")]),
     ("checkpoint_undo", _ev(steps=_undo("Done.")),
-     [(_ev(steps=_undo("")), "no final reply")]),
+     [(_ev(steps=_undo("")), "no final reply"),
+      (_ev(steps=_undo("Done.", after_undo=UNDO_LEFT_A_CHANGE)), "state before the turn"),
+      (_ev(steps=_undo("Done.", after_undo=UNDO_LEFT_A_FILE)), "state before the turn")]),
     ("compaction", _ev(stores=COMPACTED, steps=[_chat("noted")] * 3 + [_chat("amber, birch, cobalt")]),
      [(_ev(stores=COMPACTED, steps=[_chat("noted")] * 3
            + [_chat("I can't be certain, but: amber, birch, cobalt")]), "hedges"),
@@ -525,6 +585,23 @@ RECORDING_RULES = [
        "harbor")]),
     ("memory_write", _ev(stores=MEMORY, steps=[_chat("Saved.")]),
      [(_ev(stores=MEMORY, steps=[_chat("")]), "no final reply")]),
+    ("tier_full", _ev(stores=_depot(), steps=_full(), requests=FULL_REQ),
+     [(_ev(stores=_depot(), steps=_full(), requests=FULL_TOOLED_REQ), "native tools"),
+      (_ev(stores=_depot(FULL_XML_ROWS[:1]), steps=_full(), requests=FULL_REQ), ">=2 executed"),
+      (_ev(stores=_depot(FULL_JSON_ROWS), steps=_full(), requests=FULL_REQ), "XML reader"),
+      (_ev(stores=_depot(FULL_NATIVE_ROWS), steps=_full(), requests=FULL_REQ), "XML reader"),
+      (_ev(stores=_depot(files={"gears.txt": "gears: 14\n"}), steps=_full(), requests=FULL_REQ),
+       "acceptance: gears.txt"),
+      (_ev(stores=_depot(files={"gears.txt": None}), steps=_full(), requests=FULL_REQ), "acceptance: gears.txt"),
+      (_ev(stores=_depot(files={"bin-7.txt": "bolts: 5\ngears: 15\nwashers: 8\n"}), steps=_full(),
+           requests=FULL_REQ), "only reads them"),
+      (_ev(stores=_depot(), steps=_full("There are 15 gears, from bin-7.txt."), requests=FULL_REQ),
+       "gears count (14)"),
+      (_ev(stores=_depot(), steps=_full("There are 14 gears."), requests=FULL_REQ),
+       "gears count (14)"),
+      (_ev(stores=_depot(), steps=_full("There are 14 gears in bin-7.txt, but I couldn't write "
+                                        "gears.txt."), requests=FULL_REQ), "failure"),
+      (_ev(stores=_depot(), steps=_full(), requests=FULL_FED_BACK), "parse-disagreement")]),
 ]
 
 
@@ -538,6 +615,45 @@ def test_every_recording_rule_refuses_the_sample_it_was_written_for(name, good, 
     for bad, fragment in bads:
         problems = require(bad)
         assert any(fragment in p for p in problems), (name, fragment, problems)
+
+
+def test_the_tier_full_rule_counts_only_the_xml_reader():
+    """The general text oracle reads a JSON call out of the reply too; the
+    tier-full golden exists for #582's XML path, so its rule counts that
+    reader alone, and a call the server parsed natively counts for neither."""
+    from parity.scenarios import _call_in_text
+
+    def row(r):
+        return dict(zip(_TC, r))
+    assert all(_call_in_text(row(r), xml_only=True) for r in FULL_XML_ROWS)
+    assert all(_call_in_text(row(r)) for r in FULL_JSON_ROWS)
+    assert not any(_call_in_text(row(r), xml_only=True) for r in FULL_JSON_ROWS)
+    assert not any(_call_in_text(row(r)) or _call_in_text(row(r), xml_only=True)
+                   for r in FULL_NATIVE_ROWS)
+    # The store dump marks a decoded JSON column; the oracle reads through it.
+    wrapped = row([*FULL_XML_ROWS[2][:3], {"$json": FULL_XML_ROWS[2][3]}])
+    assert _call_in_text(wrapped, xml_only=True)
+
+
+def test_the_tier_full_scenario_pins_the_served_model_to_full():
+    """The override the golden depends on names the 27B the recording serves,
+    and nothing the harness's alt backend is called."""
+    from parity.runner import HARNESS_OVERRIDES
+
+    tiers = BY_NAME["tier_full"].config["adapter"]["model_tiers"]
+    assert tiers == {"qwen3.8-27b": "full"}
+    assert "qwen3.8-27b" in SERVED.lower()
+    assert "qwen3.8-27b" not in HARNESS_OVERRIDES["backends"]["alt"]["model"].lower()
+
+
+@pytest.mark.parametrize("after_undo", [UNDO_LEFT_A_CHANGE, UNDO_LEFT_A_FILE],
+                         ids=["left-a-changed-file", "left-the-written-file"])
+def test_only_the_before_turn_check_refuses_an_undo_that_left_a_change(after_undo):
+    """Before this check the rule passed these samples: the restore touched files and
+    the tree after it differs from the tree after the turn. Only the comparison with
+    the tree before the turn catches that the undo did not undo."""
+    problems = BY_NAME["checkpoint_undo"].require(_ev(steps=_undo("Done.", after_undo=after_undo)))
+    assert problems == ["the undo did not return the workspace to its state before the turn"]
 
 
 @pytest.mark.parametrize("name", sorted(BY_NAME))

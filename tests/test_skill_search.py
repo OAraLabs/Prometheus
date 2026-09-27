@@ -145,7 +145,7 @@ class TestPromptAssemblySkills:
     def test_prompt_without_skills_has_no_skills_section(self):
         from prometheus.context.prompt_assembler import build_runtime_system_prompt
         prompt = build_runtime_system_prompt(cwd="/tmp", config={})
-        assert "tool_search to find skills" not in prompt
+        assert "# Available Skills" not in prompt
 
     def test_token_savings(self):
         from prometheus.context.token_estimation import estimate_tokens
@@ -159,7 +159,7 @@ class TestPromptAssemblySkills:
 
         # Estimate old: the one-liner is ~30 tokens, old listing would be ~6300
         # We verify the new prompt's skills section is small
-        skills_text = "Use tool_search to find skills"
+        skills_text = "Find one that fits with tool_search"
         assert skills_text in prompt_new
         # The full listing of 95 skills would be ~25K chars / ~6300 tokens
         # New prompt should be well under that

@@ -1444,6 +1444,7 @@ def main() -> None:
 
     # Onboarding Phase 0: the canonical setup/diagnostics surface.
     from prometheus.cli.doctor import add_doctor_subparser
+    from prometheus.cli.gepa import add_gepa_subparser
     from prometheus.cli.retention import add_retention_subparser
     from prometheus.cli.service import add_install_service_subparser
     from prometheus.cli.setup import add_setup_subparser
@@ -1453,6 +1454,7 @@ def main() -> None:
     add_doctor_subparser(subparsers)
     add_retention_subparser(subparsers)
     add_install_service_subparser(subparsers)
+    add_gepa_subparser(subparsers)
 
     daemon_parser = subparsers.add_parser("daemon", help="Start always-on daemon")
     daemon_parser.add_argument(
@@ -1842,6 +1844,12 @@ def main() -> None:
             print(f"  vault_format {marker.vault_format}")
             print(f"  instance_id  {marker.instance_id}")
             sys.exit(0)
+
+    # `oara gepa` — review GEPA's staged skill proposals; the one place a
+    # proposal becomes a live skill (WP-X.33). No model, no daemon needed.
+    if args.command == "gepa":
+        from prometheus.cli.gepa import run_gepa_command
+        sys.exit(run_gepa_command(args))
 
     # Migration subcommand — runs pre-agent, no model needed
     if args.command == "retention":

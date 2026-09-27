@@ -1981,6 +1981,10 @@ def create_app(
         accounts for. A cost headline that silently covers 12% of the traffic is worse than no
         headline.
 
+        ``cached_input_tokens`` follows the same rule as ``cost_usd``: ``null`` when no row recorded
+        a cache count ("not recorded"), a number only when some did, with ``cache_reported_runs``
+        saying how many of ``runs`` that is. A recorded 0 is a cold cache and stays 0.
+
         BILLING IS A PROPERTY OF WHEN, NOT OF WHICH MODEL (#284). Pricing is still applied at
         read time — a corrected price should fix history. Billing MODE is not, because it is not
         a correction, it is a different fact: these tokens were paid for under the arrangement
@@ -2082,7 +2086,10 @@ def create_app(
         models: list[dict] = []
         coverage: dict[str, dict] = {}
         total_cost = 0.0
-        totals = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "runs": 0}
+        # cached_input_tokens: None until some model reports a recorded count —
+        # "not recorded" is not "0 cached" (usage_rollup, WP-X.21 T6).
+        totals: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0,
+                                  "cached_input_tokens": None, "cache_reported_runs": 0, "runs": 0}
 
         for m in raw["models"]:
             name = m["model"]
@@ -2158,8 +2165,10 @@ def create_app(
                 "first_seen": iso(m["first_seen"]),
                 "last_seen": iso(m["last_seen"]),
             })
-            for k in ("input_tokens", "output_tokens", "cached_input_tokens", "runs"):
+            for k in ("input_tokens", "output_tokens", "cache_reported_runs", "runs"):
                 totals[k] += m[k]
+            if m["cached_input_tokens"] is not None:
+                totals["cached_input_tokens"] = (totals["cached_input_tokens"] or 0) + m["cached_input_tokens"]
 
         for mode_name, bucket in coverage.items():
             bucket["models"] = sum(
@@ -4278,28 +4287,61 @@ def create_app(
                     content={"error": "content must be a non-empty string when provided"},
                 )
             content = edited
+        # WP-X.42: a draft whose name a live skill already has is refused
+        # (409) unless the reviewer asks to replace it. It used to be written
+        # beside the live skill under a suffixed name, which the registry
+        # never serves: "accepted", and nothing changed for the agent.
+        replace = (body or {}).get("replace", False)
+        if not isinstance(replace, bool):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "replace must be true or false when provided"},
+            )
+
+        from prometheus.learning.skill_creator import SkillNameTaken
 
         source = sidecar.get("source", "unknown")
         service = _live_recorder_service()
-        path = await service.persist_content(
-            content, trigger=f"skill draft {draft_id} accepted ({source})"
-        )
+        replaced: list[tuple[Path, Path]] = []
+        try:
+            path = await service.persist_content(
+                content, trigger=f"skill draft {draft_id} accepted ({source})",
+                on_collision="replace" if replace else "refuse", replaced=replaced,
+            )
+        except SkillNameTaken as exc:
+            files = [f.name for f in exc.files]
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": f"a live skill already has the name {exc.name!r} "
+                             f"(skills/auto/{', skills/auto/'.join(files)}). Accept with "
+                             "{\"replace\": true} to archive it and write this draft "
+                             "in its place, or rename the draft.",
+                    "conflict": {"skill_name": exc.name, "files": files},
+                },
+            )
         if path is None:
-            # Validation refused it (e.g. missing frontmatter name:) —
-            # leave the draft in place so the reviewer can fix and retry.
+            # Validation refused it (a missing frontmatter name:, the quality
+            # gate, or dangerous code, WP-X.40) — leave the draft in place so
+            # the reviewer can fix and retry.
             return JSONResponse(
                 status_code=422,
                 content={"error": "persistence rejected the content "
-                                  "(missing/invalid frontmatter name:)"},
+                                  "(missing/invalid frontmatter name:, a quality-gate "
+                                  "rejection, or dangerous code — the log says which)"},
             )
 
         store.remove_accepted(draft_id)
+        replaced_out = [{"file": live.name, "archived_as": f"archive/{copy.name}"}
+                        for live, copy in replaced]
         await _emit_draft_signal("skill_draft_accepted", {
             "draft_id": draft_id,
             "skill_name": path.stem,
             "skill_path": str(path),
+            "replaced": replaced_out,
         })
-        return {"status": "accepted", "skill_name": path.stem, "skill_path": str(path)}
+        return {"status": "accepted", "skill_name": path.stem, "skill_path": str(path),
+                "replaced": replaced_out}
 
     @app.post("/api/learning/skill-drafts/{draft_id}/reject")
     async def reject_skill_draft(draft_id: str):

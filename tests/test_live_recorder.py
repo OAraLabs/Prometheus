@@ -180,7 +180,8 @@ def test_skill_content_lists_parameters():
     actions_data = events_to_actions(process_events(_recording_events()))
     draft = build_skill_content(actions_data["actions"], actions_data["parameters"], METADATA)
     assert "## Parameters" in draft.content
-    assert "**email**" in draft.content
+    # A recorded parameter name renders as JSON in inline code (WP-X.42).
+    assert '- `"email"` (`"email"`)' in draft.content
 
 
 # ── quality gate ─────────────────────────────────────────────────────
