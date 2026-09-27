@@ -164,6 +164,30 @@ def test_build_report_differing_harness_sha_emits_validity_warning(tmp_path):
     assert "harness git SHA differs" in text
 
 
+def test_build_report_leaves_unscored_tasks_out_of_pass_rate(tmp_path):
+    """A task the judge could not score is neither a pass nor a fail (WP-X.22).
+
+    Its unscored metrics are named in `unavailable_metrics` and absent from
+    `metrics`, so reading `metrics` alone passed it on the ones that remain.
+    """
+    ok = [{"metric_name": n, "score": 1.0, "passed": True}
+          for n in ("Tool Usage", "Task Completion", "No Hallucination")]
+    data = {"results": [
+        {"task_id": "passes", "error": None, "metrics": ok},
+        {"task_id": "unscored", "error": None, "metrics": ok[:1],
+         "unavailable_metrics": ["Task Completion", "No Hallucination"]},
+        {"task_id": "fails", "error": None,
+         "metrics": ok[:1] + [{"metric_name": "Task Completion", "score": 0.2,
+                               "passed": False}]},
+    ]}
+    (tmp_path / "r.json").write_text(json.dumps(data))
+    manifests = {label: _manifest("sha_SAME", "Q4_K_M", str(tmp_path / "r.json"))
+                 for label in ("gemma", "qwen")}
+    text = ab.build_report(tmp_path, manifests).read_text()
+    assert "| pass_rate | 0.5 | 0.5 |" in text, text
+    assert "| unscored | 1 | 1 |" in text, text
+
+
 def test_build_report_quant_diff_is_soft_note_not_hard_warning(tmp_path):
     # same SHA, same judge, only quant differs (the real-deploy case)
     manifests = {

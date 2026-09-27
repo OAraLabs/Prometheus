@@ -179,7 +179,7 @@ def test_the_runner_names_the_metrics_it_could_not_evaluate(monkeypatch):
         expected_behavior="does the thing", expected_tools=["bash"],
     )
 
-    scores, unavailable = asyncio.run(
+    scores, unavailable, unparseable = asyncio.run(
         runner._evaluate_metrics(task, "output", TRACE)
     )
 
@@ -188,3 +188,5 @@ def test_the_runner_names_the_metrics_it_could_not_evaluate(monkeypatch):
         f"the runner did not name the metrics it could not evaluate: "
         f"{unavailable}"
     )
+    # A call that raised is an outage, not a reply without a verdict.
+    assert unparseable == []

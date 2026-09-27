@@ -2591,9 +2591,13 @@ load_golden_dataset(tier=None, skip_network=True) -> list[GoldenTask]
 ```python
 @dataclass
 class JudgeVerdict:
-    score: float         # 0.0-1.0
+    score: float | None  # 0.0-1.0; None when status is "unparseable"
     reasoning: str
     raw_response: str
+    status: str = "parsed"  # "parsed" | "unparseable" (the reply held no verdict)
+
+# The one strict reader of judge replies; the ladder's strict_judge_score uses it too
+def parse_judge_reply(raw: str, form: str = "json") -> JudgeVerdict   # form: "json" | "geval"
 
 class PrometheusJudge:
     def __init__(self, base_url="http://<gpu-host>:8080", model=None, timeout=120.0)
