@@ -60,8 +60,8 @@ def get_config_file_path() -> Path:
     return get_config_dir() / _CONFIG_FILE_NAME
 
 
-def get_data_dir() -> Path:
-    """Return the data directory for caches, history, etc.
+def data_dir_path() -> Path:
+    """Where the data directory IS. Creates nothing — see :func:`config_dir_path`.
 
     Resolution order:
     1. PROMETHEUS_DATA_DIR environment variable
@@ -69,10 +69,16 @@ def get_data_dir() -> Path:
     """
     env_dir = os.environ.get("PROMETHEUS_DATA_DIR")
     if env_dir:
-        data_dir = Path(env_dir)
-    else:
-        data_dir = get_config_dir() / "data"
+        return Path(env_dir)
+    return config_dir_path() / "data"
 
+
+def get_data_dir() -> Path:
+    """Return the data directory for caches, history, etc., creating it if needed.
+
+    The location comes from :func:`data_dir_path`; this adds the ``mkdir``.
+    """
+    data_dir = data_dir_path()
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir
 
@@ -189,6 +195,15 @@ def get_lcm_db_path() -> Path:
     pass ``db_path`` explicitly. This is only the default.
     """
     return get_data_dir() / _LCM_DB_NAME
+
+
+def lcm_db_path() -> Path:
+    """Where :func:`get_lcm_db_path` resolves, creating nothing.
+
+    For readers that must leave no directory behind when there is no store
+    yet — ``oara gepa dry-run`` reports on a box without creating state on it.
+    """
+    return data_dir_path() / _LCM_DB_NAME
 
 
 def get_legacy_lcm_db_path() -> Path:

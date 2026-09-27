@@ -108,6 +108,13 @@ KNOWN_DEFAULT_MISMATCHES: dict[str, str] = {
     #    one. Category 2 with a non-empty template value.
     "coding.docker_image": "WIRE — reader has no fallback; absence yields None",
     "evals.judge_base_url": "WIRE — reader has no fallback; absence yields None",
+    "evals.judge_model": "WIRE — reader has no fallback; absence yields None, i.e. an "
+                         "UNPINNED judge. Not new debt: GEPAOptimizer.from_config and "
+                         "scripts/run_nightly_evals.py already read it this way, out of the "
+                         "extractor's sight. It became visible when the daemon's GEPA wiring "
+                         "started passing it (WP-X.33) — before, the daemon dropped the pin. "
+                         "A literal fallback would be worse: provenance would name a model "
+                         "a non-Ollama judge endpoint may not serve.",
     "gateway.media.cache_dir": "WIRE — reader has no fallback; absence yields None",
     "learning.curator_interval_seconds": "WIRE — reader has no fallback",
     # ⚠ BOTH DISPOSITIONS CORRECTED. They were registered together as one

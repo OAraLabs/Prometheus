@@ -202,12 +202,12 @@ class TestGEPAOptimizer:
         from prometheus.learning.gepa import GEPAOptimizer
 
         repo_config({
-            "learning": {"gepa_enabled": True, "gepa_min_traces_required": 4},
+            "learning": {"gepa_enabled": True, "gepa_min_loads": 4},
             "evals": {"judge_model": "pinned-judge"},
         })
         gepa = GEPAOptimizer.from_config(MagicMock())
         assert gepa is not None
-        assert gepa._min_traces == 4
+        assert gepa._min_loads == 4
 
     def test_evals_judge_pins_are_now_reachable(self, repo_config):
         """``evals.judge_model`` exists to stop the optimizer self-judging. It

@@ -903,14 +903,30 @@ learning:
   curator_min_idle_seconds: 0             # 0 = always run on tick (reserved)
   curator_max_prunings_per_run: 10        # safety cap on auto-archives per pass
   curator_telegram_summary: true          # post a one-line summary to Telegram on run
-  # GEPA (SUNRISE Session B) — Generalized Evolutionary Prompt Architecture.
+  # GEPA — improves the auto skills the model actually LOADS, and only
+  # proposes: a winning variant is staged in ~/.prometheus/skills/proposals/
+  # and changes nothing until you run `oara gepa promote <id>`.
+  # `oara gepa dry-run` shows what a cycle would do, as counts.
   gepa_enabled: false
   gepa_max_skills_per_cycle: 3
   gepa_variants_per_skill: 3
-  gepa_min_traces_required: 10
+  # A skill is a candidate once it was loaded this many times; the latest
+  # runs that loaded it (up to 5) are the evidence it is judged on.
+  gepa_min_loads: 3
+  # A variant is proposed only if its mean judge score beats the live
+  # skill's by at least this much on the same runs, reaches
+  # gepa_judge_threshold, and is lower on no run. A verdict with no
+  # parseable score never wins. 0.15: the smallest margin at which no
+  # formatting-only rewrite passed, over two runs of
+  # docs/audits/gepa-margin/judge_noise.py.
+  gepa_min_margin: 0.15
   gepa_judge_threshold: 0.7
   gepa_min_idle_minutes: 10
   gepa_max_frequency_hours: 24
+  # Variants are written by the primary model when it is LOCAL. A hosted
+  # primary is used only when this is true (a YAML boolean): the prompt holds
+  # real requests and tool calls, redacted.
+  gepa_allow_hosted: false
   gepa_model: default
   # Live recorder — "record a skill" from browser demonstration traces.
   # The extension uploads DOM events + screenshots to

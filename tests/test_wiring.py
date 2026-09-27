@@ -7072,7 +7072,6 @@ class TestSunriseGEPAEngineWiring:
         opt = GEPAOptimizer(
             provider=None,
             config={"gepa_enabled": False},
-            trajectories_dir=tmp_path / "trajectories",
             skills_auto_dir=tmp_path / "skills" / "auto",
         )
         engine = GEPAEngine(optimizer=opt, signal_bus=bus, config={
@@ -7115,7 +7114,6 @@ class TestSunriseGEPAEngineWiring:
         opt = GEPAOptimizer(
             provider=None,
             config={"gepa_enabled": False},
-            trajectories_dir=tmp_path / "trajectories",
             skills_auto_dir=tmp_path / "skills" / "auto",
         )
         engine = GEPAEngine(optimizer=opt, signal_bus=bus, config={
@@ -7145,7 +7143,6 @@ class TestSunriseGEPAEngineWiring:
         opt = GEPAOptimizer(
             provider=None,
             config={"gepa_enabled": False},  # disabled → fast cycle
-            trajectories_dir=tmp_path / "trajectories",
             skills_auto_dir=tmp_path / "skills" / "auto",
         )
         engine = GEPAEngine(optimizer=opt, signal_bus=bus, config={
