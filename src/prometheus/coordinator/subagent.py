@@ -86,6 +86,7 @@ class SubagentSpawner:
         model: str | None = None,
         system_prompt: str | None = None,
         max_turns: int | None = None,
+        parent_session_id: str | None = None,
     ) -> SubagentResult:
         """Spawn a subagent, run to completion, return result.
 
@@ -96,8 +97,18 @@ class SubagentSpawner:
             model: Override model for this subagent.
             system_prompt: Override system prompt (otherwise uses agent definition).
             max_turns: Override max turns.
+            parent_session_id: The conversation that spawned it, if any. Names
+                the telemetry rows only (see below); None when there is none,
+                or when that turn is ephemeral.
         """
         agent_id = f"sub_{uuid.uuid4().hex[:8]}"
+        # The id this subagent's telemetry rows are filed under (WP-X.21 T4):
+        # its OWN, derived from the parent's — never the parent's itself, or
+        # the golden-trace exporter would pair the subagent's calls with the
+        # parent's conversation. RECORD-ONLY: the loop runs with no session of
+        # its own, as before, so its permission origin stays 'system'. The
+        # parent is named in the run's advertisement summary too.
+        record_session_id = f"subagent:{parent_session_id or 'none'}:{agent_id}"
         defn = get_agent_definition(agent_type)
 
         effective_prompt = system_prompt
@@ -135,6 +146,8 @@ class SubagentSpawner:
             result: RunResult = await loop.run_async(
                 system_prompt=effective_prompt,
                 user_message=task,
+                record_session_id=record_session_id,
+                record_summary={"parent_session": parent_session_id},
             )
             return SubagentResult(
                 agent_id=agent_id,

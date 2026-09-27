@@ -128,7 +128,20 @@ def test_the_route_does_not_pass_a_tools_argument(client_and_loop):
         f"the route still passes tools={loop.calls[0].get('tools')!r}; "
         f"run_async accepts that parameter and never reads it"
     )
-    assert set(loop.calls[0]) == {"system_prompt", "messages"}
+    assert set(loop.calls[0]) == {"system_prompt", "messages", "record_session_id"}
+
+
+def test_the_route_records_its_turns_under_the_conversation(client_and_loop):
+    """WP-X.21 T4. The route persists the turn under ``web:<id>`` in LCM but
+    handed the loop no session, so every telemetry row the turn wrote was
+    session-less. It now passes that id as ``record_session_id``: RECORD-ONLY,
+    so the loop's own session (and with it the permission origin, 'system')
+    is untouched — ``session_id`` must still not be passed."""
+    client, loop = client_and_loop
+    client.post("/api/chat", json={"session_id": "s1", "content": "hi"})
+
+    assert loop.calls[0]["record_session_id"] == "web:s1"
+    assert "session_id" not in loop.calls[0]
 
 
 def test_the_skill_registry_still_has_no_list_schemas():
