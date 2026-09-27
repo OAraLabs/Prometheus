@@ -263,6 +263,14 @@ def billing_stamp_full(
     unlabelled rather than lost.
     """
     try:
+        # Structural before nominal, as billing_for says, one level up: a
+        # provider that serves from a box you own is local whatever the model
+        # is called. A blank config name or an Ollama name:tag is neither a
+        # path nor a priced name, and came out `unknown` (WP-X.21 T9).
+        from prometheus.providers.registry import _LOCAL_PROVIDERS
+
+        if getattr(provider, "provider_name", None) in _LOCAL_PROVIDERS:
+            return "local", None
         host = billing_host_of(provider)
         url = f"//{host}" if host else None
         mode, _reason_withheld = billing_for(model or "", url)
