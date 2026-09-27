@@ -1586,6 +1586,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "tool_calls"
         }
        },
@@ -1595,7 +1596,7 @@
        "desktop:parity-gate",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       null,
+       4200,
        null,
        "<node>",
        "local",
@@ -1610,6 +1611,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "stop"
         }
        },
@@ -1619,7 +1621,32 @@
        "desktop:parity-gate",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
+       6291,
        null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:31>",
+       "<time>",
+       "session_titles",
+       "generate",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       251,
+       8,
+       null,
+       "desktop:parity-gate",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       15,
        null,
        "<node>",
        "local",
@@ -1649,7 +1676,7 @@
      ],
      "rows": [
       [
-       "<uuid:31>",
+       "<uuid:32>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "read_file",
@@ -1659,16 +1686,23 @@
        "permission_denied",
        "Path '/etc/prometheus-parity.conf' is under denied prefix '/etc'",
        null,
-       null,
+       {
+        "$json": {
+         "input": {
+          "path": "/etc/prometheus-parity.conf"
+         },
+         "name": "read_file"
+        }
+       },
        0,
        0,
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       null,
+       "desktop:parity-gate",
        null,
        "<node>"
       ],
       [
-       "<uuid:32>",
+       "<uuid:33>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "bash",
@@ -1678,16 +1712,23 @@
        "permission_denied",
        "Command matches deny list entry: 'DROP TABLE'",
        null,
-       null,
+       {
+        "$json": {
+         "input": {
+          "command": "echo 'DROP TABLE parity_canary'"
+         },
+         "name": "bash"
+        }
+       },
        0,
        0,
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-       null,
+       "desktop:parity-gate",
        null,
        "<node>"
       ],
       [
-       "<uuid:33>",
+       "<uuid:34>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "_loop_transition",
@@ -1701,7 +1742,7 @@
        0,
        0,
        null,
-       null,
+       "desktop:parity-gate",
        null,
        "<node>"
       ]

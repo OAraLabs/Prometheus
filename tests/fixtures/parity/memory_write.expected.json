@@ -1540,6 +1540,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "tool_calls"
         }
        },
@@ -1549,7 +1550,7 @@
        "desktop:parity-memory",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
-       null,
+       4172,
        null,
        "<node>",
        "local",
@@ -1564,6 +1565,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "stop"
         }
        },
@@ -1573,7 +1575,32 @@
        "desktop:parity-memory",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        0,
+       6243,
        null,
+       "<node>",
+       "local",
+       null
+      ],
+      [
+       "<uuid:31>",
+       "<time>",
+       "session_titles",
+       "generate",
+       "<ms>",
+       "success",
+       {
+        "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+         "stop_reason": "stop"
+        }
+       },
+       102,
+       8,
+       null,
+       "desktop:parity-memory",
+       "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+       0,
+       15,
        null,
        "<node>",
        "local",
@@ -1603,7 +1630,7 @@
      ],
      "rows": [
       [
-       "<uuid:31>",
+       "<uuid:32>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "memory",
@@ -1693,7 +1720,7 @@
        "<node>"
       ],
       [
-       "<uuid:32>",
+       "<uuid:33>",
        "<time>",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        "_loop_transition",
@@ -1707,7 +1734,7 @@
        0,
        0,
        null,
-       null,
+       "desktop:parity-memory",
        null,
        "<node>"
       ]

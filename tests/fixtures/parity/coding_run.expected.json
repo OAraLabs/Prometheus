@@ -1427,6 +1427,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "tool_calls"
         }
        },
@@ -1436,7 +1437,7 @@
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        1,
-       null,
+       0,
        null,
        "<node>",
        "local",
@@ -1451,6 +1452,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "tool_calls"
         }
        },
@@ -1460,7 +1462,7 @@
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        1,
-       null,
+       1804,
        null,
        "<node>",
        "local",
@@ -1475,6 +1477,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "tool_calls"
         }
        },
@@ -1484,7 +1487,7 @@
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        1,
-       null,
+       1975,
        null,
        "<node>",
        "local",
@@ -1499,6 +1502,7 @@
        "success",
        {
         "$json": {
+         "served_model": "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
          "stop_reason": "stop"
         }
        },
@@ -1508,7 +1512,7 @@
        "coding:cparity01",
        "/models-root/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
        1,
-       null,
+       2102,
        null,
        "<node>",
        "local",
@@ -1731,7 +1735,7 @@
        0,
        0,
        null,
-       null,
+       "coding:cparity01",
        null,
        "<node>"
       ],
@@ -1809,7 +1813,7 @@
        0,
        0,
        null,
-       null,
+       "coding:cparity01",
        null,
        "<node>"
       ],
@@ -1886,7 +1890,7 @@
        0,
        0,
        null,
-       null,
+       "coding:cparity01",
        null,
        "<node>"
       ]
