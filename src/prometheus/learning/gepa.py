@@ -34,8 +34,8 @@ counts only.
 History: until WP-X.33 GEPA read golden-trace exports and looked for a
 ``Skill`` tool, an ``input.skill`` field and a ``Reference parsed call:``
 marker — none of which exist (the tool is ``skill``, its field ``name``, and
-the export shape changed in #586). It found nothing, and would have written
-straight into ``skills/auto/`` if it had.
+#209 moved the call into the assistant turn's ``tool_calls``). It found
+nothing, and would have written straight into ``skills/auto/`` if it had.
 """
 
 from __future__ import annotations
