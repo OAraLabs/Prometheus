@@ -177,9 +177,16 @@ class LCMSummarizer:
                     max_tokens=1024,
                 )
 
-                # Consume the stream and extract the complete text.
+                # Consume the stream and extract the complete text. Through the
+                # envelope (WP-X.21 T11): the request passes unchanged, and the
+                # call leaves a usage row, which it never did.
+                from prometheus.learning.llm_envelope import LLMCallEnvelope
+                from prometheus.telemetry.tracker import get_telemetry_handle
+
+                envelope = LLMCallEnvelope("lcm_summarizer", telemetry=get_telemetry_handle())
                 full_text = ""
-                async for event in self._provider.stream_message(request):
+                async for event in envelope.stream(provider=self._provider, request=request,
+                                                   operation="summarize"):
                     from prometheus.providers.base import (
                         ApiMessageCompleteEvent,
                         ApiTextDeltaEvent,
