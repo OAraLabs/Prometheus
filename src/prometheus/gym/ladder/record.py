@@ -29,6 +29,7 @@ from collections import defaultdict
 from typing import Any
 
 from prometheus.telemetry.tracker import (
+    LUCKY_GUESS_ERROR_TYPE,
     NON_CALL_FAILURE_TYPES,
     POLICY_ERROR_TYPES,
     SYNTHETIC_TOOL_NAME,
@@ -94,18 +95,23 @@ def harvest_run_metrics(
     A real round always has input tokens, so an all-zero sum is recorded as
     NULL with ``tokens_source='unreported'`` — never as a measured 0.
     """
+    # Old lucky-guess markers are tool_calls rows but not calls — a success=1
+    # twin of a call that has its own row, with no session, so the window join
+    # below used to pull one in per guess (tracker.LUCKY_GUESS_ERROR_TYPE).
     calls = conn.execute(
         "SELECT success, retries, repairs, error_type, served_model FROM tool_calls "
-        "WHERE session_id = ? AND tool_name != ?",
-        (session_id, SYNTHETIC_TOOL_NAME),
+        "WHERE session_id = ? AND tool_name != ? "
+        "AND (error_type IS NULL OR error_type != ?)",
+        (session_id, SYNTHETIC_TOOL_NAME, LUCKY_GUESS_ERROR_TYPE),
     ).fetchall()
     unattributed = []
     if window is not None:
         unattributed = conn.execute(
             "SELECT success, retries, repairs, error_type, served_model FROM tool_calls "
             "WHERE (session_id IS NULL OR session_id = '') AND tool_name != ? "
+            "AND (error_type IS NULL OR error_type != ?) "
             "AND timestamp >= ? AND timestamp <= ?",
-            (SYNTHETIC_TOOL_NAME, window[0], window[1]),
+            (SYNTHETIC_TOOL_NAME, LUCKY_GUESS_ERROR_TYPE, window[0], window[1]),
         ).fetchall()
         calls = list(calls) + list(unattributed)
     blocked = 0

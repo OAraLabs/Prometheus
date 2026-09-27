@@ -97,6 +97,18 @@ NON_CALL_FAILURE_TYPES: frozenset[str] = POLICY_ERROR_TYPES | EXECUTED_ERROR_TYP
 # a feed that was half loop echoes. Named so a fourth reader cannot miss it.
 SYNTHETIC_TOOL_NAME = "_loop_transition"
 
+# A LUCKY GUESS IS A MARKER, NOT A CALL. When the model calls a deferred tool by
+# name (registered, but not in the schemas its run advertised), the loop notes
+# it. It used to note it as a second ``tool_calls`` row — success=1, this
+# error_type, no session id — written just before the call's own row, so every
+# per-call reader counted one call twice and a failed call half-succeeded
+# (WP-X.21 T2, docs/audits/TELEMETRY-GAPS.md). The loop now writes the marker to
+# ``subsystem_runs`` (agent_loop / LUCKY_GUESS_OPERATION, with the session). The
+# rows written before that stay in ``tool_calls``; every per-call reader skips
+# them by this error_type, the way it skips SYNTHETIC_TOOL_NAME.
+LUCKY_GUESS_ERROR_TYPE = "lucky_guess"
+LUCKY_GUESS_OPERATION = "lucky_guess"
+
 # One ``subsystem_runs`` row per ``skill`` tool call (tools/builtin/skill.py): outcome "success"
 # is a load, "failed" a lookup that found nothing. Kept in subsystem_runs rather than a table of
 # its own on purpose: the parity harness dumps every table of every store, so a new table would
@@ -1535,9 +1547,12 @@ class ToolCallTelemetry:
         query = (
             "SELECT id, timestamp, model, tool_name, success, retries, "
             "latency_ms, error_type, error_detail, parsed_tool_call "
-            "FROM tool_calls WHERE tool_name != ?"
+            "FROM tool_calls WHERE tool_name != ? "
+            # A lucky-guess marker is not a call: the feed showed it as a
+            # phantom success beside the real row (LUCKY_GUESS_ERROR_TYPE).
+            "AND (error_type IS NULL OR error_type != ?)"
         )
-        params: list[Any] = [SYNTHETIC_TOOL_NAME]
+        params: list[Any] = [SYNTHETIC_TOOL_NAME, LUCKY_GUESS_ERROR_TYPE]
         if tool_name is not None:
             query += " AND tool_name = ?"
             params.append(tool_name)
@@ -1727,8 +1742,12 @@ class ToolCallTelemetry:
                 "SELECT COUNT(*), COALESCE(SUM(success), 0), "
                 f"COALESCE(SUM(error_type IN ({_ph})), 0) "
                 "FROM tool_calls WHERE timestamp >= ? "
-                "AND tool_name != ?",
-                (*NON_CALL_FAILURE_TYPES, since, SYNTHETIC_TOOL_NAME),
+                "AND tool_name != ? "
+                # Nor the old lucky-guess markers: a success=1 twin of a call
+                # that has its own row (LUCKY_GUESS_ERROR_TYPE).
+                "AND (error_type IS NULL OR error_type != ?)",
+                (*NON_CALL_FAILURE_TYPES, since, SYNTHETIC_TOOL_NAME,
+                 LUCKY_GUESS_ERROR_TYPE),
             ).fetchone() or (0, 0, 0)
             t_total, t_succ, t_denied = (
                 int(t_total or 0), int(t_succ or 0), int(t_denied or 0),
@@ -2132,15 +2151,17 @@ class ToolCallTelemetry:
         """
         # M1: drop synthetic ``_loop_transition`` rows so the per-tool breakdown
         # doesn't list a fake "tool" and the totals aren't inflated by the loop
-        # echo of every real tool call.
+        # echo of every real tool call. Same for the old lucky-guess markers: a
+        # success=1 twin of a call that has its own row (LUCKY_GUESS_ERROR_TYPE).
         query = (
             "SELECT model, tool_name, success, retries, latency_ms, error_type,"
             " timestamp FROM tool_calls WHERE tool_name != ?"
+            " AND (error_type IS NULL OR error_type != ?)"
         )
-        params: tuple = (SYNTHETIC_TOOL_NAME,)
+        params: tuple = (SYNTHETIC_TOOL_NAME, LUCKY_GUESS_ERROR_TYPE)
         if since is not None:
             query += " AND timestamp >= ?"
-            params = (SYNTHETIC_TOOL_NAME, since)  # APPEND — do not drop the exclusion bind
+            params = (*params, since)  # APPEND — do not drop the exclusion binds
         rows = self._conn.execute(query, params).fetchall()
 
         if not rows:

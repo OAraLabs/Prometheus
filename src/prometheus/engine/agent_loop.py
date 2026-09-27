@@ -3987,14 +3987,28 @@ async def _execute_tool_call(
             }
             if tool_name not in loaded_names:
                 log.info("Lucky guess: model called deferred tool %s", tool_name)
-                if context.telemetry is not None:
-                    context.telemetry.record(
+                # A MARKER, NOT A CALL, so not a tool_calls row. It used to be
+                # one — success=1, no session — written just before the call's
+                # own row, so every per-call reader counted one call twice and
+                # a failed call half-succeeded (tracker.LUCKY_GUESS_ERROR_TYPE).
+                # The call's own row is written below as usual; this records
+                # only that its tool was not advertised.
+                if context.telemetry is not None and hasattr(context.telemetry, "record_run"):
+                    from prometheus.telemetry.tracker import LUCKY_GUESS_OPERATION
+
+                    context.telemetry.record_run(
+                        subsystem="agent_loop",
+                        operation=LUCKY_GUESS_OPERATION,
+                        outcome="success",
+                        # The call row's own rule: the turn's conversation,
+                        # and none at all on an ephemeral turn. DESCRIPTIVE
+                        # only — never an origin input.
+                        session_id=None if ephemeral else (
+                            effective_session_id if effective_session_id is not None
+                            else context.session_id
+                        ),
                         model=context.model,
-                        tool_name=tool_name,
-                        success=True,
-                        error_type="lucky_guess",
-                        error_detail=f"Tool {tool_name} called without being in prompt schema",
-                        served_model=served_model,
+                        summary={"tool": tool_name},
                     )
 
     # Content gate. GBNF validated structure, json.loads validated syntax and
