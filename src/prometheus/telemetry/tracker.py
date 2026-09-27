@@ -1422,6 +1422,12 @@ class ToolCallTelemetry:
 
         ``tracking_since`` is the first row that carried tokens — a dashboard must be able to say
         what window it is summing, because rows older than that exist and have no token data.
+
+        ``cached_input_tokens`` per model is ``None`` when NO row in the group recorded a cache
+        count — "not recorded", which is not "0 cached" (#119's None ≠ 0; a cold cache is a real
+        0 and stays 0). ``cache_reported_runs`` says how many of ``runs`` did record one, so a
+        partial sum is never mistaken for a whole. It used to be ``COALESCE(SUM(...), 0)``, which
+        reported 0 for every model while no row held a count at all (WP-X.21 T6, reader half).
         """
         window_start: float | None = None
         if days is not None and days > 0:
@@ -1437,7 +1443,9 @@ class ToolCallTelemetry:
             per_model = self._conn.execute(
                 "SELECT COALESCE(model, ''), COUNT(*), "
                 "COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), "
-                "COALESCE(SUM(cached_input_tokens), 0), MIN(timestamp), MAX(timestamp) "
+                # SUM over all-NULL is NULL: "not recorded", kept as such.
+                "SUM(cached_input_tokens), COUNT(cached_input_tokens), "
+                "MIN(timestamp), MAX(timestamp) "
                 f"FROM subsystem_runs {where} GROUP BY COALESCE(model, '') "
                 "ORDER BY SUM(input_tokens) DESC",
                 tuple(params),
@@ -1487,9 +1495,11 @@ class ToolCallTelemetry:
                     "runs": r[1],
                     "input_tokens": r[2],
                     "output_tokens": r[3],
+                    # None = no run in the group recorded a cache count. NOT 0.
                     "cached_input_tokens": r[4],
-                    "first_seen": r[5],
-                    "last_seen": r[6],
+                    "cache_reported_runs": r[5],
+                    "first_seen": r[6],
+                    "last_seen": r[7],
                 }
                 for r in per_model
             ],
