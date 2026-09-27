@@ -223,8 +223,18 @@ class CallRecord:
 class LoadRun:
     """The run around one load: its request, the calls after the load, how it ended."""
 
+    @property
+    def run_key(self) -> tuple[str, float | None]:
+        """Which run this is. Two loads in one run share it: evidence counts the run once.
+
+        A bounded run ends where the session's next run starts; an unbounded
+        one is the session's newest run, which has only one per session.
+        """
+        return (self.session_id, self.end_ts if self.bounded else None)
+
     load_ts: float
     session_id: str
+    end_ts: float
     request: str | None
     request_withheld: bool
     calls: tuple[CallRecord, ...]
@@ -417,6 +427,7 @@ def run_for_load(
     return LoadRun(
         load_ts=event.timestamp,
         session_id=session_id,
+        end_ts=end,
         request=request,
         request_withheld=withheld,
         calls=tuple(calls),

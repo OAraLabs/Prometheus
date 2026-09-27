@@ -577,6 +577,7 @@ class GEPAOptimizer:
                 if self._store.has_pending(skill.path.name, live_sha):
                     plan.pending += 1
                     continue
+                seen_runs: set[tuple[str, float | None]] = set()
                 for event in reversed(loads):
                     if len(cand.runs) >= ev.MAX_EVIDENCE_RUNS:
                         break
@@ -586,7 +587,9 @@ class GEPAOptimizer:
                         log.warning("GEPA: could not read the run of one load of %s",
                                     skill.stem, exc_info=True)
                         continue
-                    if run is not None:
+                    # A skill loaded twice in one run is one run of evidence.
+                    if run is not None and run.run_key not in seen_runs:
+                        seen_runs.add(run.run_key)
                         cand.runs.append(run)
                 if len(cand.runs) < self._min_loads:
                     plan.evidence_short += 1

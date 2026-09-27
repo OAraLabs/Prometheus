@@ -61,7 +61,8 @@ def C(tool, inp, ok=True, et=None, err=""):
 
 
 def R(request, calls, reply="done"):
-    return ev.LoadRun(load_ts=0.0, session_id="synthetic", request=request, request_withheld=False,
+    return ev.LoadRun(load_ts=0.0, session_id="synthetic", end_ts=0.0, request=request,
+                      request_withheld=False,
                       calls=tuple(calls), calls_not_shown=0, replied=True, reply=reply, bounded=True)
 
 

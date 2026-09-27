@@ -342,6 +342,20 @@ class TestCandidatesComeFromTheLoadCounter:
         assert len(plan.candidates) == 1
         assert plan.evidence_short == 1 and plan.ready == []
 
+    def test_two_loads_in_one_run_are_one_run_of_evidence(self, world):
+        """Loaded twice in each of two runs: four loads, a candidate, but two runs — short."""
+        world.write_skill()
+        for i in range(2):
+            world.run(f"s{i}")
+            world.clock.now -= 60  # back inside the run, then load again
+            world.load(f"s{i}")
+            world.clock.tick(120)
+            world.next_run_starts(f"s{i}")
+        plan = world.optimizer().plan()
+        assert plan.candidates and plan.candidates[0].loads == 4
+        assert len(plan.candidates[0].runs) == 2
+        assert plan.evidence_short == 1 and plan.ready == []
+
     def test_most_used_candidates_come_first(self, world):
         world.write_skill()
         world.write_skill(skill_text("1. Deploy.", name="deploy-app", description="Deploy"),
