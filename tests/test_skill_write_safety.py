@@ -151,7 +151,7 @@ class TestDraftsAcceptClash:
         assert resp.status_code == 409
         body = resp.json()
         assert body["conflict"] == {"skill_name": "crm-create-deal",
-                                    "files": ["crm-create-deal.md"]}
+                                    "files": ["crm-create-deal.md"], "served_elsewhere": []}
         assert "skills/auto/crm-create-deal.md" in body["error"]
         assert '"replace": true' in body["error"]
         assert sorted(p.name for p in auto.iterdir()) == ["crm-create-deal.md"]

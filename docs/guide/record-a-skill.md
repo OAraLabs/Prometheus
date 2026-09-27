@@ -80,11 +80,17 @@ vision-derived skills **never** auto-persist. They land in
 - `GET  /api/learning/skill-drafts` — list pending drafts
 - `GET  /api/learning/skill-drafts/{id}` — content + provenance
 - `POST /api/learning/skill-drafts/{id}/accept` — persist through the
-  standard auto-skill path (optionally with edited content). If a live
-  skill already has the draft's name, the answer is **409** naming it and
-  the draft stays pending; accept again with `{"replace": true}` to
+  standard auto-skill path (optionally with edited content). If a skill
+  with the draft's name is already served, the answer is **409** naming it
+  and the draft stays pending; accept again with `{"replace": true}` to
   archive the live skill to `skills/auto/archive/` and write the draft in
   its place, or rename the draft
+
+A browser recording (and a teacher-escalation skill) whose name is already
+served is not written either: it becomes a draft here too — the upload
+answers `"status": "draft"` with its `draft_id` — so a person decides
+between replacing and renaming. Nothing machine-written replaces a live
+skill on its own.
 - `POST /api/learning/skill-drafts/{id}/reject` — archived to
   `drafts/.rejected/`, never deleted
 
