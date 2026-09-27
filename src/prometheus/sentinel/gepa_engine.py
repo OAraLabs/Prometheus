@@ -123,8 +123,8 @@ class GEPAEngine:
                     kind="gepa_cycle_complete",
                     payload={
                         "summary": report.to_telegram_summary(),
-                        "skills_evaluated": report.skills_evaluated,
-                        "skills_promoted": report.skills_promoted,
+                        "candidates": report.candidates,
+                        "proposed": report.proposed,
                     },
                     source="gepa_engine",
                 ))

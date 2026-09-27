@@ -2340,7 +2340,13 @@ async def run_daemon(args: argparse.Namespace) -> None:
             evals_cfg = config.get("evals", {}) or {}
             gepa_optimizer = GEPAOptimizer(
                 provider=provider,
+                # Decides whether variants may be generated at all: a hosted
+                # provider only with learning.gepa_allow_hosted: true.
+                provider_name=model_config.get("provider", "llama_cpp"),
                 judge_base_url=evals_cfg.get("judge_base_url"),
+                # The pin from_config() already reads. Without it the in-daemon
+                # judge graded with whatever its endpoint listed first.
+                judge_model=evals_cfg.get("judge_model"),
                 telemetry=telemetry,
                 config=learning_cfg,
             )

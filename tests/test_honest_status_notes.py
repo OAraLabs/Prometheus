@@ -37,9 +37,10 @@ Claims not covered here, and why:
   trajectory-export half, which is checkable.
 * "Model IDs ... are forward-looking defaults" — a hedge, not a claim. It
   cannot be falsified and so cannot be gated.
-* GEPA "has never promoted a skill" on the reference deployment — a fact
-  about ONE machine's ``~/.prometheus``, not about this repository. Its
-  falsifiable halves (the ``Skill``-tool filter, the minimum) are covered.
+* GEPA "has never run a cycle" on the reference deployment — a fact about
+  ONE machine's ``~/.prometheus``, not about this repository. Its falsifiable
+  halves (candidates from the load counter, the minimum, promotion only by
+  ``oara gepa promote``) are covered.
 """
 
 from __future__ import annotations
@@ -349,20 +350,36 @@ def test_those_commands_do_work_on_all_three_gateways():
 
 # ── bullet 7: GEPA ──────────────────────────────────────────────────
 
-def test_gepa_only_counts_skill_tool_rows():
-    src = (REPO / "src" / "prometheus" / "learning" / "gepa.py").read_text(
-        encoding="utf-8")
-    assert 'meta.get("tool_name") != "Skill"' in src, (
-        "the note says only Skill-tool rows count toward GEPA's input; the "
-        "filter that made that true is gone"
+def test_gepa_takes_candidates_from_the_load_counter():
+    import inspect
+
+    from prometheus.learning import gepa_evidence
+
+    src = inspect.getsource(gepa_evidence.load_events)
+    assert "SKILL_LOAD_SUBSYSTEM" in src and "SKILL_LOAD_OPERATION" in src, (
+        "the note says GEPA's candidates come from the load counter; the "
+        "reader that made that true no longer reads it"
     )
 
 
 def test_gepas_minimum_is_the_number_the_note_states():
     bullet = next(b for b in _bullets() if "GEPA has not been shown" in b)
-    m = re.search(r"below a minimum of (\d+)", bullet)
+    m = re.search(r"loaded at least (\d+) times", bullet)
     assert m, f"the minimum is no longer stated: {bullet[:160]}"
-    assert _get(_template(), "learning.gepa_min_traces_required") == int(m.group(1))
+    assert _get(_template(), "learning.gepa_min_loads") == int(m.group(1))
+
+
+def test_gepa_promotion_is_the_command_the_note_names():
+    import argparse
+
+    from prometheus.cli.gepa import add_gepa_subparser
+
+    bullet = next(b for b in _bullets() if "GEPA has not been shown" in b)
+    assert "`oara gepa promote`" in bullet
+    parser = argparse.ArgumentParser()
+    add_gepa_subparser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["gepa", "promote", "gepa-1-abcd"])
+    assert args.gepa_action == "promote"
 
 
 def test_golden_traces_are_cloud_only():
