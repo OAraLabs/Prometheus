@@ -322,6 +322,7 @@ class LLMCallEnvelope:
         dropped_malformed = 0
         complete_seen = False
         empty_content = False
+        served_model: str | None = None
 
         try:
             async for event in provider.stream_message(request):
@@ -336,6 +337,7 @@ class LLMCallEnvelope:
                         usage_cache_write = getattr(event.usage, "cache_write_tokens", None)
                     stop_reason = event.stop_reason
                     dropped_malformed = getattr(event, "dropped_malformed", 0)
+                    served_model = getattr(event, "served_model", None)
                     msg = event.message
                     empty_content = not (
                         (msg.text or "").strip() or msg.tool_uses
@@ -406,6 +408,11 @@ class LLMCallEnvelope:
             # The collapse-arc shape: a complete event whose message has
             # neither prose nor tool calls. Recorded so it is queryable.
             summary["empty_content"] = True
+        if served_model:
+            # What the provider says served the round (WP-X.21 T13), beside the
+            # row's model, which stays the requested name: a blank config name
+            # otherwise leaves the round with no model at all.
+            summary["served_model"] = served_model
         self._record_usage_row(
             operation=operation,
             outcome="success",

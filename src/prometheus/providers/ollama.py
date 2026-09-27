@@ -104,6 +104,7 @@ class _Attempt:
         self.finish_reason: str | None = None
         self.input_tokens = 0
         self.output_tokens = 0
+        self.served_model: str | None = None
 
 
 def _thought(event: ApiMessageCompleteEvent) -> str:
@@ -403,6 +404,7 @@ class OllamaProvider(ModelProvider):
             ),
             stop_reason=attempt.finish_reason,
             dropped_malformed=dropped_malformed,
+            served_model=attempt.served_model,
         )
 
     async def _stream(
@@ -429,6 +431,9 @@ class OllamaProvider(ModelProvider):
                     except json.JSONDecodeError:
                         continue
 
+                    # What served this call, as Ollama names it on every chunk
+                    # (WP-X.21 T12b), the way llama_cpp.py reads it.
+                    attempt.served_model = chunk.get("model") or attempt.served_model
                     # Ollama puts usage in the final chunk under prompt_eval_count
                     if "prompt_eval_count" in chunk:
                         attempt.input_tokens = chunk.get("prompt_eval_count", 0)
