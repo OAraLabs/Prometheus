@@ -869,7 +869,7 @@ class _CapturingSummarizer(LCMSummarizer):
         super().__init__(MagicMock(), model="default")
         self.prompts: list[str] = []
 
-    async def _call_model(self, prompt: str) -> str:  # type: ignore[override]
+    async def _call_model(self, prompt: str, *, session_id: str | None = None) -> str:  # type: ignore[override]
         self.prompts.append(prompt)
         return "summary"
 
