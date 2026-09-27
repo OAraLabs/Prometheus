@@ -883,6 +883,8 @@ async def run_loop(
     mode: str = "agent",
     session_id: str | None = None,
     tool_choice: object | None = None,
+    record_session_id: str | None = None,
+    record_summary: dict | None = None,
 ) -> AsyncIterator[tuple[StreamEvent, UsageSnapshot | None]]:
     """Run the conversation loop until the model stops requesting tools.
 
@@ -950,6 +952,19 @@ async def run_loop(
     # a human is treated as present to sanction the next tool call. Enforced by
     # tests/test_session_id_descriptive_only.py, not by this comment.
     effective_session_id = session_id or context.session_id
+    # RECORD-ONLY (WP-X.21 T4). A caller whose run has no session of its own —
+    # POST /api/chat, a subagent — names the one its telemetry rows are filed
+    # under, so a per-session reader can find the run. It reaches the telemetry
+    # writers and NOTHING else: not the permission origin (context.session_id,
+    # untouched, so such a run stays 'system'), not the router's override
+    # lookup, not the profile/workspace resolvers, checkpoints or the
+    # compactor — making a run behave as that session is a separate decision.
+    # A run with a session of its own records under it. An id flagged
+    # ephemeral is dropped: the run itself is not ephemeral and still writes
+    # its content columns, which must not sit beside that id.
+    recorded_session_id = effective_session_id
+    if not recorded_session_id and record_session_id and not is_session_ephemeral(record_session_id):
+        recorded_session_id = record_session_id
     # FL-4: the divergence detector's task scope, minted here for exactly the
     # reasons the verifier's turn_key is (one shared instance, one run_loop
     # call = one task) — and HERE rather than in ``AgentLoop.run_async``,
@@ -986,6 +1001,8 @@ async def run_loop(
             ephemeral=ephemeral,
             div_task_id=div_task_id,
             effective_session_id=effective_session_id,
+            recorded_session_id=recorded_session_id,
+            record_summary=record_summary,
         ):
             yield item
     finally:
@@ -1054,6 +1071,8 @@ async def _run_loop(
     ephemeral: bool = False,
     div_task_id: str | None = None,
     effective_session_id: str | None = None,
+    recorded_session_id: str | None = None,
+    record_summary: dict | None = None,
 ) -> AsyncIterator[tuple[StreamEvent, UsageSnapshot | None]]:
     """The loop body. See :func:`run_loop` — call that, not this.
 
@@ -1063,7 +1082,14 @@ async def _run_loop(
 
     ``div_task_id`` scopes every divergence call below to THIS task; None
     when the detector is absent or disabled.
+
+    ``recorded_session_id`` is the id the TELEMETRY rows are filed under: the
+    turn's own session, or the record-only one :func:`run_loop` resolved for
+    a run with none. Behaviour — resolvers, checkpoints, the compactor — keeps
+    reading ``effective_session_id``. ``record_summary`` adds keys to this
+    run's tool_advertisement row (a subagent names its parent there).
     """
+    rec_sid = recorded_session_id or effective_session_id
     # Scopes every verifier call below to THIS turn. Empty for a duck-typed
     # verifier that predates turn scoping (see run_loop).
     _fmv_kw: dict[str, str] = {} if fmv_turn_key is None else {"turn_key": fmv_turn_key}
@@ -1210,9 +1236,11 @@ async def _run_loop(
                 # in this function uses effective_session_id; this was the one
                 # that did not. DESCRIPTIVE READER ONLY (see the definition
                 # above): never feed effective_session_id to origin_from_session_id.
-                session_id=effective_session_id,
+                session_id=rec_sid,
                 model=getattr(context, "model", None),
                 summary={
+                    # First, so the standard keys below always win.
+                    **(record_summary or {}),
                     "deferred_active": deferred_tools_active,
                     "source": deferred_source,
                     "advertised": len(tool_schema),
@@ -1652,7 +1680,7 @@ async def _run_loop(
                             subsystem="agent_loop",
                             operation="context_preflight_refusal",
                             outcome="failed",
-                            session_id=effective_session_id,
+                            session_id=rec_sid,
                             model=context.model,
                             summary={
                                 "estimated_tokens": _needed_now,
@@ -1690,7 +1718,7 @@ async def _run_loop(
             on_degrade=_on_degrade,
             operation="loop_round",
             round_index=turn,
-            session_id=effective_session_id,
+            session_id=rec_sid,
         ):
             if degrade_notice_this_turn and not _degrade_announced:
                 # First event after the swap. on_degrade fires before the fallback streams, so
@@ -2161,7 +2189,9 @@ async def _run_loop(
                 served_model=served_model_this_turn,
                 ephemeral=ephemeral,
                 div_task_id=div_task_id,
-                effective_session_id=effective_session_id,
+                # The id the call rows are filed under (and the skill-load
+                # counter's): descriptive only.
+                effective_session_id=rec_sid,
             )
             if _runnable
             else []
@@ -2398,7 +2428,7 @@ async def _run_loop(
                             "tool_iteration": tool_iteration,
                             "turn": turn,
                         },
-                        session_id=effective_session_id or context.session_id,
+                        session_id=rec_sid,
                         model=context.model,
                     )
                 except Exception:
@@ -2500,7 +2530,7 @@ async def _run_loop(
                                 "turn": turn,
                                 "task_id": div_task_id,
                             },
-                            session_id=effective_session_id or context.session_id,
+                            session_id=rec_sid,
                             model=context.model,
                         )
                     except Exception:
@@ -2913,6 +2943,8 @@ async def _try_escalate_tool_call(
     tool_input: dict,
     tool_use_id: str,
     last_error: str,
+    *,
+    parent_session_id: str | None = None,
 ) -> ToolResultBlock | None:
     """Phase 3: escalate a repeatedly-failing tool call to a stronger provider.
 
@@ -2981,6 +3013,8 @@ async def _try_escalate_tool_call(
             task=task_prompt,
             agent_type="general-purpose",
             tools_subset=[tool_name],
+            # The subagent records under its own id, derived from this turn's.
+            parent_session_id=parent_session_id,
         )
 
         if result.success and result.text:
@@ -3944,7 +3978,11 @@ async def _execute_tool_call(
             from prometheus.adapter.retry import RetryAction
             if action == RetryAction.ESCALATE:
                 escalated = await _try_escalate_tool_call(
-                    context, tool_name, tool_input, tool_use_id, str(exc)
+                    context, tool_name, tool_input, tool_use_id, str(exc),
+                    parent_session_id=None if ephemeral else (
+                        effective_session_id if effective_session_id is not None
+                        else context.session_id
+                    ),
                 )
                 if escalated is not None:
                     return escalated
@@ -4719,6 +4757,8 @@ class AgentLoop:
         session_id: str | None = None,
         session_state: object | None = None,
         tool_choice: object | None = None,
+        record_session_id: str | None = None,
+        record_summary: dict | None = None,
     ) -> RunResult:
         """Run the agent loop asynchronously, return a RunResult.
 
@@ -4743,6 +4783,11 @@ class AgentLoop:
         tool-free turn) should have been calling all along. ``None`` (the
         default) leaves ``run_loop``'s own resolution untouched — byte-identical
         to today for every caller that does not pass it.
+
+        ``record_session_id`` / ``record_summary`` (WP-X.21 T4) are RECORD-ONLY:
+        the id a run with no session of its own files its telemetry rows under,
+        and extra keys for its tool_advertisement row. ``session_id`` — the
+        permission origin and the router's lookup — is unaffected by them.
         """
         if messages is not None:
             messages = list(messages)  # shallow copy — run_loop mutates in place
@@ -4810,7 +4855,10 @@ class AgentLoop:
         started_inputs: dict[str, dict] = {}
 
         async for event, usage in run_loop(
-            context, messages, tool_choice=tool_choice
+            context, messages, tool_choice=tool_choice,
+            # Record-only: see run_loop. POST /api/chat and subagents pass one.
+            record_session_id=record_session_id,
+            record_summary=record_summary,
         ):
             if isinstance(event, AssistantTurnComplete):
                 last_text = event.message.text

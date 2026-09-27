@@ -50,6 +50,10 @@ class AgentTool(BaseTool):
             task=arguments.prompt,
             agent_type=arguments.subagent_type,
             model=arguments.model,
+            # The calling turn's conversation, which the subagent's telemetry
+            # id is derived from (descriptive only) — none for an ephemeral turn.
+            parent_session_id=None if context.metadata.get("ephemeral")
+            else context.metadata.get("effective_session_id"),
         )
 
         if not result.success:

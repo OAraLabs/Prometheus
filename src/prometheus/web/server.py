@@ -4539,6 +4539,11 @@ def create_app(
             result = await agent_loop.run_async(
                 system_prompt=system_prompt,
                 messages=session.get_messages(),
+                # RECORD-ONLY (WP-X.21 T4): the telemetry rows name the
+                # conversation this turn is persisted under. NOT session_id:
+                # that would change the permission origin and the router's
+                # override lookup for this route, which stays 'system'.
+                record_session_id=f"web:{session_id}",
             )
             session.add_result_messages(result.messages, pre_len)
             return {
