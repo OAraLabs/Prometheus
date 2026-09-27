@@ -251,6 +251,19 @@ adapter:
   adaptive_strictness: false                # auto-tune per-tool strictness from telemetry
   strictness_window: 100
   strictness_threshold: 0.8
+  # The adapter tier per model, by hand. Absent, or `auto`, the tier is decided in
+  # this order: a cloud provider → off; a config/model_registry.yaml entry → its
+  # tier; the served chat template (llama.cpp /props, ollama /api/show) → light or
+  # full; else full, said loudly on the boot line. A key here is a case-insensitive
+  # SUBSTRING of the served model's name, the way the registry matches; the longest
+  # matching key wins; a value other than auto/off/light/full is refused with its
+  # key named and the entry ignored. `off` on a local backend is allowed and warned
+  # about: it trusts the server's own parser and drops text extraction and
+  # validation. Example:
+  #   model_tiers:
+  #     "ternary-bonsai-2": light
+  #     "ornith": light
+  model_tiers: {}
 
   # ── Previously undocumented: read by the code, absent from this
   #    template. Values are the CODE'S OWN FALLBACK, so writing them

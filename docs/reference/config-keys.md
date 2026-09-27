@@ -4,7 +4,7 @@
 
 # Config key reference (generated)
 
-Every key in `config/prometheus.yaml.default` — **404** of
+Every key in `config/prometheus.yaml.default` — **405** of
 them — with the value the template ships. This is what a fresh
 install gets, not what the code falls back to when a key is absent:
 those are pinned equal to each other by
@@ -78,6 +78,7 @@ none either — the key is documented so its absence is visible.
 | `adapter.adaptive_strictness` | `False` |
 | `adapter.strictness_window` | `100` |
 | `adapter.strictness_threshold` | `0.8` |
+| `adapter.model_tiers` | `{}` *(open map)* |
 | `adapter.unwrap_dict_args` | *(empty — no code default)* |
 | `security` | *(section)* |
 | `security.permission_mode` | `default` |

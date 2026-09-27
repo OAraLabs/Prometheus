@@ -473,24 +473,29 @@ def _has_native_tool_calling(model_name: str) -> bool:
 
 
 def _resolve_adapter_tier(
-    provider_name: str, model_name: str, template: Any = None, *, warn: bool = True,
+    provider_name: str, model_name: str, template: Any = None, override: str | None = None,
+    *, warn: bool = True,
 ) -> Any:
     """The tier decision (``adapter.tier.TierDecision``) for a provider + model.
 
     ``template`` is the served chat template's verdict (``ToolTemplate``) when a
     probe read one — ``detect_tool_template`` on the provider at daemon boot,
-    ``_detect_tool_template_or_none`` on the CLI — else None.
+    ``_detect_tool_template_or_none`` on the CLI — else None. ``override`` is
+    the tier ``adapter.model_tiers`` names for this model, when an entry
+    matches (:func:`_model_tier_override`); it wins over every other source.
     """
     from prometheus.adapter.tier import resolve_tier
 
     entry, note = _registry_lookup(model_name, warn=warn)
     return resolve_tier(
         provider_name=provider_name, model_name=model_name, template=template,
-        registry_entry=entry, registry_note=note,
+        registry_entry=entry, registry_note=note, override=override,
     )
 
 
-def _get_adapter_tier(provider_name: str, model_name: str, template: Any = None) -> str:
+def _get_adapter_tier(
+    provider_name: str, model_name: str, template: Any = None, override: str | None = None,
+) -> str:
     """The adapter tier for a provider + model: "off", "light", or "full".
 
     Override > provider class > registry > chat template > fallback; the
@@ -498,9 +503,67 @@ def _get_adapter_tier(provider_name: str, model_name: str, template: Any = None)
     seam the ladder's tier sweep replaces to force a tier
     (``gym/ladder/tiers.py::forced_adapter_factory``), which is why
     ``create_adapter`` asks it with the two positional arguments that
-    replacement takes and passes ``template`` only when a probe read one.
+    replacement takes and passes ``template`` and ``override`` only when
+    there is one.
     """
-    return _resolve_adapter_tier(provider_name, model_name, template).tier
+    return _resolve_adapter_tier(provider_name, model_name, template, override).tier
+
+
+#: What adapter.model_tiers may say for a model. ``auto`` is the same as no entry.
+_MODEL_TIER_VALUES = ("auto", "off", "light", "full")
+
+
+def _model_tier_override(
+    model_name: str, adapter_cfg: dict[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    """The tier ``adapter.model_tiers`` names for ``model_name``, and the key that named it.
+
+    Keys match the served model's name the way ``config/model_registry.yaml``
+    does — a case-insensitive substring — and the longest matching key wins,
+    so ``qwen3.8-27b`` beats ``qwen`` for the 27B. ``auto`` means the entry
+    decides nothing. A value that is not one of ``auto``/``off``/``light``/
+    ``full`` is refused with its key named and treated as absent: one bad
+    entry must not stop the boot, and must not be silently honoured as
+    something else. A non-empty map that matches nothing is said once, so a
+    typo in a key is not silent.
+
+    Returns ``(tier, key)``; ``(None, None)`` when nothing decides.
+    """
+    tiers = (adapter_cfg or {}).get("model_tiers") or {}
+    if not isinstance(tiers, dict):
+        log.error(
+            "adapter.model_tiers must be a map of model-name substring → tier "
+            "(auto | off | light | full), not %r; ignoring it", type(tiers).__name__,
+        )
+        return None, None
+    name_lower = (model_name or "").lower()
+    best_key: str | None = None
+    best_value: str | None = None
+    best_len = 0
+    for key, value in tiers.items():
+        pattern = str(key).lower()
+        if not pattern or pattern not in name_lower:
+            continue
+        tier = str(value).strip().lower() if value is not None else ""
+        if tier not in _MODEL_TIER_VALUES:
+            log.error(
+                "adapter.model_tiers[%r] = %r is not one of %s; the entry is refused "
+                "and %r resolves as if it were absent",
+                key, value, ", ".join(_MODEL_TIER_VALUES), model_name,
+            )
+            continue
+        if best_key is None or len(pattern) > best_len:
+            best_key, best_value, best_len = str(key), tier, len(pattern)
+    if best_key is None:
+        if tiers:
+            log.info(
+                "adapter.model_tiers: none of %s matches %r; the tier resolves as usual",
+                sorted(str(k) for k in tiers), model_name or "(no model name)",
+            )
+        return None, None
+    if best_value == "auto":
+        return None, best_key
+    return best_value, best_key
 
 
 def _log_tier_decision(decision: Any) -> None:
@@ -510,9 +573,9 @@ def _log_tier_decision(decision: Any) -> None:
     where = TIER_SOURCE_TEXT.get(decision.source, decision.source)
     if decision.source == "fallback":
         log.warning(
-            "Adapter tier: %s — %s (%s) for %s. Add a config/model_registry.yaml "
-            "entry for this model, or check that the server renders its chat "
-            "template's tool calls (llama-server: --jinja).",
+            "Adapter tier: %s — %s (%s) for %s. Name this model in adapter.model_tiers "
+            "(prometheus.yaml), add a config/model_registry.yaml entry for it, or check "
+            "that the server renders its chat template's tool calls (llama-server: --jinja).",
             decision.tier, decision.detail, where, decision.decided_for or "(no model name)",
         )
     else:
@@ -564,14 +627,20 @@ def create_adapter(
         "unwrap_tools": acfg.get("unwrap_dict_args") or (),
     }
 
+    # adapter.model_tiers: an operator's word for this model wins over every
+    # other source (the registry, the served template, the fallback).
+    override, override_key = _model_tier_override(model_name, acfg)
+
     # The seam decides the tier (see _get_adapter_tier); the resolver explains
     # it. When the two disagree the seam was replaced — a tier sweep forcing a
     # tier — and the record says so rather than claiming a source it was not.
-    if template is None:
+    if template is None and override is None:
         tier = _get_adapter_tier(provider_name, model_name)
-    else:
+    elif override is None:
         tier = _get_adapter_tier(provider_name, model_name, template)
-    decision = _resolve_adapter_tier(provider_name, model_name, template, warn=False)
+    else:
+        tier = _get_adapter_tier(provider_name, model_name, template, override)
+    decision = _resolve_adapter_tier(provider_name, model_name, template, override, warn=False)
     if decision.tier != tier:
         decision = TierDecision(
             tier=tier, source="forced",
@@ -582,6 +651,30 @@ def create_adapter(
             call_format=decision.call_format, decided_for=model_name,
         )
     _log_tier_decision(decision)
+    if decision.source == "override":
+        from prometheus.providers.registry import ProviderRegistry
+
+        cloud = ProviderRegistry.is_cloud(provider_name)
+        if tier == "off" and not cloud:
+            log.warning(
+                "adapter.model_tiers[%r] = off for %s on a LOCAL backend (%s): text "
+                "extraction and validation are off, so a tool call the server does not "
+                "parse itself is lost. Allowed; make sure this is what you want.",
+                override_key, model_name or "(no model name)", provider_name,
+            )
+        elif tier != "off" and cloud:
+            # The loop reads tier "off" as "cloud": the microcompaction of old
+            # tool results and deferred tool advertising skip on off and run on
+            # every other tier (engine/agent_loop.py, context/dynamic_tools.py).
+            # Lifted off "off", a cloud model gets that local-only trimming, and
+            # each trim mutates the prefix its prompt cache was built on.
+            log.warning(
+                "adapter.model_tiers[%r] = %s lifts %s on a CLOUD provider (%s) off tier "
+                "off: local-only context trimming then runs on a cloud model and throws "
+                "away its prompt cache (tracked as X.41). Allowed; make sure this is what "
+                "you want.",
+                override_key, tier, model_name or "(no model name)", provider_name,
+            )
 
     if tier == "off":
         formatter = AnthropicFormatter() if provider_name == "anthropic" else PassthroughFormatter()
