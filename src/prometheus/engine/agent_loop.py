@@ -886,6 +886,12 @@ def _run_paths(context: "LoopContext") -> tuple[Path, tuple[Path, ...] | None]:
 # read-only tool calls run under gather, in tasks that copy the context.
 _ROUND_SERVING: contextvars.ContextVar = contextvars.ContextVar("prometheus_round_serving", default=None)
 
+# The session the run's rows are recorded under (WP-X.21 T3): the recorded id
+# (the turn's conversation, or a record-only run's own id), None on an
+# ephemeral turn. For _log_iteration, whose 14 call sites have no session in
+# scope; a ContextVar for _RUN_PATHS's reason. Descriptive only.
+_RUN_SESSION: contextvars.ContextVar = contextvars.ContextVar("prometheus_run_session", default=None)
+
 
 def _serving_model(context: "LoopContext") -> str:
     """The model to RECORD for the round in progress: the fallback's, if it served."""
@@ -1014,6 +1020,7 @@ async def run_loop(
     # cross-talk this must never allow).
     _paths_token = _RUN_PATHS.set(None)
     _serving_token = _ROUND_SERVING.set(None)
+    _session_token = _RUN_SESSION.set(None if ephemeral else recorded_session_id)
     try:
         async for item in _run_loop(
             context,
@@ -1032,6 +1039,7 @@ async def run_loop(
     finally:
         _RUN_PATHS.reset(_paths_token)
         _ROUND_SERVING.reset(_serving_token)
+        _RUN_SESSION.reset(_session_token)
         if turn_key is not None:
             try:
                 fmv.discard_turn(turn_key=turn_key)
@@ -2823,6 +2831,17 @@ def _pending_pairs(context: LoopContext) -> dict:
     return context.pair_pending
 
 
+def _call_json(tool_name: str, tool_input: object) -> str | None:
+    """The call, as a failure row records it (WP-X.21 T15): the ``{"name",
+    "input"}`` shape the main path and the validation writers already record."""
+    import json as _json
+
+    try:
+        return _json.dumps({"name": tool_name, "input": tool_input}, default=str)
+    except Exception:
+        return None
+
+
 def _tool_schema_json(context: LoopContext, tool_name: str) -> str | None:
     """The tool's JSON schema as the model saw it, for golden-trace export.
 
@@ -2976,6 +2995,7 @@ def _log_iteration(
             success=(reason == _IterationReason.TOOL_SUCCESS),
             error_type=reason if reason != _IterationReason.TOOL_SUCCESS else None,
             error_detail=detail or None,
+            session_id=_RUN_SESSION.get(),
         )
 
 
@@ -3403,6 +3423,11 @@ async def _safe_execute(
                     # that produced it.
                     error_detail=None if ephemeral else str(exc)[:2000],
                     served_model=served_model,
+                    parsed_tool_call=None if ephemeral else _call_json(tc.name, tc.input),
+                    session_id=None if ephemeral else (
+                        effective_session_id if effective_session_id is not None
+                        else context.session_id
+                    ),
                 )
             except Exception:  # pragma: no cover - telemetry must not mask result
                 log.debug("telemetry.record failed in _safe_execute", exc_info=True)
@@ -3892,6 +3917,12 @@ async def _execute_tool_call(
     It also skips repair-pair capture (``training.db``), whose ``chosen`` /
     ``rejected`` payloads are full tool-call JSON.
     """
+    # The session every row this call writes carries (WP-X.21 T1): the main
+    # path's own rule, the turn's conversation and none on an ephemeral turn.
+    # The failure writers passed nothing, so every failure row was session-less.
+    _row_session = None if ephemeral else (
+        effective_session_id if effective_session_id is not None else context.session_id
+    )
     # Pre-tool hook (Sprint 2)
     if context.hook_executor is not None:
         from prometheus.hooks import HookEvent
@@ -3908,6 +3939,8 @@ async def _execute_tool_call(
                     error_type="hook_blocked",
                     error_detail=pre.reason or f"pre_tool_use hook blocked {tool_name}",
                     served_model=served_model,
+                    parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
+                    session_id=_row_session,
                 )
             return ToolResultBlock(
                 tool_use_id=tool_use_id,
@@ -3924,6 +3957,8 @@ async def _execute_tool_call(
                 error_type="no_registry",
                 error_detail="No tool registry configured",
                 served_model=served_model,
+                parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
+                session_id=_row_session,
             )
         return ToolResultBlock(
             tool_use_id=tool_use_id,
@@ -4021,6 +4056,7 @@ async def _execute_tool_call(
                     # to dig the LCM because failure rows lacked this)
                     parsed_tool_call=_failed_call,
                     served_model=served_model,
+                    session_id=_row_session,
                 )
 
             # Phase 3: ESCALATE — retries exhausted + router has escalation
@@ -4055,6 +4091,8 @@ async def _execute_tool_call(
                 error_type="unknown_tool",
                 error_detail=f"Unknown tool: {tool_name}",
                 served_model=served_model,
+                parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
+                session_id=_row_session,
             )
         return ToolResultBlock(
             tool_use_id=tool_use_id,
@@ -4144,6 +4182,7 @@ async def _execute_tool_call(
                 error_detail=markup_guard.describe(_markup),
                 parsed_tool_call=_markup_call,
                 served_model=served_model,
+                session_id=_row_session,
             )
         return ToolResultBlock(
             tool_use_id=tool_use_id,
@@ -4217,6 +4256,7 @@ async def _execute_tool_call(
                     # 0/21 parsed_tool_call coverage in all history)
                     parsed_tool_call=_failed_call,
                     served_model=served_model,
+                    session_id=_row_session,
                 )
             return ToolResultBlock(
                 tool_use_id=tool_use_id,
@@ -4429,6 +4469,8 @@ async def _execute_tool_call(
                             error_type="permission_denied",
                             error_detail=f"User denied permission for {tool_name}",
                             served_model=served_model,
+                            parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
+                            session_id=_row_session,
                         )
                     return ToolResultBlock(
                         tool_use_id=tool_use_id,
@@ -4444,6 +4486,8 @@ async def _execute_tool_call(
                         error_type="permission_denied",
                         error_detail=decision.reason or f"Permission denied for {tool_name}",
                         served_model=served_model,
+                        parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
+                        session_id=_row_session,
                     )
                 return ToolResultBlock(
                     tool_use_id=tool_use_id,
@@ -4508,6 +4552,8 @@ async def _execute_tool_call(
                 error_detail=f"Tool execution exceeded {_timeout:.0f}s timeout",
                 repairs=len(repair_log),
                 served_model=served_model,
+                parsed_tool_call=None if ephemeral else _call_json(tool_name, tool_input),
+                session_id=_row_session,
             )
         return ToolResultBlock(
             tool_use_id=tool_use_id,
