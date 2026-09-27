@@ -446,9 +446,14 @@ GATE = {**_tel(tool_calls=(["tool_name", "error_type"], [["read_file", "permissi
         "home/.prometheus/data/security/audit.db": {"sqlite": {"permission_audit": {
             "columns": ["decision"], "rows": [["DENY"]]}}}}
 COMPACTED = _tel(subsystem_runs=(["subsystem"], [["context_compactor"]]))
-UNDO = [{"op": "tree", "label": "after-turn", "tree": {"a": 1}}, None,
-        {"op": "restore_latest", "result": {"restored": ["x"]}},
-        {"op": "tree", "label": "after-undo", "tree": {"b": 2}}]
+# checkpoint_undo's shape: the turn adds greeting.txt and rewrites inventory.txt;
+# the undo deletes the one and restores the other.
+_START = {"inventory.txt": "19d70ba9"}
+_TURNED = {"greeting.txt": "876ccc84", "inventory.txt": "f408144b"}
+UNDO = [{"op": "tree", "label": "before-turn", "tree": _START}, None,
+        {"op": "tree", "label": "after-turn", "tree": _TURNED},
+        {"op": "restore_latest", "result": {"restored": ["inventory.txt"], "deleted": ["greeting.txt"]}},
+        {"op": "tree", "label": "after-undo", "tree": _START}]
 ATLAS_REQ = [{"messages": [{"role": "system", "content": "# Project Atlas\n- codename ATLAS-7."}]}]
 CODE_OK = [{"op": "code", "result": {"report": {"status": "success", "acceptance_exit": 0}}}]
 # WP-X.28 PR 2c: the coding run at the chat turn's tier. An executed call the
@@ -480,8 +485,17 @@ SWITCH_REQS = [{"messages": [{"content": "one"}]}, {"messages": [{"content": "ti
 MEMORY = {"home/.prometheus/MEMORY.md": "- the parity canary colour is teal"}
 
 
-def _undo(reply: str) -> list[dict]:
-    return [s if s is not None else _chat(reply) for s in UNDO]
+def _undo(reply: str, *, after_undo: dict | None = None) -> list[dict]:
+    steps = [s if s is not None else _chat(reply) for s in UNDO]
+    if after_undo is not None:
+        steps[-1] = {"op": "tree", "label": "after-undo", "tree": after_undo}
+    return steps
+
+
+# An undo that left a changed file: greeting.txt deleted, inventory.txt NOT restored.
+UNDO_LEFT_A_CHANGE = {"inventory.txt": "f408144b"}
+# An undo that left the written file: inventory.txt restored, greeting.txt still there.
+UNDO_LEFT_A_FILE = {"greeting.txt": "876ccc84", "inventory.txt": "19d70ba9"}
 
 
 # (scenario, a sample that passes, [(a sample that must be refused, a fragment of the reason)])
@@ -493,7 +507,9 @@ RECORDING_RULES = [
     ("gate_blocked", _ev(stores=GATE, steps=[_chat("Both were refused by the security gate.")]),
      [(_ev(stores=GATE, steps=[_chat("Done, here are the results.")]), "refusals")]),
     ("checkpoint_undo", _ev(steps=_undo("Done.")),
-     [(_ev(steps=_undo("")), "no final reply")]),
+     [(_ev(steps=_undo("")), "no final reply"),
+      (_ev(steps=_undo("Done.", after_undo=UNDO_LEFT_A_CHANGE)), "state before the turn"),
+      (_ev(steps=_undo("Done.", after_undo=UNDO_LEFT_A_FILE)), "state before the turn")]),
     ("compaction", _ev(stores=COMPACTED, steps=[_chat("noted")] * 3 + [_chat("amber, birch, cobalt")]),
      [(_ev(stores=COMPACTED, steps=[_chat("noted")] * 3
            + [_chat("I can't be certain, but: amber, birch, cobalt")]), "hedges"),
@@ -538,6 +554,16 @@ def test_every_recording_rule_refuses_the_sample_it_was_written_for(name, good, 
     for bad, fragment in bads:
         problems = require(bad)
         assert any(fragment in p for p in problems), (name, fragment, problems)
+
+
+@pytest.mark.parametrize("after_undo", [UNDO_LEFT_A_CHANGE, UNDO_LEFT_A_FILE],
+                         ids=["left-a-changed-file", "left-the-written-file"])
+def test_only_the_before_turn_check_refuses_an_undo_that_left_a_change(after_undo):
+    """Before this check the rule passed these samples: the restore touched files and
+    the tree after it differs from the tree after the turn. Only the comparison with
+    the tree before the turn catches that the undo did not undo."""
+    problems = BY_NAME["checkpoint_undo"].require(_ev(steps=_undo("Done.", after_undo=after_undo)))
+    assert problems == ["the undo did not return the workspace to its state before the turn"]
 
 
 @pytest.mark.parametrize("name", sorted(BY_NAME))

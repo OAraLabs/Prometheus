@@ -138,10 +138,16 @@ def _req_checkpoint(ev: Evidence) -> list[str]:
     restore = next((s for s in ev.steps if s["op"] == "restore_latest"), {})
     result = restore.get("result") or {}
     touched = len(result.get("restored") or []) + len(result.get("deleted") or [])
+    start = next((s for s in ev.steps if s["op"] == "tree" and s.get("label") == "before-turn"), {})
     before = next((s for s in ev.steps if s["op"] == "tree" and s.get("label") == "after-turn"), {})
     after = next((s for s in ev.steps if s["op"] == "tree" and s.get("label") == "after-undo"), {})
+    # An undo that changed SOMETHING is not an undo: the tree after it must be the
+    # tree before the turn, file for file and hash for hash. A sample whose restore
+    # left a written file behind, or brought back only one of two, is refused.
     return (_need(touched > 0, "restore touched no file")
             + _need(before.get("tree") != after.get("tree"), "undo did not change the workspace")
+            + _need("tree" in start and after.get("tree") == start.get("tree"),
+                    "the undo did not return the workspace to its state before the turn")
             + _need(bool(_final_reply(ev).strip()), "no final reply"))
 
 
