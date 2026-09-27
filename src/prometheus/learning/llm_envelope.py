@@ -194,6 +194,7 @@ class LLMCallEnvelope:
         max_tokens: int = 2048,
         operation: str = "_call_model",
         context: dict[str, Any] | None = None,
+        session_id: str | None = None,
     ) -> Any:
         """Invoke the model and return concatenated text on success.
 
@@ -205,9 +206,14 @@ class LLMCallEnvelope:
         ``operation`` is recorded on both success and failure telemetry
         so a subsystem can distinguish "generate_skill" from "refine_skill"
         when multiple call paths share an envelope.
+
+        ``session_id`` is the conversation the call serves, for the row's
+        column (WP-X.21 T10); None for a call that serves none. Descriptive
+        only, like every telemetry session id.
         """
         from prometheus.engine.messages import ConversationMessage, TextBlock
         from prometheus.providers.base import (
+            ApiMessageCompleteEvent,
             ApiMessageRequest,
             ApiTextDeltaEvent,
         )
@@ -233,13 +239,17 @@ class LLMCallEnvelope:
 
         started = time.time()
         text_parts: list[str] = []
+        usage = None
         try:
             async for event in provider.stream_message(request):
                 if isinstance(event, ApiTextDeltaEvent):
                     text_parts.append(event.text)
+                elif isinstance(event, ApiMessageCompleteEvent):
+                    usage = event.usage
         except BaseException as exc:  # noqa: BLE001 — we re-raise per policy
             duration_ms = (time.time() - started) * 1000.0
-            self._record_failure(operation, exc, context, duration_ms, model, provider)
+            self._record_failure(operation, exc, context, duration_ms, model, provider,
+                                 session_id=session_id)
             log.exception(
                 "%s.%s: LLM call failed (on_failure=%s)",
                 self._subsystem, operation, self._on_failure,
@@ -253,7 +263,8 @@ class LLMCallEnvelope:
 
         text = "".join(text_parts)
         duration_ms = (time.time() - started) * 1000.0
-        self._record_success(operation, text, duration_ms, context, model, provider)
+        self._record_success(operation, text, duration_ms, context, model, provider,
+                             usage=usage, session_id=session_id)
         if self._on_failure == "log_only":
             return LLMCallResult(text=text, error=None, duration_ms=duration_ms)
         return text
@@ -574,6 +585,8 @@ class LLMCallEnvelope:
         duration_ms: float,
         model: str | None = None,
         provider: object | None = None,
+        *,
+        session_id: str | None = None,
     ) -> None:
         # THE ASYMMETRY, and why the fix is here and not at the call sites.
         #
@@ -590,10 +603,10 @@ class LLMCallEnvelope:
         # fix, and it belongs at this layer because this is the layer that
         # dropped it.
         #
-        # NOT fixed here, deliberately, and worth its own change: these two
-        # also omit input/output tokens, round_index, session_id and thinking,
-        # which stream() records. Widening that silently would make this PR
-        # about something other than the label it claims to fix.
+        # Its own change came (WP-X.21 T10): the success row now carries the
+        # completion's input/output tokens and cache counts, and both rows the
+        # caller's session_id. round_index and thinking stay stream()'s: a
+        # call() has no rounds, and no caller sets the thinking knob.
 
         if self._telemetry is None:
             return
@@ -618,6 +631,7 @@ class LLMCallEnvelope:
                 model=model,
                 billing_mode=billing_mode,
                 billing_marker=billing_marker,
+                session_id=session_id,
             )
         except Exception:
             log.debug(
@@ -635,6 +649,9 @@ class LLMCallEnvelope:
         context: dict[str, Any] | None,
         model: str | None = None,
         provider: object | None = None,
+        *,
+        usage: Any = None,
+        session_id: str | None = None,
     ) -> None:
         if self._telemetry is None:
             return
@@ -653,6 +670,11 @@ class LLMCallEnvelope:
                 model=model,
                 billing_mode=billing_mode,
                 billing_marker=billing_marker,
+                input_tokens=getattr(usage, "input_tokens", None),
+                output_tokens=getattr(usage, "output_tokens", None),
+                cached_input_tokens=getattr(usage, "cached_input_tokens", None),
+                cache_write_tokens=getattr(usage, "cache_write_tokens", None),
+                session_id=session_id,
             )
         except Exception:
             log.debug(
