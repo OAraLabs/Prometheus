@@ -167,8 +167,9 @@ below). The checks are applied in this order:
    Tests the agent could see are restored from `acceptance_files` first — over a symlink, a
    directory, or a package that would shadow the module — so editing them buys nothing.
 3. **Judge** — only where no command or predicate can decide, and only after the deterministic
-   checks have passed. Only a finite `score` in [0, 1] under that key counts; `PrometheusJudge`
-   defaults a missing score to 0.0 and clamps an out-of-range one, and the ladder refuses both.
+   checks have passed. Only a finite `score` in [0, 1] under that key counts: a missing score
+   is not 0.0 and an out-of-range one is not clamped. The nightly evals read replies with the
+   same parser (`evals.judge.parse_judge_reply`).
    A task never carries both an acceptance command and a judge.
 
 | verdict | `success` | when |

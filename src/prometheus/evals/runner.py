@@ -50,9 +50,13 @@ class EvalResult:
     tool_trace: list[dict[str, Any]] = field(default_factory=list)
     metrics: list[MetricScore] = field(default_factory=list)
     error: str | None = None
-    # Metrics whose judge call raised. NOT the same as a metric that scored
-    # zero: one says the model did badly, the other says we do not know.
+    # Metrics whose judge call raised, or whose judge replied with no verdict.
+    # NOT the same as a metric that scored zero: one says the model did badly,
+    # the other says we do not know.
     unavailable_metrics: list[str] = field(default_factory=list)
+    # Of those, the ones whose judge DID reply but gave no score on the 0-1
+    # scale (an unparseable verdict). The rest are calls that raised.
+    unparseable_metrics: list[str] = field(default_factory=list)
     failure_source: str = "pass"       # "pass", "model", "harness", "unclear"
     failure_category: str = "none"     # e.g. "model:wrong_tool", "harness:tool_crash"
     failure_detail: str = ""
@@ -99,7 +103,7 @@ class EvalRunner:
                 )
 
                 # Run metrics
-                metric_scores, unavailable = await self._evaluate_metrics(
+                metric_scores, unavailable, unparseable = await self._evaluate_metrics(
                     task, result.text, tool_trace
                 )
                 if unavailable:
@@ -131,6 +135,7 @@ class EvalRunner:
                     tool_trace=tool_trace,
                     metrics=metric_scores,
                     unavailable_metrics=unavailable,
+                    unparseable_metrics=unparseable,
                     failure_source=classification.source.value,
                     failure_category=classification.category.value,
                     failure_detail=classification.detail,
@@ -167,14 +172,20 @@ class EvalRunner:
         task: GoldenTask,
         agent_output: str,
         tool_trace: list[dict[str, Any]],
-    ) -> tuple[list[MetricScore], list[str]]:
-        """Run all three metrics. Returns (scores, names that could not run).
+    ) -> tuple[list[MetricScore], list[str], list[str]]:
+        """Run all three metrics.
+
+        Returns (scores, names that could not be evaluated, the subset of
+        those whose judge replied with no verdict).
 
         A metric whose judge call raises is NAMED in the second list rather
         than silently omitted from the first. Omitting it made a judge outage
-        indistinguishable from a clean sweep — see classify_failure.
+        indistinguishable from a clean sweep — see classify_failure. A judge
+        reply with no verdict (``a_measure`` returns None) is named the same
+        way, and in the third list: never a score, so never a pass or a fail.
         """
         unavailable: list[str] = []
+        unparseable: list[str] = []
         from prometheus.evals.metrics import (
             TaskCompletionMetric,
             ToolUsageMetric,
@@ -217,15 +228,19 @@ class EvalRunner:
                 judge=self._judge, threshold=0.7
             )
             completion_score = await completion_metric.a_measure(test_case)
-            scores.append(
-                MetricScore(
-                    metric_name="Task Completion",
-                    score=completion_score,
-                    threshold=0.7,
-                    passed=completion_metric.is_successful(),
-                    reasoning=completion_metric.reason or "",
+            if completion_score is None:
+                unavailable.append("Task Completion")
+                unparseable.append("Task Completion")
+            else:
+                scores.append(
+                    MetricScore(
+                        metric_name="Task Completion",
+                        score=completion_score,
+                        threshold=0.7,
+                        passed=completion_metric.is_successful(),
+                        reasoning=completion_metric.reason or "",
+                    )
                 )
-            )
         except Exception as exc:
             log.warning("TaskCompletionMetric failed: %s", exc)
             unavailable.append("Task Completion")
@@ -236,20 +251,24 @@ class EvalRunner:
                 judge=self._judge, threshold=0.8
             )
             hallucination_score = await hallucination_metric.a_measure(test_case)
-            scores.append(
-                MetricScore(
-                    metric_name="No Hallucination",
-                    score=hallucination_score,
-                    threshold=0.8,
-                    passed=hallucination_metric.is_successful(),
-                    reasoning=hallucination_metric.reason or "",
+            if hallucination_score is None:
+                unavailable.append("No Hallucination")
+                unparseable.append("No Hallucination")
+            else:
+                scores.append(
+                    MetricScore(
+                        metric_name="No Hallucination",
+                        score=hallucination_score,
+                        threshold=0.8,
+                        passed=hallucination_metric.is_successful(),
+                        reasoning=hallucination_metric.reason or "",
+                    )
                 )
-            )
         except Exception as exc:
             log.warning("NoHallucinationMetric failed: %s", exc)
             unavailable.append("No Hallucination")
 
-        return scores, unavailable
+        return scores, unavailable, unparseable
 
     async def run_all(
         self,
@@ -339,6 +358,13 @@ class EvalRunner:
                 cat = r.failure_category
                 category_counts[cat] = category_counts.get(cat, 0) + 1
 
+        # Judge unavailable: counted here, and never a pass or a fail. The
+        # metrics it could not score are not in r.metrics (so not in the
+        # averages), and its tasks are left out of pass_rate. A crashed task
+        # stays in pass_rate, as a task that did not pass.
+        unscored = sum(1 for r in results if r.unavailable_metrics)
+        scored = total - unscored
+
         return {
             "total_tasks": total,
             "errored": errored,
@@ -353,6 +379,15 @@ class EvalRunner:
             },
             "failure_sources": source_counts,
             "failure_categories": category_counts,
+            "judge_unavailable": {
+                "tasks": unscored,
+                "metrics": sum(len(r.unavailable_metrics) for r in results),
+                "unparseable": sum(len(r.unparseable_metrics) for r in results),
+            },
+            "scored_tasks": scored,
+            "pass_rate": round(source_counts.get("pass", 0) / scored, 3)
+            if scored
+            else None,
         }
 
     def print_summary(
@@ -378,7 +413,8 @@ class EvalRunner:
                 status = "??? "
 
             metric_str = "  ".join(
-                f"{m.metric_name}={m.score:.2f}" for m in r.metrics
+                [f"{m.metric_name}={m.score:.2f}" for m in r.metrics]
+                + [f"{name}=n/a" for name in r.unavailable_metrics]
             )
             line = f"  [{status}] {r.task_id:25s} {r.latency_ms:8.0f}ms  {metric_str}"
             if r.failure_source not in ("pass",):
@@ -406,6 +442,21 @@ class EvalRunner:
             f"  Classification:  PASS={pass_count}  "
             f"MODEL={model_count}  HARNESS={harness_count}  UNCLEAR={unclear_count}"
         )
+        if summary.get("pass_rate") is not None:
+            print(
+                f"  Pass rate: {pass_count}/{summary['scored_tasks']} scored tasks "
+                f"({summary['pass_rate']:.0%})"
+            )
+        judge_unavailable = summary.get("judge_unavailable", {})
+        if judge_unavailable.get("tasks"):
+            unparseable = judge_unavailable["unparseable"]
+            print(
+                f"  Judge unavailable: {judge_unavailable['tasks']} task(s), "
+                f"{judge_unavailable['metrics']} metric(s): "
+                f"{unparseable} unparseable verdict(s), "
+                f"{judge_unavailable['metrics'] - unparseable} failed call(s). "
+                f"Not scored, and left out of the pass rate."
+            )
 
         categories = summary.get("failure_categories", {})
         if categories:

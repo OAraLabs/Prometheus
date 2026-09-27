@@ -150,18 +150,18 @@ class TestPrometheusJudge:
         assert verdict.score == 0.7
 
     def test_parse_verdict_invalid_json(self):
-        """Should fallback to regex score extraction."""
+        """A number in prose is not a verdict (WP-X.22): no score, not 0.6."""
         judge = PrometheusJudge()
         verdict = judge._parse_verdict("I rate this 0.6 out of 1.0")
-        assert verdict.score == 0.6
+        assert (verdict.score, verdict.status) == (None, "unparseable")
 
-    def test_parse_verdict_clamp(self):
-        """Score should be clamped to [0, 1]."""
+    def test_parse_verdict_out_of_range(self):
+        """A score outside [0, 1] is not clamped into one (WP-X.22)."""
         judge = PrometheusJudge()
         verdict = judge._parse_verdict('{"score": 1.5, "reasoning": "over"}')
-        assert verdict.score == 1.0
+        assert (verdict.score, verdict.status) == (None, "unparseable")
         verdict = judge._parse_verdict('{"score": -0.5, "reasoning": "under"}')
-        assert verdict.score == 0.0
+        assert (verdict.score, verdict.status) == (None, "unparseable")
 
     def test_parse_geval_verdict(self):
         """Should extract score from SCORE: line."""
@@ -181,45 +181,45 @@ class TestPrometheusJudge:
         verdict = judge._parse_geval_verdict("Good work.\nscore: 0.7")
         assert verdict.score == 0.7
 
-    def test_parse_geval_verdict_clamp(self):
-        """G-Eval score should be clamped to [0, 1]."""
+    def test_parse_geval_verdict_out_of_range(self):
+        """A G-Eval score outside [0, 1] is not clamped into one (WP-X.22)."""
         judge = PrometheusJudge()
         verdict = judge._parse_geval_verdict("SCORE: 1.5")
-        assert verdict.score == 1.0
+        assert (verdict.score, verdict.status) == (None, "unparseable")
 
     def test_parse_geval_verdict_no_score(self):
-        """Should fall back when no SCORE: line found."""
+        """No SCORE: line, no verdict (WP-X.22): the 0.6 is not read."""
         judge = PrometheusJudge()
         verdict = judge._parse_geval_verdict("I think this is 0.6 quality")
-        assert verdict.score == 0.6  # fallback regex
+        assert (verdict.score, verdict.status) == (None, "unparseable")
 
     def test_parse_geval_verdict_alt_patterns(self):
-        """Should find score from alternative patterns like 'final score'."""
+        """'Final score' and 'score is' are not the SCORE: line (WP-X.22)."""
         judge = PrometheusJudge()
         # "final score: X"
         verdict = judge._parse_geval_verdict(
             "1. Good work.\n2. Mostly done.\nFinal score: 0.8"
         )
-        assert verdict.score == 0.8
+        assert (verdict.score, verdict.status) == (None, "unparseable")
         # "score is X"
         verdict = judge._parse_geval_verdict("Overall the score is 0.75")
-        assert verdict.score == 0.75
+        assert (verdict.score, verdict.status) == (None, "unparseable")
 
     def test_parse_geval_verdict_last_line_decimal(self):
-        """Should find standalone 0.X on last line as last resort."""
+        """A bare decimal on the last line is not the SCORE: line (WP-X.22)."""
         judge = PrometheusJudge()
         verdict = judge._parse_geval_verdict(
             "1. Agent did the task well.\n2. Output is correct.\n0.9"
         )
-        assert verdict.score == 0.9
+        assert (verdict.score, verdict.status) == (None, "unparseable")
 
     def test_parse_geval_verdict_empty(self):
-        """Should handle empty response."""
+        """An empty reply has no score, not 0.0 (WP-X.22)."""
         judge = PrometheusJudge()
         verdict = judge._parse_geval_verdict("")
-        assert verdict.score == 0.0
+        assert (verdict.score, verdict.status) == (None, "unparseable")
         verdict = judge._parse_geval_verdict("   ")
-        assert verdict.score == 0.0
+        assert (verdict.score, verdict.status) == (None, "unparseable")
 
     @pytest.mark.asyncio
     async def test_call_llm_retries_on_empty(self):
@@ -419,10 +419,10 @@ class TestConstrainedDecoding:
         assert verdict.reasoning == "well done"
 
     def test_parse_verdict_empty(self):
-        """Should handle empty response."""
+        """An empty reply has no score, not 0.0 (WP-X.22)."""
         judge = PrometheusJudge()
         verdict = judge._parse_verdict("")
-        assert verdict.score == 0.0
+        assert (verdict.score, verdict.status) == (None, "unparseable")
 
     def test_parse_verdict_markdown_fences(self):
         """Should strip markdown fences wrapping JSON (Ollama pattern)."""

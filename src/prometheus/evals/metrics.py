@@ -4,6 +4,9 @@ Three metrics tailored for tool-heavy agent evaluation:
 - TaskCompletionMetric: LLM-judged task completion (0-1)
 - ToolUsageMetric: Deterministic tool usage check (no LLM)
 - NoHallucinationMetric: LLM-judged groundedness check
+
+The two judged metrics return None, with ``score`` and ``success`` None, when
+the judge's reply holds no verdict: judge unavailable, neither pass nor fail.
 """
 
 from __future__ import annotations
@@ -11,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any, TYPE_CHECKING
+
+from prometheus.evals.judge import VERDICT_PARSED, JudgeVerdict
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +55,23 @@ if TYPE_CHECKING:
     from prometheus.evals.judge import PrometheusJudge
 
 
+def _take_verdict(metric: Any, verdict: JudgeVerdict) -> float | None:
+    """Record the judge's verdict on ``metric``; None when it gave none.
+
+    An unparseable verdict leaves ``score`` and ``success`` None. Scoring it
+    0.0 would record a judge failure as a model failure; the runner counts
+    it as "judge unavailable" instead.
+    """
+    metric.reason = verdict.reasoning
+    if verdict.status != VERDICT_PARSED or verdict.score is None:
+        metric.score = None
+        metric.success = None
+        return None
+    metric.score = verdict.score
+    metric.success = verdict.score >= metric.threshold
+    return verdict.score
+
+
 class TaskCompletionMetric(BaseMetric):
     """Measures whether the agent completed the requested task.
 
@@ -69,12 +91,12 @@ class TaskCompletionMetric(BaseMetric):
     def __name__(self) -> str:
         return "Task Completion"
 
-    def measure(self, test_case: LLMTestCase) -> float:
+    def measure(self, test_case: LLMTestCase) -> float | None:
         """Sync measurement — wraps a_measure."""
         return asyncio.run(self.a_measure(test_case))
 
-    async def a_measure(self, test_case: LLMTestCase) -> float:
-        """Async measurement via constrained JSON judge."""
+    async def a_measure(self, test_case: LLMTestCase) -> float | None:
+        """Async measurement via constrained JSON judge. None: no verdict."""
         meta = getattr(test_case, "additional_metadata", None) or {}
         tool_trace = meta.get("tool_trace")
         if tool_trace and not isinstance(tool_trace, list):
@@ -86,10 +108,7 @@ class TaskCompletionMetric(BaseMetric):
             expected_behavior=test_case.expected_output or "",
             tool_trace=tool_trace,
         )
-        self.score = verdict.score
-        self.reason = verdict.reasoning
-        self.success = self.score >= self.threshold
-        return self.score
+        return _take_verdict(self, verdict)
 
     def is_successful(self) -> bool:
         return (self.score or 0) >= self.threshold
@@ -170,12 +189,12 @@ class NoHallucinationMetric(BaseMetric):
     def __name__(self) -> str:
         return "No Hallucination"
 
-    def measure(self, test_case: LLMTestCase) -> float:
+    def measure(self, test_case: LLMTestCase) -> float | None:
         """Sync measurement — wraps a_measure."""
         return asyncio.run(self.a_measure(test_case))
 
-    async def a_measure(self, test_case: LLMTestCase) -> float:
-        """Async measurement via constrained JSON judge."""
+    async def a_measure(self, test_case: LLMTestCase) -> float | None:
+        """Async measurement via constrained JSON judge. None: no verdict."""
         meta = getattr(test_case, "additional_metadata", None) or {}
         tool_trace = meta.get("tool_trace", [])
 
@@ -198,10 +217,7 @@ class NoHallucinationMetric(BaseMetric):
             expected_behavior=expected,
             tool_trace=[t for t in tool_trace if isinstance(t, dict)],
         )
-        self.score = verdict.score
-        self.reason = verdict.reasoning
-        self.success = self.score >= self.threshold
-        return self.score
+        return _take_verdict(self, verdict)
 
     def is_successful(self) -> bool:
         return (self.score or 0) >= self.threshold
