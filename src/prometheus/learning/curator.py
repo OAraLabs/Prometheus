@@ -46,8 +46,12 @@
 #    collapses to: state lifecycle (auto) + consolidation suggestions (LLM,
 #    report-only) + prunings (LLM, applied). KEEP is implicit. PIN is a user
 #    action via ``/skills pin``.
-# 4. Usage signal: mtime-based v1 (no telemetry counter yet) — see
-#    ``skill_state.py`` adaptation notes.
+# 4. Usage signal: the last LOAD, from the skill-load counter
+#    (``ToolCallTelemetry.skill_load_stats``). It was file mtime until the
+#    skill-usage audit (docs/audits/SKILL-USAGE.md §6) found mtime standing in
+#    for "last used" while no skill had ever been loaded. A skill with no load
+#    recorded is never stale — Hermes's rule too: zero use is absence of
+#    evidence, not evidence of disuse.
 """
 
 from __future__ import annotations
@@ -75,6 +79,13 @@ if TYPE_CHECKING:
     from prometheus.sentinel.signals import SignalBus
 
 log = logging.getLogger(__name__)
+
+def _days_label(days_ago: int | None, *, suffix: str = "") -> str:
+    """How the prompt and the report show a skill's age since its last load."""
+    if days_ago is None:
+        return "never (no load recorded)"
+    return f"{days_ago}{suffix}" if suffix else str(days_ago)
+
 
 # Module-level singleton — set by daemon.py after Curator is constructed
 # so /curator run / show / status commands can reach it. Matches the
@@ -120,7 +131,8 @@ Each skill is listed with:
   - name: filename stem
   - state: lifecycle (active / stale / archived)
   - pinned: protected from any change
-  - last_used_days_ago: integer
+  - last_used_days_ago: days since the skill was last LOADED, or "never (no
+    load recorded)" when no load has been recorded since loads were counted
   - first_line: the file's first non-frontmatter line (description)
 
 Rules:
@@ -130,6 +142,8 @@ Rules:
   - Recommend pruning only when a skill is stale or archived AND has no
     consolidation target AND is clearly low-signal (one-shot debug,
     superseded approach, etc.).
+  - NEVER prune a skill whose last_used_days_ago is "never": no load data
+    means nobody has measured it, not that it is unused.
   - At most {max_prunings} prunings per run.
   - When in doubt, leave the skill alone (empty lists are valid output).
 
@@ -160,6 +174,8 @@ class CuratorRun:
     consolidations: list[dict[str, Any]] = field(default_factory=list)
     prunings: list[dict[str, Any]] = field(default_factory=list)
     skipped_pinned: list[str] = field(default_factory=list)
+    # Prunings refused because the skill has no load data (never stale).
+    skipped_no_load_data: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     report_path: str = ""
     json_path: str = ""
@@ -181,6 +197,7 @@ class CuratorRun:
             "consolidations": self.consolidations,
             "prunings": self.prunings,
             "skipped_pinned": self.skipped_pinned,
+            "skipped_no_load_data": self.skipped_no_load_data,
             "errors": self.errors,
             "report_path": self.report_path,
             "json_path": self.json_path,
@@ -199,8 +216,9 @@ class Curator:
     """Scheduled consolidation pass over auto-generated skills.
 
     Stage 1 (auto): walks ``~/.prometheus/skills/auto/*.md``; for each skill
-    flips its persisted lifecycle state based on file mtime vs ``stale``/
-    ``archive`` cutoffs. No file moves. No LLM calls.
+    flips its persisted lifecycle state on the days since its last LOAD vs
+    ``stale``/``archive`` cutoffs. A skill with no load recorded stays
+    active. No file moves. No LLM calls.
 
     Stage 2 (LLM): feeds the model the list of (name, state, pinned,
     last_used_days_ago, first_line) and parses a fenced YAML block with
@@ -523,7 +541,10 @@ class Curator:
 
         # Apply prunings (move to .archive/, never delete).
         if run.prunings and not dry_run:
-            run.skipped_pinned, applied = self._apply_prunings(run.prunings)
+            never_loaded = {s["name"] for s in skills if s["days_ago"] is None}
+            run.skipped_pinned, applied, run.skipped_no_load_data = self._apply_prunings(
+                run.prunings, never_loaded=never_loaded,
+            )
             # Keep only the records we actually moved.
             run.prunings = applied
 
@@ -587,6 +608,7 @@ class Curator:
                     "prunings": len(run.prunings),
                     "errors": len(run.errors),
                     "skipped_pinned": len(run.skipped_pinned),
+                    "skipped_no_load_data": len(run.skipped_no_load_data),
                     "report_path": run.report_path,
                 },
             )
@@ -596,9 +618,17 @@ class Curator:
     # ---------------------- Internals: discovery + auto-pass ----------------------
 
     def _discover_skills(self) -> list[dict[str, Any]]:
-        """Walk ``auto_dir`` for ``*.md`` skill files (excluding ``.archive``)."""
+        """Walk ``auto_dir`` for ``*.md`` skill files (excluding ``.archive``).
+
+        ``days_ago`` is days since the skill's last LOAD, or ``None`` when no
+        load is recorded — matched on the frontmatter name the registry serves
+        it under, or on the file stem the load row records.
+        """
         if not self._auto_dir.is_dir():
             return []
+        loads = self._load_stats()
+        by_file = {s.get("file"): s for s in loads.values() if s.get("file")}
+        now = time.time()
         out: list[dict[str, Any]] = []
         for path in sorted(self._auto_dir.glob("*.md")):
             try:
@@ -607,12 +637,16 @@ class Curator:
                 continue
             name = path.stem
             rec = self._state_store.get_skill(name)
-            days_ago = int((time.time() - stat.st_mtime) / 86400)
+            served_as = self._served_name(path)
+            last = loads.get(served_as) or by_file.get(name)
+            last_loaded_at = float(last["last_loaded_at"]) if last else None
+            days_ago = None if last_loaded_at is None else int((now - last_loaded_at) / 86400)
             out.append({
                 "name": name,
                 "path": str(path),
                 "mtime": stat.st_mtime,
                 "size": stat.st_size,
+                "last_loaded_at": last_loaded_at,
                 "days_ago": days_ago,
                 "first_line": self._first_meaningful_line(path),
                 "state": rec.state,
@@ -620,10 +654,34 @@ class Curator:
             })
         return out
 
+    def _load_stats(self) -> dict[str, dict[str, Any]]:
+        """Loads per skill from the counter; ``{}`` (no load data) without one."""
+        reader = getattr(self._telemetry, "skill_load_stats", None)
+        if reader is None:
+            return {}
+        try:
+            stats = reader()
+        except Exception:
+            log.warning("Curator: skill load stats unavailable — treating as no load data",
+                        exc_info=True)
+            return {}
+        return stats if isinstance(stats, dict) else {}
+
+    @staticmethod
+    def _served_name(path: Path) -> str:
+        """The name the registry serves *path* under (frontmatter ``name``, else the stem)."""
+        from prometheus.skills.loader import _parse_skill_markdown
+
+        try:
+            name, _ = _parse_skill_markdown(path.stem, path.read_text(encoding="utf-8"))
+        except OSError:
+            return path.stem
+        return name
+
     def _apply_auto_transitions(
         self, skills: list[dict[str, Any]], *, dry_run: bool
     ) -> list[dict[str, Any]]:
-        """Flip lifecycle state based on mtime cutoffs.
+        """Flip lifecycle state on the days since the last load (never loaded → active).
 
         Pinned skills are skipped. State transitions are applied immediately
         to the SkillStateStore unless ``dry_run`` is True.
@@ -655,7 +713,11 @@ class Curator:
                     )
         return transitions
 
-    def _target_state(self, days_ago: int) -> str:
+    def _target_state(self, days_ago: int | None) -> str:
+        if days_ago is None:
+            # No load recorded: nobody has measured this skill, which is not
+            # evidence that it is unused. Never stale on that basis.
+            return SKILL_STATE_ACTIVE
         if days_ago >= self._archive_after_days:
             return SKILL_STATE_ARCHIVED
         if days_ago >= self._stale_after_days:
@@ -707,7 +769,7 @@ class Curator:
             lines.append(
                 f"- name: {s['name']}{pinned_tag}\n"
                 f"  state: {s['state']}\n"
-                f"  last_used_days_ago: {s['days_ago']}\n"
+                f"  last_used_days_ago: {_days_label(s['days_ago'])}\n"
                 f"  first_line: {s['first_line'][:120]}"
             )
         return "\n".join(lines) if lines else "(no skills in auto/ directory)"
@@ -766,14 +828,19 @@ class Curator:
     # ---------------------- Internals: apply prunings ----------------------
 
     def _apply_prunings(
-        self, prunings: list[dict[str, Any]]
-    ) -> tuple[list[str], list[dict[str, Any]]]:
-        """Move pruned skill files to ``auto/.archive/``. Skips pinned skills.
+        self,
+        prunings: list[dict[str, Any]],
+        *,
+        never_loaded: set[str] = frozenset(),  # type: ignore[assignment]
+    ) -> tuple[list[str], list[dict[str, Any]], list[str]]:
+        """Move pruned skill files to ``auto/.archive/``. Skips pinned skills
+        and skills with no load data — whatever the model said about them.
 
-        Returns ``(skipped_pinned_names, applied_records)``.
+        Returns ``(skipped_pinned_names, applied_records, skipped_no_load_data)``.
         """
         applied: list[dict[str, Any]] = []
         skipped: list[str] = []
+        skipped_no_load: list[str] = []
         capped = prunings[: self._max_prunings] if self._max_prunings else prunings
         archive_dir = self._auto_dir / ".archive"
         archive_dir.mkdir(parents=True, exist_ok=True)
@@ -785,6 +852,9 @@ class Curator:
             rec = self._state_store.get_skill(name)
             if rec.pinned:
                 skipped.append(name)
+                continue
+            if name in never_loaded:
+                skipped_no_load.append(name)
                 continue
             src = self._auto_dir / f"{name}.md"
             if not src.exists():
@@ -808,7 +878,7 @@ class Curator:
                 )
             applied.append({**entry, "archived_to": str(dest)})
 
-        return skipped, applied
+        return skipped, applied, skipped_no_load
 
     # ---------------------- Internals: report writing ----------------------
 
@@ -856,7 +926,7 @@ class Curator:
             for t in run.auto_transitions:
                 lines.append(
                     f"- `{t['name']}`: {t['from_state']} → {t['to_state']} "
-                    f"({t['days_ago']}d since last use)"
+                    f"({_days_label(t['days_ago'], suffix='d since last load')})"
                 )
         else:
             lines.append("_none_")
@@ -890,6 +960,13 @@ class Curator:
                 "## Skipped (pinned)",
                 "",
                 ", ".join(f"`{n}`" for n in run.skipped_pinned),
+                "",
+            ]
+        if run.skipped_no_load_data:
+            lines += [
+                "## Not pruned: no load recorded",
+                "",
+                ", ".join(f"`{n}`" for n in run.skipped_no_load_data),
                 "",
             ]
         return "\n".join(lines)
@@ -930,6 +1007,7 @@ class Curator:
                     "consolidations": len(run.consolidations),
                     "prunings": len(run.prunings),
                     "skipped_pinned": len(run.skipped_pinned),
+                    "skipped_no_load_data": len(run.skipped_no_load_data),
                     "duration_seconds": run.duration_seconds,
                     "report_path": run.report_path,
                     "errors": run.errors,

@@ -9,6 +9,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from prometheus.engine.messages import ThinkingBlock
+
 
 def estimate_tokens(text: str) -> int:
     """Estimate the number of tokens in *text*.
@@ -33,11 +35,36 @@ def estimate_message_tokens(msg: Any) -> int:
     ``content_json`` covers every block type (text, tool_use, tool_result);
     ``.text`` does not, and a message whose payload is a tool result would
     otherwise measure as zero.
+
+    Thinking that no request builder sends back is left out: a ThinkingBlock
+    without a signature — Ollama, OpenAI-compatible and stub reasoning; only
+    Anthropic signs — is skipped by the OpenAI-shape builder
+    (``stub._build_openai_messages``) and by the Anthropic one, which returns
+    only signed thinking. Counting it budgeted the compactor, the context
+    pre-flight and the fallback window for tokens never in the prompt. Signed
+    and redacted thinking go back to Anthropic and still count. The message
+    itself keeps every block; only the estimate leaves them out.
     """
     try:
-        return estimate_tokens(msg.content_json)  # type: ignore[attr-defined]
+        return estimate_tokens(_sent_content_json(msg))
     except Exception:
         return estimate_tokens(getattr(msg, "text", "") or "")
+
+
+def _never_sent(block: Any) -> bool:
+    return isinstance(block, ThinkingBlock) and not block.signature
+
+
+def _sent_content_json(msg: Any) -> str:
+    content = getattr(msg, "content", None)
+    if not content or not any(_never_sent(b) for b in content):
+        # The same string as always, so the same figure: a message without
+        # unsent thinking is estimated exactly as before.
+        return str(msg.content_json)
+    kept = [b for b in content if not _never_sent(b)]
+    # Serialized by content_json itself, so what remains measures exactly
+    # as it would without the thought.
+    return str(msg.model_copy(update={"content": kept}).content_json)
 
 
 def estimate_messages(messages: Iterable[Any] | None) -> int:

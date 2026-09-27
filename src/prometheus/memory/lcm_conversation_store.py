@@ -16,6 +16,7 @@ from uuid import uuid4
 from prometheus.config.paths import get_lcm_db_path
 from prometheus.memory.lcm_fts5 import sanitize_fts5_query
 from prometheus.memory.lcm_types import MessagePart
+from prometheus.security.log_redaction import redact_json_text, redact_secrets
 
 log = logging.getLogger(__name__)
 
@@ -373,16 +374,24 @@ class LCMConversationStore:
           silent failure (subsystem ``lcm``, operation ``turn_index_collision``),
           so a new producer of duplicate indices shows up loudly instead of
           costing a message.
+
+        Token shapes in ``content`` and ``content_json`` are redacted before the
+        row, and its full-text entry, exist (X.37). ``msg`` itself is not
+        touched: the live conversation still holds what the user sent, so a
+        token pasted for the agent to use keeps working for the rest of the
+        session. Only what is kept, and read back later, is redacted.
         """
         mid = msg.message_id or uuid4().hex
         ts = msg.timestamp or time.time()
         requested = msg.turn_index
+        content = redact_secrets(msg.content)
+        content_json = redact_json_text(msg.content_json)
 
         # Trust columns are written EXPLICITLY from the MessagePart — never left
         # to the column DEFAULT — so a (task_supervisor, False) turn can never be
         # silently up-tagged to the trusted default on insert.
         values = (
-            msg.role, msg.content, msg.content_json, msg.token_count, ts,
+            msg.role, content, content_json, msg.token_count, ts,
             msg.provenance, 1 if msg.is_trusted else 0,
         )
         collision: sqlite3.IntegrityError | None = None
@@ -425,7 +434,7 @@ class LCMConversationStore:
             # Sync FTS index — use the rowid of the just-inserted row.
             self._conn.execute(
                 "INSERT OR REPLACE INTO lcm_messages_fts (rowid, content) VALUES (?, ?)",
-                (msg.row_id, msg.content),
+                (msg.row_id, content),
             )
         self._conn.commit()
         if collision is not None:
@@ -1133,9 +1142,10 @@ class LCMConversationStore:
         """Set (or replace) a session's display title. Last write wins.
 
         A blank title clears the row rather than storing an empty string, so
-        ``get_session_title`` stays a clean present/absent signal.
+        ``get_session_title`` stays a clean present/absent signal. A generated
+        title comes from the first exchange, so token shapes are redacted.
         """
-        clean = (title or "").strip()
+        clean = redact_secrets((title or "").strip())
         if not clean:
             self._conn.execute(
                 "DELETE FROM session_titles WHERE session_id = ?", (session_id,)

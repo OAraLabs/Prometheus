@@ -29,6 +29,7 @@ from prometheus.security.log_redaction import (
     RedactingFormatter,
     install_log_redaction,
     redact_capture,
+    redact_json_text,
     redact_secrets,
 )
 from prometheus.security.env_scrub import (
@@ -56,5 +57,6 @@ __all__ = [
     "install_log_redaction",
     "is_path_under_roots",
     "redact_capture",
+    "redact_json_text",
     "redact_secrets",
 ]

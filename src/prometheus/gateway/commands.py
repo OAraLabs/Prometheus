@@ -942,15 +942,37 @@ def cmd_memory_limits() -> str:
     )
 
 
-def cmd_skills_auto_list() -> str:
-    """List skills under ~/.prometheus/skills/auto/ with state + mtime.
+def skill_loads_for(path: Path, stats: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """The load-counter entry for the skill file at *path*, or None if it was never loaded.
 
-    Uses the SkillStateStore for `pinned` and `state`; mtime as last_used.
+    Counted under the name the registry serves (the frontmatter ``name``);
+    the file stem of the last load is the fallback for a renamed skill.
+    """
+    from prometheus.skills.loader import _parse_skill_markdown
+
+    try:
+        served, _ = _parse_skill_markdown(path.stem, path.read_text(encoding="utf-8"))
+    except OSError:
+        served = path.stem
+    if served in stats:
+        return stats[served]
+    return next((s for s in stats.values() if s.get("file") == path.stem), None)
+
+
+def cmd_skills_auto_list() -> str:
+    """List skills under ~/.prometheus/skills/auto/ with state and last use.
+
+    Uses the SkillStateStore for `pinned` and `state`. "Last used" is the
+    skill's last recorded load (the telemetry load counter), not the file's
+    mtime: refinement, a curator pass or a copy rewrites a file nobody
+    loaded, and a load never touches it. Without a wired counter the mtime
+    is shown, labelled as what it is.
     """
     import time as _time
     from datetime import datetime
     from prometheus.config.paths import get_config_dir
     from prometheus.learning.skill_state import SkillStateStore
+    from prometheus.telemetry.tracker import get_telemetry_handle
 
     auto_dir = get_config_dir() / "skills" / "auto"
     if not auto_dir.is_dir():
@@ -961,23 +983,41 @@ def cmd_skills_auto_list() -> str:
     if not skills:
         return "No auto-skills yet. They appear here when SkillCreator fires."
 
+    stats: dict[str, dict[str, Any]] | None = None
+    tel = get_telemetry_handle()
+    if tel is not None and hasattr(tel, "skill_load_stats"):
+        try:
+            stats = tel.skill_load_stats()
+        except Exception:  # noqa: BLE001 — a read failure must not break the list
+            stats = None
+
     now = _time.time()
+
+    def _ago(ts: float) -> str:
+        day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+        return f"{day} ({int((now - ts) / 86400)}d ago)"
+
     lines: list[str] = [f"Auto-skills ({len(skills)})"]
     for path in skills:
         rec = store.get_skill(path.stem)
-        try:
-            mtime = path.stat().st_mtime
-            days = int((now - mtime) / 86400)
-            last_used = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
-        except OSError:
-            days = 0
-            last_used = "?"
+        if stats is not None:
+            entry = skill_loads_for(path, stats)
+            if entry:
+                n = entry["loads"]
+                use = f"last used {_ago(entry['last_loaded_at'])}, {n} load{'' if n == 1 else 's'}"
+            else:
+                use = "no load recorded"
+        else:
+            try:
+                use = f"modified {_ago(path.stat().st_mtime)}"
+            except OSError:
+                use = "modified ?"
         pin = " 📌" if rec.pinned else ""
         state_tag = "" if rec.state == "active" else f" [{rec.state}]"
-        lines.append(
-            f"  {path.stem}{pin}{state_tag} — last used {last_used} ({days}d ago)"
-        )
+        lines.append(f"  {path.stem}{pin}{state_tag} — {use}")
     lines.append("")
+    if stats is None:
+        lines.append("(load counts unavailable here: telemetry is not wired, so dates are file dates)")
     lines.append("Use /skills show <name> · /skills pin <name> · /skills history <name>")
     return "\n".join(lines)
 

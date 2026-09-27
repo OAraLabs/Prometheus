@@ -575,6 +575,14 @@ async def _probe_llama_cpp(client: Any, spec: BackendSpec, st: BackendStatus) ->
         log.debug("backend %s: /v1/models failed (%s); using model_path", spec.name, exc)
     if not st.model:
         st.model = st.model_path
+    # What the served chat template does with tools, from the payload already
+    # in hand — the same reading the provider's detect_tool_template makes, so
+    # the catalog, /doctor and the boot primary cannot disagree about a box.
+    from prometheus.adapter.tier import classify_template
+
+    st.extra["tool_template"] = classify_template(
+        chat_template=props.get("chat_template"), caps=props.get("chat_template_caps"),
+    ).as_dict()
     st.ok = True
 
 
@@ -616,6 +624,14 @@ async def _probe_ollama(client: Any, spec: BackendSpec, st: BackendStatus) -> No
                 if isinstance(caps, list):
                     st.vision = "vision" in caps
                 st.extra["capabilities"] = caps
+                # Same reading as OllamaProvider.detect_tool_template, from the
+                # payload already in hand (see _probe_llama_cpp).
+                from prometheus.adapter.tier import classify_template
+
+                st.extra["tool_template"] = classify_template(
+                    ollama_capabilities=caps if isinstance(caps, list) else None,
+                    ollama_template=show.get("template"),
+                ).as_dict()
         except Exception as exc:  # noqa: BLE001
             log.debug("backend %s: /api/show failed (%s)", spec.name, exc)
     # `ok` = the server answered. A missing model is reported in `error` but the

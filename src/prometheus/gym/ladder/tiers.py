@@ -48,7 +48,10 @@ def forced_adapter_factory(
 
     def factory() -> ModelAdapter:
         real = daemon._get_adapter_tier
-        daemon._get_adapter_tier = lambda provider, model: tier  # type: ignore[assignment]
+        # The seam takes an optional third argument since WP-X.28 PR 2 (the
+        # served template's verdict); the daemon asks it with two when none
+        # was read, which is every ladder run. Forcing ignores both.
+        daemon._get_adapter_tier = lambda provider, model, template=None: tier  # type: ignore[assignment]
         try:
             return daemon.create_adapter(model_cfg, adapter_cfg)
         finally:
