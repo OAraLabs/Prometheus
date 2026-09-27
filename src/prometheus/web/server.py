@@ -1981,6 +1981,10 @@ def create_app(
         accounts for. A cost headline that silently covers 12% of the traffic is worse than no
         headline.
 
+        ``cached_input_tokens`` follows the same rule as ``cost_usd``: ``null`` when no row recorded
+        a cache count ("not recorded"), a number only when some did, with ``cache_reported_runs``
+        saying how many of ``runs`` that is. A recorded 0 is a cold cache and stays 0.
+
         BILLING IS A PROPERTY OF WHEN, NOT OF WHICH MODEL (#284). Pricing is still applied at
         read time — a corrected price should fix history. Billing MODE is not, because it is not
         a correction, it is a different fact: these tokens were paid for under the arrangement
@@ -2082,7 +2086,10 @@ def create_app(
         models: list[dict] = []
         coverage: dict[str, dict] = {}
         total_cost = 0.0
-        totals = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "runs": 0}
+        # cached_input_tokens: None until some model reports a recorded count —
+        # "not recorded" is not "0 cached" (usage_rollup, WP-X.21 T6).
+        totals: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0,
+                                  "cached_input_tokens": None, "cache_reported_runs": 0, "runs": 0}
 
         for m in raw["models"]:
             name = m["model"]
@@ -2158,8 +2165,10 @@ def create_app(
                 "first_seen": iso(m["first_seen"]),
                 "last_seen": iso(m["last_seen"]),
             })
-            for k in ("input_tokens", "output_tokens", "cached_input_tokens", "runs"):
+            for k in ("input_tokens", "output_tokens", "cache_reported_runs", "runs"):
                 totals[k] += m[k]
+            if m["cached_input_tokens"] is not None:
+                totals["cached_input_tokens"] = (totals["cached_input_tokens"] or 0) + m["cached_input_tokens"]
 
         for mode_name, bucket in coverage.items():
             bucket["models"] = sum(

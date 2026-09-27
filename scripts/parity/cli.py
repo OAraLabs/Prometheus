@@ -146,6 +146,44 @@ def replay_one(name: str, root: Path) -> RunOutput:
                   turn_timeout=180.0).run()
 
 
+def cmd_rebaseline_from_exchanges(args: argparse.Namespace) -> int:
+    """Re-derive expected.json from replays of the COMMITTED exchanges, for a
+    change that alters what the daemon records and not one model request (see
+    parity/rebaseline.py). Every scenario is judged before any file is written:
+    one refusal, and nothing is."""
+    from parity.rebaseline import MODE, judge
+    names = args.scenario or traces.available(SRC_ROOT)
+    if not names:
+        print(f"[{MODE}] no traces under tests/fixtures/parity — nothing was checked", flush=True)
+        return 2
+    verdicts = []
+    with RootLock(args.root):
+        for name in names:
+            runs = [replay_one(name, args.root) for _ in range(args.runs)]
+            base = BY_NAME.get(name)
+            v = judge(name, runs, traces.load_expected(SRC_ROOT, name), args.root,
+                      require=base.require if base else None)
+            print(v.report, flush=True)
+            for refusal in v.refusals:
+                print(f"  REFUSED: {refusal}", flush=True)
+            verdicts.append(v)
+    refused = [v.name for v in verdicts if v.refusals]
+    changed = [v for v in verdicts if v.expected is not None]
+    print(f"\n[{MODE}] {len(verdicts)} scenario(s), {args.runs} replay(s) each: "
+          f"{len(changed)} changed, {len(verdicts) - len(changed) - len(refused)} unchanged, "
+          f"{len(refused)} refused", flush=True)
+    if refused:
+        print(f"[{MODE}] REFUSED {refused} — nothing written", flush=True)
+        return 2 if any(v.harness_error for v in verdicts) else 1
+    if args.dry_run:
+        print(f"[{MODE}] dry run — nothing written", flush=True)
+        return 0
+    for v in changed:
+        path = traces.write_expected(SRC_ROOT, v.name, v.expected)
+        print(f"[{MODE}] wrote {path.name} ({', '.join(v.categories)})", flush=True)
+    return 0
+
+
 def cmd_replay(args: argparse.Namespace) -> int:
     from parity.compare import compare, render_report
     names = args.scenario or traces.available(SRC_ROOT)
@@ -363,6 +401,17 @@ def main(argv: list[str] | None = None) -> int:
     rb = sub.add_parser("rebaseline", help="re-derive expected.json from the raw recording")
     rb.add_argument("--scenario", action="append")
     rb.set_defaults(fn=cmd_rebaseline)
+
+    rx = sub.add_parser(
+        "rebaseline-from-exchanges",
+        help="re-derive expected.json from replays of the committed exchanges, for a change "
+             "to what is recorded only; refuses if any model request changed")
+    rx.add_argument("--scenario", action="append")
+    rx.add_argument("--runs", type=int, default=2,
+                    help="replays per scenario; their observables must be identical (default 2)")
+    rx.add_argument("--dry-run", action="store_true",
+                    help="print the per-column diff and the verdicts; write nothing")
+    rx.set_defaults(fn=cmd_rebaseline_from_exchanges)
 
     n = sub.add_parser("normalizations", help="print every normalization rule")
     n.set_defaults(fn=cmd_normalizations)

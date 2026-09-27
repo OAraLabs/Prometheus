@@ -22,8 +22,9 @@ uv run python scripts/parity_harness.py normalizations   # every rule that hides
 
 A diff is a behavior change until shown otherwise. The report names the
 category (model requests, tool calls, gate decisions, checkpoints, memory,
-telemetry, final reply) and the rows. If the change is intended, re-record the
-affected scenario and say in the PR what changed and why:
+telemetry, final reply) and the rows. If the change is intended and no model
+request changed, see [When only what is recorded changes](#when-only-what-is-recorded-changes).
+Otherwise re-record the affected scenario and say in the PR what changed and why:
 
 ```bash
 uv run python scripts/parity_harness.py record --scenario NAME \
@@ -47,6 +48,38 @@ recorded, so no trace can contain it. A replay needs no key and no network.
 Never edit `*.expected.json` by hand, and never add a normalization rule to make
 a diff go away. A rule may be added only for a field that is **shown** to differ
 between two runs of unchanged code. Record the evidence in the rule's `why`.
+
+## When only what is recorded changes
+
+Some changes alter what the daemon **records** (a telemetry column filled, a row
+added) without changing a single model request. Those don't need the models
+again. Every request still matches its committed exchange, so the committed
+answers still answer it. Re-derive the expected files from replays of those
+exchanges:
+
+```bash
+uv run python scripts/parity_harness.py rebaseline-from-exchanges --dry-run  # print the diff, write nothing
+uv run python scripts/parity_harness.py rebaseline-from-exchanges            # write the changed expected files
+```
+
+It replays each scenario twice against its committed exchanges. For each one it
+prints the per-column diff against the expected file. It **refuses**, exits
+non-zero and writes no file at all, if any scenario:
+
+- sends a model request that differs from its committed exchange, sends one the
+  trace has no answer for, or never sends a committed one. Re-record instead;
+- hits a harness error (exit 2) or a daemon step that failed;
+- records something different on its second replay than on its first;
+- no longer passes its own `require` check.
+
+It writes only `*.expected.json`, and only for the scenarios that changed. It
+never touches a trace. The PR that uses it shows the per-column diff for each
+change. For a bundle, apply one change at a time, run `--dry-run`, and put each
+report in the PR. Then commit the expected files and run `replay` and
+`stability`.
+
+A change that alters any model request is a different kind of change: re-record
+it.
 
 ## What the traces must never contain
 
