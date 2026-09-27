@@ -507,6 +507,12 @@ def _task_passed(task: dict) -> bool:
     ms = task.get("metrics") or []
     return bool(ms) and not task.get("error") and all(m.get("passed") for m in ms)
 
+def _unscored(task: dict) -> bool:
+    # A metric the judge could not score (the call raised, or the reply held
+    # no verdict) is named here and absent from `metrics`: neither a pass nor
+    # a fail, so the task stays out of pass_rate.
+    return bool(task.get("unavailable_metrics"))
+
 def build_report(run_dir: Path, manifests: dict[str, dict]) -> Path:
     summaries: dict[str, dict] = {}
     for label, man in manifests.items():
@@ -516,8 +522,10 @@ def build_report(run_dir: Path, manifests: dict[str, dict]) -> Path:
         summaries[label] = {
             "tasks": len(tasks),
             "errors": sum(1 for t in tasks if t.get("error")),
+            "unscored": sum(1 for t in tasks if _unscored(t)),
             "smoke": man["smoke_gate_passed"],
-            "pass_rate": _mean([1.0 if _task_passed(t) else 0.0 for t in tasks]),
+            "pass_rate": _mean([1.0 if _task_passed(t) else 0.0
+                                for t in tasks if not _unscored(t)]),
             **{k: _mean([_metric(t, name) for t in tasks])
                for k, name in METRIC_KEYS.items()},
         }
@@ -551,7 +559,7 @@ def build_report(run_dir: Path, manifests: dict[str, dict]) -> Path:
         lines += [f"> - {d}" for d in soft] + [""]
     lines += ["| metric | " + " | ".join(summaries) + " |",
               "|---|" + "|".join(["---"] * len(summaries)) + "|"]
-    for metric in ("tasks", "errors", "smoke", "pass_rate",
+    for metric in ("tasks", "errors", "unscored", "smoke", "pass_rate",
                    "tool_usage", "task_completion", "no_hallucination"):
         cells = " | ".join(str(summaries[l].get(metric)) for l in summaries)
         lines.append(f"| {metric} | {cells} |")

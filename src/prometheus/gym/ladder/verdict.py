@@ -606,10 +606,10 @@ async def run_judge(
 ) -> dict[str, Any]:
     """Grade with the pinned judge. ``status`` is ``ok`` or ``unavailable``.
 
-    ``PrometheusJudge`` turns an empty or unparseable reply into a score
-    (0.0 for empty, a stray number for garbage). Taken at face value that is
-    a judge outage recorded as a model failure — or, for a stray "1", as a
-    pass. Both are refused here: only a parsed verdict counts.
+    The raw reply is read here with ``strict_judge_score``, not taken from
+    the verdict's score: an empty reply, a missing score or a stray "1" is a
+    judge outage, never a model failure or a pass. Only a parsed verdict
+    counts.
     """
     spec = task.judge
     threshold = float(spec.get("threshold", 0.7))
@@ -647,29 +647,13 @@ def _provenance(judge: Any) -> dict[str, Any]:
 
 
 def strict_judge_score(raw: str) -> float | None:
-    """The judge's own number, or None. ``PrometheusJudge`` defaults a missing
-    score to 0.0 and clamps an out-of-range one — a malformed reply would read
-    as a model FAIL, a score of 7 as a PASS. Only a finite number in [0, 1]
-    under a ``score`` key counts."""
-    import json as _json
-    import math
+    """The judge's own number, or None: the JSON reading of
+    ``evals.judge.parse_judge_reply``, the parser the nightly evals use too.
+    Only a finite number in [0, 1] under a ``score`` key counts. A missing
+    score is not 0.0 (a model FAIL) and a 7 is not 1.0 (a PASS)."""
+    from prometheus.evals.judge import JSON_REPLY, parse_judge_reply
 
-    candidates = [raw, re.sub(r"```(?:json)?\s*\n?", "", raw).strip()]
-    if "{" in raw and "}" in raw:
-        candidates.append(raw[raw.index("{"): raw.rindex("}") + 1])
-    for text in candidates:
-        try:
-            obj = _json.loads(text)
-        except ValueError:
-            continue
-        if not isinstance(obj, dict):
-            continue
-        s = obj.get("score")
-        if isinstance(s, bool) or not isinstance(s, (int, float)):
-            return None
-        s = float(s)
-        return s if math.isfinite(s) and 0.0 <= s <= 1.0 else None
-    return None
+    return parse_judge_reply(raw, JSON_REPLY).score
 
 
 # ---------------------------------------------------------------------------
