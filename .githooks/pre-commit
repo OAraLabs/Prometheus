@@ -258,15 +258,21 @@ scan_q 1 'sentinel' 'SENTINEL' || _st_rc=$?
 # nothing and reporting nothing. Same fail-open as the scan itself, so the
 # same three-way exit-code contract applies here.
 #
-# RENAMES ARE SCANNED — the R in ACMR. Git detects renames by default, so a
-# file renamed AND edited in one commit has status R, not M. Under ACM it
-# never reached a pattern: `git mv a.py b.py`, add a key to b.py, and the hook
-# printed "All clean" (a pure rename left the list empty, and the empty-list
-# `exit 0` below ran before any scan). A rename carries whatever edit git scores as
-# similar, so it is scanned like any other staged file.
-# tests/test_precommit_renames_and_output.py replays both shapes.
+# EVERY STAGED STATUS BUT DELETIONS IS SCANNED: --diff-filter=d. The filter
+# used to list the statuses to scan, and each letter it left out was a hole.
+# Under ACM a file renamed AND edited in one commit (status R) never reached a
+# pattern: `git mv a.py b.py`, add a key to b.py, and the hook printed "All
+# clean". Under ACMR a symlink replaced by a regular file (status T) still
+# didn't. "All but deletions" names the one status with nothing staged to
+# read, so no letter (R, T, or one git adds later) can drop a file again.
+#
+# THE INDEX, NOT THE DISK. check_pattern used to skip any listed file missing
+# from the working tree (`[ -f "$file" ]`), yet it reads the staged blob, and
+# the index is what gets committed: a key staged and then deleted from disk
+# was committed while the hook printed "All clean". The disk is no longer
+# consulted. tests/test_precommit_renames_and_output.py replays each shape.
 _rc=0
-STAGED_ALL=$(git diff --cached --name-only --diff-filter=ACMR | \
+STAGED_ALL=$(git diff --cached --name-only --diff-filter=d | \
     "$GREP" -v '^\.githooks/') || _rc=$?
 [ "$_rc" -lt 2 ] || scanner_failed "(staged file list)" \
     "grep exited $_rc filtering the staged file list — the scan scope is unknown"
@@ -337,7 +343,10 @@ check_pattern() {
 
     local file match blob stripped rc
     while IFS= read -r file; do
-        [ -f "$file" ] || continue
+        # Skip only the one empty line `<<<` yields for an empty list (a
+        # docs-only commit leaves STAGED_CODE empty). A name check, not a disk
+        # check: see THE INDEX, NOT THE DISK above STAGED_ALL.
+        [ -n "$file" ] || continue
 
         # Read the STAGED version, not the working copy. Captured separately
         # so a git failure is distinguishable from "the file has no matches" —

@@ -1,12 +1,19 @@
-"""A renamed-and-edited file is scanned, and a hit never prints the secret.
+"""Every staged file is scanned from the index, and a hit never prints the secret.
 
 WHAT HAPPENED
 -------------
-`.githooks/pre-commit` built its scan list with
-`git diff --cached --name-only --diff-filter=ACM`. Git detects renames by
-default, so a file that is renamed AND edited in one commit has status R
-(`R083 a.py b.py`), and ACM drops it. Its content never reached a pattern, the
-hook said "All clean", and a key added during a `git mv` committed clean.
+`.githooks/pre-commit` built its scan list from a list of status letters, and
+each letter it lacked was a way past it:
+
+- `--diff-filter=ACM`: git detects renames by default, so a file renamed AND
+  edited in one commit has status R (`R083 a.py b.py`) and was dropped. A key
+  added during a `git mv` committed while the hook said "All clean".
+- `--diff-filter=ACMR`: a committed symlink replaced by a regular file has
+  status T, and was dropped the same way.
+
+And check_pattern skipped any listed file missing from disk (`[ -f "$file" ]`),
+although it reads the staged blob: a key staged and then deleted from the
+working tree was committed from the index while the hook said "All clean".
 
 Separately, a hit printed `BLOCKED  <file>:<line>:<the whole line>` -- the
 secret itself, echoed to the terminal and to anything capturing it.
@@ -15,10 +22,15 @@ WHAT THIS FILE ASSERTS
 ----------------------
 In a throwaway repo, running the real hook:
 
-    renamed and edited, carrying a key   refused; names file:line and the pattern
-    any hit (added or renamed)           the key never appears in the output
+    renamed and edited, carrying a key       refused; names file:line and the pattern
+    staged, then deleted from disk           refused
+    symlink replaced by a file with a key    refused
+    any hit                                  the key never appears in the output
+    controls                                 a clean rename, a pure deletion, a new
+                                             clean symlink and a docs-only commit
+                                             all pass
 
-Both failed against the hook before this fix. A clean rename still passes.
+Each refusal failed against the hook as it was before its fix.
 
 The key is generated at run time, so this file holds nothing key-shaped for the
 hook itself, or for tests/test_sdist_contents.py, to find.
@@ -99,6 +111,13 @@ def _run_hook(repo: Path) -> tuple[int, str]:
     return proc.returncode, proc.stdout + proc.stderr
 
 
+def _symlink(link: Path, target: str) -> None:
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks not supported on this platform")
+
+
 def _stage_added(repo: Path, key: str) -> str:
     (repo / "app.py").write_text(BODY + f'qzv_assigned = "{key}"\n', encoding="utf-8")
     _git(repo, "add", "app.py")
@@ -139,6 +158,96 @@ def test_a_clean_rename_still_passes(tmp_path: Path) -> None:
     """
     repo = _repo(tmp_path)
     _stage_renamed_and_edited(repo, None)
+    code, out = _run_hook(repo)
+    assert code == 0, out
+    assert "All clean" in out
+
+
+def test_a_key_staged_then_deleted_from_disk_is_refused(tmp_path: Path) -> None:
+    """THE SECOND GAP: `[ -f "$file" ]` skipped it, but the index is what commits."""
+    key = _fake_key()
+    repo = _repo(tmp_path)
+    path = _stage_added(repo, key)
+    (repo / path).unlink()
+    status = _git(repo, "diff", "--cached", "--name-status")
+    assert status.startswith("A"), f"expected a staged add:\n{status}"
+    assert not (repo / path).exists(), "the file must be gone from disk to prove anything"
+    code, out = _run_hook(repo)
+    shown = out.replace(key, "<THE KEY>")
+    printed_key = key in out
+    assert not printed_key, f"the hook printed the key it found:\n{shown}"
+    assert code != 0, f"a key committed from the index was allowed through:\n{shown}"
+    assert "All clean" not in out
+    assert f"{path}:{KEY_LINE_NO}" in out
+    assert LABEL in out
+
+
+def test_a_symlink_replaced_by_a_file_holding_a_key_is_refused(tmp_path: Path) -> None:
+    """THE THIRD GAP: a type change is status T, which ACMR dropped too."""
+    key = _fake_key()
+    repo = _repo(tmp_path)
+    (repo / "settings.py").write_text(BODY, encoding="utf-8")
+    _symlink(repo / "current.py", "settings.py")
+    _git(repo, "add", "settings.py", "current.py")
+    _git(repo, "commit", "-q", "-m", "clean")
+    (repo / "current.py").unlink()
+    (repo / "current.py").write_text(BODY + f'qzv_assigned = "{key}"\n', encoding="utf-8")
+    _git(repo, "add", "current.py")
+    status = _git(repo, "diff", "--cached", "--name-status")
+    assert status.startswith("T"), f"git saw no type change, so this proves nothing:\n{status}"
+    code, out = _run_hook(repo)
+    shown = out.replace(key, "<THE KEY>")
+    printed_key = key in out
+    assert not printed_key, f"the hook printed the key it found:\n{shown}"
+    assert code != 0, f"a key arriving as a type change was allowed through:\n{shown}"
+    assert "All clean" not in out
+    assert f"current.py:{KEY_LINE_NO}" in out
+    assert LABEL in out
+
+
+def test_a_pure_deletion_still_passes(tmp_path: Path) -> None:
+    """Deletions are the one status not scanned: nothing is staged to read.
+
+    The deleted file holds a key on purpose. Deleting it is how a key gets
+    removed, so that must never be refused.
+    """
+    key = _fake_key()
+    repo = _repo(tmp_path)
+    _stage_added(repo, key)
+    _git(repo, "commit", "-q", "-m", "a key that has to go")
+    _git(repo, "rm", "-q", "app.py")
+    status = _git(repo, "diff", "--cached", "--name-status")
+    assert status.startswith("D"), status
+    code, out = _run_hook(repo)
+    assert code == 0, out.replace(key, "<THE KEY>")
+
+
+def test_a_new_clean_symlink_passes(tmp_path: Path) -> None:
+    """A symlink's staged blob is its target path; a clean one is read and passes."""
+    repo = _repo(tmp_path)
+    (repo / "settings.py").write_text(BODY, encoding="utf-8")
+    _git(repo, "add", "settings.py")
+    _git(repo, "commit", "-q", "-m", "clean")
+    _symlink(repo / "current.py", "settings.py")
+    _git(repo, "add", "current.py")
+    status = _git(repo, "diff", "--cached", "--name-status")
+    assert status.startswith("A"), status
+    code, out = _run_hook(repo)
+    assert code == 0, out
+    assert "All clean" in out
+
+
+def test_a_docs_only_commit_still_passes(tmp_path: Path) -> None:
+    """The on-disk check also skipped the empty line `<<<` yields for an empty list.
+
+    A docs-only commit leaves the code-scoped list empty. Dropping the check with
+    nothing in its place refused every such commit ("SCANNER DID NOT RUN: git
+    show : failed"), so an empty name is still skipped; only the disk is not.
+    """
+    repo = _repo(tmp_path)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "notes.md").write_text("ordinary prose\n", encoding="utf-8")
+    _git(repo, "add", "docs/notes.md")
     code, out = _run_hook(repo)
     assert code == 0, out
     assert "All clean" in out
