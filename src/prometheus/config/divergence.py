@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from prometheus.config.shipped_defaults import (
+    ALWAYS_LOADED_SHIPPED,
     SHIPPED_ALLOWED_AUDIO_TYPES,
     SHIPPED_ALLOWED_DOCUMENT_TYPES,
     SHIPPED_ALLOWED_IMAGE_TYPES,
@@ -55,6 +56,8 @@ from prometheus.config.shipped_defaults import (
     SHIPPED_MAX_TOOL_ITERATIONS_CLOUD,
     SHIPPED_TELEGRAM_ENABLED,
     SHIPPED_WORKSPACE_ROOT,
+    always_loaded_origin,
+    resolve_always_loaded,
     resolve_denied_paths,
     resolve_max_tool_iterations,
     resolve_max_tool_iterations_cloud,
@@ -76,11 +79,16 @@ logger = logging.getLogger(__name__)
 #: ``config_rejected``  key present but UNUSABLE (``0``, ``"abc"``, wrong
 #:                      type); the resolver fell back, so the operator's
 #:                      value does nothing at all
+#: ``shipped_value``    key present, holding a value Prometheus itself shipped
+#:                      as the default (now or in an earlier release). Nobody
+#:                      chose it, so the CURRENT shipped value is in force and
+#:                      follows later releases (``always_loaded`` only)
 CONFIG_SOURCES: tuple[str, ...] = (
     "shipped_default",
     "config",
     "config_override",
     "config_rejected",
+    "shipped_value",
 )
 
 #: The two states worth interrupting a boot log for. ``config`` and
@@ -112,6 +120,9 @@ class _Governed:
     shipped: Any
     resolve: Callable[[dict], Any]
     admits: Callable[[Any], bool]
+    #: True when the section holds a value Prometheus shipped as the default,
+    #: which the resolver replaces with the current one (``shipped_value``).
+    was_shipped: Callable[[dict], bool] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -167,17 +178,9 @@ def _admits_workspace_root(raw: Any) -> bool:
     return False
 
 
-def _always_loaded(deferred_cfg: dict) -> list[str]:
-    """Mirror of ``DynamicToolLoader.__init__``'s resolution rule.
-
-    Deliberate duplication: the rule lives inline in a constructor
-    (``context/dynamic_tools.py``), not behind a ``resolve_*`` this module
-    could call. ``test_always_loaded_mirror_agrees_with_the_real_loader``
-    pins the two together, so if the loader's rule changes this goes red
-    rather than quietly reporting a value nothing enforces.
-    """
-    configured = deferred_cfg.get("always_loaded")
-    return list(SHIPPED_ALWAYS_LOADED if configured is None else configured)
+def _always_loaded_was_shipped(deferred_cfg: dict) -> bool:
+    """The section lists a tool set Prometheus shipped as the default."""
+    return always_loaded_origin(deferred_cfg) == ALWAYS_LOADED_SHIPPED
 
 
 #: Every shipped default a live config can override. Adding a ``SHIPPED_*``
@@ -226,7 +229,8 @@ GOVERNED: tuple[_Governed, ...] = (
     ),
     _Governed(
         "tools.deferred_loading.always_loaded", ("tools", "deferred_loading"),
-        "always_loaded", SHIPPED_ALWAYS_LOADED, _always_loaded, _admits_anything,
+        "always_loaded", SHIPPED_ALWAYS_LOADED, resolve_always_loaded,
+        _admits_anything, was_shipped=_always_loaded_was_shipped,
     ),
 )
 
@@ -278,6 +282,10 @@ def describe(config: dict | None) -> tuple[ConfigValue, ...]:
 
         if raw is _MISSING or raw is None:
             source = "shipped_default"
+        elif entry.was_shipped is not None and entry.was_shipped(section):
+            # A value Prometheus wrote or templated, not one the operator
+            # chose: the resolver has already replaced it with the current one.
+            source = "shipped_value"
         elif not entry.admits(raw):
             # The resolver refused it and fell back — a 0 ceiling, a blank
             # workspace root, a scalar where a list belongs. The operator's
@@ -299,12 +307,22 @@ def warn_on_divergence(config: dict | None, *, log: Any = None) -> tuple[ConfigV
 
     Warns, never refuses — see the module docstring. The two states that stay
     silent are the two that are correct: a key absent (shipped default in
-    force) and a key present that agrees with it.
+    force) and a key present that agrees with it. A key holding a value
+    Prometheus shipped (``shipped_value``) gets one INFO line: the current
+    default is in force, and the operator should know how to pin their own.
     """
     emit = log if log is not None else logger
     values = describe(config)
     for value in values:
-        if value.source == "config_override":
+        if value.source == "shipped_value":
+            emit.info(
+                "config follows a shipped default: %s holds a list Prometheus "
+                "shipped as its default, so the current default is in force: %r. "
+                "To pin a list of your own, write one that is not a shipped "
+                "default; any other list is used exactly as written.",
+                value.key, value.resolved,
+            )
+        elif value.source == "config_override":
             emit.warning(
                 "config OVERRIDES a shipped default: %s = %r (shipped: %r). "
                 "THE CONFIG WINS. If you did not mean to pin this, remove the "

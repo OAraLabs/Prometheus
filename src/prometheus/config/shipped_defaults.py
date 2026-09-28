@@ -29,13 +29,42 @@ that must remember to run). See ``tests/test_absence_hostile_keys.py``.
 
 from __future__ import annotations
 
-# tools.deferred_loading.always_loaded — the tool set a fresh install
-# advertises. Absent from an upgraded config, and the old fallback of []
-# meant the model was handed nothing it could call.
-SHIPPED_ALWAYS_LOADED: tuple[str, ...] = (
-    "bash", "task_create", "read_file", "write_file", "edit_file",
-    "grep", "glob", "tool_search", "skill", "web_search", "web_fetch", "memory",
+# tools.deferred_loading.always_loaded — EVERY tool set Prometheus has shipped
+# as the default, oldest first, read from git history (2026-09-28): the
+# template's list since the initial commit, and this module's constant since
+# FL-2. Each was the same list, in the same order, wherever it appeared. The
+# NEWEST is the default.
+#
+# To change the default, APPEND a set and leave the old ones: a config that
+# holds one of them exactly did not choose it. Setup wrote the default into
+# every config it made from 2026-08-12 (FL-2) until 0.9.5, and a copied
+# template carries it too, so pinning those configs to the set of their day is
+# what hid `skill` from them (option C2). ``resolve_always_loaded`` gives such a
+# config the newest set instead; any other list is the operator's.
+ALWAYS_LOADED_DEFAULTS_SHIPPED: tuple[tuple[str, ...], ...] = (
+    # The initial commit's template (before v0.1.0).
+    ("bash", "read_file", "write_file", "edit_file", "grep", "glob", "tool_search"),
+    # + task_create (#27, 2026-06-09): v0.1.0.
+    ("bash", "task_create", "read_file", "write_file", "edit_file", "grep", "glob",
+     "tool_search"),
+    # + web_search, web_fetch, memory (#159, 2026-08-11): v0.9.0 to v0.9.4.
+    ("bash", "task_create", "read_file", "write_file", "edit_file", "grep", "glob",
+     "tool_search", "web_search", "web_fetch", "memory"),
+    # + skill (#593, option C2, 2026-09-26).
+    ("bash", "task_create", "read_file", "write_file", "edit_file", "grep", "glob",
+     "tool_search", "skill", "web_search", "web_fetch", "memory"),
 )
+
+# The tool set a fresh install advertises: the newest shipped default. Absent
+# from an upgraded config, and the old fallback of [] meant the model was handed
+# nothing it could call.
+SHIPPED_ALWAYS_LOADED: tuple[str, ...] = ALWAYS_LOADED_DEFAULTS_SHIPPED[-1]
+
+#: Where ``tools.deferred_loading.always_loaded`` came from
+#: (:func:`always_loaded_origin`).
+ALWAYS_LOADED_ABSENT = "absent"      # no key: the shipped default
+ALWAYS_LOADED_SHIPPED = "shipped"    # a set Prometheus shipped: the newest one
+ALWAYS_LOADED_PINNED = "pinned"      # the operator's own list, used as written
 
 # security.workspace_root — where write_file/edit_file may write without
 # asking. NOT confinement: bash is gated on its command string, not on the
@@ -165,6 +194,40 @@ SHIPPED_TELEGRAM_ENABLED: bool = False
 SHIPPED_DENIED_PATHS: tuple[str, ...] = (
     "/etc", "/sys", "/boot", "/*/.ssh", "/*/.gnupg", "/*/.config/*/*env",
 )
+
+
+def always_loaded_origin(deferred_cfg: dict | None) -> str:
+    """Where a ``tools.deferred_loading`` section's ``always_loaded`` comes from.
+
+    * key ABSENT (or null) -> :data:`ALWAYS_LOADED_ABSENT`.
+    * a list EQUAL, item for item and in order, to any set in
+      :data:`ALWAYS_LOADED_DEFAULTS_SHIPPED` -> :data:`ALWAYS_LOADED_SHIPPED`.
+      Exact on purpose: a list that differs in any way, order included, may be
+      a choice, and a choice is never replaced.
+    * anything else -> :data:`ALWAYS_LOADED_PINNED`, ``[]`` included.
+    """
+    configured = (deferred_cfg or {}).get("always_loaded")
+    if configured is None:
+        return ALWAYS_LOADED_ABSENT
+    if (isinstance(configured, (list, tuple))
+            and tuple(configured) in ALWAYS_LOADED_DEFAULTS_SHIPPED):
+        return ALWAYS_LOADED_SHIPPED
+    return ALWAYS_LOADED_PINNED
+
+
+def resolve_always_loaded(deferred_cfg: dict | None) -> list[str]:
+    """The tool names advertised under deferred loading, for a
+    ``tools.deferred_loading`` section.
+
+    Absent, or a set Prometheus itself shipped as the default ->
+    :data:`SHIPPED_ALWAYS_LOADED`, the newest. So an install whose config setup
+    wrote, or copied from the template, follows the shipped default across
+    upgrades. Any other value is the operator's and is used exactly as written:
+    ``[]`` advertises nothing, on purpose (FL-2u).
+    """
+    if always_loaded_origin(deferred_cfg) == ALWAYS_LOADED_PINNED:
+        return list((deferred_cfg or {})["always_loaded"])
+    return list(SHIPPED_ALWAYS_LOADED)
 
 
 def resolve_denied_paths(security_cfg: dict | None) -> list[str]:

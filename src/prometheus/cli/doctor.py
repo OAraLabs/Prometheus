@@ -39,7 +39,12 @@ from prometheus.config.paths import (
     get_logs_dir,
     get_workspace_dir,
 )
-from prometheus.infra.doctor import DiagnosticCheck, check_router
+from prometheus.infra.doctor import (
+    ADVERTISED_TOOLS_ROW,
+    DiagnosticCheck,
+    always_loaded_case,
+    check_router,
+)
 
 import logging
 
@@ -505,6 +510,10 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
     ``always_loaded: []`` on purpose gets exactly what they asked for, and
     this is where that stays VISIBLE rather than being discovered as "the
     agent can't do anything".
+
+    It also says whether that set FOLLOWS the shipped default or is PINNED by
+    the config (``infra.doctor.always_loaded_case``, the same row the chat
+    ``/doctor`` shows), and warns when a pinned list leaves out a shipped tool.
     """
     try:
         from prometheus.__main__ import create_tool_registry
@@ -519,7 +528,7 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
         total = len(registry.list_tools())
     except Exception as exc:  # diagnostics must never crash the doctor
         return DiagnosticCheck(
-            name="Advertised tools", category="resources", status="warning",
+            name=ADVERTISED_TOOLS_ROW, category="resources", status="warning",
             message=f"could not resolve the advertised set ({exc})",
             fix="Run `oara doctor --debug` and report this — the "
                 "advertised set is what the model can actually call.",
@@ -527,7 +536,7 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
 
     if not advertised:
         return DiagnosticCheck(
-            name="Advertised tools", category="resources", status="error",
+            name=ADVERTISED_TOOLS_ROW, category="resources", status="error",
             message=f"NONE — 0 of {total} registered tools are offered to "
                     f"the model, so it cannot call anything",
             fix="Remove `tools.deferred_loading.always_loaded: []` from your "
@@ -536,10 +545,12 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
         )
     preview = ", ".join(advertised[:6])
     more = f" (+{len(advertised) - 6} more)" if len(advertised) > 6 else ""
+    case_status, case_text, case_fix = always_loaded_case(config)
     return DiagnosticCheck(
-        name="Advertised tools", category="resources", status="ok",
+        name=ADVERTISED_TOOLS_ROW, category="resources", status=case_status,
         message=f"{len(advertised)} of {total} registered offered to the "
-                f"model: {preview}{more}",
+                f"model: {preview}{more} — {case_text}",
+        fix=case_fix,
     )
 
 
@@ -1029,9 +1040,11 @@ def run_anatomy_checks(config: dict[str, Any]) -> list[DiagnosticCheck]:
             # (the class's Config check is also repo-root-relative, which
             # is wrong for pip installs). "Telegram" is superseded by the
             # per-gateway checks (SPRINT G3). "Router" is the same
-            # check_router row the extended checks already carry.
+            # check_router row the extended checks already carry, and
+            # "Advertised tools" is check_advertised_tools' row, which adds
+            # the count of tools actually offered to the same case.
             if check.name in ("Config", "Inference", "Model", "Whisper STT",
-                              "Telegram", "Router"):
+                              "Telegram", "Router", ADVERTISED_TOOLS_ROW):
                 continue
             # Missing SOUL.md/AGENTS.md doesn't break the loop — the fast
             # setup path deliberately skips identity. Warn, don't fail.
