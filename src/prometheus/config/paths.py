@@ -223,6 +223,15 @@ def get_legacy_lcm_db_path() -> Path:
     return get_config_dir() / _LCM_DB_NAME
 
 
+def legacy_lcm_db_path() -> Path:
+    """Where :func:`get_legacy_lcm_db_path` resolves, creating nothing.
+
+    ``oara scrub`` reads the legacy file too (its ``checkpoints`` table can hold
+    conversation messages), and its dry run must leave no directory behind.
+    """
+    return config_dir_path() / _LCM_DB_NAME
+
+
 def get_project_config_dir(cwd: str | Path) -> Path:
     """Return the per-project .prometheus directory."""
     project_dir = Path(cwd).resolve() / ".prometheus"
