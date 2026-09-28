@@ -43,8 +43,10 @@ TIERS = ("off", "light", "full")
 #: replaced (the ladder's tier sweep forces a tier that way).
 TIER_SOURCES = ("override", "provider_class", "registry", "template", "fallback", "forced")
 
-#: How each source reads to a human — the same sentence on the boot line, in
-#: /doctor and on the API, so no surface invents its own wording.
+#: How each source reads to a human. Only the boot line reads it today
+#: (``__main__._log_tier_decision``); /doctor and /api/status do not show the
+#: tier yet (WP-X.28 step 4). When they do, they use this same sentence, so no
+#: surface invents its own wording.
 TIER_SOURCE_TEXT = {
     "override": "config — adapter.model_tiers names this model",
     "provider_class": "the API enforces structure (cloud provider)",

@@ -83,16 +83,19 @@ vision-derived skills **never** auto-persist. They land in
   standard auto-skill path (optionally with edited content). If a skill
   with the draft's name is already served, the answer is **409** naming it
   and the draft stays pending; accept again with `{"replace": true}` to
-  archive the live skill to `skills/auto/archive/` and write the draft in
-  its place, or rename the draft
+  serve the draft under that name instead, or rename the draft. A replace
+  archives auto skills only: every auto skill file serving that name goes
+  to `skills/auto/archive/`, and the draft is written in its place. A
+  builtin skill, or one of your own in `~/.prometheus/skills/`, is never
+  archived or changed; the draft is served instead
+- `POST /api/learning/skill-drafts/{id}/reject` — archived to
+  `drafts/.rejected/`, never deleted
 
 A browser recording (and a teacher-escalation skill) whose name is already
 served is not written either: it becomes a draft here too — the upload
 answers `"status": "draft"` with its `draft_id` — so a person decides
 between replacing and renaming. Nothing machine-written replaces a live
 skill on its own.
-- `POST /api/learning/skill-drafts/{id}/reject` — archived to
-  `drafts/.rejected/`, never deleted
 
 ## The new-VLM ritual: bakeoff before enablement
 
