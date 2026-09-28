@@ -266,9 +266,14 @@ class TeacherEscalation:
         signal_bus: Any | None = None,
         provider: "ModelProvider | None" = None,
         skill_creator: "SkillCreator | None" = None,
+        skill_dedupe_threshold: float | None = None,
     ) -> None:
         from prometheus.learning.llm_envelope import LLMCallEnvelope
 
+        # learning.skill_dedupe_threshold, for the SkillCreator this engine
+        # builds itself when none is handed in (the daemon hands in its own,
+        # which already carries it). None is the calibrated default.
+        self._skill_dedupe_threshold = skill_dedupe_threshold
         self._teacher_model = teacher_model or None
         self._teacher_provider_name = teacher_provider
         self._api_key_env = api_key_env
@@ -308,6 +313,7 @@ class TeacherEscalation:
         """Build from the loaded prometheus.yaml dict. Always returns an
         engine; with no ``escalation.teacher_model`` it is inert."""
         esc = (config or {}).get("escalation") or {}
+        learning = (config or {}).get("learning") or {}
         return cls(
             teacher_model=esc.get("teacher_model"),
             teacher_provider=esc.get("teacher_provider", DEFAULT_TEACHER_PROVIDER),
@@ -317,6 +323,7 @@ class TeacherEscalation:
             telemetry=telemetry,
             signal_bus=signal_bus,
             skill_creator=skill_creator,
+            skill_dedupe_threshold=learning.get("skill_dedupe_threshold"),
         )
 
     @property
@@ -375,6 +382,7 @@ class TeacherEscalation:
                     self._ensure_provider(),
                     model=self._teacher_model or "default",
                     telemetry=self._telemetry,
+                    dedupe_threshold=self._skill_dedupe_threshold,
                 )
                 if self._signal_bus is not None:
                     self._skill_creator.signal_bus = self._signal_bus

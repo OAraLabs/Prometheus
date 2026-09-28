@@ -4037,6 +4037,8 @@ def create_app(
                 provider,
                 model=model_cfg.get("model", "default"),
                 telemetry=getattr(app.state, "telemetry", None),
+                dedupe_threshold=(cfg.get("learning", {}) or {}).get(
+                    "skill_dedupe_threshold"),
             )
             bus = getattr(app.state, "signal_bus", None)
             if bus is not None:

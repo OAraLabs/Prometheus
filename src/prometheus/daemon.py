@@ -290,6 +290,10 @@ def _wire_skill_creator(
             model=model_name,
             min_tool_calls=int(learning_config.get("skill_min_tool_calls", 3)),
             telemetry=telemetry,
+            # The near-duplicate gate's cosine (#591). Absent -> None -> the
+            # calibrated default; until this line the key had no reader here,
+            # so the gate was always 0.80 whatever the config said.
+            dedupe_threshold=learning_config.get("skill_dedupe_threshold"),
         )
     except Exception as exc:
         logger.warning("SkillCreator not available: %s", exc)
