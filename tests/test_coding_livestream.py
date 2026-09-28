@@ -313,6 +313,37 @@ async def test_tool_frames_attributed_to_the_last_round(tmp_path: Path) -> None:
     await stream.stop_all()
 
 
+async def test_loop_transition_rows_are_not_streamed_as_tools(tmp_path: Path) -> None:
+    """#619 (WP-X.21 T3) gave the loop's synthetic ``_loop_transition`` rows the
+    run's session, so the tool query started returning them: Beacon listed loop
+    bookkeeping as coding tools, and as FAILED ones for every reason but
+    tool_success. Only real tool calls are coding_tool frames."""
+    from prometheus.telemetry.tracker import SYNTHETIC_TOOL_NAME
+
+    db = tmp_path / "telemetry.db"
+    tel = ToolCallTelemetry(db_path=str(db))
+    bus = FakeBus()
+    stream = CodingLiveStream(bus, db_path=str(db), poll_interval_s=0.01)
+    sid = "coding:transitions"
+    stream.start_tail(sid)
+
+    _round(tel, sid, 0)
+    _tool(tel, sid, "code_view")
+    _tool(tel, sid, SYNTHETIC_TOOL_NAME)  # the loop continuing after a tool success
+    _round(tel, sid, 1)
+    _tool(tel, sid, "code_run", success=False, error_type="nonzero_exit")
+    _tool(tel, sid, SYNTHETIC_TOOL_NAME, success=False, error_type="tool_error_retry")
+    _round(tel, sid, 2)
+    _tool(tel, sid, SYNTHETIC_TOOL_NAME, success=False, error_type="max_iterations_hit")
+
+    assert await _wait_until(lambda: len(bus.kinds("coding_round")) >= 3)
+    await asyncio.sleep(0.05)
+    tools = [(s.payload["tool_name"], s.payload["round_index"], s.payload["success"])
+             for s in bus.kinds("coding_tool")]
+    assert tools == [("code_view", 0, True), ("code_run", 1, False)], tools
+    await stream.stop_all()
+
+
 async def test_acceptance_rows_emit_ground_truth_frames(tmp_path: Path) -> None:
     """coding_mode/acceptance rows become coding_acceptance frames; the
     terminal coding_mode/run row stays excluded as before."""
