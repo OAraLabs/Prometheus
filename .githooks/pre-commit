@@ -257,8 +257,16 @@ scan_q 1 'sentinel' 'SENTINEL' || _st_rc=$?
 # STAGED_ALL short-circuits this hook to `exit 0` four lines down, scanning
 # nothing and reporting nothing. Same fail-open as the scan itself, so the
 # same three-way exit-code contract applies here.
+#
+# RENAMES ARE SCANNED — the R in ACMR. Git detects renames by default, so a
+# file renamed AND edited in one commit has status R, not M. Under ACM it
+# never reached a pattern: `git mv a.py b.py`, add a key to b.py, and the hook
+# printed "All clean" (a pure rename left the list empty, and the empty-list
+# `exit 0` below ran before any scan). A rename carries whatever edit git scores as
+# similar, so it is scanned like any other staged file.
+# tests/test_precommit_renames_and_output.py replays both shapes.
 _rc=0
-STAGED_ALL=$(git diff --cached --name-only --diff-filter=ACM | \
+STAGED_ALL=$(git diff --cached --name-only --diff-filter=ACMR | \
     "$GREP" -v '^\.githooks/') || _rc=$?
 [ "$_rc" -lt 2 ] || scanner_failed "(staged file list)" \
     "grep exited $_rc filtering the staged file list — the scan scope is unknown"
@@ -369,7 +377,12 @@ check_pattern() {
                 [ "$rc" -eq 0 ] && continue
             fi
 
-            echo "  BLOCKED  $file:$match"
+            # File, line number and pattern name — never the line. $match is
+            # grep -n's "LINE:CONTENT", and the content IS the secret: printing
+            # it copies the key into the terminal and into anything capturing
+            # the output (CI logs, a pasted transcript). ${match%%:*} keeps the
+            # number only.
+            echo "  BLOCKED  $file:${match%%:*}"
             echo "           reason: $label"
             echo ""
             BLOCKED=1
