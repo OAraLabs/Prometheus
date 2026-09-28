@@ -206,13 +206,18 @@ def test_scrub_apply_rewrites_backs_up_and_is_idempotent(tmp_path):
     assert r2.returncode == 0 and "0 row(s)/line(s) rewritten" in r2.stdout
 
 
-def test_scrub_missing_stores_are_said_not_skipped_silently(tmp_path):
+def test_scrub_missing_stores_are_said_not_skipped_silently(tmp_path, monkeypatch):
+    # The defaults are where the daemon keeps them: PROMETHEUS_CONFIG_DIR and
+    # PROMETHEUS_DATA_DIR (inherited by _run's child), not a second copy of that rule.
+    cfg, data = tmp_path / "cfg", tmp_path / "data"
+    monkeypatch.setenv("PROMETHEUS_CONFIG_DIR", str(cfg))
+    monkeypatch.setenv("PROMETHEUS_DATA_DIR", str(data))
     r = _run(["--telemetry", str(tmp_path / "no.db"), "--training", str(tmp_path / "no2.db"), "--trajectories", str(tmp_path / "none")], tmp_path)
     assert r.returncode == 0
     # three named stores, plus what the scrub covers by default: both LCM files
     # (the data-dir lcm.db and the legacy config-root one) and memory.db
     assert r.stdout.count("not found (skipped") == 6
-    home = tmp_path / "home" / ".prometheus"
-    assert f"{home / 'data' / 'lcm.db'}: not found" in r.stdout
-    assert f"{home / 'lcm.db'}: not found" in r.stdout
-    assert f"{home / 'memory.db'}: not found" in r.stdout
+    assert f"{data / 'lcm.db'}: not found" in r.stdout
+    assert f"{cfg / 'lcm.db'}: not found" in r.stdout
+    assert f"{cfg / 'memory.db'}: not found" in r.stdout
+    assert not cfg.exists() and not data.exists()  # a dry run creates nothing

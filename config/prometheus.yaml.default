@@ -237,6 +237,11 @@ tools:
     # skill promoted 2026-09-26 (docs/audits/SKILL-USAGE.md, option C2): the
     # system prompt tells every run to "use the skill tool", and on 822 of 973
     # runs it was not in the list. ~150 tokens.
+    # Leave this key out to follow the shipped default across upgrades. A list
+    # equal to one Prometheus shipped as the default (this one, or an earlier
+    # one that setup wrote into your config) follows the default too, with one
+    # INFO line at boot. Any other list is yours and is used exactly as
+    # written (`[]` advertises nothing); `oara doctor` says which applies.
     always_loaded: [bash, task_create, read_file, write_file, edit_file, grep, glob, tool_search, skill, web_search, web_fetch, memory]
     # MCP tools follow the servers you configured: a configured server IS
     # the advertise decision, so its tools sit in the catalog like any

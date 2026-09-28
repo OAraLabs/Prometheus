@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from prometheus.telemetry.db import connect_telemetry_db
+from prometheus.telemetry.tracker import SYNTHETIC_TOOL_NAME
 
 log = logging.getLogger(__name__)
 
@@ -92,10 +93,16 @@ _ROUND_SQL = (
 # data — a strict ROUND n → tools → ROUND n+1 interleave), so a tool row
 # belongs to the last round the tail has seen. Rows are merged with the
 # round stream by timestamp (ties → round first, same reason).
+#
+# The loop's synthetic SYNTHETIC_TOOL_NAME rows are bookkeeping, not tools, and
+# are excluded the way telemetry/dashboard.py excludes them. Since #619 they
+# carry the run's session, so without the filter every loop step reached Beacon
+# as a coding_tool frame, a FAILED one for every reason but tool_success. The
+# name is bound as the third parameter.
 _TOOL_SQL = (
     "SELECT rowid, tool_name, success, error_type, latency_ms, timestamp "
     "FROM tool_calls "
-    "WHERE session_id=? AND rowid > ? "
+    "WHERE session_id=? AND rowid > ? AND tool_name != ? "
     "ORDER BY rowid ASC"
 )
 
@@ -211,7 +218,8 @@ class CodingLiveStream:
             _ROUND_SQL, (session_id, self._last_rowid.get(session_id, 0))
         ).fetchall()
         tool_rows = conn.execute(
-            _TOOL_SQL, (session_id, self._last_tool_rowid.get(session_id, 0))
+            _TOOL_SQL,
+            (session_id, self._last_tool_rowid.get(session_id, 0), SYNTHETIC_TOOL_NAME),
         ).fetchall()
         merged = (
             [(row[8], 0, "run", row) for row in run_rows]     # timestamp at [8]

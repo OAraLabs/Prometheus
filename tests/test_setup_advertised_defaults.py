@@ -27,7 +27,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 import yaml
 
-from prometheus.cli.init import SHIPPED_ALWAYS_LOADED, run_init
+from prometheus.cli.init import run_init
+from prometheus.config.shipped_defaults import SHIPPED_ALWAYS_LOADED
 from tests.support.advertisement import (
     TEMPLATE_CONFIG,
     advertised_names,
@@ -84,7 +85,7 @@ def test_shipped_list_matches_the_template(tmp_path):
     template = yaml.safe_load(TEMPLATE_CONFIG.read_text(encoding="utf-8"))
     template_list = template["tools"]["deferred_loading"]["always_loaded"]
     assert list(SHIPPED_ALWAYS_LOADED) == list(template_list), (
-        "SHIPPED_ALWAYS_LOADED in cli/init.py drifted from "
+        "SHIPPED_ALWAYS_LOADED in config/shipped_defaults.py drifted from "
         "config/prometheus.yaml.default — update BOTH or neither"
     )
 

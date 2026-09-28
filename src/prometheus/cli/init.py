@@ -36,10 +36,7 @@ from typing import Any
 import yaml
 
 from prometheus.config.paths import get_config_dir
-from prometheus.config.shipped_defaults import (
-    SHIPPED_ALWAYS_LOADED,
-    SHIPPED_MAX_TOOL_ITERATIONS,
-)
+from prometheus.config.shipped_defaults import SHIPPED_MAX_TOOL_ITERATIONS
 
 # ---------------------------------------------------------------------------
 # Local inference-server detection
@@ -192,12 +189,13 @@ def probe_backend(
 # ---------------------------------------------------------------------------
 
 
-# SHIPPED_ALWAYS_LOADED (imported at the top of this module) is the tool
-# set a fresh install advertises. It lives in
-# prometheus.config.shipped_defaults so the READER (DynamicToolLoader) and
-# this WRITER share ONE value: FL-2 made setup write it; FL-2u made the
-# reader fall back to it, so an upgraded install whose config predates the
-# key advertises correctly with no config migration.
+# tools.deferred_loading.always_loaded is deliberately NOT written. FL-2 made
+# setup write the shipped set; FL-2u made the reader fall back to it, so an
+# absent key already advertises the shipped set. Writing it froze every new
+# install at the set of its day: when `skill` joined the default (option C2),
+# no config setup had made could see it. Absent, a config follows the shipped
+# default across upgrades (config/shipped_defaults.resolve_always_loaded, which
+# also treats a list setup wrote earlier as absent).
 
 
 def _default_config(server: DetectedServer | None, model: str | None) -> dict[str, Any]:
@@ -219,14 +217,14 @@ def _default_config(server: DetectedServer | None, model: str | None) -> dict[st
             "compression_trigger": 0.75,
             "reserved_output": 2000,
         },
-        # Only the two keys DynamicToolLoader itself reads (enabled,
-        # always_loaded). The template also carries mcp_always_deferred /
-        # search_mcp — read by mcp.bootstrap since 2026-08-28, but they
-        # only matter once mcp_servers is populated, which init never does.
+        # The tri-state only: always_loaded stays out so the install follows
+        # the shipped tool set (see above). The template also carries
+        # mcp_always_deferred / search_mcp — read by mcp.bootstrap since
+        # 2026-08-28, but they only matter once mcp_servers is populated,
+        # which init never does.
         "tools": {
             "deferred_loading": {
                 "enabled": "auto",
-                "always_loaded": list(SHIPPED_ALWAYS_LOADED),
             },
         },
         "security": {
