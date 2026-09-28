@@ -285,11 +285,16 @@ def _wire_skill_creator(
     """
     try:
         from prometheus.learning.skill_creator import SkillCreator
+        from prometheus.skills.similarity import resolve_dedupe_threshold
         skill_creator = SkillCreator(
             provider,
             model=model_name,
             min_tool_calls=int(learning_config.get("skill_min_tool_calls", 3)),
             telemetry=telemetry,
+            # The near-duplicate gate's cosine (#591). Until this line the key
+            # had no reader here, so the gate was always the calibrated
+            # default whatever the config said.
+            dedupe_threshold=resolve_dedupe_threshold(learning_config),
         )
     except Exception as exc:
         logger.warning("SkillCreator not available: %s", exc)

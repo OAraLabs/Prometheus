@@ -47,7 +47,7 @@ from prometheus.config.paths import get_config_dir
 from prometheus.learning.skill_files import archive_copy, atomic_write, create_exclusive
 from prometheus.learning.trace_format import format_trace
 from prometheus.skills.loader import _parse_skill_markdown, load_skill_registry
-from prometheus.skills.similarity import DEFAULT_THRESHOLD, skill_text
+from prometheus.skills.similarity import DEFAULT_THRESHOLD, resolve_dedupe_threshold, skill_text
 
 if TYPE_CHECKING:
     from prometheus.providers.base import ModelProvider
@@ -298,7 +298,7 @@ class SkillCreator:
                 data = yaml.safe_load(fh) or {}
             learning = data.get("learning", {}) or {}
             min_calls = learning.get("skill_min_tool_calls", _MIN_TOOL_CALLS)
-            threshold = learning.get("skill_dedupe_threshold", DEFAULT_THRESHOLD)
+            threshold = resolve_dedupe_threshold(learning)
         except (OSError, yaml.YAMLError) as exc:
             log.warning(
                 "SkillCreator.from_config: failed to load %s (%s: %s); "

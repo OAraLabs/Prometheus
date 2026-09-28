@@ -41,6 +41,18 @@ log = logging.getLogger(__name__)
 #: among clearly distinct skills (0.77–0.78), so a lower bar rejects both.
 DEFAULT_THRESHOLD = 0.80
 
+
+def resolve_dedupe_threshold(learning_cfg: dict | None) -> Any:
+    """``learning.skill_dedupe_threshold`` for a ``learning`` section.
+
+    Absent -> :data:`DEFAULT_THRESHOLD`. The one place the key is read, beside
+    the calibrated value, so every SkillCreator the daemon, the teacher or the
+    live recorder builds gets the same threshold. The value is passed on as
+    written; ``SkillCreator`` converts it with ``float()``.
+    """
+    return (learning_cfg or {}).get("skill_dedupe_threshold", DEFAULT_THRESHOLD)
+
+
 _CHUNK = 1 << 20
 
 
