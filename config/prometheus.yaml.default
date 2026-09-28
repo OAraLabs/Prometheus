@@ -265,9 +265,11 @@ adapter:
   # full; else full, said loudly on the boot line. A key here is a case-insensitive
   # SUBSTRING of the served model's name, the way the registry matches; the longest
   # matching key wins; a value other than auto/off/light/full is refused with its
-  # key named and the entry ignored. `off` on a local backend is allowed and warned
-  # about: it trusts the server's own parser and drops text extraction and
-  # validation. Example:
+  # key named and the entry ignored. A bare `off` needs no quotes: YAML reads it
+  # (like `no` and `false`) as false, which is taken as off. Any other value YAML
+  # does not read as text, such as a bare `on`, `yes` or `true`, is refused.
+  # `off` on a local backend is allowed and warned about: it trusts the server's
+  # own parser and drops text extraction and validation. Example:
   #   model_tiers:
   #     "ternary-bonsai-2": light
   #     "ornith": light

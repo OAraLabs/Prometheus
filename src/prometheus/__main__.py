@@ -513,6 +513,19 @@ def _get_adapter_tier(
 _MODEL_TIER_VALUES = ("auto", "off", "light", "full")
 
 
+def _yaml_reading(value: Any) -> str:
+    """What YAML made of a model_tiers value that is not text, for the refusal."""
+    if value is True:
+        return "true (a bare on, yes or true)"
+    if value is None:
+        return "an empty value"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, dict):
+        return "a map"
+    return f"a {type(value).__name__}"
+
+
 def _model_tier_override(
     model_name: str, adapter_cfg: dict[str, Any] | None,
 ) -> tuple[str | None, str | None]:
@@ -524,8 +537,11 @@ def _model_tier_override(
     decides nothing. A value that is not one of ``auto``/``off``/``light``/
     ``full`` is refused with its key named and treated as absent: one bad
     entry must not stop the boot, and must not be silently honoured as
-    something else. A non-empty map that matches nothing is said once, so a
-    typo in a key is not silent.
+    something else. YAML reads a bare ``off`` as false, and false is taken
+    as ``off``, the one tier it can mean. Any other value that is not text
+    (true from a bare ``on``/``yes``/``true``, a number, an empty value) is
+    refused, never guessed at. A non-empty map that matches nothing is said
+    once, so a typo in a key is not silent.
 
     Returns ``(tier, key)``; ``(None, None)`` when nothing decides.
     """
@@ -544,7 +560,19 @@ def _model_tier_override(
         pattern = str(key).lower()
         if not pattern or pattern not in name_lower:
             continue
-        tier = str(value).strip().lower() if value is not None else ""
+        if value is False:
+            # `qwen: off` unquoted. `is`, not `==`: a 0 is a number, not off.
+            tier = "off"
+        elif isinstance(value, str):
+            tier = value.strip().lower()
+        else:
+            log.error(
+                "adapter.model_tiers[%r] = %r is not a tier name: YAML read it as %s. "
+                "Write one of %s; the entry is refused and %r resolves as if it were "
+                "absent",
+                key, value, _yaml_reading(value), ", ".join(_MODEL_TIER_VALUES), model_name,
+            )
+            continue
         if tier not in _MODEL_TIER_VALUES:
             log.error(
                 "adapter.model_tiers[%r] = %r is not one of %s; the entry is refused "

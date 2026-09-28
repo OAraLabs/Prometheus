@@ -79,6 +79,66 @@ class TestMatching:
 
 
 # ---------------------------------------------------------------------------
+# What YAML hands the code: a bare off is false
+# ---------------------------------------------------------------------------
+
+def _adapter_section(entry: str) -> dict:
+    """``adapter:`` from a prometheus.yaml holding ``bonsai: <entry>``, read the way
+    the daemon reads the file (``yaml.safe_load``, then ``config.get("adapter")``)."""
+    import yaml
+
+    return yaml.safe_load(f"adapter:\n  model_tiers:\n    bonsai: {entry}\n")["adapter"]
+
+
+class TestYamlValues:
+    """PyYAML reads YAML 1.1, where a bare ``off`` is the boolean false. The
+    override used to refuse it at ERROR ("False is not one of auto, off, light,
+    full"), so ``bonsai: off`` worked only in quotes (found checking the 0.9.5
+    notes). False is now ``off``, the one tier it can mean; any other value
+    that is not text is still refused, with what YAML made of it."""
+
+    @pytest.mark.parametrize("bare", ["off", "Off", "OFF", "no", "false"])
+    def test_a_bare_off_is_off(self, caplog, bare):
+        section = _adapter_section(bare)
+        assert section["model_tiers"]["bonsai"] is False
+        with caplog.at_level(logging.INFO):
+            assert m._model_tier_override(BONSAI, section) == ("off", "bonsai")
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    def test_a_bare_off_builds_the_off_adapter(self):
+        adapter = m.create_adapter({"provider": "llama_cpp", "model": BONSAI}, _adapter_section("off"))
+        assert (adapter.tier, adapter.tier_decision.source) == ("off", "override")
+        assert isinstance(adapter.formatter, PassthroughFormatter)
+
+    def test_a_quoted_off_is_still_off(self):
+        assert m._model_tier_override(BONSAI, _adapter_section('"off"')) == ("off", "bonsai")
+
+    @pytest.mark.parametrize("bare, shown, read_as", [
+        ("on", "True", "true (a bare on, yes or true)"),
+        ("yes", "True", "true (a bare on, yes or true)"),
+        ("true", "True", "true (a bare on, yes or true)"),
+        # 0 == False in Python; it is still a number, not off.
+        ("0", "0", "a number"),
+        ("1", "1", "a number"),
+        ("0.5", "0.5", "a number"),
+        ("", "None", "an empty value"),
+        ("[light]", "['light']", "a list"),
+        ("{tier: light}", "{'tier': 'light'}", "a map"),
+    ])
+    def test_any_other_value_that_is_not_text_is_refused(self, caplog, bare, shown, read_as):
+        with caplog.at_level(logging.ERROR):
+            assert m._model_tier_override(BONSAI, _adapter_section(bare)) == (None, None)
+        errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1
+        assert f"['bonsai'] = {shown} is not a tier name: YAML read it as {read_as}." in errors[0]
+        assert "auto, off, light, full" in errors[0] and "refused" in errors[0]
+
+    def test_a_refused_true_resolves_as_if_absent(self):
+        adapter = m.create_adapter({"provider": "llama_cpp", "model": BONSAI}, _adapter_section("on"))
+        assert (adapter.tier, adapter.tier_decision.source) == ("full", "fallback")
+
+
+# ---------------------------------------------------------------------------
 # The override in the decision: it wins over every other source
 # ---------------------------------------------------------------------------
 
