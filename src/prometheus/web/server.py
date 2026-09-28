@@ -4033,12 +4033,12 @@ def create_app(
             # launch). Build one — persist_skill_content makes no model
             # call, so a missing provider only disables verification.
             from prometheus.learning.skill_creator import SkillCreator
+            from prometheus.skills.similarity import resolve_dedupe_threshold
             creator = SkillCreator(
                 provider,
                 model=model_cfg.get("model", "default"),
                 telemetry=getattr(app.state, "telemetry", None),
-                dedupe_threshold=(cfg.get("learning", {}) or {}).get(
-                    "skill_dedupe_threshold"),
+                dedupe_threshold=resolve_dedupe_threshold(cfg.get("learning")),
             )
             bus = getattr(app.state, "signal_bus", None)
             if bus is not None:

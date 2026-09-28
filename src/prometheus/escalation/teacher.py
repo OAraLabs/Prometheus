@@ -312,6 +312,8 @@ class TeacherEscalation:
     ) -> "TeacherEscalation":
         """Build from the loaded prometheus.yaml dict. Always returns an
         engine; with no ``escalation.teacher_model`` it is inert."""
+        from prometheus.skills.similarity import resolve_dedupe_threshold
+
         esc = (config or {}).get("escalation") or {}
         learning = (config or {}).get("learning") or {}
         return cls(
@@ -323,7 +325,7 @@ class TeacherEscalation:
             telemetry=telemetry,
             signal_bus=signal_bus,
             skill_creator=skill_creator,
-            skill_dedupe_threshold=learning.get("skill_dedupe_threshold"),
+            skill_dedupe_threshold=resolve_dedupe_threshold(learning),
         )
 
     @property
