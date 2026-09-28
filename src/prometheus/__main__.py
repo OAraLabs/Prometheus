@@ -1446,6 +1446,7 @@ def main() -> None:
     from prometheus.cli.doctor import add_doctor_subparser
     from prometheus.cli.gepa import add_gepa_subparser
     from prometheus.cli.retention import add_retention_subparser
+    from prometheus.cli.scrub import add_scrub_subparser
     from prometheus.cli.service import add_install_service_subparser
     from prometheus.cli.setup import add_setup_subparser
     from prometheus.cli.token import add_token_subparser
@@ -1455,6 +1456,7 @@ def main() -> None:
     add_retention_subparser(subparsers)
     add_install_service_subparser(subparsers)
     add_gepa_subparser(subparsers)
+    add_scrub_subparser(subparsers)
 
     daemon_parser = subparsers.add_parser("daemon", help="Start always-on daemon")
     daemon_parser.add_argument(
@@ -1850,6 +1852,12 @@ def main() -> None:
     if args.command == "gepa":
         from prometheus.cli.gepa import run_gepa_command
         sys.exit(run_gepa_command(args))
+
+    # `oara scrub` — redact secrets kept before capture-time redaction existed.
+    # Dry run unless --apply. No model, no config; stop the daemon to apply.
+    if args.command == "scrub":
+        from prometheus.cli.scrub import run_scrub
+        sys.exit(run_scrub(args))
 
     # Migration subcommand — runs pre-agent, no model needed
     if args.command == "retention":
