@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from prometheus.config.shipped_defaults import SHIPPED_ALWAYS_LOADED
+from prometheus.config.shipped_defaults import resolve_always_loaded
 from prometheus.tools.base import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -130,13 +130,15 @@ class DynamicToolLoader:
         # An operator who genuinely wants an empty set writes
         # ``always_loaded: []`` explicitly, which is honoured (the key is
         # present, so the fallback never fires).
-        configured = self._deferred.get("always_loaded")
+        # A list Prometheus itself shipped as the default (setup wrote one into
+        # every config it made until 0.9.5) follows the NEWEST default instead:
+        # resolve_always_loaded is the one rule, shared with config/divergence.
         # Runtime-registered (dynamic) names inside _always_loaded — MCP
         # today. Tracked apart so a registry change can replace them
         # without touching the operator's static list.
         self._dynamic_names: frozenset[str] = frozenset()
         self._always_loaded: frozenset[str] = frozenset(
-            SHIPPED_ALWAYS_LOADED if configured is None else configured
+            resolve_always_loaded(self._deferred)
         )
 
     def add_always_loaded(self, names: list[str] | set[str]) -> None:

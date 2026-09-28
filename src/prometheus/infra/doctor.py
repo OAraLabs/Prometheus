@@ -121,6 +121,61 @@ def check_router(config: dict) -> DiagnosticCheck | None:
     )
 
 
+#: The row both doctors show for the advertised tool set (``oara doctor``'s
+#: extended check adds the count of tools actually offered to the same text).
+ADVERTISED_TOOLS_ROW = "Advertised tools"
+
+
+def always_loaded_case(config: dict | None) -> tuple[str, str, str | None]:
+    """Does the advertised tool set follow the shipped default, or is it pinned?
+
+    Returns ``(status, text, fix)``. Reads the same rule the loader boots with
+    (``shipped_defaults.resolve_always_loaded``), so the row and the boot line
+    cannot disagree. A pinned list that leaves out tools the shipped default
+    offers is a warning: that is exactly how ``skill`` stayed out of every
+    config setup wrote before 0.9.5.
+    """
+    from prometheus.config.shipped_defaults import (
+        ALWAYS_LOADED_ABSENT,
+        ALWAYS_LOADED_PINNED,
+        SHIPPED_ALWAYS_LOADED,
+        always_loaded_origin,
+    )
+
+    tools_cfg = (config or {}).get("tools")
+    deferred = (tools_cfg or {}).get("deferred_loading") if isinstance(tools_cfg, dict) else None
+    deferred = deferred if isinstance(deferred, dict) else {}
+    origin = always_loaded_origin(deferred)
+    shipped = len(SHIPPED_ALWAYS_LOADED)
+    if origin == ALWAYS_LOADED_ABSENT:
+        return "ok", f"follows the shipped default ({shipped} tools)", None
+    if origin != ALWAYS_LOADED_PINNED:
+        return ("ok", f"follows the shipped default ({shipped} tools): the config lists "
+                "a set Prometheus shipped as its default, which counts as the default", None)
+    configured = deferred["always_loaded"]
+    remove = ("delete tools.deferred_loading.always_loaded to follow the shipped default")
+    if not isinstance(configured, (list, tuple)):
+        return ("warning", "pinned by tools.deferred_loading.always_loaded, which is not a list",
+                f"Write a list of tool names, or {remove}.")
+    missing = [name for name in SHIPPED_ALWAYS_LOADED if name not in configured]
+    if missing:
+        return ("warning",
+                f"pinned by tools.deferred_loading.always_loaded ({len(configured)} tools); "
+                f"not offered from the shipped default: {', '.join(missing)}",
+                f"Add them to the list, or {remove}.")
+    return ("ok", f"pinned by tools.deferred_loading.always_loaded ({len(configured)} tools, "
+            "every shipped default among them)", None)
+
+
+def check_always_loaded(config: dict | None) -> DiagnosticCheck:
+    """The advertised tool set: following the shipped default, or pinned."""
+    status, text, fix = always_loaded_case(config)
+    return DiagnosticCheck(
+        name=ADVERTISED_TOOLS_ROW, category="resources", status=status,
+        message=text, fix=fix,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Doctor
 # ---------------------------------------------------------------------------
@@ -174,6 +229,7 @@ class Doctor:
         checks.append(self._check_uv())
         checks.append(self._check_config_valid())
         checks.append(check_router(self.config))
+        checks.append(check_always_loaded(self.config))
         checks.append(self._check_data_dir())
         checks.append(self._check_bootstrap_files())
         checks.append(self._check_dependencies())
