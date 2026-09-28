@@ -12,7 +12,8 @@
 #     the spirit of the upstream gate.
 #   - Two-stage pipeline matches upstream:
 #       1. Deterministic auto-pass flips lifecycle state (active / stale /
-#          archived) based on file mtime — no LLM, no file moves.
+#          archived) on the days since each skill's last load (difference 4
+#          below) — no LLM, no file moves.
 #       2. LLM review pass emits a fenced YAML block with ``consolidations``
 #          and ``prunings`` lists. We parse with PyYAML, no grammar / JSON
 #          schema — same prompt shape Hermes uses.
@@ -236,8 +237,10 @@ class Curator:
         auto_dir: Path to the auto-skills directory.
         reports_dir: Path to write Curator run reports.
         interval_seconds: How often the background loop fires (default 7d).
-        stale_after_days: Lifecycle threshold for active → stale (mtime).
-        archive_after_days: Lifecycle threshold for stale → archived (mtime).
+        stale_after_days: Lifecycle threshold for active → stale (days since the
+            last load; a skill with no load recorded stays active).
+        archive_after_days: Lifecycle threshold for stale → archived (days since
+            the last load).
         min_idle_seconds: Skip a tick if the daemon was active in the last N seconds.
             ``0`` disables the gate (default). Reserved for future use; the
             current implementation always runs on tick.

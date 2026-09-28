@@ -11,9 +11,10 @@
 #     Prometheus owns the storage choice here — a single JSON file at
 #     ``~/.prometheus/skills/auto/_state.json``, leading-underscore keeps it
 #     out of skill discovery (skills/loader.py only globs ``*.md``).
-#   - Mtime-based ``last_used_at`` v1 (no telemetry instrumentation) per Sprint 1
-#     scope decision — usage_count stays 0 until a follow-up sprint wires a
-#     counter from the skill-loading tool. See Sprint 1 reporting-back.
+#   - Usage is not stored here. Sprint 1 read "last used" from file mtime;
+#     since the skill-usage audit (#591) it comes from the skill-load counter,
+#     ``ToolCallTelemetry.skill_load_stats`` (``loads`` and ``last_loaded_at``
+#     per skill), which the Curator and ``/api/skills/list`` read.
 #   - Curator bookkeeping (``last_run_at``, ``last_report_path``, ``paused``)
 #     lives in the same file under a ``curator`` key. Single file keeps the
 #     atomic-write story simple; cost is a slightly larger payload on every
@@ -40,8 +41,9 @@ The file format:
       }
     }
 
-`last_used_at` and `usage_count` are intentionally absent — they are derived
-fields (mtime + future telemetry), not persisted on the state file.
+Usage (`loads`, `last_loaded_at`) is intentionally absent: it is read from the
+skill-load counter in telemetry (`ToolCallTelemetry.skill_load_stats`), never
+persisted on the state file.
 
 Differences from Hermes
 -----------------------

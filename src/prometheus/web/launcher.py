@@ -1,14 +1,13 @@
 """Convenience launcher for the Mission Control web stack.
 
 Starts both the FastAPI REST server (8005) and WebSocket bridge (8010)
-as async tasks. Can be called from __main__.py or run standalone.
+as async tasks. The daemon is the only caller (``oara daemon``, in
+daemon.py); there is no standalone entry point, and no
+``python -m prometheus.web``.
 
-Usage in __main__.py:
+Usage in daemon.py:
     from prometheus.web.launcher import launch_web
-    await launch_web(config, signal_bus=bus, session_mgr=mgr, ...)
-
-Standalone:
-    python -m prometheus.web --config ~/.prometheus/config/prometheus.yaml
+    web_task = asyncio.create_task(launch_web(config=config, session_mgr=mgr, ...))
 """
 
 from __future__ import annotations

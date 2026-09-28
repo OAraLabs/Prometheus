@@ -265,9 +265,11 @@ adapter:
   # full; else full, said loudly on the boot line. A key here is a case-insensitive
   # SUBSTRING of the served model's name, the way the registry matches; the longest
   # matching key wins; a value other than auto/off/light/full is refused with its
-  # key named and the entry ignored. `off` on a local backend is allowed and warned
-  # about: it trusts the server's own parser and drops text extraction and
-  # validation. Example:
+  # key named and the entry ignored. A bare `off` needs no quotes: YAML reads it
+  # (like `no` and `false`) as false, which is taken as off. Any other value YAML
+  # does not read as text, such as a bare `on`, `yes` or `true`, is refused.
+  # `off` on a local backend is allowed and warned about: it trusts the server's
+  # own parser and drops text extraction and validation. Example:
   #   model_tiers:
   #     "ternary-bonsai-2": light
   #     "ornith": light
@@ -900,14 +902,14 @@ learning:
   skill_refiner_model: default
   # Curator — periodic consolidation pass over ~/.prometheus/skills/auto/.
   # Stage 1 (auto): flip lifecycle state on the days since each skill's last
-  # LOAD (stale/archived); a skill with no load recorded is never stale.
+  # LOAD (stale/archived); a skill with no load recorded stays active.
   # Stage 2 (LLM): recommend consolidations (report-only) + prunings (applied:
   # file moved to auto/.archive/, NEVER deleted). Pinned skills are protected.
   # Adapted from Hermes agent/curator.py (see prometheus/learning/curator.py).
   curator_enabled: true
   curator_interval_seconds: 604800        # 7 days
-  curator_stale_after_days: 30            # mtime >= N days → state=stale
-  curator_archive_after_days: 90          # mtime >= N days → state=archived
+  curator_stale_after_days: 30            # last load >= N days ago → state=stale
+  curator_archive_after_days: 90          # last load >= N days ago → state=archived
   curator_min_idle_seconds: 0             # 0 = always run on tick (reserved)
   curator_max_prunings_per_run: 10        # safety cap on auto-archives per pass
   curator_telegram_summary: true          # post a one-line summary to Telegram on run
