@@ -84,6 +84,33 @@ def resolve_config_path(explicit: str | None = None) -> tuple[Path | None, list[
 # Individual checks (each returns a DiagnosticCheck)
 # ---------------------------------------------------------------------------
 
+def _yaml_error_position(exc: yaml.YAMLError) -> str:
+    """Describe a YAML parse error WITHOUT echoing any source text.
+
+    ``str(MarkedYAMLError)`` renders the marks from the file's buffer — the
+    snippet includes the surrounding lines, so a syntax error next to a
+    credential line (an unterminated quote on ``telegram_token: "…`` is the
+    common case) prints the credential. /doctor output goes to stdout —
+    terminal, Telegram chat, CI log — and stdout is NOT covered by
+    install_log_redaction, so nothing downstream scrubs it. The operator
+    still gets what they need: the problem kind and its line/column.
+    """
+    parts = []
+    context = getattr(exc, "context", None)
+    problem = getattr(exc, "problem", None)
+    if context:
+        parts.append(str(context))
+    if problem:
+        parts.append(str(problem))
+    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+    if mark is not None:
+        # 1-based, matching editors; str(Mark) would add the snippet.
+        parts.append(f"at line {mark.line + 1}, column {mark.column + 1}")
+    if not parts:
+        parts.append(f"unexpected {type(exc).__name__}")
+    return " ".join(parts)
+
+
 def check_config(explicit: str | None = None) -> tuple[DiagnosticCheck, dict[str, Any]]:
     """Config exists and parses. Returns (check, parsed_config_or_{})."""
     path, searched = resolve_config_path(explicit)
@@ -99,7 +126,7 @@ def check_config(explicit: str | None = None) -> tuple[DiagnosticCheck, dict[str
     except yaml.YAMLError as exc:
         return DiagnosticCheck(
             name="Config", category="platform", status="error",
-            message=f"{path} has a YAML parse error: {exc}",
+            message=f"{path} has a YAML parse error: {_yaml_error_position(exc)}",
             fix=f"Fix the syntax in {path}, or re-run `oara setup`.",
         ), {}
     if not isinstance(config, dict):

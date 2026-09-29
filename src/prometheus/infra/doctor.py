@@ -86,6 +86,55 @@ def match_model(model_name: str, registry: dict) -> dict | None:
     return None
 
 
+def yaml_error_summary(exc: BaseException) -> str:
+    """WHERE a YAML document failed to parse — never a snippet of it.
+
+    ``str(yaml.YAMLError)`` is unsafe to print. ``MarkedYAMLError.__str__``
+    calls ``mark.get_snippet()``, which renders the offending line out of
+    ``mark.buffer`` — the WHOLE FILE — and PyYAML truncates that snippet at a
+    fixed width rather than at a token boundary. prometheus.yaml holds
+    credentials inline (``gateway.telegram_token``, ``model.api_key``), so a
+    syntax error one line below one of them printed the first ~21 characters
+    of a live secret. Verified leaking for: an unterminated quote, a tab
+    indent, and a flow sequence opened on the token line.
+
+    Doctor is worse than most places for this because its output goes straight
+    to stdout via ``render_report`` — a terminal, a Telegram chat, a CI log —
+    and stdout does not pass through ``install_log_redaction``, which is what
+    scrubs the logger. ``redact_secrets`` could not have saved the old form
+    either: the snippet is truncated mid-token, so it matches none of the
+    whole-token patterns.
+
+    The position is what the operator actually needs to fix the file, and that
+    survives. ``problem`` and ``context`` are safe to keep because PyYAML
+    interpolates at most a SINGLE character into them (``%r`` of the char it
+    choked on); the multi-character leak is exclusively the snippet.
+
+    A ``YAMLError`` that is not marked gets its type name only. We cannot know
+    what an arbitrary subclass put in ``__str__``, and the default here has to
+    be the safe one.
+    """
+    if not isinstance(exc, yaml.MarkedYAMLError):
+        return type(exc).__name__
+
+    parts: list[str] = []
+    if exc.context:
+        parts.append(exc.context)
+    if exc.context_mark is not None:
+        parts.append(
+            f"{exc.context_mark.name}, line {exc.context_mark.line + 1}, "
+            f"column {exc.context_mark.column + 1}"
+        )
+    if exc.problem:
+        parts.append(exc.problem)
+    if exc.problem_mark is not None:
+        parts.append(
+            f"{exc.problem_mark.name}, line {exc.problem_mark.line + 1}, "
+            f"column {exc.problem_mark.column + 1}"
+        )
+    return "; ".join(parts) if parts else type(exc).__name__
+
+
 def check_router(config: dict) -> DiagnosticCheck | None:
     """The router: entries boot skipped, and why — or None when there is no
     router to speak of (no rules, no fallback, nothing refused).
@@ -318,7 +367,10 @@ class Doctor:
         except yaml.YAMLError as exc:
             return DiagnosticCheck(
                 name="Config", category="platform", status="error",
-                message=f"YAML parse error: {exc}",
+                # yaml_error_summary, NOT str(exc): the latter renders a
+                # snippet of the file, which is where prometheus.yaml keeps
+                # credentials inline. See yaml_error_summary.
+                message=f"YAML parse error: {yaml_error_summary(exc)}",
                 fix="Fix syntax errors in config/prometheus.yaml",
             )
 
@@ -409,7 +461,15 @@ class Doctor:
             )
 
     def _check_telegram_token(self) -> DiagnosticCheck:
-        """Is the Telegram bot token configured?"""
+        """Is the Telegram bot token configured?
+
+        Set/not-set ONLY — the value is never echoed, not even "masked". The
+        previous form printed ``token[:4] + "..." + token[-4:]``, which is not
+        a mask: for a Telegram token the head IS the bot id and the tail is
+        real entropy from the secret half, so it published usable pieces of a
+        live credential into a terminal, a Telegram chat and CI logs. This
+        matches `_check_cloud_keys`, which has always reported presence only.
+        """
         import os
         # Check env var (primary) then config
         token = os.environ.get("PROMETHEUS_TELEGRAM_TOKEN", "")
@@ -422,11 +482,9 @@ class Doctor:
                 message="bot token not configured",
                 fix="Get a token from @BotFather and set PROMETHEUS_TELEGRAM_TOKEN env var.",
             )
-        # Mask the token for display
-        masked = token[:4] + "..." + token[-4:]
         return DiagnosticCheck(
             name="Telegram", category="connectivity", status="ok",
-            message=f"bot token set ({masked})",
+            message="bot token set",
         )
 
     def _check_cloud_keys(self) -> DiagnosticCheck:

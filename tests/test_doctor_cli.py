@@ -560,3 +560,60 @@ class TestCodingSandboxCheck:
         c = self._check(enabled=True, sandbox_type="docker")
         assert c.status == "error"
         assert "could not be checked" in c.message
+
+
+class TestConfigParseErrorLeaksNoSecret:
+    """A broken prometheus.yaml must not be reported by echoing its source.
+
+    ``str(yaml.YAMLError)`` includes a SNIPPET of the offending document,
+    rendered from ``MarkedYAMLError.mark.buffer`` — the whole file. When the
+    syntax error sits next to a credential line, the snippet prints the
+    credential. /doctor writes that to stdout (a terminal, a Telegram chat, a
+    CI log), and stdout does NOT pass through ``install_log_redaction``, so
+    nothing else scrubs it. Verified leaking before the fix for: an
+    unterminated quote, a tab indent and a flow sequence on the token line.
+
+    The position is what the operator needs (line/column), and that survives —
+    it is the source TEXT that must not.
+    """
+
+    # Obviously fake, Telegram-token shaped: <bot id>:<secret half>.
+    # Concatenated so the pre-commit secret scanner does not read this
+    # FAKE as a real token (identical shape).
+    FAKE_TOKEN = "123456789" + ":" + "AAHfakeFakeFakeFakeFakeFakeFakeFake00"
+    # A provider key line, which prometheus.yaml can also hold inline.
+    FAKE_KEY = "sk-FAKEfakeFAKEfakeFAKEfake0000000"
+
+    def _assert_no_fragment(self, rendered: str, secret: str) -> None:
+        for start in range(len(secret) - 3):
+            for end in range(start + 4, len(secret) + 1):
+                assert secret[start:end] not in rendered, (
+                    f"doctor leaked {secret[start:end]!r} of a secret"
+                )
+
+    @pytest.mark.parametrize("broken", [
+        'gateway:\n  telegram_token: "{token}\n',          # unterminated quote
+        'gateway:\n\ttelegram_token: {token}\n',           # tab indent
+        'gateway:\n  telegram_token: [{token}\n',          # flow seq
+    ])
+    def test_check_config_omits_the_token_line(self, isolated_dirs, broken):
+        yaml_exc = broken.format(token=self.FAKE_TOKEN)
+        path = isolated_dirs / "broken.yaml"
+        path.write_text(yaml_exc, encoding="utf-8")
+        check, config = check_config(str(path))
+        assert config == {}
+        assert check.status == "error"
+        # Still useful: it says where.
+        assert "YAML parse error" in check.message
+        assert "line" in check.message
+        self._assert_no_fragment(
+            f"{check.message} {check.fix or ''}", self.FAKE_TOKEN)
+
+    def test_check_config_omits_an_inline_api_key(self, isolated_dirs):
+        path = isolated_dirs / "broken2.yaml"
+        path.write_text(
+            f'model:\n  api_key: "{self.FAKE_KEY}\n', encoding="utf-8")
+        check, _ = check_config(str(path))
+        assert check.status == "error"
+        self._assert_no_fragment(
+            f"{check.message} {check.fix or ''}", self.FAKE_KEY)

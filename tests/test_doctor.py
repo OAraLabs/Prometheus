@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -310,12 +309,55 @@ class TestDoctorChecks:
     # -- telegram token --
 
     def test_check_telegram_token_set(self) -> None:
-        with patch.dict("os.environ", {"PROMETHEUS_TELEGRAM_TOKEN": "1234:ABCDefgh1234"}):
+        # FAKE token, obviously not real. Doctor reports set/not set ONLY —
+        # no part of the value, not even masked, matching _check_cloud_keys.
+        # Built by concatenation so the pre-commit secret scanner does not
+        # mistake this FAKE for a real token (it matches the same shape).
+        fake = "123456789" + ":" + "AAHfakeFakeFakeFakeFakeFakeFakeFake00"
+        with patch.dict("os.environ", {"PROMETHEUS_TELEGRAM_TOKEN": fake}):
             check = self.doctor._check_telegram_token()
         assert check.category == "connectivity"
         assert check.status == "ok"
-        assert "1234" in check.message  # masked prefix
-        assert "1234:ABCDefgh1234" not in check.message  # not full token
+        assert "set" in check.message
+        assert fake not in check.message
+
+    def test_check_telegram_token_set_leaks_no_part_of_the_value(self) -> None:
+        """THE REGRESSION THIS LOCKS.
+
+        Doctor used to print ``token[:4] + "..." + token[-4:]``. That is not a
+        mask: for a Telegram token the first 4 characters ARE the bot id and
+        the last 4 are real entropy off the secret half, and /doctor output
+        goes to a terminal, a Telegram chat and CI logs. Every substring of
+        the configured value must be absent from the message AND the fix —
+        checked exhaustively, because a partial-mask bug survives any single
+        hand-picked probe.
+        """
+        # Built by concatenation so the pre-commit secret scanner does not
+        # mistake this FAKE for a real token (it matches the same shape).
+        fake = "123456789" + ":" + "AAHfakeFakeFakeFakeFakeFakeFakeFake00"
+        with patch.dict("os.environ", {"PROMETHEUS_TELEGRAM_TOKEN": fake}):
+            check = self.doctor._check_telegram_token()
+        rendered = f"{check.message} {check.fix or ''}"
+        # Every contiguous slice of 4+ chars from the secret must be absent.
+        for start in range(len(fake) - 3):
+            for end in range(start + 4, len(fake) + 1):
+                fragment = fake[start:end]
+                assert fragment not in rendered, (
+                    f"doctor leaked {fragment!r} of the bot token in "
+                    f"{rendered!r}"
+                )
+
+    def test_check_telegram_token_from_config_leaks_no_part(self) -> None:
+        """Same guarantee on the config-file branch (env var unset)."""
+        fake = "987654321" + ":" + "ZzConfigFakeConfigFakeConfigFake99"
+        with patch.dict("os.environ", {}, clear=True):
+            self.doctor.config = {"gateway": {"telegram_token": fake}}
+            check = self.doctor._check_telegram_token()
+        rendered = f"{check.message} {check.fix or ''}"
+        assert check.status == "ok"
+        for start in range(len(fake) - 3):
+            for end in range(start + 4, len(fake) + 1):
+                assert fake[start:end] not in rendered
 
     def test_check_telegram_token_missing(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
