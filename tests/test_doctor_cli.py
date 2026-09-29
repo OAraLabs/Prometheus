@@ -716,9 +716,11 @@ class TestConfigPinsLeaksNoSecret:
 
     The row still has to do its job for NON-secret keys. Naming both values is
     the whole point of the check — the operator needs to see that the file says
-    one thing while something else is enforced — so this gates on the key, not
-    on the comparison. Reuses ``security.env_scrub.is_secret_name`` rather than
-    inventing a third opinion about what looks like a secret.
+    one thing while something else is enforced — so this gates on the key and
+    on the value's SHAPE, never on the comparison: values are shown only when
+    both are scalars and the key is not secret-named. Reuses
+    ``security.env_scrub.is_secret_name`` rather than inventing a third opinion
+    about what looks like a secret.
     """
 
     # Obviously fake, built by concatenation so no single source literal
@@ -798,3 +800,29 @@ class TestConfigPinsLeaksNoSecret:
         assert c.status == "warning"
         assert "gemma4-26b" in c.message
         assert "Qwen3.8-27B-UD-Q4_K_XL.gguf" in c.message
+
+    def test_a_section_pin_is_not_echoed(self, monkeypatch, tmp_path):
+        """A pin written as a SECTION: ``model:`` with keys nested under it.
+
+        That is a natural way to write YAML, and ``read_config_pins`` accepts
+        it. The pin's key is then just ``model``, which is not secret-named,
+        while the values on BOTH sides are mappings that carry ``api_key``.
+        Gating on the key name alone printed both mappings in full, the file's
+        credential included.
+        """
+        # Letters only after the prefix: the fix line carries the tmp path,
+        # and a run of digits could match "pytest-<N>" in it. Neither shares a
+        # 4-char substring with the key names or the row's boilerplate.
+        pin_key = "sk-" + "QqzXwvKtMrLpNsDyHgJbFcWd"
+        file_key = "sk-" + "ZzkRtwVmXqPlNdSyGhJcBfLw"
+        c = self._check(
+            monkeypatch, tmp_path,
+            f'model:\n  model: pinned-model\n  api_key: "{pin_key}"\n',
+            f'model:\n  model: file-model\n  api_key: "{file_key}"\n')
+        assert c.status == "warning"          # the override is still reported
+        rendered = f"{c.message} {c.fix or ''}"
+        self._assert_no_fragment(rendered, pin_key)
+        self._assert_no_fragment(rendered, file_key)
+        # Still names WHICH pinned key is overriding the file.
+        assert "1 active (model)" in c.message
+        assert "model: file value differs (not shown)" in c.message

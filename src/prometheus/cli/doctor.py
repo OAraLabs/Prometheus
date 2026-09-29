@@ -555,6 +555,12 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
     )
 
 
+#: The value types check_config_pins will print. Anything else — a mapping, a
+#: list — is a SECTION, and a section can carry a credential under a key the
+#: pin's own name never mentions.
+_SCALAR_PIN_TYPES = (str, int, float, bool, type(None))
+
+
 def _pinned_key_holds_a_secret(dotted: str) -> bool:
     """Is this pinned config path a credential?
 
@@ -630,18 +636,22 @@ def check_config_pins() -> DiagnosticCheck:
         for part in str(dotted).split("."):
             val = val.get(part, {}) if isinstance(val, dict) else None
         if val and str(val) != str(expected):
-            if _pinned_key_holds_a_secret(str(dotted)):
-                # Name the key, never the values. Both of these were rendered
-                # with !r, which printed a credential IN FULL to stdout —
-                # worse than the telegram-token "mask" that started this work,
-                # because nothing there leaked more than 8 characters. The
-                # operator still learns the actionable part: WHICH pinned key
-                # is overriding their edit, and that it is. The value is in
-                # both files and they can read either.
-                overriding.append(f"{dotted}: file value differs (a pinned "
-                                  f"secret, not shown)")
-            else:
+            # Values are printed ONLY when both are plain scalars and the key
+            # is not secret-named. A secret-named key's values ARE the secret:
+            # both were rendered with !r, which printed a credential IN FULL
+            # to stdout. And a mapping or a list is a SECTION: a pin file
+            # written as nested YAML — `model:` with keys under it — pins the
+            # whole `model` mapping, whose name is not secret-shaped while the
+            # values on both sides carry api_key. Either way the operator
+            # still learns the actionable part: WHICH pinned key is overriding
+            # their edit, and that it is. Both files hold the values and they
+            # can read either.
+            if (isinstance(val, _SCALAR_PIN_TYPES)
+                    and isinstance(expected, _SCALAR_PIN_TYPES)
+                    and not _pinned_key_holds_a_secret(str(dotted))):
                 overriding.append(f"{dotted}: file={val!r} pinned={expected!r}")
+            else:
+                overriding.append(f"{dotted}: file value differs (not shown)")
 
     listing = ", ".join(sorted(pins))
     if overriding:
