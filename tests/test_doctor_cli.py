@@ -574,6 +574,12 @@ class TestConfigParseErrorLeaksNoSecret:
     nothing else scrubs it. Verified leaking before the fix for: an
     unterminated quote, a tab indent and a flow sequence on the token line.
 
+    The snippet is not the only quoted text. A value that STARTS with a YAML
+    indicator — ``!``, ``!!``, ``*`` — is read as a tag or an alias, and PyYAML
+    interpolates what it read into the error's ``problem`` field: the whole
+    value for a tag, everything up to the ``:`` for an alias. Dropping the
+    snippet but keeping ``problem`` still printed the token for those shapes.
+
     The position is what the operator needs (line/column), and that survives —
     it is the source TEXT that must not.
     """
@@ -596,6 +602,11 @@ class TestConfigParseErrorLeaksNoSecret:
         'gateway:\n  telegram_token: "{token}\n',          # unterminated quote
         'gateway:\n\ttelegram_token: {token}\n',           # tab indent
         'gateway:\n  telegram_token: [{token}\n',          # flow seq
+        # Not syntax slips: these parse as a tag or an alias, and the error's
+        # `problem` text quotes what was read (see the class docstring).
+        'gateway:\n  telegram_token: !{token}\n',          # local tag
+        'gateway:\n  telegram_token: !!{token}\n',         # secondary tag
+        'gateway:\n  telegram_token: *{token}\n',          # alias
     ])
     def test_check_config_omits_the_token_line(self, isolated_dirs, broken):
         yaml_exc = broken.format(token=self.FAKE_TOKEN)
@@ -618,6 +629,34 @@ class TestConfigParseErrorLeaksNoSecret:
         assert check.status == "error"
         self._assert_no_fragment(
             f"{check.message} {check.fix or ''}", self.FAKE_KEY)
+
+    def test_config_pins_log_line_omits_the_value(
+            self, monkeypatch, tmp_path, caplog):
+        """The same text, one row later, on stderr.
+
+        ``check_config_pins`` re-reads prometheus.yaml to compare it with the
+        pins, and when that read fails it logs WHY. That line rendered
+        ``str(exc)`` — the ``problem`` text above — and log redaction cannot
+        catch it: it matches whole tokens, and here the value is quoted as a
+        tag.
+        """
+        from prometheus.cli import doctor as D
+        # Letters only: the log line carries the tmp path, and a fake with a
+        # run of digits could match "pytest-<N>" and fail for the wrong reason.
+        fake = "QqzXwvKtMrLpNsDyHgJbFcWd"
+        cfg = tmp_path / "prometheus.yaml"
+        cfg.write_text(f"model:\n  api_key: !{fake}\n", encoding="utf-8")
+        (tmp_path / CONFIG_PINS_FILENAME).write_text(
+            "model.model: some-model\n", encoding="utf-8")
+        monkeypatch.setattr("prometheus.config.paths.get_config_dir",
+                            lambda: tmp_path)
+        monkeypatch.setattr(D, "resolve_config_path",
+                            lambda *a, **k: (cfg, [cfg]))
+        with caplog.at_level("ERROR", logger="prometheus.cli.doctor"):
+            D.check_config_pins()
+        assert "UNREADABLE" in caplog.text     # the line still fires …
+        assert "line 2" in caplog.text         # … and still says where
+        self._assert_no_fragment(caplog.text, fake)
 
 
 class TestParseErrorNamesBothPositions:

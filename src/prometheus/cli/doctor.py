@@ -611,10 +611,16 @@ def check_config_pins() -> DiagnosticCheck:
             # doctor's whole job is to report the truth about this file. An
             # unreadable config reported as an empty one makes every pin below
             # look un-overridden.
+            #
+            # yaml_error_summary, never the exception itself: str(YAMLError)
+            # quotes the document (see yaml_error_summary), this is the file
+            # that holds credentials inline, and log redaction matches whole
+            # tokens, so a value quoted back as a tag passes straight through.
+            # For an OSError the summary is its class name.
             log.error(
-                "doctor: UNREADABLE — cannot read %s (%s: %s); pin comparison "
+                "doctor: UNREADABLE — cannot read %s (%s); pin comparison "
                 "below treats the on-disk config as EMPTY and is not reliable",
-                cfg_path, type(exc).__name__, exc,
+                cfg_path, yaml_error_summary(exc),
             )
             on_disk = {}
 

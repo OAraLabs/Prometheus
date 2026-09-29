@@ -86,53 +86,57 @@ def match_model(model_name: str, registry: dict) -> dict | None:
     return None
 
 
+def _mark_position(mark: yaml.Mark) -> str:
+    """A PyYAML mark as ``name, line L, column C`` (1-based, like editors)."""
+    return f"{mark.name}, line {mark.line + 1}, column {mark.column + 1}"
+
+
 def yaml_error_summary(exc: BaseException) -> str:
-    """WHERE a YAML document failed to parse — never a snippet of it.
+    """WHAT KIND of YAML error, and WHERE — never any text from the document.
 
-    ``str(yaml.YAMLError)`` is unsafe to print. ``MarkedYAMLError.__str__``
-    calls ``mark.get_snippet()``, which renders the offending line out of
-    ``mark.buffer`` — the WHOLE FILE — and PyYAML truncates that snippet at a
-    fixed width rather than at a token boundary. prometheus.yaml holds
-    credentials inline (``gateway.telegram_token``, ``model.api_key``), so a
-    syntax error one line below one of them printed the first ~21 characters
-    of a live secret. Verified leaking for: an unterminated quote, a tab
-    indent, and a flow sequence opened on the token line.
+    Returns the exception's class name and its mark positions, nothing else.
+    ``str(yaml.YAMLError)`` is unsafe to print because it quotes the document
+    in two places:
 
-    Doctor is worse than most places for this because its output goes straight
-    to stdout via ``render_report`` — a terminal, a Telegram chat, a CI log —
-    and stdout does not pass through ``install_log_redaction``, which is what
-    scrubs the logger. ``redact_secrets`` could not have saved the old form
-    either: the snippet is truncated mid-token, so it matches none of the
-    whole-token patterns.
+    * the SNIPPET. ``MarkedYAMLError.__str__`` calls ``mark.get_snippet()``,
+      which renders the offending line out of ``mark.buffer`` — the whole file,
+      when it was loaded from a string — truncated at a fixed width rather than
+      at a token boundary. prometheus.yaml holds credentials inline
+      (``gateway.telegram_token``, ``model.api_key``), so an unterminated
+      quote, a tab indent or an unclosed ``[`` on a token line printed part of
+      the token.
+    * the ``problem`` / ``context`` TEXT. These are not fixed messages: PyYAML
+      interpolates what it read into them. An unquoted value that begins with a
+      YAML indicator is read as a tag or an alias and quoted back — in full for
+      ``!SECRET`` and ``!!SECRET`` ("could not determine a constructor for the
+      tag ..."), up to the first ``:`` for ``*SECRET`` ("found undefined alias
+      ..."), and the part between the bangs for ``!SECRET!x`` ("found undefined
+      tag handle ..."). An earlier version of this helper kept both fields on
+      the belief that PyYAML only ever quotes the single character it choked
+      on. These shapes are the counterexample.
 
-    The position is what the operator actually needs to fix the file, and that
-    survives. ``problem`` and ``context`` are safe to keep because PyYAML
-    interpolates at most a SINGLE character into them (``%r`` of the char it
-    choked on); the multi-character leak is exclusively the snippet.
+    Both doctors show this to a person — ``oara doctor`` prints it to stdout
+    via ``render_report``, and the chat ``/doctor`` command sends it as a
+    message — and stdout does not pass through ``install_log_redaction``.
+    Redaction would not have caught it anyway: it matches whole tokens, and
+    neither a truncated snippet nor a value quoted back as a tag is one.
 
-    A ``YAMLError`` that is not marked gets its type name only. We cannot know
-    what an arbitrary subclass put in ``__str__``, and the default here has to
-    be the safe one.
+    What survives is what the operator needs to find the line: the class name,
+    which says what kind of failure it was, and both marks — where parsing
+    failed (``problem_mark``) and where the construct it was inside started
+    (``context_mark``). An unmarked ``YAMLError``, or any other exception, gets
+    its class name only: we cannot know what an arbitrary ``__str__`` renders,
+    and the default has to be the safe one.
     """
+    summary = type(exc).__name__
     if not isinstance(exc, yaml.MarkedYAMLError):
-        return type(exc).__name__
-
-    parts: list[str] = []
-    if exc.context:
-        parts.append(exc.context)
-    if exc.context_mark is not None:
-        parts.append(
-            f"{exc.context_mark.name}, line {exc.context_mark.line + 1}, "
-            f"column {exc.context_mark.column + 1}"
-        )
-    if exc.problem:
-        parts.append(exc.problem)
+        return summary
     if exc.problem_mark is not None:
-        parts.append(
-            f"{exc.problem_mark.name}, line {exc.problem_mark.line + 1}, "
-            f"column {exc.problem_mark.column + 1}"
-        )
-    return "; ".join(parts) if parts else type(exc).__name__
+        summary += f" at {_mark_position(exc.problem_mark)}"
+    if exc.context_mark is not None:
+        summary += (" (inside the construct that starts at "
+                    f"{_mark_position(exc.context_mark)})")
+    return summary
 
 
 def check_router(config: dict) -> DiagnosticCheck | None:
@@ -367,9 +371,10 @@ class Doctor:
         except yaml.YAMLError as exc:
             return DiagnosticCheck(
                 name="Config", category="platform", status="error",
-                # yaml_error_summary, NOT str(exc): the latter renders a
-                # snippet of the file, which is where prometheus.yaml keeps
-                # credentials inline. See yaml_error_summary.
+                # yaml_error_summary, NOT str(exc): the latter quotes the
+                # file (a snippet, or a tag/alias value it read back), and
+                # prometheus.yaml keeps credentials inline. See
+                # yaml_error_summary.
                 message=f"YAML parse error: {yaml_error_summary(exc)}",
                 fix="Fix syntax errors in config/prometheus.yaml",
             )
