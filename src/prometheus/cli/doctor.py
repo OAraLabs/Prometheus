@@ -44,6 +44,7 @@ from prometheus.infra.doctor import (
     DiagnosticCheck,
     always_loaded_case,
     check_router,
+    yaml_error_summary,
 )
 
 import logging
@@ -99,7 +100,7 @@ def check_config(explicit: str | None = None) -> tuple[DiagnosticCheck, dict[str
     except yaml.YAMLError as exc:
         return DiagnosticCheck(
             name="Config", category="platform", status="error",
-            message=f"{path} has a YAML parse error: {exc}",
+            message=f"{path} has a YAML parse error: {yaml_error_summary(exc)}",
             fix=f"Fix the syntax in {path}, or re-run `oara setup`.",
         ), {}
     if not isinstance(config, dict):
@@ -554,6 +555,30 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
     )
 
 
+#: The value types check_config_pins will print. Anything else — a mapping, a
+#: list — is a SECTION, and a section can carry a credential under a key the
+#: pin's own name never mentions.
+_SCALAR_PIN_TYPES = (str, int, float, bool, type(None))
+
+
+def _pinned_key_holds_a_secret(dotted: str) -> bool:
+    """Is this pinned config path a credential?
+
+    Delegates to ``security.env_scrub.is_secret_name`` rather than writing a
+    third opinion about what looks like a secret — that module's patterns are
+    already built from the variable names this codebase ACTUALLY reads.
+
+    It has to be applied PER SEGMENT, not to the whole dotted path.
+    ``is_secret_name`` anchors TOKEN at ``^`` or ``_`` (deliberately: a bare
+    substring took TOKENIZERS_PARALLELISM), and a DOT satisfies neither, so
+    ``gateway.discord.token`` — the shape the Discord gateway actually uses —
+    returns False as one string and True only when its segments are tested
+    individually.
+    """
+    from prometheus.security.env_scrub import is_secret_name
+    return any(is_secret_name(seg) for seg in dotted.split("."))
+
+
 def check_config_pins() -> DiagnosticCheck:
     """Is anything pinned, and did it override the config file at boot?
 
@@ -592,10 +617,16 @@ def check_config_pins() -> DiagnosticCheck:
             # doctor's whole job is to report the truth about this file. An
             # unreadable config reported as an empty one makes every pin below
             # look un-overridden.
+            #
+            # yaml_error_summary, never the exception itself: str(YAMLError)
+            # quotes the document (see yaml_error_summary), this is the file
+            # that holds credentials inline, and log redaction matches whole
+            # tokens, so a value quoted back as a tag passes straight through.
+            # For an OSError the summary is its class name.
             log.error(
-                "doctor: UNREADABLE — cannot read %s (%s: %s); pin comparison "
+                "doctor: UNREADABLE — cannot read %s (%s); pin comparison "
                 "below treats the on-disk config as EMPTY and is not reliable",
-                cfg_path, type(exc).__name__, exc,
+                cfg_path, yaml_error_summary(exc),
             )
             on_disk = {}
 
@@ -605,7 +636,22 @@ def check_config_pins() -> DiagnosticCheck:
         for part in str(dotted).split("."):
             val = val.get(part, {}) if isinstance(val, dict) else None
         if val and str(val) != str(expected):
-            overriding.append(f"{dotted}: file={val!r} pinned={expected!r}")
+            # Values are printed ONLY when both are plain scalars and the key
+            # is not secret-named. A secret-named key's values ARE the secret:
+            # both were rendered with !r, which printed a credential IN FULL
+            # to stdout. And a mapping or a list is a SECTION: a pin file
+            # written as nested YAML — `model:` with keys under it — pins the
+            # whole `model` mapping, whose name is not secret-shaped while the
+            # values on both sides carry api_key. Either way the operator
+            # still learns the actionable part: WHICH pinned key is overriding
+            # their edit, and that it is. Both files hold the values and they
+            # can read either.
+            if (isinstance(val, _SCALAR_PIN_TYPES)
+                    and isinstance(expected, _SCALAR_PIN_TYPES)
+                    and not _pinned_key_holds_a_secret(str(dotted))):
+                overriding.append(f"{dotted}: file={val!r} pinned={expected!r}")
+            else:
+                overriding.append(f"{dotted}: file value differs (not shown)")
 
     listing = ", ".join(sorted(pins))
     if overriding:

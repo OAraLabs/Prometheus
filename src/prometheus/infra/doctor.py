@@ -86,6 +86,59 @@ def match_model(model_name: str, registry: dict) -> dict | None:
     return None
 
 
+def _mark_position(mark: yaml.Mark) -> str:
+    """A PyYAML mark as ``name, line L, column C`` (1-based, like editors)."""
+    return f"{mark.name}, line {mark.line + 1}, column {mark.column + 1}"
+
+
+def yaml_error_summary(exc: BaseException) -> str:
+    """WHAT KIND of YAML error, and WHERE — never any text from the document.
+
+    Returns the exception's class name and its mark positions, nothing else.
+    ``str(yaml.YAMLError)`` is unsafe to print because it quotes the document
+    in two places:
+
+    * the SNIPPET. ``MarkedYAMLError.__str__`` calls ``mark.get_snippet()``,
+      which renders the offending line out of ``mark.buffer`` — the whole file,
+      when it was loaded from a string — truncated at a fixed width rather than
+      at a token boundary. prometheus.yaml holds credentials inline
+      (``gateway.telegram_token``, ``model.api_key``), so an unterminated
+      quote, a tab indent or an unclosed ``[`` on a token line printed part of
+      the token.
+    * the ``problem`` / ``context`` TEXT. These are not fixed messages: PyYAML
+      interpolates what it read into them. An unquoted value that begins with a
+      YAML indicator is read as a tag or an alias and quoted back — in full for
+      ``!SECRET`` and ``!!SECRET`` ("could not determine a constructor for the
+      tag ..."), up to the first ``:`` for ``*SECRET`` ("found undefined alias
+      ..."), and the part between the bangs for ``!SECRET!x`` ("found undefined
+      tag handle ..."). An earlier version of this helper kept both fields on
+      the belief that PyYAML only ever quotes the single character it choked
+      on. These shapes are the counterexample.
+
+    Both doctors show this to a person — ``oara doctor`` prints it to stdout
+    via ``render_report``, and the chat ``/doctor`` command sends it as a
+    message — and stdout does not pass through ``install_log_redaction``.
+    Redaction would not have caught it anyway: it matches whole tokens, and
+    neither a truncated snippet nor a value quoted back as a tag is one.
+
+    What survives is what the operator needs to find the line: the class name,
+    which says what kind of failure it was, and both marks — where parsing
+    failed (``problem_mark``) and where the construct it was inside started
+    (``context_mark``). An unmarked ``YAMLError``, or any other exception, gets
+    its class name only: we cannot know what an arbitrary ``__str__`` renders,
+    and the default has to be the safe one.
+    """
+    summary = type(exc).__name__
+    if not isinstance(exc, yaml.MarkedYAMLError):
+        return summary
+    if exc.problem_mark is not None:
+        summary += f" at {_mark_position(exc.problem_mark)}"
+    if exc.context_mark is not None:
+        summary += (" (inside the construct that starts at "
+                    f"{_mark_position(exc.context_mark)})")
+    return summary
+
+
 def check_router(config: dict) -> DiagnosticCheck | None:
     """The router: entries boot skipped, and why — or None when there is no
     router to speak of (no rules, no fallback, nothing refused).
@@ -318,7 +371,11 @@ class Doctor:
         except yaml.YAMLError as exc:
             return DiagnosticCheck(
                 name="Config", category="platform", status="error",
-                message=f"YAML parse error: {exc}",
+                # yaml_error_summary, NOT str(exc): the latter quotes the
+                # file (a snippet, or a tag/alias value it read back), and
+                # prometheus.yaml keeps credentials inline. See
+                # yaml_error_summary.
+                message=f"YAML parse error: {yaml_error_summary(exc)}",
                 fix="Fix syntax errors in config/prometheus.yaml",
             )
 
@@ -409,7 +466,15 @@ class Doctor:
             )
 
     def _check_telegram_token(self) -> DiagnosticCheck:
-        """Is the Telegram bot token configured?"""
+        """Is the Telegram bot token configured?
+
+        Set/not-set ONLY — the value is never echoed, not even "masked". The
+        previous form printed ``token[:4] + "..." + token[-4:]``, which is not
+        a mask: for a Telegram token the head IS the bot id and the tail is
+        real entropy from the secret half, so it published usable pieces of a
+        live credential into a terminal, a Telegram chat and CI logs. This
+        matches `_check_cloud_keys`, which has always reported presence only.
+        """
         import os
         # Check env var (primary) then config
         token = os.environ.get("PROMETHEUS_TELEGRAM_TOKEN", "")
@@ -422,11 +487,9 @@ class Doctor:
                 message="bot token not configured",
                 fix="Get a token from @BotFather and set PROMETHEUS_TELEGRAM_TOKEN env var.",
             )
-        # Mask the token for display
-        masked = token[:4] + "..." + token[-4:]
         return DiagnosticCheck(
             name="Telegram", category="connectivity", status="ok",
-            message=f"bot token set ({masked})",
+            message="bot token set",
         )
 
     def _check_cloud_keys(self) -> DiagnosticCheck:
