@@ -555,6 +555,24 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
     )
 
 
+def _pinned_key_holds_a_secret(dotted: str) -> bool:
+    """Is this pinned config path a credential?
+
+    Delegates to ``security.env_scrub.is_secret_name`` rather than writing a
+    third opinion about what looks like a secret — that module's patterns are
+    already built from the variable names this codebase ACTUALLY reads.
+
+    It has to be applied PER SEGMENT, not to the whole dotted path.
+    ``is_secret_name`` anchors TOKEN at ``^`` or ``_`` (deliberately: a bare
+    substring took TOKENIZERS_PARALLELISM), and a DOT satisfies neither, so
+    ``gateway.discord.token`` — the shape the Discord gateway actually uses —
+    returns False as one string and True only when its segments are tested
+    individually.
+    """
+    from prometheus.security.env_scrub import is_secret_name
+    return any(is_secret_name(seg) for seg in dotted.split("."))
+
+
 def check_config_pins() -> DiagnosticCheck:
     """Is anything pinned, and did it override the config file at boot?
 
@@ -606,7 +624,18 @@ def check_config_pins() -> DiagnosticCheck:
         for part in str(dotted).split("."):
             val = val.get(part, {}) if isinstance(val, dict) else None
         if val and str(val) != str(expected):
-            overriding.append(f"{dotted}: file={val!r} pinned={expected!r}")
+            if _pinned_key_holds_a_secret(str(dotted)):
+                # Name the key, never the values. Both of these were rendered
+                # with !r, which printed a credential IN FULL to stdout —
+                # worse than the telegram-token "mask" that started this work,
+                # because nothing there leaked more than 8 characters. The
+                # operator still learns the actionable part: WHICH pinned key
+                # is overriding their edit, and that it is. The value is in
+                # both files and they can read either.
+                overriding.append(f"{dotted}: file value differs (a pinned "
+                                  f"secret, not shown)")
+            else:
+                overriding.append(f"{dotted}: file={val!r} pinned={expected!r}")
 
     listing = ", ".join(sorted(pins))
     if overriding:

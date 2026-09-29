@@ -30,6 +30,7 @@ from prometheus.cli.doctor import (
     render_report,
     run_doctor_command,
 )
+from prometheus.daemon import CONFIG_PINS_FILENAME
 
 
 class _ModelsHandler(BaseHTTPRequestHandler):
@@ -658,3 +659,103 @@ class TestParseErrorNamesBothPositions:
             "infra.doctor.yaml_error_summary so the control cannot drift"
         )
         assert cli_doctor.yaml_error_summary is infra_doctor.yaml_error_summary
+
+
+class TestConfigPinsLeaksNoSecret:
+    """A pinned credential must not be printed by the config_pins row.
+
+    ``check_config_pins`` compared the pin file against prometheus.yaml and
+    rendered BOTH values into the message with ``!r``. For a secret-shaped key
+    that published the FULL token — worse than the telegram-token "mask" this
+    branch started from, which at least only leaked 8 characters. Same
+    destination too: stdout via ``render_report``, which
+    ``install_log_redaction`` does not cover.
+
+    Pinning a credential is not hypothetical: the pin mechanism exists to stop
+    drift on "critical config values", and a gateway token whose file value
+    keeps getting edited is exactly what someone would pin.
+
+    The row still has to do its job for NON-secret keys. Naming both values is
+    the whole point of the check — the operator needs to see that the file says
+    one thing while something else is enforced — so this gates on the key, not
+    on the comparison. Reuses ``security.env_scrub.is_secret_name`` rather than
+    inventing a third opinion about what looks like a secret.
+    """
+
+    # Obviously fake, built by concatenation so no single source literal
+    # matches the pre-commit secret scanner's real-token shape. The secret
+    # halves are also chosen to share NO 4-char substring with the row's
+    # boilerplate ("file value differs", "Corrected in memory", …) — an
+    # exhaustive fragment check would otherwise false-positive on an
+    # incidental word and the test would fail for the wrong reason.
+    FILE_TOKEN = "777" + ":" + "BBxqzvkQmTzRvLwNpJsDyHgF0000"
+    PIN_TOKEN = "888" + ":" + "YYmtqbwXnRkVzQpLsDyHjGcF1111"
+
+    def _check(self, monkeypatch, tmp_path, pins: str, cfg_text: str):
+        from prometheus.cli import doctor as D
+        cfg = tmp_path / "prometheus.yaml"
+        cfg.write_text(cfg_text, encoding="utf-8")
+        (tmp_path / CONFIG_PINS_FILENAME).write_text(pins, encoding="utf-8")
+        monkeypatch.setattr("prometheus.config.paths.get_config_dir",
+                            lambda: tmp_path)
+        monkeypatch.setattr(D, "resolve_config_path",
+                            lambda *a, **k: (cfg, [cfg]))
+        return D.check_config_pins()
+
+    def _assert_no_fragment(self, rendered: str, secret: str) -> None:
+        for start in range(len(secret) - 3):
+            for end in range(start + 4, len(secret) + 1):
+                assert secret[start:end] not in rendered, (
+                    f"doctor leaked {secret[start:end]!r} of a secret"
+                )
+
+    def test_a_pinned_token_is_not_echoed(self, monkeypatch, tmp_path):
+        c = self._check(
+            monkeypatch, tmp_path,
+            f'gateway.telegram_token: "{self.PIN_TOKEN}"\n',
+            f'gateway:\n  telegram_token: "{self.FILE_TOKEN}"\n')
+        assert c.status == "warning"          # the override is still reported
+        rendered = f"{c.message} {c.fix or ''}"
+        self._assert_no_fragment(rendered, self.PIN_TOKEN)
+        self._assert_no_fragment(rendered, self.FILE_TOKEN)
+        # Still names WHICH key is overriding — that is the actionable part.
+        assert "gateway.telegram_token" in rendered
+
+    def test_a_bare_token_segment_is_also_gated(self, monkeypatch, tmp_path):
+        """``gateway.discord.token`` — the last segment is a bare ``token``.
+
+        ``is_secret_name`` anchors TOKEN at ``^`` or ``_``, which a DOT does
+        not satisfy, so the dotted key has to be tested segment by segment.
+        A whole-key test alone would have missed this shape.
+
+        The fake deliberately shares no 4-char substring with the key name or
+        the row's boilerplate: an exhaustive fragment check over a secret
+        containing "discord" would match the literal text of the key being
+        reported and pass for the wrong reason.
+        """
+        file_val = "111222333" + ":" + "QQzxwvkTmRqLpNsDyHgJbFc0000"
+        pin_val = "444555666" + ":" + "WWytmbxRnQkVzLpSdHgJcGf1111"
+        c = self._check(
+            monkeypatch, tmp_path,
+            f'gateway.discord.token: "{pin_val}"\n',
+            f'gateway:\n  discord:\n    token: "{file_val}"\n    enabled: false\n')
+        assert c.status == "warning"      # values differ → the override branch
+        rendered = f"{c.message} {c.fix or ''}"
+        self._assert_no_fragment(rendered, file_val)
+        self._assert_no_fragment(rendered, pin_val)
+        assert "gateway.discord.token" in rendered
+
+    def test_a_non_secret_pin_still_shows_both_values(self, monkeypatch, tmp_path):
+        """THE OTHER HALF. Drift detection is useless if it goes silent.
+
+        Locks that the gate is keyed on secret-shaped NAMES and not on the
+        comparison — a model pin is the case the row exists for, and it must
+        keep naming what the file says versus what is enforced.
+        """
+        c = self._check(
+            monkeypatch, tmp_path,
+            "model.model: Qwen3.8-27B-UD-Q4_K_XL.gguf\n",
+            "model:\n  model: gemma4-26b\n")
+        assert c.status == "warning"
+        assert "gemma4-26b" in c.message
+        assert "Qwen3.8-27B-UD-Q4_K_XL.gguf" in c.message
