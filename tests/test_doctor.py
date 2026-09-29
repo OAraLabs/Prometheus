@@ -272,6 +272,39 @@ class TestDoctorChecks:
         # Status depends on whether the file is found relative to the module
         assert check.status in ("ok", "error")
 
+    @pytest.mark.parametrize("broken", [
+        'gateway:\n  telegram_token: "{token}\n',   # the snippet quotes it
+        'gateway:\n  telegram_token: !{token}\n',   # the tag error quotes it
+    ])
+    def test_check_config_valid_parse_error_leaks_no_secret(
+            self, tmp_path: Path, broken: str) -> None:
+        """The infra doctor's own Config row, with its own lock.
+
+        ``_check_config_valid`` feeds the chat ``/doctor`` command and the
+        daemon's startup check. It rendered ``str(exc)`` until it switched to
+        ``yaml_error_summary``, and nothing held that in place: reverting it
+        left every test green. ``repo_root`` points the check at a fixture
+        instead of the real checkout.
+        """
+        # Built by concatenation so the pre-commit secret scanner does not
+        # mistake this FAKE for a real token (it matches the same shape).
+        fake = "123456789" + ":" + "AAHfakeFakeFakeFakeFakeFakeFakeFake00"
+        config_file = tmp_path / "config" / "prometheus.yaml"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text(broken.format(token=fake), encoding="utf-8")
+        self.doctor.repo_root = tmp_path
+        check = self.doctor._check_config_valid()
+        assert check.status == "error"
+        assert "YAML parse error" in check.message
+        assert "line 2" in check.message       # still says where
+        rendered = f"{check.message} {check.fix or ''}"
+        for start in range(len(fake) - 3):
+            for end in range(start + 4, len(fake) + 1):
+                assert fake[start:end] not in rendered, (
+                    f"doctor leaked {fake[start:end]!r} of the bot token in "
+                    f"{rendered!r}"
+                )
+
     # -- dependencies --
 
     def test_check_dependencies_all_present(self) -> None:
