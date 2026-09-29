@@ -589,9 +589,17 @@ class TestConfigParseErrorLeaksNoSecret:
     # FAKE as a real token (identical shape).
     FAKE_TOKEN = "123456789" + ":" + "AAHfakeFakeFakeFakeFakeFakeFakeFake00"
     # A provider key line, which prometheus.yaml can also hold inline.
-    FAKE_KEY = "sk-FAKEfakeFAKEfakeFAKEfake0000000"
+    FAKE_KEY = "sk-FAKEfakeFAKEfakeFAKEfakeQxRvTwZ"
 
-    def _assert_no_fragment(self, rendered: str, secret: str) -> None:
+    def _assert_no_fragment(self, rendered: str, secret: str, tmp_path) -> None:
+        import os
+        # Swap the test's own tmp dir out first: doctor names the config file
+        # by path, and a runner's temp dir can contain any 4-char run (the
+        # macOS runner's ends in "…0000gn/T/"). Longest spelling first, so
+        # the resolved /private/var/… form is not half-replaced via /var/….
+        for spelling in sorted({str(tmp_path), os.path.realpath(tmp_path)},
+                               key=len, reverse=True):
+            rendered = rendered.replace(spelling, "<TMP>")
         for start in range(len(secret) - 3):
             for end in range(start + 4, len(secret) + 1):
                 assert secret[start:end] not in rendered, (
@@ -619,7 +627,7 @@ class TestConfigParseErrorLeaksNoSecret:
         assert "YAML parse error" in check.message
         assert "line" in check.message
         self._assert_no_fragment(
-            f"{check.message} {check.fix or ''}", self.FAKE_TOKEN)
+            f"{check.message} {check.fix or ''}", self.FAKE_TOKEN, isolated_dirs)
 
     def test_check_config_omits_an_inline_api_key(self, isolated_dirs):
         path = isolated_dirs / "broken2.yaml"
@@ -628,7 +636,7 @@ class TestConfigParseErrorLeaksNoSecret:
         check, _ = check_config(str(path))
         assert check.status == "error"
         self._assert_no_fragment(
-            f"{check.message} {check.fix or ''}", self.FAKE_KEY)
+            f"{check.message} {check.fix or ''}", self.FAKE_KEY, isolated_dirs)
 
     def test_config_pins_log_line_omits_the_value(
             self, monkeypatch, tmp_path, caplog):
@@ -656,7 +664,7 @@ class TestConfigParseErrorLeaksNoSecret:
             D.check_config_pins()
         assert "UNREADABLE" in caplog.text     # the line still fires …
         assert "line 2" in caplog.text         # … and still says where
-        self._assert_no_fragment(caplog.text, fake)
+        self._assert_no_fragment(caplog.text, fake, tmp_path)
 
 
 class TestParseErrorNamesBothPositions:
@@ -729,7 +737,7 @@ class TestConfigPinsLeaksNoSecret:
     # boilerplate ("file value differs", "Corrected in memory", …) — an
     # exhaustive fragment check would otherwise false-positive on an
     # incidental word and the test would fail for the wrong reason.
-    FILE_TOKEN = "777" + ":" + "BBxqzvkQmTzRvLwNpJsDyHgF0000"
+    FILE_TOKEN = "777" + ":" + "BvxqzvkQmTzRvLwNpJsDyHgFcWaR"
     PIN_TOKEN = "888" + ":" + "YYmtqbwXnRkVzQpLsDyHjGcF1111"
 
     def _check(self, monkeypatch, tmp_path, pins: str, cfg_text: str):
@@ -743,7 +751,12 @@ class TestConfigPinsLeaksNoSecret:
                             lambda *a, **k: (cfg, [cfg]))
         return D.check_config_pins()
 
-    def _assert_no_fragment(self, rendered: str, secret: str) -> None:
+    def _assert_no_fragment(self, rendered: str, secret: str, tmp_path) -> None:
+        import os
+        # Tmp dir out first, as in TestConfigParseErrorLeaksNoSecret.
+        for spelling in sorted({str(tmp_path), os.path.realpath(tmp_path)},
+                               key=len, reverse=True):
+            rendered = rendered.replace(spelling, "<TMP>")
         for start in range(len(secret) - 3):
             for end in range(start + 4, len(secret) + 1):
                 assert secret[start:end] not in rendered, (
@@ -757,8 +770,8 @@ class TestConfigPinsLeaksNoSecret:
             f'gateway:\n  telegram_token: "{self.FILE_TOKEN}"\n')
         assert c.status == "warning"          # the override is still reported
         rendered = f"{c.message} {c.fix or ''}"
-        self._assert_no_fragment(rendered, self.PIN_TOKEN)
-        self._assert_no_fragment(rendered, self.FILE_TOKEN)
+        self._assert_no_fragment(rendered, self.PIN_TOKEN, tmp_path)
+        self._assert_no_fragment(rendered, self.FILE_TOKEN, tmp_path)
         # Still names WHICH key is overriding — that is the actionable part.
         assert "gateway.telegram_token" in rendered
 
@@ -774,7 +787,7 @@ class TestConfigPinsLeaksNoSecret:
         containing "discord" would match the literal text of the key being
         reported and pass for the wrong reason.
         """
-        file_val = "111222333" + ":" + "QQzxwvkTmRqLpNsDyHgJbFc0000"
+        file_val = "111222333" + ":" + "QvzxwvkTmRqLpNsDyHgJbFcXeTa"
         pin_val = "444555666" + ":" + "WWytmbxRnQkVzLpSdHgJcGf1111"
         c = self._check(
             monkeypatch, tmp_path,
@@ -782,8 +795,8 @@ class TestConfigPinsLeaksNoSecret:
             f'gateway:\n  discord:\n    token: "{file_val}"\n    enabled: false\n')
         assert c.status == "warning"      # values differ → the override branch
         rendered = f"{c.message} {c.fix or ''}"
-        self._assert_no_fragment(rendered, file_val)
-        self._assert_no_fragment(rendered, pin_val)
+        self._assert_no_fragment(rendered, file_val, tmp_path)
+        self._assert_no_fragment(rendered, pin_val, tmp_path)
         assert "gateway.discord.token" in rendered
 
     def test_a_non_secret_pin_still_shows_both_values(self, monkeypatch, tmp_path):
@@ -821,8 +834,8 @@ class TestConfigPinsLeaksNoSecret:
             f'model:\n  model: file-model\n  api_key: "{file_key}"\n')
         assert c.status == "warning"          # the override is still reported
         rendered = f"{c.message} {c.fix or ''}"
-        self._assert_no_fragment(rendered, pin_key)
-        self._assert_no_fragment(rendered, file_key)
+        self._assert_no_fragment(rendered, pin_key, tmp_path)
+        self._assert_no_fragment(rendered, file_key, tmp_path)
         # Still names WHICH pinned key is overriding the file.
         assert "1 active (model)" in c.message
         assert "model: file value differs (not shown)" in c.message
