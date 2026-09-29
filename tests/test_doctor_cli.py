@@ -617,3 +617,44 @@ class TestConfigParseErrorLeaksNoSecret:
         assert check.status == "error"
         self._assert_no_fragment(
             f"{check.message} {check.fix or ''}", self.FAKE_KEY)
+
+
+class TestParseErrorNamesBothPositions:
+    """One YAML-error helper, shared — and it names BOTH marks.
+
+    A collision between two sessions produced two copies of this control:
+    ``cli.doctor._yaml_error_position`` and
+    ``infra.doctor.yaml_error_summary``. They are not equivalent, and the
+    difference is operator-visible: the cli copy collapsed the marks with
+    ``problem_mark or context_mark``, so it reported ONE position.
+
+    For the common case — an unterminated quote on a ``telegram_token`` line —
+    the two marks are the useful halves of one story: ``context_mark`` is the
+    quote that OPENED and never closed, ``problem_mark`` is the end of stream
+    where the parser gave up. Reporting only the second sends the operator to
+    an empty line; reporting only the first hides where the scan actually ran
+    out. The shared helper keeps both.
+
+    This also keeps the copies from drifting: two redaction helpers is the
+    shape where one gets fixed and the other does not, and the file states that
+    principle itself in ``resolve_config_path`` ("two independent hop counts is
+    the shape that lets one of them be wrong for months; there is now one").
+    """
+
+    def test_both_marks_are_named(self, isolated_dirs):
+        path = isolated_dirs / "both-marks.yaml"
+        # Line 2 opens a quote that never closes; the scan dies at line 3.
+        path.write_text('gateway:\n  telegram_token: "123:abc\n', encoding="utf-8")
+        check, _ = check_config(str(path))
+        assert check.status == "error"
+        assert "line 2" in check.message   # context_mark: the opened quote
+        assert "line 3" in check.message   # problem_mark: where it gave up
+
+    def test_cli_and_infra_share_one_helper(self):
+        from prometheus.cli import doctor as cli_doctor
+        from prometheus.infra import doctor as infra_doctor
+        assert not hasattr(cli_doctor, "_yaml_error_position"), (
+            "cli.doctor grew a second YAML-error helper; use "
+            "infra.doctor.yaml_error_summary so the control cannot drift"
+        )
+        assert cli_doctor.yaml_error_summary is infra_doctor.yaml_error_summary
