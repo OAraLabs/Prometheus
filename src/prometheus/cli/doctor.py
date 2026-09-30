@@ -22,6 +22,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import socket
 import uuid
 from pathlib import Path
@@ -116,6 +117,54 @@ def check_config(explicit: str | None = None) -> tuple[DiagnosticCheck, dict[str
     ), config
 
 
+#: What an ``api_key_env`` VALUE must look like to be printable: an
+#: environment-variable NAME. Letters, digits and underscores, starting with a
+#: letter or underscore, at most 32 characters.
+#:
+#: The bound is chosen from the tree, not from taste: of the 71 env-var names
+#: this codebase actually reads, the longest is 30
+#: (``PROMETHEUS_TELEGRAM_TOKEN_FILE``), so 32 clears every real name with room
+#: to spare — while rejecting the credential shapes it exists to catch, whose
+#: lengths are all above it (``AIza…`` 39, ``ghp_…`` 40, ``sk-…`` 51) or whose
+#: separators are not in the character class at all (``sk-``, a JWT's dots).
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,31}")
+
+#: Printed INSTEAD of a value that failed the shape test. It names the field so
+#: the row is still actionable, and says what to do about it, because the
+#: operator's next question is "then what do I put there".
+_API_KEY_ENV_NOT_A_NAME = (
+    "api_key_env (value not shown: it doesn't look like a variable name; "
+    "put the variable's NAME here, not the key)"
+)
+
+
+def _display_api_key_env(key_env: str) -> str:
+    """How ``api_key_env`` may be shown — the name, or an explanation.
+
+    The field holds a variable NAME, and the cloud rows print it in two places
+    (the message and, when no key was found, the fix). Nothing validates which
+    of ``api_key`` and ``api_key_env`` a config meant, and they sit next to each
+    other in the file, so pasting the KEY into ``api_key_env`` is an easy slip —
+    and doctor then published the credential twice, to stdout, which
+    ``install_log_redaction`` does not cover.
+
+    This is a SHAPE test, not a secret test: it cannot tell a key from a name,
+    only whether a string is plausible as a name. That leaves one known false
+    negative — an AWS access-key ID (``AKIA`` + 16 alphanumerics, 20 chars)
+    passes, since it is indistinguishable from a short variable name. Accepted
+    deliberately: tightening until that fails would also start rejecting real
+    names, and the value this row protects is a provider API key.
+
+    Returns ``""`` for an empty value so callers keep their own unset fallbacks,
+    which are already worded per site.
+    """
+    if not key_env:
+        return ""
+    if _ENV_NAME_RE.fullmatch(key_env):
+        return key_env
+    return _API_KEY_ENV_NOT_A_NAME
+
+
 def _cloud_key_source(
     model_cfg: dict[str, Any],
     provider: str,
@@ -164,15 +213,32 @@ def check_inference(config: dict[str, Any], timeout: float = 5.0) -> tuple[Diagn
     if ProviderRegistry.is_cloud(provider):
         key_env, source = _cloud_key_source(model_cfg, provider, CLOUD_DEFAULTS)
         has_key = source is not None
+        # Display-only gate: key_env is a NAME field, and a key pasted into it
+        # must not be echoed back (see _display_api_key_env). The lookups inside
+        # _cloud_key_source already used the real value, so this changes what is
+        # SHOWN and nothing about whether a key was found.
+        shown_key_env = _display_api_key_env(key_env)
+        # "$" is a variable REFERENCE, so it goes in front of a name only. On
+        # the refusal string it would read "$api_key_env (value not shown…)" —
+        # the shape of a variable that does not exist, which is the opposite of
+        # the point. The refusal is the whole display unit, and it is too long to
+        # sit inside the "(key … set)" clause without nesting parentheses around
+        # the word "set", so a refused value moves it to the end instead.
+        refused = shown_key_env == _API_KEY_ENV_NOT_A_NAME
+        if has_key:
+            msg = (f"cloud provider {provider} (key set — {source}; "
+                   f"{_API_KEY_ENV_NOT_A_NAME})" if refused else
+                   f"cloud provider {provider} (key ${shown_key_env} set — {source})")
+        else:
+            where = _API_KEY_ENV_NOT_A_NAME if refused else (
+                f"${shown_key_env}" if shown_key_env else "<api_key_env unset>")
+            msg = (f"cloud provider {provider} but {where} is set neither in "
+                   f"the environment nor in {get_env_file_path()}")
         reach = DiagnosticCheck(
             name="Inference", category="connectivity",
             status="ok" if has_key else "error",
-            message=(f"cloud provider {provider} (key ${key_env} set — {source})"
-                     if has_key
-                     else f"cloud provider {provider} but ${key_env or '<api_key_env unset>'} "
-                          f"is set neither in the environment nor in "
-                          f"{get_env_file_path()}"),
-            fix=None if has_key else f"Export {key_env or 'the provider API key'} "
+            message=msg,
+            fix=None if has_key else f"Export {shown_key_env or 'the provider API key'} "
                                      f"or add it to {get_env_file_path()}.",
         )
         model = DiagnosticCheck(

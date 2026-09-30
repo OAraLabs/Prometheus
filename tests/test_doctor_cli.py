@@ -841,6 +841,124 @@ class TestConfigPinsLeaksNoSecret:
         assert "1 active (model)" in c.message
         assert "model: file value differs (not shown)" in c.message
 
+# ── WP-X.50 leak 2: api_key_env holding the key itself ───────────────────────
+#
+#: Obviously fake. Letters only, no adjacent repeats and no digits, so an
+#: exhaustive fragment check cannot collide with a digit run in a tmp path —
+#: and none of them shares a 4-char substring with the row's boilerplate.
+#: Built by concatenation so no single source literal matches the pre-commit
+#: secret scanner's real-token shapes.
+_FAKE_KEY_SK = "sk-" + "QqzXwvKtMrLpNsDyHgJbFc"
+_FAKE_KEY_LONG = "QzXwKtMpLsNvHgJbFcWdRtQpVsQnHbJcQwLmZtYdXr"
+_FAKE_KEY_JWT = "QzXwKtMpLs" + "." + "LsNvHgJbFc" + "." + "WdRtQpVsQn"
+
+
+class TestApiKeyEnvHoldingAKeyIsNotEchoed:
+    """``api_key_env`` holds a NAME; pasting the KEY there printed the key.
+
+    The cloud branch rendered ``${key_env}`` into the message and, when the key
+    was nowhere to be found, into the fix as ``Export {key_env}`` — so one
+    copy/paste slip published the credential TWICE, to stdout, which
+    ``install_log_redaction`` does not cover.
+
+    The slip is easy to make and the config is forgiving about it: the field
+    sits next to ``api_key``, both take a string, and nothing validates which
+    of the two you meant. Doctor is the first place anyone reads that config
+    back.
+
+    The gate is a SHAPE test, not a value test — it cannot know whether a
+    string is a secret, only whether it is plausible as a variable name. So it
+    accepts ``[A-Za-z0-9_]`` within a generous length and refuses everything
+    else, which takes the real key shapes (``sk-…``, ``ghp_…``, ``AIza…``, a
+    JWT, anything with a hyphen or dot) while keeping every name this repo
+    actually reads: the longest of the 71 env-var names in the tree is 30
+    characters, and the bound is set above that.
+    """
+
+    def _reach(self, monkeypatch, api_key_env=None, api_key=None,
+               provider="anthropic", set_env=None):
+        from prometheus.cli import doctor as D
+        model: dict[str, object] = {"provider": provider, "model": "m"}
+        if api_key_env is not None:
+            model["api_key_env"] = api_key_env
+        if api_key is not None:
+            model["api_key"] = api_key
+        if set_env is not None:
+            monkeypatch.setenv(*set_env)
+        reach, _model = D.check_inference({"model": model})
+        return reach
+
+    @pytest.mark.parametrize("pasted", [
+        _FAKE_KEY_SK,
+        _FAKE_KEY_LONG,
+        _FAKE_KEY_JWT,
+    ])
+    def test_a_key_pasted_into_api_key_env_is_not_printed(
+            self, monkeypatch, isolated_dirs, pasted):
+        """Both halves of the unset branch: the message AND the fix."""
+        reach = self._reach(monkeypatch, api_key_env=pasted)
+        assert reach.status == "error"        # still reports the missing key
+        rendered = f"{reach.message} {reach.fix or ''}"
+        for spelling in sorted(
+                {str(isolated_dirs), os.path.realpath(isolated_dirs)},
+                key=len, reverse=True):
+            rendered = rendered.replace(spelling, "<TMP>")
+        for start in range(len(pasted) - 3):
+            for end in range(start + 4, len(pasted) + 1):
+                assert pasted[start:end] not in rendered, (
+                    f"doctor leaked {pasted[start:end]!r} of api_key_env"
+                )
+        # It still tells the operator what to do about it.
+        assert "api_key_env" in rendered
+        assert "NAME" in rendered
+
+    def test_the_key_set_branch_is_also_gated(self, monkeypatch, isolated_dirs):
+        """``api_key`` inline + ``api_key_env`` holding a key → source="config".
+
+        The OTHER branch, reached when a key is present: it prints
+        ``key ${key_env} set — config``. Gating only the unset branch would
+        leave this one echoing the paste whenever an inline key is also set.
+        """
+        reach = self._reach(monkeypatch, api_key="inline-key-value",
+                            api_key_env=_FAKE_KEY_SK)
+        assert reach.status == "ok"           # the inline key is honoured …
+        for start in range(len(_FAKE_KEY_SK) - 3):
+            for end in range(start + 4, len(_FAKE_KEY_SK) + 1):
+                assert _FAKE_KEY_SK[start:end] not in reach.message, (
+                    f"doctor leaked {_FAKE_KEY_SK[start:end]!r}"
+                )
+        # … and the row still says a key was found and where it came from.
+        assert "config" in reach.message
+        assert "anthropic" in reach.message
+
+    def test_a_real_variable_name_still_shows(self, monkeypatch, isolated_dirs):
+        """THE OTHER HALF. The name is the actionable content.
+
+        For a correctly-written config the row must keep naming the variable:
+        "which variable is unset" is the whole answer, and a gate that hid
+        every name to be safe would leave the operator guessing.
+        """
+        monkeypatch.delenv("WPX_TEST_CLOUD_KEY", raising=False)
+        reach = self._reach(monkeypatch, api_key_env="WPX_TEST_CLOUD_KEY")
+        assert reach.status == "error"
+        rendered = f"{reach.message} {reach.fix or ''}"
+        assert "WPX_TEST_CLOUD_KEY" in rendered
+        assert "NAME" not in rendered         # not the refusal wording
+
+        monkeypatch.setenv("WPX_TEST_CLOUD_KEY", "value-from-environment")
+        reach = self._reach(monkeypatch, api_key_env="WPX_TEST_CLOUD_KEY")
+        assert reach.status == "ok"
+        assert "WPX_TEST_CLOUD_KEY" in reach.message
+        assert "environment" in reach.message
+
+    def test_the_provider_default_name_is_unaffected(self, monkeypatch,
+                                                    isolated_dirs):
+        """No ``api_key_env`` at all → the registry's default_env is named."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        reach = self._reach(monkeypatch)
+        assert reach.status == "error"
+        assert "ANTHROPIC_API_KEY" in f"{reach.message} {reach.fix or ''}"
+
 
 # ── WP-X.50 leak 1: the CLI doctor's own inference rows ──────────────────────
 
