@@ -683,14 +683,15 @@ def store_backed_persister(store: Any) -> Callable[[str, str | None], None]:
     choices being stored there). A key is written; None deletes the row.
 
     An EPHEMERAL session's choice is never written — "Prometheus won't
-    remember this" covers which model the chat used. Clearing is always
-    allowed, so a row written before the session went ephemeral can still be
-    removed."""
+    remember this" covers which model the chat used. A choice made while
+    ephemeral DELETES any row written before the session went ephemeral:
+    skipping the write would leave that older choice to come back at the next
+    boot."""
     from prometheus.config.ephemeral import is_session_ephemeral
 
     def persist(session_id: str, key: str | None) -> None:
         if key is not None and is_session_ephemeral(session_id):
-            return
+            key = None
         store.set_session_backend(session_id, key)
 
     return persist

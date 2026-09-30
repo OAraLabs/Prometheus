@@ -83,12 +83,13 @@ def test_an_ephemeral_session_never_gets_a_row(tmp_path):
     from prometheus.config.ephemeral import set_session_ephemeral
 
     store = _store(tmp_path)
+    store.set_session_backend("telegram:7", "gpt")       # chosen before the chat went ephemeral
     set_session_ephemeral("telegram:7", True)
     router = _router()
     router.persist_override = store_backed_persister(store)
     router.set_override("telegram:7", {"provider": "anthropic", "model": "m"}, key="claude")
     assert router.get_override_for_session("telegram:7") is not None   # the choice still applies
-    assert store.all_session_backends() == {}                          # …but nothing is remembered
+    assert store.all_session_backends() == {}      # …nothing is remembered, and the old row is gone
     router.set_override("telegram:8", {"provider": "anthropic", "model": "m"}, key="claude")
     assert store.all_session_backends() == {"telegram:8": "claude"}
 
