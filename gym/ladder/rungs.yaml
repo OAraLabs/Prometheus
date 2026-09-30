@@ -2,10 +2,17 @@
 # --judge-base-url (or LADDER_BASE_URL / LADDER_JUDGE_BASE_URL).
 #
 # A --rung run is REFUSED unless the endpoint serves a model matching `match`
-# (regex, case-insensitive), the adapter picks `adapter_tier` for it (the tier
-# the daemon itself would use — config/model_registry.yaml), and the probed
-# quantization equals `quantization`. Rows are never filed under a rung the
-# endpoint is not actually serving.
+# (regex, case-insensitive), the adapter picks `adapter_tier` for it, and the
+# probed quantization equals `quantization`. Rows are never filed under a rung
+# the endpoint is not actually serving.
+#
+# The ladder's adapter is built WITHOUT the served chat template
+# (gym/runner.py build_pipeline), so its tier comes from
+# config/model_registry.yaml or the `full` fallback. Since #583 the daemon
+# also reads the served template, and for a model the registry does not list
+# the two differ: r27b-pq2 and r09b-ornith get `full` here and `light` in the
+# daemon (checked offline 2026-09-30 from each GGUF's chat template through
+# the #583 resolver). The pins below are what the ladder enforces.
 #
 # `hf` pins the exact upstream file (repo, revision, file, sha256): a model
 # name is not an identity — the production 27B's own filename now resolves to
@@ -23,15 +30,27 @@ first_run: [r27b, r27b-pq2, r08b, r09b-ornith]
 
 # ONE judge for every rung, so pass rates on judged tasks are comparable
 # across rungs. It must not be any rung's model (enforced by
-# tests/test_ladder_suite.py and again at run time). UNDECIDED for the mini
-# rungs: at Ollama's default 32k context this judge needs ~14.8 GiB and does
-# not fit beside any rung served on the mini's 3090 Ti (~11.7 GiB free), so
-# rung runs use --no-judge (the 6 judged qa tasks are recorded UNSCORED) until
-# the judge is decided — see docs/MODEL-LADDER.md, "Judge".
+# tests/test_ladder_suite.py and again at run time). Decided 2026-09-30 for
+# WP-2.2: the judge runs on the mini's 3090 Ti and the rungs on the 4090, so
+# the card serving a rung never grades. It is served by llama-server, not
+# Ollama, and reports the pinned name through --alias: the runner compares the
+# pin with the endpoint's /v1/models ids, and without the alias llama-server
+# reports the file's name. See docs/MODEL-LADDER.md, "Judge".
 judge:
   model: qwen2.5:14b-instruct
-  served_by: ollama
+  served_by: llama.cpp
   on_disk: mini
+  file:
+    source: the mini's Ollama store (the blob behind qwen2.5:14b-instruct)
+    size: 8988110688
+    sha256: 2049f5674b1e92b4464e5729975c9689fcfbf0b0e4443ccf10b5339f370f9a54
+  serve: >
+    The mini's 3090 Ti, the ladder's llama.cpp 9d57ce456 build (sm_86), the
+    blob loaded directly with --alias qwen2.5:14b-instruct, -c 8192
+    --parallel 1 --flash-attn on --jinja -ngl 99, bound to the mini's
+    Tailscale address so a harness on another machine reaches it. It takes
+    ~10.1 GiB beside the card's resident services (measured 2026-09-30:
+    1.8 GiB left); start it for a window and stop it after.
 
 rungs:
   - id: r27b
@@ -78,8 +97,9 @@ rungs:
     notes: >
       The same checkpoint as r27b (Qwen3.8-27B), so r27b vs r27b-pq2 measures
       what PrismML's ternary pipeline costs against Unsloth UD-Q4_K_XL — not
-      against full precision. Tier `full` is what the daemon picks today (no
-      registry entry matches the name); r27b runs at `light`, so the Bonsai
+      against full precision. Tier `full` is what the ladder picks (no
+      registry entry matches the name; the daemon, reading the served
+      template since #583, picks `light`); r27b runs at `light`, so the Bonsai
       tier sweep (off / light / full) is reported beside it. Confounds: server
       (the fork tracks upstream 5ea87dd, 178 commits after 9d57ce456; its own
       commits touch no server or chat code), and PrismML's published scores
@@ -126,8 +146,9 @@ rungs:
       Side by side with r08b: same size and architecture (qwen35; the same parameter count as
       Qwen3.5-9B's MTP build), so the difference is mostly the agentic training. Two confounds,
       labelled, not fixed here: the quantizer (the official llama.cpp Q4_K_M here vs Unsloth
-      UD-Q4_K_XL for r08b), and the adapter tier — the daemon gives it `full` by default because
-      its file name matches no config/model_registry.yaml entry (evidence for WP-X.28). The
+      UD-Q4_K_XL for r08b), and the adapter tier — the ladder gives it `full` because its file
+      name matches no config/model_registry.yaml entry (evidence for WP-X.28; the daemon, reading
+      the served template since #583, gives it `light`). The
       card does not declare base_model; "Qwen3.5-9B base" is the vendor's description.
 
   - id: r04b
