@@ -977,3 +977,153 @@ class TestRouterRow:
 
         [row] = [c for c in checks if c.name == "Router"]
         assert row.status == "warning" and "2 skipped at boot" in row.message
+
+
+# ── WP-X.50 leak 1: the same URL, in the chat /doctor's inference row ───────
+
+#: Obviously fake; distinct letters, no repeated runs, sharing no 4-char
+#: substring with the row's boilerplate ("llama.cpp", "reachable at", "not
+#: responding at"). Concatenated so no single literal matches the secret
+#: scanner's real-token shape.
+_FAKE_USER = "QzXw"
+_FAKE_PASS = "KtMp" + "LsNv" + "HgJb"
+_FAKE_QKEY = "WdRc" + "TnBx" + "VsQp"
+
+
+def _assert_no_fragment(rendered: str, secret: str, tmp_path) -> None:
+    """No 4+ character piece of *secret* survives, tmp dir stripped first."""
+    import os
+    for spelling in sorted({str(tmp_path), os.path.realpath(tmp_path)},
+                           key=len, reverse=True):
+        rendered = rendered.replace(spelling, "<TMP>")
+    for start in range(len(secret) - 3):
+        for end in range(start + 4, len(secret) + 1):
+            assert secret[start:end] not in rendered, (
+                f"doctor leaked {secret[start:end]!r} of a secret"
+            )
+
+
+def _mock_client(get_side_effect=None, get_return=None):
+    client = AsyncMock()
+    if get_side_effect is not None:
+        client.get = AsyncMock(side_effect=get_side_effect)
+    else:
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        client.get = AsyncMock(return_value=get_return or resp)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    return client
+
+
+class TestInferenceUrlLeaksNoCredential:
+    """``_check_inference`` printed ``state.inference_url`` as configured.
+
+    The chat ``/doctor`` path, so the destination is a Telegram message — not
+    stdout, and not covered by ``install_log_redaction``. Both the "reachable"
+    and the "not responding" branches rendered the raw URL, so a
+    ``user:pass@host`` backend published its password to the chat and
+    ``?api_key=`` published a key.
+
+    The fix routes through the SAME ``api.turn_errors.redact_url`` the message
+    path already used: one helper, because two display functions is the shape
+    where one gets fixed and the other does not.
+
+    The request must still use the real URL — redaction is display-only — so
+    these assert what was handed to httpx as well as what was shown.
+    """
+
+    def setup_method(self) -> None:
+        self.doctor = Doctor.__new__(Doctor)
+        self.doctor.config = {}
+        self.doctor.registry = SAMPLE_REGISTRY
+
+    @pytest.mark.asyncio
+    async def test_reachable_row_hides_userinfo_but_keeps_host_and_port(self, tmp_path):
+        url = f"http://{_FAKE_USER}:{_FAKE_PASS}@127.0.0.1:8080"
+        client = _mock_client()
+        state = _sample_state(inference_url=url)
+        with patch("prometheus.infra.doctor.httpx.AsyncClient", return_value=client):
+            check = await self.doctor._check_inference(state)
+        assert check.status == "ok"
+        _assert_no_fragment(check.message, _FAKE_PASS, tmp_path)
+        _assert_no_fragment(check.message, _FAKE_USER, tmp_path)
+        assert "@" not in check.message
+        assert "127.0.0.1" in check.message      # still actionable
+        assert "8080" in check.message
+        # The REQUEST used the real URL, credentials intact.
+        assert client.get.await_args[0][0] == f"{url}/v1/models"
+
+    @pytest.mark.asyncio
+    async def test_unreachable_row_hides_userinfo(self, tmp_path):
+        url = f"http://{_FAKE_USER}:{_FAKE_PASS}@127.0.0.1:8080"
+        client = _mock_client(get_side_effect=ConnectionError("refused"))
+        state = _sample_state(inference_url=url)
+        with patch("prometheus.infra.doctor.httpx.AsyncClient", return_value=client):
+            check = await self.doctor._check_inference(state)
+        assert check.status == "error"
+        _assert_no_fragment(check.message, _FAKE_PASS, tmp_path)
+        assert "127.0.0.1" in check.message
+        assert client.get.await_args[0][0] == f"{url}/v1/models"
+
+    @pytest.mark.asyncio
+    async def test_query_credential_is_hidden(self, tmp_path):
+        url = f"http://127.0.0.1:8080/v1?api_key={_FAKE_QKEY}"
+        client = _mock_client(get_side_effect=ConnectionError("refused"))
+        state = _sample_state(inference_url=url)
+        with patch("prometheus.infra.doctor.httpx.AsyncClient", return_value=client):
+            check = await self.doctor._check_inference(state)
+        _assert_no_fragment(check.message, _FAKE_QKEY, tmp_path)
+        assert "?<redacted>" in check.message
+
+    @pytest.mark.asyncio
+    async def test_a_clean_url_is_unchanged(self):
+        """The common case must not become noise.
+
+        Most deployments configure a plain ``http://gpu:8080``; if the row
+        rewrote that, every operator would see a changed message for no gain.
+        """
+        client = _mock_client()
+        state = _sample_state(inference_url="http://192.0.2.1:8080")
+        with patch("prometheus.infra.doctor.httpx.AsyncClient", return_value=client):
+            check = await self.doctor._check_inference(state)
+        assert "http://192.0.2.1:8080" in check.message
+
+    @pytest.mark.asyncio
+    async def test_the_other_endpoint_branch_also_redacts(self, tmp_path):
+        """The engine picks the endpoint path; BOTH must go through the helper.
+
+        A fix applied to one branch would leave the other printing the
+        credential — they share one URL variable but two message lines.
+
+        NOTE on which engine reaches the else branch: ``_check_inference``
+        selects it with ``"llama" in state.inference_engine``, which is True
+        for "ollama" too (it CONTAINS "llama"). So this test uses "vllm" to
+        actually reach the ``/api/tags`` branch, and the assertion below pins
+        the substring quirk for ollama so it cannot change unnoticed. That
+        quirk is pre-existing and out of scope here — recorded in the report.
+        """
+        url = f"http://{_FAKE_USER}:{_FAKE_PASS}@127.0.0.1:11434"
+        client = _mock_client()
+        state = _sample_state(inference_url=url, inference_engine="vllm")
+        with patch("prometheus.infra.doctor.httpx.AsyncClient", return_value=client):
+            check = await self.doctor._check_inference(state)
+        _assert_no_fragment(check.message, _FAKE_PASS, tmp_path)
+        assert "127.0.0.1" in check.message
+        assert client.get.await_args[0][0] == f"{url}/api/tags"
+
+    @pytest.mark.asyncio
+    async def test_ollama_takes_the_llama_endpoint_branch(self):
+        """Pins the ``"llama" in engine`` substring quirk (pre-existing).
+
+        Ollama's engine string contains "llama", so it is routed to
+        ``/v1/models`` rather than ``/api/tags``. Asserted here so a future
+        change to that dispatch is a deliberate one, and so the redaction test
+        above is not silently relying on a branch it never reaches.
+        """
+        client = _mock_client()
+        state = _sample_state(inference_url="http://127.0.0.1:11434",
+                              inference_engine="ollama")
+        with patch("prometheus.infra.doctor.httpx.AsyncClient", return_value=client):
+            await self.doctor._check_inference(state)
+        assert client.get.await_args[0][0] == "http://127.0.0.1:11434/v1/models"

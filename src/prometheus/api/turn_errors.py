@@ -78,6 +78,20 @@ _BILLING_MARKERS = (
 # test_never_echoes_a_url_or_query_string.
 _URL_QUERY_RE = re.compile(r"(https?://[^\s'\"?]+)\?[^\s'\"]*")
 
+# The OTHER place a credential rides in a URL: the userinfo of the authority,
+# ``scheme://user:password@host``. That is a real configuration — it is how a
+# ``model.base_url`` reaches a llama.cpp or ollama server behind an
+# authenticating proxy, and httpx turns it into a Basic auth header — and both
+# doctors printed the URL exactly as written.
+#
+# Anchored so it can only match inside the AUTHORITY: the userinfo run is
+# forbidden to contain ``/``, so an ``@`` in a path (``/models@v1``) is left
+# alone rather than being mistaken for a credential boundary. Everything after
+# the ``@`` — host and port — is kept, because that is the actionable half of
+# a "server not responding" row. IPv6 literals survive for the same reason:
+# the ``@`` is consumed, not the bracket.
+_URL_USERINFO_RE = re.compile(r"(https?://)[^/\s'\"@]+@")
+
 # Belt-and-braces: redact credential-shaped tokens anywhere in the text, since
 # provider bodies can echo request material back at us and this string is
 # broadcast to every connected client.
@@ -227,13 +241,25 @@ def quota_headers(response: Any) -> dict[str, str]:
 
 
 def redact_url(url: str) -> str:
-    """Strip a URL's query string. Gemini puts its API key in ``?key=``.
+    """Strip a URL's query string AND its userinfo, keeping host and port.
+
+    Gemini puts its API key in ``?key=``; a reverse-proxy setup puts a password
+    in ``user:pass@``. Either way the host and port are what an operator needs
+    from a "server not responding" row, so those survive and the credentials do
+    not.
 
     The same ``_URL_QUERY_RE`` the message path uses, applied where a URL is
-    about to be written to a log rather than returned to a client.
+    about to be written to a log rather than returned to a client. This is the
+    ONE display helper for inference URLs — ``cli.doctor`` and ``infra.doctor``
+    both call it, deliberately: two copies of a redaction function is the shape
+    where one gets fixed and the other keeps leaking.
+
+    Display only. The REQUEST must still use the real URL — a caller that
+    redacted before ``httpx.get`` would connect somewhere else entirely.
     """
     try:
-        return _URL_QUERY_RE.sub(r"\1?<redacted>", str(url))
+        text = _URL_QUERY_RE.sub(r"\1?<redacted>", str(url))
+        return _URL_USERINFO_RE.sub(r"\1", text)
     except Exception:  # noqa: BLE001
         return "<unprintable url>"
 

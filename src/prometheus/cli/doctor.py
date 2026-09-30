@@ -30,6 +30,7 @@ from typing import Any
 import httpx
 import yaml
 
+from prometheus.api.turn_errors import redact_url
 from prometheus.config.api_token import resolve_api_token
 from prometheus.config.defaults import config_search_paths
 from prometheus.config.env_file import get_env_file_path, parse_env_file
@@ -181,6 +182,9 @@ def check_inference(config: dict[str, Any], timeout: float = 5.0) -> tuple[Diagn
         )
         return reach, model
 
+    # base_url is used for the REQUEST as written — userinfo included, since
+    # httpx turns ``user:pass@`` into a Basic auth header. Only what is
+    # DISPLAYED goes through redact_url below.
     base_url = (model_cfg.get("base_url") or "http://localhost:8080").rstrip("/")
     detected: list[str] = []
     error: str | None = None
@@ -202,7 +206,7 @@ def check_inference(config: dict[str, Any], timeout: float = 5.0) -> tuple[Diagn
     if error is not None:
         reach = DiagnosticCheck(
             name="Inference", category="connectivity", status="error",
-            message=f"{provider} not responding at {base_url}",
+            message=f"{provider} not responding at {redact_url(base_url)}",
             fix="Start the inference server (or fix model.base_url), "
                 "then re-run `oara doctor`.",
         )
@@ -215,7 +219,7 @@ def check_inference(config: dict[str, Any], timeout: float = 5.0) -> tuple[Diagn
 
     reach = DiagnosticCheck(
         name="Inference", category="connectivity", status="ok",
-        message=f"{provider} reachable at {base_url}",
+        message=f"{provider} reachable at {redact_url(base_url)}",
     )
     if detected and detected[0]:
         model = DiagnosticCheck(

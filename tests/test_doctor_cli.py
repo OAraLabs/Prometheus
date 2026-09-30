@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import threading
 from contextlib import contextmanager
@@ -839,3 +840,82 @@ class TestConfigPinsLeaksNoSecret:
         # Still names WHICH pinned key is overriding the file.
         assert "1 active (model)" in c.message
         assert "model: file value differs (not shown)" in c.message
+
+
+# ── WP-X.50 leak 1: the CLI doctor's own inference rows ──────────────────────
+
+
+class TestCliInferenceUrlLeaksNoCredential:
+    """``cli.doctor.check_inference`` printed ``base_url`` as written.
+
+    The stdout twin of the chat row ``tests/test_doctor.py`` covers — same
+    leak, same fix, different destination, and both matter: ``oara doctor``
+    writes to a terminal, a CI log and a pasted bug report, none of which pass
+    through ``install_log_redaction``.
+
+    Driven against a real ephemeral server rather than a mock, so the
+    ``reachable`` and ``not responding`` branches are the ones actually taken
+    (this file's existing ``TestCheckInference`` uses the same ``_serve``).
+
+    The request must still carry the credentials: ``user:pass@`` is how a
+    ``base_url`` reaches a llama.cpp server behind an authenticating proxy, and
+    httpx turns it into a Basic auth header. Only what is SHOWN changes.
+    """
+
+    def _assert_no_fragment(self, rendered, secret, tmp_path):
+        for spelling in sorted({str(tmp_path), os.path.realpath(tmp_path)},
+                               key=len, reverse=True):
+            rendered = rendered.replace(spelling, "<TMP>")
+        for start in range(len(secret) - 3):
+            for end in range(start + 4, len(secret) + 1):
+                assert secret[start:end] not in rendered, (
+                    f"cli doctor leaked {secret[start:end]!r} of a secret"
+                )
+
+    def test_reachable_row_hides_userinfo_keeps_host_and_port(self, tmp_path):
+        user, pw = "QzXw", "KtMp" + "LsNv" + "HgJb"
+        with _serve(_ModelsHandler) as (_plain, port):
+            reach, model = check_inference(
+                {"model": {"provider": "llama_cpp",
+                           "base_url": f"http://{user}:{pw}@127.0.0.1:{port}"}},
+                timeout=3.0)
+        assert reach.status == "ok"           # it still CONNECTED, so the
+        assert model.status == "ok"           # request used the real URL
+        self._assert_no_fragment(reach.message, pw, tmp_path)
+        self._assert_no_fragment(reach.message, user, tmp_path)
+        assert "@" not in reach.message
+        assert "127.0.0.1" in reach.message   # the actionable half survives
+        assert str(port) in reach.message
+
+    def test_unreachable_row_hides_userinfo(self, tmp_path):
+        user, pw = "QzXw", "KtMp" + "LsNv" + "HgJb"
+        port = _free_port()                   # nothing listening
+        reach, _model = check_inference(
+            {"model": {"provider": "llama_cpp",
+                       "base_url": f"http://{user}:{pw}@127.0.0.1:{port}"}},
+            timeout=0.3)
+        assert reach.status == "error"
+        self._assert_no_fragment(reach.message, pw, tmp_path)
+        assert "@" not in reach.message
+        assert "127.0.0.1" in reach.message and str(port) in reach.message
+
+    def test_query_credential_is_hidden(self, tmp_path):
+        qkey = "WdRc" + "TnBx" + "VsQp"
+        port = _free_port()
+        reach, _model = check_inference(
+            {"model": {"provider": "llama_cpp",
+                       "base_url": f"http://127.0.0.1:{port}/v1?api_key={qkey}"}},
+            timeout=0.3)
+        assert reach.status == "error"
+        self._assert_no_fragment(reach.message, qkey, tmp_path)
+        assert "?<redacted>" in reach.message
+
+    def test_a_clean_url_is_unchanged(self):
+        """The common case must not become noise for a fix nobody needs."""
+        with _serve(_ModelsHandler) as (url, port):
+            reach, _model = check_inference(
+                {"model": {"provider": "llama_cpp", "base_url": url}},
+                timeout=3.0)
+        assert reach.status == "ok"
+        assert f"http://127.0.0.1:{port}" in reach.message
+        assert "<redacted>" not in reach.message

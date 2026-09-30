@@ -166,3 +166,102 @@ def test_a_bare_429_with_no_marker_is_still_only_a_rate_limit():
     detail = classify_turn_error(exc)
     assert detail["kind"] == KIND_RATE_LIMIT
     assert is_terminal(detail["kind"]) is False
+
+
+# ── WP-X.50 leak 1: a URL's userinfo is a credential too ─────────────────────
+
+#: Obviously fake. Mixed-case letters only, every character distinct and no
+#: digits, so it shares NO 4-char substring with the URL boilerplate it is
+#: printed next to ("http", "127.0.0.1", "8080", "/v1", "<redacted>") — an
+#: exhaustive fragment check would otherwise fail for the wrong reason. Built
+#: by concatenation so no single literal matches the secret scanner's shape.
+_FAKE_USER = "QzXw"
+_FAKE_PASS = "KtMp" + "LsNv" + "HgJb"
+_FAKE_QKEY = "WdRc" + "TnBx" + "VsQp"
+
+
+def _assert_no_url_fragment(rendered: str, secret: str) -> None:
+    """No piece of *secret* 4 characters or longer survives in *rendered*."""
+    for start in range(len(secret) - 3):
+        for end in range(start + 4, len(secret) + 1):
+            assert secret[start:end] not in rendered, (
+                f"redact_url leaked {secret[start:end]!r} of a secret"
+            )
+
+
+class TestRedactUrlDropsUserinfo:
+    """``redact_url`` stripped the query but printed the userinfo in full.
+
+    ``http://user:pass@host`` puts a credential in the URL itself, and it is a
+    shape that reaches the inference rows for real: it is how an operator points
+    ``model.base_url`` at a llama.cpp server behind an authenticating proxy
+    (httpx turns the userinfo into a Basic auth header), and some providers
+    accept ``?api_key=`` too. #627 closed the YAML and config-pin echoes; the
+    inference rows were still printing the URL exactly as configured.
+
+    These live here rather than in test_turn_errors.py for a mechanical reason
+    worth keeping visible: test_turn_errors.py carries a deliberate 32-char
+    provider-key FIXTURE that trips the pre-commit secret scanner, and
+    tests/test_sdist_contents.py allowlists it BY COUNT. Any edit to that file's
+    fakes desyncs the release ratchet, so new redact_url cases go here, where
+    the function is already tested and the scanner is quiet.
+
+    This is the ONE helper both doctors call — extending it rather than adding a
+    second display function is the point, because two copies is the shape where
+    one gets fixed and the other does not (``yaml_error_summary`` exists for
+    exactly that reason). The request must still use the REAL URL; only what is
+    shown changes, so the host and port survive — that is what makes the row
+    actionable.
+    """
+
+    def test_userinfo_is_dropped_but_host_and_port_survive(self):
+        out = redact_url(f"http://{_FAKE_USER}:{_FAKE_PASS}@127.0.0.1:8080/v1")
+        _assert_no_url_fragment(out, _FAKE_PASS)
+        _assert_no_url_fragment(out, _FAKE_USER)
+        assert "@" not in out          # no userinfo left at all
+        # The actionable part is still there.
+        assert "127.0.0.1" in out
+        assert "8080" in out
+        assert "/v1" in out
+
+    def test_query_string_is_still_redacted(self):
+        """The pre-existing half must not regress."""
+        out = redact_url(f"http://127.0.0.1:8080/v1?api_key={_FAKE_QKEY}")
+        _assert_no_url_fragment(out, _FAKE_QKEY)
+        assert "?<redacted>" in out
+        assert "127.0.0.1" in out and "8080" in out
+
+    def test_both_at_once(self):
+        out = redact_url(
+            f"http://{_FAKE_USER}:{_FAKE_PASS}@127.0.0.1:8080/v1?api_key={_FAKE_QKEY}")
+        _assert_no_url_fragment(out, _FAKE_PASS)
+        _assert_no_url_fragment(out, _FAKE_USER)
+        _assert_no_url_fragment(out, _FAKE_QKEY)
+        assert "127.0.0.1:8080/v1" in out
+        assert "?<redacted>" in out
+
+    def test_a_clean_url_is_unchanged(self):
+        """A URL with nothing to hide must not be mangled.
+
+        The overwhelming majority of deployments have a plain
+        ``http://gpu:8080``; if the helper rewrote those the row would become
+        noise.
+        """
+        for url in ("http://localhost:8080",
+                    "http://127.0.0.1:8080/v1",
+                    "https://gpu.example.invalid:11434/api/tags"):
+            assert redact_url(url) == url
+
+    def test_an_at_in_the_path_is_not_userinfo(self):
+        """``@`` is legal in a path. Only the AUTHORITY part is a credential.
+
+        Stripping at the first ``@`` anywhere would corrupt a URL that merely
+        mentions one after the host, and would silently hide the real host.
+        """
+        out = redact_url("http://127.0.0.1:8080/models@v1")
+        assert out == "http://127.0.0.1:8080/models@v1"
+
+    def test_ipv6_host_survives(self):
+        out = redact_url(f"http://{_FAKE_USER}:{_FAKE_PASS}@[::1]:8080/v1")
+        _assert_no_url_fragment(out, _FAKE_PASS)
+        assert "[::1]:8080" in out
