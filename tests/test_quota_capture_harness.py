@@ -265,3 +265,92 @@ class TestRedactUrlDropsUserinfo:
         out = redact_url(f"http://{_FAKE_USER}:{_FAKE_PASS}@[::1]:8080/v1")
         _assert_no_url_fragment(out, _FAKE_PASS)
         assert "[::1]:8080" in out
+
+    # ── The three shapes the first pass missed ──────────────────────────────
+    #
+    # Found by reading the URL back out of a REAL request rather than from a
+    # hand-written string: the row only prints what httpx was given, so the
+    # cases that matter are the ones an operator's config actually produces.
+    # All three were verified leaking against 1e65266.
+
+    @pytest.mark.parametrize("scheme", ["HTTP", "Https", "hTtPs"])
+    def test_a_mixed_case_scheme_is_still_a_scheme(self, scheme):
+        """RFC 3986 makes the scheme case-INSENSITIVE, and so does httpx.
+
+        The patterns were written ``https?://`` with no flag, so ``HTTP://`` —
+        what an operator's YAML or a Windows tool's config often carries —
+        matched nothing and the whole userinfo printed. A redaction helper that
+        is stricter than the client it protects has a hole exactly as wide as
+        the difference, and the difference here is spelling.
+        """
+        url = f"{scheme}://{_FAKE_USER}:{_FAKE_PASS}@127.0.0.1:8080/v1"
+        out = redact_url(url)
+        _assert_no_url_fragment(out, _FAKE_PASS)
+        _assert_no_url_fragment(out, _FAKE_USER)
+        assert "@" not in out
+        # Host, port and path survive — the row stays actionable.
+        assert "127.0.0.1" in out and "8080" in out and "/v1" in out
+
+    def test_an_at_inside_the_password_is_not_a_boundary(self):
+        """``@`` is legal in a password, and httpx splits at the LAST one.
+
+        For ``http://user:pa@ss@host`` httpx sends ``pa@ss`` as the password and
+        connects to ``host``. The first pattern's run stopped at the FIRST ``@``,
+        so it removed ``user:pa`` and left ``ss@host`` — printing the tail of the
+        password AND misreporting the host as ``ss@host``, which is worse than
+        leaking: the operator would go look for a server that does not exist.
+
+        The userinfo class now runs to the last ``@`` in the authority, matching
+        what the client actually parsed.
+        """
+        pw = "KtMpLs" + "@" + "NvHgJb"      # letters and one @; no digit runs
+        out = redact_url(f"http://{_FAKE_USER}:{pw}@127.0.0.1:8080/v1")
+        _assert_no_url_fragment(out, pw)
+        assert "@" not in out                # neither half of the password
+        assert "127.0.0.1:8080/v1" in out     # and the REAL host is reported
+
+    def test_a_url_with_no_scheme_is_still_redacted(self):
+        """``user:pass@host`` with no scheme — the shape that reached the
+        "not responding" row.
+
+        httpx accepts a bare ``host:port`` and so does ``model.base_url`` in
+        practice; the userinfo pattern was anchored to ``https?://``, so this
+        form printed in full. There is no scheme to key off, so the authority
+        has to be recognised by what it is NOT: no scheme prefix, and the ``@``
+        arrives before any ``/``, ``?`` or ``#``.
+
+        A bare ``127.0.0.1:8080`` has no ``@`` and must stay exactly as written —
+        that is the overwhelmingly common form of this config.
+        """
+        out = redact_url(f"{_FAKE_USER}:{_FAKE_PASS}@127.0.0.1:8080")
+        _assert_no_url_fragment(out, _FAKE_PASS)
+        _assert_no_url_fragment(out, _FAKE_USER)
+        assert "@" not in out
+        assert "127.0.0.1:8080" in out        # host and port survive
+        # And the schemeless CLEAN case is untouched.
+        assert redact_url("127.0.0.1:8080") == "127.0.0.1:8080"
+
+    def test_a_mixed_case_scheme_query_is_redacted(self):
+        """The query half had the same case-sensitivity hole.
+
+        ``?key=`` is how Gemini carries its API key, and ``Https://…?key=…``
+        printed it. The pattern is shared with ``_redact`` (the wire-text path),
+        so widening it is a second, deliberate consequence of this fix: both
+        paths become case-insensitive, which can only ever redact more.
+        """
+        out = redact_url(f"Https://h/x?key={_FAKE_QKEY}")
+        _assert_no_url_fragment(out, _FAKE_QKEY)
+        assert "?<redacted>" in out
+        assert "h/x" in out                   # the path is not the secret
+
+    def test_a_schemeless_at_in_a_path_is_not_userinfo(self):
+        """Guards the new bare-authority pattern against over-reach.
+
+        It has no ``https?://`` anchor to hold it to the authority, so the
+        ``/ ? #`` exclusion in the userinfo run is the ONLY thing keeping it
+        out of a path. An ``@`` after the first ``/`` must survive, both with
+        and without a scheme.
+        """
+        assert redact_url("127.0.0.1:8080/models@v1") == "127.0.0.1:8080/models@v1"
+        assert redact_url("http://127.0.0.1:8080/models@v1") == \
+            "http://127.0.0.1:8080/models@v1"

@@ -76,7 +76,12 @@ _BILLING_MARKERS = (
 # httpx puts the FULL request URL into ``str(exc)`` — so the fallback message
 # path leaks the key unless the query is stripped. Verified by
 # test_never_echoes_a_url_or_query_string.
-_URL_QUERY_RE = re.compile(r"(https?://[^\s'\"?]+)\?[^\s'\"]*")
+#
+# IGNORECASE, because RFC 3986 makes the scheme case-insensitive and so does
+# httpx: without the flag ``HTTP://h/x?key=…`` matched nothing and printed the
+# key. This pattern is shared with _redact, so the wire-text path gains the same
+# widening — deliberately, and it can only ever redact more.
+_URL_QUERY_RE = re.compile(r"(https?://[^\s'\"?]+)\?[^\s'\"]*", re.IGNORECASE)
 
 # The OTHER place a credential rides in a URL: the userinfo of the authority,
 # ``scheme://user:password@host``. That is a real configuration — it is how a
@@ -85,12 +90,36 @@ _URL_QUERY_RE = re.compile(r"(https?://[^\s'\"?]+)\?[^\s'\"]*")
 # doctors printed the URL exactly as written.
 #
 # Anchored so it can only match inside the AUTHORITY: the userinfo run is
-# forbidden to contain ``/``, so an ``@`` in a path (``/models@v1``) is left
-# alone rather than being mistaken for a credential boundary. Everything after
-# the ``@`` — host and port — is kept, because that is the actionable half of
-# a "server not responding" row. IPv6 literals survive for the same reason:
-# the ``@`` is consumed, not the bracket.
-_URL_USERINFO_RE = re.compile(r"(https?://)[^/\s'\"@]+@")
+# forbidden to contain ``/``, ``?`` or ``#``, so an ``@`` in a path
+# (``/models@v1``) is left alone rather than being mistaken for a credential
+# boundary. Everything after the ``@`` — host and port — is kept, because that
+# is the actionable half of a "server not responding" row. IPv6 literals survive
+# for the same reason: the ``@`` is consumed, not the bracket.
+#
+# The run is GREEDY and deliberately does not exclude ``@``, so it backtracks to
+# the LAST ``@`` in the authority. That is what httpx itself does, and the
+# difference is not cosmetic: a password may contain ``@``, and matching the
+# FIRST one left the tail of the password in the output while also reporting a
+# host that does not exist (``ss@host`` for ``user:pa@ss@host``). An operator
+# sent to look for the wrong server is worse off than one shown the credential.
+#
+# IGNORECASE for the same reason as the query pattern above.
+_URL_USERINFO_RE = re.compile(r"(https?://)[^/?#\s'\"]*@", re.IGNORECASE)
+
+# The schemeless form: ``user:pass@host``. httpx accepts a bare ``host:port`` as
+# a ``base_url``, so this reaches the "not responding" row too, and neither
+# pattern above can match it — both are anchored to ``https?://``.
+#
+# There is no scheme to key off, so the authority is recognised by what it is
+# NOT: the negative lookahead rejects any string that already opens with a
+# scheme (``[a-z][a-z0-9+.-]*://`` — the RFC's scheme grammar, so a URL that the
+# pattern above already handled is not touched twice), and the run stops at the
+# first ``/``, ``?`` or ``#``, which is what keeps it out of a path. ``@`` is
+# still allowed inside it, for the same last-``@`` reason as above.
+#
+# A bare ``127.0.0.1:8080`` has no ``@`` at all and is unchanged, which is the
+# overwhelmingly common form of a schemeless ``base_url``.
+_BARE_USERINFO_RE = re.compile(r"^(?![a-z][a-z0-9+.-]*://)[^/?#\s'\"]*@", re.IGNORECASE)
 
 # Belt-and-braces: redact credential-shaped tokens anywhere in the text, since
 # provider bodies can echo request material back at us and this string is
@@ -258,8 +287,20 @@ def redact_url(url: str) -> str:
     redacted before ``httpx.get`` would connect somewhere else entirely.
     """
     try:
+        # ORDER MATTERS, and it is the order the patterns are declared in.
+        #
+        # Query first: it consumes everything after the ``?``, so the authority
+        # that the next two steps match against can no longer contain a ``?`` to
+        # trip over. (``?`` is excluded from the userinfo run anyway; doing the
+        # query first keeps the two concerns from interacting at all.)
+        #
+        # Then the schemed userinfo, then the schemeless one. The bare pattern is
+        # anchored at ``^`` with a lookahead that rejects anything already opening
+        # with a scheme, so a URL the previous step handled is left alone rather
+        # than being matched a second time at its new start.
         text = _URL_QUERY_RE.sub(r"\1?<redacted>", str(url))
-        return _URL_USERINFO_RE.sub(r"\1", text)
+        text = _URL_USERINFO_RE.sub(r"\1", text)
+        return _BARE_USERINFO_RE.sub("", text)
     except Exception:  # noqa: BLE001
         return "<unprintable url>"
 
