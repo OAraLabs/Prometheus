@@ -631,6 +631,14 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
 _SCALAR_PIN_TYPES = (str, int, float, bool, type(None))
 
 
+#: Credential-bearing config paths whose name is not a secret WORD at all.
+#: ``authorization`` carries ``Bearer <key>`` — the header every HTTP
+#: credential rides in — and no name pattern can catch it, because the word
+#: itself means nothing until you know what a header is for. Named explicitly
+#: rather than inferred, so the addition is visible at review.
+_EXTRA_SECRET_SEGMENTS = frozenset({"AUTHORIZATION"})
+
+
 def _pinned_key_holds_a_secret(dotted: str) -> bool:
     """Is this pinned config path a credential?
 
@@ -644,9 +652,32 @@ def _pinned_key_holds_a_secret(dotted: str) -> bool:
     ``gateway.discord.token`` — the shape the Discord gateway actually uses —
     returns False as one string and True only when its segments are tested
     individually.
+
+    Each segment is also NORMALISED before it is tested: hyphens to
+    underscores, then upper-cased. ``is_secret_name``'s patterns are written
+    for ENVIRONMENT-VARIABLE names, which are ``UPPER_SNAKE`` and use ``_`` as
+    their only separator, so a pinned HTTP HEADER — ``gateway.headers.x-api-key``,
+    the shape a reverse proxy or an Anthropic-style backend is configured with —
+    did not match ``API_KEY``: a hyphen satisfies neither of the anchors that
+    keep ``KEYBOARD`` out. Normalising is the same fix as splitting per segment,
+    one level down: it converts the caller's spelling into the spelling the
+    patterns were written for, WITHOUT widening the patterns themselves.
+
+    That last part is deliberate. ``env_scrub.is_secret_name`` decides what to
+    strip from a subprocess environment, where every input really is an
+    upper-snake name — teaching it about hyphens there would change what every
+    tool call inherits, to fix a leak that only exists in this row. So the
+    normalisation lives HERE, at the caller that has hyphenated input.
+
+    ``_EXTRA_SECRET_SEGMENTS`` covers the one shape normalisation cannot: a
+    credential under a name that is not a secret word.
     """
     from prometheus.security.env_scrub import is_secret_name
-    return any(is_secret_name(seg) for seg in dotted.split("."))
+    for seg in dotted.split("."):
+        normalised = seg.replace("-", "_").upper()
+        if normalised in _EXTRA_SECRET_SEGMENTS or is_secret_name(normalised):
+            return True
+    return False
 
 
 def check_config_pins() -> DiagnosticCheck:

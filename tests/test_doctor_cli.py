@@ -841,6 +841,81 @@ class TestConfigPinsLeaksNoSecret:
         assert "1 active (model)" in c.message
         assert "model: file value differs (not shown)" in c.message
 
+    # ── WP-X.50 leak 3: header-shaped pin keys ──────────────────────────────
+
+    # Obviously fake; letters only, no adjacent repeats, no digits, and sharing
+    # NO 4-char substring with the key names or the row's boilerplate (an
+    # exhaustive fragment check would otherwise pass for the wrong reason).
+    HDR_PIN = "QzXwKtMpLsNvHgJbFcWdRtQp"
+    HDR_FILE = "ZzkRtwVmXqPlNdSyGhJcBfLw"
+
+    def test_a_hyphenated_header_pin_is_gated(self, monkeypatch, tmp_path):
+        """``x-api-key`` — a header name, not an env-var name.
+
+        The gate split the dotted key on ``.`` and handed each segment to
+        ``is_secret_name``, whose patterns are written for ENV-VARIABLE names:
+        ``API_KEY`` matches, ``x-api-key`` does not, because a HYPHEN is not a
+        separator any of those patterns know. The key family is anchored at
+        ``^`` or ``_`` specifically so ``KEYBOARD`` is not caught, and a hyphen
+        satisfies neither. So a pin on a header carrying an Anthropic-style key
+        printed both values in full with ``!r``.
+
+        ``authorization`` is the same shape with a different failure: it holds
+        a credential (``Bearer …``) under a name that is not a secret WORD at
+        all, so no amount of hyphen-normalising catches it. It has to be named.
+
+        The fix lives in DOCTOR, not in ``security/env_scrub``: that module
+        decides what to strip from a subprocess ENVIRONMENT, where the inputs
+        really are ``UPPER_SNAKE`` names, and widening its patterns there would
+        change what every tool call inherits.
+        """
+        c = self._check(
+            monkeypatch, tmp_path,
+            f'gateway.headers.x-api-key: "{self.HDR_PIN}"\n',
+            f'gateway:\n  headers:\n    x-api-key: "{self.HDR_FILE}"\n')
+        assert c.status == "warning"          # the override is still reported
+        rendered = f"{c.message} {c.fix or ''}"
+        self._assert_no_fragment(rendered, self.HDR_PIN, tmp_path)
+        self._assert_no_fragment(rendered, self.HDR_FILE, tmp_path)
+        assert "file value differs (not shown)" in rendered
+        # Still names WHICH key is overriding — the actionable part survives.
+        assert "gateway.headers.x-api-key" in rendered
+
+    def test_an_authorization_pin_is_gated(self, monkeypatch, tmp_path):
+        c = self._check(
+            monkeypatch, tmp_path,
+            f'gateway.authorization: "{self.HDR_PIN}"\n',
+            f'gateway:\n  authorization: "{self.HDR_FILE}"\n')
+        assert c.status == "warning"
+        rendered = f"{c.message} {c.fix or ''}"
+        self._assert_no_fragment(rendered, self.HDR_PIN, tmp_path)
+        self._assert_no_fragment(rendered, self.HDR_FILE, tmp_path)
+        assert "file value differs (not shown)" in rendered
+        assert "gateway.authorization" in rendered
+
+    def test_the_gate_unit_normalises_and_names_authorization(self):
+        """The unit behind both cases, pinned directly.
+
+        Asserted as a unit because the two row tests above would also pass if
+        the values stopped being compared for any other reason — a silent gate
+        that never fires is indistinguishable from a correct one at row level.
+        """
+        from prometheus.cli.doctor import _pinned_key_holds_a_secret as gate
+        for dotted in (
+            "gateway.headers.x-api-key",   # hyphenated key family
+            "gateway.headers.X-API-KEY",   # same, upper-cased as written
+            "gateway.authorization",       # credential with no secret WORD
+            "gateway.AUTHORIZATION",
+            "model.api-key",               # hyphen variant of api_key
+        ):
+            assert gate(dotted), f"{dotted} must be treated as secret"
+        # The gate must not go True for everything: a model pin is the row's
+        # whole reason to exist, and it has to keep showing both values.
+        for dotted in ("model.model", "gateway.telegram.enabled",
+                       "adapter.strictness"):
+            assert not gate(dotted), f"{dotted} is NOT a secret"
+
+
 # ── WP-X.50 leak 2: api_key_env holding the key itself ───────────────────────
 #
 #: Obviously fake. Letters only, no adjacent repeats and no digits, so an
