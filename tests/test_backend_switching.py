@@ -55,6 +55,7 @@ from prometheus.router.model_router import (  # noqa: E402
     resolve_model_target,
     resolve_slash_command_target,
     restore_backend_overrides,
+    restore_cloud_overrides,
 )
 from prometheus.web.server import create_app  # noqa: E402
 
@@ -269,7 +270,13 @@ def test_boot_restore_applies_only_onto_boxes_found_up(live_registry):
     assert router.get_override_for_session("tg:1").provider_config["backend"] == "4090"
     assert router.get_override_for_session("tg:2") is None
     reasons = {sid: why for sid, _k, why in skipped}
-    assert "connect timeout" in reasons["tg:2"] and reasons["tg:3"] == "not configured"
+    assert "connect timeout" in reasons["tg:2"]
+    # A name that is no longer a configured backend is not this restore's row
+    # since WP-X.7: the early restore reports it as retired, before the gateways
+    # start, and settle_restore deletes it with a WARNING.
+    assert "tg:3" not in reasons
+    _restored, early = restore_cloud_overrides(_router(), {"tg:3": "gone"}, CFG)
+    assert early == [("tg:3", "gone", "not configured")]
 
 
 def test_conversation_store_remembers_and_purges_the_binding(tmp_path):
