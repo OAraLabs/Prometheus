@@ -13,6 +13,7 @@ from pathlib import Path
 import httpx
 import yaml
 
+from prometheus.api.turn_errors import redact_url
 from prometheus.config.paths import get_config_dir
 from prometheus.infra.anatomy import AnatomyState
 
@@ -438,7 +439,15 @@ class Doctor:
     # ------------------------------------------------------------------
 
     async def _check_inference(self, state: AnatomyState) -> DiagnosticCheck:
-        """Is the inference engine reachable?"""
+        """Is the inference engine reachable?
+
+        The URL is DISPLAYED through ``api.turn_errors.redact_url``, the same
+        helper the message path uses: ``state.inference_url`` can carry
+        ``user:pass@`` (a llama.cpp server behind an authenticating proxy) or a
+        ``?api_key=``, and this row goes to a chat as ``/doctor`` output, which
+        ``install_log_redaction`` does not cover. The REQUEST below still uses
+        the real URL — redaction is display-only.
+        """
         url = state.inference_url
         if not url:
             return DiagnosticCheck(
@@ -456,12 +465,12 @@ class Doctor:
                 resp.raise_for_status()
             return DiagnosticCheck(
                 name="Inference", category="connectivity", status="ok",
-                message=f"{engine} reachable at {url}",
+                message=f"{engine} reachable at {redact_url(url)}",
             )
         except Exception:
             return DiagnosticCheck(
                 name="Inference", category="connectivity", status="error",
-                message=f"{engine} not responding at {url}",
+                message=f"{engine} not responding at {redact_url(url)}",
                 fix="Check that the server is running on the target machine.",
             )
 

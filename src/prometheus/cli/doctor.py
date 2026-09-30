@@ -22,6 +22,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import socket
 import uuid
 from pathlib import Path
@@ -30,6 +31,7 @@ from typing import Any
 import httpx
 import yaml
 
+from prometheus.api.turn_errors import redact_url
 from prometheus.config.api_token import resolve_api_token
 from prometheus.config.defaults import config_search_paths
 from prometheus.config.env_file import get_env_file_path, parse_env_file
@@ -115,6 +117,77 @@ def check_config(explicit: str | None = None) -> tuple[DiagnosticCheck, dict[str
     ), config
 
 
+#: What an ``api_key_env`` VALUE must look like to be printable: an
+#: environment-variable NAME. Letters, digits and underscores, starting with a
+#: letter or underscore, at most 31 characters.
+#:
+#: The bound is chosen from the tree, not from taste: of the 71 env-var names
+#: this codebase actually reads, the longest is 30
+#: (``PROMETHEUS_TELEGRAM_TOKEN_FILE``), so 31 accepts every one of them — while
+#: rejecting the credential shapes it exists to catch. Most are separated by a
+#: length gap or by a character the class does not allow at all (``AIza…`` 39,
+#: ``ghp_…`` 40, ``sk-…`` 51, a JWT's dots), but a 32-character alphanumeric key
+#: — Mistral's shape, no prefix, no separator — is made ENTIRELY of characters
+#: that are legal in a variable name, so length is the only thing standing
+#: between it and the output. That is why the cap is 31 and not 32.
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,30}")
+
+#: Printed INSTEAD of a value that failed the shape test. It names the field so
+#: the row is still actionable, and says what to do about it, because the
+#: operator's next question is "then what do I put there".
+_API_KEY_ENV_NOT_A_NAME = (
+    "api_key_env (value not shown: it doesn't look like a variable name; "
+    "put the variable's NAME here, not the key)"
+)
+
+
+def _api_key_env_fix(provider: str, env_path: Any) -> str:
+    """The unset-branch fix line for a REFUSED ``api_key_env`` value.
+
+    Its own imperative sentence, not the refusal string dropped into the normal
+    ``Export {name} or add it to …`` template. Substituting there produced
+    "Export api_key_env (value not shown: it doesn't look like a variable name;
+    put the variable's NAME here, not the key) or add it to …" — an instruction
+    to export a sentence, on the line an already-confused operator reads first.
+
+    It names a correct example for the provider in question rather than a
+    generic one, because "put the NAME here" is much easier to act on next to a
+    name that belongs to the provider you actually configured.
+    """
+    from prometheus.providers.registry import CLOUD_DEFAULTS
+    example = CLOUD_DEFAULTS.get(provider, {}).get("default_env") or "PROVIDER_API_KEY"
+    return (f"Set api_key_env to the NAME of the environment variable that holds "
+            f"the key (for example {example}), then export that variable or add "
+            f"it to {env_path}.")
+
+
+def _display_api_key_env(key_env: str) -> str:
+    """How ``api_key_env`` may be shown — the name, or an explanation.
+
+    The field holds a variable NAME, and the cloud rows print it in two places
+    (the message and, when no key was found, the fix). Nothing validates which
+    of ``api_key`` and ``api_key_env`` a config meant, and they sit next to each
+    other in the file, so pasting the KEY into ``api_key_env`` is an easy slip —
+    and doctor then published the credential twice, to stdout, which
+    ``install_log_redaction`` does not cover.
+
+    This is a SHAPE test, not a secret test: it cannot tell a key from a name,
+    only whether a string is plausible as a name. That leaves one known false
+    negative — an AWS access-key ID (``AKIA`` + 16 alphanumerics, 20 chars)
+    passes, since it is indistinguishable from a short variable name. Accepted
+    deliberately: tightening until that fails would also start rejecting real
+    names, and the value this row protects is a provider API key.
+
+    Returns ``""`` for an empty value so callers keep their own unset fallbacks,
+    which are already worded per site.
+    """
+    if not key_env:
+        return ""
+    if _ENV_NAME_RE.fullmatch(key_env):
+        return key_env
+    return _API_KEY_ENV_NOT_A_NAME
+
+
 def _cloud_key_source(
     model_cfg: dict[str, Any],
     provider: str,
@@ -163,16 +236,41 @@ def check_inference(config: dict[str, Any], timeout: float = 5.0) -> tuple[Diagn
     if ProviderRegistry.is_cloud(provider):
         key_env, source = _cloud_key_source(model_cfg, provider, CLOUD_DEFAULTS)
         has_key = source is not None
+        # Display-only gate: key_env is a NAME field, and a key pasted into it
+        # must not be echoed back (see _display_api_key_env). The lookups inside
+        # _cloud_key_source already used the real value, so this changes what is
+        # SHOWN and nothing about whether a key was found.
+        shown_key_env = _display_api_key_env(key_env)
+        # "$" is a variable REFERENCE, so it goes in front of a name only. On
+        # the refusal string it would read "$api_key_env (value not shown…)" —
+        # the shape of a variable that does not exist, which is the opposite of
+        # the point. The refusal is the whole display unit, and it is too long to
+        # sit inside the "(key … set)" clause without nesting parentheses around
+        # the word "set", so a refused value moves it to the end instead.
+        refused = shown_key_env == _API_KEY_ENV_NOT_A_NAME
+        if has_key:
+            msg = (f"cloud provider {provider} (key set — {source}; "
+                   f"{_API_KEY_ENV_NOT_A_NAME})" if refused else
+                   f"cloud provider {provider} (key ${shown_key_env} set — {source})")
+        else:
+            where = _API_KEY_ENV_NOT_A_NAME if refused else (
+                f"${shown_key_env}" if shown_key_env else "<api_key_env unset>")
+            msg = (f"cloud provider {provider} but {where} is set neither in "
+                   f"the environment nor in {get_env_file_path()}")
+        if has_key:
+            fix = None
+        elif refused:
+            # Not the normal "Export <name>" template with the refusal dropped
+            # into it — that reads as an instruction to export a sentence.
+            fix = _api_key_env_fix(provider, get_env_file_path())
+        else:
+            fix = (f"Export {shown_key_env or 'the provider API key'} "
+                   f"or add it to {get_env_file_path()}.")
         reach = DiagnosticCheck(
             name="Inference", category="connectivity",
             status="ok" if has_key else "error",
-            message=(f"cloud provider {provider} (key ${key_env} set — {source})"
-                     if has_key
-                     else f"cloud provider {provider} but ${key_env or '<api_key_env unset>'} "
-                          f"is set neither in the environment nor in "
-                          f"{get_env_file_path()}"),
-            fix=None if has_key else f"Export {key_env or 'the provider API key'} "
-                                     f"or add it to {get_env_file_path()}.",
+            message=msg,
+            fix=fix,
         )
         model = DiagnosticCheck(
             name="Model", category="model", status="ok" if model_cfg.get("model") else "warning",
@@ -181,6 +279,9 @@ def check_inference(config: dict[str, Any], timeout: float = 5.0) -> tuple[Diagn
         )
         return reach, model
 
+    # base_url is used for the REQUEST as written — userinfo included, since
+    # httpx turns ``user:pass@`` into a Basic auth header. Only what is
+    # DISPLAYED goes through redact_url below.
     base_url = (model_cfg.get("base_url") or "http://localhost:8080").rstrip("/")
     detected: list[str] = []
     error: str | None = None
@@ -202,7 +303,7 @@ def check_inference(config: dict[str, Any], timeout: float = 5.0) -> tuple[Diagn
     if error is not None:
         reach = DiagnosticCheck(
             name="Inference", category="connectivity", status="error",
-            message=f"{provider} not responding at {base_url}",
+            message=f"{provider} not responding at {redact_url(base_url)}",
             fix="Start the inference server (or fix model.base_url), "
                 "then re-run `oara doctor`.",
         )
@@ -215,7 +316,7 @@ def check_inference(config: dict[str, Any], timeout: float = 5.0) -> tuple[Diagn
 
     reach = DiagnosticCheck(
         name="Inference", category="connectivity", status="ok",
-        message=f"{provider} reachable at {base_url}",
+        message=f"{provider} reachable at {redact_url(base_url)}",
     )
     if detected and detected[0]:
         model = DiagnosticCheck(
@@ -561,6 +662,20 @@ def check_advertised_tools(config: dict[str, Any]) -> DiagnosticCheck:
 _SCALAR_PIN_TYPES = (str, int, float, bool, type(None))
 
 
+#: Credential-bearing config paths whose name is not a secret WORD at all.
+#: ``authorization`` carries ``Bearer <key>`` and ``cookie`` a whole session
+#: credential — neither word is secret-shaped on its own, because it means
+#: nothing until you know what the header is for. Named explicitly rather than
+#: inferred, so the addition is visible at review.
+#:
+#: ``proxy-authorization`` is NOT listed here: it is caught by the suffix rule
+#: in _pinned_key_holds_a_secret, which is the right mechanism — it carries the
+#: same credential as ``authorization`` under a prefix, and enumerating every
+#: prefix a proxy vendor might choose would be a list that is wrong the day
+#: someone writes a new one.
+_EXTRA_SECRET_SEGMENTS = frozenset({"AUTHORIZATION", "COOKIE"})
+
+
 def _pinned_key_holds_a_secret(dotted: str) -> bool:
     """Is this pinned config path a credential?
 
@@ -574,9 +689,46 @@ def _pinned_key_holds_a_secret(dotted: str) -> bool:
     ``gateway.discord.token`` — the shape the Discord gateway actually uses —
     returns False as one string and True only when its segments are tested
     individually.
+
+    Each segment is also NORMALISED before it is tested: hyphens to
+    underscores, then upper-cased. ``is_secret_name``'s patterns are written
+    for ENVIRONMENT-VARIABLE names, which are ``UPPER_SNAKE`` and use ``_`` as
+    their only separator, so a pinned HTTP HEADER — ``gateway.headers.x-api-key``,
+    the shape a reverse proxy or an Anthropic-style backend is configured with —
+    did not match ``API_KEY``: a hyphen satisfies neither of the anchors that
+    keep ``KEYBOARD`` out. Normalising is the same fix as splitting per segment,
+    one level down: it converts the caller's spelling into the spelling the
+    patterns were written for, WITHOUT widening the patterns themselves.
+
+    That last part is deliberate. ``env_scrub.is_secret_name`` decides what to
+    strip from a subprocess environment, where every input really is an
+    upper-snake name — teaching it about hyphens there would change what every
+    tool call inherits, to fix a leak that only exists in this row. So the
+    normalisation lives HERE, at the caller that has hyphenated input.
+
+    ``_EXTRA_SECRET_SEGMENTS`` covers the one shape normalisation cannot: a
+    credential under a name that is not a secret word.
     """
     from prometheus.security.env_scrub import is_secret_name
-    return any(is_secret_name(seg) for seg in dotted.split("."))
+    for seg in dotted.split("."):
+        normalised = seg.replace("-", "_").upper()
+        if normalised in _EXTRA_SECRET_SEGMENTS:
+            return True
+        # SUFFIX, not equality: proxy-authorization carries the same Basic
+        # credential as authorization under a prefix, and any prefix a proxy or
+        # a gateway chooses is still that header. Matching on the suffix is
+        # fail-closed in the only direction that matters here — the cost of a
+        # false positive is that the row withholds a value it could have shown,
+        # while still naming the key and reporting the override, whereas a false
+        # negative prints a credential to stdout. Plain endswith rather than
+        # "_AUTHORIZATION" for the same reason: it also takes a hypothetical
+        # unseparated spelling, which no real key uses but no real key is harmed
+        # by either.
+        if normalised.endswith("AUTHORIZATION"):
+            return True
+        if is_secret_name(normalised):
+            return True
+    return False
 
 
 def check_config_pins() -> DiagnosticCheck:

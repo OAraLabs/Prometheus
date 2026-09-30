@@ -43,6 +43,7 @@ from prometheus.gateway.cron_scheduler import run_scheduler_loop
 from prometheus.gateway.heartbeat import Heartbeat
 from prometheus.gateway.platform_base import GatewaySubsystemRegistry
 from prometheus.gateway.telegram import TelegramAdapter
+from prometheus.infra.doctor import yaml_error_summary
 from prometheus.providers.registry import ProviderRegistry
 from prometheus.__main__ import (
     create_adapter,
@@ -366,10 +367,14 @@ CONFIG_PINS_FILENAME = "config_pins.yaml"
 
 
 def read_config_pins(pins_path: Path) -> dict:
-    """The pinned values, or {} when no pin file exists. Read-only, no logging.
+    """The pinned values, or {} when no pin file exists. Read-only.
 
     Exists so doctor and the REST surfaces can answer "is anything pinned?"
     without importing the correction path or re-implementing the parse.
+
+    Logs ONLY when a pin file exists but cannot be read — that case must not be
+    confused with "nothing pinned", which is what the empty return says. The
+    happy path is silent, so a caller can poll this without filling the log.
     """
     if not pins_path.is_file():
         return {}
@@ -380,10 +385,21 @@ def read_config_pins(pins_path: Path) -> dict:
         # A pin file that exists and cannot be read is NOT "nothing pinned".
         # Returning {} silently told every surface the operator had pinned
         # nothing, which is the reading they would act on.
+        #
+        # WHY the exception is not logged whole: str(YAMLError) quotes the
+        # document. PyYAML interpolates what it read into `problem`, so a value
+        # written as `!SECRET` or `*SECRET` is echoed back — in full for the
+        # tag, up to the first ":" for the alias. This file holds credentials
+        # inline, log redaction matches WHOLE tokens only, and a value quoted
+        # back inside a sentence is not one. yaml_error_summary keeps the class
+        # name and both mark positions, which is what an operator needs to find
+        # the line — the same control #627 gave doctor's copy of this message.
+        # For an OSError the summary is its class name: errno prose varies by
+        # platform and can carry a path fragment.
         logger.error(
             "config_pins: UNREADABLE — %s exists but could not be read "
-            "(%s: %s); reporting NO pins. Drift correction is not running.",
-            pins_path, type(exc).__name__, exc,
+            "(%s); reporting NO pins. Drift correction is not running.",
+            pins_path, yaml_error_summary(exc),
         )
         return {}
 
