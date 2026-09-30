@@ -418,7 +418,14 @@
       "set_by",
       "updated_at"
      ],
-     "rows": []
+     "rows": [
+      [
+       "desktop:parity-hosted",
+       "claude",
+       "router",
+       "<time>"
+      ]
+     ]
     },
     "session_forks": {
      "columns": [
