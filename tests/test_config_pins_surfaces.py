@@ -22,6 +22,7 @@ on an adjacent screen, and one word meaning two things in one UI gets misread.
 from __future__ import annotations
 
 import logging
+import os
 
 import pytest
 
@@ -229,3 +230,110 @@ class TestDoctorCheck:
 
     def test_the_check_is_named_config_pins(self, monkeypatch, tmp_path):
         assert self._check(monkeypatch, tmp_path, None).name == "config_pins"
+
+
+# --------------------------------------------------------------------------- #
+# WP-X.50 leak 4: the UNREADABLE line quoted the pin file's text
+# --------------------------------------------------------------------------- #
+
+#: Obviously fake. Distinct letters, no digits and no repeated runs, sharing no
+#: 4-char substring with the line's boilerplate ("UNREADABLE", "exists but
+#: could not be read", "reporting NO pins"). Concatenated so no single literal
+#: matches the secret scanner's real-token shape.
+FAKE_PIN_SECRET = "QqzXwvKtMrLp" + "NsDyHgJbFcWd"
+
+
+def _assert_no_fragment(rendered: str, secret: str, tmp_path) -> None:
+    """No 4+ character piece of *secret* survives, tmp dir stripped first."""
+    import os
+    for spelling in sorted({str(tmp_path), os.path.realpath(tmp_path)},
+                           key=len, reverse=True):
+        rendered = rendered.replace(spelling, "<TMP>")
+    for start in range(len(secret) - 3):
+        for end in range(start + 4, len(secret) + 1):
+            assert secret[start:end] not in rendered, (
+                f"read_config_pins leaked {secret[start:end]!r} of a secret"
+            )
+
+
+class TestUnreadablePinsLogLeaksNoSecret:
+    """``read_config_pins`` logged ``str(exc)`` for an unparseable pin file.
+
+    The same leak #627 closed in doctor, on the other copy of the control, but
+    a NARROWER one — and the difference is worth recording because it is easy
+    to get wrong: ``str(yaml.YAMLError)`` can quote the document in two places,
+    and only one of them is reachable HERE.
+
+    * The SNIPPET is rendered from ``mark.buffer``, which is only populated
+      when the document was parsed from a STRING. ``read_config_pins`` hands
+      ``safe_load`` a file OBJECT, so ``mark.buffer is None`` and no snippet is
+      produced. The two snippet-shaped cases below therefore did NOT leak
+      before the fix; they are kept as regression guards, because the point of
+      routing through ``yaml_error_summary`` is that this line stays safe if the
+      read ever changes to ``read_text()`` — which DOES leak, as the equivalent
+      cases in ``test_doctor_cli``'s config-parse tests show.
+    * The ``problem`` TEXT is the live leak: PyYAML interpolates what it read,
+      and for a value written as ``!SECRET`` or ``*SECRET`` it quotes the value
+      back — in full for the tag, up to the first ``:`` for the alias.
+
+    Log redaction cannot catch that: it matches WHOLE tokens, and a value
+    quoted back as a tag is embedded in a sentence.
+
+    The line must stay: "UNREADABLE … reporting NO pins" is what stops an
+    operator reading ``{}`` as "nothing pinned", which is the reading they
+    would act on. Only the source text goes, and what replaces it keeps the
+    class name and the position — enough to find the line.
+    """
+
+    @pytest.mark.parametrize("broken", [
+        # The two LIVE leaks: PyYAML quotes the value back in `problem`.
+        'model:\n  api_key: !{secret}\n',      # local tag
+        'model:\n  api_key: *{secret}\n',      # undefined alias
+        # The two snippet shapes. Not a leak while the file is parsed from a
+        # file object (no mark.buffer); guarded so the fix survives a switch to
+        # parsing the file's text.
+        'model:\n  api_key: "{secret}\n',      # unterminated quote
+        'model:\n\tapi_key: {secret}\n',       # tab indent
+    ])
+    def test_the_log_names_the_position_not_the_text(
+            self, tmp_path, caplog, broken):
+        p = tmp_path / CONFIG_PINS_FILENAME
+        p.write_text(broken.format(secret=FAKE_PIN_SECRET), encoding="utf-8")
+        with caplog.at_level(logging.ERROR, logger="prometheus.daemon"):
+            assert read_config_pins(p) == {}
+        text = caplog.text
+        assert "UNREADABLE" in text             # the line still fires …
+        assert "reporting NO pins" in text      # … and still says why it matters
+        assert "line 2" in text                 # … and still says WHERE
+        assert "could not be read" in text
+        _assert_no_fragment(text, FAKE_PIN_SECRET, tmp_path)
+
+    def test_a_yaml_error_is_summarised_with_its_class(self, tmp_path, caplog):
+        """The class name survives — it says what kind of failure this was."""
+        p = tmp_path / CONFIG_PINS_FILENAME
+        p.write_text(f"model:\n  api_key: !{FAKE_PIN_SECRET}\n", encoding="utf-8")
+        with caplog.at_level(logging.ERROR, logger="prometheus.daemon"):
+            read_config_pins(p)
+        assert "ConstructorError" in caplog.text
+
+    def test_an_oserror_logs_its_class_only(self, tmp_path, caplog):
+        """THE OTHER BRANCH. An OSError carries no document text, but its
+        ``str()`` is not ours to trust either — errno prose varies by platform
+        and can include a path fragment. Class name only, and the line must
+        still say the pins are not being applied."""
+        if os.getuid() == 0:
+            pytest.skip("root ignores the file mode; cannot induce an OSError")
+        p = tmp_path / CONFIG_PINS_FILENAME
+        p.write_text("model:\n  model: m\n", encoding="utf-8")
+        os.chmod(p, 0o000)
+        try:
+            with caplog.at_level(logging.ERROR, logger="prometheus.daemon"):
+                assert read_config_pins(p) == {}
+            text = caplog.text
+            assert "UNREADABLE" in text
+            assert "reporting NO pins" in text
+            assert "PermissionError" in text or "OSError" in text
+            # No errno prose from the exception's own __str__.
+            assert "Errno" not in text
+        finally:
+            os.chmod(p, 0o644)
