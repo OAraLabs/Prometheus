@@ -290,7 +290,7 @@ class TestProviderOverrideCommand:
         assert applied is True
         assert model in text
         agent_loop._model_router.set_override.assert_called_once_with(
-            "telegram:1", dict(OVERRIDE_PRESETS[name]),
+            "telegram:1", dict(OVERRIDE_PRESETS[name]), key=name,
         )
 
     def test_display_names_cover_new_four(self) -> None:
