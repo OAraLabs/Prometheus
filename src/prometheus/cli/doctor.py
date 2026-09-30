@@ -119,15 +119,18 @@ def check_config(explicit: str | None = None) -> tuple[DiagnosticCheck, dict[str
 
 #: What an ``api_key_env`` VALUE must look like to be printable: an
 #: environment-variable NAME. Letters, digits and underscores, starting with a
-#: letter or underscore, at most 32 characters.
+#: letter or underscore, at most 31 characters.
 #:
 #: The bound is chosen from the tree, not from taste: of the 71 env-var names
 #: this codebase actually reads, the longest is 30
-#: (``PROMETHEUS_TELEGRAM_TOKEN_FILE``), so 32 clears every real name with room
-#: to spare — while rejecting the credential shapes it exists to catch, whose
-#: lengths are all above it (``AIza…`` 39, ``ghp_…`` 40, ``sk-…`` 51) or whose
-#: separators are not in the character class at all (``sk-``, a JWT's dots).
-_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,31}")
+#: (``PROMETHEUS_TELEGRAM_TOKEN_FILE``), so 31 accepts every one of them — while
+#: rejecting the credential shapes it exists to catch. Most are separated by a
+#: length gap or by a character the class does not allow at all (``AIza…`` 39,
+#: ``ghp_…`` 40, ``sk-…`` 51, a JWT's dots), but a 32-character alphanumeric key
+#: — Mistral's shape, no prefix, no separator — is made ENTIRELY of characters
+#: that are legal in a variable name, so length is the only thing standing
+#: between it and the output. That is why the cap is 31 and not 32.
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,30}")
 
 #: Printed INSTEAD of a value that failed the shape test. It names the field so
 #: the row is still actionable, and says what to do about it, because the
@@ -136,6 +139,26 @@ _API_KEY_ENV_NOT_A_NAME = (
     "api_key_env (value not shown: it doesn't look like a variable name; "
     "put the variable's NAME here, not the key)"
 )
+
+
+def _api_key_env_fix(provider: str, env_path: Any) -> str:
+    """The unset-branch fix line for a REFUSED ``api_key_env`` value.
+
+    Its own imperative sentence, not the refusal string dropped into the normal
+    ``Export {name} or add it to …`` template. Substituting there produced
+    "Export api_key_env (value not shown: it doesn't look like a variable name;
+    put the variable's NAME here, not the key) or add it to …" — an instruction
+    to export a sentence, on the line an already-confused operator reads first.
+
+    It names a correct example for the provider in question rather than a
+    generic one, because "put the NAME here" is much easier to act on next to a
+    name that belongs to the provider you actually configured.
+    """
+    from prometheus.providers.registry import CLOUD_DEFAULTS
+    example = CLOUD_DEFAULTS.get(provider, {}).get("default_env") or "PROVIDER_API_KEY"
+    return (f"Set api_key_env to the NAME of the environment variable that holds "
+            f"the key (for example {example}), then export that variable or add "
+            f"it to {env_path}.")
 
 
 def _display_api_key_env(key_env: str) -> str:
@@ -234,12 +257,20 @@ def check_inference(config: dict[str, Any], timeout: float = 5.0) -> tuple[Diagn
                 f"${shown_key_env}" if shown_key_env else "<api_key_env unset>")
             msg = (f"cloud provider {provider} but {where} is set neither in "
                    f"the environment nor in {get_env_file_path()}")
+        if has_key:
+            fix = None
+        elif refused:
+            # Not the normal "Export <name>" template with the refusal dropped
+            # into it — that reads as an instruction to export a sentence.
+            fix = _api_key_env_fix(provider, get_env_file_path())
+        else:
+            fix = (f"Export {shown_key_env or 'the provider API key'} "
+                   f"or add it to {get_env_file_path()}.")
         reach = DiagnosticCheck(
             name="Inference", category="connectivity",
             status="ok" if has_key else "error",
             message=msg,
-            fix=None if has_key else f"Export {shown_key_env or 'the provider API key'} "
-                                     f"or add it to {get_env_file_path()}.",
+            fix=fix,
         )
         model = DiagnosticCheck(
             name="Model", category="model", status="ok" if model_cfg.get("model") else "warning",
@@ -632,11 +663,17 @@ _SCALAR_PIN_TYPES = (str, int, float, bool, type(None))
 
 
 #: Credential-bearing config paths whose name is not a secret WORD at all.
-#: ``authorization`` carries ``Bearer <key>`` — the header every HTTP
-#: credential rides in — and no name pattern can catch it, because the word
-#: itself means nothing until you know what a header is for. Named explicitly
-#: rather than inferred, so the addition is visible at review.
-_EXTRA_SECRET_SEGMENTS = frozenset({"AUTHORIZATION"})
+#: ``authorization`` carries ``Bearer <key>`` and ``cookie`` a whole session
+#: credential — neither word is secret-shaped on its own, because it means
+#: nothing until you know what the header is for. Named explicitly rather than
+#: inferred, so the addition is visible at review.
+#:
+#: ``proxy-authorization`` is NOT listed here: it is caught by the suffix rule
+#: in _pinned_key_holds_a_secret, which is the right mechanism — it carries the
+#: same credential as ``authorization`` under a prefix, and enumerating every
+#: prefix a proxy vendor might choose would be a list that is wrong the day
+#: someone writes a new one.
+_EXTRA_SECRET_SEGMENTS = frozenset({"AUTHORIZATION", "COOKIE"})
 
 
 def _pinned_key_holds_a_secret(dotted: str) -> bool:
@@ -675,7 +712,21 @@ def _pinned_key_holds_a_secret(dotted: str) -> bool:
     from prometheus.security.env_scrub import is_secret_name
     for seg in dotted.split("."):
         normalised = seg.replace("-", "_").upper()
-        if normalised in _EXTRA_SECRET_SEGMENTS or is_secret_name(normalised):
+        if normalised in _EXTRA_SECRET_SEGMENTS:
+            return True
+        # SUFFIX, not equality: proxy-authorization carries the same Basic
+        # credential as authorization under a prefix, and any prefix a proxy or
+        # a gateway chooses is still that header. Matching on the suffix is
+        # fail-closed in the only direction that matters here — the cost of a
+        # false positive is that the row withholds a value it could have shown,
+        # while still naming the key and reporting the override, whereas a false
+        # negative prints a credential to stdout. Plain endswith rather than
+        # "_AUTHORIZATION" for the same reason: it also takes a hypothetical
+        # unseparated spelling, which no real key uses but no real key is harmed
+        # by either.
+        if normalised.endswith("AUTHORIZATION"):
+            return True
+        if is_secret_name(normalised):
             return True
     return False
 

@@ -8,6 +8,7 @@ tmp dirs via PROMETHEUS_CONFIG_DIR / PROMETHEUS_ENV_FILE.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import socket
@@ -31,6 +32,7 @@ from prometheus.cli.doctor import (
     render_report,
     run_doctor_command,
 )
+from prometheus.config.env_file import get_env_file_path
 from prometheus.daemon import CONFIG_PINS_FILENAME
 
 
@@ -51,6 +53,27 @@ class _ModelsHandler(BaseHTTPRequestHandler):
 
 class _EmptyModelsHandler(_ModelsHandler):
     payload = {"data": []}
+
+
+class _RecordingModelsHandler(_ModelsHandler):
+    """A models server that remembers the Authorization header it received.
+
+    Exists for one assertion: that doctor's redaction is DISPLAY-ONLY. A row
+    reporting `reachable` only proves a connection was made — httpx would
+    happily connect to `user:pass@host` and send the credentials, or connect to
+    a URL whose userinfo had been stripped and send none. Those two are the
+    difference between "doctor hid the password" and "doctor broke the
+    request", and nothing else in the suite distinguishes them on the CLI side.
+
+    Class-level because BaseHTTPRequestHandler is instantiated PER REQUEST and
+    the server thread owns those instances; the test resets it before serving.
+    """
+
+    auth_headers: list[str | None] = []
+
+    def do_GET(self):  # noqa: N802
+        type(self).auth_headers.append(self.headers.get("Authorization"))
+        super().do_GET()
 
 
 def _free_port() -> int:
@@ -906,14 +929,54 @@ class TestConfigPinsLeaksNoSecret:
             "gateway.headers.X-API-KEY",   # same, upper-cased as written
             "gateway.authorization",       # credential with no secret WORD
             "gateway.AUTHORIZATION",
+            # SUFFIXED authorization headers. Matching the exact segment only
+            # would leave proxy-authorization — the header a forward proxy is
+            # configured with, carrying its own Basic credential — printing both
+            # values. Any normalised segment ENDING in AUTHORIZATION is the
+            # credential, whatever prefix it wears.
+            "gateway.headers.proxy-authorization",
+            "gateway.headers.PROXY_AUTHORIZATION",
+            # Cookie carries a whole session credential (Set-Cookie / Cookie).
+            # Like authorization, the word is not secret-shaped on its own — it
+            # means nothing until you know what the header is for — so it is
+            # named explicitly rather than inferred.
+            "gateway.headers.cookie",
+            "gateway.COOKIE",
             "model.api-key",               # hyphen variant of api_key
         ):
             assert gate(dotted), f"{dotted} must be treated as secret"
         # The gate must not go True for everything: a model pin is the row's
         # whole reason to exist, and it has to keep showing both values.
+        #
+        # The first three are ordinary non-secret keys. The last two are the
+        # shapes this widening could catch by accident, because each CONTAINS a
+        # secret word as a substring: TOKENizer, KEYboard. is_secret_name
+        # anchors those families (at ^ or _) precisely so they do not match
+        # bare — TOKENIZERS_PARALLELISM is a real, widely-set HuggingFace
+        # variable — so if the normalisation ever turned into a substring test,
+        # these two are what would go True first.
         for dotted in ("model.model", "gateway.telegram.enabled",
-                       "adapter.strictness"):
+                       "adapter.strictness", "tokenizer.parallelism",
+                       "keyboard.layout"):
             assert not gate(dotted), f"{dotted} is NOT a secret"
+
+    def test_a_proxy_authorization_pin_is_not_echoed(self, monkeypatch, tmp_path):
+        """End-to-end, for the suffixed header.
+
+        The unit test above proves the gate classifies the key; this proves the
+        row then withholds the VALUES, which is the leak. Two separate things:
+        a gate that returns True is only useful if the caller acts on it.
+        """
+        c = self._check(
+            monkeypatch, tmp_path,
+            f'gateway.headers.proxy-authorization: "{self.HDR_PIN}"\n',
+            f'gateway:\n  headers:\n    proxy-authorization: "{self.HDR_FILE}"\n')
+        assert c.status == "warning"
+        rendered = f"{c.message} {c.fix or ''}"
+        self._assert_no_fragment(rendered, self.HDR_PIN, tmp_path)
+        self._assert_no_fragment(rendered, self.HDR_FILE, tmp_path)
+        assert "file value differs (not shown)" in rendered
+        assert "gateway.headers.proxy-authorization" in rendered
 
 
 # ── WP-X.50 leak 2: api_key_env holding the key itself ───────────────────────
@@ -926,6 +989,12 @@ class TestConfigPinsLeaksNoSecret:
 _FAKE_KEY_SK = "sk-" + "QqzXwvKtMrLpNsDyHgJbFc"
 _FAKE_KEY_LONG = "QzXwKtMpLsNvHgJbFcWdRtQpVsQnHbJcQwLmZtYdXr"
 _FAKE_KEY_JWT = "QzXwKtMpLs" + "." + "LsNvHgJbFc" + "." + "WdRtQpVsQn"
+#: The shape the first cap MISSED: 32 letters, no prefix, no separator — a
+#: Mistral-style key. Every character is legal in a variable name, so only the
+#: LENGTH distinguishes it, and the longest env-var name in this tree is 30.
+#: Letters only and no adjacent repeats, so the exhaustive fragment check cannot
+#: collide with a digit run in a tmp path.
+_FAKE_KEY_32 = "QzXwKtMpLsNvHgJbFcWdRtQpVsQnHbJc"
 
 
 class TestApiKeyEnvHoldingAKeyIsNotEchoed:
@@ -943,11 +1012,17 @@ class TestApiKeyEnvHoldingAKeyIsNotEchoed:
 
     The gate is a SHAPE test, not a value test — it cannot know whether a
     string is a secret, only whether it is plausible as a variable name. So it
-    accepts ``[A-Za-z0-9_]`` within a generous length and refuses everything
-    else, which takes the real key shapes (``sk-…``, ``ghp_…``, ``AIza…``, a
-    JWT, anything with a hyphen or dot) while keeping every name this repo
-    actually reads: the longest of the 71 env-var names in the tree is 30
-    characters, and the bound is set above that.
+    accepts ``[A-Za-z_][A-Za-z0-9_]{0,30}`` — at most 31 characters — and
+    refuses everything else, which takes the real key shapes (``sk-…``,
+    ``ghp_…``, ``AIza…``, a JWT, anything with a hyphen or dot) while keeping
+    every name this repo actually reads: of the 71 env-var names in the tree
+    the longest is 30, so the cap sits one above that and no real name is
+    refused.
+
+    The cap is not generous on purpose. A 32-character alphanumeric key
+    (Mistral's shape) contains nothing but characters a variable name may use,
+    so its LENGTH is the only thing distinguishing it from one; a cap of 32
+    printed it.
     """
 
     def _reach(self, monkeypatch, api_key_env=None, api_key=None,
@@ -967,6 +1042,7 @@ class TestApiKeyEnvHoldingAKeyIsNotEchoed:
         _FAKE_KEY_SK,
         _FAKE_KEY_LONG,
         _FAKE_KEY_JWT,
+        _FAKE_KEY_32,
     ])
     def test_a_key_pasted_into_api_key_env_is_not_printed(
             self, monkeypatch, isolated_dirs, pasted):
@@ -986,6 +1062,74 @@ class TestApiKeyEnvHoldingAKeyIsNotEchoed:
         # It still tells the operator what to do about it.
         assert "api_key_env" in rendered
         assert "NAME" in rendered
+
+    def test_the_cap_rejects_a_32_character_key_and_keeps_a_30_character_name(
+            self, monkeypatch, isolated_dirs):
+        """WHY the cap is 31 and not 32.
+
+        A 32-character alphanumeric key — Mistral's shape, no prefix, no
+        separator — is made entirely of characters that are legal in a variable
+        name, so nothing but the LENGTH distinguishes it from one. The first cap
+        allowed 32, and printed that key.
+
+        The bound has to be chosen against something real, and the tree supplies
+        it: of the env-var names this codebase reads, the longest is 30
+        (``PROMETHEUS_TELEGRAM_TOKEN_FILE``). Capping at 31 accepts every one of
+        them and refuses a 32-character key. Asserting BOTH ends is the point —
+        a cap that rejects the key by also rejecting real names would be a fix
+        that breaks the row for everyone who configured it correctly.
+        """
+        from prometheus.cli.doctor import _display_api_key_env
+
+        real_name = "PROMETHEUS_TELEGRAM_TOKEN_FILE"     # 30 chars, real
+        assert len(real_name) == 30 and len(_FAKE_KEY_32) == 32
+        assert _display_api_key_env(real_name) == real_name   # still shown …
+        assert _display_api_key_env(_FAKE_KEY_32) != _FAKE_KEY_32   # … key refused
+        assert _display_api_key_env("A" * 31) == "A" * 31     # 31 is the last accepted
+        assert _display_api_key_env("A" * 32) != "A" * 32     # 32 is refused
+
+    def test_a_refused_value_gets_its_own_fix_sentence(
+            self, monkeypatch, isolated_dirs):
+        """The fix line must not read ``Export api_key_env (value not shown…)``.
+
+        The unset branch's fix was ``Export {key_env} or add it to <file>.`` With
+        the refusal string substituted that became an instruction to export a
+        sentence — "Export api_key_env (value not shown: it doesn't look like a
+        variable name; put the variable's NAME here, not the key) or add it to
+        …" — which is not a thing an operator can act on, and it is the line
+        they read FIRST when they are already confused.
+
+        A refused value therefore gets its own imperative, telling them what to
+        put in the field, with an example of a correct name so the difference
+        between a name and a key is concrete rather than asserted.
+        """
+        reach = self._reach(monkeypatch, api_key_env=_FAKE_KEY_SK)
+        assert reach.status == "error"
+        assert reach.fix is not None
+        # The old, broken shape must be gone.
+        assert not reach.fix.startswith("Export api_key_env (value not shown")
+        assert "Export api_key_env" not in reach.fix
+        # The new shape: an instruction naming the field, with an example name.
+        assert "Set api_key_env to the NAME" in reach.fix
+        assert "ANTHROPIC_API_KEY" in reach.fix       # a concrete example
+        assert str(get_env_file_path()) in reach.fix  # and where to put it
+        # The credential is nowhere in the fix either.
+        for start in range(len(_FAKE_KEY_SK) - 3):
+            for end in range(start + 4, len(_FAKE_KEY_SK) + 1):
+                assert _FAKE_KEY_SK[start:end] not in reach.fix
+
+    def test_a_good_name_keeps_the_short_fix(self, monkeypatch, isolated_dirs):
+        """THE OTHER HALF. The rewrite is for the refused case only.
+
+        For a correctly-written config the terse ``Export MY_TEST_VAR or add it
+        to <file>.`` is the right instruction and must not become a paragraph —
+        the longer wording would be noise for the overwhelmingly common case.
+        """
+        monkeypatch.delenv("WPX_TEST_CLOUD_KEY", raising=False)
+        reach = self._reach(monkeypatch, api_key_env="WPX_TEST_CLOUD_KEY")
+        assert reach.fix is not None
+        assert reach.fix.startswith("Export WPX_TEST_CLOUD_KEY")
+        assert "Set api_key_env to the NAME" not in reach.fix
 
     def test_the_key_set_branch_is_also_gated(self, monkeypatch, isolated_dirs):
         """``api_key`` inline + ``api_key_env`` holding a key → source="config".
@@ -1067,13 +1211,25 @@ class TestCliInferenceUrlLeaksNoCredential:
 
     def test_reachable_row_hides_userinfo_keeps_host_and_port(self, tmp_path):
         user, pw = "QzXw", "KtMp" + "LsNv" + "HgJb"
-        with _serve(_ModelsHandler) as (_plain, port):
+        _RecordingModelsHandler.auth_headers = []
+        with _serve(_RecordingModelsHandler) as (_plain, port):
             reach, model = check_inference(
                 {"model": {"provider": "llama_cpp",
                            "base_url": f"http://{user}:{pw}@127.0.0.1:{port}"}},
                 timeout=3.0)
         assert reach.status == "ok"           # it still CONNECTED, so the
         assert model.status == "ok"           # request used the real URL
+
+        # THE DISPLAY-ONLY PROOF. `status == "ok"` alone does not establish it:
+        # a connection succeeds whether or not the credentials were sent, so a
+        # "fix" that redacted the URL BEFORE the request would also report
+        # reachable — while silently connecting to a server that requires auth
+        # without auth. What the server actually received is the only evidence,
+        # and it must be the Basic header httpx derives from the real userinfo.
+        expected = "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode()
+        assert _RecordingModelsHandler.auth_headers, "the server saw no request"
+        assert expected in _RecordingModelsHandler.auth_headers
+
         self._assert_no_fragment(reach.message, pw, tmp_path)
         self._assert_no_fragment(reach.message, user, tmp_path)
         assert "@" not in reach.message
