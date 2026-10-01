@@ -38,10 +38,30 @@ COUNTERS = ("calls_from_text", "text_calls_missed", "xml_markup_turns",
             "adapter_retries", "adapter_aborts", "adapter_escalations")
 
 
+def served_adapter_factory(
+    model_cfg: dict[str, Any], adapter_cfg: dict[str, Any] | None, template: Any,
+) -> Callable[[], ModelAdapter]:
+    """A fresh-per-run adapter factory that builds the daemon's adapter with the
+    served chat template's verdict, as the daemon does at boot (``daemon.py``
+    hands ``detect_tool_template``'s answer to ``create_adapter``), so the tier
+    is the one the daemon would pick — for a model the registry does not list,
+    the template decides it."""
+    import prometheus.__main__ as daemon
+
+    def factory() -> ModelAdapter:
+        return daemon.create_adapter(model_cfg, adapter_cfg, template=template)
+
+    return factory
+
+
 def forced_adapter_factory(
     tier: str, model_cfg: dict[str, Any], adapter_cfg: dict[str, Any] | None,
+    template: Any = None,
 ) -> Callable[[], ModelAdapter]:
-    """A fresh-per-run adapter factory that builds the daemon's adapter for ``tier``."""
+    """A fresh-per-run adapter factory that builds the daemon's adapter for ``tier``.
+
+    ``template`` is the served template's verdict, passed through so the
+    adapter's record says what the daemon would have picked from it."""
     if tier not in ADAPTER_TIERS:
         raise ValueError(f"unknown adapter tier {tier!r}; expected one of {ADAPTER_TIERS}")
     import prometheus.__main__ as daemon
@@ -51,10 +71,10 @@ def forced_adapter_factory(
         # The seam takes an optional third argument since WP-X.28 PR 2 (the
         # served template's verdict) and a fourth since PR 3 (the tier
         # adapter.model_tiers names); the daemon asks it with two when it has
-        # neither, which is every ladder run. Forcing ignores them all.
+        # neither. Forcing ignores them all.
         daemon._get_adapter_tier = lambda provider, model, template=None, override=None: tier  # type: ignore[assignment]
         try:
-            return daemon.create_adapter(model_cfg, adapter_cfg)
+            return daemon.create_adapter(model_cfg, adapter_cfg, template=template)
         finally:
             daemon._get_adapter_tier = real  # type: ignore[assignment]
 

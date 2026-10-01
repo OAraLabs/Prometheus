@@ -147,10 +147,16 @@ def test_first_run_rungs_pin_their_file_and_would_pass_their_own_preflight():
     """A name is not an identity: every first-run rung pins its upstream file by
     revision and sha256. And the rung must be declared the way the ladder and
     the daemon will SEE that file — its regex, quant label and adapter tier —
-    or its own --rung preflight refuses it (Bonsai's tier is `full` because no
-    registry entry matches its name; this is where that is caught)."""
+    or its own --rung preflight refuses it. The tier is decided with the served
+    chat template, as the preflight decides it: Bonsai and Ornith are in no
+    registry entry, so their native Qwen-XML template makes them `light` (from
+    the name alone they would be `full`; this is where a pin that forgot the
+    template is caught)."""
     import prometheus.__main__ as daemon
     from prometheus.gym.ladder.runner import quant_from_filename
+    from tests.support.served_template import recorded_tool_template
+
+    template = recorded_tool_template()
 
     data = yaml.safe_load(RUNGS.read_text())
     rungs = {r["id"]: r for r in data["rungs"]}
@@ -164,4 +170,4 @@ def test_first_run_rungs_pin_their_file_and_would_pass_their_own_preflight():
         name = hf["file"]
         assert re.search(r["match"], name, re.IGNORECASE), (rid, name)
         assert quant_from_filename(name) == r["quantization"], (rid, quant_from_filename(name))
-        assert daemon._get_adapter_tier("llama_cpp", name) == r["adapter_tier"], rid
+        assert daemon._get_adapter_tier("llama_cpp", name, template) == r["adapter_tier"], rid

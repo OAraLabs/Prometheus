@@ -6,13 +6,13 @@
 # probed quantization equals `quantization`. Rows are never filed under a rung
 # the endpoint is not actually serving.
 #
-# The ladder's adapter is built WITHOUT the served chat template
-# (gym/runner.py build_pipeline), so its tier comes from
-# config/model_registry.yaml or the `full` fallback. Since #583 the daemon
-# also reads the served template, and for a model the registry does not list
-# the two differ: r27b-pq2 and r09b-ornith get `full` here and `light` in the
-# daemon (checked offline 2026-09-30 from each GGUF's chat template through
-# the #583 resolver). The pins below are what the ladder enforces.
+# The tier is decided as the daemon decides it: config/model_registry.yaml
+# for a listed model, else the served chat template's verdict (asked at
+# preflight, as daemon.py asks it at boot, and recorded on every row as
+# `tool_template`), else the `full` fallback. r27b-pq2 and r09b-ornith are not
+# listed; their templates render native Qwen XML tool calls, so they are
+# `light` (until 2026-09-30 the ladder never read the template and pinned them
+# `full`, the fallback — the first run's smokes ran there).
 #
 # `hf` pins the exact upstream file (repo, revision, file, sha256): a model
 # name is not an identity — the production 27B's own filename now resolves to
@@ -81,7 +81,7 @@ rungs:
     model: Ternary-Bonsai-2-27B (PrismML, from Qwen3.8-27B)
     match: 'ternary-bonsai-2-27b'
     quantization: PQ2_0
-    adapter_tier: full
+    adapter_tier: light
     hf:
       repo: prism-ml/Ternary-Bonsai-2-27B-gguf
       revision: 65f27a86966957c534ea6ad12149286e01ca7cc0
@@ -97,10 +97,10 @@ rungs:
     notes: >
       The same checkpoint as r27b (Qwen3.8-27B), so r27b vs r27b-pq2 measures
       what PrismML's ternary pipeline costs against Unsloth UD-Q4_K_XL — not
-      against full precision. Tier `full` is what the ladder picks (no
-      registry entry matches the name; the daemon, reading the served
-      template since #583, picks `light`); r27b runs at `light`, so the Bonsai
-      tier sweep (off / light / full) is reported beside it. Confounds: server
+      against full precision. Tier `light` comes from the served template (no
+      registry entry matches the name), the same tier as r27b; the first
+      run's smoke ran at `full`, the fallback the ladder used before it read
+      the template, so its tier sweep (off / light / full) is reported beside it. Confounds: server
       (the fork tracks upstream 5ea87dd, 178 commits after 9d57ce456; its own
       commits touch no server or chat code), and PrismML's published scores
       are thinking-mode only while the ladder runs thinking suppressed.
@@ -132,7 +132,7 @@ rungs:
     model: Ornith-1.5-9B (ornith-ai; Qwen3.5-9B base, agentic-coding RL)
     match: 'ornith-1\.5-9b'
     quantization: Q4_K_M
-    adapter_tier: full
+    adapter_tier: light
     hf:
       repo: ornith-ai/Ornith-1.5-9B-GGUF
       revision: abdd624b12ebf020b767fff532ff44fe552b28c3
@@ -146,9 +146,9 @@ rungs:
       Side by side with r08b: same size and architecture (qwen35; the same parameter count as
       Qwen3.5-9B's MTP build), so the difference is mostly the agentic training. Two confounds,
       labelled, not fixed here: the quantizer (the official llama.cpp Q4_K_M here vs Unsloth
-      UD-Q4_K_XL for r08b), and the adapter tier — the ladder gives it `full` because its file
-      name matches no config/model_registry.yaml entry (evidence for WP-X.28; the daemon, reading
-      the served template since #583, gives it `light`). The
+      UD-Q4_K_XL for r08b), and the adapter tier of the first run — `full`, the fallback for a file
+      name no config/model_registry.yaml entry matches (evidence for WP-X.28); it is now `light`,
+      from the served template, as in the daemon. The
       card does not declare base_model; "Qwen3.5-9B base" is the vendor's description.
 
   - id: r04b
