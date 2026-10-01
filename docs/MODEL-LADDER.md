@@ -298,21 +298,24 @@ The judge is `PrometheusJudge` (OpenAI-compatible, JSON-schema constrained decod
 - the judge's provenance (`model`, `pinned`) is stored with every judged row; the endpoint is
   not, and a judge error is stored with its URL replaced.
 
-For the rungs, the pin is in `rungs.yaml`: **`qwen2.5:14b-instruct` on the mini's ollama**, one
+For the rungs, the pin is in `rungs.yaml`: **`qwen2.5:14b-instruct`**, one
 judge for every rung so judged pass rates compare across rungs. It is not any rung's model
 (tested) and it is a different generation from all of them. It is weaker than the 27B rung it
 grades; that is why judged tasks are a minority (six of 92, all in `qa`), why each rubric states
 concrete pass/fail criteria and carries a reference answer, and why a report shows judged and
 mechanical verdicts separately (the `decided by` column). A `--rung` run cannot override the pin.
 
-**Where the judge runs is undecided, and until it is, rung runs use `--no-judge`** (the six judged
-tasks are recorded `unscored`; `--no-judge` works with `--rung`). The first run serves three rungs
-on the mini's 3090 Ti (one at a time), and at Ollama's default context there (32k, chosen from VRAM) this judge
-needs about 14.8 GiB — it does not fit beside any rung in the ~11.7 GiB the card has free (an
-earlier version of this page said it did; it does not). Options for the full runs: re-pin to the
-already-resident `qwen2.5:7b-instruct` (no extra memory, weaker); serve the 14b's existing file
-with the mini's llama-server at 8k context in a window with its cover-traffic user paused; or a
-judge on another machine.
+**Where the judge runs (decided 2026-09-30, for WP-2.2):** on the mini's 3090 Ti, while the rungs
+run on the 4090, so the card serving a rung never grades. It is served by **llama-server, not
+Ollama**, loading the 14b's existing file from the mini's Ollama store (pinned by size and SHA-256
+in `rungs.yaml`) with `--alias qwen2.5:14b-instruct` — the runner compares the pin with the
+endpoint's `/v1/models` ids, and without the alias llama-server reports the file's name, so the
+run is refused. At `-c 8192` it takes about 10.1 GiB beside the card's resident services, leaving
+1.8 GiB (measured 2026-09-30); at Ollama's default 32k context it would need about 14.8 GiB and not
+fit. It is bound to the mini's Tailscale address, so a harness on another machine reaches it, and
+it is started for a run window and stopped after. The first run predates this decision: its rung
+runs used `--no-judge` (the six judged tasks recorded `unscored`; `--no-judge` still works with
+`--rung`).
 
 ## Where each field lives in `telemetry.db`
 
@@ -458,8 +461,11 @@ uv run python scripts/ladder_run.py --provider llama_cpp --base-url "$LADDER_BAS
   selected with the `PROMETHEUS_*` path variables, so cron jobs, wiki, memory files and LCM
   history are throwaway and nothing reaches the real stores.
 - The config is built from the flags, not read from the machine's `prometheus.yaml`, so two boxes
-  running the same rung run the same pipeline. The adapter tier is the one the daemon would pick
-  (`config/model_registry.yaml`).
+  running the same rung run the same pipeline. The adapter tier comes from
+  `config/model_registry.yaml`, or the `full` fallback: the ladder builds its adapter without the
+  served chat template. Since #583 the daemon also reads that template, so for a model the registry
+  does not list the two differ — `r27b-pq2` and `r09b-ornith` run at `full` here and would get
+  `light` in the daemon (checked offline from each GGUF's template, 2026-09-30).
 - One ladder run per sandbox root and per telemetry DB at a time (file locks): a second run
   is refused — give it its own `--workdir` and `--telemetry-db`. A run label that already has
   rows is refused too, so a report never mixes two runs; unknown class names or task ids are
